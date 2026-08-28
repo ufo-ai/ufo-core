@@ -32,7 +32,7 @@ from ufo_ext_composio.client import BANNED
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_imessage.manifest import manifest as imessage_manifest
 from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.store import MEMORY_BODY_MAX_CHARS, recall_subjects
+from ufo_ext_memory.store import recall_subjects
 from ufo_ext_pipedream.client import CONNECTORS as PIPEDREAM_CONNECTORS
 from ufo_ext_report_digest.manifest import manifest as report_digest_manifest
 from ufo_ext_report_digest.writer import report_digest_entry
@@ -66,16 +66,16 @@ from ufo_ext_web.audience import AUDIENCE_PREFIX, EXTENSION_WEB, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.panels import (
     FIRST_RUN_PROVIDER_NAMES,
+    FRAME_HEADER,
+    NO_FRAME_ACCESS,
     ApplyIntent,
-    ConnectGitHubIntent,
-    ConnectImessageIntent,
-    ConnectSlackIntent,
-    PanelIntent,
-    _connect_outcome,
+    _action_intent,
+    _action_outcome,
+    _github_outcome,
     _imessage_outcome,
     _outcome,
     _rebuild_outcome,
-    _tool_intent,
+    _slack_outcome,
 )
 from ufo_ext_web.surface import (
     ASSET_MEDIA_TYPES,
@@ -1251,6 +1251,8 @@ async def web(
         objects=member_object_registry(
             (
                 web_manifest(),
+                imessage_manifest(),
+                slack_manifest(),
                 SCHEDULED_TASK_KIND_ONLY,
                 SOURCE_TRIGGER_KIND_ONLY,
                 SLOTTED,
@@ -1258,6 +1260,7 @@ async def web(
                 skill_create_manifest(),
                 report_digest_manifest(),
             ),
+            CredentialStore(fernet=CREDENTIAL_FERNET),
             public_base_url="https://web",
             artifact_token_secret=SECRET,
         ),
@@ -2375,7 +2378,11 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert index.status_code == 200
     assert index.json() == {
-        "member": {"email": "outsider@example.com", "admin": False},
+        "member": {
+            "email": "outsider@example.com",
+            "admin": False,
+            "workspace_id": str(workspace_id),
+        },
         "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True),
         "archived": [],
         "agents": [
@@ -2464,7 +2471,11 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
     admin_view = await client.get(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
-    assert admin_view.json()["member"] == {"email": "admin@example.com", "admin": True}
+    assert admin_view.json()["member"] == {
+        "email": "admin@example.com",
+        "admin": True,
+        "workspace_id": str(workspace_id),
+    }
     assert [(a["name"], a["main"]) for a in admin_view.json()["agents"]] == [
         ("assistant", True),
         ("ops", False),
@@ -2504,7 +2515,11 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
     member_view = await client.get(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
-    assert member_view.json()["member"] == {"email": "member@example.com", "admin": False}
+    assert member_view.json()["member"] == {
+        "email": "member@example.com",
+        "admin": False,
+        "workspace_id": str(workspace_id),
+    }
     assert [(a["id"], a["mine"]) for a in member_view.json()["agents"]] == [
         (str(agent_id), False),
         (str(second_agent), True),
@@ -3404,7 +3419,8 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     }
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
-    assert set(payload) == {"providers", "connectors", "imessage"}
+    assert set(payload) == {"providers", "connectors", "imessage", "actions"}
+    assert [view["name"] for view in payload["actions"]["member"]] == ["add_member"]
 
 
 async def test_the_first_run_offers_no_imessage_step_where_the_flag_reads_off(
@@ -5041,7 +5057,11 @@ async def test_the_credential_index_lists_every_declared_slot_and_no_value(
     for token_value in (token, admin_token):
         cookie = {"cookie": f"{SESSION_COOKIE}={token_value}"}
         listed = (await client.get(index, headers=cookie)).json()
-        assert {row["name"]: row["filled"] for row in listed["objects"]} == {
+        assert {
+            row["name"]: row["filled"]
+            for row in listed["objects"]
+            if row["name"].startswith("acme-")
+        } == {
             "acme-api-key": True,
             "acme-install-seal": False,
         }
@@ -10361,13 +10381,14 @@ async def test_homepage_seed_admits_one_turn_per_agent_once(db: None) -> None:
         assert row.inbound == web_surface.SEED_PROMPT
 
 
-async def test_homepage_seed_skips_an_agent_whose_allowlist_lacks_the_site_tools(
+async def test_homepage_seed_reevaluates_an_agent_whose_allowlist_lacks_the_build(
     db: None,
 ) -> None:
-    assert web_surface.HOMEPAGE_TOOLS == ("build_ufo_application",)
+    assert web_surface.HOMEPAGE_TOOLS == ("action:site:build_ufo_application",)
     workspace_id, main_agent = await _seed_workspace()
     await _seed_member(workspace_id, "seed-allow-admin@example.com", admin=True)
     walled = uuid4()
+    granted = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.agent).values(
@@ -10377,6 +10398,18 @@ async def test_homepage_seed_skips_an_agent_whose_allowlist_lacks_the_site_tools
                 prompt="be narrow",
                 model="claude-opus-4-8",
                 tools=["load_skill", "memory_search"],
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=granted,
+                workspace_id=workspace_id,
+                name="builder",
+                prompt="be narrow but build",
+                model="claude-opus-4-8",
+                tools=["load_skill", *web_surface.HOMEPAGE_TOOLS],
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -10391,10 +10424,29 @@ async def test_homepage_seed_skips_an_agent_whose_allowlist_lacks_the_site_tools
         ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
         await web_surface.seed_homepages(ctx)
         markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX))
-    assert markers[f"{web_surface.HOMEPAGE_SEED_PREFIX}{walled}"] == "withheld-tools"
+    assert f"{web_surface.HOMEPAGE_SEED_PREFIX}{walled}" not in markers
     assert sorted(markers) == sorted(
-        f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}" for agent_id in (main_agent, walled)
+        f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}" for agent_id in (main_agent, granted)
     )
+    assert workspace_id in await candidates()
+    async with workspace_tx() as connection:
+        seeded = (
+            await connection.execute(
+                sa.select(tables.conversation.c.agent_id).where(
+                    tables.conversation.c.queue_key.startswith("homepage/")
+                )
+            )
+        ).scalars()
+        assert set(seeded) == {main_agent, granted}
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == walled)
+            .values(tools=["load_skill", *web_surface.HOMEPAGE_TOOLS])
+        )
+    with ws(workspace_id):
+        await web_surface.seed_homepages(ctx)
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX))
+    assert f"{web_surface.HOMEPAGE_SEED_PREFIX}{walled}" in markers
     assert workspace_id not in await candidates()
     async with workspace_tx() as connection:
         seeded = (
@@ -10404,7 +10456,7 @@ async def test_homepage_seed_skips_an_agent_whose_allowlist_lacks_the_site_tools
                 )
             )
         ).scalars()
-        assert list(seeded) == [main_agent]
+        assert set(seeded) == {main_agent, granted, walled}
 
 
 async def _seed_app_agent(workspace_id: UUID, slug: str) -> UUID:
@@ -10956,41 +11008,39 @@ def test_every_catalog_tile_is_served_by_a_broker() -> None:
     assert FIRST_RUN_PROVIDER_NAMES & set(BANNED) <= set(PIPEDREAM_CONNECTORS)
 
 
-def test_the_first_run_connect_steps_prepare_the_install_tools_verbatim() -> None:
-    """Each connect step names the chat verb that installs its connector and nothing else: the
-    panel carries no install rule of its own, so the tool's own admin gate decides who may, and
-    `ToolIntent`'s whitelist is what admits the verb at all — a tool it does not name cannot be
-    prepared here."""
-    for verb, tool in (("connect_slack", "slack_connect"), ("connect_github", "connect_github")):
-        submitted = PanelIntent.model_validate({"submitted": {"verb": verb}}).submitted
-        prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
-        assert prepared.tool == tool
-        assert prepared.input == {}
+def test_the_action_lane_writes_the_envelope_from_its_route_in_one_order() -> None:
+    """The route holds the target — the kind, the row for an instance action — and writes it first
+    and in one order, with the action's own body under `input`; the serialized intent is the turn's
+    inbound and its audit record, compared byte for byte at admission. A collection action carries
+    no row."""
+    prepared = _action_intent("surface", "slack", "slack_connect", {})
+    assert prepared.tool == "object_action"
+    assert list(prepared.input) == ["kind", "action", "name", "input"]
+    assert prepared.input == {
+        "kind": "surface",
+        "action": "slack_connect",
+        "name": "slack",
+        "input": {},
+    }
+    assert _action_intent("report", None, "rebuild_report_digest", {}).input == {
+        "kind": "report",
+        "action": "rebuild_report_digest",
+        "input": {},
+    }
 
 
-def test_the_first_run_imessage_offer_prepares_the_phone_tool_verbatim() -> None:
-    submitted = PanelIntent.model_validate(
-        {"submitted": {"verb": "connect_imessage", "phone_number": "+1 415 555 0123"}}
-    ).submitted
-    assert isinstance(submitted, ConnectImessageIntent)
-    prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
-    assert prepared.tool == "imessage_connect"
-    assert prepared.input == {"phone_number": "+1 415 555 0123"}
-
-
-def test_the_rebuild_intents_prepare_their_own_extensions_tools_verbatim() -> None:
-    """Each rebuild names the tool that owns the text being written again and carries nothing but
-    the line the activity timeline reads. Neither panel holds a window, a batch size, or a rule
-    about who may press it: the tool that drains the work states the first two and its own admin
-    gate decides the third, so nothing about a rebuild is answered twice."""
-    for verb, tool in (
-        ("rebuild_reports", "rebuild_report_digest"),
-        ("rebuild_page_facts", "rebuild_page_facts"),
-    ):
-        submitted = PanelIntent.model_validate({"submitted": {"verb": verb}}).submitted
-        prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
-        assert prepared.tool == tool
-        assert prepared.input == {}
+def test_each_actions_answer_is_read_the_way_that_action_writes_it() -> None:
+    """The actions whose answer says more than done or refused are read by name — a rebuild's
+    queued-work sentence, the links Slack and GitHub mint — and every other action's answer is done
+    or the refusal in its own words."""
+    turn_id = uuid4()
+    queued = TerminalFrame(status="done", text="The last seven days' entries are written again.")
+    for kind, action in (("report", "rebuild_report_digest"), ("page", "rebuild_page_facts")):
+        assert json.loads(_action_outcome(kind, action, {}, queued, turn_id).body)["message"] == (
+            "The last seven days' entries are written again."
+        )
+    plain = json.loads(_action_outcome("member", "add_member", {}, queued, turn_id).body)
+    assert plain["message"] == "Saved."
 
 
 def test_a_rebuild_outcome_carries_the_tools_own_account_of_what_it_queued() -> None:
@@ -11028,17 +11078,12 @@ def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:
     the link, and `hint` says why it minted none. GitHub answers a sentence carrying its link, and
     refuses a non-admin as the turn's own refusal."""
     turn_id = uuid4()
-    slack = PanelIntent.model_validate({"submitted": {"verb": "connect_slack"}}).submitted
-    github = PanelIntent.model_validate({"submitted": {"verb": "connect_github"}}).submitted
-    assert isinstance(slack, ConnectSlackIntent)
-    assert isinstance(github, ConnectGitHubIntent)
     minted = json.loads(
-        _connect_outcome(
-            slack,
+        _slack_outcome(
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "slack_connect",
+                    "action:surface:slack_connect",
                     json.dumps(
                         {
                             "state": "not_installed",
@@ -11059,12 +11104,11 @@ def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:
         "turn_id": str(turn_id),
     }
     stated = json.loads(
-        _connect_outcome(
-            slack,
+        _slack_outcome(
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "slack_connect",
+                    "action:surface:slack_connect",
                     json.dumps(
                         {
                             "state": "not_installed",
@@ -11080,8 +11124,7 @@ def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:
     assert stated["url"] is None
     assert stated["message"] == "Ask a workspace admin to connect Slack."
     installed = json.loads(
-        _connect_outcome(
-            github,
+        _github_outcome(
             TerminalFrame(
                 status="done",
                 text=(
@@ -11096,8 +11139,7 @@ def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:
     assert installed["url"] == "https://github.com/apps/ufo-ai/installations/new?state=sealed"
     assert installed["message"] == ""
     refused = json.loads(
-        _connect_outcome(
-            github,
+        _github_outcome(
             TerminalFrame(
                 status="failed",
                 error_class="IntentRefused",
@@ -11111,6 +11153,19 @@ def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:
         "message": "only a workspace admin can connect GitHub",
         "turn_id": str(turn_id),
     }
+    routed = json.loads(
+        _action_outcome(
+            "credential",
+            "connect_github",
+            {},
+            TerminalFrame(
+                status="done",
+                text="Install it: https://github.com/apps/ufo-ai/installations/new?state=sealed",
+            ),
+            turn_id,
+        ).body
+    )
+    assert routed["url"] == "https://github.com/apps/ufo-ai/installations/new?state=sealed"
 
 
 def test_the_imessage_outcome_carries_the_phone_claim_instruction_and_link() -> None:
@@ -11122,7 +11177,7 @@ def test_the_imessage_outcome_carries_the_phone_claim_instruction_and_link() -> 
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "imessage_connect",
+                    "action:surface:imessage_connect",
                     json.dumps(
                         {
                             "state": "pending",
@@ -11146,7 +11201,7 @@ def test_the_imessage_outcome_carries_the_phone_claim_instruction_and_link() -> 
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "imessage_connect",
+                    "action:surface:imessage_connect",
                     json.dumps(
                         {
                             "state": "connected",
@@ -11169,7 +11224,7 @@ def test_the_imessage_outcome_carries_the_phone_claim_instruction_and_link() -> 
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "imessage_connect",
+                    "action:surface:imessage_connect",
                     json.dumps(
                         {
                             "state": "not_connected",
@@ -11194,11 +11249,11 @@ async def test_the_slack_step_mints_an_install_link_for_an_admin_and_no_one_else
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The first run's Slack step end to end: the intent dispatches `slack_connect` on the member's
-    own lane, and that tool's own admin gate is the whole gate — a member is told who installs it
-    and gets no link, the admin gets the deploy's Add to Slack URL sealed to this workspace. No
-    message is spoken and no chat conversation exists to speak it in: the link comes back on the
-    submit."""
+    """The first run's Slack step end to end: the intent dispatches the `slack_connect` action on
+    `surface/slack` on the member's own lane, and that action's own admin gate is the whole gate —
+    a member is told who installs it and gets no link, the admin gets the deploy's Add to Slack URL
+    sealed to this workspace. No message is spoken and no chat conversation exists to speak it in:
+    the link comes back on the submit."""
     client, workspace_id, agent_id = web
     config, _hub, _blob, _sandboxes = dbos_runtime
     monkeypatch.setenv(SLACK_CLIENT_ID_ENV, "slack-client")
@@ -11206,15 +11261,15 @@ async def test_the_slack_step_mints_an_install_link_for_an_admin_and_no_one_else
     monkeypatch.setattr(config.connect, "public_base_url", "https://web")
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
     _admin_id, admin_token = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    path = f"/surface/web/agents/{agent_id}/intents"
-    refused = await client.post(
-        path, json={"verb": "connect_slack"}, headers={"cookie": f"{SESSION_COOKIE}={token}"}
-    )
+    path = f"/surface/web/agents/{agent_id}/actions/surface/slack/slack_connect"
+    connect: dict[str, object] = {}
+    refused = await client.post(path, json=connect, headers={"cookie": f"{SESSION_COOKIE}={token}"})
     assert refused.status_code == 200
-    assert refused.json()["url"] is None
+    assert refused.json().get("url") is None, refused.json()
+    assert "url" in refused.json(), refused.json()
     assert "admin" in refused.json()["message"]
     minted = await client.post(
-        path, json={"verb": "connect_slack"}, headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
+        path, json=connect, headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
     assert minted.status_code == 200
     outcome = minted.json()
@@ -11230,8 +11285,8 @@ async def test_the_imessage_step_dispatches_the_phone_tool(
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "member@example.com")
     response = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "connect_imessage", "phone_number": "+14155550123"},
+        f"/surface/web/agents/{agent_id}/actions/surface/imessage/imessage_connect",
+        json={"phone_number": "+14155550123"},
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert response.status_code == 200
@@ -11338,20 +11393,30 @@ async def test_a_delete_only_kind_admits_a_delete_and_refuses_an_apply(
     assert index.json()["deletes"] is True
 
 
+def _credential_request(slot: str, prompt: str) -> dict[str, object]:
+    """The body the credentials listing authors for its Set/Replace act from the slot it read: the
+    `request_credentials` action's own input, and nothing about where it lands — the route's path
+    names the credential collection and the action."""
+    return {
+        "reason": "This value is stored encrypted and never shown again.",
+        "prompts": [{"slot": slot, "prompt": prompt}],
+    }
+
+
 async def test_a_credential_set_intent_mints_a_prompt_and_the_seal_stores_the_value(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """Set/replace end to end with no pending chat request: the panel's `request` intent dispatches
-    `request_credentials` verbatim, the turn's terminal frame carries the server-minted seal and
-    its prompts, and the value crosses only in the sealed fulfillment — the intent outcome, the
-    audit turn, and every response body stay secret-free. A deploy-written slot is not a slot the
-    panel can name."""
+    """Set/replace end to end with no pending chat request: the panel submits the credential
+    collection's `request_credentials` action with the prompt it authored from the slot it listed,
+    the turn's terminal frame carries the server-minted seal and its prompts, and the value crosses
+    only in the sealed fulfillment — the intent outcome, the audit turn, and every response body
+    stay secret-free. A deploy-written slot is not a slot the action mints a prompt for."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     minted = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "request", "kind": "credential", "name": "acme-api-key"},
+        f"/surface/web/agents/{agent_id}/actions/credential/request_credentials",
+        json=_credential_request("acme_api_key", "ACME API key"),
         headers=cookie,
     )
     assert minted.status_code == 200
@@ -11382,13 +11447,13 @@ async def test_a_credential_set_intent_mints_a_prompt_and_the_seal_stores_the_va
     assert "s3cr3t-value" not in audit.inbound
     assert "s3cr3t-value" not in str(audit.terminal)
     machinery = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "request", "kind": "credential", "name": "acme-install-seal"},
+        f"/surface/web/agents/{agent_id}/actions/credential/request_credentials",
+        json=_credential_request("acme_install_seal", "ACME install seal"),
         headers=cookie,
     )
     refused = machinery.json()
     assert refused["applied"] is False
-    assert "No credential slot named" in refused["message"]
+    assert "credentials" not in refused
 
 
 async def test_a_credential_clear_intent_empties_the_slot_and_gates_on_admin(
@@ -11413,8 +11478,8 @@ async def test_a_credential_clear_intent_empties_the_slot_and_gates_on_admin(
     assert "admin" in refusal["message"]
     assert await store.get(workspace_id, "acme_api_key") == "live-value"
     unminted = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "request", "kind": "credential", "name": "acme-api-key"},
+        f"/surface/web/agents/{agent_id}/actions/credential/request_credentials",
+        json=_credential_request("acme_api_key", "ACME API key"),
         headers=member_cookie,
     )
     assert unminted.json()["applied"] is False
@@ -12995,10 +13060,10 @@ async def test_audience_intents_write_the_grant_store(
             )
         )
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    member_id, member_token = await _seed_member(workspace_id, "member@example.com")
     granted = await client.post(
-        f"/surface/web/agents/{second_agent}/intents",
-        json={"verb": "grant_web_access", "email": "member@example.com"},
+        f"/surface/web/agents/{second_agent}/actions/member/{member_id}/grant_web_access",
+        json={},
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert granted.status_code == 200
@@ -13008,8 +13073,8 @@ async def test_audience_intents_write_the_grant_store(
     )
     assert "ops" in [agent["name"] for agent in listed.json()["agents"]]
     revoked = await client.post(
-        f"/surface/web/agents/{second_agent}/intents",
-        json={"verb": "revoke_web_access", "email": "member@example.com"},
+        f"/surface/web/agents/{second_agent}/actions/member/{member_id}/revoke_web_access",
+        json={},
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert revoked.json()["applied"] is True
@@ -13017,10 +13082,11 @@ async def test_audience_intents_write_the_grant_store(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
     assert "ops" not in [agent["name"] for agent in relisted.json()["agents"]]
+    other_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.member).values(
-                id=uuid4(),
+                id=other_id,
                 workspace_id=workspace_id,
                 email="other@example.com",
                 created_at=sa.func.now(),
@@ -13028,8 +13094,8 @@ async def test_audience_intents_write_the_grant_store(
             )
         )
     outsider = await client.post(
-        f"/surface/web/agents/{second_agent}/intents",
-        json={"verb": "grant_web_access", "email": "other@example.com"},
+        f"/surface/web/agents/{second_agent}/actions/member/{other_id}/grant_web_access",
+        json={},
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert outsider.status_code == 404
@@ -14023,13 +14089,10 @@ async def _acknowledge(
     client: AsyncClient, agent_id: UUID, conversation_id: UUID, token: str
 ) -> Response:
     return await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
+        f"/surface/web/agents/{agent_id}/actions/conversation/{conversation_id}"
+        "/read_private_transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
-        json={
-            "verb": "read",
-            "kind": "transcript",
-            "conversation_id": str(conversation_id),
-        },
+        json={},
     )
 
 
@@ -14969,6 +15032,12 @@ async def test_team_view_lists_the_roster_for_every_member(
     assert anonymous.status_code == 401
 
 
+def _add_member(email: str, *, admin: bool) -> dict[str, object]:
+    """The team panel's add as the member collection's projected `add_member` view submits it: the
+    action's own input; the route's path names the collection and the action."""
+    return {"email": email, "admin": admin}
+
+
 async def test_the_team_panel_adds_a_member_through_the_intent_lane(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -14983,8 +15052,8 @@ async def test_the_team_panel_adds_a_member_through_the_intent_lane(
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
 
     added = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "add_member", "email": "New.Hire@example.com", "admin": True},
+        f"/surface/web/agents/{agent_id}/actions/member/add_member",
+        json=_add_member("New.Hire@example.com", admin=True),
         headers=cookie,
     )
     assert added.status_code == 200
@@ -15005,8 +15074,8 @@ async def test_the_team_panel_adds_a_member_through_the_intent_lane(
     assert "new.hire@example.com" in [entry["email"] for entry in roster.json()["members"]]
 
     refused = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "add_member", "email": "sneak@example.com", "admin": True},
+        f"/surface/web/agents/{agent_id}/actions/member/add_member",
+        json=_add_member("sneak@example.com", admin=True),
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
     )
     assert refused.status_code == 200
@@ -15033,8 +15102,8 @@ async def test_the_team_panel_adds_a_member_at_another_domain(
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     added = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "add_member", "email": "contractor@other.test", "admin": False},
+        f"/surface/web/agents/{agent_id}/actions/member/add_member",
+        json=_add_member("contractor@other.test", admin=False),
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     assert added.status_code == 200
@@ -15675,13 +15744,38 @@ async def test_an_admin_archives_a_shipped_app_from_settings_and_restores_it(
     assert [app["name"] for app in index.json()["archived"]] == ["invoice-intake"]
     assert [agent["id"] for agent in index.json()["agents"]] == [str(agent_id)]
 
+    assert index.json()["archived"][0]["object"] == f"~archived-{app_id}"
+    projected = await client.get(f"/surface/web/actions/agent/~archived-{app_id}", headers=cookie)
+    assert projected.status_code == 200, projected.text
+    [restore] = [v for v in projected.json()["actions"] if v["name"] == "restore_application"]
+    assert restore["label"]
+    assert restore["call"] == {
+        "kind": "agent",
+        "action": "restore_application",
+        "name": f"~archived-{app_id}",
+        "input": {},
+    }
     restored = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "restore_application", "app_id": str(app_id), "name": "invoice-intake-2"},
+        f"/surface/web/agents/{agent_id}/actions/agent/~archived-{app_id}/restore_application",
+        json={"new_name": "invoice-intake-2"},
         headers=cookie,
     )
     assert restored.status_code == 200
     assert restored.json()["applied"] is True, restored.json()["message"]
+    async with workspace_tx() as connection:
+        inbound = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.id == UUID(restored.json()["turn_id"])
+                )
+            )
+        ).scalar_one()
+    assert (
+        inbound
+        == _action_intent(
+            "agent", f"~archived-{app_id}", "restore_application", {"new_name": "invoice-intake-2"}
+        ).model_dump_json()
+    )
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -15742,3 +15836,143 @@ async def test_the_homepage_sweep_settles_an_archived_app_without_a_turn(db: Non
             .all()
         )
     assert seeded == [main_agent]
+
+
+async def test_the_lane_refuses_an_action_the_portal_never_presented(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The panel-authority fence: an action without a presentation has no portal control, and the
+    route refuses to prepare it before a turn exists — the same rule the projection draws by, so a
+    body a page authored by hand cannot reach past what the portal offers."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/actions/surface/slack/slack_channels",
+        json={},
+        headers=cookie,
+    )
+    assert refused.status_code == 200
+    assert refused.json() == {
+        "applied": False,
+        "message": "surface/slack has no portal action named 'slack_channels'.",
+    }
+    addressed = await client.post(
+        f"/surface/web/agents/{agent_id}/actions/member/add_member",
+        json={"email": "x@example.com", "kind": "agent", "name": "other"},
+        headers=cookie,
+    )
+    assert addressed.json() == {
+        "applied": False,
+        "message": "The body names kind, name; the route binds the target.",
+    }
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+async def test_an_actions_view_comes_from_its_declaration_and_a_pin_holds_it_to_its_row(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The surface kind reads for admins only, so a member's row read of `surface/imessage` is
+    not-found — yet the acts are projected from the declarations beside the route's target, so
+    every member is handed `imessage_connect` on that row with the words its presentation declares.
+    Slack's connect is pinned to `surface/slack` and never appears on the iMessage row, and the
+    surface's other actions, declaring no presentation, stay chat-only."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "m@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    hidden = await client.get(
+        f"/surface/web/objects/surface/imessage?agent={agent_id}", headers=cookie
+    )
+    assert hidden.status_code == 404
+    shown = await client.get("/surface/web/actions/surface/imessage", headers=cookie)
+    assert shown.status_code == 200, shown.text
+    [connect] = shown.json()["actions"]
+    assert connect["name"] == "imessage_connect"
+    assert connect["label"]
+    assert connect["call"] == {
+        "kind": "surface",
+        "action": "imessage_connect",
+        "name": "imessage",
+        "input": {},
+    }
+    assert "phone_number" in connect["input_schema"]["properties"]
+    slack = await client.get("/surface/web/actions/surface/slack", headers=cookie)
+    assert [view["name"] for view in slack.json()["actions"]] == ["slack_connect"]
+    unknown = await client.get("/surface/web/actions/no_such_kind/x", headers=cookie)
+    assert unknown.status_code == 404
+
+
+FRAMED_CONNECT = {
+    "verb": "connect",
+    "kind": "connection",
+    "name": "github",
+    "spec": {"shared": False},
+}
+
+
+async def test_a_frames_post_reaches_only_the_acts_declared_for_a_page(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The shell marks every call it forwards for an embedded page, and both lanes hold a marked
+    post to the acts whose declaration says `frame`: a presented action without the mark answers the
+    typed refusal before any turn exists, and `connect_account`, which carries it, is admitted
+    exactly as the same post is without the mark."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    framed = {**cookie, FRAME_HEADER: "1"}
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/actions/member/add_member",
+        json={"email": "x@example.com"},
+        headers=framed,
+    )
+    assert refused.status_code == 200
+    assert refused.json() == {"applied": False, "message": NO_FRAME_ACCESS}
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+    lane = f"/surface/web/agents/{agent_id}/intents"
+    admitted = await client.post(lane, json=FRAMED_CONNECT, headers=framed)
+    unmarked = await client.post(lane, json=FRAMED_CONNECT, headers=cookie)
+    assert admitted.status_code == unmarked.status_code == 200
+    assert admitted.json()["message"] != NO_FRAME_ACCESS
+    assert admitted.json()["message"] == unmarked.json()["message"]
+
+
+@pytest.fixture
+def frameless(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ufo.serve.frame_admissible", lambda manifests, registry: frozenset())
+
+
+async def test_a_deploy_whose_pack_presents_nothing_to_a_page_refuses_every_framed_post(
+    frameless: None,
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The set the lane checks is the one boot computed from the pack: with nothing in it, the mark
+    alone refuses `connect_account` and every presented action on both lanes, and the same posts
+    without the mark are admitted as before."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    framed = {**cookie, FRAME_HEADER: "1"}
+    connect = await client.post(
+        f"/surface/web/agents/{agent_id}/intents", json=FRAMED_CONNECT, headers=framed
+    )
+    assert connect.json() == {"applied": False, "message": NO_FRAME_ACCESS}
+    action = await client.post(
+        f"/surface/web/agents/{agent_id}/actions/member/add_member",
+        json={"email": "x@example.com"},
+        headers=framed,
+    )
+    assert action.json() == {"applied": False, "message": NO_FRAME_ACCESS}
+    unmarked = await client.post(
+        f"/surface/web/agents/{agent_id}/intents", json=FRAMED_CONNECT, headers=cookie
+    )
+    assert unmarked.json()["message"] != NO_FRAME_ACCESS

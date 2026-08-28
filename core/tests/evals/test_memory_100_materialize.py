@@ -15,6 +15,7 @@ from ufo_ext_memory.store import (
     memory_item,
     recall_subjects,
 )
+from ufo_ext_sources import manifest as sources_manifest
 from ufo_testsupport.migrations import apply_cached_migrations
 
 from evals.memory_100.materialize import Memory100Materializer
@@ -372,7 +373,7 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
         blob=blob,
         index=index,
         embed=embed,
-        manifests=(memory_manifest.manifest(), sample.manifest()),
+        manifests=(sources_manifest.manifest(), memory_manifest.manifest(), sample.manifest()),
     )
 
     readiness = await materializer.run()

@@ -1,4 +1,4 @@
-"""The `monitor` tool: arm a durable watch and end the turn.
+"""The `monitor` action on the monitor kind: arm a durable watch and end the turn.
 
 The probe runs once here, inline in the arming turn — the turn is live, so the sandbox and its
 egress are the `bash` tool's own machinery. A command that fails fails this tool call rather than
@@ -9,13 +9,14 @@ persist; a refused arm leaves nothing behind."""
 import json
 from datetime import UTC, datetime, timedelta
 
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ufo.sdk.context import ExtensionContext
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_monitors.monitors import (
     ARMED_MAX,
     DEADLINE_MAX_MINUTES,
+    MONITOR_KIND,
     NAME_MAX,
     NAME_PATTERN,
     PROBE_TIMEOUT_SECONDS,
@@ -35,7 +36,9 @@ MONITOR_DIRECTIVE = (
 
 
 class MonitorInput(BaseModel):
-    name: str = Field(
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str = Field(
         max_length=NAME_MAX,
         pattern=f"^{NAME_PATTERN}$",
         description=(
@@ -72,7 +75,7 @@ class MonitorInput(BaseModel):
 
 def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
     if ext is None:
-        raise RuntimeError("the monitor tool requires the scheduled-tasks ExtensionContext")
+        raise RuntimeError("the monitor action requires the monitors ExtensionContext")
     return ext
 
 
@@ -88,10 +91,10 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
             f"{ARMED_MAX} monitors are already armed in this conversation, which is the cap. "
             "Delete one with the monitor object kind before arming another."
         )
-    name = qualified_name(ctx.turn.conversation_id, args.name)
+    name = qualified_name(ctx.turn.conversation_id, args.slug)
     if any(row.name == name for row in armed):
         return _refusal(
-            f"a monitor named {args.name!r} is already armed in this conversation; delete it or "
+            f"a monitor named {args.slug!r} is already armed in this conversation; delete it or "
             "choose another name"
         )
     probe = await ctx.sandbox.bash(args.command, timeout_s=PROBE_TIMEOUT_SECONDS)
@@ -146,5 +149,6 @@ MONITOR_TOOL = ToolDef(
     ),
     input_model=MonitorInput,
     handler=monitor,
+    bound=ObjectBinding(kind=MONITOR_KIND, binding="collection"),
     side_effecting=True,
 )

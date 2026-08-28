@@ -8,12 +8,15 @@ description: Load when the user wants to create a Slack app, make a Slack bot, o
 `slack_connect` (default `method="oauth"`) returns an "Add to Slack" link an admin clicks — no app
 to build, no secrets to paste. This skill is the **bring-your-own-app** alternative: use it when the
 admin wants their own Slack app, or when `slack_connect` reports OAuth is not configured on this
-deploy. Reach it explicitly with `slack_connect(method="manifest")`.
+deploy. Reach it explicitly with `slack_connect` and `method: manifest`.
 
 Stand up a Slack bot and wire it into the slack surface this deploy already runs. There is no new
-server to build: the surface is mounted and listening, and you drive every step with three tools —
-`slack_connect`, `slack_app_manifest`, `request_credentials`. The member only clicks through
-Slack's own pages and enters two values privately in their terminal.
+server to build: the surface is mounted and listening, and you drive every step with three calls —
+the `slack_connect` and `slack_app_manifest` actions on the `surface/slack` object (`object_action`
+with `kind: surface`, `name: slack`, `action: <name>`, and the action's own fields under `input`;
+`object_get` on `surface/slack` lists them), and the `credential` collection's `request_credentials`
+action. The member only clicks through Slack's own pages and enters two values privately in their
+terminal.
 
 ## Ground rules — read before you reply
 
@@ -27,8 +30,9 @@ Slack's own pages and enters two values privately in their terminal.
   Slack's `url_verification` body has no team id, so its bounded challenge echoes without binding
   a workspace or marking setup connected. If verification fails anyway, the deploy isn't reachable
   at the URL — the URL is wrong.
-- **Secrets never enter this chat.** The bot token and signing secret travel through
-  `request_credentials` — the member's terminal prompts for each value privately. Never ask for a
+- **Secrets never enter this chat.** The bot token and signing secret travel through the
+  `credential` collection's `request_credentials` action — the member's terminal prompts for each
+  value privately. Never ask for a
   secret in chat prose, and never accept one pasted here; if a member pastes one, tell them to
   rotate it.
 - **Conversational bot.** It answers `@mentions` in channels and direct messages, replying
@@ -52,8 +56,8 @@ can all land here (skip to Step 5); `not_configured` starts at Step 2.
 
 ## Step 2 — create the app from the manifest
 
-Ask for the bot's display name if you don't have one, call `slack_app_manifest` with it, and show
-the returned YAML verbatim in a code block. Send the member to <https://api.slack.com/apps> →
+Ask for the bot's display name if you don't have one, call `slack_app_manifest` with it as
+`bot_name`, and show the returned YAML verbatim in a code block. Send the member to <https://api.slack.com/apps> →
 **Create New App → From a manifest**, pick the workspace, and paste it exactly — Slack rejects a
 manifest with extra fields. The tool renders this shape, filled in for this deploy:
 
@@ -106,7 +110,7 @@ settings:
 
 Why each piece: `app_mentions:read` + the `message.*` events and matching `*:history` scopes let
 the surface see the messages it's added to and the mentions it must answer; the `*:read` scopes
-(`channels:read`, `groups:read`, `im:read`, `mpim:read`) back the `slack_channels` tool, which pages
+(`channels:read`, `groups:read`, `im:read`, `mpim:read`) back the `slack_channels` action, which pages
 `conversations.list` on the bot token so the agent can find a public or private channel by name, or
 a DM/group DM by the people in it, instead of only acting on an id it was handed; `chat:write` posts
 the reply in-thread; the `agent_view` block enables Slack's Agents & AI Apps experience and
@@ -125,7 +129,8 @@ Token / Socket Mode prompt — that mints an `xapp-` token this surface never us
 
 ## Step 3 — collect the two secrets privately
 
-Call `request_credentials` with reason "connecting Slack" and these two prompts, then tell the
+Run the `credential` collection's `request_credentials` action with reason "connecting Slack" and
+these two prompts, then tell the
 member where each value lives and end your turn — their terminal prompts for the values with
 hidden input, and they never appear in this conversation:
 
@@ -145,7 +150,7 @@ remains. A rejected token means a bad copy — re-run Step 3.
 ## Step 5 — first contact
 
 If the signing secret changed since it was entered, collect `slack_signing_secret` again through
-`request_credentials` before first contact. Then the member invites the bot to a channel and
+the `credential` collection's `request_credentials` action before first contact. Then the member invites the bot to a channel and
 @mentions it, or DMs it. The first signed request flips `pending` to `connected`; confirm with
 `slack_connect`.
 
@@ -159,7 +164,7 @@ every declared slot from its upper-cased env var. `slack_connect` still derives 
 ## Discovering channels
 
 The `channels:read`/`groups:read` scopes (channels) and `im:read`/`mpim:read` scopes (DMs and group
-DMs) back the `slack_channels` tool: it pages `conversations.list` on the app's own bot token
+DMs) back the `slack_channels` action: it pages `conversations.list` on the app's own bot token
 host-side and returns the conversations matching a query — a channel by its `name`/`purpose`/`topic`,
 or a DM by the people in it. A DM has no name, so the tool resolves each DM's members to their
 display name/email (using the same `users:read` the surface already relies on) and matches on those.

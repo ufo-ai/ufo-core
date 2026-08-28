@@ -194,7 +194,13 @@ SUPPORTED_BACKENDS = ("docker",)
 MAX_PREVIEW_SERVER_CALLS = 1
 MAX_BROWSER_QA_CALLS = 4
 MAX_PRODUCT_QA_CALLS = 3
-DEPLOY_TOOLS = ("deploy_website", "deploy_ufo_application", "publish_website")
+DEPLOY_TOOLS = (
+    "action:site:deploy_website",
+    "deploy_ufo_application",
+    "action:site:publish_website",
+)
+BUILD_ACTION = f"action:site:{APPLICATION_BUILDER_DELEGATION_TOOL}"
+HOMEPAGE_ACTION = "action:agent:set_homepage"
 SOURCE_SENTENCE = re.compile(r"(?<=[.!?])\s+")
 SOURCE_COPY_WINDOW_PARTS = 3
 SOURCE_COPY_MIN_WORDS = 6
@@ -1742,9 +1748,7 @@ def _application_builder_scorer() -> Grader:
                 "the parent asked the member for input during the application build",
                 failed,
             )
-        delegations = tuple(
-            call for call in own if call.name == APPLICATION_BUILDER_DELEGATION_TOOL
-        )
+        delegations = tuple(call for call in own if call.call == BUILD_ACTION)
         if not delegations:
             return CapabilityVerdict(
                 False,
@@ -1785,12 +1789,12 @@ def _application_builder_scorer() -> Grader:
             APPLICATION_BUILDER_EDIT_TOOL,
             APPLICATION_BUILDER_WRITE_TOOL,
             *DEPLOY_TOOLS,
-            "set_homepage",
-            "build_website",
+            HOMEPAGE_ACTION,
+            "action:site:build_website",
             "write",
             "edit",
         }
-        parent_work = tuple(call.name for call in own if call.name in parent_forbidden)
+        parent_work = tuple(call.call for call in own if call.call in parent_forbidden)
         if parent_work:
             return CapabilityVerdict(
                 False,
@@ -1834,7 +1838,7 @@ def _application_builder_scorer() -> Grader:
                 "the worker must write one SVG design before app.tsx",
                 failed,
             )
-        if any(call.name == "set_homepage" for call in output.calls):
+        if any(call.call == HOMEPAGE_ACTION for call in output.calls):
             return CapabilityVerdict(
                 False,
                 "the worker tried to certify its own homepage",
@@ -1871,10 +1875,7 @@ def _skill_scorer() -> Grader:
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         verdict = await base(output)
-        delegated = any(
-            call.name == APPLICATION_BUILDER_DELEGATION_TOOL and call.succeeded
-            for call in output.own_calls
-        )
+        delegated = any(call.call == BUILD_ACTION and call.succeeded for call in output.own_calls)
         if delegated:
             return CapabilityVerdict(
                 True,
@@ -1902,12 +1903,10 @@ def _delivery_scorer() -> Grader:
             (index, call) for index, call in enumerate(output.calls) if call.succeeded
         )
         deployments = tuple(
-            (index, call) for index, call in successful if call.name in DEPLOY_TOOLS
+            (index, call) for index, call in successful if call.call in DEPLOY_TOOLS
         )
         delegations = tuple(
-            call
-            for call in output.own_calls
-            if call.name == APPLICATION_BUILDER_DELEGATION_TOOL and call.succeeded
+            call for call in output.own_calls if call.call == BUILD_ACTION and call.succeeded
         )
         result = None
         if len(delegations) == 1:
@@ -1972,7 +1971,7 @@ def _qa_efficiency_scorer() -> Grader:
         if not qa_calls[-1].succeeded:
             return CapabilityVerdict(False, "the final QA call failed", failed)
         deployments = tuple(
-            (index, call) for index, call in enumerate(output.calls) if call.name in DEPLOY_TOOLS
+            (index, call) for index, call in enumerate(output.calls) if call.call in DEPLOY_TOOLS
         )
         if not deployments:
             return CapabilityVerdict(
@@ -1982,7 +1981,7 @@ def _qa_efficiency_scorer() -> Grader:
             )
         if not deployments[-1][1].succeeded:
             return CapabilityVerdict(False, "the final application deployment failed", failed)
-        names = tuple(call.name for call in output.calls)
+        names = tuple(call.call for call in output.calls)
         qa_indexes = tuple(
             index
             for index, call in enumerate(output.calls)
@@ -2144,7 +2143,7 @@ def _scored_task(task: EvalTask) -> EvalTask:
 
 def _pull_before_redeploy_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        names = tuple(call.name for call in output.calls)
+        names = tuple(call.call for call in output.calls)
         deploys = tuple(index for index, name in enumerate(names) if name in DEPLOY_TOOLS)
         if len(deploys) < 2:
             return CapabilityVerdict(
@@ -2199,7 +2198,7 @@ def _screen(
         ),
         judge_on_deterministic_failure=True,
         digest_tag=(
-            f"ufo-app-bench:{name}:interactive-homepage:qa-bounded-product:"
+            f"ufo-app-bench:{name}:interactive-homepage:actions:qa-bounded-product:"
             f"audit-{AUDIT_DIGEST[:12]}:wait-{WORKFLOW_WAIT_SECONDS:g}{data_digest}"
         ),
         artifact_probe=(
@@ -2323,7 +2322,7 @@ COPY_CASES = tuple(
             _copy_scorer(spec),
         ),
         digest_tag=(
-            f"ufo-app-copy:{spec.name}:source-use-and-reader-copy:"
+            f"ufo-app-copy:{spec.name}:source-use-and-reader-copy:actions:"
             f"wait-{WORKFLOW_WAIT_SECONDS:g}:capture-{COPY_CAPTURE_DIGEST[:12]}:"
             f"data-{APP_DATA_DIGEST[:12]}"
         ),

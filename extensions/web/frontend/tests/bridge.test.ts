@@ -69,6 +69,12 @@ test("the endpoint table admits its rows and their fills, and nothing else", () 
   ).toBeTruthy();
   expect(endpointFor("POST", "objects/scheduled_task")).toBeTruthy();
   expect(endpointFor("POST", "credentials")).toBeTruthy();
+  expect(endpointFor("GET", "actions/report")).toBeTruthy();
+  expect(endpointFor("GET", "actions/surface/slack")).toBeTruthy();
+  expect(endpointFor("POST", "agents/" + AGENT_ID + "/actions/report/rebuild_report_digest")).toBeTruthy();
+  expect(
+    endpointFor("POST", "agents/" + AGENT_ID + "/actions/surface/slack/slack_connect"),
+  ).toBeTruthy();
   expect(endpointFor("POST", "agents/" + AGENT_ID + "/chat?conversation=new")).toBeTruthy();
   expect(endpointFor("GET", "api/chats?conversation=" + AGENT_ID)).toBeTruthy();
   // Not a row, the wrong method for one, the wrong depth, or a traversal in a filled segment.
@@ -261,39 +267,33 @@ test("a text row posts the member's message and returns the admission", async ()
   });
 });
 
-test("an intent rides through only when its verb is a page's own control", async () => {
-  const applied = { applied: true, message: "Rebuilding." };
-  const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(applied));
+test("an action from a page is marked for the server's presentation gate", async () => {
+  const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ applied: true, message: "" }));
   vi.stubGlobal("fetch", fetchMock);
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
+  const other = "9f1d3c2b-0000-4000-8000-0000000000aa";
   deliver(
     {
       ufo: "call",
-      id: "i1",
+      id: "a1",
       method: "POST",
-      path: "agents/" + AGENT_ID + "/intents",
-      body: { verb: "rebuild_reports" },
+      path: "agents/" + other + "/actions/report/rebuild_report_digest",
+      body: {},
+      headers: { "x-ufo-frame": "0", authorization: "Bearer stolen" },
     },
     iframe.contentWindow,
   );
   await vi.waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({ ufo: "data", id: "a1", ok: true });
   expect(fetchMock).toHaveBeenCalledTimes(1);
-  expect(posted[0]).toMatchObject({ ufo: "data", id: "i1", ok: true });
+  const [url, init] = fetchMock.mock.calls[0];
+  expect(url).toBe(BASE + "/agents/" + other + "/actions/report/rebuild_report_digest");
+  expect(init?.method).toBe("POST");
+  expect(init?.body).toBe("{}");
+  expect(init?.headers).toMatchObject({ "x-ufo-frame": "1", "content-type": "application/json" });
+  expect(init?.headers).not.toHaveProperty("authorization");
 
-  deliver(
-    {
-      ufo: "call",
-      id: "i2",
-      method: "POST",
-      path: "agents/" + AGENT_ID + "/intents",
-      body: { verb: "add_member", email: "x@example.com", admin: true },
-    },
-    iframe.contentWindow,
-  );
-  await vi.waitFor(() => expect(posted).toHaveLength(2));
-  expect(fetchMock).toHaveBeenCalledTimes(1);
-  expect(posted[1]).toMatchObject({ ufo: "data", id: "i2", ok: false });
 });
 
 test("the setup band's act rides through, and the fence names why the others do not", async () => {
@@ -322,8 +322,8 @@ test("the setup band's act rides through, and the fence names why the others do 
   expect(posted[0]).toMatchObject({ ufo: "data", id: "c1", ok: true });
 
   // The fence is an allowlist, so a verb it does not name is refused whether the lane knows it or
-  // not: a credential prompt and a web grant are both acts far past a page's remit, and a frame
-  // speaks with the viewer's whole session.
+  // not: a verb the lane retired and one it never had are both refused in the same words, because
+  // a frame speaks with the viewer's whole session.
   for (const [id, body] of [
     ["c2", { verb: "request", kind: "credential", name: "acme_api_key" }],
     ["c3", { verb: "grant_web_access", email: "x@example.com" }],
@@ -427,15 +427,15 @@ test("a page's intent acts on its own app, and never widens an account", async (
   expect(fetchMock).toHaveBeenCalledTimes(1);
   expect(posted[2]).toMatchObject({ ufo: "data", id: "c3", ok: true });
 
-  // Every other verb a page may post names the agent that owns the record it acts on — the main
-  // agent for a rebuild, an object's own agent on a record sheet — and each is gated by its kind.
+  // Every other verb a page may post names the agent that owns the record it acts on — an
+  // object's own agent on a record sheet — and each is gated by its kind.
   deliver(
     {
       ufo: "call",
       id: "c4",
       method: "POST",
       path: "/agents/" + other + "/intents",
-      body: { verb: "rebuild_reports" },
+      body: { verb: "apply", kind: "scheduled_task", name: "daily-brief", spec: { paused: true } },
     },
     iframe.contentWindow,
   );

@@ -102,11 +102,12 @@ from evals.harness.capability import (
 from evals.harness.scorers import combine
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL
 from ufo.schema import tables
 from ufo.skills.runtime import SKILLS_ROOT
 from ufo.turns.activity import SKILL_LOAD_TOOL
 from ufo.workspace import ws_current
+
+REQUEST_CREDENTIALS_TOOL = "action:credential:request_credentials"
 
 ONBOARDING_HELP_PACKS = ("assistant_hosted",)
 CORPUS_SKILL = "customer-onboarding-help"
@@ -237,9 +238,9 @@ def slack_rotated_secret_scorer() -> Grader:
             return loaded
         requests = []
         for call in output.calls:
-            if call.name != REQUEST_CREDENTIALS_TOOL:
+            if call.call != REQUEST_CREDENTIALS_TOOL:
                 continue
-            prompts = call.input.get("prompts")
+            prompts = call.arguments.get("prompts")
             if not isinstance(prompts, list):
                 continue
             if any(
@@ -710,7 +711,7 @@ CASES = (
         "pending. Take the next step.",
         slack_rotated_secret_scorer(),
         samples=3,
-        digest_tag="onboarding:slack-signing-secret-rotated",
+        digest_tag="onboarding:slack-signing-secret-rotated:action",
         seed=seed_slack_rotated_secret,
         rubric=(
             "The answer says the current Slack signing secret will be collected through a private "

@@ -8,12 +8,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/cn";
-import type { SchemaProperty } from "@/lib/types";
-
-export type SpecSchema = {
-  properties?: Record<string, SchemaProperty>;
-  required?: string[];
-};
+import type { SchemaProperty, SpecSchema } from "@/lib/types";
 
 export type SpecValue = string | boolean;
 
@@ -31,6 +26,12 @@ function specFormat(prop: SchemaProperty): string | undefined {
 
 function specMaxLength(prop: SchemaProperty): number | undefined {
   return prop.maxLength ?? (prop.anyOf ?? []).find((entry) => entry.maxLength)?.maxLength;
+}
+
+/** Whether a field holds a number on the wire, whichever way the schema spells it. */
+export function numeric(prop: SchemaProperty): boolean {
+  const type = specType(prop);
+  return type === "integer" || type === "number";
 }
 
 export function initialSpecValue(prop: SchemaProperty, value: unknown): SpecValue {
@@ -58,9 +59,14 @@ function wireMoment(local: string): string {
 
 /** A string the schema declines to bound is prose, and prose gets the box that shows more than one
  *  line of it. A field the schema bounds (a cron line, a listing line) is a value, and a value that
- *  fits on a line is typed on one. */
+ *  fits on a line is typed on one — a format (an email, an instant) names a value the same way a
+ *  bound does. */
 function prose(prop: SchemaProperty): boolean {
-  return specType(prop) === "string" && specMaxLength(prop) === undefined;
+  return (
+    specType(prop) === "string" &&
+    specMaxLength(prop) === undefined &&
+    specFormat(prop) === undefined
+  );
 }
 
 type SpecFieldProps = {
@@ -160,6 +166,15 @@ function SpecField({ name, prop, value, options, required, layout, onChange }: S
           value={localMoment(String(value))}
           onChange={(event) => onChange(wireMoment(event.target.value))}
         />
+      ) : numeric(prop) ? (
+        <Input
+          id={id}
+          type="number"
+          required={required}
+          placeholder={placeholder}
+          value={String(value)}
+          onChange={(event) => onChange(event.target.value)}
+        />
       ) : prose(prop) ? (
         <Textarea
           id={id}
@@ -171,6 +186,7 @@ function SpecField({ name, prop, value, options, required, layout, onChange }: S
       ) : (
         <Input
           id={id}
+          type={specFormat(prop) === "email" ? "email" : "text"}
           required={required}
           placeholder={placeholder}
           maxLength={specMaxLength(prop)}

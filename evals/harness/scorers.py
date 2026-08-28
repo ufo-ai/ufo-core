@@ -197,7 +197,7 @@ def required_tools_scorer(
     """Every required tool completed successfully, and each requested ordering held."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        names = [call.name for call in output.calls if call.succeeded]
+        names = [call.call for call in output.calls if call.succeeded]
         missing = [tool for tool in required if tool not in names]
         if missing:
             return CapabilityVerdict(False, f"did not complete successfully: {', '.join(missing)}")
@@ -232,8 +232,8 @@ def attempted_tools_scorer(
             f"{tool} matching {expected}"
             for tool, expected in required
             if not any(
-                call.name == tool
-                and all(call.input.get(key) == value for key, value in expected.items())
+                call.call == tool
+                and all(call.arguments.get(key) == value for key, value in expected.items())
                 for call in output.calls
             )
         ]

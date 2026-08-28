@@ -230,14 +230,14 @@ cd <project-name>
 npm run build
 ```
 
-Then deploy with `deploy_website(project_path="<project-name>/dist/public", site_name="...", entry_point="index.html")`.
+Then deploy with the `site` collection's `deploy_website` action: `object_action(kind="site", action="deploy_website", input={project_path="<project-name>/dist/public", site_name="...", entry_point="index.html"})`.
 
 **Apps with backend (most webapp projects):**
 
 The template's Express server serves the built client **and** the `/api/...` routes from one origin on port 5000. After building, run that server with `publish_website`:
 
 1. Build: `npm run build`
-2. Publish: `publish_website(project_path="<project>", dist_path="dist/public", app_name="...", install_command="npm install", run_command="NODE_ENV=production node dist/index.cjs")`
+2. Publish: `object_action(kind="site", action="publish_website", input={project_path="<project>", dist_path="dist/public", app_name="...", install_command="npm install", run_command="NODE_ENV=production node dist/index.cjs"})`
 
 `publish_website` installs dependencies, runs the production server, and returns the reachable `http://localhost:<port>` URL inside the sandbox. A website-building subagent does not hold `publish_website`: build and validate through step 1, then stop and report that the app is built and needs publishing — the agent that delegated to you reads these same files and publishes them. Because client and API share one origin, requests use relative `/api/...` paths — no URL rewriting. Read `$UFO_HOME/skills/website-building/shared/19-backend.md` for details.
 

@@ -43,6 +43,8 @@ from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
+from ufo.ext.loader import turn_tools
+from ufo.loop.queue import _agent_actions
 from ufo.models.interface import (
     IMAGE_UNSUPPORTED_TEXT,
     ImageBlock,
@@ -60,10 +62,12 @@ from ufo.models.interface import (
 from ufo.models.pricing import ModelPrice
 from ufo.models.registry import model_registry
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn, Usage
+from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn, Usage
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.credentials import CredentialValueInvalid
+from ufo.sdk.objects import ARTIFACT_KIND
 from ufo.tools.context import ToolContext
+from ufo.tools.registry import ObjectBinding
 from ufo.workspace import init_workspace_credentials, ws
 
 OPENROUTER_KEY = "sk-or-v1-secret-0xfeedface"
@@ -1110,7 +1114,7 @@ async def _generate(
     args = GenerateImageInput(
         **{
             "prompt": "a red panda astronaut, studio lighting",
-            "name": "poster",
+            "file_name": "poster",
             **overrides,
         }
     )
@@ -1142,29 +1146,70 @@ def test_manifest_publishes_the_generation_tools_and_the_key_slot() -> None:
     manifest = openrouter.manifest()
     assert [tool.name for tool in manifest.tools] == ["generate_image", "generate_video"]
     assert all(tool.side_effecting for tool in manifest.tools)
+    assert all(
+        tool.bound == ObjectBinding(kind=ARTIFACT_KIND, binding="collection")
+        for tool in manifest.tools
+    )
+    assert [tool.canonical_id for tool in manifest.tools] == [
+        "action:artifact:generate_image",
+        "action:artifact:generate_video",
+    ]
     (slot,) = manifest.credentials
     assert slot.name == openrouter.OPENROUTER_KEY_SLOT
     assert slot.injection is None
     assert {spec.key_slot for spec in manifest.models} == {openrouter.OPENROUTER_KEY_SLOT}
 
 
+def test_generation_registers_as_artifact_actions_and_leaves_the_wire() -> None:
+    manifest = openrouter.manifest()
+    tools, ext_by_tool, verbs = turn_tools(
+        (manifest,),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=conversation_audience(None),
+    )
+    assert {"generate_image", "generate_video"} <= set(verbs.actions[ARTIFACT_KIND])
+    for name in ("generate_image", "generate_video"):
+        bound = verbs.actions[ARTIFACT_KIND][name]
+        assert bound.extension == openrouter.NAME
+        assert bound.context is not None and bound.context.store.extension == openrouter.NAME
+    wire = {tool.name for tool in tools}
+    assert wire.isdisjoint({"generate_image", "generate_video"})
+    assert "object_action" in wire
+    assert set(ext_by_tool).isdisjoint({"generate_image", "generate_video"})
+    assert {"action:artifact:generate_image", "action:artifact:generate_video"} <= _agent_actions(
+        verbs.actions, None, MEMBER_ADMISSION
+    )
+    assert _agent_actions(
+        verbs.actions, ("action:artifact:generate_image", "bash"), MEMBER_ADMISSION
+    ) == frozenset({"action:artifact:generate_image"})
+    assert _agent_actions(verbs.actions, ("generate_image",), MEMBER_ADMISSION) == frozenset()
+
+
 def test_the_payload_is_bounded_at_the_tool_boundary() -> None:
-    common = {"prompt": "p", "name": "poster"}
+    common = {"prompt": "p", "file_name": "poster"}
     with pytest.raises(ValidationError):
         GenerateImageInput(**common, n=openrouter.MAX_IMAGES_PER_CALL + 1)
     with pytest.raises(ValidationError):
         GenerateImageInput(**{**common, "prompt": "x" * (openrouter.MAX_IMAGE_PROMPT_CHARS + 1)})
     with pytest.raises(ValidationError):
-        GenerateImageInput(**{**common, "name": "../escape"})
+        GenerateImageInput(**{**common, "file_name": "../escape"})
     with pytest.raises(ValidationError):
         GenerateImageInput(**common, model="stability/whatever")
+
+
+def test_generation_inputs_refuse_an_extra_key() -> None:
+    common = {"prompt": "p", "file_name": "poster"}
+    for model in (GenerateImageInput, GenerateVideoInput):
+        model.model_validate(common)
+        with pytest.raises(ValidationError, match="unexpected_key"):
+            model.model_validate({**common, "unexpected_key": "x"})
 
 
 def test_the_offered_resolution_tiers_are_the_ones_seedream_draws() -> None:
     """Seed's parameter list names `1K`, and Seed then refuses to render it: it draws at least
     3,686,400 output pixels and 1K is 1,048,576 at every aspect ratio. What the field offers is
     what came back as an image, so `1K` is not a tier here however the parameter list reads."""
-    common = {"prompt": "p", "name": "poster"}
+    common = {"prompt": "p", "file_name": "poster"}
     tiers, _none = get_args(GenerateImageInput.model_fields["resolution"].annotation)
     assert set(get_args(tiers)) == {"2K", "4K"}
     assert openrouter.IMAGE_MODELS[openrouter.DEFAULT_IMAGE_MODEL].resolutions == set(
@@ -1178,7 +1223,7 @@ def test_the_offered_resolution_tiers_are_the_ones_seedream_draws() -> None:
 def test_an_unasked_resolution_settles_on_the_cheapest_tier_that_draws() -> None:
     """A call that names no tier draws at 2K rather than whatever the provider would pick, and 4K
     stays reachable for the member who wants it."""
-    common = {"prompt": "p", "name": "poster"}
+    common = {"prompt": "p", "file_name": "poster"}
     assert GenerateImageInput(**common).resolution == openrouter.DEFAULT_RESOLUTION
     assert openrouter.DEFAULT_RESOLUTION == "2K"
     for tier in ("2K", "4K"):
@@ -1188,7 +1233,7 @@ def test_an_unasked_resolution_settles_on_the_cheapest_tier_that_draws() -> None
 def test_a_model_that_sizes_its_own_output_is_sent_no_tier() -> None:
     """Only seedream takes a resolution, so the default is never applied to the others and naming
     one for them is refused rather than sent as a parameter their providers do not serve."""
-    common = {"prompt": "p", "name": "poster"}
+    common = {"prompt": "p", "file_name": "poster"}
     for model in ("openai/gpt-image-2", "black-forest-labs/flux.2-pro", "recraft/recraft-v4.1"):
         assert GenerateImageInput(**common, model=model).resolution is None
         with pytest.raises(ValidationError, match="takes no resolution tier"):
@@ -1198,7 +1243,7 @@ def test_a_model_that_sizes_its_own_output_is_sent_no_tier() -> None:
 def test_a_model_that_draws_one_image_refuses_a_batch() -> None:
     """The flux.2 models are `n: 1-1` upstream, so a batch the schema's own cap allows is refused
     here rather than spent on a 400 mid-turn."""
-    common = {"prompt": "p", "name": "poster"}
+    common = {"prompt": "p", "file_name": "poster"}
     for model in ("black-forest-labs/flux.2-pro", "black-forest-labs/flux.2-klein-4b"):
         assert GenerateImageInput(**common, model=model, n=1).n == 1
         with pytest.raises(ValidationError, match="at most 1 image"):
@@ -1209,7 +1254,7 @@ def test_a_model_that_draws_one_image_refuses_a_batch() -> None:
 def test_an_aspect_ratio_the_chosen_model_does_not_serve_is_refused() -> None:
     """recraft serves five of the eight ratios the field offers; the other three are a 400 from
     OpenRouter, so they are caught where the model can read why and pick one it serves."""
-    common = {"prompt": "p", "name": "poster"}
+    common = {"prompt": "p", "file_name": "poster"}
     for ratio in ("3:2", "2:3", "21:9"):
         with pytest.raises(ValidationError, match="does not take aspect_ratio"):
             GenerateImageInput(**common, model="recraft/recraft-v4.1", aspect_ratio=ratio)
@@ -1392,7 +1437,7 @@ async def test_two_generations_on_one_turn_accumulate_into_one_images_row(
     _wire(monkeypatch, _ImageApi())
     workspace_id, turn_id = await _keyed_turn()
     await _generate(workspace_id, turn_id, _Sandbox(), tmp_path)
-    await _generate(workspace_id, turn_id, _Sandbox(), tmp_path, name="second")
+    await _generate(workspace_id, turn_id, _Sandbox(), tmp_path, file_name="second")
     assert await _images_ledger(turn_id) == (2, 160_000, "bytedance-seed/seedream-4.5", None)
 
 
@@ -1534,7 +1579,7 @@ async def _film(
     args = GenerateVideoInput(
         **{
             "prompt": "a red panda astronaut drifting down a station corridor",
-            "name": "teaser",
+            "file_name": "teaser",
             **overrides,
         }
     )
@@ -1559,7 +1604,7 @@ def test_the_video_field_bounds_span_every_model_the_tool_offers() -> None:
     """OpenRouter's video model listing gives H3 durations 5-15s and Seedance 4-30s, and both take
     the same six aspect ratios; the field offers one range and one ratio enum across every model, so
     the range is the widest any of them films and each model narrows it at the boundary."""
-    common = {"prompt": "p", "name": "teaser"}
+    common = {"prompt": "p", "file_name": "teaser"}
     ratios, _none = get_args(GenerateVideoInput.model_fields["aspect_ratio"].annotation)
     assert set(get_args(ratios)) == {"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"}
     for limits in openrouter.VIDEO_MODELS.values():
@@ -1580,7 +1625,7 @@ def test_each_video_model_films_only_its_own_durations() -> None:
     """H3's 5-15s and Seedance's 4-30s are one field, so a take the field allows and the chosen
     model does not is refused here, where the model reads why and can ask again, rather than
     spending minutes of generation on a 400."""
-    common = {"prompt": "p", "name": "teaser"}
+    common = {"prompt": "p", "file_name": "teaser"}
     for model, (low, high) in (
         ("minimax/hailuo-3", (5, 15)),
         ("bytedance/seedance-2.5", (4, 30)),
@@ -1600,7 +1645,7 @@ def test_a_video_model_serving_less_than_the_field_offers_is_narrowed_at_the_bou
     """A model whose provider serves a shorter take or fewer ratios than the field offers is held to
     its own `VIDEO_MODELS` row, where the model reads why and can ask again, rather than spending
     minutes of generation on a 400."""
-    common = {"prompt": "p", "name": "teaser"}
+    common = {"prompt": "p", "file_name": "teaser"}
     monkeypatch.setitem(
         openrouter.VIDEO_MODELS,
         openrouter.DEFAULT_VIDEO_MODEL,
@@ -1624,7 +1669,7 @@ def test_each_video_model_films_only_the_tiers_it_serves() -> None:
     """H3 films 2K and nothing else, Seedance films 480p or 720p and has no 2K tier at all, so a
     tier valid for one model is a 400 for the other and is refused where the model can pick again. A
     call naming no tier settles on the model's own default rather than the provider's."""
-    common = {"prompt": "p", "name": "teaser"}
+    common = {"prompt": "p", "file_name": "teaser"}
     tiers, _none = get_args(GenerateVideoInput.model_fields["resolution"].annotation)
     assert set(get_args(tiers)) == {"480p", "720p", "2K"}
     assert GenerateVideoInput(**common).resolution == "2K"
@@ -1658,11 +1703,11 @@ def test_a_per_second_rate_is_a_rate_at_one_frame_size() -> None:
 
 
 def test_the_video_payload_is_bounded_at_the_tool_boundary() -> None:
-    common = {"prompt": "p", "name": "teaser"}
+    common = {"prompt": "p", "file_name": "teaser"}
     with pytest.raises(ValidationError):
         GenerateVideoInput(**{**common, "prompt": "x" * (openrouter.MAX_VIDEO_PROMPT_CHARS + 1)})
     with pytest.raises(ValidationError):
-        GenerateVideoInput(**{**common, "name": "../escape"})
+        GenerateVideoInput(**{**common, "file_name": "../escape"})
     with pytest.raises(ValidationError):
         GenerateVideoInput(**common, model="minimax/hailuo-2.3")
 
@@ -1812,7 +1857,7 @@ async def test_two_generations_on_one_turn_accumulate_into_one_videos_row(
     _wire_video(monkeypatch, _VideoApi(statuses=[{"status": "completed", "usage": {"cost": 0.65}}]))
     workspace_id, turn_id = await _keyed_turn()
     await _film(workspace_id, turn_id, _Sandbox(), tmp_path)
-    await _film(workspace_id, turn_id, _Sandbox(), tmp_path, name="second")
+    await _film(workspace_id, turn_id, _Sandbox(), tmp_path, file_name="second")
     assert await _videos_ledger(turn_id) == (2, 1_300_000, "minimax/hailuo-3", None)
 
 

@@ -24,7 +24,7 @@ from ufo.billing.balance import (
 from ufo.db import workspace_tx
 from ufo.hub import InProcessHub, Parked
 from ufo.schema import tables
-from ufo.schema.records import BILLING_INTENT_TOOL, TerminalFrame, ToolIntent, Usage
+from ufo.schema.records import TerminalFrame, ToolIntent, Usage
 from ufo.surfaces.admission import Admission
 from ufo.surfaces.hub_tail import PARK_NOTICE, HubTailer, turn_status_frame
 from ufo.workspace import ws
@@ -431,10 +431,15 @@ async def test_entry_stays_the_stricter_line_once_the_grace_applies(db: None) ->
     assert continuing.outcome == ALLOW
 
 
-def _billing_intent() -> ToolIntent:
+def _billing_intent(workspace_id: UUID, operation: str = "autopay") -> ToolIntent:
     return ToolIntent(
-        tool=BILLING_INTENT_TOOL,
-        input={"action": "autopay"},
+        tool="object_action",
+        input={
+            "kind": "workspace",
+            "action": "manage_billing",
+            "name": str(workspace_id),
+            "input": {"operation": operation},
+        },
     )
 
 
@@ -452,9 +457,9 @@ async def test_a_spent_balance_still_admits_the_act_that_ends_the_refusal(db: No
     admitted = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
         workspace_id,
         conversation_id,
-        _billing_intent().model_dump_json(),
+        _billing_intent(workspace_id).model_dump_json(),
         member_id,
-        intent=_billing_intent(),
+        intent=_billing_intent(workspace_id),
     )
     assert await _status(admitted.turn_id) != "cancelled"
 
@@ -462,17 +467,14 @@ async def test_a_spent_balance_still_admits_the_act_that_ends_the_refusal(db: No
 async def test_a_spent_balance_admits_the_step_before_the_refill(db: None) -> None:
     """A refill is refused until a card is on file, so reaching the provider is the act that ends
     the refusal for a workspace that has never paid — and it is the step the billing screen carries
-    for exactly that workspace. The exemption keys on the tool rather than the action, which is what
-    makes this true without a second gate to keep in step; this asserts it rather than leaving it to
-    be read off the gate."""
+    for exactly that workspace. The exemption keys on the action rather than its operation, which is
+    what makes this true without a second gate to keep in step; this asserts it rather than leaving
+    it to be read off the gate."""
     async with workspace_tx() as connection:
         workspace_id, member_id, _agent_id, conversation_id = await _seed(connection)
         await _fund(connection, workspace_id, dollars=1)
         await debit(connection, workspace_id, 5 * DOLLAR)
-    portal = ToolIntent(
-        tool=BILLING_INTENT_TOOL,
-        input={"action": "portal"},
-    )
+    portal = _billing_intent(workspace_id, "portal")
     admitted = await Admission(dbos=StubDbos(), durable_surfaces=frozenset()).admit_member(
         workspace_id,
         conversation_id,
@@ -492,8 +494,8 @@ async def test_the_exemption_is_the_billing_verb_and_nothing_else(db: None) -> N
         await _fund(connection, workspace_id, dollars=1)
         await debit(connection, workspace_id, 5 * DOLLAR)
     other = ToolIntent(
-        tool="memory_update",
-        input={"body": "note"},
+        tool="object_action",
+        input={"kind": "memory", "action": "record_first_run", "input": {"body": "note"}},
     )
     dbos = StubDbos()
     admitted = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(

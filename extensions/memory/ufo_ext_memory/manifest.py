@@ -29,6 +29,7 @@ from uuid import UUID
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
+from ufo_ext_sources.pages import PAGE_KIND
 
 from ufo.sdk.context import ExtensionContext, SourceReader
 from ufo.sdk.index import TextChunker
@@ -50,7 +51,14 @@ from ufo.sdk.objects import ObjectRef
 from ufo.sdk.operator import resolve_operator_workspace
 from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.surfaces import SurfaceSpec
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    ActionPresentation,
+    ObjectBinding,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolResult,
+)
 from ufo_ext_memory.condenser import (
     DEDUP_MIN_AGE,
     MIN_CLUSTER_FACTS,
@@ -106,6 +114,12 @@ NAME = "memory"
 VERSION = "0.1.0"
 MEMORY_SEARCH_LIMIT = 8
 MAX_MEMORY_QUERIES = 3
+RECORD_CORRECTION_ACTION = "record_correction"
+RECORD_CORRECTION_LABEL = "Record correction"
+CORRECTION_SOURCE_PREFIX = "corrects memory/"
+RECORD_FIRST_RUN_ACTION = "record_first_run"
+RECORD_FIRST_RUN_LABEL = "Continue"
+FIRST_RUN_SOURCE_REF = "first run"
 RECALL_LIMIT = MAX_RECALLED_MEMORY_IDS
 INTERNAL_ADMISSION = "internal"
 RECALL_SKIP_INTERNAL = "internal_admission"
@@ -156,6 +170,8 @@ logger = logging.getLogger(__name__)
 
 
 class MemorySearchInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     queries: tuple[str, ...] = Field(
         min_length=1,
         max_length=MAX_MEMORY_QUERIES,
@@ -207,6 +223,31 @@ class MemoryUpdateInput(BaseModel):
     )
     source_ref: str | None = Field(
         default=None, description="Optional reference to the source this fact came from."
+    )
+
+
+class RecordCorrectionInput(BaseModel):
+    """What a member states from the memory view: the item they are correcting and the statement
+    that replaces it. Everything else a recorded item carries — its class, kind, confidence, and the
+    provenance naming the corrected row — is the write's own to derive."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    corrects: UUID = Field(description="The memory item this statement corrects.")
+    body: str = Field(
+        min_length=1, max_length=MEMORY_BODY_MAX_CHARS, description="The corrected statement."
+    )
+
+
+class RecordFirstRunInput(BaseModel):
+    """What the first run states about the team: one sentence naming the tools they picked, written
+    by the page from the catalog's own labels. Its class, kind, confidence, and provenance are the
+    write's own."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    body: str = Field(
+        min_length=1, max_length=MEMORY_BODY_MAX_CHARS, description="What the team uses."
     )
 
 
@@ -315,12 +356,6 @@ class MemorySearchService:
         reaches a consumer's filter without a second list to remember."""
         return get_args(ItemClass)
 
-    def body_max_chars(self) -> int:
-        """How long a body this store commits, which is the bound `memory_update` refuses past. A
-        portal form that records one reads it here and stops the member at the same length, so the
-        rule is stated once by whoever enforces it."""
-        return MEMORY_BODY_MAX_CHARS
-
     async def list_recent(
         self,
         subjects: frozenset[str],
@@ -419,6 +454,46 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
             memory_kind=args.memory_kind,
             confidence=args.confidence,
             source_ref=args.source_ref,
+        )
+    )
+    return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
+
+
+async def record_correction_handler(ctx: ToolContext, args: RecordCorrectionInput) -> ToolResult:
+    """The memory view's correction: a new item under the corrector's own audience naming the
+    corrected item in `source_ref` — the row the portal's correction writes. The named item is
+    neither edited nor removed — the dedup sweep retires the near-duplicate original
+    toward this newer statement."""
+    if ctx.ext is None:
+        raise RuntimeError("record_correction dispatched without its ExtensionContext")
+    subject = str(ctx.effective_audience)
+    await store_for(ctx.ext).commit(
+        MemoryWrite(
+            subject=subject,
+            body=args.body,
+            item_class=FACT,
+            memory_kind=KIND_FACT,
+            confidence=DEFAULT_CONFIDENCE,
+            source_ref=f"{CORRECTION_SOURCE_PREFIX}{args.corrects}",
+        )
+    )
+    return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
+
+
+async def record_first_run_handler(ctx: ToolContext, args: RecordFirstRunInput) -> ToolResult:
+    """The first run's one memory: what the team uses, under the picking member's own audience,
+    named as the first run's so every later turn recalls it — the row the first run writes."""
+    if ctx.ext is None:
+        raise RuntimeError("record_first_run dispatched without its ExtensionContext")
+    subject = str(ctx.effective_audience)
+    await store_for(ctx.ext).commit(
+        MemoryWrite(
+            subject=subject,
+            body=args.body,
+            item_class=FACT,
+            memory_kind=KIND_FACT,
+            confidence=DEFAULT_CONFIDENCE,
+            source_ref=FIRST_RUN_SOURCE_REF,
         )
     )
     return ToolResult(content=(TextContent(text=f"Remembered ({subject})."),))
@@ -805,6 +880,7 @@ def manifest() -> Manifest:
                 ),
                 input_model=MemorySearchInput,
                 handler=memory_search_handler,
+                parallel_safe=True,
             ),
             ToolDef(
                 name="memory_update",
@@ -829,6 +905,31 @@ def manifest() -> Manifest:
                 side_effecting=True,
             ),
             ToolDef(
+                name=RECORD_CORRECTION_ACTION,
+                description=(
+                    "Record the corrected statement of one memory item, as the portal's memory "
+                    "view does: a new item under the speaker's own audience naming the corrected "
+                    "item; the dedup sweep retires the original toward it."
+                ),
+                input_model=RecordCorrectionInput,
+                handler=record_correction_handler,
+                bound=ObjectBinding(kind=MEMORY_KIND, binding="collection"),
+                side_effecting=True,
+                presentation=ActionPresentation(label=RECORD_CORRECTION_LABEL),
+            ),
+            ToolDef(
+                name=RECORD_FIRST_RUN_ACTION,
+                description=(
+                    "Record what the team uses, as the portal's first run states it: one item "
+                    "under the speaker's own audience, named as the first run's."
+                ),
+                input_model=RecordFirstRunInput,
+                handler=record_first_run_handler,
+                bound=ObjectBinding(kind=MEMORY_KIND, binding="collection"),
+                side_effecting=True,
+                presentation=ActionPresentation(label=RECORD_FIRST_RUN_LABEL),
+            ),
+            ToolDef(
                 name="rebuild_page_facts",
                 description=(
                     "Write the workspace's page-derived facts again, for a workspace admin who "
@@ -845,6 +946,12 @@ def manifest() -> Manifest:
                 input_model=RebuildPageFactsInput,
                 handler=rebuild_page_facts_handler,
                 side_effecting=True,
+                bound=ObjectBinding(kind=PAGE_KIND, binding="collection"),
+                presentation=ActionPresentation(
+                    label="Rebuild page facts",
+                    confirm="Every synced page's derived facts are written again.",
+                    frame=True,
+                ),
             ),
         ),
         objects=(MEMORY_OBJECT, PROFILE_OBJECT),

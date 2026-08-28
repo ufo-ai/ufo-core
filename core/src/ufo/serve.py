@@ -74,12 +74,14 @@ from ufo.ext.context import context_for as extension_context_for
 from ufo.ext.conversation_slots import BoundConversationSlot
 from ufo.ext.loader import (
     CORE_OBJECT_KINDS,
+    MemberObjectRegistry,
     NotRegisteredError,
     connection_hooks,
     connector_clis,
     core_object_kinds,
     durable_surfaces,
     embed_backend,
+    frame_admissible,
     index_backend,
     injecting_slots,
     load_manifests,
@@ -133,7 +135,6 @@ from ufo.models.interface import AUTO_MODEL
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
 from ufo.o11y import init_o11y, init_service_checks, log, warn
-from ufo.objects import BoundKind
 from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV, OnboardControl
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.runtime.jobs import (
@@ -244,7 +245,7 @@ def run() -> None:
     threading.Thread(
         target=lambda: asyncio.run(heartbeat.run()), name="instance-heartbeat", daemon=True
     ).start()
-    validate_ext_tools(manifests, credentials)
+    deploy_actions = validate_ext_tools(manifests, credentials)
     _validate_requires(config, manifests, credentials)
     init_workspace_credentials(credentials)
     init_flags(_select_flag_provider(config, manifests))
@@ -293,6 +294,7 @@ def run() -> None:
         tools=bridge_tools(manifests),
         subagents=subagents,
         subagent_grants=subagent_grants,
+        actions=deploy_actions,
     )
     runtime = Runtime(
         config=config,
@@ -1045,7 +1047,7 @@ def _mount_shared_surfaces(
     sandbox_sizes: tuple[str, ...] = (),
     memory: MemorySearch | None = None,
     surface_model: "Callable[[str], SurfaceModel] | None" = None,
-    objects: "Mapping[str, BoundKind] | None" = None,
+    objects: MemberObjectRegistry | None = None,
     key_slot_for: Callable[[str], str | None] | None = None,
 ) -> None:
     """Install the fleet-wide `WorkspaceScopeBoundary` and mount each shared-fleet-capable
@@ -1147,7 +1149,11 @@ def _mount_shared_surfaces(
             _object_schemas=kind_schemas,
             _memory=memory,
             _model=None if surface_model is None else surface_model(surface),
-            _objects=objects or {},
+            _objects={} if objects is None else objects.kinds,
+            _actions={} if objects is None else objects.actions,
+            _frame_admissible=(
+                frozenset() if objects is None else frame_admissible(manifests, objects)
+            ),
             _conversation_slots=conversation_slots,
             _preview_url=preview_service_url.rstrip("/") if preview_service_url else None,
             _preview_token=preview_token,

@@ -1,20 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { ActionControls } from "@/kernel/action";
 import { MessageLog, OpenedAtTheFoot, TranscriptScroll } from "@/kernel/messages";
-import {
-  type NoticeState,
-  OutcomeNotice,
-  Panel,
-  PanelBlank,
-  PanelEmpty,
-  QUIET,
-  Section,
-  outcomeNotice,
-  usePanelRead,
-} from "@/kernel/panel";
+import { Notice, Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
-import { postIntent } from "@/lib/api";
+import { postAction } from "@/lib/api";
 import {
   audienceLabel,
   origin as surfaceOrigin,
@@ -24,7 +15,7 @@ import {
   useViewer,
 } from "@/lib/audience";
 import { useEarlierMessages, type EarlierMessages } from "@/lib/earlier";
-import type { Agent, Conversation, Message, Transcript } from "@/lib/types";
+import type { ActionView, Agent, Conversation, Message, Transcript } from "@/lib/types";
 
 /** The one way back out of a conversation, and the only thing above the section that names it. */
 function Back({ onBack }: { onBack: () => void }) {
@@ -50,11 +41,12 @@ export function Disclose({
   onBack?: () => void;
   onOpened: () => void;
 }) {
-  const [outcome, setOutcome] = useState<NoticeState>(QUIET);
-  const [busy, setBusy] = useState(false);
   const live = useRef(true);
   const viewer = useViewer();
   const owner = conversation.member_email || "another member";
+  const acts = usePanelRead<{ actions: ActionView[] }>(
+    "/actions/conversation/" + conversation.id,
+  );
 
   useEffect(() => {
     live.current = true;
@@ -62,22 +54,6 @@ export function Disclose({
       live.current = false;
     };
   }, []);
-
-  async function acknowledge() {
-    setBusy(true);
-    const submitted = await postIntent(agent.id, {
-      verb: "read",
-      kind: "transcript",
-      conversation_id: conversation.id,
-    });
-    if (!live.current) return;
-    setBusy(false);
-    if (!submitted.applied) {
-      setOutcome(outcomeNotice(submitted));
-      return;
-    }
-    onOpened();
-  }
 
   return (
     <>
@@ -87,12 +63,20 @@ export function Disclose({
           This conversation is private to {owner} and may contain private information. Opening it
           records your email, theirs, and the time.
         </p>
-        <div>
-          <Button variant="send" busy={busy} onClick={acknowledge}>
-            Open transcript
-          </Button>
-        </div>
-        <OutcomeNotice state={outcome} />
+        {/* The acts the conversation object projects for this reader — the acknowledgement, drawn
+            from its own declaration — on the agent's lane. An answer landing after the member has
+            left opens nothing: the screen it would open is not the one they are looking at. */}
+        <Panel state={acts} loading={() => null} failed={(message) => <Notice>{message}</Notice>}>
+          {({ actions }) => (
+            <ActionControls
+              views={actions}
+              post={(view, input) => postAction(agent.id, view.call, input)}
+              onApplied={() => {
+                if (live.current) onOpened();
+              }}
+            />
+          )}
+        </Panel>
       </Section>
     </>
   );

@@ -392,7 +392,13 @@ async def test_scenario_followup_merges_one_internal_flow(db: None, tmp_path) ->
             (
                 Message(
                     role="assistant",
-                    content=(ToolUseBlock(id="build", name="build_ufo_application", input={}),),
+                    content=(
+                        ToolUseBlock(
+                            id="build",
+                            name="object_action",
+                            input={"kind": "site", "action": "build_ufo_application"},
+                        ),
+                    ),
                 ),
                 Message(
                     role="user",
@@ -426,7 +432,7 @@ async def test_scenario_followup_merges_one_internal_flow(db: None, tmp_path) ->
     async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
         assert outcome.followup is not None
         assert outcome.followup.response == "Homepage ready."
-        assert outcome.output.tools == ("build_ufo_application",)
+        assert outcome.output.tools == ("action:site:build_ufo_application",)
         return CapabilityVerdict(True, "creation and homepage build completed")
 
     case = ScenarioCase(
@@ -447,7 +453,7 @@ async def test_scenario_followup_merges_one_internal_flow(db: None, tmp_path) ->
     assert attempt["followupTrajectory"] is not None
     assert len(cast(list[object], attempt["followupTrajectories"])) == 1
     assert [call["name"] for call in cast(list[dict[str, object]], attempt["calls"])] == [
-        "build_ufo_application"
+        "object_action"
     ]
 
 
@@ -536,7 +542,13 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
             (
                 Message(
                     role="assistant",
-                    content=(ToolUseBlock(id="first", name="build_ufo_application", input={}),),
+                    content=(
+                        ToolUseBlock(
+                            id="first",
+                            name="object_action",
+                            input={"kind": "site", "action": "build_ufo_application"},
+                        ),
+                    ),
                 ),
                 Message(
                     role="user",
@@ -547,7 +559,13 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
             (
                 Message(
                     role="assistant",
-                    content=(ToolUseBlock(id="second", name="build_ufo_application", input={}),),
+                    content=(
+                        ToolUseBlock(
+                            id="second",
+                            name="object_action",
+                            input={"kind": "site", "action": "build_ufo_application"},
+                        ),
+                    ),
                 ),
                 Message(
                     role="user",
@@ -592,8 +610,8 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
             "Homepage ready.",
         ]
         assert outcome.output.tools == (
-            "build_ufo_application",
-            "build_ufo_application",
+            "action:site:build_ufo_application",
+            "action:site:build_ufo_application",
         )
         return CapabilityVerdict(True, "both build attempts retained")
 
@@ -627,7 +645,13 @@ async def test_failed_scenario_followup_retains_its_evidence(db: None, tmp_path)
             (
                 Message(
                     role="assistant",
-                    content=(ToolUseBlock(id="build", name="build_ufo_application", input={}),),
+                    content=(
+                        ToolUseBlock(
+                            id="build",
+                            name="object_action",
+                            input={"kind": "site", "action": "build_ufo_application"},
+                        ),
+                    ),
                 ),
                 Message(
                     role="user",
@@ -675,7 +699,7 @@ async def test_failed_scenario_followup_retains_its_evidence(db: None, tmp_path)
     attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
     assert attempt["followupTrajectory"] is not None
     assert [call["name"] for call in cast(list[dict[str, object]], attempt["calls"])] == [
-        "build_ufo_application"
+        "object_action"
     ]
 
 

@@ -41,7 +41,10 @@ from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, JsonValue, ValidationError
+from ufo_ext_sites.application_builder import APPLICATION_BUILDER_DELEGATION
+from ufo_ext_sites.objects import SITE_KIND
 from ufo_ext_sites.surface import homepage_embed_url, shipped_homepage_url
+from ufo_ext_slack.surface import SURFACE_SLACK
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import SHARED_AUDIENCE, audience_subjects, conversation_audience
@@ -98,7 +101,15 @@ from ufo.sdk.manifest import (
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
-from ufo.sdk.objects import AGENT_KIND, ObjectListQuery, ObjectRef, ObjectRow
+from ufo.sdk.objects import (
+    AGENT_KIND,
+    CREDENTIAL_KIND,
+    MEMBER_KIND,
+    ActionView,
+    ObjectListQuery,
+    ObjectRef,
+    ObjectRow,
+)
 from ufo.sdk.sandbox import ContainmentError, contained_relative, shipped_app_slug
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
@@ -124,6 +135,7 @@ from ufo.sdk.surfaces import (
     inbox_name,
     member_message_text,
 )
+from ufo.sdk.tools import ActionBinding
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
 from ufo_ext_web.panels import (
@@ -134,6 +146,7 @@ from ufo_ext_web.panels import (
     ApplyIntent,
     AppUnlock,
     agent_settings,
+    submit_action,
     submit_intent,
 )
 from ufo_ext_web.starters import (
@@ -180,7 +193,7 @@ MAX_MEMORY_QUERY_CHARS = 500
 MAX_SEARCH_CHARS = 200
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
-SITE_KIND = "site"
+MEMORY_KIND = "memory"
 SETUP_READ_FANOUT = 8
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
@@ -196,11 +209,12 @@ TITLE_BATCH = 5
 HOMEPAGE_SEED_PREFIX = "homepage-seed/"
 SEED_JOB_NAME = "seed_homepages"
 SEED_JOB_SCHEDULE = "0 */5 * * * *"
-HOMEPAGE_TOOLS = ("build_ufo_application",)
+HOMEPAGE_TOOLS = (APPLICATION_BUILDER_DELEGATION.canonical_id,)
 SEED_PROMPT = (
     "Build your homepage: the page members open on the agents screen. State what you are for, "
-    "what you watch, recent work, and what you need from members. Call build_ufo_application once "
-    "for the complete build. The worker owns connected data inspection, app.tsx, browser QA, "
+    "what you watch, recent work, and what you need from members. Call the site collection's "
+    "build_ufo_application action (object_action with kind site) once for the complete build. "
+    "The worker owns connected data inspection, app.tsx, browser QA, "
     "repair, and deployment. Product checks own acceptance and homepage binding. Do not inspect "
     "or repair its work. Give one final response from its structured result."
 )
@@ -721,12 +735,14 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
     its homepage is the deploy-wide bundle served row-less, so it needs no build. Marking it rather
     than skipping it is what lets the candidate query settle — an unmarked agent it never builds
     would keep the workspace due forever.
-    An agent whose allowlist withholds the site tools is marked
-    settled rather than handed a turn it cannot finish — chat is its recovery if the allowlist
-    grows — an archived app is marked for the same reason, since it admits no turn at all, and an
-    ownerless agent in a workspace with no seated admin waits, unmarked, for one.
+    An agent whose allowlist withholds the homepage build is skipped and left unmarked: the
+    negative is recomputed every pass, so an allowlist that later gains the action is seeded on the
+    next sweep and a marker computed against a stale name can never outlive a deploy. An archived
+    app is marked, since it admits no turn at all, and an ownerless agent in a workspace with no
+    seated admin waits, unmarked, for one.
     The candidates gate on due work: a workspace whose agents are all marked never fires this
-    handler, so the settled fleet costs nothing. `bucket` is the day the idempotency key names — a
+    handler, so a settled fleet costs nothing beyond one roster read per pass for a workspace that
+    holds a withheld agent. `bucket` is the day the idempotency key names — a
     refused admission is a durable turn its key would answer forever, so a refusal costs at most
     one bucket's attempt while a crash between admitting and marking still dedupes to the turn
     already admitted."""
@@ -748,7 +764,6 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
             await ctx.store.put(key, "shipped")
             continue
         if agent.tools is not None and not set(HOMEPAGE_TOOLS) <= set(agent.tools):
-            await ctx.store.put(key, "withheld-tools")
             continue
         acting = agent.owner_member_id
         if acting is None:
@@ -1102,12 +1117,17 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     }
     return JSONResponse(
         {
-            "member": {"email": email, "admin": audience.admin},
+            "member": {
+                "email": email,
+                "admin": audience.admin,
+                "workspace_id": str(ctx.workspace_id),
+            },
             "surfaces": {name: flags[key] for name, key in PORTAL_SURFACES.items()},
             "archived": [
                 {
                     "id": str(app.id),
                     "name": app.name,
+                    "object": app.object_name,
                     "icon": app.icon,
                     "archived_at": app.archived_at.isoformat(),
                 }
@@ -2702,16 +2722,14 @@ async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
     The filter is the listing's alone: recall ranks by similarity and mixes in source pages, which
     carry no item class to narrow on.
 
-    Either shape states how long a body the provider stores, because the correction form on this
-    page collects one and has to stop the member at the bound the memory tool enforces rather than
-    refuse what they already wrote."""
+    Either shape carries the acts the memory collection presents, whose own schemas bound what a
+    correction may run to; a deploy without memory answers the same fields, empty."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, _email, audience = resolved
     if not ctx.memory_available:
-        return JSONResponse({"available": False, "matches": []})
-    body_max_chars = ctx.memory_body_max_chars
+        return JSONResponse({"available": False, "kinds": [], "matches": [], "actions": []})
     subjects = audience_subjects(conversation_audience(member_id))
     query = request.query_params.get("q", "").strip()
     if not query:
@@ -2738,9 +2756,9 @@ async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
                 "matches": _memory_rows(page.rows),
                 "kinds": list(offered),
                 "kind": selected or None,
-                "body_max_chars": body_max_chars,
                 "older": None if page.older is None else page.older.encode(),
                 "newer": None if page.newer is None else page.newer.encode(),
+                "actions": _action_payloads(ctx.object_actions(MEMORY_KIND, "collection")),
             }
         )
     legs = await asyncio.gather(
@@ -2767,7 +2785,7 @@ async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response:
         {
             "available": True,
             "matches": _memory_rows(found),
-            "body_max_chars": body_max_chars,
+            "actions": _action_payloads(ctx.object_actions(MEMORY_KIND, "collection")),
         }
     )
 
@@ -3384,7 +3402,12 @@ async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Respon
     if isinstance(resolved, Response):
         return resolved
     listed = await ctx.list_credential_slots()
-    return JSONResponse({"slots": [entry.model_dump(mode="json") for entry in listed]})
+    return JSONResponse(
+        {
+            "slots": [entry.model_dump(mode="json") for entry in listed],
+            "actions": _action_payloads(ctx.object_actions(CREDENTIAL_KIND, "collection")),
+        }
+    )
 
 
 async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
@@ -3404,6 +3427,7 @@ async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
                 for entry in await ctx.list_members()
             ],
             "can_add": audience.admin,
+            "actions": _action_payloads(ctx.object_actions(MEMBER_KIND, "collection")),
         }
     )
 
@@ -3436,14 +3460,13 @@ async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"installations": [entry.model_dump(mode="json") for entry in visible]})
 
 
-SLACK_SURFACE = "slack"
 GITHUB_PROVIDER = "github"
 IMESSAGE_EXTENSION = "imessage"
 IMESSAGE_STEP_FLAG = "enable-imessage-step"
 """Whether the first run offers the iMessage step. It reads open, like every flag withholding a
 screen the product already offers: a deploy with no flag service, an unseeded key and a Flagship
 outage all leave the step where it was."""
-CONNECT_STEP_NAMES = (SLACK_SURFACE, GITHUB_PROVIDER)
+CONNECT_STEP_NAMES = (SURFACE_SLACK, GITHUB_PROVIDER)
 CONNECTOR_CATALOG_LIMIT = 50
 CONNECTOR_CATALOG_QUERY_CHARS = 100
 CONNECTOR_CATALOG_CURSOR_CHARS = 500
@@ -3518,7 +3541,7 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     member_id, _email, audience = resolved
     surfaces = {entry.surface for entry in await ctx.list_installations()}
     coverage = await ctx.github_coverage(member_id, admin=audience.admin)
-    held = {SLACK_SURFACE: SLACK_SURFACE in surfaces, GITHUB_PROVIDER: coverage.git_push}
+    held = {SURFACE_SLACK: SURFACE_SLACK in surfaces, GITHUB_PROVIDER: coverage.git_push}
     imessage = any(
         extension.name == IMESSAGE_EXTENSION for extension in ctx.deploy_extensions
     ) and await flag_enabled(IMESSAGE_STEP_FLAG, default=True)
@@ -3533,6 +3556,10 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
                 for tile in FIRST_RUN_PROVIDERS
                 if tile.name in CONNECT_STEP_NAMES
             ],
+            "actions": {
+                MEMBER_KIND: _action_payloads(ctx.object_actions(MEMBER_KIND, "collection")),
+                MEMORY_KIND: _action_payloads(ctx.object_actions(MEMORY_KIND, "collection")),
+            },
         }
     )
 
@@ -3623,8 +3650,8 @@ async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) 
     ago is never offered again."""
     connections = await ctx.list_connections(member_id, admin=admin)
     held = {view.provider for view in connections}
-    if SLACK_SURFACE in {entry.surface for entry in await ctx.list_installations()}:
-        held.add(SLACK_SURFACE)
+    if SURFACE_SLACK in {entry.surface for entry in await ctx.list_installations()}:
+        held.add(SURFACE_SLACK)
     if (await ctx.github_coverage(member_id, admin=admin)).git_push:
         held.add(GITHUB_PROVIDER)
     return frozenset(held)
@@ -4179,6 +4206,9 @@ async def admin_index(ctx: SurfaceContext, request: Request) -> Response:
                     "email": entry.email,
                     "admin": entry.admin,
                     "seated": entry.seated,
+                    "actions": _action_payloads(
+                        ctx.object_actions(MEMBER_KIND, "instance", name=str(entry.id))
+                    ),
                 }
                 for entry in snapshot.members
             ],
@@ -4219,6 +4249,10 @@ def _object_agent(request: Request, audience: WebAudience) -> AgentSummary | Res
         if agent.id == agent_id:
             return agent
     return Response("no such agent", status_code=404)
+
+
+def _action_payloads(views: tuple[ActionView, ...]) -> list[dict[str, object]]:
+    return [view.model_dump(mode="json", exclude_none=True) for view in views]
 
 
 def _kind_payload(kind: PortalKind) -> dict[str, object]:
@@ -4369,7 +4403,13 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
     if not named:
         rows.sort(key=lambda row: _merged_rank(row, query.order_by), reverse=order == "desc")
         walk = _fanout_token(walking)
-    return JSONResponse({**_kind_payload(kind), "objects": rows, "next_cursor": walk})
+    return JSONResponse(
+        {
+            **_kind_payload(kind),
+            "objects": rows,
+            "next_cursor": walk,
+        }
+    )
 
 
 async def object_detail(ctx: SurfaceContext, request: Request) -> Response:
@@ -4463,6 +4503,44 @@ async def intents(ctx: SurfaceContext, request: Request) -> Response:
         return gated
     member_id, email, _audience, agent_id = gated
     return await submit_intent(ctx, request, agent_id, member_id, email)
+
+
+async def actions(ctx: SurfaceContext, request: Request) -> Response:
+    """The presented-action lane: the path names the kind, the action, and — for an instance
+    action — the row; the lane's agent is the path's; the body is the action's own input alone.
+    The route binds the target, never the browser."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, email, _audience, agent_id = gated
+    params = request.path_params
+    return await submit_action(
+        ctx,
+        request,
+        agent_id,
+        member_id,
+        email,
+        kind=params["kind"],
+        name=params.get("name"),
+        action=params["action"],
+    )
+
+
+async def action_views(ctx: SurfaceContext, request: Request) -> Response:
+    """The acts a kind presents, projected from the declarations alone: a collection's for the
+    bare kind, and for a named row the instance actions open on it or pinned to it. A panel holding
+    a target the portal offers no row read for — an archived app, the workspace, another member's
+    private conversation — still draws the controls its declarations offer; dispatch's recheck and
+    the handler stay the authority."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    kind = request.path_params["kind"]
+    if ctx.object_kind(kind) is None:
+        return Response(f"no object kind named {kind!r}", status_code=404)
+    name = request.path_params.get("name")
+    binding: ActionBinding = "collection" if name is None else "instance"
+    return JSONResponse({"actions": _action_payloads(ctx.object_actions(kind, binding, name=name))})
 
 
 DIRECT_WRITE_TIMEOUT_SECONDS = 120
@@ -4862,6 +4940,12 @@ ROUTES = (
     SurfaceRoute(method="GET", path="agents/{agent_id}/setup", handler=agent_setup),
     SurfaceRoute(method="GET", path="agents/{agent_id}/homepage", handler=homepage),
     SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
+    SurfaceRoute(method="POST", path="agents/{agent_id}/actions/{kind}/{action}", handler=actions),
+    SurfaceRoute(
+        method="POST", path="agents/{agent_id}/actions/{kind}/{name}/{action}", handler=actions
+    ),
+    SurfaceRoute(method="GET", path="actions/{kind}", handler=action_views),
+    SurfaceRoute(method="GET", path="actions/{kind}/{name}", handler=action_views),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),
     SurfaceRoute(method="GET", path="connections", handler=connection_pool),
     SurfaceRoute(method="GET", path="connector-catalog", handler=connector_catalog),

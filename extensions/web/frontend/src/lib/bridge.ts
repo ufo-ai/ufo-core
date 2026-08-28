@@ -34,6 +34,8 @@ const ENDPOINTS: Endpoint[] = (
     ["GET", "workspace/starters"],
     ["GET", "objects/{kind}"],
     ["GET", "objects/{kind}/{name}"],
+    ["GET", "actions/{kind}"],
+    ["GET", "actions/{kind}/{name}"],
     ["GET", "agents/{id}/conversations"],
     ["GET", "agents/{id}/transcript"],
     ["GET", "agents/{id}/conversations/{cid}/transcript"],
@@ -43,16 +45,18 @@ const ENDPOINTS: Endpoint[] = (
     ["POST", "objects/{kind}/{name}/delete", "json"],
     ["POST", "agents/{id}/chat", "text"],
     ["POST", "agents/{id}/intents", "json"],
+    ["POST", "agents/{id}/actions/{kind}/{action}", "json"],
+    ["POST", "agents/{id}/actions/{kind}/{name}/{action}", "json"],
     ["POST", "credentials", "urlencoded"],
   ] as const
 ).map(([method, template, body]) => ({ method, template: template.split("/"), body }));
 
 /** The intent verbs a frame may post: the object mutations the kernel's own record panes speak
- *  (`apply`, `delete` — the same authority the table's direct-write rows already grant), the
- *  rebuilds the shipped pages carry as controls, and `connect`, which mints a consent link the
- *  member completes on the provider's own site and so authorizes nothing on its own. A band that
- *  states a need has to carry the act that settles it, or a member reads a list of chores each of
- *  which sends them somewhere else to type.
+ *  (`apply`, `delete` — the same authority the table's direct-write rows already grant), and
+ *  `connect`, which mints a consent link the member completes on the provider's own site and so
+ *  authorizes nothing on its own — admitted only where the deploy's declarations present its tool
+ *  to a page. A band that states a need has to carry the act that settles it, or a member reads a
+ *  list of chores each of which sends them somewhere else to type.
  *
  *  Every one of them dispatches verbatim and runs no model round. That is the line, and it is the
  *  same line `POST agents/{id}/chat` is held to: a turn that runs model rounds runs with the
@@ -60,18 +64,21 @@ const ENDPOINTS: Endpoint[] = (
  *  is asked for in the portal's composer, where the words are the member's own to send.
  *
  *  The intents lane reaches acts far past a page's remit — membership, credentials, deploys — and
- *  a frame speaks with the viewer's whole session, so the fence names the verbs rather than
- *  trusting the page (RFC 0039 security debt: the per-message gate is deferred, the table is the
- *  fence). */
+ *  a frame speaks with the viewer's whole session, so the table names its verbs and the server
+ *  checks action declarations (RFC 0039 security debt: the per-message gate is deferred). */
 const FRAME_INTENT_VERBS: ReadonlySet<string> = new Set([
   "apply",
   "delete",
   "connect",
-  "rebuild_reports",
-  "rebuild_page_facts",
 ]);
 
 const INTENTS_TEMPLATE = "agents/{id}/intents";
+
+/** The mark on every call the shell forwards for a page. The surface reads it to hold a frame's
+ *  post to the acts declared for a page, so a page reaching the lane by any other route than this
+ *  table meets the same answer. It is written after the page's
+ *  own headers, so a page cannot unset it. */
+const FRAME_HEADER = "x-ufo-frame";
 
 const CHAT_TEMPLATE = "agents/{id}/chat";
 
@@ -372,7 +379,8 @@ export function attachBridge({
             return;
           }
         }
-        if (endpoint.template.join("/") === INTENTS_TEMPLATE) {
+        const template = endpoint.template.join("/");
+        if (template === INTENTS_TEMPLATE) {
           const verb = (body as { verb?: unknown } | null)?.verb;
           if (typeof verb !== "string" || !FRAME_INTENT_VERBS.has(verb)) {
             refuse("This intent is not available from an app page.");
@@ -414,6 +422,7 @@ export function attachBridge({
             credentials: "same-origin",
             headers: {
               ...carried,
+              [FRAME_HEADER]: "1",
               ...(form === null && endpoint.body === "json"
                 ? { "content-type": "application/json" }
                 : {}),

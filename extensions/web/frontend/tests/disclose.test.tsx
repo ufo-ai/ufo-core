@@ -51,8 +51,24 @@ const WALLED = {
 const OWNER = "owner@example.com";
 const ROOM = "Private channel";
 
-const conversations = (entries: unknown[]) => ({
+/** The acknowledgement as the conversation object projects it to an admin: the instance action
+ *  its declaration presents, pre-bound to the row the read answered. */
+const OPEN_TRANSCRIPT = (id: string) => ({
+  name: "read_private_transcript",
+  description: "Record that an admin opened another member's private conversation.",
+  input_schema: { properties: {} },
+  call: { kind: "conversation", action: "read_private_transcript", name: id, input: {} },
+  label: "Open transcript",
+});
+
+const conversations = <Entry extends { id: string }>(entries: Entry[]) => ({
   "/conversations$": () => json({ conversations: entries }),
+  ...Object.fromEntries(
+    entries.map((entry) => [
+      "/actions/conversation/" + entry.id + "$",
+      () => json({ actions: [OPEN_TRANSCRIPT(entry.id)] }),
+    ]),
+  ),
 });
 
 beforeEach(() => {
@@ -95,25 +111,24 @@ test("the acknowledgement names the owner and what opening records, and does not
 });
 
 test("acknowledging posts the transcript intent and opens the conversation it named", async () => {
-  const bodies: string[] = [];
+  const posted: { url: string; body: unknown }[] = [];
   wire({
     "/transcript": () => json({ messages: [] }),
-    ...conversations([PRIVATE]),
-    "/intents": (_url, init) => {
-      bodies.push(String(init?.body));
+    "/read_private_transcript": (url, init) => {
+      posted.push({ url, body: JSON.parse(String(init?.body)) });
       return json({ applied: true, message: "Recorded." });
     },
+    ...conversations([PRIVATE]),
   });
   standing(PRIVATE.id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
 
-  await waitFor(() => expect(bodies.length).toBe(1));
-  expect(JSON.parse(bodies[0])).toEqual({
-    verb: "read",
-    kind: "transcript",
-    conversation_id: "c1",
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toEqual({
+    url: "/surface/web/agents/" + AGENT.id + "/actions/conversation/c1/read_private_transcript",
+    body: {},
   });
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   expect(screen.getByRole("heading", { name: "Slack · owner@example.com" })).toBeTruthy();
@@ -125,7 +140,7 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
   wire({
     "/transcript": () => json({ messages: [] }),
     ...conversations([PRIVATE, { ...WALLED, disclosable: true }]),
-    "/intents": () =>
+    "/read_private_transcript": () =>
       new Promise<Response>((resolve) => {
         release = resolve;
       }),
@@ -150,7 +165,7 @@ test("an acknowledgement in flight for one conversation never opens over another
   wire({
     "/transcript": () => json({ messages: [] }),
     ...conversations([PRIVATE, { ...WALLED, disclosable: true }]),
-    "/intents": () => {
+    "/read_private_transcript": () => {
       if (release) return Response.json({ applied: false, message: "Refused." });
       return new Promise<Response>((resolve) => {
         release = resolve;
@@ -175,7 +190,7 @@ test("an acknowledgement in flight for one conversation never opens over another
 test("a refused acknowledgement states the refusal and opens nothing", async () => {
   const { calls } = wire({
     ...conversations([PRIVATE]),
-    "/intents": () => json({ applied: false, message: "Only an admin may read it." }),
+    "/read_private_transcript": () => json({ applied: false, message: "Only an admin may read it." }),
   });
   standing(PRIVATE.id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
@@ -194,8 +209,9 @@ test("a permalink to another member's conversation offers the listing's acknowle
       url.includes("conversation=")
         ? json({ chats: [], conversation: linked })
         : json({ chats: [] }),
+    "/read_private_transcript": () => json({ applied: true, message: "Recorded." }),
+    "/actions/conversation/": () => json({ actions: [OPEN_TRANSCRIPT(CONVO_ID)] }),
     "/transcript": () => json({ messages: [] }),
-    "/intents": () => json({ applied: true, message: "Recorded." }),
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 

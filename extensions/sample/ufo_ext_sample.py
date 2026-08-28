@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
@@ -70,12 +70,15 @@ from ufo.sdk.manifest import (
     InjectionTarget,
     Manifest,
     MemorySearchProviderSpec,
+    ModifyInput,
+    ModifyOutput,
     OnboardingStep,
     PageChangeBatch,
     PostCompact,
     PostToolUse,
     PostToolUseFailure,
     PreCompact,
+    PreToolUse,
     PromptSection,
     RouteSpec,
     SearchProviderSpec,
@@ -103,6 +106,7 @@ from ufo.sdk.models import (
 )
 from ufo.sdk.objects import (
     AdminRequired,
+    ObjectActionTarget,
     ObjectDetail,
     ObjectKind,
     ObjectListQuery,
@@ -130,9 +134,24 @@ from ufo.sdk.search import (
 )
 from ufo.sdk.sources import Page, SourceAuth, SyncResult
 from ufo.sdk.subjects import SHARED_SUBJECT
-from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec, Writeback
+from ufo.sdk.surfaces import (
+    AskQuestion,
+    AskUserInput,
+    SurfaceAuth,
+    SurfaceContext,
+    SurfaceRoute,
+    SurfaceSpec,
+    Writeback,
+)
 from ufo.sdk.terminal import Terminals
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    ActionPresentation,
+    ObjectBinding,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolResult,
+)
 
 NAME = "sample"
 VERSION = "0.1.0"
@@ -200,8 +219,8 @@ SECTION_BODY = (
     "The sample pack contributes this capability section to the agent's system prompt.\n"
     "</sample_capability>"
 )
-SURFACE_NAME = "sample_surface"
-SURFACE_LIVE_NAME = "sample_live"
+SURFACE_NAME = "sample-surface"
+SURFACE_LIVE_NAME = "sample-live"
 SURFACE_INBOX_REL = "sample-inbox/note.txt"
 SURFACE_DELIVERED_PREFIX = "sample-delivered"
 SURFACE_POST_REF = "sample-posted-ref"
@@ -237,7 +256,6 @@ SAMPLE_SEARCH_TEXT = "the sample search backend answers a canned hit"
 SAMPLE_SEARCH_ANSWER = "the sample search backend answers directly"
 SAMPLE_MEMORY_TEXT = "the sample memory provider returns a scoped result"
 SAMPLE_MEMORY_KIND = "fact"
-SAMPLE_MEMORY_BODY_MAX_CHARS = 64
 MEMORY_SEARCH_KEY = "memory_search"
 MEMORY_RECENT_KEY = "memory_recent"
 MEMORY_SEARCH_PROVIDER = "sample"
@@ -252,6 +270,33 @@ CONVERSATION_SLOT = "sample_changes"
 SAMPLE_FETCH_TEXT = "the sample search backend fetched a canned page"
 WIDGET_KIND = "sample_widget"
 WIDGET_KEY_PREFIX = "object:widget:"
+WORKSPACE_KIND = "workspace"
+AUDIT_ACTION = "audit"
+POLISH_ACTION = "polish"
+ENGRAVE_ACTION = "engrave"
+DIVINE_ACTION = "divine"
+CALIBRATE_ACTION = "calibrate"
+BLESS_ACTION = "bless"
+BESEECH_ACTION = "beseech"
+BLESS_CANONICAL_ID = f"action:{WIDGET_KIND}:{BLESS_ACTION}"
+AUDIT_KEY = "action:audit"
+POLISH_KEY = "action:polish"
+ENGRAVE_KEY = "action:engrave"
+ENGRAVE_PRESENTATION_LABEL = "Engrave"
+ENGRAVE_PRESENTATION_CONFIRM = "Engrave this widget?"
+DIVINE_KEY = "action:divine"
+CALIBRATE_KEY = "action:calibrate"
+BLESS_KEY = "action:bless"
+BESEECH_KEY = "action:beseech"
+BESEECH_DIRECTIVE = "ask the member privately"
+BESEECH_TITLE = "The probe widgets need a decision."
+HOOK_BLESS_PRE_KEY = "hook:bless_pre"
+HOOK_BLESS_POST_KEY = "hook:bless_post"
+HOOK_BLESS_FAILURE_KEY = "hook:bless_failure"
+BLESS_FOLD_SUFFIX = " (folded)"
+BLESS_REWRITE = "the bless output was replaced by the sample post hook"
+BLESS_FAILURE = "the sample bless action was asked to fail"
+DIVINATION = "the divination speaks in an untrusted voice"
 RELIC_KIND = "sample_relic"
 RELIC_NAME = "meteor-shard"
 RELIC_INSCRIPTION = "the sample relic is excavated, never authored"
@@ -376,13 +421,15 @@ class RelicSpec(BaseModel):
 
 
 class StoredWidget(BaseModel):
-    """A widget's persisted row: the applied spec and the timestamps the envelope renders. Crosses
+    """A widget's persisted row: the applied spec, the timestamps the envelope renders, and the
+    generation replaced on every apply — the fence the verbs and instance actions check. Crosses
     the `ext_store` boundary, so it validates on the way back out."""
 
     model_config = ConfigDict(extra="forbid")
     spec: WidgetSpec
     created_at: datetime
     updated_at: datetime
+    generation: UUID
 
 
 @dataclass(frozen=True)
@@ -390,7 +437,9 @@ class WidgetStore:
     """The full-CRUD probe store over the sample's own `ext_store` keys: apply/get/delete round a
     spec through `WIDGET_KEY_PREFIX` rows, list pages by keyset over the store's key order, and
     delete gates on a workspace admin — so the conformance tests drive create, update, paging,
-    admin refusal, and delete through the real verbs and read back through this public store."""
+    admin refusal, and delete through the real verbs and read back through this public store.
+    Every apply replaces the row's generation, and each fenced verb refuses once the row under
+    the name is not the one its read observed."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         entries = await self._ext(ctx).store.list(WIDGET_KEY_PREFIX)
@@ -411,7 +460,10 @@ class WidgetStore:
             return None
         stored = StoredWidget.model_validate(value)
         return ObjectDetail(
-            spec=stored.spec, created_at=stored.created_at, updated_at=stored.updated_at
+            spec=stored.spec,
+            created_at=stored.created_at,
+            updated_at=stored.updated_at,
+            generation=stored.generation,
         )
 
     async def status(
@@ -421,6 +473,10 @@ class WidgetStore:
         *,
         expected_generation: UUID | None,
     ) -> None:
+        value = await self._ext(ctx).store.get(WIDGET_KEY_PREFIX + name)
+        if value is None:
+            return None
+        self._require_current(name, StoredWidget.model_validate(value), expected_generation)
         return None
 
     async def apply(
@@ -435,10 +491,19 @@ class WidgetStore:
         ext = self._ext(ctx)
         value = await ext.store.get(WIDGET_KEY_PREFIX + name)
         now = datetime.now(UTC)
-        created_at = now if value is None else StoredWidget.model_validate(value).created_at
+        if value is None:
+            if expected_generation is not None:
+                raise ValueError(f"sample widget {name!r} changed while editing")
+            created_at = now
+        else:
+            stored = StoredWidget.model_validate(value)
+            self._require_current(name, stored, expected_generation)
+            created_at = stored.created_at
         await ext.store.put(
             WIDGET_KEY_PREFIX + name,
-            StoredWidget(spec=spec, created_at=created_at, updated_at=now).model_dump(mode="json"),
+            StoredWidget(
+                spec=spec, created_at=created_at, updated_at=now, generation=uuid4()
+            ).model_dump(mode="json"),
         )
 
     async def delete(
@@ -448,9 +513,19 @@ class WidgetStore:
         *,
         expected_generation: UUID | None,
     ) -> None:
+        ext = self._ext(ctx)
+        value = await ext.store.get(WIDGET_KEY_PREFIX + name)
+        if value is not None:
+            self._require_current(name, StoredWidget.model_validate(value), expected_generation)
         if not await ctx.speaker_is_admin():
             raise AdminRequired(WIDGET_DELETE_GATE)
-        await self._ext(ctx).store.delete(WIDGET_KEY_PREFIX + name)
+        await ext.store.delete(WIDGET_KEY_PREFIX + name)
+
+    def _require_current(
+        self, name: str, stored: StoredWidget, expected_generation: UUID | None
+    ) -> None:
+        if stored.generation != expected_generation:
+            raise ValueError(f"sample widget {name!r} changed while editing")
 
     def _ext(self, ctx: ToolContext) -> ExtensionContext:
         if ctx.ext is None:
@@ -504,6 +579,189 @@ class RelicStore:
         expected_generation: UUID | None,
     ) -> None:
         raise VerbNotSupported(RELIC_REFUSAL)
+
+
+class AuditInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    subject: str = ""
+
+
+class PolishInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    coats: int = 1
+
+
+class EngraveInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+    interrupt_once: bool = False
+
+
+class DivineInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = ""
+
+
+class CalibrateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    offset: int = 0
+
+
+class BlessInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phrase: str = ""
+    fail: bool = False
+
+
+class BeseechInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    question: str = "Which widget?"
+
+
+def _target_record(target: ObjectActionTarget | None) -> dict[str, JsonValue] | None:
+    if target is None:
+        return None
+    return {
+        "kind": target.kind,
+        "name": target.name,
+        "agent": None if target.agent is None else target.agent.name,
+        "generation": None if target.generation is None else str(target.generation),
+        "expected_generation": (
+            None if target.expected_generation is None else str(target.expected_generation)
+        ),
+    }
+
+
+def _action_ext(ctx: ToolContext) -> ExtensionContext:
+    if ctx.ext is None:
+        raise RuntimeError("sample action dispatched without its ExtensionContext")
+    return ctx.ext
+
+
+async def _audit(ctx: ToolContext, args: AuditInput) -> ToolResult:
+    ext = _action_ext(ctx)
+    await ext.store.put(
+        AUDIT_KEY,
+        {
+            "subject": args.subject,
+            "extension": ext.store.extension,
+            "target": _target_record(ctx.target),
+        },
+    )
+    return ToolResult(content=(TextContent(text=f"audited {args.subject or 'the workspace'}"),))
+
+
+async def _polish(ctx: ToolContext, args: PolishInput) -> ToolResult:
+    ext = _action_ext(ctx)
+    await ext.store.put(POLISH_KEY, {"coats": args.coats, "target": _target_record(ctx.target)})
+    return ToolResult(content=(TextContent(text=f"polished with {args.coats} coats"),))
+
+
+async def _engrave(ctx: ToolContext, args: EngraveInput) -> ToolResult:
+    ext = _action_ext(ctx)
+    target = ctx.target
+    if target is None or target.name is None:
+        raise RuntimeError("sample engrave dispatched without an instance target")
+    match await ext.store.get(ENGRAVE_KEY):
+        case {"idempotency_key": prior_key} if prior_key == ctx.idempotency_key:
+            return ToolResult(content=(TextContent(text=f"engraved {args.text!r}"),))
+    if target.expected_generation is not None and target.expected_generation != target.generation:
+        raise ValueError(f"sample widget {target.name!r} changed after your read")
+    key = WIDGET_KEY_PREFIX + target.name
+    value = await ext.store.get(key)
+    if value is None:
+        raise RuntimeError(f"sample widget {target.name!r} vanished after its target read")
+    stored = StoredWidget.model_validate(value)
+    minted = uuid4()
+    await ext.store.put(
+        key,
+        StoredWidget(
+            spec=stored.spec,
+            created_at=stored.created_at,
+            updated_at=datetime.now(UTC),
+            generation=minted,
+        ).model_dump(mode="json"),
+    )
+    await ext.store.put(
+        ENGRAVE_KEY,
+        {
+            "text": args.text,
+            "idempotency_key": ctx.idempotency_key,
+            "target": _target_record(target),
+            "minted": str(minted),
+        },
+    )
+    if args.interrupt_once:
+        raise asyncio.CancelledError
+    return ToolResult(content=(TextContent(text=f"engraved {args.text!r}"),))
+
+
+async def _divine(ctx: ToolContext, args: DivineInput) -> ToolResult:
+    ext = _action_ext(ctx)
+    await ext.store.put(DIVINE_KEY, {"query": args.query, "target": _target_record(ctx.target)})
+    return ToolResult(content=(TextContent(text=DIVINATION),))
+
+
+async def _calibrate(ctx: ToolContext, args: CalibrateInput) -> ToolResult:
+    ext = _action_ext(ctx)
+    await ext.store.put(
+        CALIBRATE_KEY, {"offset": args.offset, "target": _target_record(ctx.target)}
+    )
+    return ToolResult(content=(TextContent(text=f"calibrated by {args.offset}"),))
+
+
+async def _bless(ctx: ToolContext, args: BlessInput) -> ToolResult:
+    if args.fail:
+        raise ValueError(BLESS_FAILURE)
+    ext = _action_ext(ctx)
+    await ext.store.put(BLESS_KEY, {"phrase": args.phrase, "target": _target_record(ctx.target)})
+    return ToolResult(content=(TextContent(text=f"blessed with {args.phrase!r}"),))
+
+
+async def _beseech(ctx: ToolContext, args: BeseechInput) -> ToolResult:
+    ext = _action_ext(ctx)
+    await ext.store.put(
+        BESEECH_KEY, {"question": args.question, "target": _target_record(ctx.target)}
+    )
+    payload = AskUserInput(title=BESEECH_TITLE, questions=(AskQuestion(question=args.question),))
+    return ToolResult(
+        content=(TextContent(text=f"{BESEECH_DIRECTIVE}\n{payload.model_dump_json()}"),)
+    )
+
+
+async def _bless_fold(ctx: HookContext) -> HookOutcome:
+    match ctx.payload:
+        case PreToolUse(call=call, target=target, tool_input=BlessInput() as args):
+            await ctx.ext.store.put(
+                HOOK_BLESS_PRE_KEY,
+                {
+                    "call": call,
+                    "tool_name": ctx.payload.tool_name,
+                    "target": _target_record(target),
+                },
+            )
+            return ModifyInput(
+                tool_input=BlessInput(phrase=args.phrase + BLESS_FOLD_SUFFIX, fail=args.fail)
+            )
+    return None
+
+
+async def _bless_replace(ctx: HookContext) -> HookOutcome:
+    match ctx.payload:
+        case PostToolUse(call=call, output=output, target=target):
+            await ctx.ext.store.put(
+                HOOK_BLESS_POST_KEY,
+                {"call": call, "output": output, "target": _target_record(target)},
+            )
+            return ModifyOutput(output=BLESS_REWRITE)
+    return None
+
+
+async def _bless_failure(ctx: HookContext) -> HookOutcome:
+    match ctx.payload:
+        case PostToolUseFailure(call=call, output=output):
+            await ctx.ext.store.put(HOOK_BLESS_FAILURE_KEY, {"call": call, "output": output})
+    return None
 
 
 class SampleSourceConfig(BaseModel):
@@ -1080,9 +1338,6 @@ class SampleMemorySearch:
     def listable_kinds(self) -> tuple[str, ...]:
         return (SAMPLE_MEMORY_KIND,)
 
-    def body_max_chars(self) -> int:
-        return SAMPLE_MEMORY_BODY_MAX_CHARS
-
     async def list_recent(
         self,
         subjects: frozenset[str],
@@ -1206,6 +1461,67 @@ def manifest() -> Manifest:
                 input_model=NoteInput,
                 handler=_note,
             ),
+            ToolDef(
+                name=AUDIT_ACTION,
+                description="Audit the workspace's probe records.",
+                input_model=AuditInput,
+                handler=_audit,
+                bound=ObjectBinding(kind=WORKSPACE_KIND, binding="collection"),
+                parallel_safe=True,
+            ),
+            ToolDef(
+                name=POLISH_ACTION,
+                description="Polish one probe widget — the agent-targetable action.",
+                input_model=PolishInput,
+                handler=_polish,
+                bound=ObjectBinding(kind=WIDGET_KIND, binding="instance"),
+                agent_targetable=True,
+            ),
+            ToolDef(
+                name=ENGRAVE_ACTION,
+                description="Engrave one probe widget — an external write that dedups on its key.",
+                input_model=EngraveInput,
+                handler=_engrave,
+                bound=ObjectBinding(kind=WIDGET_KIND, binding="instance"),
+                side_effecting=True,
+                presentation=ActionPresentation(
+                    label=ENGRAVE_PRESENTATION_LABEL,
+                    confirm=ENGRAVE_PRESENTATION_CONFIRM,
+                    frame=True,
+                ),
+            ),
+            ToolDef(
+                name=DIVINE_ACTION,
+                description="Read the widgets' divination — third-party text, walled as data.",
+                input_model=DivineInput,
+                handler=_divine,
+                bound=ObjectBinding(kind=WIDGET_KIND, binding="collection"),
+                untrusted=True,
+                parallel_safe=True,
+            ),
+            ToolDef(
+                name=CALIBRATE_ACTION,
+                description="Calibrate the probe widgets — a profile-held primitive.",
+                input_model=CalibrateInput,
+                handler=_calibrate,
+                bound=ObjectBinding(kind=WIDGET_KIND, binding="collection"),
+                profile_only=True,
+            ),
+            ToolDef(
+                name=BLESS_ACTION,
+                description="Bless one probe widget — the hook-targeted action.",
+                input_model=BlessInput,
+                handler=_bless,
+                bound=ObjectBinding(kind=WIDGET_KIND, binding="instance"),
+            ),
+            ToolDef(
+                name=BESEECH_ACTION,
+                description="Ask the member a question about the probe widgets — a final act.",
+                input_model=BeseechInput,
+                handler=_beseech,
+                bound=ObjectBinding(kind=WIDGET_KIND, binding="collection"),
+                final_act_model=AskUserInput,
+            ),
         ),
         objects=(
             ObjectKind(
@@ -1217,6 +1533,7 @@ def manifest() -> Manifest:
                 spec_model=WidgetSpec,
                 store=WidgetStore(),
                 list_fields=frozenset({"color", "size"}),
+                agent_target_verbs=frozenset({"get"}),
             ),
             ObjectKind(
                 name=RELIC_KIND,
@@ -1313,6 +1630,13 @@ def manifest() -> Manifest:
         ),
         hooks=(
             HookSpec(event="pre_tool_use", handler=_deny_echo, tools=(TOOL_NAME,)),
+            HookSpec(event="pre_tool_use", handler=_bless_fold, tools=(BLESS_CANONICAL_ID,)),
+            HookSpec(event="post_tool_use", handler=_bless_replace, tools=(BLESS_CANONICAL_ID,)),
+            HookSpec(
+                event="post_tool_use_failure",
+                handler=_bless_failure,
+                tools=(BLESS_CANONICAL_ID,),
+            ),
             HookSpec(event="post_tool_use", handler=_record_post),
             HookSpec(event="post_tool_use_failure", handler=_record_post_failure),
             HookSpec(event="stop", handler=_record_stop),

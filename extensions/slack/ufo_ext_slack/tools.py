@@ -1,13 +1,16 @@
-"""Slack setup as chat tools: an admin connects Slack in conversation and the agent drives it.
+"""Slack setup as chat actions: an admin connects Slack in conversation and the agent drives it.
 
-Two install paths converge on the same per-workspace bot token and identity record. `slack_connect`
-defaults to `method="oauth"`: when the deploy has its own Slack app configured, it seals an install
-handoff to the admin and the bot-token slot and returns an "Add to Slack" link; the OAuth callback
-lands the token, team binding, and identity. `method="manifest"` is the bring-your-own-app path —
-`slack_app_manifest` renders the exact app YAML the member creates the app from, the two secrets
-(bot token, signing secret) travel through `request_credentials` fulfillment into per-workspace
-slots (never through chat), and `slack_connect` derives the identity with `auth.test`. Both paths
-report the same downstream states: `pending` once identity is proven, `connected` once a
+The three tools are instance actions on core's `surface/slack` object — a read of that object
+lists them, and `object_action` dispatches them under `action:surface:<name>` with this extension's
+own context. Two install paths converge on the same per-workspace bot token and identity record.
+`slack_connect` defaults to `method="oauth"`: when the deploy has its own Slack app configured, it
+seals an install handoff to the admin and the bot-token slot and returns an "Add to Slack" link;
+the OAuth callback lands the token, team binding, and identity. `method="manifest"` is the
+bring-your-own-app path — `slack_app_manifest` renders the exact app YAML the member creates the
+app from, the two secrets (bot token, signing secret) travel through `request_credentials`
+fulfillment into per-workspace slots (never through chat), and `slack_connect` derives the identity
+with `auth.test`. Both paths report the same downstream states: `pending` once identity is proven,
+`connected` once a
 signature-verified request writes the url-verified marker. The manifest template below is pinned to
 the skill's YAML by a test, so the scopes and events never drift apart.
 
@@ -20,10 +23,18 @@ import os
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.sdk.objects import SURFACE_KIND
 from ufo.sdk.surfaces import CredentialSlotUnset, SurfaceInstallationConflict
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    ActionPresentation,
+    ObjectBinding,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolResult,
+)
 from ufo_ext_slack.surface import (
     MALFORMED_IDENTITY_ERROR,
     SLACK_BOT_TOKEN_SLOT,
@@ -46,6 +57,9 @@ from ufo_ext_slack.surface import (
 )
 
 SLACK_SECRET_SLOTS = (SLACK_BOT_TOKEN_SLOT, SLACK_SIGNING_SECRET_SLOT)
+SLACK_CONNECT_ACTION = "slack_connect"
+SLACK_APP_MANIFEST_ACTION = "slack_app_manifest"
+SLACK_CHANNELS_ACTION = "slack_channels"
 
 BOT_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,34}$"
 
@@ -100,6 +114,7 @@ settings:
 
 
 class SlackConnectInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     method: Literal["oauth", "manifest"] = Field(
         default="oauth",
         description=(
@@ -111,12 +126,14 @@ class SlackConnectInput(BaseModel):
 
 
 class SlackManifestInput(BaseModel):
-    name: str = Field(
+    model_config = ConfigDict(extra="forbid")
+    bot_name: str = Field(
         default="ufo", description="The bot's display name shown in Slack, 1-35 plain characters."
     )
 
 
 class SlackChannelsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     query: str = Field(
         default="",
         description="Case-insensitive text matched against each conversation's name, purpose, "
@@ -226,8 +243,8 @@ async def _derive_manifest_identity(
     if missing:
         return _state(
             "not_configured",
-            "use slack_app_manifest to create the app, then request_credentials for "
-            f"{', '.join(missing)}, then slack_connect again.",
+            "use slack_app_manifest to create the app, then the credential collection's "
+            f"request_credentials action for {', '.join(missing)}, then slack_connect again.",
             events_url,
             missing=missing,
         )
@@ -273,7 +290,7 @@ async def slack_manifest_handler(ctx: ToolContext, args: SlackManifestInput) -> 
     """The ready-to-paste Slack app manifest for this deploy: the member creates the app from it at
     api.slack.com (Create New App → From a manifest), so the scopes, events, and request URLs are
     right by construction — never hand-assembled."""
-    if not re.match(BOT_NAME_PATTERN, args.name):
+    if not re.match(BOT_NAME_PATTERN, args.bot_name):
         raise ValueError("bot display name must be 1-35 plain characters")
     base = ctx.public_base_url
     if not base:
@@ -282,7 +299,7 @@ async def slack_manifest_handler(ctx: ToolContext, args: SlackManifestInput) -> 
         )
     events_url = _events_url(base)
     manifest = SLACK_APP_MANIFEST_TEMPLATE.format(
-        name=args.name, request_url=events_url, interactivity_url=f"{events_url}/interactive"
+        name=args.bot_name, request_url=events_url, interactivity_url=f"{events_url}/interactive"
     )
     return ToolResult(content=(TextContent(text=manifest),))
 
@@ -324,7 +341,7 @@ def _token_diagnosis(error: str) -> str:
 
 TOOLS = (
     ToolDef(
-        name="slack_connect",
+        name=SLACK_CONNECT_ACTION,
         description=(
             "Walk the Slack install state machine and report where it stands (not_configured / "
             "not_installed / pending / connected). Idempotent — call it before, during, and after "
@@ -334,10 +351,13 @@ TOOLS = (
         ),
         input_model=SlackConnectInput,
         handler=slack_connect_handler,
+        bound=ObjectBinding(kind=SURFACE_KIND, binding="instance", name=SURFACE_SLACK),
         untrusted=True,
+        side_effecting=True,
+        presentation=ActionPresentation(label="Connect Slack"),
     ),
     ToolDef(
-        name="slack_app_manifest",
+        name=SLACK_APP_MANIFEST_ACTION,
         description=(
             "The exact Slack app manifest for this deploy, ready to paste at api.slack.com "
             "(Create New App → From a manifest). Show it to the member verbatim in a code block "
@@ -345,9 +365,10 @@ TOOLS = (
         ),
         input_model=SlackManifestInput,
         handler=slack_manifest_handler,
+        bound=ObjectBinding(kind=SURFACE_KIND, binding="instance", name=SURFACE_SLACK),
     ),
     ToolDef(
-        name="slack_channels",
+        name=SLACK_CHANNELS_ACTION,
         description=(
             "List and search the connected workspace's Slack conversations — public and private "
             "channels, group DMs, and 1:1 DMs — by name, purpose, topic, or (for DMs) the people "
@@ -358,6 +379,7 @@ TOOLS = (
         ),
         input_model=SlackChannelsInput,
         handler=slack_channels_handler,
+        bound=ObjectBinding(kind=SURFACE_KIND, binding="instance", name=SURFACE_SLACK),
         untrusted=True,
     ),
 )

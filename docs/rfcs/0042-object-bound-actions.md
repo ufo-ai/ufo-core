@@ -81,9 +81,9 @@ one member ask two discovery grammars. This RFC's final unit deletes it; until t
 keeps running unchanged, the counts here are registry counts, and the billed comparison is
 measured against production with the catalog live.
 
-Twenty-five names in the hosted set are object-local. `monitor` is the same shape in the separate
-monitors extension, making 26 repository-wide. Moving the hosted 25 and adding `object_action`
-changes the static member-facing registry from 67 to 43, a net reduction of 24 schemas. This count
+Twenty-three names in the hosted set are object-local. `monitor` is the same shape in the separate
+monitors extension, making 24 repository-wide. Moving the hosted 23 and adding `object_action`
+changes the static member-facing registry from 67 to 45, a net reduction of 22 schemas. This count
 does not claim a token saving: descriptions and JSON Schemas differ in size, a static schema rides
 the cached prompt prefix while a discovered one is per-conversation transcript tokens, and a moved
 action is still read when its object is explored. The measurement gate uses serialized bytes,
@@ -101,9 +101,9 @@ RFC 0017 already supplies the required discovery vocabulary:
 - `object_apply` and `object_delete` are the generic mutations.
 
 The registry is already extension-spanning and workspace-scoped. The gap is imperative behavior.
-`request_credentials`, `slack_connect`, `memory_search`, and `deploy_website` are not honest CRUD,
+`request_credentials`, `slack_connect`, `skill_search`, and `deploy_website` are not honest CRUD,
 but globally listing each one gives every model round their full schemas even when the member's task
-has nothing to do with credentials, Slack, memory, or sites.
+has nothing to do with credentials, Slack, skills, or sites.
 
 ### Constraints a generic dispatcher must preserve
 
@@ -140,6 +140,7 @@ ActionBinding = Literal["collection", "instance"]
 class ObjectBinding:
     kind: str
     binding: ActionBinding
+    name: str | None = None  # pins an instance action to one named row
 
 
 @dataclass(frozen=True)
@@ -323,7 +324,10 @@ actions:
 ```
 
 If the detail has a generation, the invocation template carries it. If the object read was
-agent-targeted, it carries that stable agent name. Action order is lexical by short name.
+agent-targeted, it carries that stable agent name, and the read publishes only the actions that
+declare `agent_targetable`: dispatch refuses an agent target on any other action, and the same
+template without the agent would resolve the calling agent's object rather than the one the read
+returned. Action order is lexical by short name.
 
 `object_explain(kind)` returns the kind's existing fields plus separate `collection_actions` and
 `instance_actions`. `object_list("")` continues to list kinds only, adding at most
@@ -334,7 +338,8 @@ Discovery is structural, not personalized capability minting:
 - a collection action appears when the caller can list the kind and the executing agent/profile is
   granted its canonical id;
 - an instance action appears only after the kind's own `get` returned that object and the executing
-  agent/profile is granted its canonical id;
+  agent/profile is granted its canonical id, and an agent-targeted read publishes only its
+  `agent_targetable` actions, because every other template it could publish is uninvocable;
 - schemas contain no secret defaults or values;
 - role and state do not remove an action;
 - invocation repeats every gate.
@@ -448,23 +453,42 @@ would be false. Domain stores keep any audit rows they already own.
 class ActionPresentation:
     label: str
     confirm: str | None = None
+    frame: bool = False
 ```
 
 Absence means chat/model only. Presence admits the action through the prepared-intent lane and lets
 a portal render a schema-derived control. The fence is enforced at the one dispatch point: the
 intent path refuses a dispatcher intent whose resolved action declares no presentation, so no
 route can widen the lane the closed set used to curate. It is not an authority grant: the turn
-carries the submitting member and the handler decides.
+carries the submitting member and the handler decides. A presented action has a member-shaped
+input by construction — a model-facing input (a class, a confidence) is never presented; the
+member's act is its own declaration writing what the model's tool writes (the memory view's
+`record_correction` beside the model's `memory_update`).
 
-The submitted body contains only the action-specific `input_model`. The route supplies `kind`,
-`name`, path agent, generation, and action id from its own projection, prepares one
-`ToolIntent(tool="object_action", input=...)`, and admits it verbatim. `ToolIntent`'s closed set
+The route binds the target. A presented action is posted to
+`POST agents/{agent_id}/actions/{kind}/{action}` (collection) or
+`POST agents/{agent_id}/actions/{kind}/{name}/{action}` (instance): the body is the action's
+`input_model` alone and a body naming an envelope field is refused before a turn exists; the route
+writes `kind`, `name`, and `action` from its path and the agent from its lane into one
+`ToolIntent(tool="object_action", input=...)` and admits it verbatim. `ToolIntent`'s closed set
 therefore needs one action dispatcher entry rather than every moved tool name. A caller cannot
-submit a different agent or target in the action-specific body.
+submit a different agent or target.
 
 The same serializable `ActionView` feeds model object results and portal projections. Model results
-include description and call template; portal views additionally include label and confirmation.
-No layout, widget, grouping, order, or CSS metadata enters core.
+include description and call template; portal views additionally include label, confirmation, and
+frame admission. A portal projects an instance action's view from the declaration beside the target
+its route holds (`GET actions/{kind}/{name}`) — a member row read is optional enrichment, never the
+gate, so a target the portal offers no row for (an archived app, the workspace, another member's
+private conversation) still draws its controls, and dispatch's instance recheck and the handler
+stay the authority. An instance action pinned to one row (`ObjectBinding.name`) projects on that
+row alone and dispatch refuses any other target.
+
+An embedded app page speaks with the viewer's whole session, so it posts only callables whose
+presentation says `frame`: the portal shell marks every forwarded call and the lane checks the
+declaration. The set is `connect_account`, `rebuild_report_digest`, and `rebuild_page_facts`. Every
+portal act rides one of the two lanes — the first run's iMessage offer posts `imessage_connect` on
+the action lane like any other presented action; no hand-written envelope stands beside them. No
+layout, widget, grouping, order, or CSS metadata enters core.
 
 The credential and connect final acts retain their typed `TerminalFrame` fields. The effective
 action declaration supplies the final-act model; a mapping beside `TerminalFrame` binds each model
@@ -544,7 +568,7 @@ the locality; renaming is not needed to achieve it.
 | `workspace/<workspace-id>` | instance | `manage_billing` | Balance, payment method, and auto-refill are workspace-wide. |
 | `page` | collection | `rebuild_page_facts` | Marks the workspace's page-derived facts due as one collection operation. |
 | `report` | collection | `rebuild_report_digest` | Rebuilds derived entries over the current report window. |
-| `memory` | collection | `memory_search`, `memory_update` | Searches and records memory; neither is an authored replacement of an existing row. |
+| `memory` | collection | `record_correction`, `record_first_run` | The portal's correction and first-run memory: presented actions with member-shaped inputs, writing what the model's global `memory_update` writes. `memory_search` and `memory_update` stay global tools on every round. |
 | `monitor` | collection | `monitor` | Arms a monitor after probing; the existing monitor kind lists and deletes armed rows. |
 | `site` | collection | `deploy_website`, `publish_website`, `build_website`, `build_ufo_application`, `render_application_preview` | These create, publish, build, or preview site/application output rather than update an existing site spec. |
 | `agent/<name>` | instance | `set_homepage` | The homepage is the agent's property; the site is plain input. The speakerless seed turn targets its own agent row, and the handler's deployed-this-turn carve-out is unchanged. |
@@ -671,8 +695,8 @@ handoff, memory index, site store, monitor probe, or transcript access.
 ### Model evals
 
 **Suites move with their tools.** `required_tools_scorer` and its siblings grade `call.name` from
-the transcript, and existing suites assert moved names (`tool_calling` requires `memory_update`,
-`member_add_notify` requires `add_member`, `credential_handoff` requires `request_credentials`,
+the transcript, and existing suites assert moved names (`member_add_notify` requires `add_member`,
+`credential_handoff` requires `request_credentials`,
 `app_home_change`, `new_application`, and five more). Each family unit updates those suites'
 required trajectories to the dispatched form in the same change — a case keeps asserting the same
 member outcome, expressed in each arm's own vocabulary, and the paired verdict stays per-case pass
@@ -872,8 +896,8 @@ unit also prunes its names from the live catalog's eager set (unit 1 adds `objec
 dispatch needs no search round while the catalog survives), ships a migration rewriting stored
 `agent.tools` allowlist entries to canonical ids, and corrects a moved tool's mis-declared
 execution flags deliberately — `deploy_website`, `publish_website`, `set_homepage`, and
-`slack_connect` gain `side_effecting` (each a durable write); `memory_search` gains
-`parallel_safe`; `request_credentials` and `connect_github` deliberately keep `side_effecting`
+`slack_connect` gain `side_effecting` (each a durable write); `memory_search`, retained on the
+wire, gains `parallel_safe`; `request_credentials` and `connect_github` deliberately keep `side_effecting`
 false, since a handoff seal is not an external write and the flip would only forfeit guidance
 preemption — each named in its unit.
 

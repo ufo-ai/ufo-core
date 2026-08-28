@@ -1,6 +1,7 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn,
-ask_user, request_credentials, load_skill, skill_search, connect_account,
-cancel_spawn, message_spawn.
+ask_user, load_skill, connect_account, cancel_spawn, message_spawn — and
+core's own object actions: add_member on the member collection, restore_application on an archived
+agent, request_credentials on the credential collection.
 
 Each file/shell handler reaches files only through `ctx.sandbox`, so the carrier's path and egress
 rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and `write` run
@@ -28,8 +29,7 @@ values privately and fulfillment lands them in the encrypted store, never the tr
 `load_skill` loads a skill's `SKILL.md` and assets — and those of the whole chain it `depends` on —
 under `$UFO_HOME/skills`, and returns each one's workflow followed by one tree of those files; the
 system prompt's `<available_skills>` block indexes the deploy tier and a member turn's
-`<saved_skills>` block the agent's saved skills. `skill_search` ranks every loadable skill's
-routing card by keyword and returns matching lines, the reach into whatever neither block shows.
+`<saved_skills>` block the agent's saved skills.
 `cancel_spawn` and `message_spawn` reach `ctx.subagents`, the same
 Subagents workflow that backs `spawn`, to cancel a running child or queue it a follow-up message
 that runs as its next turn — scoped to the children this turn
@@ -46,13 +46,14 @@ from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from ufo.access.grants import installed_connect_flow
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.db import workspace_tx
 from ufo.kinds.agents import RESTORE_APPLICATION_TOOL_DEF
 from ufo.kinds.artifacts import artifact_object_names
+from ufo.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
@@ -66,7 +67,6 @@ from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME, WORKSPACE_DIR, shell_path, 
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
 from ufo.skills.runtime import load_skills, loaded_context
-from ufo.skills.selection import SKILL_LINE_MAX_CHARS, lexical_score
 from ufo.tools.context import (
     AmbiguousSpawnTarget,
     ImageContent,
@@ -76,7 +76,7 @@ from ufo.tools.context import (
     UnknownSpawnTarget,
 )
 from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
-from ufo.tools.registry import ToolDef
+from ufo.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.tools.tasks import (
     BACKGROUND_TASKS_DIR,
     FLAT_SLEEP_REFUSAL,
@@ -287,14 +287,9 @@ class SpawnInput(BaseModel):
 class LoadSkillInput(BaseModel):
     name: str = Field(
         description="The skill name, e.g. 'office/pptx', 'data/visualization'. Choose from the "
-        "system prompt's <available_skills> index, a <saved_skills> block, or a skill_search "
-        "result."
+        "system prompt's <available_skills> index, a <saved_skills> block, or a result of the "
+        "skill kind's skill_search action."
     )
-
-
-class SkillSearchInput(BaseModel):
-    query: str = Field(description="Keywords naming the task or capability to find a skill for.")
-    limit: int = Field(default=8, ge=1, le=8, description="Maximum results.")
 
 
 class ConnectAccountInput(BaseModel):
@@ -317,6 +312,7 @@ class ConnectAccountInput(BaseModel):
 
 
 class RequestCredentialsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     reason: str = Field(
         description="Why these values are needed, shown to the member above the prompts."
     )
@@ -947,29 +943,6 @@ async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResu
     return ToolResult(content=(TextContent(text=text),))
 
 
-SKILL_SEARCH_NO_MATCH = "No matches among {total} loadable skills."
-
-
-async def skill_search_handler(ctx: ToolContext, args: SkillSearchInput) -> ToolResult:
-    """Rank every loadable skill's routing card — deploy and member alike — by the lexical scorer
-    the member block uses, and return the matching `name: description` lines, never a body. Zero
-    matches answers with the searchable total, so the caller knows the corpus was searched rather
-    than empty."""
-    cards = ctx.skills.all_cards()
-    ranked = sorted(
-        ((lexical_score(args.query, card), card) for card in cards),
-        key=lambda scored: scored[0],
-        reverse=True,
-    )
-    matched = [card for score, card in ranked if score > 0][: args.limit]
-    if not matched:
-        return ToolResult(
-            content=(TextContent(text=SKILL_SEARCH_NO_MATCH.format(total=len(cards))),)
-        )
-    lines = "\n".join(f"{card.name}: {card.description}"[:SKILL_LINE_MAX_CHARS] for card in matched)
-    return ToolResult(content=(TextContent(text=lines),))
-
-
 CONNECT_ACCOUNT_DIRECTIVE = (
     "Tell the member to use the private connection control in your reply, then end your turn — "
     "the authorization URL never appears in this conversation."
@@ -1090,8 +1063,6 @@ async def message_spawn_handler(ctx: ToolContext, args: MessageSpawnInput) -> To
 
 
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
-    ADD_MEMBER_TOOL_DEF,
-    RESTORE_APPLICATION_TOOL_DEF,
     ToolDef(
         name="bash",
         description=(
@@ -1216,6 +1187,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=AskUserCall,
         handler=ask_user_handler,
+        final_act_model=AskUserInput,
     ),
     ToolDef(
         name="load_skill",
@@ -1231,17 +1203,6 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         parallel_safe=True,
     ),
     ToolDef(
-        name="skill_search",
-        description=(
-            "Search every loadable skill by keyword and get back matching `name: description` "
-            "lines to pass to load_skill. Use it when the task might have a skill the visible "
-            "indexes do not show."
-        ),
-        input_model=SkillSearchInput,
-        handler=skill_search_handler,
-        parallel_safe=True,
-    ),
-    ToolDef(
         name="connect_account",
         description=(
             "Connect an external account to this agent through OAuth when the member asks in chat "
@@ -1253,19 +1214,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=ConnectAccountInput,
         handler=connect_account_handler,
-    ),
-    ToolDef(
-        name="request_credentials",
-        description=(
-            "Ask the speaking member to fill credential slots (API keys, bot tokens, signing "
-            "secrets) without the values passing through this conversation — a private prompt "
-            "collects each one. Use it when a capability needs a secret a member "
-            "must supply; never ask for a secret in chat prose. Only a workspace admin can "
-            "fill slots. After calling it, explain what you need in your reply and end your "
-            "turn; verify the slots once the member says they have entered them."
-        ),
-        input_model=RequestCredentialsInput,
-        handler=request_credentials_handler,
+        final_act_model=ConnectRequest,
+        presentation=ActionPresentation(label="Connect", frame=True),
     ),
     ToolDef(
         name="cancel_spawn",
@@ -1290,3 +1240,28 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         parallel_safe=True,
     ),
 )
+
+REQUEST_CREDENTIALS_TOOL_DEF = ToolDef(
+    name="request_credentials",
+    description=(
+        "Ask the speaking member to fill credential slots (API keys, bot tokens, signing "
+        "secrets) without the values passing through this conversation — a private prompt "
+        "collects each one. Use it when a capability needs a secret a member "
+        "must supply; never ask for a secret in chat prose. Only a workspace admin can "
+        "fill slots. After calling it, explain what you need in your reply and end your "
+        "turn; verify the slots once the member says they have entered them."
+    ),
+    input_model=RequestCredentialsInput,
+    handler=request_credentials_handler,
+    final_act_model=CredentialRequest,
+    bound=ObjectBinding(kind=CREDENTIAL_KIND, binding="collection"),
+    presentation=ActionPresentation(label="Request credentials"),
+)
+
+BUILTIN_ACTIONS: tuple[ToolDef, ...] = (
+    ADD_MEMBER_TOOL_DEF,
+    RESTORE_APPLICATION_TOOL_DEF,
+    REQUEST_CREDENTIALS_TOOL_DEF,
+)
+"""Core's own bound actions, registered by the loader beside every extension's — actions on the
+kinds core itself projects, dispatching with no extension context exactly as `BUILTIN_TOOLS` do."""

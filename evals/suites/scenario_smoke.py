@@ -46,7 +46,7 @@ def _communicated(*fragments: str) -> ScenarioGrader:
 async def _remembered_review_day(outcome: ScenarioOutcome) -> CapabilityVerdict:
     """The write must show in the trajectory (tying it to this conversation) and land as a durable
     memory_item row; the recall must reach the member; the member must end satisfied."""
-    if not any(call.name == "memory_update" and call.succeeded for call in outcome.output.calls):
+    if not any(call.call == "memory_update" and call.succeeded for call in outcome.output.calls):
         return CapabilityVerdict(False, "agent never made a successful memory_update call")
     async with workspace_tx() as connection:
         stored = (

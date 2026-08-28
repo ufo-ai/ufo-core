@@ -776,7 +776,7 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
             )
         raise ValueError(
             f"add the {spec.provider!r} credential before registering its sources "
-            f"(request_credentials for slot {spec.provider!r})"
+            f"(the credential collection's request_credentials action for slot {spec.provider!r})"
         )
 
 

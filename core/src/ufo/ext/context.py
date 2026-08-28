@@ -1026,6 +1026,15 @@ class TurnOutcome:
     text: str | None
 
 
+@dataclass(frozen=True)
+class AgentIdentity:
+    """One live agent as an instance action addresses it: its id and the member who owns it (None
+    for an admin-only row)."""
+
+    id: UUID
+    owner_member_id: UUID | None
+
+
 class WorkspaceAgent(BaseModel):
     id: UUID
     name: str
@@ -1219,6 +1228,25 @@ class ExtensionContext:
                 )
             ).all()
         return {row.id: row.visibility for row in rows}
+
+    async def agent_named(self, name: str) -> AgentIdentity | None:
+        """The live agent the `agent` object kind names `name`: the id an instance action on
+        `agent/<name>` acts on and the owner an authority check compares against. Identity, not
+        the roster, so it is not gated on `member_context_read`; an archived agent's freed name
+        answers None."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id, tables.agent.c.owner_member_id).where(
+                        tables.agent.c.workspace_id == self.workspace_id,
+                        tables.agent.c.name == name,
+                        tables.agent.c.archived_at.is_(None),
+                    )
+                )
+            ).one_or_none()
+        return (
+            None if row is None else AgentIdentity(id=row.id, owner_member_id=row.owner_member_id)
+        )
 
     async def earliest_seated_admin(self) -> UUID | None:
         """The workspace's earliest-seated admin — the deterministic member an ownerless agent's

@@ -1,10 +1,18 @@
-import { type FormEvent, useRef, useState } from "react";
+import { useState } from "react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
-import { Field, Hint, Input } from "@/components/ui/field";
+import { Field, Hint } from "@/components/ui/field";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Sheet } from "@/components/ui/sheet";
 import { ACTS, Td, TdActs, TdFact } from "@/components/ui/table";
+import { ActionControls } from "@/kernel/action";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -20,10 +28,10 @@ import { Header, Page, Pane } from "@/kernel/pane";
 import { closed, opened } from "@/kernel/slots";
 import { DataTable, OPEN } from "@/kernel/table";
 import { agentName } from "@/lib/agentName";
-import { postIntent } from "@/lib/api";
+import { postAction, postIntent, type IntentOutcome } from "@/lib/api";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { money } from "@/lib/money";
-import type { AdminAgent, AdminPayload, Member } from "@/lib/types";
+import type { ActionInput, ActionView, AdminAgent, AdminPayload, Member } from "@/lib/types";
 import { MEMBER_COLUMNS, MemberCells } from "@/views/Team";
 
 const AGENT_COLUMNS = [
@@ -57,10 +65,21 @@ export function Admin() {
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const state = usePanelRead<AdminPayload>("/api/admin", reloads);
 
-  async function intent(agentId: string, envelope: unknown): Promise<NoticeState> {
-    const outcome = await postIntent(agentId, envelope);
+  function settled(outcome: IntentOutcome): IntentOutcome {
     if (outcome.applied) setReloads((count) => count + 1);
-    return outcomeNotice(outcome);
+    return outcome;
+  }
+
+  async function intent(agentId: string, envelope: unknown): Promise<IntentOutcome> {
+    return settled(await postIntent(agentId, envelope));
+  }
+
+  async function action(
+    agentId: string,
+    view: ActionView,
+    input: ActionInput,
+  ): Promise<IntentOutcome> {
+    return settled(await postAction(agentId, view.call, input));
   }
 
   return (
@@ -90,7 +109,7 @@ export function Admin() {
               <Header heading={1} title="Administration" />
               <OutcomeNotice state={notice} />
 
-              <AgentSection agents={payload.agents} onIntent={intent} />
+              <AgentSection agents={payload.agents} members={payload.members} onAction={action} />
 
               <Section title="Members">
                 <DataTable
@@ -105,12 +124,14 @@ export function Admin() {
                       onApply={async (spec) => {
                         if (!mainAgent) return;
                         setNotice(
-                          await intent(mainAgent.id, {
-                            verb: "apply",
-                            kind: "member",
-                            name: member.id,
-                            spec,
-                          }),
+                          outcomeNotice(
+                            await intent(mainAgent.id, {
+                              verb: "apply",
+                              kind: "member",
+                              name: member.id,
+                              spec,
+                            }),
+                          ),
                         );
                       }}
                     />
@@ -174,10 +195,12 @@ export function Admin() {
 
 function AgentSection({
   agents,
-  onIntent,
+  members,
+  onAction,
 }: {
   agents: AdminAgent[];
-  onIntent: (agentId: string, envelope: unknown) => Promise<NoticeState>;
+  members: Member[];
+  onAction: (agentId: string, view: ActionView, input: ActionInput) => Promise<IntentOutcome>;
 }) {
   const [opens, setOpens] = useState<string[]>([]);
   const sheet = opens.slice(-1).map((id) => {
@@ -187,8 +210,9 @@ function AgentSection({
       <AgentRecord
         key={id}
         agent={agent}
+        members={members}
         onClose={() => setOpens((held) => closed(held, id))}
-        onIntent={onIntent}
+        onAction={onAction}
       />
     );
   });
@@ -223,32 +247,24 @@ function AgentSection({
 }
 
 /** One agent: what it is, and who reaches it on the web. The main agent answers every member, so it
- *  carries no grant form — an audience that is already everyone is not one an address adds to.
+ *  carries no audience acts — an audience that is already everyone is not one a member adds to.
  *
- *  Granting and revoking read the one field, so both are held to the one contract that field
- *  declares: the form validates before either posts, and an address it refuses is refused on the
- *  field itself, where the member is looking. A press the handler drops instead is a live control
- *  that answers nothing. */
+ *  The acts are the member object's own, projected on each member row the administration read
+ *  carries: the admin picks the member, and the grant and the revoke draw from their declarations,
+ *  posted on this agent's lane so the audience they change is this agent's. */
 function AgentRecord({
   agent,
+  members,
   onClose,
-  onIntent,
+  onAction,
 }: {
   agent: AdminAgent;
+  members: Member[];
   onClose: () => void;
-  onIntent: (agentId: string, envelope: unknown) => Promise<NoticeState>;
+  onAction: (agentId: string, view: ActionView, input: ActionInput) => Promise<IntentOutcome>;
 }) {
-  const form = useRef<HTMLFormElement>(null);
-  const [email, setEmail] = useState("");
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
-  const [busy, setBusy] = useState(false);
-
-  async function audience(verb: string) {
-    if (busy || !form.current?.reportValidity()) return;
-    setBusy(true);
-    setNotice(await onIntent(agent.id, { verb, email }));
-    setBusy(false);
-  }
+  const [picked, setPicked] = useState("");
+  const member = members.find((entry) => entry.id === picked);
 
   return (
     <Sheet open title={agentName(agent.name)} onClose={onClose}>
@@ -261,37 +277,29 @@ function AgentRecord({
         ]}
       />
       {agent.main ? null : (
-        <form
-          ref={form}
-          onSubmit={(event: FormEvent) => {
-            event.preventDefault();
-            audience("grant_web_access");
-          }}
-          className="flex flex-col gap-xl"
-        >
-          <OutcomeNotice state={notice} />
-          <Field label="Web Access Address" htmlFor="web-access">
-            <Input
-              id="web-access"
-              type="email"
-              required
-              placeholder="email@work.com"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-            />
+        <div className="flex flex-col gap-xl">
+          <Field label="Web Access Member" htmlFor="web-access-member">
+            <Select value={picked} onValueChange={setPicked}>
+              <SelectTrigger id="web-access-member">
+                <SelectValue placeholder="Choose a member" />
+              </SelectTrigger>
+              <SelectContent>
+                {members.map((entry) => (
+                  <SelectItem key={entry.email} value={entry.id ?? entry.email}>
+                    {entry.email}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </Field>
-          <div className="flex justify-end gap-sm">
-            <ConfirmButton
-              verb="Revoke"
-              size="bar"
-              busy={busy}
-              onClick={() => audience("revoke_web_access")}
+          {member ? (
+            <ActionControls
+              key={member.id}
+              views={member.actions ?? []}
+              post={(view, input) => onAction(agent.id, view, input)}
             />
-            <Button type="submit" variant="send" size="bar" busy={busy}>
-              Grant
-            </Button>
-          </div>
-        </form>
+          ) : null}
+        </div>
       )}
     </Sheet>
   );

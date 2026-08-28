@@ -6,8 +6,10 @@ generalizes across the whole installed set: it enumerates every `ufo.extension` 
 covered the moment it is present) and asserts each declared Manifest point resolves through the same
 core selection and registration seams `serve` runs at boot — tools through the ToolRegistry, the
 backend points through their `_select_*`/`*_backend` seams, surfaces through the mount, hooks
-through the HookChain, jobs through the scheduler bindings, and so on. It needs no API key, no live
-service: the seams route and construct in-process, so a point that fails to resolve — a name a
+through the HookChain, jobs through the scheduler bindings, and so on. An extension boots beside
+the installed owners of the kinds its bound actions target, as `serve`'s full set has them. It
+needs no API key, no live service: the seams route and construct in-process, so a point that fails
+to resolve — a name a
 selection seam does not know, a tool-name collision, a duplicate connector provider — is a real
 registration defect this test names precisely. Live construction of a key- or service-gated backend
 (e2b's carrier, a BYOK index) is deferred to the Tier-B integration proofs; here the seam need only
@@ -145,9 +147,24 @@ def _check_tools(manifest: Manifest, store: CredentialStore) -> None:
     )
     if not declared:
         return
-    tools, ext_by_tool = turn_tools((manifest,), store, audience=conversation_audience(None))
+    targeted = {tool.bound.kind for tool in declared if tool.bound is not None}
+    owners = tuple(
+        owner
+        for owner, _entry in INSTALLED.values()
+        if owner is not manifest and any(kind.name in targeted for kind in owner.objects)
+    )
+    tools, ext_by_tool, verbs = turn_tools(
+        (manifest, *owners), store, audience=conversation_audience(None)
+    )
     registry = ToolRegistry(tools)
     for tool in declared:
+        if tool.bound is not None:
+            bound = verbs.actions[tool.bound.kind][tool.name]
+            assert bound.action is tool
+            assert bound.extension == manifest.name
+            assert bound.context is not None
+            assert tool.name not in ext_by_tool
+            continue
         assert registry.get(tool.name).name == tool.name
         assert tool.name in ext_by_tool
 
@@ -397,7 +414,7 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
 
 
 def test_no_registered_tool_takes_a_user_description() -> None:
-    tools, _ = turn_tools(
+    tools, _, _ = turn_tools(
         load_manifests(), _credential_store(), audience=conversation_audience(None)
     )
     assert tools

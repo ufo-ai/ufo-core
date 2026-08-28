@@ -49,7 +49,7 @@ from ufo.billing.balance import credit, debit, set_reserve
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import SourceReader, context_for
-from ufo.ext.loader import BoundHook, HookChain
+from ufo.ext.loader import BoundHook, HookChain, turn_tools
 from ufo.ext.manifest import (
     Deny,
     HookContext,
@@ -65,7 +65,6 @@ from ufo.loop.compaction import (
 )
 from ufo.loop.engine import (
     ADOPTED_CLAIM,
-    ASK_USER_TOOL,
     FINISH_ALONE,
     FINISH_DESCRIPTION,
     FINISH_PROMPT,
@@ -79,7 +78,6 @@ from ufo.loop.engine import (
     OBJECT_APPLY_TOOL,
     OFFLOAD_NOTICE,
     PREEMPTED,
-    REQUEST_CREDENTIALS_TOOL,
     ROUND_BUDGET_INCOMPLETE,
     TOOL_IMAGE_BLOB_DIR,
     TOOL_IMAGE_EDGE_LIMIT,
@@ -90,6 +88,7 @@ from ufo.loop.engine import (
     ActiveMessage,
     Arrival,
     DispatchResult,
+    EffectiveCall,
     ModelStreamError,
     TurnEngine,
     TurnParked,
@@ -107,7 +106,12 @@ from ufo.loop.engine import (
     _TurnMeter,
 )
 from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
-from ufo.loop.queue import _previous_turn_ended_at
+from ufo.loop.queue import (
+    _agent_actions,
+    _agent_tools,
+    _previous_turn_ended_at,
+    _with_action_verbs,
+)
 from ufo.loop.transcript import Transcript
 from ufo.memory import MemoryMatch, MemorySearch
 from ufo.models.interface import (
@@ -132,6 +136,7 @@ from ufo.models.interface import (
 )
 from ufo.models.spec import ReasoningSupport
 from ufo.object_name import ObjectRef
+from ufo.object_scope import ObjectActionTarget
 from ufo.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
 from ufo.sandbox.session import (
     RUNTIME_DIRNAME,
@@ -150,6 +155,7 @@ from ufo.schema.records import (
     CANCELLED,
     INTENT_ADMISSION,
     INTERNAL_ADMISSION,
+    MEMBER_ADMISSION,
     SCHEDULED_ADMISSION,
     Agent,
     AskUserInput,
@@ -184,7 +190,7 @@ from ufo.tools.context import (
     ToolResult,
     UntrustedContentError,
 )
-from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.tools.registry import ActionPresentation, ToolDef, ToolRegistry
 from ufo.turns.activity import ActivitySummarizer
 from ufo.turns.audience import Audience, audience_subjects, conversation_audience
 from ufo.turns.contracts import AgentResultOutput, ResultOutput
@@ -1036,11 +1042,22 @@ def _engine(
     handle: SandboxHandle | None = None,
     byok: bool = False,
     reasoning: ReasoningSupport | None = None,
+    actions: bool = False,
 ) -> TurnEngine:
     carrier = carrier or RecordingCarrier()
     blob = FilesystemBlobStore(root=tmp_path)
     handle = handle or SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
     turn = turn.model_copy(update={"speaker_member_id": member_id})
+    verbs, granted_actions = ObjectVerbs({}), frozenset[str]()
+    tools = ToolRegistry(BUILTIN_TOOLS)
+    if actions:
+        all_tools, _ext, verbs = turn_tools((), None, audience=conversation_audience(member_id))
+        granted_actions = _agent_actions(verbs.actions, None, MEMBER_ADMISSION)
+        tools = ToolRegistry(
+            _with_action_verbs(
+                _agent_tools(all_tools, None, MEMBER_ADMISSION), all_tools, granted_actions
+            )
+        )
     return TurnEngine(
         turn=turn,
         agent=Agent(prompt="p", model=model_id),
@@ -1060,7 +1077,7 @@ def _engine(
         cdp_provider=None,
         search_provider=None,
         connectors=ConnectorRegistry(entries={}),
-        tools=ToolRegistry(BUILTIN_TOOLS),
+        tools=tools,
         tool_ext={},
         hooks=HookChain(audience=conversation_audience(member_id)),
         blob=blob,
@@ -1071,6 +1088,8 @@ def _engine(
         requestable_credentials=requestable_credentials,
         memory=memory,
         skills=skills,
+        verbs=verbs,
+        granted_actions=granted_actions,
     )
 
 
@@ -1524,11 +1543,13 @@ async def test_preemptibility_reads_the_builtin_declarations(db: None, tmp_path:
     is nothing to preempt."""
     turn = await _seed_turn("running", None)
     engine = _engine(turn, object(), tmp_path)
-    assert engine._redoes_on_replay("bash") is False
-    assert engine._redoes_on_replay("read") is True
-    assert engine._redoes_on_replay("spawn") is False
-    assert engine._redoes_on_replay("message_spawn") is False
-    assert engine._redoes_on_replay("unknown") is False
+    assert engine._redoes_on_replay(engine.tools.get("bash")) is False
+    assert engine._redoes_on_replay(engine.tools.get("read")) is True
+    assert engine._redoes_on_replay(engine.tools.get("spawn")) is False
+    assert engine._redoes_on_replay(engine.tools.get("message_spawn")) is False
+    assert not isinstance(
+        engine._resolve_call(ToolUseBlock(id="u1", name="unknown", input={})), EffectiveCall
+    )
 
 
 async def test_park_releases_the_arrivals_this_attempt_claimed(db: None, tmp_path: Path) -> None:
@@ -2176,11 +2197,23 @@ async def test_each_end_a_tool_call_has_is_metered_apart(
         (point.value, tuple(sorted(point.attributes.items())))
         for point in points["ufo.tool_call_total"]
     } == {
-        (1, (("outcome", "ok"), ("profile", "main"), ("tool", "ok_tool"))),
-        (1, (("outcome", "handler_error"), ("profile", "main"), ("tool", "error_tool"))),
+        (
+            1,
+            (("call", "ok_tool"), ("outcome", "ok"), ("profile", "main"), ("tool", "ok_tool")),
+        ),
         (
             1,
             (
+                ("call", "error_tool"),
+                ("outcome", "handler_error"),
+                ("profile", "main"),
+                ("tool", "error_tool"),
+            ),
+        ),
+        (
+            1,
+            (
+                ("call", "raising_tool"),
                 ("error_class", "RuntimeError"),
                 ("outcome", "handler_raised"),
                 ("profile", "main"),
@@ -2190,16 +2223,26 @@ async def test_each_end_a_tool_call_has_is_metered_apart(
         (
             1,
             (
+                ("call", "strict_tool"),
                 ("error_class", "ValidationError"),
                 ("outcome", "invalid_call"),
                 ("profile", "main"),
                 ("tool", "strict_tool"),
             ),
         ),
-        (1, (("outcome", "hook_denied"), ("profile", "main"), ("tool", "denied_tool"))),
         (
             1,
             (
+                ("call", "denied_tool"),
+                ("outcome", "hook_denied"),
+                ("profile", "main"),
+                ("tool", "denied_tool"),
+            ),
+        ),
+        (
+            1,
+            (
+                ("call", UNREGISTERED_TOOL),
                 ("error_class", "KeyError"),
                 ("outcome", "invalid_call"),
                 ("profile", "main"),
@@ -2347,14 +2390,14 @@ async def _dispatch(
     call: ToolUseBlock,
     requesters: dict[UUID, ActiveMessage],
 ) -> ToolResultBlock:
-    bound = await engine._bind_or_error(context, call, requesters)
+    bound = await engine._bind_or_error(context, engine._resolve_call(call), requesters)
     return await engine._dispatch(bound)
 
 
 async def _dispatch_step(
     engine: TurnEngine, context: ToolContext, call: ToolUseBlock
 ) -> DispatchResult:
-    bound = await engine._bind_or_error(context, call, {})
+    bound = await engine._bind_or_error(context, engine._resolve_call(call), {})
     return await engine._dispatch_step(bound)
 
 
@@ -2438,6 +2481,7 @@ async def test_a_call_whose_requester_will_not_bind_counts_as_an_unusable_call(
     ] == [
         {
             "tool": "ok_tool",
+            "call": "ok_tool",
             "outcome": "invalid_call",
             "profile": "main",
             "error_class": "ValueError",
@@ -2477,6 +2521,7 @@ async def test_a_store_fault_reached_through_the_bind_is_the_engines_and_not_the
     ] == [
         {
             "tool": "ok_tool",
+            "call": "ok_tool",
             "outcome": "step_failed",
             "profile": "main",
             "error_class": "OperationalError",
@@ -2517,6 +2562,7 @@ async def test_a_cancelled_bind_counts_the_same_end_the_step_would_have(
     ] == [
         {
             "tool": "ok_tool",
+            "call": "ok_tool",
             "outcome": "step_failed",
             "profile": "main",
             "error_class": "CancelledError",
@@ -2567,6 +2613,7 @@ async def test_a_gating_hook_that_fails_closed_is_not_counted_as_policy(
     ] == [
         {
             "tool": "ok_tool",
+            "call": "ok_tool",
             "outcome": "hook_failed",
             "profile": "main",
             "error_class": o11y.OTHER_ERROR_CLASS,
@@ -2599,6 +2646,7 @@ async def test_a_dispatch_that_raises_past_its_handler_counts_the_step_it_failed
     ] == [
         {
             "tool": "shot",
+            "call": "shot",
             "outcome": "step_failed",
             "profile": "main",
             "error_class": "RuntimeError",
@@ -2636,6 +2684,7 @@ async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
     ] == [
         {
             "tool": "ok_tool",
+            "call": "ok_tool",
             "outcome": "step_failed",
             "profile": "main",
             "error_class": "CancelledError",
@@ -2660,7 +2709,7 @@ async def test_a_durable_cancel_does_not_retry_the_tool(db: None, tmp_path: Path
     )
     bound = await engine._bind_or_error(
         _dispatch_context(engine),
-        ToolUseBlock(id="c1", name="write", input={}),
+        engine._resolve_call(ToolUseBlock(id="c1", name="write", input={})),
         {},
     )
     with ws(turn.workspace_id), pytest.raises(DBOSWorkflowCancelledError):
@@ -2697,6 +2746,7 @@ async def test_a_handler_raising_untrusted_content_keeps_its_own_series(
     ] == [
         {
             "tool": "ok_tool",
+            "call": "ok_tool",
             "outcome": "handler_raised",
             "profile": "main",
             "error_class": "UntrustedContentError",
@@ -2802,7 +2852,7 @@ async def test_a_subagent_turn_meters_under_its_profile(
         {"status": "done", "profile": "coding"}
     ]
     assert [dict(point.attributes) for point in points["ufo.tool_call_ms"]] == [
-        {"tool": "bash", "outcome": "ok", "profile": "coding"}
+        {"tool": "bash", "call": "bash", "outcome": "ok", "profile": "coding"}
     ]
     assert {point.attributes["profile"] for point in points["ufo.turn_rounds_total"]} == {"coding"}
     assert {point.attributes["profile"] for point in points["ufo.turn_terminal_total"]} == {
@@ -2831,7 +2881,7 @@ async def test_both_entry_points_name_the_profile_and_the_spawning_turn_on_the_l
     chat = (await _seed_turn("queued", None)).model_copy(update=spawned)
     intent_turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
     owner = await _seeded_member(intent_turn.workspace_id)
-    intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input=REQUEST_INPUT)
+    intent = ToolIntent(tool="object_action", input=REQUEST_CALL)
     intent_turn = intent_turn.model_copy(update={"inbound": intent.model_dump_json(), **spawned})
     requests = CredentialRequests(
         fernet=Fernet(Fernet.generate_key()),
@@ -2841,7 +2891,12 @@ async def test_both_entry_points_name_the_profile_and_the_spawning_turn_on_the_l
     with caplog.at_level(logging.INFO, logger="ufo"):
         chat_frame = await _engine(chat, EchoModel(), tmp_path).run()
         intent_frame = await _engine(
-            intent_turn, object(), tmp_path, member_id=owner, requestable_credentials=requests
+            intent_turn,
+            object(),
+            tmp_path,
+            member_id=owner,
+            requestable_credentials=requests,
+            actions=True,
         ).run_intent()
     assert chat_frame is not None and chat_frame.status == "done"
     assert intent_frame is not None and intent_frame.status == "done"
@@ -3063,7 +3118,7 @@ async def test_a_prepared_intent_turn_meters_its_wall_clock_and_no_rounds(
     reader = _metric_capture(monkeypatch)
     turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
     owner = await _seeded_member(turn.workspace_id)
-    intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input=REQUEST_INPUT)
+    intent = ToolIntent(tool="object_action", input=REQUEST_CALL)
     turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
     requests = CredentialRequests(
         fernet=Fernet(Fernet.generate_key()),
@@ -3071,7 +3126,7 @@ async def test_a_prepared_intent_turn_meters_its_wall_clock_and_no_rounds(
         fillable=frozenset({"sample_api"}),
     )
     frame = await _engine(
-        turn, object(), tmp_path, member_id=owner, requestable_credentials=requests
+        turn, object(), tmp_path, member_id=owner, requestable_credentials=requests, actions=True
     ).run_intent()
     assert frame is not None and frame.status == "done"
     assert frame.credential_request is not None
@@ -3135,14 +3190,15 @@ async def test_an_interrupted_intent_turn_names_what_interrupted_it(
         reader = _metric_capture(monkeypatch)
         turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
         owner = await _seeded_member(turn.workspace_id)
-        intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input={})
+        intent = ToolIntent(tool="connect_account", input={})
         turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
 
         tool = ToolDef(
-            name=REQUEST_CREDENTIALS_TOOL,
+            name="connect_account",
             description="interrupted mid-dispatch",
             input_model=_NoArgs,
             handler=InterruptedHandler(interrupt),
+            presentation=ActionPresentation(label="Connect", frame=True),
         )
         carrier = RecordingCarrier()
         engine = replace(
@@ -3167,7 +3223,7 @@ async def test_a_read_back_frame_never_carries_another_errors_stack(
     the refusal's name. Only the commit that actually wrote the frame may carry a stack."""
     turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
     owner = await _seeded_member(turn.workspace_id)
-    intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input=REQUEST_INPUT)
+    intent = ToolIntent(tool="object_action", input=REQUEST_CALL)
     turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
     requests = CredentialRequests(
         fernet=Fernet(Fernet.generate_key()), declared=frozenset(), fillable=frozenset()
@@ -3177,7 +3233,9 @@ async def test_a_read_back_frame_never_carries_another_errors_stack(
         raise OSError("blob store unreachable")
 
     monkeypatch.setattr(TurnEngine, "_persist_transcript", failing_persist)
-    engine = _engine(turn, object(), tmp_path, member_id=owner, requestable_credentials=requests)
+    engine = _engine(
+        turn, object(), tmp_path, member_id=owner, requestable_credentials=requests, actions=True
+    )
 
     with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(OSError):
         await engine.run_intent()
@@ -3197,14 +3255,19 @@ async def test_a_refused_intent_meters_the_refusal_as_the_turn_it_failed(
     reader = _metric_capture(monkeypatch)
     turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
     owner = await _seeded_member(turn.workspace_id)
-    intent = ToolIntent(tool=REQUEST_CREDENTIALS_TOOL, input=REQUEST_INPUT)
+    intent = ToolIntent(tool="object_action", input=REQUEST_CALL)
     turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
     requests = CredentialRequests(
         fernet=Fernet(Fernet.generate_key()), declared=frozenset(), fillable=frozenset()
     )
     with caplog.at_level(logging.INFO, logger="ufo"):
         frame = await _engine(
-            turn, object(), tmp_path, member_id=owner, requestable_credentials=requests
+            turn,
+            object(),
+            tmp_path,
+            member_id=owner,
+            requestable_credentials=requests,
+            actions=True,
         ).run_intent()
     assert frame is not None and frame.status == "failed"
     (refused,) = [r.ufo for r in caplog.records if r.getMessage() == "turn.terminal"]
@@ -4523,16 +4586,16 @@ def test_asked_question_reads_the_handlers_result_not_the_raw_call() -> None:
     content = "Ask these in your reply.\n" + json.dumps({"awaiting": "question", **folded})
     calls = (ToolUseBlock(id="q1", name="ask_user", input=ASK_INPUT),)
     results = (ToolResultBlock(tool_use_id="q1", content=content),)
-    question = _final_act(calls, results, ASK_USER_TOOL, AskUserInput)
+    question = _final_act(calls, results, "ask_user", AskUserInput)
     assert question is not None
     assert question.title == "Folded"
     assert question.questions[0].question == "Really?"
     rewritten = (ToolResultBlock(tool_use_id="q1", content="a hook replaced this output"),)
-    assert _final_act(calls, rewritten, ASK_USER_TOOL, AskUserInput) is None
+    assert _final_act(calls, rewritten, "ask_user", AskUserInput) is None
     errored = (ToolResultBlock(tool_use_id="q1", content=content, is_error=True),)
-    assert _final_act(calls, errored, ASK_USER_TOOL, AskUserInput) is None
+    assert _final_act(calls, errored, "ask_user", AskUserInput) is None
     others = (ToolUseBlock(id="c1", name="bash", input={}),)
-    assert _final_act(others, results, ASK_USER_TOOL, AskUserInput) is None
+    assert _final_act(others, results, "ask_user", AskUserInput) is None
 
 
 async def test_question_is_cleared_when_the_turn_works_on_after_asking(
@@ -4550,6 +4613,7 @@ REQUEST_INPUT = {
     "reason": "Connecting Slack needs the bot token.",
     "prompts": [{"slot": "sample_api", "prompt": "Bot User OAuth Token"}],
 }
+REQUEST_CALL = {"kind": "credential", "action": "request_credentials", "input": REQUEST_INPUT}
 
 
 @dataclass(frozen=True)
@@ -4569,10 +4633,10 @@ class CollectThenEndModel:
             yield TextDelta(text="Your terminal will prompt for the token.")
             yield Usage(input_tokens=1, output_tokens=1)
             return
-        yield ToolCallStart(id="s1", name="request_credentials")
+        yield ToolCallStart(id="s1", name="object_action")
         yield ToolCallDelta(
             id="s1",
-            partial_json=json.dumps({**REQUEST_INPUT, "requested_by": str(self.message_ref)}),
+            partial_json=json.dumps({**REQUEST_CALL, "requested_by": str(self.message_ref)}),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 
@@ -4594,16 +4658,16 @@ class CollectThenBookkeepModel:
             and any(isinstance(block, ToolResultBlock) for block in message.content)
         )
         if rounds == 0:
-            yield ToolCallStart(id="s1", name="request_credentials")
+            yield ToolCallStart(id="s1", name="object_action")
             yield ToolCallDelta(
                 id="s1",
-                partial_json=json.dumps({**REQUEST_INPUT, "requested_by": str(self.message_ref)}),
+                partial_json=json.dumps({**REQUEST_CALL, "requested_by": str(self.message_ref)}),
             )
             yield Usage(input_tokens=2, output_tokens=2)
             return
         if rounds == 1:
-            yield ToolCallStart(id="s2", name="skill_search")
-            yield ToolCallDelta(id="s2", partial_json=json.dumps({"query": "slack setup"}))
+            yield ToolCallStart(id="s2", name="bash")
+            yield ToolCallDelta(id="s2", partial_json=json.dumps({"command": "echo slack setup"}))
             yield Usage(input_tokens=2, output_tokens=2)
             return
         yield TextDelta(text="A prompt is waiting for the token.")
@@ -4630,6 +4694,7 @@ async def test_a_credential_request_survives_a_later_round_of_the_agents_own_wor
         tmp_path,
         member_id=owner,
         requestable_credentials=requests,
+        actions=True,
     )
 
     frame = await engine.run()
@@ -4662,13 +4727,13 @@ class CollectBesideOtherWorkModel:
             and any(isinstance(block, ToolResultBlock) for block in message.content)
         )
         if rounds == 0:
-            yield ToolCallStart(id="s1", name="request_credentials")
+            yield ToolCallStart(id="s1", name="object_action")
             yield ToolCallDelta(
                 id="s1",
-                partial_json=json.dumps({**REQUEST_INPUT, "requested_by": str(self.message_ref)}),
+                partial_json=json.dumps({**REQUEST_CALL, "requested_by": str(self.message_ref)}),
             )
-            yield ToolCallStart(id="s2", name="skill_search")
-            yield ToolCallDelta(id="s2", partial_json=json.dumps({"query": "slack setup"}))
+            yield ToolCallStart(id="s2", name="bash")
+            yield ToolCallDelta(id="s2", partial_json=json.dumps({"command": "echo slack setup"}))
             yield Usage(input_tokens=2, output_tokens=2)
             return
         yield TextDelta(text="A prompt is waiting for the token.")
@@ -4695,6 +4760,7 @@ async def test_a_credential_request_beside_other_work_in_its_round_still_reaches
         tmp_path,
         member_id=owner,
         requestable_credentials=requests,
+        actions=True,
     )
 
     frame = await engine.run()
@@ -4719,10 +4785,10 @@ class CollectThenAskModel:
             and any(isinstance(block, ToolResultBlock) for block in message.content)
         )
         if rounds == 0:
-            yield ToolCallStart(id="s1", name="request_credentials")
+            yield ToolCallStart(id="s1", name="object_action")
             yield ToolCallDelta(
                 id="s1",
-                partial_json=json.dumps({**REQUEST_INPUT, "requested_by": str(self.message_ref)}),
+                partial_json=json.dumps({**REQUEST_CALL, "requested_by": str(self.message_ref)}),
             )
             yield Usage(input_tokens=2, output_tokens=2)
             return
@@ -4753,6 +4819,7 @@ async def test_a_prompt_and_a_question_both_stand_when_a_turn_raises_both(
         tmp_path,
         member_id=owner,
         requestable_credentials=requests,
+        actions=True,
     )
 
     frame = await engine.run()
@@ -4791,8 +4858,8 @@ class ConnectThenBookkeepModel:
             yield Usage(input_tokens=2, output_tokens=2)
             return
         if rounds == 1:
-            yield ToolCallStart(id="s2", name="skill_search")
-            yield ToolCallDelta(id="s2", partial_json=json.dumps({"query": "connect"}))
+            yield ToolCallStart(id="s2", name="bash")
+            yield ToolCallDelta(id="s2", partial_json=json.dumps({"command": "echo connect"}))
             yield Usage(input_tokens=2, output_tokens=2)
             return
         yield TextDelta(text="Press the control to authorize.")
@@ -4918,6 +4985,7 @@ async def test_a_credential_request_survives_the_round_budget(db: None, tmp_path
             tmp_path,
             member_id=owner,
             requestable_credentials=requests,
+            actions=True,
         ),
         max_rounds=2,
     )
@@ -4934,8 +5002,8 @@ def test_the_two_act_rules_stay_apart(tmp_path: Path) -> None:
     stale — the turn had its chance to answer it. A credential request is owed whatever the round
     ended on, because nothing the turn does fills the slot. Sharing one helper is what carried the
     question's rule onto the acts it does not fit."""
-    asked = ToolUseBlock(id="q1", name=ASK_USER_TOOL, input={})
-    collected = ToolUseBlock(id="s1", name=REQUEST_CREDENTIALS_TOOL, input={})
+    asked = ToolUseBlock(id="q1", name="ask_user", input={})
+    collected = ToolUseBlock(id="s1", name="request_credentials", input={})
     worked = ToolUseBlock(id="c1", name="bash", input={})
     question_result = ToolResultBlock(
         tool_use_id="q1", content=f"directive\n{json.dumps(ASK_INPUT)}"
@@ -4949,13 +5017,13 @@ def test_the_two_act_rules_stay_apart(tmp_path: Path) -> None:
     # `_final_act` pairs against by position.
     beside = (asked, collected, worked)
     results = (question_result, collected_result, worked_result)
-    assert _final_act(beside, results, ASK_USER_TOOL, AskUserInput) is None
-    assert _pending_act(beside, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest) is not None
+    assert _final_act(beside, results, "ask_user", AskUserInput) is None
+    assert _pending_act(beside, results, "request_credentials", CredentialRequest) is not None
 
     # The same question, in a round that does end on it.
     ending_on_the_ask = (worked, asked)
     assert (
-        _final_act(ending_on_the_ask, (worked_result, question_result), ASK_USER_TOOL, AskUserInput)
+        _final_act(ending_on_the_ask, (worked_result, question_result), "ask_user", AskUserInput)
         is not None
     )
 
@@ -4988,6 +5056,7 @@ async def test_request_credentials_as_the_final_act_rides_the_terminal_frame(
         tmp_path,
         member_id=owner,
         requestable_credentials=requests,
+        actions=True,
     )
     frame = await engine.run()
     assert frame.status == "done"
@@ -5122,14 +5191,14 @@ def test_requested_credentials_reads_the_handlers_result_not_the_raw_call() -> N
     content = "Tell the member what you need.\n" + json.dumps(payload)
     calls = (ToolUseBlock(id="s1", name="request_credentials", input=REQUEST_INPUT),)
     results = (ToolResultBlock(tool_use_id="s1", content=content),)
-    request = _final_act(calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest)
+    request = _final_act(calls, results, "request_credentials", CredentialRequest)
     assert request is not None
     assert request.reason == "folded"
     assert request.sealed == "opaque"
     rewritten = (ToolResultBlock(tool_use_id="s1", content="a hook replaced this output"),)
-    assert _final_act(calls, rewritten, REQUEST_CREDENTIALS_TOOL, CredentialRequest) is None
+    assert _final_act(calls, rewritten, "request_credentials", CredentialRequest) is None
     others = (ToolUseBlock(id="c1", name="bash", input={}),)
-    assert _final_act(others, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest) is None
+    assert _final_act(others, results, "request_credentials", CredentialRequest) is None
 
 
 async def test_round_budget_exhaustion_forces_a_final_answer_instead_of_failing(
@@ -5876,7 +5945,9 @@ async def test_no_step_argument_renders_a_payload_into_a_cancellation_log(
         first_round=True,
     )
     call = ToolUseBlock(id="toolu_1", name="write", input={"content": secret})
-    bound = _BoundToolCall(context=_dispatch_context(engine), call=call)
+    resolved = engine._resolve_call(call)
+    assert isinstance(resolved, EffectiveCall)
+    bound = _BoundToolCall(context=_dispatch_context(engine), effective=resolved)
     rejected = _RejectedToolCall(
         call=call,
         text=f"ValueError: {secret}",
@@ -6457,7 +6528,11 @@ async def test_recovered_find_dispatch_preserves_the_cancelled_cache_write(
     recovered_usage: list[Usage] = []
     results = [interrupted, completed]
 
-    async def replay_then_retry(dispatching: TurnEngine, bound: object) -> DispatchResult:
+    async def replay_then_retry(
+        dispatching: TurnEngine,
+        bound: object,
+        target: ObjectActionTarget | None = None,
+    ) -> DispatchResult:
         result = results.pop(0)
         if result is completed:
             recovered_usage.append(read)
@@ -6467,7 +6542,7 @@ async def test_recovered_find_dispatch_preserves_the_cancelled_cache_write(
     monkeypatch.setattr(TurnEngine, "_dispatch_step", replay_then_retry)
     bound = await recovered._bind_or_error(
         _dispatch_context(recovered),
-        ToolUseBlock(id="c1", name="rank", input={}),
+        recovered._resolve_call(ToolUseBlock(id="c1", name="rank", input={})),
         {},
     )
     assert await recovered._dispatch_step_recovering(bound, recovered_usage) is completed
@@ -6535,7 +6610,7 @@ async def test_interrupted_side_effecting_dispatch_retries_with_the_same_idempot
     )
     bound = await engine._bind_or_error(
         _dispatch_context(engine),
-        ToolUseBlock(id="c1", name="write", input={}),
+        engine._resolve_call(ToolUseBlock(id="c1", name="write", input={})),
         {},
     )
     with ws(turn.workspace_id):
@@ -6547,12 +6622,16 @@ async def test_interrupted_side_effecting_dispatch_retries_with_the_same_idempot
     original_dispatch_step = TurnEngine._dispatch_step
     replayed = False
 
-    async def replay_then_retry(dispatching: TurnEngine, retry_bound: object) -> DispatchResult:
+    async def replay_then_retry(
+        dispatching: TurnEngine,
+        retry_bound: object,
+        target: ObjectActionTarget | None = None,
+    ) -> DispatchResult:
         nonlocal replayed
         if not replayed:
             replayed = True
             return interrupted
-        return await original_dispatch_step(dispatching, retry_bound)
+        return await original_dispatch_step(dispatching, retry_bound, target)
 
     monkeypatch.setattr(TurnEngine, "_dispatch_step", replay_then_retry)
     recovered = replace(engine)
@@ -7464,6 +7543,16 @@ def test_dispatch_segments_batch_safe_runs_and_barrier_the_rest() -> None:
             ),
         )
     )
+
+    def resolve(block: ToolUseBlock) -> EffectiveCall | _RejectedToolCall:
+        try:
+            tool = tools.get(block.name)
+        except KeyError:
+            return _RejectedToolCall(
+                call=block, text="unknown", outcome="invalid_call", error_class="KeyError"
+            )
+        return EffectiveCall(call=block, tool=tool, call_id=tool.name, ext=None)
+
     calls = (
         call("s1", "safe"),
         call("s2", "safe"),
@@ -7472,11 +7561,12 @@ def test_dispatch_segments_batch_safe_runs_and_barrier_the_rest() -> None:
         call("x1", "unknown"),
     )
     segments = [
-        tuple(block.id for block in segment) for segment in _dispatch_segments(tools, calls)
+        tuple(item.call.id for item in segment)
+        for segment in _dispatch_segments(tuple(resolve(block) for block in calls))
     ]
     assert segments == [("s1", "s2"), ("u1",), ("s3",), ("x1",)]
-    burst = tuple(call(f"s{n}", "safe") for n in range(MAX_PARALLEL_TOOL_CALLS + 3))
-    sizes = [len(segment) for segment in _dispatch_segments(tools, burst)]
+    burst = tuple(resolve(call(f"s{n}", "safe")) for n in range(MAX_PARALLEL_TOOL_CALLS + 3))
+    sizes = [len(segment) for segment in _dispatch_segments(burst)]
     assert sizes == [MAX_PARALLEL_TOOL_CALLS, 3]
 
 

@@ -507,9 +507,9 @@ def test_design_proof_requires_each_preview_before_its_choice_on_both_ways_in() 
         "first_screen_priority": "Overdue queue",
         "regions": ["Overdue", "Unassigned", "Recent activity"],
     }
-    preview = ToolInvocation(name="render_application_preview", input=contract, has_result=True)
+    preview = ToolInvocation(name="object_action", input=_preview_call(contract), has_result=True)
     revised = ToolInvocation(
-        name="render_application_preview", input=revised_contract, has_result=True
+        name="object_action", input=_preview_call(revised_contract), has_result=True
     )
     one_preview = CapabilityOutput("", (asked, asked, preview, asked, apply))
     two_previews = CapabilityOutput("", (asked, asked, preview, asked, revised, asked, apply))
@@ -537,11 +537,13 @@ def test_design_proof_requires_each_preview_before_its_choice_on_both_ways_in() 
     )
     natural_revision = replace(
         revised,
-        input={
-            **contract,
-            "first_screen_priority": "Overdue issues, oldest first",
-            "regions": ["Overdue issues", "Unassigned", "Recent activity"],
-        },
+        input=_preview_call(
+            {
+                **contract,
+                "first_screen_priority": "Overdue issues, oldest first",
+                "regions": ["Overdue issues", "Unassigned", "Recent activity"],
+            }
+        ),
     )
     assert (
         _design_pass_failure(
@@ -553,11 +555,13 @@ def test_design_proof_requires_each_preview_before_its_choice_on_both_ways_in() 
     )
     retained_revision = replace(
         revised,
-        input={
-            **contract,
-            "first_screen_priority": "The queue of overdue items waiting on you",
-            "regions": ["Waiting on you", "This week's draft", "Published notes"],
-        },
+        input=_preview_call(
+            {
+                **contract,
+                "first_screen_priority": "The queue of overdue items waiting on you",
+                "regions": ["Waiting on you", "This week's draft", "Published notes"],
+            }
+        ),
     )
     assert (
         _design_pass_failure(
@@ -569,10 +573,12 @@ def test_design_proof_requires_each_preview_before_its_choice_on_both_ways_in() 
     )
     missing_overdue = replace(
         retained_revision,
-        input={
-            **retained_revision.input,
-            "first_screen_priority": "Items waiting on you",
-        },
+        input=_preview_call(
+            {
+                **retained_revision.arguments,
+                "first_screen_priority": "Items waiting on you",
+            }
+        ),
     )
     assert "overdue queue first" in str(
         _design_pass_failure(
@@ -583,10 +589,12 @@ def test_design_proof_requires_each_preview_before_its_choice_on_both_ways_in() 
     )
     summary_first = replace(
         retained_revision,
-        input={
-            **retained_revision.input,
-            "regions": ["Waiting on your weekly summary", "Overdue queue", "Published notes"],
-        },
+        input=_preview_call(
+            {
+                **retained_revision.arguments,
+                "regions": ["Waiting on your weekly summary", "Overdue queue", "Published notes"],
+            }
+        ),
     )
     assert "overdue queue first" in str(
         _design_pass_failure(
@@ -597,10 +605,12 @@ def test_design_proof_requires_each_preview_before_its_choice_on_both_ways_in() 
     )
     summary_with_label = replace(
         retained_revision,
-        input={
-            **retained_revision.input,
-            "regions": ["Weekly summary waiting on you", "Overdue queue", "Published notes"],
-        },
+        input=_preview_call(
+            {
+                **retained_revision.arguments,
+                "regions": ["Weekly summary waiting on you", "Overdue queue", "Published notes"],
+            }
+        ),
     )
     assert "overdue queue first" in str(
         _design_pass_failure(
@@ -644,14 +654,12 @@ def test_application_journey_graders_require_the_fixed_worker_tools() -> None:
         )
     )
     assert _application_worker_tool_failure(worker_calls) is None
-    old_worker_calls = tuple(
-        ToolInvocation(name, {}, has_result=True)
-        for name in (
-            APPLICATION_BUILDER_WRITE_TOOL,
-            "start_server",
-            "js_repl",
-            "deploy_website",
-        )
+    old_worker_calls = (
+        *(
+            ToolInvocation(name, {}, has_result=True)
+            for name in (APPLICATION_BUILDER_WRITE_TOOL, "start_server", "js_repl")
+        ),
+        ToolInvocation("object_action", _deploy_call({}), has_result=True),
     )
     assert APPLICATION_BUILDER_DESIGN_TOOL in str(
         _application_worker_tool_failure(old_worker_calls)
@@ -660,7 +668,9 @@ def test_application_journey_graders_require_the_fixed_worker_tools() -> None:
     failed = CapabilityOutput("", (worker_calls[1],))
     repaired = CapabilityOutput("", (worker_calls[-1],))
     assert _application_repair_tool_failure(failed, repaired) is None
-    old_repair = CapabilityOutput("", (ToolInvocation("deploy_website", {}, has_result=True),))
+    old_repair = CapabilityOutput(
+        "", (ToolInvocation("object_action", _deploy_call({}), has_result=True),)
+    )
     assert _application_repair_tool_failure(failed, old_repair) == (
         "the repair attempt deployed no site"
     )
@@ -949,6 +959,33 @@ def test_the_built_design_must_carry_the_regions_the_member_accepted() -> None:
     )
 
 
+def _preview_call(contract: dict[str, object]) -> dict[str, object]:
+    return {"kind": "site", "action": "render_application_preview", "input": contract}
+
+
+def _deploy_call(arguments: dict[str, object]) -> dict[str, object]:
+    return {"kind": "site", "action": "deploy_website", "input": arguments}
+
+
+async def test_a_dispatched_action_reads_as_its_canonical_id_and_its_own_arguments() -> None:
+    deploy = ToolInvocation("object_action", _deploy_call({"site_name": "status"}), "served", True)
+    assert deploy.call == "action:site:deploy_website"
+    assert deploy.arguments == {"site_name": "status"}
+    bare = ToolInvocation("object_action", {"kind": "site", "action": "deploy_website"})
+    assert bare.arguments == {}
+    read = ToolInvocation("object_get", {"kind": "site", "name": "status"}, "read", True)
+    assert read.call == "object_get"
+    assert read.arguments == {"kind": "site", "name": "status"}
+    output = CapabilityOutput("", (deploy, read))
+    assert output.tools == ("action:site:deploy_website", "object_get")
+    ordered = required_tools_scorer(
+        ("action:site:deploy_website", "object_get"),
+        (("action:site:deploy_website", "object_get"),),
+    )
+    assert (await ordered(output)).passed
+    assert not (await restraint_scorer(("action:site:deploy_website",))(output)).passed
+
+
 def test_the_accepted_design_block_must_reach_the_application_prompt() -> None:
     """The renderer returns the block and the skill copies it, so the prompt either carries those
     words or does not. A paraphrase is the failure this grades: the worker implements the
@@ -960,7 +997,7 @@ def test_the_accepted_design_block_must_reach_the_application_prompt() -> None:
         "layout": "queue-detail",
         "design_direction": "House style",
     }
-    preview = ToolInvocation("render_application_preview", contract, has_result=True)
+    preview = ToolInvocation("object_action", _preview_call(contract), has_result=True)
     apply = ToolInvocation(
         "object_apply",
         {"manifest": "kind: agent\nname: helper\nspec:\n  prompt: p\n"},
@@ -997,7 +1034,7 @@ def test_the_accepted_design_block_must_reach_the_application_prompt() -> None:
     )
 
     revised = {**contract, "first_screen_priority": "Paid this month"}
-    revised_render = ToolInvocation("render_application_preview", revised, has_result=True)
+    revised_render = ToolInvocation("object_action", _preview_call(revised), has_result=True)
     revised_block = homepage_design_block(RenderApplicationPreviewInput.model_validate(revised))
     revised_selected = accepted((preview, revised_render, apply))
     assert "omits the accepted design block" in str(
@@ -1016,7 +1053,7 @@ def test_the_accepted_design_block_must_reach_the_application_prompt() -> None:
         "regions": ["Revenue", "Churn", "Runway"],
         "layout": "metrics",
     }
-    unaccepted_render = ToolInvocation("render_application_preview", unaccepted, has_result=True)
+    unaccepted_render = ToolInvocation("object_action", _preview_call(unaccepted), has_result=True)
     later_design = ToolInvocation(
         APPLICATION_BUILDER_DESIGN_TOOL,
         {"content": "<svg/>"},
@@ -1176,7 +1213,10 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "skill_authoring",
         "skill_loading_member",
         "skill_gtm",
+        "skill_tail_search",
         "ufo-app-qa-replay",
+        "member_add_notify",
+        "rebuild_actions",
     }
 
 
@@ -1843,6 +1883,42 @@ async def test_seed_candidate_agent_rejects_a_missing_proposal(db: None) -> None
     workspace_id = await _workspace()
     with pytest.raises(ValueError, match="no proposal"):
         await seed_candidate_agent(uuid4(), workspace_id)
+
+
+async def test_a_capability_case_cleanup_runs_after_its_turn(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id, worker),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+    lifecycle: list[tuple[str, UUID, UUID]] = []
+
+    async def seed(seeded_workspace: UUID, seeded_agent: UUID, _blob: object) -> None:
+        lifecycle.append(("seeded", seeded_workspace, seeded_agent))
+
+    async def cleanup(cleaned_workspace: UUID, cleaned_agent: UUID, _blob: object) -> None:
+        lifecycle.append(("cleaned", cleaned_workspace, cleaned_agent))
+
+    case = CapabilityCase(
+        "seeded-then-cleaned",
+        "find the record then remember it",
+        required_tools_scorer(("search_web",)),
+        seed=seed,
+        cleanup=cleanup,
+    )
+
+    with ws(workspace_id):
+        result = await run_capability_case(case, target)
+
+    assert result.passed
+    assert lifecycle == [("seeded", workspace_id, agent_id), ("cleaned", workspace_id, agent_id)]
 
 
 def _research_transcript() -> tuple[Message, ...]:
@@ -3103,8 +3179,12 @@ async def test_eval_trajectory_omits_images_and_private_handoffs(db: None, tmp_p
             content=(
                 ToolUseBlock(
                     id="credential",
-                    name="request_credentials",
-                    input={"reason": "test", "prompts": []},
+                    name="object_action",
+                    input={
+                        "kind": "credential",
+                        "action": "request_credentials",
+                        "input": {"reason": "test", "prompts": []},
+                    },
                 ),
             ),
         ),
@@ -3165,8 +3245,12 @@ async def test_eval_trajectory_names_reasoning_and_stores_no_signature(db: None,
             content=(
                 ToolUseBlock(
                     id="credential",
-                    name="request_credentials",
-                    input={"reason": "test", "prompts": []},
+                    name="object_action",
+                    input={
+                        "kind": "credential",
+                        "action": "request_credentials",
+                        "input": {"reason": "test", "prompts": []},
+                    },
                 ),
             ),
         ),
@@ -4710,7 +4794,9 @@ async def test_private_deploy_scorer_wants_the_link_and_the_audience_not_a_quest
         }
         if visibility is not None:
             arguments["visibility"] = visibility
-        return ToolInvocation("deploy_website", arguments, dumps({"site_url": url}), True)
+        return ToolInvocation(
+            "object_action", _deploy_call(arguments), dumps({"site_url": url}), True
+        )
 
     answer = f"The page is up at {url} — private, so only you can open it."
     grader = low_stakes_default.private_deploy_scorer()
@@ -4723,13 +4809,23 @@ async def test_private_deploy_scorer_wants_the_link_and_the_audience_not_a_quest
     assert not (
         await grader(CapabilityOutput("It is up, only you can open it.", (deploy(None),)))
     ).passed
-    unreadable = ToolInvocation("deploy_website", {"site_name": "status-check"}, "served", True)
+    unreadable = ToolInvocation(
+        "object_action", _deploy_call({"site_name": "status-check"}), "served", True
+    )
     assert not (await grader(CapabilityOutput(answer, (unreadable,)))).passed
+
+
+GITHUB_APP_CALL = {
+    "kind": "credential",
+    "action": "connect_github",
+    "name": "github-app-installation",
+    "input": {},
+}
 
 
 async def test_github_connection_graders_accept_the_shipped_routes() -> None:
     coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
-    github_app = ToolInvocation("connect_github", {}, "admin required", True, True)
+    github_app = ToolInvocation("object_action", GITHUB_APP_CALL, "admin required", True, True)
     github_connector = ToolInvocation(
         "connect_account", {"provider": "github"}, "member required", True, True
     )
@@ -4740,8 +4836,8 @@ async def test_github_connection_graders_accept_the_shipped_routes() -> None:
     )
 
     reasons = (
-        "loaded 'coding'; attempted connect_github, connect_account",
-        "loaded 'coding'; attempted connect_github",
+        "loaded 'coding'; attempted action:credential:connect_github, connect_account",
+        "loaded 'coding'; attempted action:credential:connect_github",
         "loaded 'coding'; attempted connect_account",
     )
 
@@ -4753,7 +4849,7 @@ async def test_github_connection_graders_accept_the_shipped_routes() -> None:
 
 async def test_github_connection_graders_reject_the_wrong_routes() -> None:
     coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
-    github_app = ToolInvocation("connect_github", {}, "admin required", True, True)
+    github_app = ToolInvocation("object_action", GITHUB_APP_CALL, "admin required", True, True)
     github_connector = ToolInvocation(
         "connect_account", {"provider": "github"}, "member required", True, True
     )
@@ -4763,7 +4859,7 @@ async def test_github_connection_graders_reject_the_wrong_routes() -> None:
     failures = (
         (
             CapabilityOutput("", (coding, github_connector)),
-            "loaded 'coding'; did not attempt: connect_github matching {}",
+            "loaded 'coding'; did not attempt: action:credential:connect_github matching {}",
         ),
         (
             CapabilityOutput("", (coding, github_app, github_connector)),
@@ -4784,7 +4880,7 @@ async def test_github_connection_graders_reject_the_wrong_routes() -> None:
 async def test_github_connection_graders_require_the_parent_to_load_coding_first() -> None:
     errored_coding = ToolInvocation("load_skill", {"name": "coding"}, "mount failed", True, True)
     coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
-    github_app = ToolInvocation("connect_github", {}, "admin required", True, True)
+    github_app = ToolInvocation("object_action", GITHUB_APP_CALL, "admin required", True, True)
     github_connector = ToolInvocation(
         "connect_account", {"provider": "github"}, "member required", True, True
     )
@@ -4815,15 +4911,16 @@ def test_github_connection_grading_statements_pin_inputs_order_and_restraint() -
     statements = tuple(grading_statement(case.grader) for case in github_connections.CASES)
 
     skill = "the first load_skill loads 'coding' (not the distractor 'create-skill') and succeeds; "
+    connect = "action:credential:connect_github"
     assert statements == (
         skill
-        + "attempts connect_github matching {}, connect_account matching {'provider': 'github'}; "
-        "load_skill before connect_github, load_skill before connect_account; "
+        + f"attempts {connect} matching {{}}, connect_account matching {{'provider': 'github'}}; "
+        f"load_skill before {connect}, load_skill before connect_account; "
         "never attempts spawn",
-        skill + "attempts connect_github matching {}; load_skill before connect_github; "
+        skill + f"attempts {connect} matching {{}}; load_skill before {connect}; "
         "never attempts connect_account, spawn",
         skill + "attempts connect_account matching {'provider': 'github'}; "
-        "load_skill before connect_account; never attempts connect_github, spawn",
+        f"load_skill before connect_account; never attempts {connect}, spawn",
     )
 
 

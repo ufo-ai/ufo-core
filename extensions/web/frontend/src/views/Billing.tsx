@@ -11,11 +11,18 @@ import {
   QUIET,
   Section,
   outcomeNotice,
+  usePanelRead,
 } from "@/kernel/panel";
-import { postIntent } from "@/lib/api";
+import { postAction } from "@/lib/api";
+import { useWorkspaceId } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
+import type { ActionView } from "@/lib/types";
 
 const BILLING_PATH = "/ext/metronome/billing";
+
+/** The workspace object's billing action, which both of this screen's acts address: the refill
+ *  rule and the provider link are two operations of the one action the workspace projects. */
+const BILLING_ACTION = "manage_billing";
 
 const REFILL_DOLLARS = 100;
 const REFILL_BELOW_DOLLARS = 25;
@@ -194,6 +201,16 @@ export function WorkspaceBilling({
   const [busy, setBusy] = useState(false);
   const [amount, setAmount] = useState(String(REFILL_DOLLARS));
   const [below, setBelow] = useState(String(REFILL_BELOW_DOLLARS));
+  // The workspace is the one row the member stands in, and the acts projected for it are what the
+  // screen draws its two controls over — the same projection every other control reads.
+  const workspace = useWorkspaceId();
+  const acts = usePanelRead<{ actions: ActionView[] }>(
+    workspace ? "/actions/workspace/" + workspace : null,
+  );
+  const billing =
+    acts.phase === "ready"
+      ? acts.payload.actions.find((view) => view.name === BILLING_ACTION)
+      : undefined;
   useEffect(() => {
     let live = true;
     fetch(BILLING_PATH, { credentials: "same-origin" })
@@ -214,13 +231,12 @@ export function WorkspaceBilling({
   }, [reloads]);
 
   async function refill(amountDollars: number | null, belowDollars: number | null) {
-    if (busy || !mainAgent) return;
+    if (busy || !mainAgent || !billing) return;
     setBusy(true);
-    const outcome = await postIntent(mainAgent.id, {
-      verb: "refill",
-      kind: "billing",
-      amount_dollars: amountDollars,
-      below_dollars: belowDollars,
+    const outcome = await postAction(mainAgent.id, billing.call, {
+      operation: "autopay",
+      autopay_dollars: amountDollars,
+      autopay_below_dollars: belowDollars,
     });
     setBusy(false);
     if (outcome.applied) {
@@ -233,9 +249,9 @@ export function WorkspaceBilling({
   }
 
   async function saveCard() {
-    if (busy || !mainAgent) return;
+    if (busy || !mainAgent || !billing) return;
     setBusy(true);
-    const outcome = await postIntent(mainAgent.id, { verb: "save_card", kind: "billing" });
+    const outcome = await postAction(mainAgent.id, billing.call, { operation: "portal" });
     setBusy(false);
     setLink(outcome.url ?? null);
     setRefusal(outcome.url ? QUIET : outcomeNotice(outcome));
@@ -255,7 +271,8 @@ export function WorkspaceBilling({
   // A provider that would not answer leaves the card unknown, which is not the same as absent: it
   // must not read as an invitation to save one, and it cannot license arranging a refill either.
   const unread = report.card_unread === true;
-  const arrangeable = card !== null && figures.amount !== null && figures.below !== null;
+  const arrangeable =
+    billing !== undefined && card !== null && figures.amount !== null && figures.below !== null;
   const cardBlocker = unread
     ? "The card provider did not answer. The balance above is current."
     : "Save a payment method to arrange refills.";
@@ -292,7 +309,7 @@ export function WorkspaceBilling({
               }
               note={card || unread ? null : "A refill charges the card saved here."}
               action={
-                <Button busy={busy} onClick={saveCard}>
+                <Button busy={busy} disabled={!billing} onClick={saveCard}>
                   {card ? "Update" : unread ? "Open the billing portal" : "Save a payment method"}
                 </Button>
               }
@@ -310,7 +327,7 @@ export function WorkspaceBilling({
               <Standing
                 statement={rule}
                 action={
-                  <Button busy={busy} onClick={() => refill(null, null)}>
+                  <Button busy={busy} disabled={!billing} onClick={() => refill(null, null)}>
                     Stop
                   </Button>
                 }

@@ -40,7 +40,8 @@ no source: its app answers from its own server, so its row states sandbox servin
 the acting agent's bound homepage from another conversation updates that row in place — same link,
 same origin, new source and generation — rather than founding a second site beside it.
 
-`set_homepage` binds one hosted site as the acting agent's homepage — the pointer the portal reads.
+`set_homepage` binds one hosted site as the homepage of the agent it is dispatched on — its own
+by default, another agent's only for that agent's owner or an admin — the pointer the portal reads.
 The frame gates a homepage's viewers on the agent's visibility rather than the site's, so who may
 open it is decided where the agent's audience is decided — the agent object's `visibility` — and
 the bind itself is the re-gating act: it takes the site's creator acting, and a live speaker
@@ -53,10 +54,11 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ufo.sdk.objects import AGENT_KIND
 from ufo.sdk.sandbox import WORKSPACE_DIR, serve_port, shell_path, workspace_path
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
@@ -88,7 +90,7 @@ from ufo_ext_sites.application_builder import (
     application_design_acceptance_relative,
     application_design_evidence_relative,
 )
-from ufo_ext_sites.objects import effective_visibility, site_object_name
+from ufo_ext_sites.objects import SITE_KIND, effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page
 from ufo_ext_sites.source import (
     PROJECT_CONFIG,
@@ -387,7 +389,7 @@ VISIBILITY_DESCRIPTION = (
     "and an existing one keeps the visibility it has."
 )
 SET_HOMEPAGE_DESCRIPTION = (
-    "Bind a hosted site as your homepage — the page the portal shows for this agent. Pass the "
+    "Bind a hosted site as this agent's homepage — the page the portal shows for it. Pass the "
     "site object name from the deploy result; binding another site later moves the homepage and "
     "the old site stays hosted. A homepage's viewers are the agent's: a workspace-visible "
     "agent's homepage opens for every member, a private agent's for its owner and workspace "
@@ -399,6 +401,11 @@ HOMEPAGE_NEEDS_ITS_CREATOR = (
     "a homepage answers the agent's audience instead of the site's own visibility, so binding a "
     "site re-gates it, and that is its creator's act alone: {site} is someone else's site, so "
     "have its creator bind it or deploy a site of your own"
+)
+HOMEPAGE_NEEDS_THE_AGENTS_OWNER = (
+    "a homepage is the agent's own page, and rewriting another agent's page is its owner's or a "
+    "workspace admin's act: {agent} is not yours to direct, so bind your own homepage or have its "
+    "owner ask"
 )
 HOMEPAGE_BIND_NEEDS_A_SPEAKER = (
     "binding a standing site moves its viewers onto the agent's audience, and that re-gating "
@@ -445,6 +452,7 @@ class StartServerInput(BaseModel):
 
 
 class DeployWebsiteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     project_path: str = Field(
         description="Directory containing the built static output (index.html)."
     )
@@ -462,6 +470,7 @@ class QaUfoApplicationInput(BaseModel):
 
 
 class PublishWebsiteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     project_path: str = Field(description="The web app project directory.")
     dist_path: str = Field(description="Directory of the built static output to serve.")
     app_name: str = Field(description="A name for the published app; it names the hosted link.")
@@ -475,6 +484,7 @@ class PublishWebsiteInput(BaseModel):
 
 
 class SetHomepageInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     site: str = Field(description="The site object name from the deploy result.")
 
 
@@ -1267,19 +1277,32 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
 
 
 async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
-    """Bind one hosted site as the acting agent's homepage.
+    """Bind one hosted site as the homepage of the agent the call targets.
 
-    Binding writes nothing but the pointer, yet it moves the site's viewers onto the agent's
-    audience — every member for a workspace agent, its owner and admins for a private one — so
-    the bind answers to the module's disclosure rule the way a visibility change does. It is the
-    creator's act alone: another member's site is refused whatever its visibility, since a bind
-    would widen a private site or re-gate a shared one out from under its creator. And a standing
-    site needs the creator speaking — without a live speaker the bind reaches only a site this
-    same turn deployed, whose gate is the room's default rather than a choice anyone made — which
-    is exactly the seed's deploy-and-bind shape, so seeding stays speakerless-safe while a
+    The agent is the instance the action was dispatched on: its own kind's read admitted the row
+    — shared, owned, admin, or the turn's own agent — before this handler ran, and a read is not a
+    write: another agent's page is rewritten only by that agent's owner or a workspace admin,
+    since the kind shows members agents they do not control. Binding writes
+    nothing but the pointer, yet it moves the site's viewers onto the agent's audience — every
+    member for a workspace agent, its owner and admins for a private one — so the bind answers to
+    the module's disclosure rule the way a visibility change does. It is the creator's act alone:
+    another member's site is refused whatever its visibility, since a bind would widen a private
+    site or re-gate a shared one out from under its creator. And a standing site needs the creator
+    speaking — without a live speaker the bind reaches only a site this same turn deployed, onto
+    this same turn's agent, whose gate is the room's default rather than a choice anyone made —
+    which is exactly the seed's deploy-and-bind shape, so seeding stays speakerless-safe while a
     scheduled turn can never re-gate what a member left standing."""
     if ctx.ext is None:
         raise RuntimeError("the website tools dispatched without their ExtensionContext")
+    if ctx.target is None or ctx.target.name is None:
+        raise RuntimeError("set_homepage dispatched without its agent target")
+    agent = await ctx.ext.agent_named(ctx.target.name)
+    if agent is None:
+        raise ValueError(f"no live agent is named {ctx.target.name!r}")
+    agent_id = agent.id
+    owns = ctx.acting_member_id is not None and agent.owner_member_id == ctx.acting_member_id
+    if agent_id != ctx.turn.agent_id and not owns and not await ctx.speaker_is_admin():
+        raise ValueError(HOMEPAGE_NEEDS_THE_AGENTS_OWNER.format(agent=ctx.target.name))
     workspace_id = ctx.ext.store.workspace_id
     sites = HostedSites(workspace_id, ctx.ext.transaction)
     named = {site_object_name(site.conversation_id, site.name): site for site in await sites.all()}
@@ -1294,10 +1317,11 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
     deployed_this_turn = (
         site.conversation_id == ctx.sandbox.conversation_id
         and site.created_at >= ctx.turn.created_at
+        and agent_id == ctx.turn.agent_id
     )
     if ctx.speaker_member_id is None and not deployed_this_turn:
         raise RuntimeError(HOMEPAGE_BIND_NEEDS_A_SPEAKER)
-    bound = await sites.set_homepage(ctx.turn.agent_id, site.conversation_id, site.name)
+    bound = await sites.set_homepage(agent_id, site.conversation_id, site.name)
     if bound is None:
         raise ValueError(f"site {args.site!r} was unhosted while it was being bound")
     return _json_result(
@@ -1306,8 +1330,8 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
             "site_url": site_url(
                 ctx.public_base_url, workspace_id, bound.conversation_id, bound.name
             ),
-            "visibility": await ctx.agent_visibility(),
-            "homepage_agent": str(ctx.turn.agent_id),
+            "visibility": (await ctx.ext.agent_visibilities())[agent_id],
+            "homepage_agent": str(agent_id),
         }
     )
 
@@ -1353,19 +1377,23 @@ SITES_TOOLS: tuple[ToolDef, ...] = (
         description=DEPLOY_WEBSITE_DESCRIPTION,
         input_model=DeployWebsiteInput,
         handler=deploy_website,
+        side_effecting=True,
+        bound=ObjectBinding(kind=SITE_KIND, binding="collection"),
     ),
     ToolDef(
         name=PUBLISH_WEBSITE_TOOL,
         description=PUBLISH_WEBSITE_DESCRIPTION,
         input_model=PublishWebsiteInput,
         handler=publish_website,
+        side_effecting=True,
+        bound=ObjectBinding(kind=SITE_KIND, binding="collection"),
     ),
     ToolDef(
         name=SET_HOMEPAGE_TOOL,
         description=SET_HOMEPAGE_DESCRIPTION,
         input_model=SetHomepageInput,
         handler=set_homepage,
+        side_effecting=True,
+        bound=ObjectBinding(kind=AGENT_KIND, binding="instance"),
     ),
 )
-
-SITES_TOOL_NAMES: tuple[str, ...] = tuple(tool.name for tool in SITES_TOOLS)

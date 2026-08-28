@@ -502,7 +502,8 @@ This is the app a *customer* installs in their own Slack workspace — nothing t
 inviter above, which represents UFO in UFO's workspace and shares none of its credentials.
 The `assistant_hosted` shared fleet activates the `slack` extension alongside the ufo chat surface.
 There are two install paths — both land the same per-workspace bot token and identity record, and
-the agent drives either in chat with `slack_connect` (default `method="oauth"`).
+the agent drives either in chat with the `slack_connect` action on `surface/slack` (default
+`method="oauth"`).
 
 **Preferred — OAuth on the deploy's own app.** The deploy holds one Slack app; its client id, client
 secret, and signing secret are read from env in-process (never per-workspace BYOK, never the
@@ -585,7 +586,7 @@ by its Fernet-sealed state, and it resolves its workspace from that state alone.
 ## The seams underneath
 
 ```text
-request_credentials (core builtin)
+request_credentials (core action on the credential collection, dispatched through object_action)
   gates: speaking member · workspace admin · declared slots · credential key
   seals: {workspace, member, slots} under the credential Fernet, TTL-bound
   ends the turn; the request rides the terminal frame / writeback
@@ -620,8 +621,8 @@ setup API.
 
 The `assistant_hosted` pack includes the slack extension — its durable member surface
 (`/surface/slack`, with the OAuth callback at `/surface/slack/oauth`), its two per-workspace slots,
-the deploy Slack app's env secrets, and its `slack_connect` / `slack_app_manifest` tools plus the
-`slack-app-setup` skill; connecting it is a conversation, not a separate setup surface.
+the deploy Slack app's env secrets, and its `slack_connect` / `slack_app_manifest` actions on
+`surface/slack` plus the `slack-app-setup` skill; connecting it is a conversation, not a separate setup surface.
 
 ## Operational edges
 

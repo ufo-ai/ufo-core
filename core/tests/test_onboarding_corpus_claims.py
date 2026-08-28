@@ -41,7 +41,6 @@ BUILTIN_TOOLS_SOURCE = "core/src/ufo/tools/builtins.py"
 SITES_TOOLS = "extensions/sites/ufo_ext_sites/tools.py"
 TOOLS_CONTEXT = "core/src/ufo/tools/context.py"
 STOP = "core/src/ufo/surfaces/stop.py"
-WEB_PANELS = "extensions/web/ufo_ext_web/panels.py"
 WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
 WEB_AUDIENCE = "extensions/web/ufo_ext_web/audience.py"
 WEB_BILLING_VIEW = "extensions/web/frontend/src/views/Billing.tsx"
@@ -464,7 +463,7 @@ CLAIMS = (
         corpus="references/capabilities.md",
         phrase="Radar can rebuild its entries",
         source=RADAR_HOME,
-        pattern=r'<RebuildDialog title="Rebuild Entries" action="Rebuild entries"',
+        pattern=r'<RebuildDialog title="Rebuild Entries" kind="report"',
     ),
     Claim(
         claim="the portal memory view reads saved facts and records corrections",
@@ -480,8 +479,8 @@ CLAIMS = (
         claim="a portal memory correction supersedes instead of editing the earlier statement",
         corpus="references/capabilities.md",
         phrase="a correction that\n  supersedes the earlier statement",
-        source=WEB_PANELS,
-        pattern=r"The named item is never edited or removed",
+        source=MEMORY_MANIFEST,
+        pattern=r"neither edited nor removed — the dedup sweep retires",
     ),
     Claim(
         claim="the agent records a correction through the memory update tool",
@@ -552,8 +551,8 @@ CLAIMS = (
         claim="the billing screen turns automatic refills on or off, no chat needed",
         corpus="references/billing-and-seats.md",
         phrase="turn\n  automatic refills on or off",
-        source=WEB_PANELS,
-        pattern=r'verb: Literal\["refill"\]',
+        source=WEB_BILLING_VIEW,
+        pattern=r'operation: "autopay",',
     ),
     Claim(
         claim="the screen takes any whole-dollar refill amount and balance line, not a fixed pair",
@@ -567,8 +566,8 @@ CLAIMS = (
         corpus="references/billing-and-seats.md",
         phrase="the billing screen offers a button that returns the same link — to save a\nfirst"
         " card, or to change the one on file",
-        source=WEB_PANELS,
-        pattern=r'verb: Literal\["save_card"\]',
+        source=WEB_BILLING_VIEW,
+        pattern=r'\{ operation: "portal" \}',
     ),
     Claim(
         claim="no route adds credit once without leaving a standing rule behind",
@@ -576,7 +575,7 @@ CLAIMS = (
         phrase="Adding credit once, without leaving a standing rule behind, is not something the"
         " screen or\n  the agent can do",
         source=METRONOME,
-        pattern=r'action: Literal\["status", "portal", "autopay"\]',
+        pattern=r'operation: Literal\["status", "portal", "autopay"\]',
     ),
     Claim(
         claim="the screen names the card it will charge by brand and last four",

@@ -29,7 +29,7 @@ SKILL_QUERY_TERM_MIN_CHARS = 3
 QUERY_TERM_SPLIT = re.compile(r"\W+")
 MEMBER_BLOCK_OPEN = "<saved_skills>"
 MEMBER_BLOCK_CLOSE = "</saved_skills>"
-MEMBER_BLOCK_MORE = "{count} more skills; skill_search finds them."
+MEMBER_BLOCK_MORE = "{count} more skills; the skill kind's skill_search action finds them."
 
 
 def _query_terms(query: str) -> tuple[str, ...]:

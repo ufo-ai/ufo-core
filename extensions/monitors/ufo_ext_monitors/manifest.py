@@ -1,4 +1,4 @@
-"""What the monitors extension declares: the `monitor` tool, the `monitor` object kind, and the
+"""What the monitors extension declares: the `monitor` object kind, its `monitor` action, and the
 per-minute runner that probes every due watch.
 
 A monitor is a durable watch — a shell probe run in a conversation's sandbox on an interval, under

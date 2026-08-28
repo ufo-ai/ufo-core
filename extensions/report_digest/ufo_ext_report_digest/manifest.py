@@ -11,9 +11,16 @@ from pydantic import BaseModel, ConfigDict
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.manifest import Manifest, SkillSpec
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    ActionPresentation,
+    ObjectBinding,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolResult,
+)
 from ufo_ext_report_digest.digest import SKILL_DIR
-from ufo_ext_report_digest.objects import REPORT_OBJECT
+from ufo_ext_report_digest.objects import REPORT_KIND, REPORT_OBJECT
 from ufo_ext_report_digest.writer import DigestRebuild, DigestWriter, undigested_workspaces
 
 NAME = "report_digest"
@@ -86,6 +93,12 @@ def manifest() -> Manifest:
                 input_model=RebuildReportDigestInput,
                 handler=rebuild_report_digest_handler,
                 side_effecting=True,
+                bound=ObjectBinding(kind=REPORT_KIND, binding="collection"),
+                presentation=ActionPresentation(
+                    label="Rebuild entries",
+                    confirm="Every report of the last seven days has its entry written again.",
+                    frame=True,
+                ),
             ),
         ),
         jobs=(

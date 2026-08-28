@@ -32,6 +32,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo_ext_sites.application_audit import ApplicationAuditRegion, application_region_relation
 from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_DELEGATION,
     APPLICATION_BUILDER_DELEGATION_TOOL,
     APPLICATION_BUILDER_DEPLOY_TOOL,
     APPLICATION_BUILDER_DESIGN_TOOL,
@@ -72,7 +73,9 @@ from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws_current
 
 SKILL = "create-application"
-PREVIEW_TOOL = "render_application_preview"
+PREVIEW_TOOL = "action:site:render_application_preview"
+BUILD_ACTION = f"action:site:{APPLICATION_BUILDER_DELEGATION_TOOL}"
+HOMEPAGE_ACTION = "action:agent:set_homepage"
 WEB_EXTENSION = "web"
 HOMEPAGE_SEED_PREFIX = "homepage-seed/"
 SANDBOX_CONTAINER_PREFIX = "ufo-sbx-"
@@ -556,7 +559,7 @@ def _design_pass_failure(
     preview_calls = tuple(
         (index, call)
         for index, call in enumerate(output.calls)
-        if index < create and call.name == PREVIEW_TOOL and call.succeeded
+        if index < create and call.call == PREVIEW_TOOL and call.succeeded
     )
     delegated_previews = tuple(
         index
@@ -609,7 +612,7 @@ def _design_pass_failure(
         if position and design_asks[position - 1] >= render:
             return f"preview {position + 1} was not built after the prior design choice"
     for position, (_, call) in enumerate(preview_calls):
-        contract = call.input
+        contract = call.arguments
         required = {
             "purpose",
             "first_screen_priority",
@@ -620,7 +623,7 @@ def _design_pass_failure(
         if missing := sorted(required - contract.keys()):
             return f"preview {position + 1} contract omits {', '.join(missing)}"
     if previews > 1:
-        contract = preview_calls[-1][1].input
+        contract = preview_calls[-1][1].arguments
         regions = contract.get("regions", [])
         priority = str(contract.get("first_screen_priority", "")).casefold()
         first_region = str(regions[0]).casefold() if isinstance(regions, list) and regions else ""
@@ -639,10 +642,10 @@ def _accepted_design(
         return None, failure
     previews: list[tuple[int, ToolInvocation, RenderApplicationPreviewInput]] = []
     for index, call in enumerate(output.calls[: application.create_index]):
-        if call.name != PREVIEW_TOOL or not call.succeeded:
+        if call.call != PREVIEW_TOOL or not call.succeeded:
             continue
         try:
-            contract = RenderApplicationPreviewInput.model_validate(call.input)
+            contract = RenderApplicationPreviewInput.model_validate(call.arguments)
         except ValueError:
             continue
         previews.append((index, call, contract))
@@ -715,7 +718,7 @@ async def _prepare_created_homepage(
                 tables.agent.c.workspace_id == ws_current().workspace_id,
                 tables.agent.c.id == application.id,
             )
-            .values(tools=[APPLICATION_BUILDER_DELEGATION_TOOL])
+            .values(tools=[APPLICATION_BUILDER_DELEGATION.canonical_id])
         )
         insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
         await connection.execute(
@@ -997,7 +1000,7 @@ def _application_worker_tool_failure(calls: tuple[ToolInvocation, ...]) -> str |
         return f"the Gemini worker did not call {APPLICATION_BUILDER_WRITE_TOOL}"
     if not any(call.name == APPLICATION_BUILDER_QA_TOOL and call.succeeded for call in calls):
         return "the Gemini worker completed no product QA batch"
-    if any(call.name == "set_homepage" for call in calls):
+    if any(call.call == HOMEPAGE_ACTION for call in calls):
         return "the Gemini worker tried to certify its own homepage"
     return None
 
@@ -1008,9 +1011,7 @@ async def _homepage_journey_failure(
     followup = outcome.followup
     if followup is None:
         return "the created application ran no homepage turn"
-    delegations = tuple(
-        call for call in followup.own_calls if call.name == APPLICATION_BUILDER_DELEGATION_TOOL
-    )
+    delegations = tuple(call for call in followup.own_calls if call.call == BUILD_ACTION)
     if not delegations or any(not call.succeeded for call in delegations):
         return f"the application made {len(delegations)} successful-or-failed build call(s)"
     if len({call.result for call in delegations}) != 1:
@@ -1033,13 +1034,13 @@ async def _homepage_journey_failure(
         APPLICATION_BUILDER_WRITE_TOOL,
         "edit_application_source",
         "read_application_source",
-        "deploy_website",
-        "set_homepage",
-        "build_website",
+        "action:site:deploy_website",
+        HOMEPAGE_ACTION,
+        "action:site:build_website",
         "write",
         "edit",
     }
-    parent_work = tuple(call.name for call in followup.own_calls if call.name in forbidden)
+    parent_work = tuple(call.call for call in followup.own_calls if call.call in forbidden)
     if parent_work:
         return f"the Opus application parent entered the build loop: {', '.join(parent_work)}"
     if failure := _application_worker_tool_failure(followup.calls):
@@ -1125,7 +1126,7 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
     ):
         return CapabilityVerdict(False, f"never loaded {SKILL!r}")
     previews = tuple(
-        index for index, call in enumerate(calls) if call.name == PREVIEW_TOOL and call.succeeded
+        index for index, call in enumerate(calls) if call.call == PREVIEW_TOOL and call.succeeded
     )
     if not previews:
         return CapabilityVerdict(False, "rendered no design, so the member saw nothing")
@@ -1345,9 +1346,7 @@ async def _graded_repair_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
     build_statuses: list[str] = []
     for followup in outcome.followups:
         calls = tuple(
-            call
-            for call in followup.own_calls
-            if call.name == APPLICATION_BUILDER_DELEGATION_TOOL and call.succeeded
+            call for call in followup.own_calls if call.call == BUILD_ACTION and call.succeeded
         )
         if not calls:
             return CapabilityVerdict(
@@ -1363,7 +1362,7 @@ async def _graded_repair_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
         build_statuses.append(result["status"])
     if build_statuses != ["blocked", "deployed"]:
         return CapabilityVerdict(False, f"build statuses were {build_statuses}")
-    if any(call.name == "set_homepage" for call in outcome.output.calls):
+    if any(call.call == HOMEPAGE_ACTION for call in outcome.output.calls):
         return CapabilityVerdict(False, "a Gemini worker tried to certify its own homepage")
     first, second = outcome.followups
     if repair_failure := _application_repair_tool_failure(first, second):
@@ -1445,7 +1444,7 @@ SCENARIOS = (
             "account the workspace already has.",
             "The assistant never offers to delete the application or undo the create.",
         ),
-        digest_tag="new-application:support-desk",
+        digest_tag="new-application:actions:support-desk",
     ),
     ScenarioCase(
         "A02-stated-up-front",
@@ -1468,7 +1467,7 @@ SCENARIOS = (
             "The assistant never asks the member how much the application may do on its own, or "
             "when it should run.",
         ),
-        digest_tag="new-application:stated-up-front",
+        digest_tag="new-application:actions:stated-up-front",
     ),
     ScenarioCase(
         "A03-existing-application",
@@ -1488,7 +1487,7 @@ SCENARIOS = (
             "The assistant never creates a second application and never claims to have created "
             "one.",
         ),
-        digest_tag="new-application:existing-application",
+        digest_tag="new-application:actions:existing-application",
     ),
     ScenarioCase(
         "A04-daily-brief",
@@ -1515,7 +1514,7 @@ SCENARIOS = (
             "The application prompt keeps task and memory suggestions as drafts until the member "
             "approves them in a later turn.",
         ),
-        digest_tag="new-application:daily-brief",
+        digest_tag="new-application:actions:daily-brief",
     ),
     ScenarioCase(
         "A05-guided-build",
@@ -1533,7 +1532,7 @@ SCENARIOS = (
             "The assistant proposes one concrete application instead of asking the member what "
             "to build.",
         ),
-        digest_tag="new-application:guided-build",
+        digest_tag="new-application:actions:guided-build",
     ),
     ScenarioCase(
         "A06-guided-revision",
@@ -1551,7 +1550,7 @@ SCENARIOS = (
             "The assistant changes the existing design instead of starting the interview again.",
             "The assistant creates nothing before the member accepts the revised design.",
         ),
-        digest_tag="new-application:guided-revision",
+        digest_tag="new-application:actions:guided-revision",
     ),
     ScenarioCase(
         "A07-named-homepage-journey",
@@ -1575,7 +1574,7 @@ SCENARIOS = (
             "The creation reply states what the application still needs and does not claim that "
             "the homepage build was verified by Opus.",
         ),
-        digest_tag="new-application:named-homepage-journey",
+        digest_tag="new-application:actions:named-homepage-journey",
         followup=_build_created_homepage,
         artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
@@ -1596,7 +1595,7 @@ SCENARIOS = (
             "to build.",
             "No parent turn claims to inspect or verify the Gemini build.",
         ),
-        digest_tag="new-application:guided-homepage-journey",
+        digest_tag="new-application:actions:guided-homepage-journey",
         followup=_build_created_homepage,
         artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
@@ -1616,7 +1615,7 @@ SCENARIOS = (
             "The assistant changes the existing design instead of starting the interview again.",
             "No parent turn claims to inspect or verify the Gemini build.",
         ),
-        digest_tag="new-application:revised-homepage-journey",
+        digest_tag="new-application:actions:revised-homepage-journey",
         followup=_build_created_homepage,
         artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
@@ -1647,7 +1646,7 @@ SCENARIOS = (
             "The creation reply states what the application still needs.",
             "No parent turn claims to inspect or verify either Gemini build.",
         ),
-        digest_tag="new-application:failed-repaired-homepage-journey",
+        digest_tag="new-application:actions:failed-repaired-homepage-journey",
         followup=_repair_created_homepage,
         artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
@@ -1665,7 +1664,7 @@ SCENARIOS = (
             _graded_shows_the_design,
         ),
         seed=_seeded(),
-        digest_tag="new-application:named-shows-the-design",
+        digest_tag="new-application:actions:named-shows-the-design",
     ),
     ScenarioCase(
         "A12-guided-shows-the-design",
@@ -1680,7 +1679,7 @@ SCENARIOS = (
             _graded_shows_the_design,
         ),
         seed=_seeded(),
-        digest_tag="new-application:guided-shows-the-design",
+        digest_tag="new-application:actions:guided-shows-the-design",
     ),
     ScenarioCase(
         "A13-carries-the-design",

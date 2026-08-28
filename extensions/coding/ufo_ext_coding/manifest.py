@@ -30,6 +30,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ufo.sdk.credentials import credential_object_name
 from ufo.sdk.manifest import (
     CredentialSlot,
     InjectionTarget,
@@ -39,7 +40,8 @@ from ufo.sdk.manifest import (
     SkillSpec,
     SubagentProfile,
 )
-from ufo.sdk.tools import ToolDef
+from ufo.sdk.objects import CREDENTIAL_KIND
+from ufo.sdk.tools import ActionPresentation, ObjectBinding, ToolDef
 from ufo_ext_coding.connect import (
     GIT_INSTALLATION_SLOT,
     ROUTE_PATH,
@@ -213,6 +215,12 @@ def manifest() -> Manifest:
                 "GitHub API work: hands an admin the App install link. Admin-only.",
                 input_model=ConnectGitHubInput,
                 handler=connect_github,
+                bound=ObjectBinding(
+                    kind=CREDENTIAL_KIND,
+                    binding="instance",
+                    name=credential_object_name(GIT_INSTALLATION_SLOT),
+                ),
+                presentation=ActionPresentation(label="Connect GitHub"),
             ),
         ),
         routes=(

@@ -2,16 +2,52 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
 
+import { WorkspaceId } from "@/lib/audience";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { AGENT, AGENT_ID, PlacedWorkspace, json, wire } from "./harness";
+import { AGENT, AGENT_ID, PlacedWorkspace, type Route, json, wire } from "./harness";
 
-function billingTab() {
+const WORKSPACE = "7a1e1b2c-0000-4000-8000-000000000042";
+
+/** The billing action as the workspace object projects it to an admin: the one action both of the
+ *  screen's controls address, pre-bound to the workspace row the detail read answered. */
+const MANAGE_BILLING = {
+  name: "manage_billing",
+  description: "Read or change how this workspace pays.",
+  input_schema: {
+    properties: {
+      operation: { type: "string", title: "Operation", enum: ["status", "portal", "autopay"] },
+      autopay_dollars: { anyOf: [{ type: "integer" }, { type: "null" }], default: null },
+      autopay_below_dollars: { anyOf: [{ type: "integer" }, { type: "null" }], default: null },
+    },
+    required: ["operation"],
+  },
+  call: { kind: "workspace", action: "manage_billing", name: WORKSPACE, input: {} },
+  label: "Manage billing",
+};
+
+/** The read the screen draws its acts from: the acts projected for the workspace's own row. */
+const WORKSPACE_READ = "/actions/workspace/" + WORKSPACE + "$";
+
+const WORKSPACE_ACTIONS: Record<string, Route> = {
+  [WORKSPACE_READ]: () => json({ actions: [MANAGE_BILLING] }),
+};
+
+/** Where both of the screen's acts post: the workspace row's `manage_billing` on the main agent's
+ *  lane, with the operation and its figures as the whole body. */
+const BILLING_LANE =
+  "/surface/web/agents/" + AGENT_ID + "/actions/workspace/" + WORKSPACE + "/manage_billing";
+
+function billingTab(routes: Record<string, Route>) {
+  const wired = wire({ ...WORKSPACE_ACTIONS, ...routes });
   render(
-    <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="billing" />
-    </MainAgentProvider>,
+    <WorkspaceId.Provider value={WORKSPACE}>
+      <MainAgentProvider agents={[AGENT]}>
+        <PlacedWorkspace view="billing" />
+      </MainAgentProvider>
+    </WorkspaceId.Provider>,
   );
+  return wired;
 }
 
 const LIMITED = {
@@ -32,8 +68,7 @@ const LIMITED = {
 const RULE = "Adding $100.00 when the balance falls below $25.00.";
 
 test("the balance is the figure, and its refusal line shows only once it bites", async () => {
-  wire({ "/ext/metronome/billing": () => json({ ...LIMITED, card: null }) });
-  billingTab();
+  billingTab({ "/ext/metronome/billing": () => json({ ...LIMITED, card: null }) });
 
   expect(await screen.findByText("$12.34")).toBeTruthy();
   expect(screen.getByText("Current balance")).toBeTruthy();
@@ -41,11 +76,10 @@ test("the balance is the figure, and its refusal line shows only once it bites",
 });
 
 test("a stopped workspace states what has to be true before turns run again", async () => {
-  wire({
+  billingTab({
     "/ext/metronome/billing": () =>
       json({ ...LIMITED, balance_micro_usd: -6_430_000, refused_below_micro_usd: 0, card: null }),
   });
-  billingTab();
 
   expect(await screen.findByText("-$6.43")).toBeTruthy();
   expect(
@@ -54,16 +88,14 @@ test("a stopped workspace states what has to be true before turns run again", as
 });
 
 test("the card on file is named, not reduced to yes", async () => {
-  wire({ "/ext/metronome/billing": () => json(LIMITED) });
-  billingTab();
+  billingTab({ "/ext/metronome/billing": () => json(LIMITED) });
 
   expect(await screen.findByText("visa •••• 4242")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Update" })).toBeTruthy();
 });
 
 test("the credit history states what was added and what it cost", async () => {
-  wire({ "/ext/metronome/billing": () => json(LIMITED) });
-  billingTab();
+  billingTab({ "/ext/metronome/billing": () => json(LIMITED) });
 
   // The table draws a stacked variant for narrow widths, so every cell renders twice.
   expect((await screen.findAllByText("Aug 20, 2026")).length).toBeGreaterThan(0);
@@ -76,11 +108,10 @@ test("the credit history states what was added and what it cost", async () => {
 test("a member the billing route refuses is told who may read it", async () => {
   // The route answers a refusal with a body, exactly as the handler does. Claiming the workspace
   // has no limit would be a guess: a refused read knows nothing about the balance.
-  wire({
+  billingTab({
     "/ext/metronome/billing": () =>
       Response.json({ error: "only a workspace admin can read billing" }, { status: 403 }),
   });
-  billingTab();
 
   expect(await screen.findByText("Only a workspace admin can read billing.")).toBeTruthy();
   expect(screen.queryByText("Current balance")).toBeNull();
@@ -90,16 +121,14 @@ test("a deploy carrying no billing extension says so, and claims no refusal", as
   // The tab is drawn on every deploy, but the route is mounted only for a loaded manifest, so a
   // pack without the billing extension answers 404. Calling that an authorization refusal tells an
   // admin they lack a permission on a deploy that has nothing to permit.
-  wire({ "/ext/metronome/billing": () => Response.json({}, { status: 404 }) });
-  billingTab();
+  billingTab({ "/ext/metronome/billing": () => Response.json({}, { status: 404 }) });
 
   expect(await screen.findByText("This deploy does not carry billing.")).toBeTruthy();
   expect(screen.queryByText("Only a workspace admin can read billing.")).toBeNull();
 });
 
 test("a read that fails for any other reason says only that", async () => {
-  wire({ "/ext/metronome/billing": () => Response.json({}, { status: 500 }) });
-  billingTab();
+  billingTab({ "/ext/metronome/billing": () => Response.json({}, { status: 500 }) });
 
   expect(await screen.findByText("Billing could not be read.")).toBeTruthy();
 });
@@ -107,10 +136,9 @@ test("a read that fails for any other reason says only that", async () => {
 test("a card the provider would not read shows as unknown, not as absent", async () => {
   // "No payment method" would invite saving one on a guess about the provider's own state, and the
   // balance beside it is core's — so it still reads.
-  wire({
+  billingTab({
     "/ext/metronome/billing": () => json({ ...LIMITED, card: null, card_unread: true }),
   });
-  billingTab();
 
   expect(await screen.findByText("Payment method could not be read")).toBeTruthy();
   expect(screen.getByText("$12.34")).toBeTruthy();
@@ -122,10 +150,9 @@ test("a card the provider would not read shows as unknown, not as absent", async
 });
 
 test("no card offers the provider and holds the refill shut with its reason", async () => {
-  wire({
+  billingTab({
     "/ext/metronome/billing": () => json({ ...LIMITED, card: null }),
   });
-  billingTab();
 
   expect(await screen.findByRole("button", { name: "Save a payment method" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Turn on" })).toHaveProperty("disabled", true);
@@ -133,20 +160,21 @@ test("no card offers the provider and holds the refill shut with its reason", as
   expect(screen.getByLabelText("Add")).toHaveProperty("disabled", true);
 });
 
-test("saving a payment method posts the card verb and states the link it answers", async () => {
+test("saving a payment method posts the portal operation and states the link it answers", async () => {
   const posted: unknown[] = [];
-  wire({
+  billingTab({
     "/ext/metronome/billing": () => json({ ...LIMITED, card: null }),
-    "/intents": (_url, init) => {
+    "/manage_billing": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "", url: "https://billing.stripe.test/session/abc" });
     },
   });
-  billingTab();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Save a payment method" }));
+  const save = await screen.findByRole("button", { name: "Save a payment method" });
+  await waitFor(() => expect(save).toHaveProperty("disabled", false));
+  await userEvent.click(save);
 
-  expect(posted).toEqual([{ verb: "save_card", kind: "billing" }]);
+  expect(posted).toEqual([{ operation: "portal" }]);
   const link = await screen.findByRole("link", { name: "Open the billing portal" });
   expect(link.getAttribute("href")).toBe("https://billing.stripe.test/session/abc");
 });
@@ -154,7 +182,7 @@ test("saving a payment method posts the card verb and states the link it answers
 test("a card on file opens the amounts and posts the figures typed into them", async () => {
   const posted: unknown[] = [];
   let reads = 0;
-  const { calls } = wire({
+  const { calls } = billingTab({
     "/ext/metronome/billing": () => {
       reads += 1;
       return json(
@@ -163,12 +191,11 @@ test("a card on file opens the amounts and posts the figures typed into them", a
           : { ...LIMITED, autopay_micro_usd: 250_000_000, autopay_below_micro_usd: 50_000_000 },
       );
     },
-    "/intents": (_url, init) => {
+    "/manage_billing": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Automatic refills are on." });
     },
   });
-  billingTab();
 
   const amount = await screen.findByLabelText("Add");
   await userEvent.clear(amount);
@@ -176,12 +203,14 @@ test("a card on file opens the amounts and posts the figures typed into them", a
   const below = screen.getByLabelText("When the balance falls below");
   await userEvent.clear(below);
   await userEvent.type(below, "50");
-  await userEvent.click(screen.getByRole("button", { name: "Turn on" }));
+  const turnOn = screen.getByRole("button", { name: "Turn on" });
+  await waitFor(() => expect(turnOn).toHaveProperty("disabled", false));
+  await userEvent.click(turnOn);
 
   expect(posted).toEqual([
-    { verb: "refill", kind: "billing", amount_dollars: 250, below_dollars: 50 },
+    { operation: "autopay", autopay_dollars: 250, autopay_below_dollars: 50 },
   ]);
-  expect(calls).toContain("/surface/web/agents/" + AGENT_ID + "/intents");
+  expect(calls).toContain(BILLING_LANE);
   await waitFor(() =>
     expect(
       screen.getByText("Adding $250.00 when the balance falls below $50.00."),
@@ -190,11 +219,10 @@ test("a card on file opens the amounts and posts the figures typed into them", a
 });
 
 test("an emptied amount cannot be submitted", async () => {
-  wire({
+  billingTab({
     "/ext/metronome/billing": () =>
       json({ ...LIMITED, autopay_micro_usd: null, autopay_below_micro_usd: null }),
   });
-  billingTab();
 
   await userEvent.clear(await screen.findByLabelText("Add"));
 
@@ -202,11 +230,10 @@ test("an emptied amount cannot be submitted", async () => {
 });
 
 test("a set refill rule states its figures and offers only the stop", async () => {
-  wire({
+  billingTab({
     "/ext/metronome/billing": () =>
       json({ ...LIMITED, autopay_micro_usd: 100_000_000, autopay_below_micro_usd: 25_000_000 }),
   });
-  billingTab();
 
   expect(await screen.findByText(RULE)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
@@ -216,7 +243,7 @@ test("a set refill rule states its figures and offers only the stop", async () =
 test("stopping refills posts both figures as null", async () => {
   const posted: unknown[] = [];
   let reads = 0;
-  wire({
+  billingTab({
     "/ext/metronome/billing": () => {
       reads += 1;
       return json(
@@ -225,24 +252,36 @@ test("stopping refills posts both figures as null", async () => {
           : { ...LIMITED, autopay_micro_usd: null, autopay_below_micro_usd: null },
       );
     },
-    "/intents": (_url, init) => {
+    "/manage_billing": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Automatic refills are off." });
     },
   });
-  billingTab();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Stop" }));
+  const stop = await screen.findByRole("button", { name: "Stop" });
+  await waitFor(() => expect(stop).toHaveProperty("disabled", false));
+  await userEvent.click(stop);
 
   expect(posted).toEqual([
-    { verb: "refill", kind: "billing", amount_dollars: null, below_dollars: null },
+    { operation: "autopay", autopay_dollars: null, autopay_below_dollars: null },
   ]);
   await waitFor(() => expect(screen.getByLabelText("Add")).toBeTruthy());
 });
 
+test("the acts stay shut until the workspace projects the billing action", async () => {
+  billingTab({
+    [WORKSPACE_READ]: () => json({ actions: [] }),
+    "/ext/metronome/billing": () =>
+      json({ ...LIMITED, autopay_micro_usd: 100_000_000, autopay_below_micro_usd: 25_000_000 }),
+  });
+
+  expect(await screen.findByText(RULE)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Stop" })).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: "Update" })).toHaveProperty("disabled", true);
+});
+
 test("a workspace with no balance row has no spending limit", async () => {
-  wire({ "/ext/metronome/billing": () => json({ limited: false }) });
-  billingTab();
+  billingTab({ "/ext/metronome/billing": () => json({ limited: false }) });
 
   expect(await screen.findByText("This workspace has no spending limit.")).toBeTruthy();
 });

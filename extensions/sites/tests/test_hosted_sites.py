@@ -116,6 +116,7 @@ from ufo.hub import InProcessHub
 from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, verify_artifact_url
 from ufo.media.image_previews import ImagePreviewGrant
 from ufo.media.site_previewer import SitePreviewer
+from ufo.object_scope import ObjectActionTarget
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox import containment
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -513,15 +514,22 @@ def _tool(
     public_base_url: str | None = PUBLIC_BASE_URL,
     blob: WorkspaceBlobStore | None = None,
 ) -> tuple[ToolDef, ToolContext]:
-    """One real tool and the context the engine dispatches it with, its extension bound."""
-    tools, ext_by_tool = turn_tools(
+    """One real tool and the context the engine dispatches it with, its extension bound: a wire
+    tool by name, or a site action by its short name out of the action registry."""
+    tools, ext_by_tool, verbs = turn_tools(
         (sites_manifest(),),
         None,
         audience=audience,
         public_base_url=public_base_url,
         artifact_token_secret=ARTIFACT_SECRET,
     )
-    tool = next(entry for entry in tools if entry.name == name)
+    actions = {
+        bound.action.name: bound for held in verbs.actions.values() for bound in held.values()
+    }
+    if name in actions:
+        tool, ext = actions[name].action, actions[name].context
+    else:
+        tool, ext = next(entry for entry in tools if entry.name == name), ext_by_tool.get(name)
     return tool, ToolContext(
         sandbox=FakeSandbox(),
         blob=blob or _source_store(),
@@ -541,7 +549,7 @@ def _tool(
         audience=audience,
         artifact_token_secret=ARTIFACT_SECRET,
         public_base_url=public_base_url,
-        ext=ext_by_tool.get(name),
+        ext=ext,
     )
 
 
@@ -604,6 +612,25 @@ def _bind(
 
 
 async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> dict[str, object]:
+    """The handler call the engine makes: an instance action arrives with its target folded on —
+    the turn's own agent, the row every homepage bind in these tests names."""
+    if tool.bound is not None and tool.bound.binding == "instance":
+        async with workspace_tx() as connection:
+            name = (
+                await connection.execute(
+                    sa.select(tables.agent.c.name).where(tables.agent.c.id == ctx.turn.agent_id)
+                )
+            ).scalar_one()
+        ctx = replace(
+            ctx,
+            target=ObjectActionTarget(
+                kind=tool.bound.kind,
+                name=name,
+                agent=None,
+                generation=None,
+                expected_generation=None,
+            ),
+        )
     result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     payload = json.loads(result.content[0].text)
     assert isinstance(payload, dict)

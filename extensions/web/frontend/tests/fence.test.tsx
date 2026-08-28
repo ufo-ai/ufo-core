@@ -91,6 +91,7 @@ test("a slow read for a filter the member left never paints over the filter they
   const matches = (text: string, kind: string) =>
     json({
       available: true,
+      actions: [],
       kinds: ["fact", "preference"],
       matches: [{ text, kind, ref: null, created_at: null }],
       older: null,
@@ -99,7 +100,7 @@ test("a slow read for a filter the member left never paints over the filter they
 
   await waitFor(() => expect(pending.size).toBe(1));
   pending.get([...pending.keys()][0])!(
-    json({ available: true, kinds: ["fact", "preference"], matches: [], older: null, newer: null }),
+    json({ available: true, actions: [], kinds: ["fact", "preference"], matches: [], older: null, newer: null }),
   );
   await screen.findByText("No memories yet.");
 

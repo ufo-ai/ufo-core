@@ -177,7 +177,7 @@ class AbsentTopicGrader:
             "citedIssues": cited,
             "attributedToCorpusIssues": attributed,
             "memorySearchCalls": [
-                call.name for call in output.calls if call.name == MEMORY_SEARCH_TOOL
+                call.call for call in output.calls if call.call == MEMORY_SEARCH_TOOL
             ],
         }
         if recall.error_class is not None:
@@ -271,7 +271,7 @@ class IssueRecallGrader:
             "frontSlots": len(front),
             "relatedInFront": related_in_front,
             "memorySearchCalls": [
-                call.name for call in output.calls if call.name == MEMORY_SEARCH_TOOL
+                call.call for call in output.calls if call.call == MEMORY_SEARCH_TOOL
             ],
             "citedIssues": sorted(set(ISSUE_NUMBER_PATTERN.findall(output.response))),
             "issueShapedInjected": sum(memory_id in self.issue_shaped for memory_id in selected),

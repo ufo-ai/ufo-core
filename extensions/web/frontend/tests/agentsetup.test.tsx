@@ -10,6 +10,8 @@ import { AGENT_ID, json, wire } from "./harness";
 
 const SETUP = "/setup$";
 const INTENTS = "/intents";
+const GITHUB_INSTALL =
+  "/agents/" + AGENT_ID + "/actions/credential/github-app-installation/connect_github";
 const TURN = "7f1d9d0e-6d2a-4c53-9d1f-2f4b9a0c1e77";
 
 type FakeStream = {
@@ -86,8 +88,8 @@ async function actButton(name: string | RegExp) {
   return act;
 }
 
-function applied(handler: ReturnType<typeof wire>["handler"]) {
-  const posted = handler.mock.calls.find(([url]) => String(url).endsWith("/intents"));
+function applied(handler: ReturnType<typeof wire>["handler"], lane = INTENTS) {
+  const posted = handler.mock.calls.find(([url]) => String(url).endsWith(lane));
   return posted ? JSON.parse(String((posted[1] as RequestInit).body)) : null;
 }
 
@@ -182,14 +184,31 @@ test("a workspace install is one press, and its link opens the provider's own pa
   vi.stubGlobal("open", vi.fn().mockReturnValue(opened));
   const { handler } = wire({
     [SETUP]: () => json(owed()),
-    [INTENTS]: () => json({ applied: true, message: "", url: "https://github.test/install" }),
+    [GITHUB_INSTALL]: () => json({ applied: true, message: "", url: "https://github.test/install" }),
+    "/actions/credential/github-app-installation": () =>
+      json({
+        actions: [
+          {
+            name: "connect_github",
+            description: "Install the ufo GitHub App.",
+            input_schema: { properties: {} },
+            call: {
+              kind: "credential",
+              action: "connect_github",
+              name: "github-app-installation",
+              input: {},
+            },
+            label: "Connect",
+          },
+        ],
+      }),
   });
   mount();
 
   await userEvent.click(await stepTrigger("Install the workspace app"));
   await userEvent.click(await actButton("Install ufo GitHub App"));
 
-  await waitFor(() => expect(applied(handler)).toEqual({ verb: "connect_github" }));
+  await waitFor(() => expect(applied(handler, GITHUB_INSTALL)).toEqual({}));
   expect(opened.location.href).toBe("https://github.test/install");
 });
 

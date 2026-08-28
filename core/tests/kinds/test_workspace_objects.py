@@ -145,7 +145,7 @@ def _context(
 
 
 def _tool(name: str) -> ToolDef:
-    tools, _ = turn_tools((), None, audience=conversation_audience(None))
+    tools, _, _ = turn_tools((), None, audience=conversation_audience(None))
     return next(tool for tool in tools if tool.name == name)
 
 

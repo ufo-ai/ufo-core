@@ -34,7 +34,7 @@ WEBSITE_BUILDING_TOOL_NAMES = (
     "grep",
     "load_skill",
     *(
-        tool.name
+        tool.canonical_id
         for tool in SITES_TOOLS
         if tool.name != PUBLISH_WEBSITE_TOOL and not tool.profile_only
     ),

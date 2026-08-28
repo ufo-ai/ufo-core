@@ -113,9 +113,9 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   memory recall injects on — pinned skills first, every card while they fit, then lexical top-k
   as full lines with the rest as bare names and a count — rendered from **routing cards** (name,
   description, depends, pinned; columns written at save), so no turn decodes a skill's stored files
-  except the one `load_skill` names. `skill_search` searches every card and returns rows, never
-  bodies; a vector retrieval leg runs shadow-only until measurement promotes or deletes it
-  (RFC 0038).
+  except the one `load_skill` names. The skill kind's `skill_search` action searches every card
+  and returns rows, never bodies; a vector retrieval leg runs shadow-only until measurement
+  promotes or deletes it (RFC 0038).
   Every-turn content belongs in the system prompt, situational/long content in skills; skills carry
   workflows, never restated tool docs (the tool's description is authoritative). `load_skill` loads
   each skill's files and injects its `SKILL.md` without the frontmatter, under a header that says
@@ -214,10 +214,11 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   against the live page, audience, and grant state before return. The main agent's owner exception
   applies to explicit work for that member; automatic room/shared recall carries no acting member
   and cannot inject their private source.
-- **Minimal built-in tools** — `bash`, `read`, `write`, `edit`,
-  `ask_user`, `request_credentials`, `spawn`, `load_skill`, `share_file`, and the five
-  object verbs (`object_list`/`get`/`explain`/`apply`/`delete`) over extension-registered kinds
-  (RFC 0017) — one generic CRUD surface instead of per-extension config tools. Object lists accept
+- **Minimal built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`, `share_file`,
+  `spawn`, `cancel_spawn`, `message_spawn`, `ask_user`, `load_skill`, `connect_account`, and the
+  six object verbs (`object_list`/`get`/`explain`/`apply`/`delete`/`action`) over
+  extension-registered kinds (RFC 0017, RFC 0042) — one generic CRUD-plus-actions surface instead
+  of per-extension config tools. Object lists accept
   exact first-class-field filters and field ordering over the fields each kind declares — its own
   vocabulary of scalars its rows carry, not its spec's shape, so a read-only kind indexes a column
   without widening the spec a form renders and its apply refuses; a row carrying an undeclared
@@ -251,6 +252,21 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   private target resolves for its owner and workspace admins; a `workspace` target resolves for
   every member, and a refused name reads as absent.
   Everything else arrives via extensions.
+  An operation CRUD does not express is an **object action** (RFC 0042): the same `ToolDef`, its
+  `bound` naming a kind's collection or one visible instance, registered through the `tools`
+  manifest point by whichever extension owns the behavior — the kind's owner or another. An action
+  never enters the wire registry; the kind's `object_list`/`object_get`/`object_explain` return the
+  actions the turn holds beside the rows, and `object_action` dispatches one under its canonical id
+  `action:<kind>:<name>` — the one name allowlists, hook selectors, idempotency keys, activity, and
+  telemetry address. Dispatch resolves the bound declaration exactly as a global call resolves its
+  `ToolDef` — validation, requester binding, hooks, idempotency, trust wall, and metrics are the
+  same code — after the arity, grant, and instance-target checks the binding adds; a bound
+  handler reads its target from `ctx.target` and never from its input. Every registered tool rides
+  every model round: the static member-facing registry is the retained global set, and the
+  progressive-discovery mechanism is the object substrate itself, never a second catalog or
+  deferred-schema layer. A declared `presentation` (label, confirmation) is the action's portal
+  control and admits it through the prepared-intent lane; the panel is derived from the input
+  schema, never hand-written per action.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.
 
@@ -280,7 +296,7 @@ process-wide connection ceiling bounds proxy state; a per-workspace share keeps 
 consuming it. Meter records cross a bounded, backpressured queue and write aggregated per run in
 workspace-scoped transactions, so one failed run cannot roll back another.
 
-The sandbox exports `UFO_TOOL_BRIDGE_URL` for `ufo tool`: a JSON stdin/stdout interface to the five
+The sandbox exports `UFO_TOOL_BRIDGE_URL` for `ufo tool`: a JSON stdin/stdout interface to the six
 object verbs and the connector broker's list/describe/search/call verbs. Its synthetic HTTPS host
 terminates only at the egress proxy; the proxy forwards the signed run authority to `serve`, never
 into the request body. A schema read and a call both require the parent turn to remain live and the
@@ -360,12 +376,24 @@ named and never valued — and whose status carries what it asks of the deploy (
 `requires`). Instances are declarations rather than rows, so their envelope timestamps are null,
 and every mutation refuses: installing and removing an extension is a lockfile act (`ufoctl ext`).
 
+The registered chat surfaces read back as the core-registered `surface` kind: one object per
+`SurfaceSpec` the active manifests declare, named by the surface name, installed or not — the
+terminal and subagent transports declare none and get no row. Its spec is the declaration (the
+declaring extension, addressed vs installation-routed, durable vs live delivery, the home surface);
+its status is the workspace's `surface_installation` binding — bound or not, the bound agent, whether
+the installation identity routes ingress — never an installation id or a provider secret. Foreign
+audiences read no rows and the portal answers admins alone; apply and delete refuse, because setup is
+the surface's own connect flow. No extension can express it: none sees the whole manifest set or owns
+the shared routing table, so the loader builds it and binds it with no extension context. Slack and
+iMessage attach their setup tools to it as instance actions (`action:surface:slack_connect`,
+`action:surface:imessage_connect`, …), so connecting a surface starts from a read of its object.
+
 Manifest registers (each optional):
 
 | Point | Contract |
 |---|---|
-| `tools` | Typed tool defs + handlers; appear in agents' granted tool sets. A `profile_only` tool is withheld from the member-facing set, so it reaches only a subagent profile that names it or an extension-shipped agent whose declared allowlist names it (the raw browser surface reaches every other agent solely through `browser_task`/`wide_browse`). An allowlist is declared, never typed: `object_apply agent` writes no tool list and the main agent carries none, so a held-back primitive is reachable exactly where a manifest says so and no member can grant one. A prepared intent takes no model round and so runs past the allowlist — the panel's verb dispatches verbatim under the submitting member's authority, which is what keeps a shipped agent's own portal panel able to grant it an account or a key. |
-| `objects` | Workspace-object kinds (RFC 0017): name, one-line description, model-facing guidance, spec model (`extra="forbid"`, JSON-round-trippable, no secret fields — boot-gated), and store handlers over the extension's own tables. Core's five `object_*` verbs validate the YAML envelope and spec, then dispatch to the kind under its own ExtensionContext; domain refusals live in the handlers. A kind whose rows belong to a member (`connection`, `connector_grant`, `source`, `scheduled_task`, `site`) is built on the `MemberOwnedObjects` base: it declares each row's owner (`member_id`, `shared`) and the base enforces per-member access. A row is visible when shared, owned by the acting member, or inspected by an admin. Its member-owner controls expansion; an admin may inspect, restrict, or delete but cannot widen another member's access. |
+| `tools` | Typed tool defs + handlers; appear in agents' granted tool sets. A def whose `bound` names a registered kind's collection or instance is an object action: it never enters the wire registry, is discovered on that kind's list/get/explain, dispatches through `object_action`, and is granted, hooked, keyed, and metered under `action:<kind>:<name>`; an allowlist names canonical ids and never `object_action` itself (boot refuses it), and the dispatcher's schema rides exactly when the turn holds at least one action. A `profile_only` tool is withheld from the member-facing set, so it reaches only a subagent profile that names it or an extension-shipped agent whose declared allowlist names it (the raw browser surface reaches every other agent solely through `browser_task`/`wide_browse`). An allowlist is declared, never typed: `object_apply agent` writes no tool list and the main agent carries none, so a held-back primitive is reachable exactly where a manifest says so and no member can grant one. A prepared intent takes no model round and so runs past the allowlist — the panel's verb dispatches verbatim under the submitting member's authority, which is what keeps a shipped agent's own portal panel able to grant it an account or a key. |
+| `objects` | Workspace-object kinds (RFC 0017): name, one-line description, model-facing guidance, spec model (`extra="forbid"`, JSON-round-trippable, no secret fields — boot-gated), and store handlers over the extension's own tables. Core's six `object_*` verbs validate the YAML envelope and spec, then dispatch to the kind under its own ExtensionContext (`object_action` to the bound declaration under its contributor's); domain refusals live in the handlers. A kind whose rows belong to a member (`connection`, `connector_grant`, `source`, `scheduled_task`, `site`) is built on the `MemberOwnedObjects` base: it declares each row's owner (`member_id`, `shared`) and the base enforces per-member access. A row is visible when shared, owned by the acting member, or inspected by an admin. Its member-owner controls expansion; an admin may inspect, restrict, or delete but cannot widen another member's access. |
 | `agents` | Durable workspace agents the extension ships (RFC 0030): a declared name, an `AgentSpec` (prompt, model, reasoning, internet policy, sandbox tier, portal visibility), and an optional tool allowlist. Activation — workspace onboarding, or the first turn of a workspace that predates the declaration — creates the ordinary `agent` row and stops owning it. The row is written once and never again, with one exception: the two fields that are the extension's own statement rather than the member's — the `setup` it declares, and the `purpose` where the row has none — are carried forward on every pass, or a release that gives an app a feature needing a second account would state that need to new workspaces only. Such a write moves the recorded version with it, so the version always names the declaration the row carries. Everything else a later version of the extension changes reaches new workspaces only, and a member's own edit stands — including a purpose they rewrote in their own words. Identity is `(extension, declared name)`, never the row's own name, so a name already in use — by a member's agent or by a second extension declaring the same one — sends the shipped agent to a free variant rather than overwriting anything or stopping the deploy. A provision may declare itself the workspace's **main agent**'s instead of an agent's of its own: it lands on that row, which keeps its name, prompt, mark and every edge hanging off it, so the app's page becomes the main agent's page and no second agent stands beside it — the chat app is this. It arrives with no connector grant, credential, source, or memory: installing an extension never hands it the workspace's connected accounts, and a member grants each in chat as they would for any agent. An `AgentSpec` shipped here must carry a `purpose` — the one sentence saying what the app is for, refused where the provision is written, because a member meets a shipped app with nobody to ask. A provision may declare a `setup` slot — the connector providers its agent works from (a kind of authority, never an instance) and the instructions to obtain them; a need it names must be settleable by that agent, which is why source feeds, having no attach verb, are absent. It lands on the row, and renders as a loadable skill on the agent itself — a task, so the index costs one line and the instructions load on demand — derived from the grants themselves so it erases itself as they land. Every grant binds to the agent whose conversation it is made in, so setup happens there and nowhere else. That is the whole of what an extension may say about authority: a grant is consent over an account a person owns, so it is declared and never created. |
 | `subagents` | Typed subagent profiles. A profile may isolate its named tools from deploy-wide defaults and grants; only core constructs the child's effective registry, so an extension cannot enforce that boundary itself. |
 | `prompt_sections` | Capability sections a pack contributes to the agent's system prompt, rendered into the shell's `{{sections}}` slot ordered by name — a pack's rules (web search, browsing, office docs) reach the agent without core naming the capability. |
@@ -574,7 +602,8 @@ born `workspace` and refuses to narrow, since every surface routes an unbound me
 beyond those the portal lists and admits exactly the private agents whose web audience holds the
 signed-in member — a row they own joins by ownership alone, the rest by grants kept in the web
 extension's own store, granted and revoked in chat
-(`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent). A
+(`grant_web_access`/`revoke_web_access`, admin-only actions on the member object, binding the
+agent the call names or, unnamed, the conversation's own). A
 member-private extension conversation is listed as a chat and admits that member's replies, but
 does not grant another conversation or an agent panel. A readable Slack or terminal conversation
 whose audience is the workspace or the signed-in member admits portal comments through the same
@@ -835,10 +864,10 @@ where it is — a task keeps its occurrence, a pause and a watch stay armed, a s
 pending — so a restore runs what was owed. A source is the one clock-fired cost with no turn to
 refuse: it belongs to the workspace and is reached through grants, so the sweep gates on its
 readers — a source the archive took every one of them from waits for a restore, its pages and
-their extracted facts being tokens spent on a feed nothing can read. The freed name is what takes the app out of the object
-namespace, so `restore_application` addresses the stable row by id — read from
-`object_list agent` under the `archived` filter — and names the app as it returns, since another
-app may hold the name it had.
+their extracted facts being tokens spent on a feed nothing can read. The freed name is what takes the app out of the live
+namespace: the row stays gettable under its durable `~archived-<id>` name — listed by
+`object_list agent` under the `archived` filter — and `restore_application` is that row's own
+action, taking the name the app returns under, since another app may hold the name it had.
 
 A workspace-scoped view has no agent of its own, so its intents ride the main agent's lane — the
 agent every surface already routes an unbound member to: a source's resync, share, and remove; a
@@ -909,7 +938,8 @@ constant naming us, never a tenant-level role — an internal channel's block al
 accounting, model metadata, and a debugger link.
 
 Slack installs by either of two paths in chat, both landing the same per-workspace bot token and
-identity. **Preferred — OAuth on the deploy's own app**: its client id, client secret, and signing
+identity; the setup tools are instance actions on the core `surface/slack` object, so an agent
+reaches them through a read of that object. **Preferred — OAuth on the deploy's own app**: its client id, client secret, and signing
 secret are read from the deploy's env (never the sandbox), `slack_connect` (default) returns an
 **"Add to Slack" link** whose sealed state names the speaking admin and workspace, and the state-verified
 OAuth callback exchanges the code for that workspace's `xoxb` bot token, binds the team, and records
@@ -918,7 +948,8 @@ the identity. **Alternative — bring-your-own app** (`slack_connect method="man
 `slack_bot_token` and `slack_signing_secret` slots privately, and `slack_connect` derives the
 identity with `auth.test`.
 
-iMessage setup is one chat tool. An admin binds the deploy's Spectrum project to the workspace;
+iMessage setup is one action on `surface/imessage`. An admin binds the deploy's Spectrum project to
+the workspace;
 each signed-in member claims a 10-digit US phone number, stored in E.164 form. The tool registers
 the phone with Spectrum,
 records the claim, and returns the assigned line with the claim's random six-character `UFO <code>`,

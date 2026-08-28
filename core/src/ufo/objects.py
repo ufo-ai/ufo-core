@@ -44,17 +44,32 @@ from ufo.object_name import (
     ObjectRef,
     validate_object_name,
 )
-from ufo.object_scope import ObjectAgent, object_agent
+from ufo.object_scope import ObjectActionTarget, ObjectAgent, object_agent
+from ufo.object_views import action_view
 from ufo.schema import tables
 from ufo.seats import member_is_admin
 from ufo.tools.context import TextContent, ToolContext, ToolResult
-from ufo.tools.registry import ToolDef
+from ufo.tools.registry import (
+    OBJECT_ACTION_TOOL,
+    REQUESTED_BY,
+    ToolDef,
+    validate_tool_declaration,
+)
 
 OBJECT_MANIFEST_MAX_BYTES = 65_536
 MATERIALIZE_MAX_BYTES = 33_554_432
 OBJECT_LIST_PAGE = 50
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
 ENVELOPE_GENERATION_KEY = "generation"
+ACTION_RESERVED_INPUT_FIELDS = (
+    REQUESTED_BY,
+    "kind",
+    "action",
+    "name",
+    "agent",
+    "generation",
+    "input",
+)
 AGENT_TARGET_DESCRIPTION = (
     "Stable agent name for an agent-scoped kind. Omit for this agent. Only the workspace main "
     "agent may target another agent, on an exact member-requested call."
@@ -103,6 +118,10 @@ class ObjectDetail[SpecT: BaseModel]:
     links: tuple[ObjectLink, ...] = ()
     spec_visible: bool = True
     generation: UUID | None = None
+    name: str | None = None
+    """The object's own name when the read resolved an alias for it — the agent kind's empty name
+    for the turn's own agent — so the envelope and the pre-bound action templates carry the name
+    the object really answers to; None when the caller's name was already that name."""
 
 
 class UnknownKind(ValueError):
@@ -728,6 +747,67 @@ class BoundKind:
     context: ExtensionContext | None
 
 
+@dataclass(frozen=True)
+class BoundAction:
+    """A bound `ToolDef` and its contributor: the declaring extension's name (None for a
+    core-registered action) and the workspace-scoped context its handler runs under. The
+    contributor may differ from the target kind's owner — visibility is the kind owner's store,
+    the handler runs with the contributor's own capabilities, and neither receives the other's
+    context."""
+
+    action: ToolDef
+    extension: str | None
+    context: ExtensionContext | None
+
+
+def action_registry(
+    bound: tuple[BoundAction, ...], kinds: Mapping[str, BoundKind]
+) -> dict[str, dict[str, BoundAction]]:
+    """Validate and index a deploy's object actions, keyed kind → short name — the boot gate,
+    run only after every manifest is collected so extension order cannot fail a valid
+    cross-extension attachment. Fails loud on a name outside the kind grammar, a target kind no
+    manifest registers, a short name two contributors claim on one kind (across both bindings),
+    an input model that admits unknown keys, non-JSON values, or secrets, an input model that
+    smuggles a target or authority field, and a presentation or final-act declaration the shared
+    gate refuses."""
+    registry: dict[str, dict[str, BoundAction]] = {}
+    for entry in bound:
+        action, owner = entry.action, entry.extension or "core"
+        binding = action.bound
+        if binding is None:
+            raise ValueError(f"{owner!r} registers {action.name!r} as an action with no binding")
+        label = f"{owner!r} action {binding.kind}:{action.name}"
+        if not KIND_NAME_PATTERN.fullmatch(action.name):
+            raise ValueError(f"{label}: action names are snake_case ({KIND_NAME_PATTERN.pattern})")
+        if not KIND_NAME_PATTERN.fullmatch(binding.kind):
+            raise ValueError(f"{label}: kind names are snake_case ({KIND_NAME_PATTERN.pattern})")
+        if binding.kind not in kinds:
+            registered = ", ".join(sorted(kinds)) or "none"
+            raise ValueError(
+                f"{label} targets a kind no extension registers; registered kinds: {registered}"
+            )
+        held = registry.setdefault(binding.kind, {}).get(action.name)
+        if held is not None:
+            other = held.extension or "core"
+            raise ValueError(
+                f"action {binding.kind}:{action.name} from {owner!r} collides with {other!r}'s"
+            )
+        reserved = [
+            field
+            for field in ACTION_RESERVED_INPUT_FIELDS
+            if field in action.input_model.model_fields
+        ]
+        if reserved:
+            raise ValueError(
+                f"{label}: input reserves {', '.join(repr(field) for field in reserved)} — the "
+                "wire envelope owns the target and authority fields, never the action input"
+            )
+        validate_tool_declaration(action, label)
+        _validate_spec_model(label, action.input_model)
+        registry[binding.kind][action.name] = entry
+    return registry
+
+
 def object_registry(bound: tuple[BoundKind, ...]) -> dict[str, BoundKind]:
     """Validate and index a deploy's kinds — the boot gate. Fails loud on a kind-name collision
     (one global namespace across core and every extension) and on a spec model that admits unknown
@@ -749,14 +829,13 @@ def object_registry(bound: tuple[BoundKind, ...]) -> dict[str, BoundKind]:
                 f"{owner!r} object kind {kind.name!r}: unknown agent target verbs "
                 f"{sorted(unknown_target_verbs)}"
             )
-        _validate_spec_model(owner, kind)
+        _validate_spec_model(f"{owner!r} object kind {kind.name!r}", kind.spec_model)
         registry[kind.name] = entry
     return registry
 
 
-def _validate_spec_model(owner: str, kind: ObjectKind) -> None:
-    label = f"{owner!r} object kind {kind.name!r}"
-    for model in _reachable_models(kind.spec_model):
+def _validate_spec_model(label: str, spec_model: type[BaseModel]) -> None:
+    for model in _reachable_models(spec_model):
         if model.model_config.get("extra") != "forbid":
             raise ValueError(f'{label}: spec model {model.__name__} must set extra="forbid"')
         for field_name, field in model.model_fields.items():
@@ -769,7 +848,7 @@ def _validate_spec_model(owner: str, kind: ObjectKind) -> None:
                     f"specs are rendered into transcripts and echoed by object_get"
                 )
     try:
-        kind.spec_model.model_json_schema()
+        spec_model.model_json_schema()
     except PydanticInvalidForJsonSchema as error:
         raise ValueError(
             f"{label}: spec model is not JSON-representable — specs are stored, rendered, "
@@ -846,13 +925,44 @@ class ObjectDeleteInput(BaseModel):
     agent: str = Field(default="", description=AGENT_TARGET_DESCRIPTION)
 
 
+class ObjectActionInput(BaseModel):
+    kind: str
+    action: str = Field(
+        description="The action's short name as an object read returned it beside this kind."
+    )
+    name: str = Field(
+        default="",
+        description="The target instance for an instance action; a collection action takes none.",
+    )
+    agent: str = Field(default="", description=AGENT_TARGET_DESCRIPTION)
+    generation: UUID | None = Field(
+        default=None,
+        description=(
+            "The generation an object_get returned. It is handed to the action beside the live "
+            "generation, not checked ahead of it: an action that must not act on a row changed "
+            "after your read fences its own write on the two."
+        ),
+    )
+    input: dict[str, JsonValue] = Field(
+        default_factory=dict,
+        description="The action's own input, validated against its published input_schema.",
+    )
+
+
 @dataclass(frozen=True)
 class ObjectVerbs:
-    """The five CRUD verbs over one deploy's kind registry. Each dispatch resolves the kind,
-    re-binds the ToolContext to the owning extension's context, and calls the kind's store; every
-    failure raises with its cause and renders as the tool error the model recovers from."""
+    """The five CRUD verbs and the `object_action` dispatcher over one deploy's kind and action
+    registries. Each CRUD dispatch resolves the kind, re-binds the ToolContext to the owning
+    extension's context, and calls the kind's store; every failure raises with its cause and
+    renders as the tool error the model recovers from. The `object_action` def exists for schema
+    exposure only — the engine resolves the wire name into the bound action before segmentation,
+    so its handler is never a dispatch path and raises if reached. Discovery returns each kind's
+    actions at the envelope, filtered to the canonical ids the calling turn holds
+    (`ctx.granted_actions`); the views are structural — role and state never remove one, and
+    invocation repeats every gate."""
 
     registry: Mapping[str, BoundKind]
+    actions: Mapping[str, Mapping[str, BoundAction]] = dataclass_field(default_factory=dict)
 
     def tools(self) -> tuple[ToolDef, ...]:
         return (
@@ -924,16 +1034,31 @@ class ObjectVerbs:
                 handler=self._delete,
                 side_effecting=True,
             ),
+            ToolDef(
+                name=OBJECT_ACTION_TOOL,
+                description=(
+                    "Invoke an action on a workspace object kind or instance, when CRUD does not "
+                    "express the operation. Discover each kind's actions and their input schemas "
+                    "where their subject lives: object_list returns a kind's collection actions, "
+                    "object_get an instance's actions with the call pre-bound, and object_explain "
+                    "both sets. Call with the returned template — `kind` and `action`, `name` for "
+                    "an instance action, and the action's own `input`."
+                ),
+                input_model=ObjectActionInput,
+                handler=self._object_action,
+            ),
         )
 
     async def _list(self, ctx: ToolContext, args: ObjectListInput) -> ToolResult:
         if not args.kind:
             if args.agent:
                 raise ValueError("an agent target requires an agent-scoped object kind")
-            kinds = [
-                {"kind": name, "description": entry.kind.description}
-                for name, entry in sorted(self.registry.items())
-            ]
+            kinds: list[dict[str, JsonValue]] = []
+            for name, entry in sorted(self.registry.items()):
+                row: dict[str, JsonValue] = {"kind": name, "description": entry.kind.description}
+                if self._granted_actions(ctx, name):
+                    row["has_actions"] = True
+                kinds.append(row)
             return _json_result({"kinds": kinds})
         bound = self._resolve(args.kind)
         target = await self._target(ctx, bound, args.agent, frozenset({"list"}))
@@ -954,6 +1079,9 @@ class ObjectVerbs:
                 {"name": row.name, "summary": row.summary, **row.fields} for row in page.rows
             ]
         }
+        actions = self._action_views(ctx, args.kind, "collection")
+        if actions:
+            listing["actions"] = actions
         if target is not None:
             listing["agent"] = target.name
         if page.next_cursor is not None:
@@ -968,16 +1096,25 @@ class ObjectVerbs:
             detail = await bound.kind.store.get(bound_ctx, args.name)
             if detail is None:
                 raise UnknownObject(f"no {args.kind} object named {args.name!r}")
+            name = detail.name or args.name
             status = await bound.kind.store.status(
                 bound_ctx,
-                args.name,
+                name,
                 expected_generation=detail.generation,
             )
         rendered: dict[str, object] = {
             "kind": args.kind,
-            "name": args.name,
+            "name": name,
             "spec": detail.spec.model_dump(mode="json") if detail.spec_visible else None,
             "status": status,
+            "actions": self._action_views(
+                ctx,
+                args.kind,
+                "instance",
+                name=name,
+                agent=None if target is None else target.name,
+                generation=detail.generation,
+            ),
             "links": [
                 link.model_copy(
                     update={
@@ -1012,6 +1149,8 @@ class ObjectVerbs:
                     f"{OBJECT_NAME_PATTERN.pattern}, at most {OBJECT_NAME_MAX_LENGTH} chars"
                 ),
                 "spec_schema": bound.kind.spec_model.model_json_schema(),
+                "collection_actions": self._action_views(ctx, args.kind, "collection"),
+                "instance_actions": self._action_views(ctx, args.kind, "instance"),
             }
         )
 
@@ -1119,6 +1258,97 @@ class ObjectVerbs:
             result["agent"] = target.name
         return _json_result(result)
 
+    async def _object_action(self, ctx: ToolContext, args: ObjectActionInput) -> ToolResult:
+        raise RuntimeError("object_action dispatches through the engine")
+
+    def _granted_actions(self, ctx: ToolContext, kind: str) -> dict[str, BoundAction]:
+        held = self.actions.get(kind)
+        if not held:
+            return {}
+        return {
+            name: bound
+            for name, bound in held.items()
+            if bound.action.canonical_id in ctx.granted_actions
+        }
+
+    def _action_views(
+        self,
+        ctx: ToolContext,
+        kind: str,
+        binding: str,
+        *,
+        name: str | None = None,
+        agent: str | None = None,
+        generation: UUID | None = None,
+    ) -> list[JsonValue]:
+        """The granted actions of one binding on `kind`, lexical by short name, each with its
+        pre-bound invocation template — the instance fields ride only what the enclosing read
+        established. An agent-targeted read publishes only the actions that declare
+        `agent_targetable`: dispatch refuses an agent target on any other action, and the same
+        template without the agent would resolve a different agent's object than the read
+        returned."""
+        views: list[JsonValue] = []
+        for _short_name, bound in sorted(self._granted_actions(ctx, kind).items()):
+            declared = bound.action.bound
+            if declared is None or declared.binding != binding:
+                continue
+            if declared.name is not None and declared.name != name:
+                continue
+            if agent is not None and not bound.action.agent_targetable:
+                continue
+            views.append(
+                action_view(kind, bound, name=name, agent=agent, generation=generation).model_dump(
+                    mode="json", exclude_none=True
+                )
+            )
+        return views
+
+    async def action_target(
+        self, ctx: ToolContext, action: ToolDef, wire: ObjectActionInput
+    ) -> ObjectActionTarget:
+        """Resolve what one dispatched action acts on, before its handler runs: the cross-agent
+        gate when the action declares `agent_targetable` and the call names an agent, and — for
+        an instance action — the kind owner's own get and status under the kind owner's context
+        and agent scope, so visibility and existence are the kind's answer, never the
+        contributor's. The read never refuses on the wire's generation: both the live and the
+        supplied generation ride the target, and a handler that must fence does so against its
+        own write, after the idempotent dedup a resumed dispatch relies on."""
+        declared = action.bound
+        if declared is None:
+            raise ValueError(f"{action.name!r} is not an object action")
+        agent_target: ObjectAgent | None = None
+        if wire.agent:
+            if not action.agent_targetable:
+                raise ValueError(f"action {action.canonical_id} takes no agent target")
+            agent_target = await self._agent_gate(ctx, wire.agent)
+        if declared.binding == "collection":
+            return ObjectActionTarget(
+                kind=declared.kind,
+                name=None,
+                agent=agent_target,
+                generation=None,
+                expected_generation=None,
+            )
+        if declared.name is not None and wire.name != declared.name:
+            raise ValueError(
+                f"action {action.canonical_id} acts on {declared.kind}/{declared.name}, not "
+                f"{declared.kind}/{wire.name}"
+            )
+        kind = self._resolve(declared.kind)
+        kind_ctx = self._bound_ctx(ctx, kind)
+        with object_agent(agent_target):
+            detail = await kind.kind.store.get(kind_ctx, wire.name)
+            if detail is None:
+                raise UnknownObject(f"no {declared.kind} object named {wire.name!r}")
+            await kind.kind.store.status(kind_ctx, wire.name, expected_generation=detail.generation)
+        return ObjectActionTarget(
+            kind=declared.kind,
+            name=wire.name,
+            agent=agent_target,
+            generation=detail.generation,
+            expected_generation=wire.generation,
+        )
+
     def _resolve(self, kind: str) -> BoundKind:
         found = self.registry.get(kind)
         if found is None:
@@ -1142,6 +1372,9 @@ class ObjectVerbs:
             raise ValueError(
                 f"object kind {bound.kind.name!r} rejects an agent target for this verb"
             )
+        return await self._agent_gate(ctx, name)
+
+    async def _agent_gate(self, ctx: ToolContext, name: str) -> ObjectAgent | None:
         member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         async with workspace_tx() as connection:
             current = (

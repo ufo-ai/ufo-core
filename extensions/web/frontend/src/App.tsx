@@ -35,7 +35,7 @@ import { SignIn } from "@/views/SignIn";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
-import { WEB_SURFACE, isPortalChat, Viewer, surfaceWord, useViewer } from "@/lib/audience";
+import { WEB_SURFACE, isPortalChat, Viewer, WorkspaceId, surfaceWord, useViewer } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { useAppStatus } from "@/lib/appStatusStore";
 import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
@@ -217,21 +217,23 @@ export function App({
    *  and the page carries its own mark and its own foot instead. */
   if (route.kind === "first-run") {
     return (
-      <Viewer.Provider value={member.email}>
-        <SurfacesProvider surfaces={surfaces}>
-          <MainAgentProvider agents={agents}>
-            {mainAgent ? (
-              <FirstRun
-                agent={mainAgent}
-                member={member}
-                onOpenChat={() => openNewChat(mainAgent.id)}
-              />
-            ) : (
-              <PaneNote>No such app.</PaneNote>
-            )}
-          </MainAgentProvider>
-        </SurfacesProvider>
-      </Viewer.Provider>
+      <WorkspaceId.Provider value={member.workspace_id ?? null}>
+        <Viewer.Provider value={member.email}>
+          <SurfacesProvider surfaces={surfaces}>
+            <MainAgentProvider agents={agents}>
+              {mainAgent ? (
+                <FirstRun
+                  agent={mainAgent}
+                  member={member}
+                  onOpenChat={() => openNewChat(mainAgent.id)}
+                />
+              ) : (
+                <PaneNote>No such app.</PaneNote>
+              )}
+            </MainAgentProvider>
+          </SurfacesProvider>
+        </Viewer.Provider>
+      </WorkspaceId.Provider>
     );
   }
 
@@ -247,56 +249,58 @@ export function App({
   const shell = !inSetup(route, agents);
 
   return (
-    <Viewer.Provider value={member.email}>
-      <SurfacesProvider surfaces={surfaces}>
-        <MainAgentProvider agents={agents}>
-          <TooltipProvider>
-          <DrawerHost hosted={narrow && shell} shut={shutMenu}>
-            <div
-              className={cn(
-                "grid h-dvh",
-                shell
-                  ? cn(
-                      "max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
-                      rail.collapsed
-                        ? "grid-cols-[var(--container-rail)_1fr]"
-                        : "grid-cols-[var(--container-sidebar)_1fr]",
-                    )
-                  : "grid-cols-1",
-              )}
-            >
-              {shell && narrow ? (
-                <NarrowBar agents={listed} member={member} menu={menu} onMenu={setMenu} />
-              ) : null}
-              {shell ? (
-                <WorkspaceSidebar
-                  route={route}
-                  agents={listed}
-                  member={member}
-                  mainAgent={mainAgent}
-                  narrow={narrow}
-                  onBuild={startBuild}
-                />
-              ) : null}
-              <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
-                <RoutedPane
-                  route={route}
-                  agents={agents}
-                  member={member}
-                  mainAgent={mainAgent}
-                  onAgents={onAgents}
-                  onExitBuilder={exitBuild}
-                  onForwardAgents={forwardBuild}
-                  buildWanted={wantedBuild}
-                />
-              </AppsProvider>
-              <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
-            </div>
-          </DrawerHost>
-          </TooltipProvider>
-        </MainAgentProvider>
-      </SurfacesProvider>
-    </Viewer.Provider>
+    <WorkspaceId.Provider value={member.workspace_id ?? null}>
+      <Viewer.Provider value={member.email}>
+        <SurfacesProvider surfaces={surfaces}>
+          <MainAgentProvider agents={agents}>
+            <TooltipProvider>
+            <DrawerHost hosted={narrow && shell} shut={shutMenu}>
+              <div
+                className={cn(
+                  "grid h-dvh",
+                  shell
+                    ? cn(
+                        "max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
+                        rail.collapsed
+                          ? "grid-cols-[var(--container-rail)_1fr]"
+                          : "grid-cols-[var(--container-sidebar)_1fr]",
+                      )
+                    : "grid-cols-1",
+                )}
+              >
+                {shell && narrow ? (
+                  <NarrowBar agents={listed} member={member} menu={menu} onMenu={setMenu} />
+                ) : null}
+                {shell ? (
+                  <WorkspaceSidebar
+                    route={route}
+                    agents={listed}
+                    member={member}
+                    mainAgent={mainAgent}
+                    narrow={narrow}
+                    onBuild={startBuild}
+                  />
+                ) : null}
+                <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
+                  <RoutedPane
+                    route={route}
+                    agents={agents}
+                    member={member}
+                    mainAgent={mainAgent}
+                    onAgents={onAgents}
+                    onExitBuilder={exitBuild}
+                    onForwardAgents={forwardBuild}
+                    buildWanted={wantedBuild}
+                  />
+                </AppsProvider>
+                <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
+              </div>
+            </DrawerHost>
+            </TooltipProvider>
+          </MainAgentProvider>
+        </SurfacesProvider>
+      </Viewer.Provider>
+    </WorkspaceId.Provider>
   );
 }
 

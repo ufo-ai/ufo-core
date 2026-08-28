@@ -46,6 +46,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import turn_tools
+from ufo.kinds.workspace_kind import WORKSPACE_KIND
 from ufo.models.registry import ModelRegistry, model_registry
 from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
@@ -1003,15 +1004,16 @@ def _billing_tool(
     public_base_url: str | None = None,
     home_surface: str | None = HOME_SURFACE,
 ) -> tuple[ToolDef, ExtensionContext]:
-    declared, ext_by_tool = turn_tools(
+    _declared, _ext_by_tool, verbs = turn_tools(
         (metronome.manifest(),),
         CredentialStore(fernet=Fernet(Fernet.generate_key())),
         audience=audience,
         public_base_url=public_base_url,
         home_surface=home_surface,
     )
-    tool = next(t for t in declared if t.name == metronome.MANAGE_BILLING_TOOL)
-    return tool, ext_by_tool[metronome.MANAGE_BILLING_TOOL]
+    bound = verbs.actions[WORKSPACE_KIND][metronome.MANAGE_BILLING_TOOL]
+    assert bound.context is not None
+    return bound.action, bound.context
 
 
 async def _manage_billing(
@@ -1048,7 +1050,7 @@ async def _manage_billing(
         )
         result = await tool.handler(
             ctx,
-            tool.input_model.model_validate({"action": action} | extra),
+            tool.input_model.model_validate({"operation": action} | extra),
         )
     return json.loads(result.content[0].text)
 

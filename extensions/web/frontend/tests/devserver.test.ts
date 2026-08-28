@@ -24,6 +24,8 @@ test("the token post and every read reach the fleet", () => {
     "/surface/web/api/admin",
     "/surface/web/agents/x/transcript",
     "/surface/web/agents/x/intents",
+    "/surface/web/agents/x/actions/surface/slack/slack_connect",
+    "/surface/web/actions/surface/slack",
     "/surface/web/workspace/sources",
     "/surface/web/turns/x/stream",
     "/surface/web/credentials",

@@ -33,8 +33,8 @@ from ufo_ext_monitors.monitors import MONITOR_KIND, Monitor, MonitorStore
 BASELINE_EXCERPT_MAX = 400
 SUMMARY_MAX = 120
 ARM_REFUSAL = (
-    "arming a monitor happens in chat — the agent's monitor tool validates the probe and seeds its "
-    "baseline"
+    "arming a monitor happens in chat — the kind's `monitor` action validates the probe and seeds "
+    "its baseline"
 )
 DELETE_GATE = "only the monitor's creator or a workspace admin may stop a monitor"
 
@@ -60,7 +60,7 @@ def _owner(row: Monitor) -> GeneratedObjectOwner:
 
 def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
     if ext is None:
-        raise RuntimeError("the monitor kind requires the scheduled-tasks ExtensionContext")
+        raise RuntimeError("the monitor kind requires the monitors ExtensionContext")
     return ext
 
 
@@ -173,9 +173,9 @@ MONITOR_OBJECT = ObjectKind(
         "three consecutive probe failures, or at `deadline_at` — and then retires. Seen by whoever "
         "reads the conversation it watches: a monitor on a workspace-shared conversation by every "
         "member, one on a member's own conversation by that member alone. Arming is not an apply: "
-        "the baseline is seeded by a probe run in a live turn, so the agent's `monitor` tool arms "
-        "and this kind reads. Deleting stops the watch, and is the creator's or a workspace "
-        "admin's."
+        "the baseline is seeded by a probe run in a live turn, so this kind's `monitor` action "
+        "arms and its list and get read. Deleting stops the watch, and is the creator's or a "
+        "workspace admin's."
     ),
     guidance=(
         "Each monitor is named for the conversation it watches and the slug the watch was armed "
@@ -187,7 +187,8 @@ MONITOR_OBJECT = ObjectKind(
         "excerpt of the baseline the next probe is compared against. Listing filters and orders on "
         "`next_probe_at`, `deadline_at`, `conversation`, `owner_email`, and `mine`; get shows a "
         "`reports_to` link naming the conversation the fire lands in. Applying a manifest is "
-        "refused: call the `monitor` tool, which runs the probe once and records what it returned. "
+        "refused: arm through the `monitor` action this kind lists, which runs the probe once and "
+        "records what it returned. "
         "When a member says to stop watching something, delete the monitor by name — that is what "
         "disarms it, and a monitor never fires again after its one fire anyway."
     ),

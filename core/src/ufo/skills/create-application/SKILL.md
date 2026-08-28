@@ -91,8 +91,8 @@ line: what the application settles itself, what it brings to a person.
 
 Every application builds a homepage: the page members open on the Apps screen, where it states
 what it is for, what it watches, its recent work, and what it needs. The design pass settles what
-this app's page reports and how it is laid out. Settle one small contract and call
-`render_application_preview`:
+this app's page reports and how it is laid out. Settle one small contract and call the `site`
+collection's `render_application_preview` action (`object_action` with kind `site`):
 
 | Field | Value |
 |---|---|

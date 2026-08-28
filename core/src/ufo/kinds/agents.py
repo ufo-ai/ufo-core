@@ -8,9 +8,10 @@ ones they created; an owner or a workspace admin edits, and an ownerless row —
 provisioned agent — answers to admins alone. Create never copies grants, credentials, sources, or
 derived data. A mutation by anyone else raises `AdminRequired`.
 
-Delete archives: the row leaves the live namespace and releases the name it held, keeping the
-app's conversations, spend and grants as the record of what it did. `restore_application` brings
-the same row back by id. The main agent answers every member, so it is not archivable."""
+Delete archives: the row releases the name it held and stays gettable under its durable
+`~archived-<id>` name, keeping the app's conversations, spend and grants as the record of what it
+did. The archived row's `restore_application` action brings the same row back. The main agent
+answers every member, so it is not archivable."""
 
 from dataclasses import dataclass, replace
 from typing import ClassVar
@@ -34,11 +35,9 @@ from ufo.objects import (
     ObjectListQuery,
     ObjectOwner,
     ObjectPage,
-    ObjectRow,
     OwnedRow,
     UnknownObject,
     VerbNotSupported,
-    object_page,
 )
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -52,7 +51,7 @@ from ufo.schema.records import (
     auto_agent_icon,
 )
 from ufo.tools.context import TextContent, ToolContext, ToolResult
-from ufo.tools.registry import ToolDef
+from ufo.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.turns.contracts import check_declared_schema
 from ufo.workspace import ws_current
 
@@ -66,6 +65,7 @@ AGENT_CREATE_GATE = "creating an agent requires a speaking member"
 AGENT_PROMPT_REQUIRED = "creating an agent requires a prompt"
 MAIN_AGENT_STAYS_WORKSPACE = "the main agent answers every member; its visibility cannot change"
 ARCHIVED_AGENT_NAME_PREFIX = "~archived-"
+AGENT_ALREADY_ARCHIVED = "the app is already archived"
 
 
 def _effective_model(ctx: ToolContext, stored: str) -> str:
@@ -202,7 +202,9 @@ def _agent_summary(ctx: ToolContext, row: sa.Row) -> str:
 
 @dataclass(frozen=True)
 class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
-    """The complete agent row behind the shared member-ownership gate."""
+    """The complete agent row behind the shared member-ownership gate. An agent's own row reads as
+    shared on its own turns, speaker or not: the row is the turn's identity, so an action bound to
+    it (a homepage bind) runs on the scheduled and seed turns that have no member speaking."""
 
     kind_name: ClassVar[str] = AGENT_KIND
     mutate_gate: ClassVar[str] = AGENT_EDIT_GATE
@@ -215,30 +217,36 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         """The workspace's live agents, and its archived ones for a caller that asks for them by
-        filter. Archived rows carry the stable `id` a restore addresses."""
+        filter. An archived row is named by the durable `~archived-<id>` name its get answers to,
+        with the name it held in `archived_name` and the stable `id` a restore addresses."""
         if "archived" not in query.filters:
             query = replace(query, filters={**query.filters, "archived": False})
-        is_admin = await ctx.speaker_is_admin()
-        rows = tuple(
-            ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
-            for row in await self._agent_rows(ctx, live_only=False)
-            if self._visible(row.owner, ctx.acting_member_id, is_admin)
+        return await super().list(ctx, query)
+
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[AgentSpec] | None:
+        """The empty name reads the turn's own agent. The model is never told its agent's name, so
+        the instance actions bound to that row would otherwise cost a listing round to reach; the
+        read reports the real name and the pre-bound action templates carry it."""
+        if name:
+            return await super().get(ctx, name)
+        own = next(
+            (
+                row.name
+                for row in await self._owned_rows(ctx)
+                if row.fields["id"] == str(ctx.turn.agent_id)
+            ),
+            None,
         )
-        return object_page(
-            rows=rows,
-            query=query,
-        )
+        if own is None:
+            return None
+        detail = await super().get(ctx, own)
+        return None if detail is None else replace(detail, name=own)
 
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
-        return await self._agent_rows(ctx, live_only=True)
-
-    async def _agent_rows(
-        self, ctx: ToolContext, *, live_only: bool
-    ) -> tuple[OwnedRow[ObjectOwner], ...]:
-        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         selection = sa.select(
             tables.agent.c.id,
-            member_name.label("name"),
+            tables.agent.c.name,
+            tables.agent.c.archived_name,
             tables.agent.c.model,
             tables.agent.c.is_main,
             tables.agent.c.internet_access_allowed,
@@ -246,17 +254,15 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
             tables.agent.c.owner_member_id,
             tables.agent.c.visibility,
         ).where(tables.agent.c.workspace_id == ws_current().workspace_id)
-        if live_only:
-            selection = selection.where(tables.agent.c.archived_at.is_(None))
         async with workspace_tx() as connection:
-            rows = (await connection.execute(selection.order_by(member_name))).all()
+            rows = (await connection.execute(selection.order_by(tables.agent.c.name))).all()
         return tuple(
             OwnedRow(
                 name=row.name,
                 summary=_agent_summary(ctx, row),
                 owner=ObjectOwner(
                     member_id=row.owner_member_id,
-                    shared=row.visibility == "workspace",
+                    shared=row.visibility == "workspace" or row.id == ctx.turn.agent_id,
                 ),
                 fields={
                     "id": str(row.id),
@@ -264,6 +270,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
                     "archived_at": (
                         None if row.archived_at is None else row.archived_at.isoformat()
                     ),
+                    "archived_name": row.archived_name,
                 },
             )
             for row in rows
@@ -316,6 +323,9 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
         return {
             "main": row.is_main,
             "model": _effective_model(ctx, row.model),
+            "archived": row.archived_at is not None,
+            "archived_at": None if row.archived_at is None else row.archived_at.isoformat(),
+            "archived_name": row.archived_name,
             "owner_member_id": None if row.owner_member_id is None else str(row.owner_member_id),
             "provisioned_by": row.provisioned_by,
             "provisioned_name": row.provisioned_name,
@@ -489,6 +499,8 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
             raise UnknownObject(f"no agent object named {name!r}")
         if row.is_main:
             raise VerbNotSupported(MAIN_AGENT_UNARCHIVABLE)
+        if row.archived_at is not None:
+            raise VerbNotSupported(AGENT_ALREADY_ARCHIVED)
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.agent)
@@ -530,6 +542,8 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
                         tables.agent.c.provisioned_by,
                         tables.agent.c.provisioned_name,
                         tables.agent.c.provisioned_version,
+                        tables.agent.c.archived_at,
+                        tables.agent.c.archived_name,
                         tables.agent.c.created_at,
                         tables.agent.c.updated_at,
                         sa.select(main.c.name)
@@ -542,7 +556,6 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
                     ).where(
                         tables.agent.c.workspace_id == ws_current().workspace_id,
                         tables.agent.c.name == name,
-                        tables.agent.c.archived_at.is_(None),
                     )
                 )
             ).one_or_none()
@@ -550,13 +563,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
 
 class RestoreApplicationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    app_id: str = Field(
-        description=(
-            "The archived app's id, read from object_list on the agent kind with the filter "
-            '{"archived": true}. The id remains stable when the app is restored.'
-        )
-    )
-    name: str = Field(
+    new_name: str = Field(
         description=(
             "The name the app takes as it comes back. Pass the name it held, or another name "
             "when a live app holds that one."
@@ -567,68 +574,78 @@ class RestoreApplicationInput(BaseModel):
 @dataclass(frozen=True)
 class RestoreApplication:
     async def restore(self, ctx: ToolContext, args: RestoreApplicationInput) -> ToolResult:
+        if ctx.target is None or ctx.target.name is None:
+            raise RuntimeError("restore_application dispatched without its archived agent target")
+        archived_name = ctx.target.name
         if ctx.speaker_member_id is None:
             raise AdminRequired(AGENT_RESTORE_GATE)
+        validate_object_name(args.new_name)
         try:
-            app_id = UUID(args.app_id)
+            archived_id = UUID(archived_name.removeprefix(ARCHIVED_AGENT_NAME_PREFIX))
         except ValueError as error:
-            raise ValueError(f"{args.app_id!r} is not an app id") from error
-        validate_object_name(args.name)
+            raise UnknownObject(f"no archived app named {archived_name!r}") from error
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.agent.c.owner_member_id).where(
+                    sa.select(
+                        tables.agent.c.owner_member_id,
+                        tables.agent.c.name,
+                        tables.agent.c.archived_at,
+                    ).where(
                         tables.agent.c.workspace_id == ws_current().workspace_id,
-                        tables.agent.c.id == app_id,
-                        tables.agent.c.archived_at.is_not(None),
+                        tables.agent.c.id == archived_id,
                     )
                 )
             ).one_or_none()
-        if row is None:
-            raise UnknownObject(f"no archived app with id {args.app_id!r}")
+        if row is None or (row.archived_at is None and row.name != args.new_name):
+            raise UnknownObject(f"no archived app named {archived_name!r}")
         owned = row.owner_member_id is not None and ctx.speaker_member_id == row.owner_member_id
         if not owned and not await ctx.speaker_is_admin():
-            raise UnknownObject(f"no archived app with id {args.app_id!r}")
+            raise UnknownObject(f"no archived app named {archived_name!r}")
+        result = ToolResult(
+            content=(TextContent(text=f"{args.new_name} is live again. Its next turn runs it."),)
+        )
+        if row.archived_at is None:
+            return result
         async with workspace_tx() as connection:
             try:
                 restored = (
                     await connection.execute(
                         sa.update(tables.agent)
                         .values(
-                            name=args.name,
+                            name=args.new_name,
                             archived_name=None,
                             archived_at=None,
                             updated_at=sa.func.now(),
                         )
                         .where(
                             tables.agent.c.workspace_id == ws_current().workspace_id,
-                            tables.agent.c.id == app_id,
+                            tables.agent.c.id == archived_id,
                             tables.agent.c.archived_at.is_not(None),
                         )
                         .returning(tables.agent.c.id)
                     )
                 ).scalar_one_or_none()
             except IntegrityError as error:
-                raise ValueError(f"an agent named {args.name!r} already exists") from error
+                raise ValueError(f"an agent named {args.new_name!r} already exists") from error
         if restored is None:
-            raise UnknownObject(f"no archived app with id {args.app_id!r}")
-        return ToolResult(
-            content=(TextContent(text=f"{args.name} is live again. Its next turn runs it."),)
-        )
+            raise UnknownObject(f"no archived app named {archived_name!r}")
+        return result
 
 
 RESTORE_APPLICATION_TOOL_DEF = ToolDef(
     name=RESTORE_APPLICATION_TOOL,
     description=(
-        "Bring an archived app back, under the name it held or another one. Its conversations, "
+        "Bring this archived app back, under the name it held or another one. Its conversations, "
         "scheduled tasks, connected accounts and grants come back with it. Only the app's owner "
-        "or a workspace admin may restore it. Read the archived apps, and the id this takes, from "
-        'object_list on the agent kind with the filter {"archived": true}.'
+        "or a workspace admin may restore it."
     ),
     input_model=RestoreApplicationInput,
     handler=RestoreApplication().restore,
     side_effecting=True,
     parallel_safe=True,
+    bound=ObjectBinding(kind=AGENT_KIND, binding="instance"),
+    presentation=ActionPresentation(label="Restore"),
 )
 
 
@@ -668,11 +685,12 @@ AGENT_OBJECT = ObjectKind(
         "its "
         "conversations, scheduled tasks, connected accounts and grants stay on the row. A turn "
         "already running finishes. The main agent is not archivable. List the archived apps with "
-        'the filter {"archived": true}, which carries '
-        f"each one's id, and {RESTORE_APPLICATION_TOOL} brings one back under an available name. "
+        'the filter {"archived": true}; get one by its durable name, and its '
+        f"{RESTORE_APPLICATION_TOOL} action brings it back under an available name. "
+        "object_get with an empty name reads this turn's own agent, with the actions bound to it. "
         "Confirm before changing settings, and before archiving."
     ),
     spec_model=AgentSpec,
     store=AgentObjects(),
-    list_fields=frozenset({"id", "archived", "archived_at"}),
+    list_fields=frozenset({"id", "archived", "archived_at", "archived_name"}),
 )

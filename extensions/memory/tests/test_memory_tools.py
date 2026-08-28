@@ -9,6 +9,7 @@ import asyncio
 import gc
 import json
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -16,6 +17,8 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory
+import ufo_ext_sources.manifest as sources
+from cryptography.fernet import Fernet
 from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
@@ -34,12 +37,23 @@ from ufo_ext_memory.store import (
     store_for,
 )
 
+from ufo.access.credentials import CredentialStore
 from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
+from ufo.ext.loader import turn_tools
 from ufo.indexing import TextChunker
-from ufo.objects import BoundKind, ObjectListQuery, ObjectVerbs, object_registry
+from ufo.loop.engine import EffectiveCall, _dispatch_segments
+from ufo.models.interface import ToolUseBlock
+from ufo.objects import (
+    BoundAction,
+    BoundKind,
+    ObjectListQuery,
+    ObjectVerbs,
+    action_registry,
+    object_registry,
+)
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import (
@@ -51,15 +65,117 @@ from ufo.sdk.audience import (
 )
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
 from ufo.tools.context import SpawnResult, ToolContext, ToolResult
+from ufo.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.workspace import ws
 
 TOOL_NARRATION = "remembering what they told me"
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
+MEMORY_ACTION_IDS = frozenset(
+    {
+        f"action:memory:{memory.RECORD_CORRECTION_ACTION}",
+        f"action:memory:{memory.RECORD_FIRST_RUN_ACTION}",
+    }
+)
 
 
 def test_memory_update_is_side_effecting() -> None:
     assert MEMORY_TOOLS["memory_update"].side_effecting
+
+
+def test_memory_tools_stay_global_and_the_portal_writes_bind_to_the_collection() -> None:
+    tools, _, verbs = turn_tools(
+        (memory.manifest(), sources.manifest()),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=SHARED_AUDIENCE,
+    )
+    wire = {tool.name: tool for tool in tools}
+    assert {"memory_search", "memory_update"} <= wire.keys()
+    assert wire["memory_search"].bound is None and wire["memory_update"].bound is None
+    search = wire["memory_search"]
+    assert search.parallel_safe and not search.side_effecting and search.presentation is None
+    actions = {name: bound.action for name, bound in verbs.actions[MEMORY_KIND].items()}
+    assert actions.keys() == {memory.RECORD_CORRECTION_ACTION, memory.RECORD_FIRST_RUN_ACTION}
+    for action in actions.values():
+        assert action.bound == ObjectBinding(kind=MEMORY_KIND, binding="collection")
+    assert {action.canonical_id for action in actions.values()} == MEMORY_ACTION_IDS
+    assert actions[memory.RECORD_CORRECTION_ACTION].presentation == ActionPresentation(
+        label=memory.RECORD_CORRECTION_LABEL
+    )
+    assert actions[memory.RECORD_FIRST_RUN_ACTION].presentation == ActionPresentation(
+        label=memory.RECORD_FIRST_RUN_LABEL
+    )
+
+
+def test_memory_search_reads_dispatch_in_one_segment() -> None:
+    search, update = MEMORY_TOOLS["memory_search"], MEMORY_TOOLS["memory_update"]
+    assert search.parallel_safe
+
+    def resolved(call_id: str, tool: ToolDef) -> EffectiveCall:
+        call = ToolUseBlock(id=call_id, name=tool.name, input={})
+        return EffectiveCall(call=call, tool=tool, call_id=tool.name, ext=None)
+
+    calls = (resolved("s1", search), resolved("s2", search), resolved("w1", update))
+    segments = [tuple(item.call.id for item in segment) for segment in _dispatch_segments(calls)]
+    assert segments == [("s1", "s2"), ("w1",)]
+
+
+async def test_the_memory_listing_offers_its_actions(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    alice = uuid4()
+    alice_dm = conversation_audience(alice)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), StubEmbed(vec((0, 1.0))), alice_dm)
+    ctx = replace(
+        _tool_ctx(ext, alice, tmp_path, workspace_id=workspace_id, audience=alice_dm),
+        granted_actions=MEMORY_ACTION_IDS,
+    )
+    kinds = object_registry(
+        (
+            BoundKind(kind=MEMORY_OBJECT, extension=memory.NAME, context=ext),
+            *(
+                BoundKind(kind=kind, extension=sources.NAME, context=None)
+                for kind in sources.manifest().objects
+            ),
+        )
+    )
+    verbs = ObjectVerbs(
+        registry=kinds,
+        actions=action_registry(
+            tuple(
+                BoundAction(action=tool, extension=memory.NAME, context=ext)
+                for tool in memory.manifest().tools
+                if tool.bound is not None
+            ),
+            kinds,
+        ),
+    )
+    tool = next(tool for tool in verbs.tools() if tool.name == "object_list")
+    with ws(workspace_id):
+        result = await tool.handler(ctx, tool.input_model.model_validate({"kind": MEMORY_KIND}))
+    assert result.is_error is False
+    views = json.loads(result.content[0].text)["actions"]
+    assert [view["name"] for view in views] == [
+        memory.RECORD_CORRECTION_ACTION,
+        memory.RECORD_FIRST_RUN_ACTION,
+    ]
+    correction, first_run = views
+    assert correction["call"] == {
+        "kind": MEMORY_KIND,
+        "action": memory.RECORD_CORRECTION_ACTION,
+        "input": {},
+    }
+    assert {"corrects", "body"} <= correction["input_schema"]["properties"].keys()
+    assert "body" in first_run["input_schema"]["properties"]
+    assert "label" not in correction and "label" not in first_run
+
+
+def test_memory_inputs_refuse_an_unknown_field() -> None:
+    with pytest.raises(ValidationError):
+        memory.MemorySearchInput.model_validate({"queries": ("launch date",), "kind": "memory"})
+    with pytest.raises(ValidationError):
+        memory.MemoryUpdateInput.model_validate(
+            {"body": "Acme Corp — Moved the launch to March.", "kind": "memory"}
+        )
 
 
 def test_recall_hook_is_best_effort() -> None:

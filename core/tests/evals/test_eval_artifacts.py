@@ -88,6 +88,7 @@ from evals.suites.ufo_app_bench import (
     APP_WORKSPACE_FILES,
     AUDIT_CONTENT,
     AUDIT_DIGEST,
+    BUILD_ACTION,
     CONNECTED_APPS,
     CONNECTED_CASES,
     CONTROL_CASES,
@@ -1699,8 +1700,8 @@ def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
     own_calls = (
         ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
         ToolInvocation(
-            APPLICATION_BUILDER_DELEGATION_TOOL,
-            {},
+            "object_action",
+            {"kind": "site", "action": APPLICATION_BUILDER_DELEGATION_TOOL, "input": {}},
             result,
             has_result=True,
         ),
@@ -1749,14 +1750,24 @@ async def test_ufo_app_bench_rework_pulls_the_source_between_deploys() -> None:
             ToolInvocation("object_get", {"kind": "site"}, "read", has_result=True),
             ToolInvocation("js_repl", {}, "checked repair", has_result=True),
             ToolInvocation("js_repl", {}, "reviewed repair", has_result=True),
-            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
+            ToolInvocation(
+                "object_action",
+                {"kind": "site", "action": "deploy_website", "input": {}},
+                "redeployed",
+                has_result=True,
+            ),
         ),
     )
     unpulled = replace(
         base,
         calls=(
             *base.calls,
-            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
+            ToolInvocation(
+                "object_action",
+                {"kind": "site", "action": "deploy_website", "input": {}},
+                "redeployed",
+                has_result=True,
+            ),
         ),
     )
 
@@ -1775,12 +1786,8 @@ async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
     base = _built_screen({})
     direct = replace(
         base,
-        calls=tuple(
-            call for call in base.calls if call.name != APPLICATION_BUILDER_DELEGATION_TOOL
-        ),
-        own_calls=tuple(
-            call for call in base.own_calls if call.name != APPLICATION_BUILDER_DELEGATION_TOOL
-        ),
+        calls=tuple(call for call in base.calls if call.call != BUILD_ACTION),
+        own_calls=tuple(call for call in base.own_calls if call.call != BUILD_ACTION),
     )
     wrong_lane_call = ToolInvocation(
         "spawn",
@@ -1855,7 +1862,15 @@ async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
 
     self_certified = replace(
         base,
-        calls=(*base.calls, ToolInvocation("set_homepage", {}, "bound", has_result=True)),
+        calls=(
+            *base.calls,
+            ToolInvocation(
+                "object_action",
+                {"kind": "agent", "action": "set_homepage", "input": {}},
+                "bound",
+                has_result=True,
+            ),
+        ),
     )
     certified = await _application_builder_scorer()(self_certified)
     assert not certified.passed
@@ -1884,12 +1899,8 @@ async def test_ufo_app_bench_accepts_the_worker_preloaded_skill() -> None:
     scorer = _skill_scorer()
     without_delegation = replace(
         base,
-        calls=tuple(
-            call for call in base.calls if call.name != APPLICATION_BUILDER_DELEGATION_TOOL
-        ),
-        own_calls=tuple(
-            call for call in base.own_calls if call.name != APPLICATION_BUILDER_DELEGATION_TOOL
-        ),
+        calls=tuple(call for call in base.calls if call.call != BUILD_ACTION),
+        own_calls=tuple(call for call in base.own_calls if call.call != BUILD_ACTION),
     )
     without_parent_load = replace(
         base,
@@ -1913,8 +1924,8 @@ async def test_ufo_app_bench_accepts_the_worker_preloaded_skill() -> None:
 async def test_ufo_app_bench_rejects_a_routine_second_delegation() -> None:
     base = _built_screen({})
     second = ToolInvocation(
-        APPLICATION_BUILDER_DELEGATION_TOOL,
-        {},
+        "object_action",
+        {"kind": "site", "action": APPLICATION_BUILDER_DELEGATION_TOOL, "input": {}},
         "repaired",
         has_result=True,
     )
@@ -1932,8 +1943,8 @@ async def test_ufo_app_bench_rejects_a_routine_second_delegation() -> None:
 async def test_ufo_app_bench_rejects_a_failed_delegation_before_a_success() -> None:
     base = _built_screen({})
     failed = ToolInvocation(
-        APPLICATION_BUILDER_DELEGATION_TOOL,
-        {},
+        "object_action",
+        {"kind": "site", "action": APPLICATION_BUILDER_DELEGATION_TOOL, "input": {}},
         "invalid input",
         has_result=True,
         is_error=True,
@@ -2017,7 +2028,12 @@ async def test_ufo_app_bench_accepts_static_deploy_or_published_application() ->
         calls=(
             ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
             *_application_qa_calls(),
-            ToolInvocation("publish_website", {}, "published", has_result=True),
+            ToolInvocation(
+                "object_action",
+                {"kind": "site", "action": "publish_website", "input": {}},
+                "published",
+                has_result=True,
+            ),
         ),
     )
     app = await _delivery_scorer()(published)
@@ -2181,7 +2197,15 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         )
         unbound = replace(
             _built_screen({**pages, **report, **shots}),
-            calls=(*own_calls, ToolInvocation("deploy_website", {}, "deployed", has_result=True)),
+            calls=(
+                *own_calls,
+                ToolInvocation(
+                    "object_action",
+                    {"kind": "site", "action": "deploy_website", "input": {}},
+                    "deployed",
+                    has_result=True,
+                ),
+            ),
             own_calls=own_calls,
         )
         not_homepage = await case.grader(unbound)

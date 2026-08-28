@@ -16,6 +16,7 @@ from xml.etree import ElementTree
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     TypeAdapter,
     ValidationError,
@@ -30,7 +31,7 @@ from ufo.sdk.manifest import (
     SubagentProfile,
 )
 from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, ExecResult, contained_relative
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
@@ -43,6 +44,7 @@ from ufo_ext_sites.application_audit import (
     application_design_region_size_failure,
     application_region_relation,
 )
+from ufo_ext_sites.objects import SITE_KIND
 from ufo_ext_sites.source import (
     PROJECT_CONFIG,
     PROJECT_CONFIG_BYTES,
@@ -503,10 +505,13 @@ class ApplicationBuilderTask(BaseModel):
 class BuildUfoApplicationInput(BaseModel):
     """One fixed application delegation for the current member request."""
 
+    model_config = ConfigDict(extra="forbid")
+
 
 class RenderApplicationPreviewInput(BaseModel):
     """The complete small design contract for one application preview."""
 
+    model_config = ConfigDict(extra="forbid")
     purpose: str = Field(min_length=1, max_length=240)
     first_screen_priority: str = Field(min_length=1, max_length=160)
     regions: tuple[ApplicationRegion, ...] = Field(min_length=2, max_length=6)
@@ -1671,6 +1676,7 @@ APPLICATION_BUILDER_DELEGATION = ToolDef(
     input_model=BuildUfoApplicationInput,
     handler=build_ufo_application,
     side_effecting=True,
+    bound=ObjectBinding(kind=SITE_KIND, binding="collection"),
 )
 
 
@@ -1684,6 +1690,7 @@ APPLICATION_PREVIEW = ToolDef(
     input_model=RenderApplicationPreviewInput,
     handler=render_application_preview,
     side_effecting=True,
+    bound=ObjectBinding(kind=SITE_KIND, binding="collection"),
 )
 
 

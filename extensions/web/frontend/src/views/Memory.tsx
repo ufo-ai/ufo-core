@@ -1,34 +1,26 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Hint, Input } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
 import { Td } from "@/components/ui/table";
+import { ActionForm } from "@/kernel/action";
 import { Pager, type Placement } from "@/kernel/pager";
 import { PageToolbar, usePageSearch } from "@/kernel/pane";
-import {
-  OutcomeNotice,
-  Panel,
-  PanelEmpty,
-  QUIET,
-  Section,
-  usePanelRead,
-  type NoticeState,
-} from "@/kernel/panel";
+import { Panel, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
 import { DataTable, type Column } from "@/kernel/table";
 import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
-import { postIntent } from "@/lib/api";
+import { postAction } from "@/lib/api";
 import { subjectLabel } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
+import type { ActionView } from "@/lib/types";
 
 type Match = {
   text: string;
@@ -42,13 +34,17 @@ type MemoryPayload = {
   available: boolean;
   kinds: string[];
   matches: Match[];
-  /** How long a body the installed memory provider stores, stated by the read rather than held as
-   *  a number here: the tool refuses past it, so the form has to stop the member at the same
-   *  length, and a copy kept in the portal would drift the day the provider moves its own. */
-  body_max_chars?: number;
+  /** The acts the memory collection projects for this reader — the correction's write among them,
+   *  whose own schema bounds the body a correction may run to. */
+  actions: ActionView[];
   newer?: string | null;
   older?: string | null;
 };
+
+const RECORD_CORRECTION_ACTION = "record_correction";
+
+/** How a search hit names its row: the kind and the item's id, which is what a correction names. */
+const MEMORY_REF_PREFIX = "memory/";
 
 const COLUMNS: Column[] = [
   "Memory",
@@ -87,6 +83,10 @@ export function Memory({
     "/workspace/memory" + (search ? "?" + search : ""),
     reloads,
   );
+  const update =
+    state.phase === "ready"
+      ? state.payload.actions.find((view) => view.name === RECORD_CORRECTION_ACTION)
+      : undefined;
 
   useEffect(() => setCorrecting(null), [submitted]);
 
@@ -166,10 +166,10 @@ export function Memory({
         </Panel>
       </Section>
       <Dialog open={correcting !== null} onOpenChange={(next) => !next && setCorrecting(null)}>
-        {correcting ? (
+        {correcting && update ? (
           <CorrectionDialog
             match={correcting}
-            limit={state.phase === "ready" ? state.payload.body_max_chars : undefined}
+            view={update}
             onSuccess={() => {
               setCorrecting(null);
               setReloads((count) => count + 1);
@@ -181,41 +181,23 @@ export function Memory({
   );
 }
 
-/** One memory restated. `limit` is the provider's own body bound, carried by the read that drew
- *  this row: the field stops there and says how much is left, so the member meets the rule while
- *  they write rather than as a refusal after they submit. A correction is a new statement and
- *  never an edit of the row it names, so a row past the bound — the Overview paragraph is one —
- *  opens the field empty with its current text above it to write against, rather than seeding a
- *  body the tool would refuse and a count that has already run out. */
+/** One memory restated through the memory collection's projected correction: the body is the one
+ *  field the member types, bounded by the action's own schema, and the corrected item rides
+ *  `corrects` pinned. A correction is a new statement and never an edit of the row it names, so a row past the
+ *  bound — the Overview paragraph is one — opens the field empty with its current text above it to
+ *  write against, rather than seeding a body the action would refuse. */
 function CorrectionDialog({
   match,
-  limit,
+  view,
   onSuccess,
 }: {
   match: Match;
-  limit?: number;
+  view: ActionView;
   onSuccess: () => void;
 }) {
   const mainAgent = useMainAgent();
+  const limit = view.input_schema.properties?.body?.maxLength;
   const overlong = limit !== undefined && match.text.length > limit;
-  const [body, setBody] = useState(overlong ? "" : match.text);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (busy || !body.trim() || !mainAgent || !match.ref) return;
-    setBusy(true);
-    const outcome = await postIntent(mainAgent.id, {
-      verb: "record",
-      kind: "memory",
-      corrects: match.ref.slice("memory/".length),
-      body: body.trim(),
-    });
-    setBusy(false);
-    if (outcome.applied) onSuccess();
-    else setNotice({ text: outcome.message, refused: true });
-  }
 
   return (
     <DialogContent>
@@ -227,41 +209,27 @@ function CorrectionDialog({
             : "The correction replaces this memory."}
         </DialogDescription>
       </DialogHeader>
-      <OutcomeNotice state={notice} />
-      <form id="correct-memory" onSubmit={submit} className="flex flex-col items-start gap-sm">
-        {overlong ? (
-          <p
-            className={cn(
-              "w-full rounded-panel bg-fill px-lg py-md",
-              "text-subtitle narrow:text-ui text-ink-soft",
-            )}
-          >
-            {match.text}
-          </p>
-        ) : null}
-        <Input
-          autoFocus
-          aria-label="Memory"
-          maxLength={limit}
-          value={body}
-          onChange={(event) => setBody(event.target.value)}
-          className="max-w-none w-full"
-        />
-        {limit === undefined ? null : (
-          <Hint className="m-0">{limit - body.length} characters left</Hint>
-        )}
-      </form>
-      <DialogFooter>
-        <Button
-          type="submit"
-          form="correct-memory"
-          variant="send"
-          busy={busy}
-          disabled={!body.trim()}
+      {overlong ? (
+        <p
+          className={cn(
+            "w-full rounded-panel bg-fill px-lg py-md",
+            "text-subtitle narrow:text-ui text-ink-soft",
+          )}
         >
-          Record correction
-        </Button>
-      </DialogFooter>
+          {match.text}
+        </p>
+      ) : null}
+      <ActionForm
+        view={view}
+        initial={{ body: overlong ? "" : match.text }}
+        fixed={{ corrects: (match.ref ?? "").slice(MEMORY_REF_PREFIX.length) }}
+        act={async (input) => {
+          if (!mainAgent) return { applied: false, message: "" };
+          const outcome = await postAction(mainAgent.id, view.call, input);
+          if (outcome.applied) onSuccess();
+          return outcome;
+        }}
+      />
     </DialogContent>
   );
 }

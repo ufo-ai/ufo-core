@@ -50,7 +50,8 @@ One new tool, registered by the sites extension beside its deploy tools:
 |---|---|---|
 | `set_homepage` | `site` — the site object name from the deploy result | resolve the name against the registry (the kind's own `_find`, `objects.py:226`); refuse a name that resolves to nothing; in one transaction clear the acting agent's current homepage row and stamp this one |
 
-- The tool binds the turn's own agent (`ctx.agent`) — an agent designates its own homepage.
+- The action binds the agent it is dispatched on — its own by default; another agent's page only
+  for that agent's owner or a workspace admin.
 - **Speakerless-safe.** Binding widens nothing — the frame still gates every viewer on the site's
   own visibility — so `set_homepage` runs on scheduled turns, which seeding requires. Deploying
   and re-gating keep their existing speaker rules.

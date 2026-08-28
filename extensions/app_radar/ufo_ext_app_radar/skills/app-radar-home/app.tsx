@@ -197,7 +197,7 @@ function RebuildEntries() {
       <DialogTrigger asChild>
         <Button size="bar">Rebuild entries</Button>
       </DialogTrigger>
-      <RebuildDialog title="Rebuild Entries" action="Rebuild entries" verb="rebuild_reports">
+      <RebuildDialog title="Rebuild Entries" kind="report">
         <p className="m-0">
           Every report published in the last seven days is read again, and the title and lines
           standing over it are written from scratch.

@@ -47,10 +47,10 @@ Build the site page by page. Screenshot each page via Playwright at desktop (128
 ### Step 3: Preview
 
 ```
-deploy_website(
-  project_path="project-name",
-  site_name="project-name",
-  entry_point="index.html"
+object_action(
+  kind="site",
+  action="deploy_website",
+  input={project_path="project-name", site_name="project-name", entry_point="index.html"}
 )
 ```
 
@@ -64,7 +64,7 @@ To update a site, edit the local workspace files (same `project-name/` directory
 
 ## Examples
 
-**Landing page:** `index.html`, `base.css`, `style.css`, assets. **Multi-page:** `index.html` links to `pages/*.html`, shared CSS/JS. **Dashboard:** same structure + `app.js`. **React/Vite:** create source → `npm install && npm run build` → `deploy_website(project_path="app/dist", site_name="app", entry_point="index.html")`.
+**Landing page:** `index.html`, `base.css`, `style.css`, assets. **Multi-page:** `index.html` links to `pages/*.html`, shared CSS/JS. **Dashboard:** same structure + `app.js`. **React/Vite:** create source → `npm install && npm run build` → `object_action(kind="site", action="deploy_website", input={project_path="app/dist", site_name="app", entry_point="index.html"})`.
 
 ---
 

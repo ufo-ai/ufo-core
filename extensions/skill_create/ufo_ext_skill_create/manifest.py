@@ -30,8 +30,8 @@ from ufo.sdk.objects import (
     object_page,
 )
 from ufo.sdk.sandbox import ContainmentError, contained_relative, workspace_path
-from ufo.sdk.skills import RuntimeSkill, SkillCard, skill_root
-from ufo.sdk.tools import ToolContext
+from ufo.sdk.skills import SKILL_LINE_MAX_CHARS, RuntimeSkill, SkillCard, lexical_score, skill_root
+from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_skill_create.store import (
     MAX_PINNED_USER_SKILLS,
     SKILL_OWNER_KIND,
@@ -342,11 +342,63 @@ SKILL_OBJECT = ObjectKind(
         "saved first — get the skill again and re-apply from the current state. Load the "
         "create-skill skill first for the authoring workflow. A saved skill cannot replace a "
         "built-in skill. A pinned skill always shows in the skill list; at most "
-        f"{MAX_PINNED_USER_SKILLS} skills may be pinned."
+        f"{MAX_PINNED_USER_SKILLS} skills may be pinned. The kind's `skill_search` action "
+        "searches every loadable skill by keyword — the deploy's built-in skills and the "
+        "workspace's saved ones alike — where this listing shows only the saved rows."
     ),
     spec_model=UserSkillSpec,
     store=SkillObjects(),
     list_fields=frozenset({"pinned"}),
+)
+
+SKILL_SEARCH_ACTION = "skill_search"
+SKILL_SEARCH_LIMIT = 8
+SKILL_SEARCH_NO_MATCH = "No matches among {total} loadable skills."
+
+
+class SkillSearchInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(description="Keywords naming the task or capability to find a skill for.")
+    limit: int = Field(
+        default=SKILL_SEARCH_LIMIT,
+        ge=1,
+        le=SKILL_SEARCH_LIMIT,
+        description="Maximum results.",
+    )
+
+
+async def skill_search(ctx: ToolContext, args: SkillSearchInput) -> ToolResult:
+    """Rank every loadable skill's routing card — deploy and member alike — by the lexical scorer
+    the member block uses, and return the matching `name: description` lines, never a body. Zero
+    matches answers with the searchable total, so the caller knows the corpus was searched rather
+    than empty."""
+    cards = ctx.skills.all_cards()
+    ranked = sorted(
+        ((lexical_score(args.query, card), card) for card in cards),
+        key=lambda scored: scored[0],
+        reverse=True,
+    )
+    matched = [card for score, card in ranked if score > 0][: args.limit]
+    if not matched:
+        return ToolResult(
+            content=(TextContent(text=SKILL_SEARCH_NO_MATCH.format(total=len(cards))),)
+        )
+    lines = "\n".join(f"{card.name}: {card.description}"[:SKILL_LINE_MAX_CHARS] for card in matched)
+    return ToolResult(content=(TextContent(text=lines),))
+
+
+SKILL_SEARCH_TOOL = ToolDef(
+    name=SKILL_SEARCH_ACTION,
+    description=(
+        "Search every loadable skill by keyword and get back matching `name: description` "
+        "lines to pass to load_skill. Use it when the task might have a skill the visible "
+        "indexes do not show."
+    ),
+    input_model=SkillSearchInput,
+    handler=skill_search,
+    bound=ObjectBinding(kind=SKILL_KIND, binding="collection"),
+    parallel_safe=True,
 )
 
 
@@ -471,6 +523,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
+        tools=(SKILL_SEARCH_TOOL,),
         objects=(SKILL_OBJECT,),
         skills=(SkillSpec(path=SKILL_DIR),),
         member_skills=MemberSkillsSpec(

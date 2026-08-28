@@ -2,6 +2,7 @@
 resolution the portal reads — admins see every agent, everyone else the main agent
 plus exactly the non-main agents granted to their email."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -32,15 +33,19 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.ext.surface import SurfaceContext
 from ufo.hub import InProcessHub
+from ufo.kinds.conversations import CONVERSATION_KIND
+from ufo.kinds.members import MEMBER_KIND
+from ufo.object_scope import ObjectActionTarget, ObjectAgent
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import conversation_audience, foreign_room_audience
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.tools.registry import ObjectBinding
 from ufo.workspace import ws
 
 GRANT = WEB_ACCESS_TOOLS[0]
@@ -95,6 +100,21 @@ async def _unavailable_spawn(
     profile: str, payload: dict[str, object], background: bool = False
 ) -> SpawnResult:
     raise RuntimeError("spawn is not wired in the audience tests")
+
+
+def _targeting(
+    ctx: ToolContext, kind: str, name: UUID, agent: tuple[UUID, str] | None = None
+) -> ToolContext:
+    return replace(
+        ctx,
+        target=ObjectActionTarget(
+            kind=kind,
+            name=str(name),
+            agent=None if agent is None else ObjectAgent(id=agent[0], name=agent[1]),
+            generation=None,
+            expected_generation=None,
+        ),
+    )
 
 
 def _tool_ctx(workspace_id: UUID, agent_id: UUID, speaker: UUID | None) -> ToolContext:
@@ -173,17 +193,19 @@ async def test_granted_emails_groups_per_agent_and_sorts(db: None, tmp_path) -> 
             )
         )
     admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
-    await _member(workspace_id, MEMBER_EMAIL)
-    await _member(workspace_id, "zed@example.com")
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
+    zed_id = await _member(workspace_id, "zed@example.com")
     with ws(workspace_id):
-        for agent_id, email in (
-            (second_agent, "zed@example.com"),
-            (second_agent, MEMBER_EMAIL),
-            (third_agent, "zed@example.com"),
+        for agent_id, granted_member in (
+            (second_agent, zed_id),
+            (second_agent, member_id),
+            (third_agent, zed_id),
         ):
             granted = await GRANT.handler(
-                _tool_ctx(workspace_id, agent_id, admin_id),
-                WebAccessInput(email=email),
+                _targeting(
+                    _tool_ctx(workspace_id, agent_id, admin_id), MEMBER_KIND, granted_member
+                ),
+                WebAccessInput(),
             )
             assert not granted.is_error
         grants = await granted_emails(web_extension().store)
@@ -196,13 +218,13 @@ async def test_granted_emails_groups_per_agent_and_sorts(db: None, tmp_path) -> 
 async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_path) -> None:
     workspace_id, main_agent, second_agent = await _seed()
     admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
-    await _member(workspace_id, MEMBER_EMAIL)
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
     with ws(workspace_id):
         surface = _surface(workspace_id, tmp_path)
         extension = context_for(NAME, frozenset())
         granted = await GRANT.handler(
-            _tool_ctx(workspace_id, second_agent, admin_id),
-            WebAccessInput(email=MEMBER_EMAIL.upper()),
+            _targeting(_tool_ctx(workspace_id, second_agent, admin_id), MEMBER_KIND, member_id),
+            WebAccessInput(),
         )
         assert not granted.is_error
         audience = await web_audience(surface, extension, MEMBER_EMAIL)
@@ -213,12 +235,26 @@ async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_pa
         assert admin_view.admin
         assert [agent.id for agent in admin_view.agents] == [main_agent, second_agent]
         revoked = await REVOKE.handler(
-            _tool_ctx(workspace_id, second_agent, admin_id),
-            WebAccessInput(email=MEMBER_EMAIL),
+            _targeting(_tool_ctx(workspace_id, second_agent, admin_id), MEMBER_KIND, member_id),
+            WebAccessInput(),
         )
         assert not revoked.is_error
         remaining = await web_audience(surface, extension, MEMBER_EMAIL)
         assert [agent.id for agent in remaining.agents] == [main_agent]
+
+        aimed = await GRANT.handler(
+            _targeting(
+                _tool_ctx(workspace_id, main_agent, admin_id),
+                MEMBER_KIND,
+                member_id,
+                agent=(second_agent, "ops"),
+            ),
+            WebAccessInput(),
+        )
+        assert not aimed.is_error
+        assert "reach ops in the web portal" in aimed.content[0].text
+        regranted = await web_audience(surface, extension, MEMBER_EMAIL)
+        assert [agent.id for agent in regranted.agents] == [main_agent, second_agent]
 
 
 async def test_the_wiki_app_is_private_and_reachable_by_its_audience_only(
@@ -247,7 +283,7 @@ async def test_the_wiki_app_is_private_and_reachable_by_its_audience_only(
             )
         )
     admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
-    await _member(workspace_id, MEMBER_EMAIL)
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
     await _member(workspace_id, "carol@example.com")
     with ws(workspace_id):
         surface = _surface(workspace_id, tmp_path)
@@ -259,8 +295,8 @@ async def test_the_wiki_app_is_private_and_reachable_by_its_audience_only(
         assert admin_view.admin
         assert wiki_agent in {agent.id for agent in admin_view.agents}
         granted = await GRANT.handler(
-            _tool_ctx(workspace_id, wiki_agent, admin_id),
-            WebAccessInput(email=MEMBER_EMAIL),
+            _targeting(_tool_ctx(workspace_id, wiki_agent, admin_id), MEMBER_KIND, member_id),
+            WebAccessInput(),
         )
         assert not granted.is_error
         widened = await web_audience(surface, extension, MEMBER_EMAIL)
@@ -332,12 +368,12 @@ async def test_the_main_agent_needs_no_grant_and_revocation_only_clears_stale_ro
     the agent."""
     workspace_id, main_agent, _second_agent = await _seed()
     admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
-    await _member(workspace_id, MEMBER_EMAIL)
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
     with ws(workspace_id):
         extension = context_for(NAME, frozenset())
         granted = await GRANT.handler(
-            _tool_ctx(workspace_id, main_agent, admin_id),
-            WebAccessInput(email=MEMBER_EMAIL),
+            _targeting(_tool_ctx(workspace_id, main_agent, admin_id), MEMBER_KIND, member_id),
+            WebAccessInput(),
         )
         assert not granted.is_error
         assert "already answers every member" in granted.content[0].text
@@ -346,8 +382,8 @@ async def test_the_main_agent_needs_no_grant_and_revocation_only_clears_stale_ro
             f"{AUDIENCE_PREFIX}{main_agent}/{MEMBER_EMAIL}", {"granted_by": str(admin_id)}
         )
         revoked = await REVOKE.handler(
-            _tool_ctx(workspace_id, main_agent, admin_id),
-            WebAccessInput(email=MEMBER_EMAIL),
+            _targeting(_tool_ctx(workspace_id, main_agent, admin_id), MEMBER_KIND, member_id),
+            WebAccessInput(),
         )
         assert not revoked.is_error
         assert "still reaches it in the portal" in revoked.content[0].text
@@ -363,8 +399,8 @@ async def test_non_admin_speaker_cannot_change_web_access(db: None, tmp_path) ->
     member_id = await _member(workspace_id, MEMBER_EMAIL)
     with ws(workspace_id):
         refused = await GRANT.handler(
-            _tool_ctx(workspace_id, second_agent, member_id),
-            WebAccessInput(email=MEMBER_EMAIL),
+            _targeting(_tool_ctx(workspace_id, second_agent, member_id), MEMBER_KIND, member_id),
+            WebAccessInput(),
         )
         assert refused.is_error
         extension = context_for(NAME, frozenset())
@@ -377,8 +413,8 @@ async def test_grant_requires_an_existing_member(db: None, tmp_path) -> None:
     admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
     with ws(workspace_id):
         refused = await GRANT.handler(
-            _tool_ctx(workspace_id, second_agent, admin_id),
-            WebAccessInput(email="carol@example.com"),
+            _targeting(_tool_ctx(workspace_id, second_agent, admin_id), MEMBER_KIND, uuid4()),
+            WebAccessInput(),
         )
         assert refused.is_error
         assert "invite" in refused.content[0].text
@@ -386,11 +422,11 @@ async def test_grant_requires_an_existing_member(db: None, tmp_path) -> None:
 
 async def test_speakerless_turn_cannot_change_web_access(db: None, tmp_path) -> None:
     workspace_id, _, second_agent = await _seed()
-    await _member(workspace_id, ADMIN_EMAIL, admin=True)
+    admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
     with ws(workspace_id):
         refused = await GRANT.handler(
-            _tool_ctx(workspace_id, second_agent, None),
-            WebAccessInput(email=ADMIN_EMAIL),
+            _targeting(_tool_ctx(workspace_id, second_agent, None), MEMBER_KIND, admin_id),
+            WebAccessInput(),
         )
         assert refused.is_error
 
@@ -425,27 +461,40 @@ async def test_reading_a_private_transcript_is_admin_only_and_records_the_reader
                     updated_at=sa.func.now(),
                 )
             )
-    args = PrivateTranscriptInput(conversation_id=conversation_id)
-    own_args = PrivateTranscriptInput(conversation_id=own_conversation_id)
+    args = PrivateTranscriptInput()
+
+    def reading(
+        agent_id: UUID, speaker: UUID | None, conversation: UUID = conversation_id
+    ) -> ToolContext:
+        return _targeting(
+            _tool_ctx(workspace_id, agent_id, speaker), CONVERSATION_KIND, conversation
+        )
+
     with ws(workspace_id):
         # The non-admin is a bystander rather than the subject, because the admin gate is the first
         # thing a non-admin subject would hit — the reader's-own branch sits inside the writer,
         # behind that gate, so only an admin subject reaches it. `own_args` is that case.
-        refused = await TRANSCRIPT.handler(_tool_ctx(workspace_id, main_agent, bystander_id), args)
+        refused = await TRANSCRIPT.handler(reading(main_agent, bystander_id), args)
         assert refused.is_error
         assert "admin" in refused.content[0].text
-        own = await TRANSCRIPT.handler(_tool_ctx(workspace_id, main_agent, admin_id), own_args)
+        own = await TRANSCRIPT.handler(reading(main_agent, admin_id, own_conversation_id), args)
         assert own.is_error
         assert own.content[0].text != refused.content[0].text
         # The one refusal answers three branches — no such conversation on this agent, a room or
         # externally-shared channel, and the reader's own — so it may not claim the id is unknown.
         assert "your own" in own.content[0].text
         assert "has that id" not in own.content[0].text
-        speakerless = await TRANSCRIPT.handler(_tool_ctx(workspace_id, main_agent, None), args)
+        speakerless = await TRANSCRIPT.handler(reading(main_agent, None), args)
         assert speakerless.is_error
         assert "speaking member" in speakerless.content[0].text
-        walled = await TRANSCRIPT.handler(_tool_ctx(workspace_id, second_agent, admin_id), args)
+        walled = await TRANSCRIPT.handler(reading(second_agent, admin_id), args)
         assert walled.is_error
+        foreign = await TRANSCRIPT.handler(
+            replace(reading(main_agent, admin_id), audience=foreign_room_audience("slack", "C1")),
+            args,
+        )
+        assert foreign.is_error
+        assert "another organization" in foreign.content[0].text
         async with workspace_tx() as connection:
             assert (
                 await connection.execute(
@@ -453,7 +502,7 @@ async def test_reading_a_private_transcript_is_admin_only_and_records_the_reader
                 )
             ).scalar_one() == 0
 
-        recorded = await TRANSCRIPT.handler(_tool_ctx(workspace_id, main_agent, admin_id), args)
+        recorded = await TRANSCRIPT.handler(reading(main_agent, admin_id), args)
         assert not recorded.is_error
         assert MEMBER_EMAIL in recorded.content[0].text
         # The record is the operator's, so the admin is told it exists and is told no reader.
@@ -517,3 +566,26 @@ async def test_no_web_access_tool_takes_a_user_description() -> None:
 @pytest.mark.parametrize("tool", WEB_ACCESS_TOOLS, ids=lambda tool: tool.name)
 def test_web_access_tools_are_side_effecting(tool) -> None:
     assert tool.side_effecting
+
+
+def test_the_web_access_tools_bind_to_the_objects_they_act_on() -> None:
+    """Each is an instance action on the object it grants or opens, reaches an agent through the
+    cross-agent gate, and declares the presentation the prepared-intent lane requires."""
+    assert (GRANT.bound, REVOKE.bound) == (
+        ObjectBinding(kind=MEMBER_KIND, binding="instance"),
+        ObjectBinding(kind=MEMBER_KIND, binding="instance"),
+    )
+    assert TRANSCRIPT.bound == ObjectBinding(kind=CONVERSATION_KIND, binding="instance")
+    assert all(tool.agent_targetable for tool in WEB_ACCESS_TOOLS)
+    assert [tool.canonical_id for tool in WEB_ACCESS_TOOLS] == [
+        "action:member:grant_web_access",
+        "action:member:revoke_web_access",
+        "action:conversation:read_private_transcript",
+    ]
+    assert [tool.presentation.label for tool in WEB_ACCESS_TOOLS if tool.presentation] == [
+        "Grant web access",
+        "Revoke web access",
+        "Open transcript",
+    ]
+    assert TRANSCRIPT.presentation is not None and TRANSCRIPT.presentation.confirm
+    assert all(not tool.input_model.model_fields for tool in WEB_ACCESS_TOOLS)

@@ -7,6 +7,13 @@ export function useViewer(): string | null {
   return useContext(Viewer);
 }
 
+/** The workspace the signed-in member stands in — the row the workspace object's acts address. */
+export const WorkspaceId = createContext<string | null>(null);
+
+export function useWorkspaceId(): string | null {
+  return useContext(WorkspaceId);
+}
+
 /** The names the surfaces register under, which every conversation carries as its `surface`. The
  *  CLI registers as `ufo`, and `SURFACE_WORDS` is the one place that becomes a member's word. */
 export const WEB_SURFACE = "web";

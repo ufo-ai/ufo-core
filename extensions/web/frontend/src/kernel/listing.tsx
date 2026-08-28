@@ -16,15 +16,20 @@ import {
 } from "@/kernel/panel";
 import { Pager, type Placement } from "@/kernel/pager";
 import { RowLines } from "@/kernel/rows";
-import { postIntent } from "@/lib/api";
+import { postAction, postIntent, type IntentOutcome } from "@/lib/api";
 import { useViewer } from "@/lib/audience";
 import { useMainAgent } from "@/lib/mainAgent";
-import type { CredentialRequest } from "@/lib/types";
+import type { ActionInput, ActionView, CredentialRequest } from "@/lib/types";
 
+/** What a row's acts are drawn with: the lane to post on — `act` for an object mutation's envelope,
+ *  `action` for one of the acts the read projected for the listing's kind, posted with the call its
+ *  view carries — whether one is in flight, who is reading, and those projected acts. */
 export type RowContext = {
   act: (envelope: unknown) => void;
+  action: (view: ActionView, input: ActionInput) => void;
   busy: boolean;
   viewer: string | null;
+  actions: ActionView[];
 };
 
 export type Part<Row> = {
@@ -79,6 +84,8 @@ export type ListingSpec<Payload, Row> = {
   search?: (row: Row) => string;
   chips?: Chip<Row>[];
   actions?: (row: Row, context: RowContext) => ReactNode;
+  /** Where the payload carries the acts the read projected for the listing's kind. */
+  views?: (payload: Payload) => ActionView[];
   credentials?: (
     request: CredentialRequest,
     onStored: (slots: string[]) => void,
@@ -115,7 +122,16 @@ export function Listing<Payload, Row>({
   async function act(envelope: unknown) {
     if (!mainAgent) return;
     setBusy(true);
-    const outcome = await postIntent(mainAgent.id, envelope);
+    settle(await postIntent(mainAgent.id, envelope));
+  }
+
+  async function action(view: ActionView, input: ActionInput) {
+    if (!mainAgent) return;
+    setBusy(true);
+    settle(await postAction(mainAgent.id, view.call, input));
+  }
+
+  function settle(outcome: IntentOutcome) {
     setBusy(false);
     if (outcome.credentials) {
       setCredentials(outcome.credentials);
@@ -128,7 +144,6 @@ export function Listing<Payload, Row>({
     setNotice(outcomeNotice(outcome));
   }
 
-  const context: RowContext = { act, busy, viewer };
   const term = query.trim().toLowerCase();
   const bySearch = (row: Row) =>
     !spec.search || !term || spec.search(row).toLowerCase().includes(term);
@@ -174,6 +189,13 @@ export function Listing<Payload, Row>({
         <Panel state={state} shape={spec.cards ? "cards" : "table"} empty={spec.unavailable}>
           {(payload) => {
             const rows = spec.rows(payload);
+            const context: RowContext = {
+              act,
+              action,
+              busy,
+              viewer,
+              actions: spec.views?.(payload) ?? [],
+            };
             if (!rows.length)
               return (
                 <PanelBlank body={spec.serverQuery && (term || picked) ? "Nothing matches." : spec.empty} />

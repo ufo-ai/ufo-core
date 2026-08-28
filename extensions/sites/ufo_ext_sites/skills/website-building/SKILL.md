@@ -74,10 +74,12 @@ For a ufo application homepage, use its QA reference above. For every other buil
 schemes, exercise every control, and check overflow and console errors. Fix each failure and run the
 failed check again. Deploy only after the checks pass.
 
-- Use `deploy_website(project_path=…, site_name=…, entry_point="index.html", visibility=…)` for a
-  static folder. Reuse the requested site's name when updating it.
-- Use `publish_website(project_path=…, dist_path=…, app_name=…, install_command=…,
-  run_command=…, visibility=…)` only when the app needs a build step or backend.
+- Use the `site` collection's `deploy_website` action — `object_action(kind="site",
+  action="deploy_website", input={project_path=…, site_name=…, entry_point="index.html",
+  visibility=…})` — for a static folder. Reuse the requested site's name when updating it.
+- Use its `publish_website` action — `object_action(kind="site", action="publish_website",
+  input={project_path=…, dist_path=…, app_name=…, install_command=…, run_command=…,
+  visibility=…})` — only when the app needs a build step or backend.
 - Use `start_server` only for local validation. Its URL is not a member deliverable.
 - Pass `visibility` only when the member asks. Otherwise keep the conversation default.
 

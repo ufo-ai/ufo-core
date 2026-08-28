@@ -23,6 +23,7 @@ import {
   atPhoneWidth,
   json,
   pageFits,
+  pick,
   pressRow,
   tableFloors,
   useStreamFake,
@@ -394,9 +395,31 @@ const SECOND_AGENT = {
   installations: ["slack", "ufo"],
 };
 
+/** The web-access acts as the member object projects them on one member row: the grant, and the
+ *  revoke with the sentence it states before it commits. */
+const WEB_ACCESS = (action: string, label: string, confirm?: string) => ({
+  name: action,
+  description: "Change who reaches the agent on the web.",
+  input_schema: { properties: {} },
+  call: { kind: "member", action, name: "m1", input: {} },
+  label,
+  ...(confirm ? { confirm } : {}),
+});
+
+const ADMIN_MEMBER = {
+  id: "m1",
+  email: "member@example.com",
+  admin: true,
+  seated: true,
+  actions: [
+    WEB_ACCESS("grant_web_access", "Grant web access"),
+    WEB_ACCESS("revoke_web_access", "Revoke web access", "Their access to this app ends."),
+  ],
+};
+
 const ADMIN_TABLES = {
   agents: [SECOND_AGENT],
-  members: [{ id: "m1", email: "member@example.com", admin: true, seated: true }],
+  members: [ADMIN_MEMBER],
   caps: [
     {
       scope: "workspace",
@@ -424,11 +447,11 @@ async function administration(routes: Record<string, Route>) {
   await openAdministration();
 }
 
-/** Revoking is destructive, so it arms on the first press and commits on the second, as every other
- *  destructive act in the portal does. */
+/** Revoking declares a confirm, so it arms on the first press and commits on the second, as every
+ *  other destructive act in the portal does. */
 async function revoke(record: HTMLElement): Promise<void> {
-  await userEvent.click(within(record).getByRole("button", { name: "Revoke" }));
-  await userEvent.click(within(record).getByRole("button", { name: "Confirm revoke" }));
+  await userEvent.click(within(record).getByRole("button", { name: "Revoke web access" }));
+  await userEvent.click(within(record).getByRole("button", { name: "Confirm revoke web access" }));
 }
 
 /** The tracks are fixed pixels, so a table declaring more of them than the desktop leaves holds its
@@ -447,14 +470,15 @@ test("every administration table fits the desktop page it is read on", async () 
   for (const floor of tableFloors()) expect(pageFits(floor)).toBe(true);
 });
 
-/** The grant is a field and two acts, which no fixed track holds at the pitch a row is read at. It
- *  stands in the agent's own record instead, with the surfaces the row no longer states. */
-test("an agent's record carries its surfaces and the web access grant, and the row does not", async () => {
+/** The audience acts are the member object's own, projected on each member row, so no fixed track
+ *  holds them at the pitch a row is read at. They stand in the agent's own record instead, behind
+ *  the member they change, with the surfaces the row no longer states. */
+test("an agent's record carries its surfaces and a member's web access acts, and the row does not", async () => {
   const posted: unknown[] = [];
   const lanes: string[] = [];
   const { calls } = wire({
-    "/api/admin": () => json({ ...ADMIN_TABLES, members: [], caps: [] }),
-    "/intents": (url, init) => {
+    "/api/admin": () => json({ ...ADMIN_TABLES, caps: [] }),
+    "/actions/member/": (url, init) => {
       lanes.push(url);
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Granted." });
@@ -471,7 +495,7 @@ test("an agent's record carries its surfaces and the web access grant, and the r
 
   await openAdministration();
   await screen.findByText("Second");
-  expect(screen.queryByPlaceholderText("email@work.com")).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "Web Access Member" })).toBeNull();
   expect(screen.queryByText("Slack, Terminal")).toBeNull();
 
   await pressRow("Second");
@@ -479,74 +503,48 @@ test("an agent's record carries its surfaces and the web access grant, and the r
   expect(within(record).getByText("Surfaces")).toBeTruthy();
   expect(within(record).getByText("Slack, Terminal")).toBeTruthy();
 
-  await userEvent.type(within(record).getByLabelText("Web Access Address"), "new@work.com");
-  await userEvent.click(within(record).getByRole("button", { name: "Grant" }));
+  await pick("Web Access Member", "member@example.com");
+  await userEvent.click(within(record).getByRole("button", { name: "Grant web access" }));
   await waitFor(() => expect(posted.length).toBe(1));
 
   await revoke(record);
   await waitFor(() => expect(posted.length).toBe(2));
 
-  expect(posted).toEqual([
-    { verb: "grant_web_access", email: "new@work.com" },
-    { verb: "revoke_web_access", email: "new@work.com" },
-  ]);
+  expect(posted).toEqual([{}, {}]);
   expect(lanes).toEqual([
-    "/surface/web/agents/" + SECOND_ID + "/intents",
-    "/surface/web/agents/" + SECOND_ID + "/intents",
+    "/surface/web/agents/" + SECOND_ID + "/actions/member/m1/grant_web_access",
+    "/surface/web/agents/" + SECOND_ID + "/actions/member/m1/revoke_web_access",
   ]);
   expect(calls.filter((url) => url.includes("/api/admin")).length).toBe(3);
 });
-
-const GRANT_ROUTES = {
-  "/api/admin": () => json({ ...ADMIN_TABLES, members: [], caps: [] }),
-};
 
 async function grantForm(): Promise<HTMLElement> {
   await pressRow("Second");
   return await screen.findByRole("dialog", { name: "Second" });
 }
 
-/** One field, two acts, one contract. The address is declared by the field, so the field is what
- *  refuses it — and it refuses whichever act was pressed, or the act the browser does not gate is a
- *  way around the one it does. */
-test("neither web access act posts an address the field refuses", async () => {
+/** The acts belong to a member row, so none is drawn until the admin names the member: a press with
+ *  nobody picked has nothing to address. */
+test("no web access act is drawn until a member is picked", async () => {
   const posted: unknown[] = [];
   await administration({
-    ...GRANT_ROUTES,
-    "/intents": (_url, init) => {
+    "/api/admin": () => json({ ...ADMIN_TABLES, caps: [] }),
+    "/actions/member/": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Granted." });
     },
   });
   const record = await grantForm();
 
-  await userEvent.type(within(record).getByLabelText("Web Access Address"), "nonsense");
-  await userEvent.click(within(record).getByRole("button", { name: "Grant" }));
-  await revoke(record);
+  expect(within(record).getByRole("combobox", { name: "Web Access Member" })).toBeTruthy();
+  expect(within(record).queryByRole("button", { name: "Grant web access" })).toBeNull();
+  expect(within(record).queryByRole("button", { name: "Revoke web access" })).toBeNull();
 
+  await pick("Web Access Member", "member@example.com");
+  expect(within(record).getByRole("button", { name: "Grant web access" })).toBeTruthy();
+  await userEvent.click(within(record).getByRole("button", { name: "Revoke web access" }));
+  expect(within(record).getByText("Their access to this app ends.")).toBeTruthy();
   expect(posted).toEqual([]);
-});
-
-/** A press on a live control always lands somewhere the member can read. An empty box is the
- *  field's own refusal, raised on the field, rather than a handler returning in silence. */
-test("an empty web access box answers the press on the field", async () => {
-  const posted: unknown[] = [];
-  await administration({
-    ...GRANT_ROUTES,
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
-      return json({ applied: true, message: "Revoked." });
-    },
-  });
-  const record = await grantForm();
-  const field = within(record).getByLabelText<HTMLInputElement>("Web Access Address");
-  const refused: boolean[] = [];
-  field.addEventListener("invalid", () => refused.push(field.validity.valueMissing));
-
-  await revoke(record);
-
-  expect(posted).toEqual([]);
-  expect(refused).toEqual([true]);
 });
 
 const GRANTED_AGENT = {
@@ -602,7 +600,7 @@ test("the main agent's record states its audience and carries no grant form", as
 
   const record = await screen.findByRole("dialog", { name: "Assistant" });
   expect(within(record).getByText("Every member")).toBeTruthy();
-  expect(within(record).queryByRole("button", { name: "Grant" })).toBeNull();
+  expect(within(record).queryByRole("combobox", { name: "Web Access Member" })).toBeNull();
 });
 
 test("a boot whose body is not json states the network fault, not a 200 error", async () => {
@@ -651,21 +649,21 @@ test("the admin loading arm keeps the padded frame its other arms own", async ()
 });
 
 /** A refusal has no field to answer it, so it stands in the record the act was raised in — with
- *  what the member typed still in the box — and the page behind it keeps reading. */
+ *  the member still picked — and the page behind it keeps reading. */
 test("a refused audience change tones the notice inside the record that raised it", async () => {
   await administration({
-    "/api/admin": () => json({ ...ADMIN_TABLES, members: [] }),
-    "/intents": () => json({ applied: false, message: "Only an admin grants access." }),
+    "/api/admin": () => json(ADMIN_TABLES),
+    "/actions/member/": () => json({ applied: false, message: "Only an admin grants access." }),
   });
   await pressRow("Second");
 
   const record = await screen.findByRole("dialog", { name: "Second" });
-  await userEvent.type(within(record).getByLabelText("Web Access Address"), "new@work.com");
-  await userEvent.click(within(record).getByRole("button", { name: "Grant" }));
+  await pick("Web Access Member", "member@example.com");
+  await userEvent.click(within(record).getByRole("button", { name: "Grant web access" }));
 
   await refusedNotice("Only an admin grants access.");
-  expect(within(record).getByLabelText<HTMLInputElement>("Web Access Address").value).toBe(
-    "new@work.com",
+  expect(within(record).getByRole("combobox", { name: "Web Access Member" }).textContent).toBe(
+    "member@example.com",
   );
   expect(screen.getByText("<$0.01")).toBeTruthy();
 });

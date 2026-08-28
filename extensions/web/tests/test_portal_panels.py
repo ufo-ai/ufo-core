@@ -14,14 +14,17 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest_module
+import ufo_ext_sources.manifest as sources_manifest_module
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from ufo_ext_coding.connect import GIT_INSTALLATION_SLOT
+from ufo_ext_coding.github_app import GIT_SLOT
+from ufo_ext_coding.manifest import manifest as coding_manifest
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.manifest import MemoryUpdateInput
+from ufo_ext_memory.manifest import RECORD_CORRECTION_ACTION, RecordCorrectionInput
 from ufo_ext_memory.store import (
-    MEMORY_BODY_MAX_CHARS,
     MemoryIndexer,
     MemoryStore,
     MemoryWrite,
@@ -41,11 +44,10 @@ from ufo_ext_skill_create.store import UserSkillStore
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
-from ufo_ext_web.panels import FIRST_RUN_PROVIDERS, TOOLING_PREFIX, _tools_recorded
 from ufo_ext_web.surface import MEMORY_RECENT_LIMIT
 from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY
 
-from ufo.access.credentials import CredentialStore
+from ufo.access.credentials import CredentialStore, credential_object_name
 from ufo.agent_scope import agent as bind_agent
 from ufo.auth.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
@@ -193,14 +195,18 @@ SCHEDULED_TASK_KIND_ONLY = Manifest(
 )
 
 
-def _mount_portal(tmp_path: Path, *, with_memory: bool) -> FastAPI:
+def _mount_portal(
+    tmp_path: Path, *, with_memory: bool, installed: tuple[Manifest, ...] = ()
+) -> FastAPI:
     index = DefaultIndex(transaction=workspace_tx)
     embed = StubEmbed()
     manifests = (
         web_manifest(),
         skill_create_manifest(),
         SCHEDULED_TASK_KIND_ONLY,
+        sources_manifest_module.manifest(),
         memory_manifest_module.manifest(),
+        *installed,
     )
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     app = FastAPI()
@@ -226,7 +232,7 @@ def _mount_portal(tmp_path: Path, *, with_memory: bool) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=DEPLOY_SKILLS,
         member_skill_listing=lambda: member_skill_listing(manifests, credentials, index, embed),
-        objects=member_object_registry(manifests),
+        objects=member_object_registry(manifests, credentials, index, embed),
         memory=memory_search(manifests, None, index, embed) if with_memory else None,
     )
     return app
@@ -701,11 +707,11 @@ async def test_memory_listing_is_newest_first_and_bounded(portal, tmp_path: Path
 async def test_the_memory_read_states_the_bound_the_writing_tool_holds_a_body_to(
     db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The correction form on this page collects a body the memory tool refuses past, so the read
-    that draws the rows carries how long one may run — from the installed provider, which is what
-    enforces it. Both shapes state it, because either can be the read a correction is opened from,
-    and the number is the tool's own: a copy kept in the portal would drift the day the provider
-    moves its bound, and the member would meet the difference as a refusal."""
+    """The correction form on this page collects a body the memory action refuses past, so the read
+    that draws the rows carries how long one may run — inside the projected action's own schema,
+    which is what enforces it. Both shapes carry it, because either can be the read a correction is
+    opened from, and the number is the action's own: a copy kept in the portal would drift the day
+    the provider moves its bound, and the member would meet the difference as a refusal."""
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     workspace_id, _agent_a, _agent_b = await _seed_workspace()
     _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
@@ -716,9 +722,10 @@ async def test_the_memory_read_states_the_bound_the_writing_tool_holds_a_body_to
             await client.get("/surface/web/workspace/memory?q=anything", headers=headers)
         ).json()
 
-    written = MemoryUpdateInput.model_json_schema()["properties"]["body"]["maxLength"]
-    assert listing["body_max_chars"] == written
-    assert searched["body_max_chars"] == written
+    written = RecordCorrectionInput.model_json_schema()["properties"]["body"]["maxLength"]
+    for read in (listing, searched):
+        [correction] = [v for v in read["actions"] if v["name"] == RECORD_CORRECTION_ACTION]
+        assert correction["input_schema"]["properties"]["body"]["maxLength"] == written
 
 
 async def test_a_memoryless_deploy_never_claims_availability(
@@ -730,9 +737,9 @@ async def test_a_memoryless_deploy_never_claims_availability(
     app = _mount_portal(tmp_path, with_memory=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         blank = await client.get("/surface/web/workspace/memory", headers=headers)
-        assert blank.json() == {"available": False, "matches": []}
+        assert blank.json() == {"available": False, "kinds": [], "matches": [], "actions": []}
         queried = await client.get("/surface/web/workspace/memory?q=anything", headers=headers)
-        assert queried.json() == {"available": False, "matches": []}
+        assert queried.json() == {"available": False, "kinds": [], "matches": [], "actions": []}
 
 
 async def _seed_notes(
@@ -953,21 +960,24 @@ async def test_the_subject_fence_holds_on_every_page(
     assert sorted(walked) == ["mine 0", "mine 1", "mine 2"]
 
 
-def test_the_first_run_records_every_pick_inside_the_row_it_is_drawn_as() -> None:
-    """A member may pick every tile. Naming all 21 runs to 208 characters and nine of the longer
-    labels to 120, so the sentence is built to the bound rather than refused after they continue."""
-    labels = tuple(tile.label for tile in FIRST_RUN_PROVIDERS)
-    for picked in range(1, len(labels) + 1):
-        body = _tools_recorded(labels[:picked], MEMORY_BODY_MAX_CHARS)
-        assert len(body) <= MEMORY_BODY_MAX_CHARS, (picked, len(body), body)
-        assert body.startswith(TOOLING_PREFIX)
-        memory_manifest_module.MemoryUpdateInput(body=body)
-
-
-def test_the_first_run_says_how_many_picks_it_could_not_name() -> None:
-    labels = tuple(tile.label for tile in FIRST_RUN_PROVIDERS)
-    whole = _tools_recorded(labels[:2], MEMORY_BODY_MAX_CHARS)
-    assert whole == f"{TOOLING_PREFIX}{labels[0]}, {labels[1]}."
-    every = _tools_recorded(labels, MEMORY_BODY_MAX_CHARS)
-    named = every.removeprefix(TOOLING_PREFIX).split(", and ")[0].split(", ")
-    assert every.endswith(f", and {len(labels) - len(named)} more.")
+async def test_connect_github_projects_on_its_installation_row_alone(
+    db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The credential kind has a row per declared slot, and `connect_github` installs exactly one of
+    them: its declaration pins the installation slot's row, so that row's projection carries the
+    act and every other credential row's does not."""
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    workspace_id, _agent_a, _agent_b = await _seed_workspace()
+    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    app = _mount_portal(tmp_path, with_memory=False, installed=(coding_manifest(),))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
+        installation = await client.get(
+            f"/surface/web/actions/credential/{credential_object_name(GIT_INSTALLATION_SLOT)}",
+            headers=headers,
+        )
+        token = await client.get(
+            f"/surface/web/actions/credential/{credential_object_name(GIT_SLOT)}", headers=headers
+        )
+    assert installation.status_code == token.status_code == 200
+    assert [view["name"] for view in installation.json()["actions"]] == ["connect_github"]
+    assert "connect_github" not in [view["name"] for view in token.json()["actions"]]

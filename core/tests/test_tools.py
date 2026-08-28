@@ -30,6 +30,7 @@ from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillCard, Ski
 from ufo.tools.builtins import (
     BUILTIN_TOOLS,
     FILE_TOOL_RESULT_MAX_CHARS,
+    REQUEST_CREDENTIALS_TOOL_DEF,
     SHARE_PREFLIGHT_CMD,
     _file_tool_result,
 )
@@ -216,18 +217,16 @@ def test_a_barrier_is_a_position_read_final_act_or_a_guard_that_reads_the_round(
     assert barriers == {
         "ask_user",
         "connect_account",
-        "request_credentials",
         "write",
         "edit",
         "share_file",
     }
+    assert REQUEST_CREDENTIALS_TOOL_DEF.parallel_safe is False
 
 
 def test_registry_schemas_cover_every_tool() -> None:
     schemas = REGISTRY.schemas()
     assert {schema.name for schema in schemas} == {
-        "add_member",
-        "restore_application",
         "bash",
         "read",
         "write",
@@ -237,9 +236,7 @@ def test_registry_schemas_cover_every_tool() -> None:
         "share_file",
         "spawn",
         "ask_user",
-        "request_credentials",
         "load_skill",
-        "skill_search",
         "connect_account",
         "cancel_spawn",
         "message_spawn",
@@ -780,50 +777,6 @@ async def test_load_skill_of_a_vanished_member_row_fails_loud(tmp_path: Path) ->
     )
     with pytest.raises(ValueError, match="skill 'gone' is no longer available"):
         await _load_skill(ctx, "gone")
-
-
-async def test_skill_search_ranks_matches_across_both_tiers(tmp_path: Path) -> None:
-    saved = RuntimeSkill(
-        name="invoice-review",
-        description="Load when a member asks to reconcile an invoice.",
-        instructions="i",
-    )
-    ctx = replace(make_context(FakeSandbox(), tmp_path), skills=_member_tier(saved))
-
-    result = await run("skill_search", ctx, query="reconcile an invoice")
-
-    lines = result.content[0].text.splitlines()
-    assert lines[0] == "invoice-review: Load when a member asks to reconcile an invoice."
-    assert not result.is_error
-    assert all(":" in line for line in lines)
-    deploy_hit = await run("skill_search", ctx, query="sandbox container commands")
-    assert deploy_hit.content[0].text.splitlines()[0].startswith("sandbox: ")
-
-
-async def test_skill_search_with_no_match_answers_the_searchable_total(tmp_path: Path) -> None:
-    ctx = make_context(FakeSandbox(), tmp_path)
-    result = await run("skill_search", ctx, query="zzzznothing")
-    total = len(ctx.skills.all_cards())
-    assert result.content[0].text == f"No matches among {total} loadable skills."
-
-
-async def test_skill_search_clamps_its_limit_and_truncates_lines(tmp_path: Path) -> None:
-    crowd = tuple(
-        RuntimeSkill(
-            name=f"billing-{i}", description="Load when billing " + "x" * 300, instructions="i"
-        )
-        for i in range(12)
-    )
-    ctx = replace(make_context(FakeSandbox(), tmp_path), skills=_member_tier(*crowd))
-
-    tool = REGISTRY.get("skill_search")
-    with pytest.raises(ValidationError):
-        tool.input_model.model_validate({"query": "billing", "limit": 9})
-
-    result = await run("skill_search", ctx, query="billing")
-    lines = result.content[0].text.splitlines()
-    assert len(lines) == 8
-    assert all(len(line) <= 200 for line in lines)
 
 
 async def test_cancel_spawn_cancels_and_reports_status(tmp_path: Path) -> None:

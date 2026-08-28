@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     JsonValue,
     StringConstraints,
@@ -200,37 +201,39 @@ class ToolIntent(BaseModel):
     round, so the submitted values apply exactly or the refusal returns, never a paraphrase. The
     turn row is the audit record: the intent serializes as its inbound, the speaker is the
     submitting member, and the result commits as its terminal frame. The Literal is the closed
-    whitelist; a verb joins it with its panel producer, never ahead of one — `request_credentials`
-    mints the sealed private prompt a panel's set or replace fulfills against, so the secret
-    itself never rides an intent."""
+    whitelist of wire tools; a verb joins it with its panel producer, never ahead of one, and every
+    bound action rides `object_action` with its kind, name, and input in the envelope — the
+    credential collection's `request_credentials` mints the sealed private prompt a panel's set or
+    replace fulfills against, so the secret itself never rides an intent."""
 
     tool: Literal[
-        "add_member",
-        "restore_application",
         "object_apply",
         "object_delete",
+        "object_action",
         "connect_account",
-        "grant_web_access",
-        "revoke_web_access",
-        "memory_update",
-        "request_credentials",
-        "read_private_transcript",
-        "manage_billing",
-        "slack_connect",
-        "connect_github",
-        "imessage_connect",
-        "rebuild_report_digest",
-        "rebuild_page_facts",
     ]
     input: dict[str, JsonValue]
 
 
-# The one prepared intent a spent balance still admits. Arranging a refill is what lifts the
-# refusal, so a gate that refused it would refuse the only act that ends the refusal — the shape
-# this system has built three times and had to unbuild. It is safe to admit because a prepared
-# intent runs no model round: the turn dispatches this verb verbatim and terminates, so an
-# overdrawn workspace cannot spend against it, and the tool's own admin gate still decides who may.
-BILLING_INTENT_TOOL = "manage_billing"
+BILLING_ACTION = ("workspace", "manage_billing")
+
+
+def admits_spent_balance(intent: ToolIntent) -> bool:
+    """Whether a prepared intent is the one a spent balance still admits: the workspace object's
+    `manage_billing` action. Arranging a refill is what lifts the refusal, so a gate that refused it
+    would refuse the only act that ends the refusal — the shape this system has built three times
+    and had to unbuild. It is safe to admit because a prepared intent runs no model round: the turn
+    dispatches this action verbatim and terminates, so an overdrawn workspace cannot spend against
+    it, and the action's own admin gate still decides who may."""
+    return (
+        intent.tool == "object_action"
+        and (
+            intent.input.get("kind"),
+            intent.input.get("action"),
+        )
+        == BILLING_ACTION
+    )
+
 
 ProposalStatus = Literal["pending", "approved", "rejected"]
 PENDING: ProposalStatus = "pending"
@@ -340,6 +343,7 @@ class AskUserInput(BaseModel):
 
 
 class CredentialPrompt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     slot: str = Field(description="The credential slot to fill.")
     prompt: str = Field(description="What to show the member when asking for this value.")
 
@@ -372,6 +376,22 @@ class ConnectRequest(BaseModel):
 
 
 TERMINAL_ERROR_MESSAGE_MAX_CHARS = 2_000
+
+FinalActRule = Literal["last_call", "pending"]
+LAST_CALL_ACT: FinalActRule = "last_call"
+PENDING_ACT: FinalActRule = "pending"
+
+FINAL_ACT_FIELDS: dict[type[BaseModel], tuple[str, FinalActRule]] = {
+    AskUserInput: ("question", LAST_CALL_ACT),
+    CredentialRequest: ("credential_request", PENDING_ACT),
+    ConnectRequest: ("connect_request", PENDING_ACT),
+}
+"""Every final act a turn can leave open: the payload model a callable declares as
+`final_act_model`, the `TerminalFrame` field that carries it, and the rule that reads it from the
+round. A question is stale unless it was the round's last call; a credential or connect handoff is
+owed from anywhere in the round and persists until the turn ends, because only the member
+discharges it. A declared `final_act_model` outside this mapping fails boot — the frame has no
+field to carry it."""
 
 
 class TerminalFrame(BaseModel):

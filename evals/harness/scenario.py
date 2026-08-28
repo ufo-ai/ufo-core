@@ -391,7 +391,7 @@ class _ScenarioRun:
                 merged = replace(
                     last.output,
                     calls=calls,
-                    own_tools=tuple(call.name for call in own_calls),
+                    own_tools=tuple(call.call for call in own_calls),
                     own_calls=own_calls,
                     tool_errors=(*last.output.tool_errors, *followup.output.tool_errors),
                     tokens=tokens,

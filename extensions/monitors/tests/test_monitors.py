@@ -24,7 +24,12 @@ from ufo_ext_monitors.monitor_runner import (
     FIRE_KEY_PREFIX,
     MonitorRunner,
 )
-from ufo_ext_monitors.monitor_tool import MONITOR_DIRECTIVE, MonitorInput, monitor
+from ufo_ext_monitors.monitor_tool import (
+    MONITOR_DIRECTIVE,
+    MONITOR_TOOL_NAME,
+    MonitorInput,
+    monitor,
+)
 from ufo_ext_monitors.monitors import (
     ARMED_MAX,
     CAPTURE_HALF_BYTES,
@@ -54,7 +59,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ToolDef
+from ufo.tools.registry import ObjectBinding, ToolDef
 from ufo.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.turns.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
 from ufo.workspace import ws
@@ -62,6 +67,7 @@ from ufo.workspace import ws
 TOOL_NARRATION = "watching the run"
 ALPHA = "printf 'alpha\\n'"
 BETA = "printf 'beta\\n'"
+MONITOR_ACTION_ID = f"action:{MONITOR_KIND}:{MONITOR_TOOL_NAME}"
 
 
 @dataclass(frozen=True)
@@ -91,7 +97,7 @@ async def _unavailable_spawn(
 
 
 def _object_tool(name: str) -> ToolDef:
-    tools, _ = turn_tools((manifest(),), None, audience=SHARED_AUDIENCE)
+    tools, _, _ = turn_tools((manifest(),), None, audience=SHARED_AUDIENCE)
     return next(tool for tool in tools if tool.name == name)
 
 
@@ -218,10 +224,10 @@ def _runner_ctx(invoker: AdmissionInvoker, root: Path) -> ExtensionContext:
     return context_for(NAME, frozenset(), invoker=invoker, sandboxes=_sandboxes(root))
 
 
-def _input(name: str, command: str, **overrides: object) -> MonitorInput:
+def _input(slug: str, command: str, **overrides: object) -> MonitorInput:
     return MonitorInput.model_validate(
         {
-            "name": name,
+            "slug": slug,
             "command": command,
             "deadline_minutes": 60,
             "ai_response": "I'll watch the run.",
@@ -396,6 +402,20 @@ def test_the_monitor_name_is_a_slug(name: str) -> None:
         _input(name, ALPHA)
 
 
+def test_the_monitor_input_refuses_an_unknown_field() -> None:
+    with pytest.raises(ValueError):
+        _input("ci-run", ALPHA, kind="monitor")
+
+
+def test_monitor_arms_through_an_action_on_the_monitor_collection() -> None:
+    tools, _, verbs = turn_tools((manifest(),), None, audience=SHARED_AUDIENCE)
+    assert MONITOR_TOOL_NAME not in {tool.name for tool in tools}
+    action = verbs.actions[MONITOR_KIND][MONITOR_TOOL_NAME].action
+    assert action.bound == ObjectBinding(kind=MONITOR_KIND, binding="collection")
+    assert action.canonical_id == MONITOR_ACTION_ID
+    assert action.side_effecting and not action.parallel_safe and action.presentation is None
+
+
 async def test_the_deadline_fires_once_and_retires_the_monitor(db: None, tmp_path: Path) -> None:
     """The watch's ceiling: nothing changed, no probe failed, and the arming turn still gets its one
     arrival — carrying the reason, next steps, and metadata it armed with, on behalf of the member
@@ -556,6 +576,13 @@ async def test_the_kind_lists_gets_and_disarms_an_armed_monitor(db: None, tmp_pa
     with ws(workspace_id), agent(agent_id):
         await monitor(ctx, _input("ci-run", ALPHA, interval_minutes=9))
         listed = json.loads(await _dispatch(_object_tool("object_list"), ctx, kind=MONITOR_KIND))
+        offered = json.loads(
+            await _dispatch(
+                _object_tool("object_list"),
+                replace(ctx, granted_actions=frozenset({MONITOR_ACTION_ID})),
+                kind=MONITOR_KIND,
+            )
+        )
         fetched = yaml.safe_load(
             await _dispatch(
                 _object_tool("object_get"),
@@ -573,6 +600,13 @@ async def test_the_kind_lists_gets_and_disarms_an_armed_monitor(db: None, tmp_pa
         remaining = await _rows(workspace_id)
 
     [row] = listed["objects"]
+    assert "actions" not in listed
+    assert [view["name"] for view in offered["actions"]] == [MONITOR_TOOL_NAME]
+    assert offered["actions"][0]["call"] == {
+        "kind": MONITOR_KIND,
+        "action": MONITOR_TOOL_NAME,
+        "input": {},
+    }
     assert row["name"] == qualified_name(conversation_id, "ci-run")
     assert row["mine"] is True
     assert row["conversation"] == str(conversation_id)
@@ -605,7 +639,7 @@ async def test_applying_a_monitor_manifest_names_the_tool_instead(db: None, tmp_
         }
     )
     with ws(workspace_id), agent(agent_id):
-        with pytest.raises(VerbNotSupported, match="monitor tool validates the probe"):
+        with pytest.raises(VerbNotSupported, match="action validates the probe"):
             await _dispatch(_object_tool("object_apply"), ctx, manifest=document)
         assert await _rows(workspace_id) == []
 

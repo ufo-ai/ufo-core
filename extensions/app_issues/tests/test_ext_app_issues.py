@@ -112,9 +112,14 @@ def test_the_built_page_is_the_apps_own_tsx() -> None:
 def test_the_home_skill_edits_builds_and_deploys_the_project() -> None:
     skill = (SKILL_DIR / "SKILL.md").read_text()
     assert "Copy this skill's `app.tsx` and `index.html`" in skill
-    assert "`deploy_website` with that directory and `site_name` `issues-home`" in skill
+    assert (
+        "`deploy_website` action (`object_action` with kind `site`) with that directory and "
+        "`site_name` `issues-home`"
+    ) in skill
     assert "do not run a build yourself" in skill
-    assert "set_homepage" in skill
+    assert "`object_get` kind `agent` with an empty name reads this turn's own agent" in skill
+    assert "`set_homepage` action's call template already carries the agent's name" in skill
+    assert f"`{app_issues.manifest().agents[0].name}`" not in skill
     assert "takes the platform kit as it stands today" in skill
 
 

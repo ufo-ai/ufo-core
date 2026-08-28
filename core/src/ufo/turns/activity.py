@@ -10,7 +10,7 @@ from ufo.models.interface import Message, ModelRequest, ToolUseBlock
 from ufo.o11y import emit_metric, log
 
 SKILL_LOAD_TOOL = "load_skill"
-SKILL_SEARCH_TOOL = "skill_search"
+SKILL_SEARCH_ACTION_ID = "action:skill:skill_search"
 ACTIVITY_JOB = "core:tool_activity"
 ACTIVITY_GOAL_CHARS = 800
 ACTIVITY_ARGUMENT_CHARS = 600

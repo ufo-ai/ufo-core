@@ -16,7 +16,7 @@ import { codeSpans } from "@/kernel/cards";
 import { OutcomeNotice, type NoticeState, QUIET } from "@/kernel/panel";
 import type { ListingSpec } from "@/kernel/listing";
 import { BASE } from "@/lib/api";
-import type { CredentialPrompt } from "@/lib/types";
+import type { ActionView, CredentialPrompt } from "@/lib/types";
 
 type Slot = {
   name: string;
@@ -26,7 +26,17 @@ type Slot = {
   filled: boolean;
 };
 
-type CredentialsPayload = { slots: Slot[] };
+type CredentialsPayload = { slots: Slot[]; actions: ActionView[] };
+
+/** The prompt the credential collection's `request_credentials` mints for one slot, authored here
+ *  from the slot the listing read: the action's own input, posted through the projected view. */
+function credentialRequest(row: Slot) {
+  return {
+    reason:
+      row.extension + " authenticates with this value; it is stored encrypted and never shown again.",
+    prompts: [{ slot: row.slot, prompt: row.description || row.slot }],
+  };
+}
 
 const MODEL_PROVIDER_SLOTS = [
   "anthropic_api_key",
@@ -106,38 +116,42 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     whole: true,
   },
   empty: "No credential slots are declared.",
-  actions: (row, { act, busy }) => (
-    <div className={ACTS}>
-      {row.filled ? (
-        <span
-          data-part="status"
-          className="flex items-center gap-xs text-label text-ink-soft"
-        >
-          <IconCheck role="img" aria-label={row.slot + " filled"} className="size-icon" />
-          Filled
-        </span>
-      ) : null}
-      <Button
-        variant="row"
-        disabled={busy}
-        onClick={() =>
-          act({ verb: "request", kind: "credential", name: row.name })
-        }
-      >
-        {row.filled ? "Replace" : "Set"}
-      </Button>
-      {row.filled ? (
-        <ConfirmButton
-          verb="Clear"
-          variant="row"
-          disabled={busy}
-          onClick={() =>
-            act({ verb: "delete", kind: "credential", name: row.name })
-          }
-        />
-      ) : null}
-    </div>
-  ),
+  views: (payload) => payload.actions,
+  actions: (row, { act, action, busy, actions }) => {
+    const request = actions.find((view) => view.name === "request_credentials");
+    return (
+      <div className={ACTS}>
+        {row.filled ? (
+          <span
+            data-part="status"
+            className="flex items-center gap-xs text-label text-ink-soft"
+          >
+            <IconCheck role="img" aria-label={row.slot + " filled"} className="size-icon" />
+            Filled
+          </span>
+        ) : null}
+        {request ? (
+          <Button
+            variant="row"
+            disabled={busy}
+            onClick={() => action(request, credentialRequest(row))}
+          >
+            {row.filled ? "Replace" : "Set"}
+          </Button>
+        ) : null}
+        {row.filled ? (
+          <ConfirmButton
+            verb="Clear"
+            variant="row"
+            disabled={busy}
+            onClick={() =>
+              act({ verb: "delete", kind: "credential", name: row.name })
+            }
+          />
+        ) : null}
+      </div>
+    );
+  },
   credentials: (request, onStored, close) => (
     <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
       <DialogContent>

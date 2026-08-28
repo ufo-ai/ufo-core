@@ -1,10 +1,10 @@
 """The core-registered `member` object kind: workspace membership, admin role, and seat, plus
 `add_member`, the one verb that mints a member ahead of their first contact.
 
-The roster is the main agent's: a read off any other agent narrows to the reader's own row, and a
-channel another organization sits in narrows the same way. The portal reads through that one rule —
-`member_page`/`member_detail` answer on the agent the request names, with the signed-in member as
-the reader."""
+The roster is the main agent's, and a speaking workspace admin's: a read off any other agent
+narrows anyone else to their own row, and a channel another organization sits in narrows everyone
+that way. The portal reads through the main-agent rule alone — `member_page`/`member_detail`
+answer on the agent the request names, with the signed-in member as the reader."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -31,13 +31,16 @@ from ufo.objects import (
 from ufo.schema import tables
 from ufo.seats import Seats, create_member, email_domain, member_is_admin
 from ufo.tools.context import TextContent, ToolContext, ToolResult
-from ufo.tools.registry import ToolDef
+from ufo.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.turns.audience import FOREIGN_AUDIENCE_PREFIX
 from ufo.workspace import ws_current
 
 MEMBER_KIND = "member"
 ADD_MEMBER_TOOL = "add_member"
-MEMBER_CREATE = f"members join through a verified chat surface, or are added with {ADD_MEMBER_TOOL}"
+MEMBER_CREATE = (
+    "members join through a verified chat surface, or are added with the collection's "
+    f"{ADD_MEMBER_TOOL} action"
+)
 MEMBER_DELETE = "workspace members cannot be deleted through objects"
 MEMBER_ADMIN_GATE = "a member's role or seat is changed by a workspace admin using the main agent"
 ADD_MEMBER_GATE = "a member is added by a workspace admin using the main agent"
@@ -76,11 +79,12 @@ class MemberObjects:
         admin: bool,
         query: ObjectListQuery,
     ) -> ObjectPage:
-        """The roster a signed-in member reads outside a turn, on the rule `list` answers by: the
-        whole workspace off the main agent, the reader's own row alone off any other. The reader
-        is the speaker — a portal read is always live and member-made — and its audience is that
-        member's own, never a channel another organization sits in, so the foreign narrowing
-        `list` also applies has nothing to catch here."""
+        """The roster a signed-in member reads outside a turn: the whole workspace off the main
+        agent, the reader's own row alone off any other — the reader's admin standing widens a
+        turn's `list`, never this portal read. The reader is the speaker — a portal read is
+        always live and member-made — and its audience is that member's own, never a channel
+        another organization sits in, so the foreign narrowing `list` also applies has nothing to
+        catch here."""
         return object_page(
             tuple(_row(row) for row in await self._member_rows(member_id)),
             query,
@@ -99,8 +103,9 @@ class MemberObjects:
         admin: bool,
     ) -> MemberObject[MemberSpec] | None:
         """One member as the portal reads them — the row `list` renders beside the detail `get`
-        reads, behind the same main-agent rule. A colleague's row is absent off a child agent for
-        everyone, an admin included: the roster is the main agent's."""
+        reads, behind the portal's main-agent rule. A colleague's row is absent off a child agent
+        here for everyone, an admin included: a turn's `get` widens for a speaking admin, this
+        portal read never does."""
         row = next(
             (row for row in await self._member_rows(member_id) if str(row.id) == name),
             None,
@@ -219,7 +224,8 @@ class MemberObjects:
             return ()
         if ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
             return await self._roster(ctx.speaker_member_id, whole=False)
-        return await self._roster(ctx.speaker_member_id, whole=await ctx.agent_is_main())
+        whole = await ctx.agent_is_main() or await ctx.speaker_is_admin()
+        return await self._roster(ctx.speaker_member_id, whole=whole)
 
     async def _visible_row(self, ctx: ToolContext, name: str) -> sa.Row | None:
         return next(
@@ -290,7 +296,10 @@ def _detail(row: sa.Row) -> ObjectDetail[MemberSpec]:
 
 class AddMemberInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    email: str = Field(description="The email of the person to add, at any domain.")
+    email: str = Field(
+        description="The email of the person to add, at any domain.",
+        json_schema_extra={"format": "email"},
+    )
     admin: bool = Field(
         default=False,
         description="Whether they administer the workspace — a workspace admin manages every "
@@ -384,6 +393,8 @@ ADD_MEMBER_TOOL_DEF = ToolDef(
     handler=AddMember().add,
     side_effecting=True,
     parallel_safe=True,
+    bound=ObjectBinding(kind=MEMBER_KIND, binding="collection"),
+    presentation=ActionPresentation(label="Add member"),
 )
 
 MEMBER_OBJECT = ObjectKind(
@@ -392,13 +403,15 @@ MEMBER_OBJECT = ObjectKind(
     guidance=(
         "List members from the main agent for the workspace roster — every member reads it in an "
         "internal conversation, so any member can be told who their colleagues are and which of "
-        "them administer the workspace. A child agent and an externally shared channel list only "
-        "the speaker: the roster is internal, and a channel another organization sits in never "
+        "them administer the workspace. A child agent lists only the speaker, unless the speaker "
+        "is a workspace admin, who reads the whole roster off any agent in an internal "
+        "conversation. An externally shared channel lists only the speaker for everyone: the "
+        "roster is internal, and a channel another organization sits in never "
         "hears it. Apply {admin: true|false, seated: "
         "true|false} to an existing member id; only a speaking admin using the main agent may "
         "change either. Unseating removes access at admission and seating restores it; members "
         "are unlimited, so nothing is counted. The last admin and last seated admin cannot be "
-        f"removed. Use {ADD_MEMBER_TOOL} to "
+        f"removed. Run the collection's {ADD_MEMBER_TOOL} action to "
         "add someone who has not arrived yet; members also join by themselves through a verified "
         "chat surface. Members cannot be deleted here."
     ),

@@ -72,7 +72,8 @@ CODE_APP_SETUP_INSTRUCTIONS = (
     "the pull-request source for that account and share it — only a shared source carries a "
     "trigger — and apply a source trigger naming it, so a changed pull request wakes this "
     "conversation. The reviewers also need the ufo GitHub App installed to fetch commits: "
-    "`connect_github` hands an admin that link once for the whole workspace."
+    "the `github-app-installation` credential object's `connect_github` action hands an admin "
+    "that link once for the whole workspace."
 )
 
 CODE_APP_AGENT = AgentProvision(

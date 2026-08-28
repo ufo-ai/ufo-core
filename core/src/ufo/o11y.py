@@ -119,7 +119,16 @@ HISTOGRAMS = {
         "gap",
         "result",
     ),
-    "tool_call_ms": ("tool", "outcome", ERROR_CLASS_DIMENSION, PROFILE_DIMENSION),
+    "tool_call_ms": (
+        "tool",
+        "call",
+        "kind",
+        "binding",
+        "contributor",
+        "outcome",
+        ERROR_CLASS_DIMENSION,
+        PROFILE_DIMENSION,
+    ),
     "turn_ms": ("status", PROFILE_DIMENSION),
 }
 UP_DOWN_METRICS = {

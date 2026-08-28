@@ -15,7 +15,7 @@ The cleanest setup serves the frontend **and** the API from one server on one po
 
 1. Write a server that listens on the `PORT` environment variable (default 8000 for local testing) and serves both your static files and `/api/...` routes
 2. During the build, run it with `start_server(command=…, project_path=…, port=…)` to test
-3. Ship it with `publish_website(project_path=…, app_name=…, install_command=…, run_command=…)` — it installs dependencies, runs your server with `PORT` set to the port it probes, and returns the reachable URL. A server that ignores `PORT` never reports ready. A website-building subagent does not hold this tool: stop after step 2 and report that the app needs publishing, for the agent that delegated to you to do from these same files
+3. Ship it with the `site` collection's `publish_website` action — `object_action(kind="site", action="publish_website", input={project_path=…, app_name=…, install_command=…, run_command=…})` — it installs dependencies, runs your server with `PORT` set to the port it probes, and returns the reachable URL. A server that ignores `PORT` never reports ready. A website-building subagent does not hold this tool: stop after step 2 and report that the app needs publishing, for the agent that delegated to you to do from these same files
 
 The server is reachable at `http://localhost:<port>` inside the sandbox. Bind to `0.0.0.0` so the readiness probe on `127.0.0.1` connects.
 
@@ -110,12 +110,16 @@ A website-building subagent stops before this step and reports that the app need
 agent that delegated to you publishes it from these same files.
 
 ```
-publish_website(
-  project_path="/workspace/my-project",
-  dist_path="public",
-  app_name="My App",
-  install_command="pip install -r requirements.txt",
-  run_command="python api_server.py"
+object_action(
+  kind="site",
+  action="publish_website",
+  input={
+    project_path="/workspace/my-project",
+    dist_path="public",
+    app_name="My App",
+    install_command="pip install -r requirements.txt",
+    run_command="python api_server.py"
+  }
 )
 ```
 

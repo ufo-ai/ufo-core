@@ -61,7 +61,6 @@ from ufo.hub import ArrivalQueued, Hub, Reply
 from ufo.o11y import current_traceparent, log, span
 from ufo.schema import tables
 from ufo.schema.records import (
-    BILLING_INTENT_TOOL,
     DBOS_APP_VERSION,
     DELIVERY_PENDING,
     INTENT_ADMISSION,
@@ -80,6 +79,7 @@ from ufo.schema.records import (
     ToolIntent,
     TurnContext,
     TurnStatus,
+    admits_spent_balance,
     mid_turn_reply_id_for,
     turn_id_for,
 )
@@ -669,7 +669,7 @@ class Admission:
                     ).decide(connection, 0)
                     balance = (
                         SpendDecision(outcome=ALLOW, message="")
-                        if intent is not None and intent.tool == BILLING_INTENT_TOOL
+                        if intent is not None and admits_spent_balance(intent)
                         else await BalanceGate(workspace_id, self.billing_url).admits(
                             connection, agent_id, self.key_slot_for
                         )

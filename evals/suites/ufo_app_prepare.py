@@ -4,7 +4,7 @@ import argparse
 import asyncio
 
 import sqlalchemy as sa
-from ufo_ext_sites.application_builder import APPLICATION_BUILDER_DELEGATION_TOOL
+from ufo_ext_sites.application_builder import APPLICATION_BUILDER_DELEGATION
 
 from ufo.config import Config, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -15,7 +15,7 @@ from ufo.workspace import ws
 WEB_EXTENSION = "web"
 HOMEPAGE_SEED_PREFIX = "homepage-seed/"
 SETTLED_MARKER = "withheld-eval"
-APP_PARENT_TOOLS = (APPLICATION_BUILDER_DELEGATION_TOOL,)
+APP_PARENT_TOOLS = (APPLICATION_BUILDER_DELEGATION.canonical_id,)
 
 
 async def prepare_app_eval(config: Config) -> None:

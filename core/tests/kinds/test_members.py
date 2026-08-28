@@ -13,7 +13,7 @@ from dbos import EnqueueOptions
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import turn_tools
-from ufo.kinds.members import ADD_MEMBER_TOOL, MEMBER_KIND
+from ufo.kinds.members import ADD_MEMBER_TOOL_DEF, MEMBER_KIND
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
@@ -22,7 +22,12 @@ from ufo.seats import SEAT_REFUSAL_MESSAGE, create_member
 from ufo.surfaces.admission import Admission
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
-from ufo.turns.audience import Audience, conversation_audience, foreign_room_audience
+from ufo.turns.audience import (
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
 from ufo.workspace import ws
 
 LOCK_OBSERVE_TIMEOUT_SECONDS = 5
@@ -124,7 +129,7 @@ def _context(
 
 
 def _tool(name: str) -> ToolDef:
-    tools, _ = turn_tools((), None, audience=conversation_audience(None))
+    tools, _, _ = turn_tools((), None, audience=conversation_audience(None))
     return next(tool for tool in tools if tool.name == name)
 
 
@@ -338,7 +343,7 @@ async def _member_row(workspace_id: UUID, email: str) -> sa.Row | None:
 
 
 async def _add(ctx: ToolContext, **args: object) -> str:
-    return await _text(_tool(ADD_MEMBER_TOOL), ctx, **args)
+    return await _text(ADD_MEMBER_TOOL_DEF, ctx, **args)
 
 
 async def test_an_admin_adds_a_member_who_has_never_spoken(db: None) -> None:
@@ -562,6 +567,51 @@ async def test_every_member_lists_the_roster_from_the_main_agent(db: None) -> No
         assert [row["name"] for row in walled["objects"]] == [str(member_id)]
 
 
+async def test_a_speaking_admin_reads_the_roster_from_a_child_agent(db: None) -> None:
+    workspace_id, _, child_agent, admin_id, member_id = await _seed()
+    with ws(workspace_id):
+        listing = json.loads(
+            await _text(
+                _tool("object_list"),
+                _context(workspace_id, child_agent, admin_id),
+                kind=MEMBER_KIND,
+            )
+        )
+        assert {row["name"] for row in listing["objects"]} == {str(admin_id), str(member_id)}
+        opened = yaml.safe_load(
+            await _text(
+                _tool("object_get"),
+                _context(workspace_id, child_agent, admin_id),
+                kind=MEMBER_KIND,
+                name=str(member_id),
+            )
+        )
+        assert opened["status"]["email"] == "member@example.com"
+        room = json.loads(
+            await _text(
+                _tool("object_list"),
+                _context(workspace_id, child_agent, admin_id, room_audience("slack", "C7")),
+                kind=MEMBER_KIND,
+            )
+        )
+        assert {row["name"] for row in room["objects"]} == {str(admin_id), str(member_id)}
+        with pytest.raises(UnknownObject):
+            await _text(
+                _tool("object_get"),
+                _context(workspace_id, child_agent, member_id),
+                kind=MEMBER_KIND,
+                name=str(admin_id),
+            )
+        foreign = json.loads(
+            await _text(
+                _tool("object_list"),
+                _context(workspace_id, child_agent, admin_id, foreign_room_audience("slack", "C9")),
+                kind=MEMBER_KIND,
+            )
+        )
+        assert [row["name"] for row in foreign["objects"]] == [str(admin_id)]
+
+
 async def test_a_listing_member_still_cannot_change_a_role(db: None) -> None:
     workspace_id, main_agent, _, admin_id, member_id = await _seed()
     with ws(workspace_id), pytest.raises(AdminRequired, match="workspace admin"):
@@ -686,7 +736,7 @@ async def test_object_apply_names_the_verb_that_creates_a_member(db: None) -> No
     """The kind refuses create and points at the verb that does it, so an agent told "add
     jane@acme.com" is never left with a dead end."""
     workspace_id, main_agent, _, admin_id, _ = await _seed()
-    with ws(workspace_id), pytest.raises(VerbNotSupported, match="added with add_member"):
+    with ws(workspace_id), pytest.raises(VerbNotSupported, match="add_member action"):
         await _tool("object_apply").handler(
             _context(workspace_id, main_agent, admin_id),
             _tool("object_apply").input_model.model_validate(

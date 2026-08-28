@@ -14,7 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
-import { FormFromSchema, initialSpecValue, type SpecSchema, type SpecValue } from "@/kernel/form";
+import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import type { Placement } from "@/kernel/pager";
 import { Header, PageToolbar } from "@/kernel/pane";
 import { appended, beside, closed, opened } from "@/kernel/slots";
@@ -35,7 +35,7 @@ import { cn } from "@/lib/cn";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { Moment, isMoment } from "@/lib/moments";
-import type { Agent } from "@/lib/types";
+import type { Agent, SpecSchema } from "@/lib/types";
 
 const AGENT_FIELD = "object-agent";
 /** The conversation a record belongs to is where the member goes, never a column they read: the

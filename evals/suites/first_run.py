@@ -160,7 +160,7 @@ def _goal_plan_scorer(goal: GoalCase) -> Grader:
         memory = [
             index
             for index, call in enumerate(output.calls)
-            if call.name == MEMORY_TOOL and call.succeeded
+            if call.call == MEMORY_TOOL and call.succeeded
         ]
         applications = [
             index

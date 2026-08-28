@@ -17,7 +17,8 @@ freezes the label into each export intent at mint, resolved through the deploy's
 this module only relays `export.byok` — so a backlog drained after an outage carries the key
 state that served it, and a re-send is byte-identical whatever changed since.
 
-Billing is a chat act too. An admin asks, the agent calls `manage_billing`, and the tool hands back
+Billing is a chat act too. An admin asks, the agent runs the workspace object's `manage_billing`
+action, and it hands back
 either what the workspace has left or a short-lived Stripe Customer Portal link for saving a payment
 method — no callback, no webhook, no billing table. What the tool persists is the workspace's Stripe
 Customer id, under a deterministic key so a conflict is reconciled by fetching the customer that
@@ -72,12 +73,20 @@ from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection, RouteSpec
 from ufo.sdk.o11y import log, warn
+from ufo.sdk.objects import WORKSPACE_KIND
 from ufo.sdk.seats import (
     member_by_email,
     member_is_admin,
     member_workspaces,
 )
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    ActionPresentation,
+    ObjectBinding,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolResult,
+)
 
 NAME = "metronome"
 VERSION = "0.1.0"
@@ -142,18 +151,20 @@ BILLING_SECTION_BODY = (
     "balance is above zero — and a workspace with no balance at all is not limited by one, which "
     "is what a null balance and reserve mean. When a "
     "workspace admin asks about billing, what they have left, or how to add a card, "
-    "call manage_billing with action 'status' and report the balance, the reserve beneath it, "
+    "run the workspace object's manage_billing action with operation 'status' and report the "
+    "balance, the reserve beneath it, "
     "and whether a card is on file. A workspace whose card has already paid a refill keeps working "
     "for a fixed amount past that line, so a low balance there is not the same as being stopped. "
     "Report what status returns rather "
     "than inferring why a turn stopped. For adding or changing a card, or "
-    "for invoices, call action 'portal' and give them the "
+    "for invoices, run it with operation 'portal' and give them the "
     "returned portal_url as a link to open. There is no plan to sell and none to activate, so "
     "never offer one or say one is pending. If an admin says they are already on a plan, do not "
     "contradict them — nothing here can see a billing arrangement made before this, so say you "
-    "will check with the team. An admin can arrange automatic refills from the card on file: call "
-    "action 'autopay' with the amount to add and the balance to refill below, both in whole "
-    "dollars, and omit both to stop. A card has to be saved first, because the refill runs with "
+    "will check with the team. An admin can arrange automatic refills from the card on file: run "
+    "it with operation 'autopay', giving the amount to add and the balance to refill below, both "
+    "in whole dollars, and omit both to stop. A card has to be saved first, because the refill "
+    "runs with "
     "nobody present. If they ask to add credit as a one-off, say you will pass that to the team."
 )
 
@@ -343,7 +354,8 @@ async def _billing_record(ctx: ExtensionContext) -> BillingRecord | None:
 
 
 class ManageBillingInput(BaseModel):
-    action: Literal["status", "portal", "autopay"] = Field(
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["status", "portal", "autopay"] = Field(
         description=(
             "status: report the card on file and the workspace's remaining balance. portal: return "
             "a link for saving a payment method, and for invoices and billing details. autopay: "
@@ -364,7 +376,7 @@ class ManageBillingInput(BaseModel):
 async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResult:
     ext = await _admin_billing(ctx)
     config = BillingConfig.from_env()
-    match args.action:
+    match args.operation:
         case "status":
             return await _billing_status(ext, config)
         case "portal":
@@ -478,6 +490,8 @@ MANAGE_BILLING_TOOL_DEF = ToolDef(
     input_model=ManageBillingInput,
     handler=manage_billing,
     side_effecting=True,
+    bound=ObjectBinding(kind=WORKSPACE_KIND, binding="instance"),
+    presentation=ActionPresentation(label="Manage billing"),
 )
 
 

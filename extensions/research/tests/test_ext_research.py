@@ -13,8 +13,11 @@ from datetime import UTC, date, datetime
 from uuid import uuid4
 
 import pytest
+import ufo_ext_memory.manifest as memory_manifest
 import ufo_ext_research.manifest as research_manifest
 import ufo_ext_research.tools as research_tools
+import ufo_ext_sources.manifest as sources_manifest
+from cryptography.fernet import Fernet
 from pydantic import ValidationError
 from ufo_ext_research.subagent import (
     DEEP_RESEARCH_MODEL,
@@ -27,12 +30,14 @@ from ufo_ext_research.subagent import (
 )
 from ufo_ext_research.tools import RESEARCH_TOOLS
 
-from ufo.ext.loader import skill_registry
+from ufo.access.credentials import CredentialStore
+from ufo.ext.loader import skill_registry, turn_tools
 from ufo.loop.prompts.render import render_system_prompt
+from ufo.loop.queue import _subagent_actions, _subagent_tools, _with_action_verbs
 from ufo.loop.subagents import subagent_system_prompt
 from ufo.models.catalog import CORE_MODEL_SPECS
 from ufo.schema.records import Agent, Turn
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.search import (
     FetchedPage,
     FetchRequest,
@@ -423,3 +428,26 @@ def test_research_skills_parse_and_index() -> None:
     index = dict(skill_registry((research_manifest.manifest(),)).index())
     for name in ("research-assistant", "research-report"):
         assert name in index
+
+
+def test_a_research_child_keeps_memory_search_on_the_wire() -> None:
+    tools, _, verbs = turn_tools(
+        (memory_manifest.manifest(), sources_manifest.manifest(), research_manifest.manifest()),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=SHARED_AUDIENCE,
+    )
+    assert "memory_search" in RESEARCH_TOOL_NAMES
+    assert not {"object_list", "object_get", "object_action"} & set(RESEARCH_TOOL_NAMES)
+    for profile in (RESEARCH_PROFILE, DEEP_RESEARCH_PROFILE):
+        granted = _subagent_actions(verbs.actions, profile, frozenset())
+        assert granted == frozenset()
+        selected = _with_action_verbs(_subagent_tools(tools, profile, frozenset()), tools, granted)
+        names = {tool.name for tool in selected}
+        assert "memory_search" in names
+        assert not names & {
+            "object_action",
+            "object_list",
+            "object_get",
+            "object_apply",
+            "object_delete",
+        }

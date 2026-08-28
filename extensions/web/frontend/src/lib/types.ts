@@ -54,7 +54,18 @@ export type AdminAgent = Agent & {
   web_audience: string[];
 };
 
-export type Member = { id?: string; email: string; admin: boolean; seated?: boolean };
+/** A workspace member. The administration read carries each row's `actions` — the acts the member
+ *  object projects for that row, pre-bound to it — where a screen offers them. */
+export type Member = {
+  id?: string;
+  email: string;
+  admin: boolean;
+  seated?: boolean;
+  /** The workspace the signed-in member stands in, carried by the boot read alone: the row the
+   *  workspace object's own acts are addressed to. */
+  workspace_id?: string;
+  actions?: ActionView[];
+};
 
 /** The agent a conversation ran under, carried by a read that spans every agent the member
  *  reaches and null by one taken inside a single agent's namespace. */
@@ -85,6 +96,8 @@ export type OwnedConversation = Conversation & { agent: ConversationAgent };
 export type ArchivedApp = {
   id: string;
   name: string;
+  /** The durable name the archived agent object answers to — what a restore targets. */
+  object: string;
   icon: string;
   archived_at: string;
 };
@@ -260,5 +273,40 @@ export type SchemaProperty = {
   maxLength?: number;
   examples?: string[];
   enum?: string[];
+  default?: unknown;
   anyOf?: { type?: string; format?: string; maxLength?: number; enum?: string[] }[];
 };
+
+export type SpecSchema = {
+  properties?: Record<string, SchemaProperty>;
+  required?: string[];
+};
+
+/** The invocation template an action view carries, pre-bound to the object it was read off: the
+ *  kind and action, and the instance name and generation the read established. A control never
+ *  reads it — the body it submits is the action's own input — and echoes it whole to the lane. */
+export type ActionCall = {
+  kind: string;
+  action: string;
+  name?: string;
+  agent?: string;
+  generation?: string;
+  input: Record<string, unknown>;
+};
+
+/** One action as a portal read projects it beside its rows: the JSON Schema of the body it takes,
+ *  the call it addresses, and the words the member reads. */
+export type ActionView = {
+  name: string;
+  description: string;
+  input_schema: SpecSchema;
+  call: ActionCall;
+  label: string;
+  confirm?: string;
+};
+
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+/** An action's input as it submits: each field in its wire type, an optional field left empty
+ *  omitted so the input model applies its own default. */
+export type ActionInput = Record<string, JsonValue>;

@@ -463,7 +463,11 @@ def test_the_connect_tool_and_its_return_leg_ship_together() -> None:
     """The member acts between them: a tool that mints an install link with no route to return to
     would strand every connection, and a route with no tool could never be reached with a seal."""
     manifest = coding.manifest()
-    assert "connect_github" in {tool.name for tool in manifest.tools}
+    (tool,) = (tool for tool in manifest.tools if tool.name == "connect_github")
+    assert tool.canonical_id == "action:credential:connect_github"
+    assert tool.bound is not None and tool.bound.binding == "instance"
+    assert tool.side_effecting is False
+    assert tool.presentation is not None and tool.presentation.label == "Connect GitHub"
     (route,) = manifest.routes
     assert (route.method, route.path) == ("GET", connect.ROUTE_PATH)
     assert route.identify is connect.install_workspace

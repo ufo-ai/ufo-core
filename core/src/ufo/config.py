@@ -153,8 +153,9 @@ class MemoryConfig(BaseModel):
 
 class SkillsConfig(BaseModel):
     """`member_block` renders the bound agent's saved-skill cards into each member turn's injected
-    context. Off, member skills stay loadable through `skill_search` and `load_skill` but no turn
-    suggests them — the ablation arm the suggestion-bias evals run against."""
+    context. Off, member skills stay loadable through the skill kind's `skill_search` action and
+    `load_skill` but no turn suggests them — the ablation arm the suggestion-bias evals run
+    against."""
 
     model_config = ConfigDict(extra="forbid")
     member_block: bool = True

@@ -1,6 +1,6 @@
-"""The portal's memory-writing intent lanes end to end: the memory view's correction and the first
-run's picks. A row's correction posts a `record` intent on the main agent's lane, the turn
-dispatches `memory_update` verbatim — exactly the write chat performs — so a new item lands under
+"""The portal's memory-writing action lanes end to end: the memory view's correction and the first
+run's picks. A row's correction posts `record_correction` on the main agent's lane, the turn
+dispatches it verbatim — writing what chat's `memory_update` writes — so a new item lands under
 the correcting member's own audience naming the corrected item in `source_ref`. The named item is
 never edited or removed; both statements stand until the dedup sweep retires the near-duplicate
 original toward the correction, the newest of the two, and a correction further away retires
@@ -28,7 +28,9 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory import manifest as memory_manifest_module
 from ufo_ext_memory.condenser import DEDUP_MIN_AGE, MemoryDeduper
 from ufo_ext_memory.store import MemoryIndexer, MemoryStore, MemoryWrite, memory_item
+from ufo_ext_sources import manifest as sources_manifest_module
 from ufo_ext_web.manifest import manifest as web_manifest
+from ufo_ext_web.panels import FRAME_HEADER
 from ufo_ext_web.surface import SESSION_COOKIE
 from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.surfaces import (
@@ -45,7 +47,7 @@ from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.loader import memory_search, skill_registry
+from ufo.ext.loader import member_object_registry, memory_search, skill_registry
 from ufo.hub import InProcessHub
 from ufo.indexing import TextChunker
 from ufo.loop import queue as loop_queue
@@ -186,7 +188,7 @@ def memory_runtime(
             invoker_for=invoker_factory(dbos_client),
             subagents=SubagentRegistry(()),
             subagent_grants={},
-            manifests=(memory_manifest_module.manifest(),),
+            manifests=(sources_manifest_module.manifest(), memory_manifest_module.manifest()),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
             credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),
@@ -214,7 +216,11 @@ async def memory_web(
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     dbos_client = replay_safe_client(config.database.system_url)
     workspace_id, agent_id = await _seed_workspace()
-    manifests = (web_manifest(), memory_manifest_module.manifest())
+    manifests = (
+        web_manifest(),
+        memory_manifest_module.manifest(),
+        sources_manifest_module.manifest(),
+    )
     index = DefaultIndex(transaction=workspace_tx)
     embed = StubEmbed()
     app = FastAPI()
@@ -234,6 +240,9 @@ async def memory_web(
         skills=EMPTY_SKILL_REGISTRY,
         member_skill_listing=no_member_skills,
         memory=memory_search(manifests, None, index, embed),
+        objects=member_object_registry(
+            manifests, CredentialStore(fernet=Fernet(Fernet.generate_key())), index, embed
+        ),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
         yield client, workspace_id, agent_id
@@ -304,6 +313,17 @@ async def _index(workspace_id: UUID) -> None:
         ).run()
 
 
+def _correction(original_id: UUID, body: str) -> dict[str, object]:
+    """A correction as the memory view submits it: the `record_correction` action's own input — the
+    item corrected and the statement replacing it; the route's path names the collection and the
+    action, and the write derives the rest."""
+    return {"corrects": str(original_id), "body": body}
+
+
+def _correction_path(agent_id: UUID) -> str:
+    return f"/surface/web/agents/{agent_id}/actions/memory/record_correction"
+
+
 async def test_a_correction_stands_beside_its_statement_until_the_sweep(
     memory_web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -323,13 +343,8 @@ async def test_a_correction_stands_beside_its_statement_until_the_sweep(
     assert hit["ref"].startswith("memory/")
     original_id = UUID(hit["ref"].removeprefix("memory/"))
     corrected = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={
-            "verb": "record",
-            "kind": "memory",
-            "corrects": str(original_id),
-            "body": "the codename is redwood",
-        },
+        _correction_path(agent_id),
+        json=_correction(original_id, "the codename is redwood"),
         headers=cookie,
     )
     assert corrected.status_code == 200
@@ -376,7 +391,8 @@ async def test_a_correction_stands_beside_its_statement_until_the_sweep(
     assert correction["subject"] == member_subject(member_id)
     assert correction["source_ref"] == f"corrects memory/{original_id}"
     assert turn["status"] == "done"
-    assert json.loads(turn["inbound"])["tool"] == "memory_update"
+    inbound = json.loads(turn["inbound"])
+    assert (inbound["tool"], inbound["input"]["action"]) == ("object_action", "record_correction")
     await _index(workspace_id)
     reread = await client.get("/surface/web/workspace/memory?q=codename", headers=cookie)
     texts = {match["text"] for match in reread.json()["matches"]}
@@ -401,13 +417,8 @@ async def test_a_correction_further_than_the_fence_leaves_both_live(
             )
         ).scalar_one()
     corrected = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={
-            "verb": "record",
-            "kind": "memory",
-            "corrects": str(original_id),
-            "body": replacement,
-        },
+        _correction_path(agent_id),
+        json=_correction(original_id, replacement),
         headers=cookie,
     )
     assert corrected.status_code == 200
@@ -438,13 +449,8 @@ async def test_a_correction_never_touches_another_members_item(
             )
         ).scalar_one()
     corrected = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={
-            "verb": "record",
-            "kind": "memory",
-            "corrects": str(original_id),
-            "body": "the launch is monday",
-        },
+        _correction_path(agent_id),
+        json=_correction(original_id, "the launch is monday"),
         headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
     assert corrected.status_code == 200
@@ -475,28 +481,15 @@ async def test_a_correction_never_touches_another_members_item(
 async def test_the_first_run_records_what_the_team_uses(
     memory_web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The first run's pick lane: the tiles the member pressed dispatch `memory_update` verbatim, so
-    one item lands under their own subject naming the first run in `source_ref`, and its body states
-    the catalog's labels in the catalog's own order however the picks arrived. A name the catalog
-    does not offer, and a pick of nothing, are 400 before a turn exists — so the one item on the
-    workspace is the one the accepted intent wrote."""
+    """The first run's pick lane: the sentence the page writes from the tiles the member pressed
+    dispatches the memory collection's `record_first_run` verbatim, so one item lands under their
+    own subject naming the first run in `source_ref` with the body the page authored."""
     client, workspace_id, agent_id = memory_web
     member_id, token = await _seed_member(workspace_id, "owner@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    path = f"/surface/web/agents/{agent_id}/intents"
-    unoffered = await client.post(
-        path,
-        json={"verb": "record_tooling", "kind": "memory", "providers": ["notion", "myspace"]},
-        headers=cookie,
-    )
-    assert unoffered.status_code == 400
-    nothing = await client.post(
-        path, json={"verb": "record_tooling", "kind": "memory", "providers": []}, headers=cookie
-    )
-    assert nothing.status_code == 400
     recorded = await client.post(
-        path,
-        json={"verb": "record_tooling", "kind": "memory", "providers": ["notion", "gmail"]},
+        f"/surface/web/agents/{agent_id}/actions/memory/record_first_run",
+        json={"body": "My team uses Gmail, Notion."},
         headers=cookie,
     )
     assert recorded.status_code == 200
@@ -529,14 +522,16 @@ async def test_the_first_run_records_what_the_team_uses(
     assert rows[0]["body"] == "My team uses Gmail, Notion."
     assert rows[0]["subject"] == member_subject(member_id)
     assert rows[0]["source_ref"] == "first run"
-    assert json.loads(turn["inbound"])["tool"] == "memory_update"
+    inbound = json.loads(turn["inbound"])
+    assert (inbound["tool"], inbound["input"]["action"]) == ("object_action", "record_first_run")
 
 
 async def test_a_malformed_or_walled_correction_writes_nothing(
     memory_web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The refusal polarities before any turn: a cross-paired verb/kind and an empty body are 400
-    at validation, a walled agent is not-found — and none of them writes a turn or an item."""
+    """The refusal polarities before any turn: an action named on a kind that does not present it
+    is refused, an apply on the memory kind is 400 at validation, a walled agent is not-found — and
+    none of them writes a turn or an item."""
     client, workspace_id, agent_id = memory_web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -553,33 +548,33 @@ async def test_a_malformed_or_walled_correction_writes_nothing(
                 updated_at=sa.func.now(),
             )
         )
-    correction = {
-        "verb": "record",
-        "kind": "memory",
-        "corrects": str(uuid4()),
-        "body": "corrected",
-    }
+    correction = _correction(uuid4(), "corrected")
     cross_paired = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={**correction, "kind": "agent"},
+        f"/surface/web/agents/{agent_id}/actions/agent/record_correction",
+        json=correction,
         headers=cookie,
     )
-    assert cross_paired.status_code == 400
-    empty = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={**correction, "body": ""},
+    assert cross_paired.status_code == 200
+    assert cross_paired.json() == {
+        "applied": False,
+        "message": "agent has no portal action named 'record_correction'.",
+    }
+    model_only = await client.post(
+        f"/surface/web/agents/{agent_id}/actions/memory/memory_update",
+        json={"body": "corrected"},
         headers=cookie,
     )
-    assert empty.status_code == 400
+    assert model_only.json() == {
+        "applied": False,
+        "message": "memory has no portal action named 'memory_update'.",
+    }
     apply_on_memory = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json={"verb": "apply", "kind": "memory", "name": str(uuid4())},
         headers=cookie,
     )
     assert apply_on_memory.status_code == 400
-    walled = await client.post(
-        f"/surface/web/agents/{walled_agent}/intents", json=correction, headers=cookie
-    )
+    walled = await client.post(_correction_path(walled_agent), json=correction, headers=cookie)
     assert walled.status_code == 404
     async with workspace_tx() as connection:
         turns = (
@@ -595,13 +590,16 @@ async def test_a_malformed_or_walled_correction_writes_nothing(
 async def test_the_wiki_rebuild_clears_the_derive_cursor_through_the_lane(
     memory_web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The rebuild's whole chain: the page's intent is admitted as a turn, the turn dispatches
-    `rebuild_page_facts` verbatim, and the cursor the fact deriver rides is gone — so the next tick
-    replays every page and writes each one's facts again. The turn writes no memory itself, because
-    the pass that owns that text is what writes it.
+    """The rebuild's whole chain: the control is projected from the `page` kind's declarations — a
+    kind the portal never lists for a member — the page's post is admitted as a turn, the turn
+    dispatches `rebuild_page_facts` verbatim, and the cursor the fact deriver rides is gone — so the
+    next tick replays every page and writes each one's facts again. The turn writes no memory
+    itself, because the pass that owns that text is what writes it.
 
     The gate is the tool's, exercised through the lane the button uses: a member who is not an admin
-    reads the tool's refusal and the cursor stands exactly where it was."""
+    reads the tool's refusal and the cursor stands exactly where it was. The admin's press arrives
+    marked as a page's — the wiki page carries this control — and the rebuild's declaration admits
+    the mark."""
     client, workspace_id, agent_id = memory_web
     member_id, token = await _seed_member(workspace_id, "rebuilder@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -609,11 +607,15 @@ async def test_the_wiki_rebuild_clears_the_derive_cursor_through_the_lane(
     with ws(workspace_id):
         await cursor.put(memory_manifest_module.DERIVE_CURSOR_KEY, "2026-08-01T00:00:00+00:00|page")
 
-    refused = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "rebuild_page_facts"},
-        headers=cookie,
-    )
+    assert (await client.get("/surface/web/objects/page", headers=cookie)).status_code == 404
+    projected = await client.get("/surface/web/actions/page", headers=cookie)
+    assert projected.status_code == 200, projected.text
+    [view] = [v for v in projected.json()["actions"] if v["name"] == "rebuild_page_facts"]
+    assert view["label"]
+    assert view["call"] == {"kind": "page", "action": "rebuild_page_facts", "input": {}}
+
+    rebuild = f"/surface/web/agents/{agent_id}/actions/page/rebuild_page_facts"
+    refused = await client.post(rebuild, json={}, headers=cookie)
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
     assert refused.json()["message"] == memory_manifest_module.REBUILD_ADMIN_ONLY
@@ -624,11 +626,7 @@ async def test_the_wiki_rebuild_clears_the_derive_cursor_through_the_lane(
         await connection.execute(
             sa.update(tables.member).where(tables.member.c.id == member_id).values(is_admin=True)
         )
-    queued = await client.post(
-        f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "rebuild_page_facts"},
-        headers=cookie,
-    )
+    queued = await client.post(rebuild, json={}, headers={**cookie, FRAME_HEADER: "1"})
     assert queued.status_code == 200
     assert queued.json()["applied"] is True
     assert queued.json()["message"] == memory_manifest_module.REBUILD_QUEUED
@@ -638,3 +636,13 @@ async def test_the_wiki_rebuild_clears_the_derive_cursor_through_the_lane(
         assert (
             await connection.execute(sa.select(sa.func.count()).select_from(memory_item))
         ).scalar_one() == 0
+        inbound = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound).where(
+                    tables.turn.c.id == UUID(queued.json()["turn_id"])
+                )
+            )
+        ).scalar_one()
+    assert inbound == (
+        '{"tool":"object_action","input":{"kind":"page","action":"rebuild_page_facts","input":{}}}'
+    )

@@ -43,6 +43,7 @@ from ufo.ext.context import ExtensionContext, JsonValue, context_for
 from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
 from ufo.ext.manifest import Manifest
 from ufo.kinds.agents import (
+    AGENT_ALREADY_ARCHIVED,
     AGENT_CREATE_GATE,
     AGENT_EDIT_GATE,
     AGENT_KIND,
@@ -72,6 +73,7 @@ from ufo.object_name import (
     OBJECT_NAME_PATTERN,
     InvalidName,
 )
+from ufo.object_scope import ObjectActionTarget
 from ufo.objects import (
     MATERIALIZE_MAX_BYTES,
     OBJECT_LIST_PAGE,
@@ -223,7 +225,7 @@ def _tool_context(
 def _object_tools() -> dict[str, ToolDef]:
     manifest = next((m for m in load_manifests() if m.name == sample.NAME), None)
     assert manifest is not None, "sample extension not discovered via entry points — run `uv sync`"
-    tools, ext_by_tool = turn_tools(
+    tools, ext_by_tool, _ = turn_tools(
         (manifest,),
         CredentialStore(fernet=Fernet(Fernet.generate_key())),
         audience=conversation_audience(None),
@@ -338,7 +340,7 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
         explained = json.loads(await _text(tools, "object_explain", ctx, kind=sample.WIDGET_KIND))
         assert "color" in explained["spec_schema"]["properties"]
         assert explained["guidance"] == sample.WIDGET_GUIDANCE
-        assert explained["agent_target_verbs"] == []
+        assert explained["agent_target_verbs"] == ["get"]
 
         deleted = json.loads(
             await _text(tools, "object_delete", ctx, kind=sample.WIDGET_KIND, name="anvil")
@@ -1177,6 +1179,30 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
                 )
             ).one()
         assert repaired == ("workspace", "drifted")
+
+
+async def test_an_agent_reads_its_own_row_on_a_speakerless_turn(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        await _agent_row(workspace_id, name="ufo", is_main=True)
+        own = await _agent_row(workspace_id, name="research")
+        await _agent_row(workspace_id, name="analyst")
+        ctx = _tool_context(workspace_id, agent_id=own)
+
+        fetched = yaml.safe_load(
+            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="research")
+        )
+        assert fetched["spec"]["visibility"] == "private"
+        unnamed = yaml.safe_load(await _text(tools, "object_get", ctx, kind=AGENT_KIND, name=""))
+        assert unnamed["name"] == "research"
+        assert unnamed["spec"] == fetched["spec"]
+        listing = json.loads(await _text(tools, "object_list", ctx, kind=AGENT_KIND))
+        assert [row["name"] for row in listing["objects"]] == ["research", "ufo"]
+        with pytest.raises(UnknownObject):
+            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="analyst")
+        with pytest.raises(UnknownObject):
+            await _text(tools, "object_get", ctx, kind="workspace", name="")
 
 
 async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_named(
@@ -3010,7 +3036,7 @@ async def test_explicit_room_request_opens_room_and_requester_private_conversati
             agent_id=room_turn.agent_id,
             member_id=bob,
         )
-        ctx, _ = await _workspace_context(room_turn, tmp_path, audience=room)
+        ctx, workspace_dir = await _workspace_context(room_turn, tmp_path, audience=room)
         ctx = replace(ctx, speaker_member_id=alice)
         for turn in (room_turn, mine, theirs):
             await Transcript(blob=ctx.blob, conversation_id=turn.conversation_id).write(
@@ -3046,7 +3072,7 @@ async def test_explicit_room_request_opens_room_and_requester_private_conversati
                 name=str(mine.conversation_id),
             )
         )
-        with pytest.raises(UnknownObject):
+        theirs_get = yaml.safe_load(
             await _agent_text(
                 room_turn.agent_id,
                 tools,
@@ -3055,6 +3081,7 @@ async def test_explicit_room_request_opens_room_and_requester_private_conversati
                 kind=CONVERSATION_KIND,
                 name=str(theirs.conversation_id),
             )
+        )
 
     assert {row["name"] for row in listing["objects"]} == {
         str(room_turn.conversation_id),
@@ -3062,6 +3089,8 @@ async def test_explicit_room_request_opens_room_and_requester_private_conversati
     }
     assert room_get["status"]["messages"] == 2
     assert mine_get["status"]["messages"] == 2
+    assert theirs_get["status"] is None
+    assert not (workspace_dir / "transcripts" / f"{theirs.conversation_id}.txt").exists()
 
 
 async def test_conversation_surface_label_lists_filters_and_orders(
@@ -3822,6 +3851,143 @@ async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
     assert [row.name for row in portal_only.rows] == [str(mine_id)]
 
 
+async def test_a_speaking_admin_reads_another_members_private_conversation_as_metadata(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        admin = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        private = await _turn_row(workspace_id, member_id=bob)
+        reader = await _turn_row(workspace_id, agent_id=private.agent_id, member_id=admin)
+        ctx, workspace_dir = await _workspace_context(
+            reader,
+            tmp_path,
+            audience=conversation_audience(admin),
+            speaker_member_id=admin,
+        )
+        await Transcript(blob=ctx.blob, conversation_id=private.conversation_id).write(
+            LAUNCH_EXCHANGE
+        )
+
+        with agent(private.agent_id):
+            fetched = yaml.safe_load(
+                await _text(
+                    tools,
+                    "object_get",
+                    ctx,
+                    kind=CONVERSATION_KIND,
+                    name=str(private.conversation_id),
+                )
+            )
+            listed = json.loads(
+                await _text(
+                    tools,
+                    "object_list",
+                    ctx,
+                    kind=CONVERSATION_KIND,
+                    filters={"private": True},
+                )
+            )
+            unfiltered = json.loads(await _text(tools, "object_list", ctx, kind=CONVERSATION_KIND))
+
+    assert fetched["spec"]["audience"] == f"member:{bob}"
+    assert fetched["status"] is None
+    assert not (workspace_dir / "transcripts").exists()
+    assert [row["name"] for row in listed["objects"]] == [str(private.conversation_id)]
+    assert listed["objects"][0]["private"] is True
+    assert str(private.conversation_id) not in {row["name"] for row in unfiltered["objects"]}
+
+
+async def test_private_conversation_metadata_stays_closed_without_a_speaking_admin(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    foreign = foreign_room_audience("slack", "CSHARED")
+    with ws(workspace_id):
+        admin = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        carol = await _member(workspace_id, datetime(2026, 7, 3, tzinfo=UTC))
+        private = await _turn_row(workspace_id, member_id=bob)
+        room = await _turn_row(
+            workspace_id, agent_id=private.agent_id, audience=room_audience("slack", "COPS")
+        )
+        reader = await _turn_row(workspace_id, agent_id=private.agent_id, member_id=carol)
+        foreign_turn = await _turn_row(workspace_id, agent_id=private.agent_id, audience=foreign)
+        elsewhere = await _turn_row(workspace_id, member_id=admin)
+        ctx, _ = await _workspace_context(
+            reader,
+            tmp_path,
+            audience=conversation_audience(carol),
+            speaker_member_id=carol,
+        )
+        admin_ctx = replace(ctx, speaker_member_id=admin, audience=conversation_audience(admin))
+        speakerless = replace(ctx, speaker_member_id=None, on_behalf_of_member_id=admin)
+        foreign_admin = replace(ctx, turn=foreign_turn, speaker_member_id=admin, audience=foreign)
+        get_tool = tools["object_get"]
+        name = str(private.conversation_id)
+
+        with agent(private.agent_id):
+            for refused in (ctx, speakerless, foreign_admin):
+                with pytest.raises(UnknownObject):
+                    await get_tool.handler(
+                        refused,
+                        get_tool.input_model.model_validate(
+                            {"kind": CONVERSATION_KIND, "name": name}
+                        ),
+                    )
+                listed = json.loads(
+                    await _text(
+                        tools,
+                        "object_list",
+                        refused,
+                        kind=CONVERSATION_KIND,
+                        filters={"private": True},
+                    )
+                )
+                assert listed["objects"] == []
+            widened = json.loads(
+                await _text(
+                    tools,
+                    "object_list",
+                    admin_ctx,
+                    kind=CONVERSATION_KIND,
+                    filters={"private": True},
+                )
+            )
+            assert {row["name"] for row in widened["objects"]} == {
+                name,
+                str(reader.conversation_id),
+            }
+            with pytest.raises(UnknownObject):
+                await get_tool.handler(
+                    admin_ctx,
+                    get_tool.input_model.model_validate(
+                        {"kind": CONVERSATION_KIND, "name": str(room.conversation_id)}
+                    ),
+                )
+        with agent(elsewhere.agent_id), pytest.raises(UnknownObject):
+            await get_tool.handler(
+                admin_ctx,
+                get_tool.input_model.model_validate({"kind": CONVERSATION_KIND, "name": name}),
+            )
+
+
+def _restoring(ctx: ToolContext, archived_id: UUID) -> ToolContext:
+    return replace(
+        ctx,
+        target=ObjectActionTarget(
+            kind=AGENT_KIND,
+            name=f"~archived-{archived_id}",
+            agent=None,
+            generation=None,
+            expected_generation=None,
+        ),
+    )
+
+
 async def test_delete_archives_an_app_frees_its_name_and_restore_returns_the_same_row(
     db: None,
 ) -> None:
@@ -3852,7 +4018,8 @@ async def test_delete_archives_an_app_frees_its_name_and_restore_returns_the_sam
         listed = json.loads(
             await _text(tools, "object_list", ctx, kind=AGENT_KIND, filters={"archived": True})
         )
-        assert [row["name"] for row in listed["objects"]] == ["invoice-intake"]
+        assert [row["name"] for row in listed["objects"]] == [f"~archived-{archived_id}"]
+        assert listed["objects"][0]["archived_name"] == "invoice-intake"
         assert listed["objects"][0]["id"] == str(archived_id)
         assert listed["objects"][0]["archived_at"] is not None
         async with workspace_tx() as connection:
@@ -3890,13 +4057,8 @@ async def test_delete_archives_an_app_frees_its_name_and_restore_returns_the_sam
 
         restore = RESTORE_APPLICATION_TOOL_DEF
         answer = await restore.handler(
-            ctx,
-            restore.input_model.model_validate(
-                {
-                    "app_id": str(archived_id),
-                    "name": "invoice-intake-first",
-                }
-            ),
+            _restoring(ctx, archived_id),
+            restore.input_model.model_validate({"new_name": "invoice-intake-first"}),
         )
         assert isinstance(answer.content[0], TextContent)
         assert "invoice-intake-first is live again." in answer.content[0].text
@@ -3958,13 +4120,8 @@ async def test_a_restore_is_refused_a_name_a_live_app_answers_to(db: None) -> No
         restore = RESTORE_APPLICATION_TOOL_DEF
         with pytest.raises(ValueError) as refusal:
             await restore.handler(
-                ctx,
-                restore.input_model.model_validate(
-                    {
-                        "app_id": str(archived_id),
-                        "name": "invoice-intake",
-                    }
-                ),
+                _restoring(ctx, archived_id),
+                restore.input_model.model_validate({"new_name": "invoice-intake"}),
             )
         assert "already exists" in str(refusal.value)
 
@@ -4005,13 +4162,8 @@ async def test_archive_keeps_the_main_app_and_other_members_apps_out_of_reach(db
             await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name="briefer")
         await _text(tools, "object_delete", admin_ctx, kind=AGENT_KIND, name="briefer")
         await RESTORE_APPLICATION_TOOL_DEF.handler(
-            admin_ctx,
-            RESTORE_APPLICATION_TOOL_DEF.input_model.model_validate(
-                {
-                    "app_id": str(shipped),
-                    "name": "briefer",
-                }
-            ),
+            _restoring(admin_ctx, shipped),
+            RESTORE_APPLICATION_TOOL_DEF.input_model.model_validate({"new_name": "briefer"}),
         )
         with pytest.raises(UnknownObject):
             await _text(
@@ -4021,11 +4173,51 @@ async def test_archive_keeps_the_main_app_and_other_members_apps_out_of_reach(db
         await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name="invoice-intake")
         with pytest.raises(UnknownObject):
             await RESTORE_APPLICATION_TOOL_DEF.handler(
-                stranger_ctx,
+                _restoring(stranger_ctx, owned),
                 RESTORE_APPLICATION_TOOL_DEF.input_model.model_validate(
-                    {
-                        "app_id": str(owned),
-                        "name": "invoice-intake",
-                    }
+                    {"new_name": "invoice-intake"}
                 ),
             )
+
+
+async def test_an_archived_app_is_gettable_by_its_durable_name(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, JOINER_CREATED_AT)
+        stranger = await _member(workspace_id, datetime(2026, 7, 3, tzinfo=UTC))
+        admin = await _member(workspace_id, ADMIN_CREATED_AT)
+        await _agent_row(workspace_id, name="ufo", is_main=True)
+        archived_id = await _agent_row(workspace_id, name="invoice-intake")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(owner_member_id=owner)
+                .where(tables.agent.c.id == archived_id)
+            )
+        owner_ctx = _tool_context(workspace_id, speaker_member_id=owner)
+        stranger_ctx = _tool_context(workspace_id, speaker_member_id=stranger)
+        admin_ctx = _tool_context(workspace_id, speaker_member_id=admin)
+        await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name="invoice-intake")
+        durable = f"~archived-{archived_id}"
+
+        fetched = yaml.safe_load(
+            await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name=durable)
+        )
+        assert fetched["spec"]["prompt"] == "be brief"
+        assert fetched["status"]["archived"] is True
+        assert fetched["status"]["archived_name"] == "invoice-intake"
+        assert fetched["status"]["archived_at"] is not None
+
+        widened = yaml.safe_load(
+            await _text(tools, "object_get", admin_ctx, kind=AGENT_KIND, name=durable)
+        )
+        assert widened["status"]["archived"] is True
+
+        with pytest.raises(UnknownObject):
+            await _text(tools, "object_get", stranger_ctx, kind=AGENT_KIND, name=durable)
+        with pytest.raises(UnknownObject):
+            await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name="invoice-intake")
+        with pytest.raises(VerbNotSupported) as refusal:
+            await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name=durable)
+        assert str(refusal.value) == AGENT_ALREADY_ARCHIVED

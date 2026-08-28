@@ -884,9 +884,25 @@ test("the main app has no Archive action in Settings", async () => {
 test("the workspace Apps tab restores an archived app the sidebar does not list", async () => {
   const posted: unknown[] = [];
   const onAgents = vi.fn();
+  const restore = {
+    name: "restore_application",
+    description: "Bring an archived app back under a live name.",
+    input_schema: {
+      properties: { new_name: { type: "string", title: "New Name", maxLength: 64 } },
+      required: ["new_name"],
+    },
+    call: {
+      kind: "agent",
+      action: "restore_application",
+      name: `~archived-${SECOND_ID}`,
+      input: {},
+    },
+    label: "Restore",
+  };
   wire({
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
+    "/actions/agent/": (url, init) => {
+      if (init?.method !== "POST") return json({ actions: [restore] });
+      posted.push({ url, body: JSON.parse(String(init.body)) });
       return json({ applied: true, message: "Applied." });
     },
     "/transcript": () => json({ messages: [] }),
@@ -899,6 +915,7 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
         {
           id: SECOND_ID,
           name: "invoice-intake",
+          object: `~archived-${SECOND_ID}`,
           icon: "aten",
           archived_at: "2026-08-20T12:00:00Z",
         },
@@ -913,14 +930,18 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
 
   await userEvent.click(screen.getByRole("button", { name: "Restore" }));
   const dialog = await screen.findByRole("dialog");
-  const name = within(dialog).getByRole("textbox", { name: "Name" });
+  const name = await within(dialog).findByRole("textbox", { name: "New Name" });
+  expect((name as HTMLInputElement).value).toBe("invoice-intake");
   await userEvent.clear(name);
   await userEvent.type(name, "invoice-intake-2");
   await userEvent.click(within(dialog).getByRole("button", { name: "Restore" }));
 
   await waitFor(() => expect(onAgents).toHaveBeenCalledOnce());
   expect(posted).toEqual([
-    { verb: "restore_application", app_id: SECOND_ID, name: "invoice-intake-2" },
+    {
+      url: `/surface/web/agents/${AGENT_ID}/actions/agent/~archived-${SECOND_ID}/restore_application`,
+      body: { new_name: "invoice-intake-2" },
+    },
   ]);
   expect(screen.queryByRole("dialog")).toBeNull();
 });

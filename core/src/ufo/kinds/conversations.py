@@ -38,7 +38,12 @@ from ufo.objects import (
 from ufo.schema import tables
 from ufo.schema.records import EXTENSION_SURFACE_PREFIX, PORTAL_SURFACE
 from ufo.tools.context import ToolContext
-from ufo.turns.audience import audience_subjects, conversation_audience
+from ufo.turns.audience import (
+    FOREIGN_AUDIENCE_PREFIX,
+    audience_subjects,
+    conversation_audience,
+)
+from ufo.turns.subjects import MEMBER_SUBJECT_PREFIX
 from ufo.turns.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.workspace import ws_current
 
@@ -68,14 +73,26 @@ class ConversationSpec(BaseModel):
 class ConversationObjects:
     """Read-only handlers over the selected agent's conversations visible to the caller, in a turn
     and — through `member_detail` — for a signed-in member outside one. Status materializes a
-    visible transcript. Resolves artifact and scheduled-task links; every mutation refuses."""
+    visible transcript. A speaking workspace admin's turn also reads another member's private
+    conversation of the selected agent as a metadata row: get serves its spec and links, list
+    shows such rows only under the explicit `{"private": true}` filter, status answers nothing,
+    and no transcript is read or written — content stays behind the recorded acknowledgement, and
+    a foreign-audience turn never widens. Resolves artifact and scheduled-task links; every
+    mutation refuses."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         rows = tuple(_row(row) for row in await self._rows(ctx.read_subjects, conversation_id=None))
+        if query.filters.get("private") is True and await self._widens_for_admin(ctx):
+            rows += tuple(
+                _row(row, private=True)
+                for row in await self._private_rows(ctx, conversation_id=None)
+            )
         return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ConversationSpec] | None:
         row = await self._find(ctx.read_subjects, name)
+        if row is None:
+            row = await self._private_find(ctx, name)
         return None if row is None else _detail(row)
 
     async def member_page(
@@ -228,8 +245,35 @@ class ConversationObjects:
         async with workspace_tx() as connection:
             return tuple((await connection.execute(query)).all())
 
+    async def _widens_for_admin(self, ctx: ToolContext) -> bool:
+        if ctx.audience.startswith(FOREIGN_AUDIENCE_PREFIX):
+            return False
+        return await ctx.speaker_is_admin()
 
-def _visible(subjects: frozenset[str]) -> sa.Select:
+    async def _private_find(self, ctx: ToolContext, name: str) -> sa.Row | None:
+        if not await self._widens_for_admin(ctx):
+            return None
+        try:
+            conversation_id = UUID(name)
+        except ValueError:
+            return None
+        rows = await self._private_rows(ctx, conversation_id=conversation_id)
+        return rows[0] if rows else None
+
+    async def _private_rows(
+        self, ctx: ToolContext, *, conversation_id: UUID | None
+    ) -> tuple[sa.Row, ...]:
+        query = _agent_conversations().where(
+            tables.conversation.c.audience.startswith(MEMBER_SUBJECT_PREFIX),
+            tables.conversation.c.audience.notin_(ctx.read_subjects),
+        )
+        if conversation_id is not None:
+            query = query.where(tables.conversation.c.id == conversation_id)
+        async with workspace_tx() as connection:
+            return tuple((await connection.execute(query)).all())
+
+
+def _agent_conversations() -> sa.Select:
     member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
     return (
         sa.select(
@@ -249,9 +293,12 @@ def _visible(subjects: frozenset[str]) -> sa.Select:
         .where(
             tables.conversation.c.workspace_id == ws_current().workspace_id,
             tables.conversation.c.agent_id == object_agent_id(),
-            tables.conversation.c.audience.in_(subjects),
         )
     )
+
+
+def _visible(subjects: frozenset[str]) -> sa.Select:
+    return _agent_conversations().where(tables.conversation.c.audience.in_(subjects))
 
 
 def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
@@ -275,7 +322,7 @@ def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
     )
 
 
-def _row(row: sa.Row) -> ObjectRow:
+def _row(row: sa.Row, *, private: bool = False) -> ObjectRow:
     origin = (
         f"{row.surface} conversation"
         if row.surface_label is None
@@ -284,6 +331,8 @@ def _row(row: sa.Row) -> ObjectRow:
     fields: dict[str, JsonValue] = {"surface": row.surface}
     if row.surface_label is not None:
         fields["surface_label"] = row.surface_label
+    if private:
+        fields["private"] = True
     return ObjectRow(
         name=str(row.id),
         summary=f"{origin}, created {row.created_at.date().isoformat()}",
@@ -317,6 +366,10 @@ CONVERSATION_OBJECT = ObjectKind(
         "one by its id to see which surface and audience it runs on and when it started; its own "
         "`scoped_to` link names the agent it runs with. Reads "
         "show the selected agent's conversations visible to the conversation and exact requester. "
+        "A speaking workspace admin also gets another member's private conversation of the "
+        "selected agent as metadata — its spec and links, with no status and no transcript — and "
+        'lists such rows only under the explicit filter {"private": true}; a channel shared with '
+        "another organization never widens. "
         "Filter or order a listing on `surface` and on `surface_label`, the surface's own name for "
         "where the conversation runs — a Slack channel as `#general`, a Slack DM as `Direct "
         "message`. A conversation whose surface names no origin carries no `surface_label`. "
@@ -328,7 +381,7 @@ CONVERSATION_OBJECT = ObjectKind(
     spec_model=ConversationSpec,
     store=ConversationObjects(),
     list_fields=frozenset(
-        {"surface", "surface_label", "title", "mine", "speaker", "portal", "last_at"}
+        {"surface", "surface_label", "title", "mine", "speaker", "portal", "last_at", "private"}
     ),
     agent_target_verbs=frozenset({"list", "get"}),
 )

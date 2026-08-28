@@ -135,16 +135,25 @@ Admission (`core/src/ufo/surfaces/admission.py`) then holds four gates:
 - Spend preflight (see [Spend caps](#spend-caps)). A refusal — seat or cap — parks instead of
   cancelling when the turn holds already-paid work (a delivered subagent result).
 
-**Prepared intents** are the portal's one mutation path: a panel form's structured intent is
-admitted as a turn on the member's durable intent conversation (`intent/<agent>/<email>`,
-member-private audience) and dispatched verbatim — no model round, no fold into a live turn — so
-the turn is the audit record and the kind's own gate produces the result or refusal. The verb and
-kind sets are closed (`extensions/web/ufo_ext_web/panels.py`). Two intent-lane properties differ
-from chat: the agent **tool allowlist does not apply** — there is no model round to misuse a
-tool, and the panel's verb runs under the submitting member's authority, which is what lets an
-allowlisted shipped agent still be granted an account (the lane still serves only the
-member-facing set; `profile_only` stays withheld) — and an admin may change any agent setting
-through the lane while chat admits only the main agent changing a prompt.
+**Prepared intents** are the portal's one mutation path: a panel's act is admitted as a turn on
+the member's durable intent conversation (`intent/<agent>/<email>`, member-private audience) and
+dispatched verbatim — no model round, no fold into a live turn — so the turn is the audit record
+and the handler's own gate produces the result or refusal. Two lanes carry it. The object verbs
+(`apply`, `delete`, `connect`) ride `POST agents/{agent_id}/intents` with a closed verb and kind
+set (`extensions/web/ufo_ext_web/panels.py`). Every other act is an object action the portal draws
+from its declaration: `POST agents/{agent_id}/actions/{kind}/{action}` or
+`.../actions/{kind}/{name}/{action}`, where the route binds the target from its own path and the
+lane's agent, the body is the action's input alone, and only an action whose declaration carries a
+`presentation` is admitted — at the route and again at dispatch. An embedded app page may post only
+what its declaration additionally marks `frame` — `connect_account`, `rebuild_report_digest`, and
+`rebuild_page_facts` — and the lane checks that mark on a call the shell forwards for a page. The
+first run's iMessage offer posts `imessage_connect` on this lane like any other presented action. Two
+intent-lane properties differ from chat: the
+agent **tool allowlist does not apply** — there is no model round to misuse a tool, and the act
+runs under the submitting member's authority, which is what lets an allowlisted shipped agent still
+be granted an account (the lane still serves only the member-facing set; `profile_only` stays
+withheld) — and an admin may change any agent setting through the lane while chat admits only the
+main agent changing a prompt.
 
 ## Audience — who may read
 
@@ -188,8 +197,8 @@ flowchart TD
     DISC -->|no| NO3["refused — acknowledge first<br/>(read_private_transcript)"]
 ```
 
-The acknowledgement is itself a granting act — `read_private_transcript`, an admin-only chat
-verb the portal dispatches through the prepared-intent lane: the row names reader, subject, and moment before any
+The acknowledgement is itself a granting act — `read_private_transcript`, an admin-only action on
+the conversation object the portal dispatches through the prepared-intent lane: the row names reader, subject, and moment before any
 content is served, emits `surface.transcript_disclosed`, opens that one conversation to that one
 admin for an hour, and is read back only by `ufoctl transcript-reads` — no member-facing route
 lists it. Chat stays narrower on purpose: no tool reads another member's transcript, because an
@@ -235,7 +244,8 @@ the `site` kind's listing all answer the agent's `visibility` instead — `works
 member, `private` the agent's owner and admins — so flipping the agent object is what moves the
 page. The bind itself is the re-gating act, so `set_homepage` gates like a visibility change:
 only the site's creator acting may bind it — another member's site would widen or narrow out
-from under its creator — and a standing site needs a live speaker, a speakerless turn reaching
+from under its creator — another agent's page is bound only by that agent's owner or an admin,
+and a standing site needs a live speaker, a speakerless turn reaching
 only the site its own turn deployed, which is the seed's deploy-and-bind shape.
 
 ## Grants — what an agent may use
@@ -292,8 +302,9 @@ Operators fill slots with `ufoctl credential set`, limited to the same member-fi
 **Web audience.** Which agents a member reaches in the portal starts from the agent's own
 `visibility` (agent-kind spec field): every member reaches every `workspace` agent — main is born
 one and refuses to narrow. A `private` agent reaches its owner, and beyond that the web
-extension's own grant store: `grant_web_access`/`revoke_web_access` (admin-only, in chat, or the
-admin view's intent lane) govern per-member access; admins reach every agent. An out-of-audience
+extension's own grant store: `grant_web_access`/`revoke_web_access`, the admin-only actions on a
+member object (in chat, or the admin view's intent lane), govern per-member access; admins reach
+every agent. An out-of-audience
 agent is not-found on every portal route.
 
 Sharing semantics differ by object:
@@ -382,6 +393,13 @@ untrusted input or multi-tenant deploys.
   allowlist intersected with the live registry. `profile_only` tools reach only a subagent
   profile or extension-shipped agent whose declared allowlist names them — an allowlist is
   declared in a manifest, never typed by a member, so no member can grant a held-back primitive.
+- An object action is granted by its canonical id `action:<kind>:<name>` under the same rules —
+  null grants every non-`profile_only` action; a tuple grants the ids it names plus the companions
+  `IMPLIED_GRANTS` pairs with a named tool (`load_skill` carries `action:skill:skill_search`), each
+  intersected with the live registry. `object_action` itself is never an allowlist entry (boot
+  refuses it); its schema rides exactly when the turn holds at least one action, and a call naming
+  an action the turn was not granted is refused before any hook fires. The action's own handler
+  keeps its authority gate — a granted id is reachability, not permission.
 - A prepared intent bypasses the allowlist (§Identity and admission).
 - A subagent's set is its profile's tools ∪ every `subagent_default` tool ∪ cross-extension
   `subagent_tool_grants` (union-only); an isolated profile keeps its own list alone. Only core

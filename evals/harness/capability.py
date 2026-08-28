@@ -40,6 +40,7 @@ from evals.harness.timing import CaseTiming
 from ufo.blob import WorkspaceBlobStore
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import ImageBlock, ImageSource, Message
+from ufo.tools.registry import OBJECT_ACTION_TOOL
 from ufo.turns.transcript import CompactionSummary
 
 PAGE_IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
@@ -91,6 +92,24 @@ class ToolInvocation:
     @property
     def succeeded(self) -> bool:
         return self.has_result and not self.is_error
+
+    @property
+    def call(self) -> str:
+        """What the call did, in the engine's own vocabulary: the canonical `action:<kind>:<name>`
+        id an `object_action` dispatched, the wire name for every other tool — the name a
+        trajectory grades once a capability lives on an object."""
+        if self.name != OBJECT_ACTION_TOOL:
+            return self.name
+        return f"action:{self.input.get('kind', '')}:{self.input.get('action', '')}"
+
+    @property
+    def arguments(self) -> JsonObject:
+        """The arguments the handler validated: an `object_action`'s own `input` mapping, the
+        whole input for every other tool."""
+        if self.name != OBJECT_ACTION_TOOL:
+            return self.input
+        nested = self.input.get("input", {})
+        return nested if isinstance(nested, dict) else {}
 
 
 def merge_tool_calls(
@@ -241,7 +260,7 @@ class CapabilityOutput:
 
     @property
     def tools(self) -> tuple[str, ...]:
-        return tuple(call.name for call in self.calls)
+        return tuple(call.call for call in self.calls)
 
 
 type Grader = Callable[[CapabilityOutput], Awaitable[CapabilityVerdict]]
@@ -340,7 +359,9 @@ class CapabilityCase:
     the case runs against, resetting whatever it owns. `prepare`, when set, runs once the
     conversation's workspace directory exists and its files are staged, and before the turn opens,
     receiving (workspace_id, that directory) — for a case whose external environment must read the
-    very files the agent will write, which `seed` runs too early to know. `undelivered` seeds the
+    very files the agent will write, which `seed` runs too early to know. `cleanup`, when set,
+    receives the same arguments as `seed` once the case's turn has settled or failed to start, and
+    removes the state `seed` established so no later case runs against it. `undelivered` seeds the
     agent's rounds from before the case message, so they answer the last of the `prior_messages`.
     `artifact_probe`, when set, runs after the clean turn in the same sandbox and adds grader-only
     artifacts without adding instructions or another turn to the evaluated trajectory."""
@@ -365,6 +386,7 @@ class CapabilityCase:
     followup: CapabilityFollowup | None = None
     seed: CapabilitySeed | None = None
     prepare: WorkspacePrepare | None = None
+    cleanup: CapabilitySeed | None = None
     artifact_probe: ArtifactProbe | None = None
     followup_artifact_probe: ArtifactProbe | None = None
     judge_on_deterministic_failure: bool = False

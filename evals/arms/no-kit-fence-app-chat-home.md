@@ -14,10 +14,10 @@ To change it:
 1. Copy this skill's `app.tsx` and `index.html` into a directory of their own —
    `cp $UFO_HOME/skills/app-chat-home/app.tsx $UFO_HOME/skills/app-chat-home/index.html chat-home/`.
 2. Edit `app.tsx`.
-3. `deploy_website` with that directory and `site_name` `chat-home`. It builds the page against
+3. The `site` collection's `deploy_website` action (`object_action` with kind `site`) with that directory and `site_name` `chat-home`. It builds the page against
    the deploy's own kit and hosts what the build wrote — do not run a build yourself, and do not
    pass a `dist` directory.
-4. `set_homepage` with the site name from the deploy result, the first time only; the binding stays
+4. `object_get` kind `agent` with an empty name reads this turn's own agent; its `set_homepage` action's call template already carries the agent's name. Call it (`object_action` with kind `agent` and the name the template carries) with the site name from the deploy result, the first time only; the binding stays
    across later redeploys of the same site.
 
 A redeploy takes the platform kit as it stands today, not the one the page was first built against.

@@ -1097,21 +1097,38 @@ test("a library consent the browser refuses still renders the link", async () =>
   expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });
 
-test("a workspace install dispatches its own verb and hands back its install page", async () => {
+test("a workspace install posts the surface object's own action and hands back its install page", async () => {
   const posted: unknown[] = [];
   location.hash = sectionHash("connectors");
   library({
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
+    "/slack_connect": (url, init) => {
+      posted.push({ url, body: JSON.parse(String(init?.body)) });
       return json({ applied: true, message: "", url: SLACK_LINK });
     },
+    "/actions/surface/slack": () =>
+      json({
+        actions: [
+          {
+            name: "slack_connect",
+            description: "Install ufo in Slack.",
+            input_schema: { properties: {} },
+            call: { kind: "surface", action: "slack_connect", name: "slack", input: {} },
+            label: "Connect",
+          },
+        ],
+      }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByRole("heading", { name: "Available" });
   await userEvent.click(connects("Slack"));
 
-  expect(posted[0]).toEqual({ verb: "connect_slack" });
+  await waitFor(() =>
+    expect(posted[0]).toEqual({
+      url: "/surface/web/agents/" + AGENT.id + "/actions/surface/slack/slack_connect",
+      body: {},
+    }),
+  );
   const link = await screen.findByRole("link", { name: "Open the Slack install page" });
   expect(link.getAttribute("href")).toBe(SLACK_LINK);
 });
@@ -1119,7 +1136,20 @@ test("a workspace install dispatches its own verb and hands back its install pag
 test("a refused intent states itself and the row stays open", async () => {
   location.hash = sectionHash("connectors");
   library({
-    "/intents": () => json({ applied: false, message: "Only a workspace admin connects Slack." }),
+    "/slack_connect": () =>
+      json({ applied: false, message: "Only a workspace admin connects Slack." }),
+    "/actions/surface/slack": () =>
+      json({
+        actions: [
+          {
+            name: "slack_connect",
+            description: "Install ufo in Slack.",
+            input_schema: { properties: {} },
+            call: { kind: "surface", action: "slack_connect", name: "slack", input: {} },
+            label: "Connect",
+          },
+        ],
+      }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 

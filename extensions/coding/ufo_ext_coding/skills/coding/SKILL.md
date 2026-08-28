@@ -49,7 +49,7 @@ Before calling `spawn(target="coding", ...)`, choose exactly one setup mode and 
 
 - **Clone a repo:** Use for the first spawn of the turn that needs the repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, then work inside it.` For fan-out, use: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, verify the checkout, report the checked-out branch as the base, then finish without task work.` Name that path and reuse it below. A public repository clones with no connection; a private one needs the workspace connected to GitHub (below).
 
-  **A clone that fails to authenticate means the workspace is not connected. Call `connect_github` — that is the next action, not a fallback route.** Reaching the files another way is the trap here, and every route is forbidden, not just the obvious one: no `gh api` file reads, and no `GITHUB_DOWNLOAD_A_REPOSITORY_ARCHIVE_ZIP`/`_TAR`, zipball, tarball, or `GITHUB_GET_RAW_REPOSITORY_CONTENT` through `call_external_tool`. A snapshot fetched that way has no `.git`, cannot push, and hides from the member that nothing is connected.
+  **A clone that fails to authenticate means the workspace is not connected. Run the `connect_github` action on the `github-app-installation` credential object — that is the next action, not a fallback route.** Reaching the files another way is the trap here, and every route is forbidden, not just the obvious one: no `gh api` file reads, and no `GITHUB_DOWNLOAD_A_REPOSITORY_ARCHIVE_ZIP`/`_TAR`, zipball, tarball, or `GITHUB_GET_RAW_REPOSITORY_CONTENT` through `call_external_tool`. A snapshot fetched that way has no `.git`, cannot push, and hides from the member that nothing is connected.
 - **Pinned commit:** Use when the task names an exact commit. Start the objective with: `Repository setup: fetch commit <sha> from https://github.com/org/repo into /workspace/org-repo with git at depth 1 and check out exactly that commit, then work inside it. The checkout is the only route to the files — no raw.githubusercontent.com, zipball, or tarball fetches.` As with a clone, you never run the fetch — the first child does.
 - **Existing checkout:** Use for any later spawn after the child using that path has finished. Start the objective with: `Repository setup: use the existing checkout at /workspace/org-repo, from https://github.com/org/repo. Do not clone.` The URL is what the child falls back to if the path is not there.
 - **Local checkout:** Use for every spawn that overlaps another child. Start the objective with: `Repository setup: copy the committed tree at /workspace/org-repo to /workspace/org-repo-<slug> with git, base the work on <base>, keep the source as workspace, use https://github.com/org/repo as origin, then work inside it.` This copies from disk without a fetch, separates the source's branches from GitHub's, and keeps pushes pointed at GitHub.
@@ -61,7 +61,7 @@ When the requesting message's `<context>` carries a `source`, put it in the obje
 
 ## Connecting GitHub for private repositories
 
-A private clone or push needs the workspace connected, and only a workspace admin can do it. Call `connect_github` and give them the link it returns. On GitHub they choose the organization and which repositories the ufo App may reach; GitHub returns them to ufo and the connection completes itself. Nothing is pasted back and no id or token is ever typed — GitHub confirms under that admin's authorization that they reach the installation. The link is single-purpose and expires shortly, so mint a fresh one rather than reusing an old message.
+A private clone or push needs the workspace connected, and only a workspace admin can do it. Run the `connect_github` action on the `github-app-installation` credential object and give them the link it returns. On GitHub they choose the organization and which repositories the ufo App may reach; GitHub returns them to ufo and the connection completes itself. Nothing is pasted back and no id or token is ever typed — GitHub confirms under that admin's authorization that they reach the installation. The link is single-purpose and expires shortly, so mint a fresh one rather than reusing an old message.
 
 For a repository outside any organization that installed the App, the fallback is an admin's fine-grained personal access token with Contents read and write, collected privately into `github_git_token`. Never accept a token pasted into the conversation itself.
 
@@ -81,7 +81,7 @@ The reverse holds too: git access is not API access. Issue and pull-request read
 
 For GitHub-backed tasks, identify the repository URL and put it in the objective. If the user doesn't provide one directly:
 
-1. **Check memory** — `memory_search` for the repo name, project name, or related keywords.
+1. **Check memory** — the memory kind's `memory_search` action for the repo name, project name, or related keywords.
 2. **Ask the user** — if memory doesn't have it, just ask.
 
 ## Mixed Tasks

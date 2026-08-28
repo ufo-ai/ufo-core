@@ -1778,7 +1778,7 @@ async def test_a_provider_the_namespace_does_not_claim_asks_for_its_credential(
             await tool.handler(ctx, args)
     assert str(refusal.value) == (
         "add the 'greenhouse' credential before registering its sources "
-        "(request_credentials for slot 'greenhouse')"
+        "(the credential collection's request_credentials action for slot 'greenhouse')"
     )
 
 

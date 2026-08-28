@@ -2,7 +2,8 @@
 
 import asyncio
 import json
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import sqlalchemy as sa
@@ -14,9 +15,11 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo.db import workspace_tx
 from ufo.ext.surface import TurnTailer
 from ufo.hub import Parked, Terminal
+from ufo.loop.queue import with_implied_grants
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.interface import ToolSchema
 from ufo.o11y import current_traceparent, log
+from ufo.objects import BoundAction
 from ufo.sandbox.session import RunToken
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -39,18 +42,24 @@ from ufo.tools.bridge import (
     ToolBridgeSuccess,
     ToolBridgeToolList,
 )
-from ufo.tools.registry import ToolDef
+from ufo.tools.registry import ACTION_READ_TOOLS, OBJECT_ACTION_TOOL, ToolDef
 
 
 @dataclass(frozen=True)
 class ToolBridge:
-    """Describe or durably dispatch one bridge tool under a live sandbox run's authority."""
+    """Describe or durably dispatch one bridge tool under a live sandbox run's authority.
+    `actions` is the deploy's bound-action registry: `object_action` is listed and callable
+    exactly when the parent's agent or profile holds at least one canonical action id, mirroring
+    the wire registry a turn builds — and the admitted intent turn re-resolves the named action
+    under its own grants and speaker rules, so the bridge's answer is discovery, never
+    authority."""
 
     dbos: DBOSClient
     tailer: TurnTailer
     tools: tuple[ToolDef, ...]
     subagents: SubagentRegistry
     subagent_grants: dict[str, frozenset[str]]
+    actions: Mapping[str, Mapping[str, BoundAction]] = field(default_factory=dict)
 
     async def request(self, run: RunToken, request: ToolBridgeRequest) -> ToolBridgeResponse:
         parent = await self._parent(run)
@@ -120,13 +129,36 @@ class ToolBridge:
             ).one_or_none()
 
     def _allowed(self, parent: sa.Row[tuple[object, ...]], tool: ToolDef) -> bool:
+        if tool.name == OBJECT_ACTION_TOOL:
+            return self._any_action_granted(parent)
+        if tool.name in ACTION_READ_TOOLS and self._any_action_granted(parent):
+            return True
         if parent.subagent_profile is None:
-            return parent.tools is None or tool.name in parent.tools
+            return parent.tools is None or tool.name in with_implied_grants(set(parent.tools))
         profile = self.subagents.get(parent.subagent_profile)
         allowed = set(profile.tool_names)
         if not profile.isolated_tools:
             allowed.update(self.subagent_grants.get(profile.name, frozenset()))
+        allowed = with_implied_grants(allowed)
         return tool.name in allowed or (tool.subagent_default and not profile.isolated_tools)
+
+    def _any_action_granted(self, parent: sa.Row[tuple[object, ...]]) -> bool:
+        actions = tuple(bound.action for held in self.actions.values() for bound in held.values())
+        if parent.subagent_profile is None:
+            if parent.tools is None:
+                return any(not action.profile_only for action in actions)
+            names = with_implied_grants(set(parent.tools))
+            return any(action.canonical_id in names for action in actions)
+        profile = self.subagents.get(parent.subagent_profile)
+        allowed = set(profile.tool_names)
+        if not profile.isolated_tools:
+            allowed.update(self.subagent_grants.get(profile.name, frozenset()))
+        allowed = with_implied_grants(allowed)
+        return any(
+            action.canonical_id in allowed
+            or (action.subagent_default and not profile.isolated_tools)
+            for action in actions
+        )
 
     async def _admit(
         self,

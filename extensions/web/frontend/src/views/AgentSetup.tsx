@@ -16,7 +16,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Notice, Panel, QUIET, usePanelRead, type NoticeState } from "@/kernel/panel";
-import { BASE, postIntent } from "@/lib/api";
+import { BASE, postIntent, postObjectAction } from "@/lib/api";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { newChatHash } from "@/lib/route";
 import { agentName } from "@/lib/agentName";
@@ -25,6 +25,7 @@ import { ProviderGlyph } from "@/lib/providerGlyph";
 import { cn } from "@/lib/cn";
 import { navigate } from "@/lib/router";
 import type { Agent } from "@/lib/types";
+import { CONNECT_INSTALLS } from "@/views/FirstRun";
 
 /** The recurrence an app offers to arm its schedule with. `hour` null is hourly, which names no
  *  wall-clock time; `weekdays` empty is every day. */
@@ -96,13 +97,6 @@ const BLOCKED_POPUP = "Your browser blocked the window. Allow pop-ups and press 
 const CONNECT_REFUSED = "The connect did not open a consent page. Try again.";
 const CONSENT_ELSEWHERE = "The consent window closed before the link arrived. Press Connect again.";
 
-/** The workspace-wide install a credential's provider takes, keyed by that provider. The named tool
- *  mints the link inside its turn and the outcome carries it back, so installing takes no message
- *  the member has to send — the same two verbs the first run offers. */
-const INSTALL_VERB: Record<string, string> = {
-  slack: "connect_slack",
-  github: "connect_github",
-};
 
 const EVERY_HOUR = "every hour";
 const EVERY_DAY = "every day";
@@ -384,13 +378,14 @@ export function AgentSetup({
     setWatching(outcome.turn_id);
   }
 
-  /** The workspace-wide install, which is one act and not a brokered grant: the tool mints the link
-   *  inside its own turn and the outcome carries it straight back. */
+  /** The workspace-wide install, which is one act and not a brokered grant: the object the first
+   *  run also installs against projects the act, and it mints the link inside its own turn and the
+   *  outcome carries it straight back. */
   async function install(provider: string) {
     setNotice(QUIET);
     const opened = openConsentWindow();
     setInstalling(provider);
-    const outcome = await postIntent(agent.id, { verb: INSTALL_VERB[provider] });
+    const outcome = await postObjectAction(agent.id, CONNECT_INSTALLS[provider], {});
     setInstalling(null);
     if (opened && outcome.url) opened.location.href = outcome.url;
     if (opened && !outcome.url) opened.close();
@@ -558,8 +553,9 @@ export function AgentSetup({
     title: string,
   ) {
     if (credential.filled) return INSTALLED;
-    const verb = credential.provider === null ? undefined : INSTALL_VERB[credential.provider];
-    if (verb === undefined) return NOT_INSTALLED;
+    const target =
+      credential.provider === null ? undefined : CONNECT_INSTALLS[credential.provider];
+    if (target === undefined) return NOT_INSTALLED;
     if (!admin) {
       return (
         <span className="text-ink-soft">{ADMIN_INSTALLS}</span>

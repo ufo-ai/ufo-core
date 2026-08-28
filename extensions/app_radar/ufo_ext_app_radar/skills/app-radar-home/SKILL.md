@@ -16,10 +16,10 @@ To change it:
    `SectionApp`, `mountApp`, `getJson`, `navigate`. Any other bare import fails the deploy with
    `failed to resolve import`; never install it, because a local `node_modules` makes that build
    pass and ships a second React whose hooks break in the page.
-3. `deploy_website` with that directory and `site_name` `radar-home`. It builds the page against
+3. The `site` collection's `deploy_website` action (`object_action` with kind `site`) with that directory and `site_name` `radar-home`. It builds the page against
    the deploy's own kit and hosts what the build wrote — do not run a build yourself, and do not
    pass a `dist` directory.
-4. `set_homepage` with the site name from the deploy result, the first time only; the binding stays
+4. `object_get` kind `agent` with an empty name reads this turn's own agent; its `set_homepage` action's call template already carries the agent's name. Call it (`object_action` with kind `agent` and the name the template carries) with the site name from the deploy result, the first time only; the binding stays
    across later redeploys of the same site.
 
 A redeploy takes the platform kit as it stands today, not the one the page was first built against.

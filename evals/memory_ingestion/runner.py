@@ -131,7 +131,7 @@ class MemoryIngestionGrader:
         searched = {
             UUID(memory_id)
             for call in output.calls
-            if call.name == "memory_search" and call.succeeded
+            if call.call == "memory_search" and call.succeeded
             for memory_id in MEMORY_REF_PATTERN.findall(call.result)
         }
         selected = frozenset(recall.memory_ids)

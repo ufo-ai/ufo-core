@@ -70,7 +70,8 @@ broker's transport instead, with no key at rest.
 
 ## How a member connects one
 
-In chat, like everything else. The agent calls `request_credentials` for the provider's slots; the
+In chat, like everything else. The agent runs the credential collection's `request_credentials`
+action for the provider's slots; the
 owner enters each value privately (never in the transcript); the agent then calls the provider's REST
 API from the sandbox with the exported env vars. The sandbox holds sentinels — the proxy swaps the
 real secret onto the wire for a live turn only, and meters the host under `requests`.

@@ -10,6 +10,7 @@ import sqlalchemy as sa
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory import manifest as memory_manifest
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
+from ufo_ext_sources import manifest as sources_manifest
 from ufo_testsupport.migrations import apply_cached_migrations
 
 from evals.__main__ import _tasks as selected_eval_tasks
@@ -295,7 +296,7 @@ async def test_materializer_runs_luna_derivation_and_indexes_only_derived_memory
         blob=blob,
         index=DefaultIndex(transaction=workspace_tx),
         embed=DeterministicEmbed(),
-        manifests=(memory_manifest.manifest(),),
+        manifests=(sources_manifest.manifest(), memory_manifest.manifest()),
         registry=_registry(client),
         background_model=DERIVATION_MODEL,
         run_budget=run_budget,

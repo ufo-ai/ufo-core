@@ -124,7 +124,7 @@ async def test_workspace_agents_carry_the_roster_with_owners_and_archive_state(d
                 name=f"~archived-{brief_id}",
                 archived_name=tables.agent.c.name,
                 owner_member_id=member_id,
-                tools=["load_skill", "rebuild_report_digest"],
+                tools=["load_skill", "action:report:rebuild_report_digest"],
                 archived_at=sa.func.now(),
             )
         )
@@ -136,7 +136,7 @@ async def test_workspace_agents_carry_the_roster_with_owners_and_archive_state(d
     assert owners[brief_id] == member_id
     assert [owner for agent_id, owner in owners.items() if agent_id != brief_id] == [None, None]
     allowlists = {a.id: a.tools for a in agents}
-    assert allowlists[brief_id] == ("load_skill", "rebuild_report_digest")
+    assert allowlists[brief_id] == ("load_skill", "action:report:rebuild_report_digest")
     assert [tools for agent_id, tools in allowlists.items() if agent_id != brief_id] == [None, None]
     archived = {a.id: a.archived for a in agents}
     assert archived[brief_id] is True
@@ -158,6 +158,43 @@ async def test_agent_visibilities_answer_by_id_without_member_context(db: None) 
     assert {level for agent_id, level in visibilities.items() if agent_id != brief_id} == {
         "private"
     }
+
+
+async def test_an_agent_identity_answers_by_live_name_without_member_context(db: None) -> None:
+    workspace_id, member_id, _other_member_id, brief_id = await _seed()
+    async with workspace_tx() as connection:
+        brief_name = (
+            await connection.execute(
+                sa.select(tables.agent.c.name).where(tables.agent.c.id == brief_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == brief_id)
+            .values(owner_member_id=member_id)
+        )
+    with ws(workspace_id):
+        context = context_for("report_digest", frozenset())
+        brief = await context.agent_named(brief_name)
+        assert brief is not None
+        assert (brief.id, brief.owner_member_id) == (brief_id, member_id)
+        notes = await context.agent_named("notes")
+        assert notes is not None
+        assert notes.id != brief_id and notes.owner_member_id is None
+        assert await context.agent_named("nobody") is None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == brief_id)
+            .values(
+                name=f"~archived-{brief_id}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        assert await context.agent_named(brief_name) is None
+        assert await context.agent_named(f"~archived-{brief_id}") is None
 
 
 async def test_member_reads_are_gated_on_member_context(db: None) -> None:

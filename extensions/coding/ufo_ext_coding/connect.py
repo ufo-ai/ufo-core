@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ufo.sdk.callback_page import CLOSE_THIS_PAGE, PageLink, callback_page
 from ufo.sdk.context import ExtensionContext
@@ -45,7 +45,10 @@ JSON_HEADERS = {"Accept": "application/json"}
 
 
 class ConnectGitHubInput(BaseModel):
-    """The connection is for the speaking admin's workspace, so it takes no target."""
+    """Empty: the action's target is the credential object of the `github_app_installation` slot the
+    return leg fills, and the connection is the speaking admin's whole workspace."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 async def connect_github(ctx: ToolContext, args: ConnectGitHubInput) -> ToolResult:

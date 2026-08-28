@@ -216,7 +216,7 @@ def test_names_past_the_budget_drop_from_the_end_behind_a_count_line() -> None:
 
     assert len(block) <= SKILL_MEMBER_BLOCK_MAX_CHARS
     dropped = int(lines[-1].split()[0])
-    assert lines[-1] == f"{dropped} more skills; skill_search finds them."
+    assert lines[-1] == f"{dropped} more skills; the skill kind's skill_search action finds them."
     assert len(lines) - 1 + dropped == len(cards)
     shown_names = [line.removeprefix("- ").split(":")[0] for line in lines[:-1]]
     assert shown_names == [card.name for card in cards][: len(shown_names)]

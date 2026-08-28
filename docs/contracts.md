@@ -95,8 +95,9 @@ class ToolContext(Protocol):    # capability-scoped view a handler gets
     async def spawn(self, profile: str, input: BaseModel, background: bool = False) -> SpawnResult: ...
 class ToolResult(BaseModel):    content: tuple[ContentBlock, ...]; is_error: bool = False
 ```
-Builtins: `bash read write edit memory_search memory_update ask_user spawn load_skill
-share_file`. Registry rejects a second registration of an existing name.
+Builtins: `bash read write edit glob grep share_file spawn cancel_spawn message_spawn ask_user
+load_skill connect_account`, plus the six `object_*` verbs the loader builds over the registered kinds.
+Registry rejects a second registration of an existing name.
 Every tool schema also accepts optional `requested_by`: a visible active inbound message ref.
 Dispatch strips it before validating the declared input and binds that message's member to the
 context; omission is common authority unless the turn carries `on_behalf_of_member_id`.

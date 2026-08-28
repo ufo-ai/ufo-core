@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from PIL import Image
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
 from ufo_ext_sites import manifest as sites_manifest
@@ -108,6 +108,7 @@ from ufo_ext_sites.application_builder import (
 from ufo_ext_sites.delegation import BuildWebsiteInput, _build_website
 from ufo_ext_sites.objects import (
     CONVERSATION_DIGEST_HEX,
+    SITE_KIND,
     site_name_from_object,
     site_object_name,
 )
@@ -145,17 +146,22 @@ from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResu
 from ufo_ext_sites.tools import (
     APPLICATION_AUDIT_MAX_ATTEMPTS,
     APPLICATION_AUDIT_SCRIPT,
+    DEPLOY_LOG,
+    ENUMERATE_PROG,
     LOG_CLEAR_PROG,
     LOG_TAIL_TIMEOUT_SECONDS,
     PORT_STOP_PROG,
     PREVIEW_HEIGHT,
     PREVIEW_WIDTH,
+    PUBLISH_LOG,
     READINESS_TIMEOUT_SECONDS,
-    SITES_TOOL_NAMES,
     SITES_TOOLS,
+    TOOL_OUTPUT_DIR,
     DeployUfoApplicationInput,
     DeployWebsiteInput,
+    PublishWebsiteInput,
     QaUfoApplicationInput,
+    SetHomepageInput,
     StartServerInput,
     WebsiteInput,
     _audit_builder_application,
@@ -163,13 +169,15 @@ from ufo_ext_sites.tools import (
     _require_current_application_qa,
     deploy_ufo_application,
     deploy_website,
+    publish_website,
     qa_ufo_application,
+    set_homepage,
     start_server,
     website,
 )
 
 from ufo.access.connectors import ConnectorRegistry
-from ufo.blob import FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import HookChain, skill_registry
@@ -189,6 +197,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.object_name import OBJECT_NAME_MAX_LENGTH
+from ufo.object_scope import ObjectActionTarget
 from ufo.sandbox.session import (
     SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
@@ -199,8 +208,9 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.manifest import Deny, HookContext, PreToolUse
+from ufo.sdk.objects import AGENT_KIND
 from ufo.sdk.sandbox import WORKSPACE_DIR
-from ufo.sdk.tools import TextContent, ToolResult
+from ufo.sdk.tools import ObjectBinding, TextContent, ToolResult
 from ufo.skills.runtime import install_skill
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext
@@ -467,6 +477,12 @@ class FakeSandbox:
         self.runtime_writes.append(path)
         self.writes[path] = content
 
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        async def bytes_of() -> AsyncIterator[bytes]:
+            yield self.writes.get(path, b"")
+
+        return bytes_of()
+
 
 @dataclass
 class JournalSandbox(FakeSandbox):
@@ -621,7 +637,10 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     assert profile.input_model.model_validate({"objective": "x" * 10_000}).objective == "x" * 10_000
     assert "maxLength" not in profile.input_model.model_json_schema()["properties"]["objective"]
     assert "maxLength" not in profile.output_model.model_json_schema()["properties"]["result"]
-    assert "deploy_website" in profile.tool_names
+    assert "action:site:deploy_website" in profile.tool_names
+    assert "action:agent:set_homepage" in profile.tool_names
+    assert {"website", "start_server"} <= set(profile.tool_names)
+    assert "action:site:publish_website" not in profile.tool_names
     assert "publish_website" not in profile.tool_names
     assert "this conversation's sandbox" in build.description
     assert [(hook.event, hook.tools) for hook in manifest.hooks] == [
@@ -633,6 +652,240 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     ]
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
+
+
+def test_hosting_writes_declare_side_effecting() -> None:
+    tools = {tool.name: tool for tool in SITES_TOOLS}
+    assert tools["deploy_website"].side_effecting is True
+    assert tools["publish_website"].side_effecting is True
+    assert tools["set_homepage"].side_effecting is True
+    assert tools["website"].side_effecting is False
+    assert tools["start_server"].side_effecting is False
+
+
+def test_site_actions_bind_to_their_objects_and_the_runtime_stays_global() -> None:
+    tools = {tool.name: tool for tool in sites_manifest.manifest().tools}
+    collection = ObjectBinding(kind=SITE_KIND, binding="collection")
+    for name in (
+        "deploy_website",
+        "publish_website",
+        "build_website",
+        APPLICATION_BUILDER_DELEGATION_TOOL,
+        APPLICATION_PREVIEW_TOOL,
+    ):
+        assert tools[name].bound == collection
+        assert tools[name].canonical_id == f"action:site:{name}"
+    assert tools["set_homepage"].bound == ObjectBinding(kind=AGENT_KIND, binding="instance")
+    assert tools["set_homepage"].canonical_id == "action:agent:set_homepage"
+    for name in (
+        "website",
+        "start_server",
+        APPLICATION_BUILDER_QA_TOOL,
+        APPLICATION_BUILDER_DEPLOY_TOOL,
+        APPLICATION_BUILDER_DESIGN_TOOL,
+        APPLICATION_BUILDER_READ_TOOL,
+        APPLICATION_BUILDER_EDIT_TOOL,
+        APPLICATION_BUILDER_WRITE_TOOL,
+    ):
+        assert tools[name].bound is None
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (
+            DeployWebsiteInput,
+            {"project_path": "/workspace/dist", "site_name": "s", "entry_point": "index.html"},
+        ),
+        (
+            PublishWebsiteInput,
+            {"project_path": "/workspace/app", "dist_path": "/workspace/app/dist", "app_name": "a"},
+        ),
+        (SetHomepageInput, {"site": "s-0011223344556677"}),
+        (BuildWebsiteInput, {"objective": "build a page"}),
+        (BuildUfoApplicationInput, {}),
+        (
+            RenderApplicationPreviewInput,
+            {
+                "purpose": "p",
+                "first_screen_priority": "f",
+                "regions": ("queue", "detail"),
+                "layout": "queue-detail",
+            },
+        ),
+    ],
+)
+def test_site_action_inputs_refuse_an_extra_key(
+    model: type[BaseModel], payload: dict[str, object]
+) -> None:
+    model.model_validate(payload)
+    with pytest.raises(ValidationError, match="unexpected_key"):
+        model.model_validate({**payload, "unexpected_key": "x"})
+
+
+async def _seeded_workspace() -> UUID:
+    workspace_id = uuid4()
+    now = datetime(2026, 8, 26, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(id=workspace_id, created_at=now, updated_at=now)
+        )
+    return workspace_id
+
+
+def _keyed_server_task(sandbox: FakeSandbox, key: str, port: int, log: str) -> None:
+    identity = f"{key}:{port}:{log}"
+    assert [task_base for _command, task_base, detach, _timeout in sandbox.tasks if detach] == [
+        f"{RUNTIME_ROOT}/{TOOL_OUTPUT_DIR}/server-tasks/"
+        f"{sha256(identity.encode()).hexdigest()[:16]}"
+    ]
+
+
+async def test_deploy_website_keys_its_server_task_on_the_call(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", "sites-test-secret")
+    workspace_id = await _seeded_workspace()
+    listing = {"index.html": {"size": 17, "sha256": "ab" * 32}}
+    sandbox = FakeSandbox(
+        scripted_programs={ENUMERATE_PROG: ExecResult(json.dumps(listing), "", 0)}
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"workspace_id": workspace_id}),
+        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
+        on_behalf_of_member_id=uuid4(),
+        idempotency_key=f"{base.turn.id}/deploy_website/call-1",
+        public_base_url="https://ufo.example.test",
+        ext=context_for("sites", frozenset()),
+    )
+
+    with ws(workspace_id):
+        result = await deploy_website(
+            ctx,
+            DeployWebsiteInput(
+                project_path="/workspace/dist", site_name="marketing", entry_point="index.html"
+            ),
+        )
+
+    payload = json.loads(result.content[0].text)
+    assert payload["site_name"] == "marketing"
+    assert ctx.idempotency_key is not None
+    log = f"{RUNTIME_ROOT}/{DEPLOY_LOG.format(port=payload['port'])}"
+    _keyed_server_task(sandbox, ctx.idempotency_key, payload["port"], log)
+
+
+async def test_publish_website_keys_its_server_task_on_the_call(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", "sites-test-secret")
+    workspace_id = await _seeded_workspace()
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"workspace_id": workspace_id}),
+        on_behalf_of_member_id=uuid4(),
+        idempotency_key=f"{base.turn.id}/publish_website/call-1",
+        public_base_url="https://ufo.example.test",
+        ext=context_for("sites", frozenset()),
+    )
+
+    with ws(workspace_id):
+        result = await publish_website(
+            ctx,
+            PublishWebsiteInput(
+                project_path="/workspace/app", dist_path="/workspace/app/dist", app_name="crm"
+            ),
+        )
+
+    payload = json.loads(result.content[0].text)
+    assert payload["site_name"] == "crm"
+    assert ctx.idempotency_key is not None
+    log = f"{RUNTIME_ROOT}/{PUBLISH_LOG.format(port=payload['port'])}"
+    _keyed_server_task(sandbox, ctx.idempotency_key, payload["port"], log)
+
+
+async def test_set_homepage_repeats_cleanly_under_its_call_key(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", "sites-test-secret")
+    workspace_id = uuid4()
+    member_id = uuid4()
+    now = datetime(2026, 8, 26, tzinfo=UTC)
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"workspace_id": workspace_id}),
+        speaker_member_id=member_id,
+        idempotency_key=f"{base.turn.id}/action:agent:set_homepage/call-1",
+        public_base_url="https://ufo.example.test",
+        ext=context_for("sites", frozenset()),
+        target=ObjectActionTarget(
+            kind=AGENT_KIND, name="tasks", agent=None, generation=None, expected_generation=None
+        ),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(id=workspace_id, created_at=now, updated_at=now)
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="owner@example.com",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=ctx.turn.agent_id,
+                workspace_id=workspace_id,
+                name="tasks",
+                prompt="Track the team's work.",
+                model="claude-opus-4-8",
+                visibility="workspace",
+                is_main=False,
+                owner_member_id=member_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    with ws(workspace_id):
+        site = await HostedSites(workspace_id, workspace_tx).register(
+            sandbox.conversation_id,
+            "marketing",
+            41000,
+            member_id,
+            None,
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
+        )
+        args = SetHomepageInput(site=site_object_name(site.conversation_id, site.name))
+        first = json.loads((await set_homepage(ctx, args)).content[0].text)
+        second = json.loads((await set_homepage(ctx, args)).content[0].text)
+
+    assert ctx.idempotency_key is not None
+    assert first == second
+    assert first["homepage_agent"] == str(ctx.turn.agent_id)
+    async with workspace_tx() as connection:
+        bound = (
+            (
+                await connection.execute(
+                    sa.select(hosted_site.c.homepage_agent_id).where(
+                        hosted_site.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert bound == [ctx.turn.agent_id]
 
 
 def test_application_audit_accepts_measured_interactive_facts() -> None:
@@ -5136,7 +5389,7 @@ def test_the_website_building_profile_names_only_meaningful_tools() -> None:
     # resolves to nothing is dropped in silence — a typo would leave the child short of a tool and
     # every test green. Whatever this profile names has to exist somewhere that ships.
     available = (
-        set(SITES_TOOL_NAMES)
+        {tool.canonical_id for tool in SITES_TOOLS}
         | {tool.name for tool in BUILTIN_TOOLS}
         | {JS_REPL_TOOL, XLSX_REPL_TOOL}
         | {SEARCH_WEB_TOOL, SEARCH_VERTICAL_TOOL, FETCH_URL_TOOL}
@@ -5145,7 +5398,14 @@ def test_the_website_building_profile_names_only_meaningful_tools() -> None:
     # Named, not merely resolvable: the containment above passes just as well with a tool dropped,
     # and the two REPLs are what the child drives a page and a workbook with.
     assert {JS_REPL_TOOL, XLSX_REPL_TOOL} <= names
-    assert {"website", "start_server", "write", "js_repl", "deploy_website"} <= names
+    assert {
+        "website",
+        "start_server",
+        "write",
+        "js_repl",
+        "action:site:deploy_website",
+        "action:agent:set_homepage",
+    } <= names
     assert {tool.name for tool in SITES_TOOLS if tool.profile_only}.isdisjoint(names)
     assert "share_file" not in names
     assert WEBSITE_BUILDING_PROFILE.input_model.model_validate(

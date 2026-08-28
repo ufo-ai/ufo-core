@@ -14,6 +14,54 @@ const IMESSAGE_LINK = "sms:+14085550123?&body=UFO%20ABC123";
 
 const OPENED = { turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Setting up" };
 
+/** The acts the run writes through, as their kinds project them: the member collection's add and
+ *  the memory collection's write. */
+const ADD_MEMBER = {
+  name: "add_member",
+  description: "Add a member to this workspace.",
+  input_schema: {
+    properties: {
+      email: { type: "string", format: "email", title: "Email" },
+      admin: { type: "boolean", title: "Admin", default: false },
+      notify: { type: "boolean", title: "Notify", default: true },
+    },
+    required: ["email"],
+  },
+  call: { kind: "member", action: "add_member", input: {} },
+  label: "Add member",
+};
+
+const RECORD_FIRST_RUN = {
+  name: "record_first_run",
+  description: "Record what the team uses.",
+  input_schema: {
+    properties: { body: { type: "string", title: "Body", maxLength: 200 } },
+    required: ["body"],
+  },
+  call: { kind: "memory", action: "record_first_run", input: {} },
+  label: "Continue",
+};
+
+/** The installs as the objects they act on project them, read by the connect steps on the press. */
+const INSTALL_VIEW = (kind: string, name: string, action: string) => ({
+  name: action,
+  description: "Install the workspace app.",
+  input_schema: { properties: {} },
+  call: { kind, action, name, input: {} },
+  label: "Connect",
+});
+
+const INSTALL_READS: Record<string, Route> = {
+  "/actions/surface/slack$": () =>
+    json({ actions: [INSTALL_VIEW("surface", "slack", "slack_connect")] }),
+  "/actions/credential/github-app-installation$": () =>
+    json({
+      actions: [INSTALL_VIEW("credential", "github-app-installation", "connect_github")],
+    }),
+  "/actions/surface/imessage$": () =>
+    json({ actions: [INSTALL_VIEW("surface", "imessage", "imessage_connect")] }),
+};
+
 const FIRST_RUN = {
   imessage: true,
   providers: [
@@ -29,6 +77,7 @@ const FIRST_RUN = {
     { name: "slack", label: "Slack", installed: false },
     { name: "github", label: "GitHub", installed: false },
   ],
+  actions: { member: [ADD_MEMBER], memory: [RECORD_FIRST_RUN] },
 };
 
 const HELD_SLACK = {
@@ -49,6 +98,7 @@ beforeEach(() => {
 function open(routes: Record<string, Route> = {}, member = ADMIN, payload = FIRST_RUN) {
   const wired = wire({
     ...chatsOnWire([]),
+    ...INSTALL_READS,
     "/workspace/first-run": () => json(payload),
     ...routes,
   });
@@ -56,13 +106,19 @@ function open(routes: Record<string, Route> = {}, member = ADMIN, payload = FIRS
   return wired;
 }
 
-/** The bodies of every intent the page submitted, in the order it submitted them. */
+/** Every act the page submitted, in order: the lane below the agent it posted on — `intents` for
+ *  an object mutation, the action route for a presented act — and the body it carried. */
 function intents(calls: { url: string; body: unknown }[]): unknown[] {
-  return calls.filter((call) => call.url.includes("/intents")).map((call) => call.body);
+  return calls.map((call) => ({ lane: laneOf(call.url), body: call.body }));
 }
 
-/** The lane, answering each verb with what that verb's tool would. Anything unnamed applies, so a
- *  case states only the outcome it is about. */
+function laneOf(url: string): string {
+  return url.split("/agents/" + AGENT.id + "/")[1];
+}
+
+/** The two lanes an act posts on, answering each with what that act's handler would — an action by
+ *  the name its route ends in, any other verb by the verb. Anything unnamed applies, so a case
+ *  states only the outcome it is about. */
 function recorder(outcomes: Record<string, unknown> = {}): {
   calls: { url: string; body: unknown }[];
   route: Route;
@@ -73,10 +129,17 @@ function recorder(outcomes: Record<string, unknown> = {}): {
     route: (url, init) => {
       const body = JSON.parse(String(init?.body));
       calls.push({ url, body });
-      return json(outcomes[body.verb] ?? { applied: true, message: "Saved." });
+      const lane = laneOf(url);
+      const act = lane === "intents" ? body.verb : lane.split("/").at(-1);
+      return json(outcomes[act] ?? { applied: true, message: "Saved." });
     },
   };
 }
+
+const lanes = (posted: ReturnType<typeof recorder>): Record<string, Route> => ({
+  "/intents": posted.route,
+  "/actions/": posted.route,
+});
 
 async function chooseGoal(goal = "Faster product dev", context = "") {
   await userEvent.click(await screen.findByRole("radio", { name: goal }));
@@ -96,9 +159,22 @@ function commit(): HTMLButtonElement {
   return screen.getByRole("button", { name: "Continue" }) as HTMLButtonElement;
 }
 
+/** The picks as the page writes them: one sentence naming the catalog's labels in the catalog's own
+ *  order, posted as the memory collection's write. */
 function toolingIntent(...providers: string[]) {
-  return { verb: "record_tooling", kind: "memory", providers };
+  const labels = FIRST_RUN.providers
+    .filter((tile) => providers.includes(tile.name))
+    .map((tile) => tile.label);
+  return {
+    lane: "actions/memory/record_first_run",
+    body: { body: "My team uses " + labels.join(", ") + "." },
+  };
 }
+
+const install = (kind: string, name: string, action: string) => ({
+  lane: "actions/" + kind + "/" + name + "/" + action,
+  body: {},
+});
 
 /** The member coming back from the provider's install page: the tab they left is looked at again,
  *  which is the whole account this page has of an install granted somewhere else. */
@@ -142,7 +218,7 @@ test("the page draws no shell around the step", async () => {
 
 test("the head counts the three certain steps, and no connector leaves them three", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   const progress = await screen.findByRole("progressbar", { name: "Step" });
   expect(progress.getAttribute("aria-valuenow")).toBe("1");
@@ -165,7 +241,7 @@ test("the head counts the three certain steps, and no connector leaves them thre
  *  tools are recorded. */
 test("the run never counts itself complete before its last step", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   const progress = await screen.findByRole("progressbar", { name: "Step" });
   await chooseGoal();
@@ -177,7 +253,7 @@ test("the run never counts itself complete before its last step", async () => {
 
 test("both connectors reveal a five-step run", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Slack", "GitHub");
 
@@ -263,7 +339,7 @@ test("the tools step names the agent, and the mention carries the strong weight"
 
 test("the picks are recorded through the intent lane, and only what was picked is asked for", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Notion", "Slack");
 
@@ -279,7 +355,7 @@ test("the picks are recorded through the intent lane, and only what was picked i
 
 test("picking neither connector skips to the invite step", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Notion");
 
@@ -292,7 +368,7 @@ test("picking neither connector skips to the invite step", async () => {
 
 test("each connector picked is its own step, in the order the tiles offer them", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("GitHub", "Slack");
 
@@ -315,7 +391,7 @@ test("each connector picked is its own step, in the order the tiles offer them",
  *  in the heavier weight the theme keeps for emphasis. */
 test("each connect step names the agent, and the mentions carry the strong weight", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("GitHub", "Slack");
 
@@ -346,7 +422,7 @@ test("each connect step names the agent, and the mentions carry the strong weigh
 
 test("the foot carries only the acts the step has", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await screen.findByRole("radio", { name: "Faster product dev" });
   expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
@@ -368,8 +444,8 @@ test("the foot carries only the acts the step has", async () => {
 });
 
 test("continue is held closed until the install itself lands, not until the link is minted", async () => {
-  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
-  open({ "/intents": posted.route });
+  const posted = recorder({ slack_connect: { applied: true, message: "", url: SLACK_LINK } });
+  open({ ...lanes(posted) });
 
   await record("Slack", "GitHub");
 
@@ -386,8 +462,8 @@ test("continue is held closed until the install itself lands, not until the link
 });
 
 test("one press opens the consent window and lands the minted link in it", async () => {
-  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
-  open({ "/intents": posted.route });
+  const posted = recorder({ slack_connect: { applied: true, message: "", url: SLACK_LINK } });
+  open({ ...lanes(posted) });
   const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
   const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
 
@@ -408,8 +484,8 @@ test("one press opens the consent window and lands the minted link in it", async
 });
 
 test("a browser that refuses the window still hands the member the link", async () => {
-  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
-  open({ "/intents": posted.route });
+  const posted = recorder({ slack_connect: { applied: true, message: "", url: SLACK_LINK } });
+  open({ ...lanes(posted) });
   const opened = vi.spyOn(window, "open").mockReturnValue(null);
 
   await record("Slack", "GitHub");
@@ -425,7 +501,7 @@ test("a refused connect closes the window it opened rather than parking it on no
   const posted = recorder({
     connect_slack: { applied: false, message: "A workspace admin connects Slack." },
   });
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
   const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
   const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
 
@@ -439,10 +515,10 @@ test("a refused connect closes the window it opened rather than parking it on no
 });
 
 test("the connect step passes itself when the install lands", async () => {
-  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
+  const posted = recorder({ slack_connect: { applied: true, message: "", url: SLACK_LINK } });
   let landed = false;
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/workspace/first-run": () => json(landed ? HELD_SLACK : FIRST_RUN),
   });
 
@@ -461,7 +537,7 @@ test("the connect step passes itself when the install lands", async () => {
 
 test("a connector the workspace already held waits to be read rather than passing itself", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route }, ADMIN, HELD_SLACK);
+  open({ ...lanes(posted) }, ADMIN, HELD_SLACK);
 
   await record("Slack");
   await screen.findByText("Slack connected");
@@ -472,10 +548,10 @@ test("a connector the workspace already held waits to be read rather than passin
 });
 
 test("a step passed by its own install is connected on the way back to it", async () => {
-  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
+  const posted = recorder({ slack_connect: { applied: true, message: "", url: SLACK_LINK } });
   let landed = false;
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/workspace/first-run": () => json(landed ? HELD_SLACK : FIRST_RUN),
   });
 
@@ -499,10 +575,10 @@ test("a step passed while the tab stayed open is settled before the page's own r
   onTestFinished(() => {
     vi.useRealTimers();
   });
-  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
+  const posted = recorder({ slack_connect: { applied: true, message: "", url: SLACK_LINK } });
   let landed = false;
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/workspace/first-run": () => json(landed ? HELD_SLACK : FIRST_RUN),
   });
   const settle = () => act(async () => void (await vi.advanceTimersByTimeAsync(0)));
@@ -533,7 +609,7 @@ test("a step passed while the tab stayed open is settled before the page's own r
 
 test("skip leaves the connect step behind with nothing connected", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Slack");
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
@@ -544,7 +620,7 @@ test("skip leaves the connect step behind with nothing connected", async () => {
 
 test("back re-opens the tiles with the picks still on them and still editable", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Slack", "GitHub");
   await userEvent.click(await screen.findByRole("button", { name: "Back" }));
@@ -559,7 +635,7 @@ test("back re-opens the tiles with the picks still on them and still editable", 
 
 test("a changed pick on the way back is recorded again", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Slack");
   await userEvent.click(await screen.findByRole("button", { name: "Back" }));
@@ -572,7 +648,7 @@ test("a changed pick on the way back is recorded again", async () => {
 
 test("picks left as they were on the way back are not recorded twice", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Slack");
   await userEvent.click(await screen.findByRole("button", { name: "Back" }));
@@ -584,7 +660,7 @@ test("picks left as they were on the way back are not recorded twice", async () 
 
 test("a connector the workspace already holds states so and carries no act", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route }, ADMIN, HELD_SLACK);
+  open({ ...lanes(posted) }, ADMIN, HELD_SLACK);
 
   await record("Slack");
 
@@ -594,22 +670,22 @@ test("a connector the workspace already holds states so and carries no act", asy
 });
 
 test("connecting mints the link on the intent lane, never through the chat", async () => {
-  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
-  open({ "/intents": posted.route });
+  const posted = recorder({ slack_connect: { applied: true, message: "", url: SLACK_LINK } });
+  open({ ...lanes(posted) });
 
   await record("Slack");
   await userEvent.click(await screen.findByRole("button", { name: "Connect Slack" }));
 
   const link = await screen.findByRole("link", { name: "Open the Slack install page" });
   expect(link.getAttribute("href")).toBe(SLACK_LINK);
-  expect(intents(posted.calls).at(-1)).toEqual({ verb: "connect_slack" });
+  expect(intents(posted.calls).at(-1)).toEqual(install("surface", "slack", "slack_connect"));
   expect(location.hash).toBe("#/first-run");
   expect(screen.queryByPlaceholderText("Ask UFO…")).toBeNull();
 });
 
 test("a link minted on one connector's step is not shown on the next one's", async () => {
-  const posted = recorder({ connect_slack: { applied: true, message: "", url: SLACK_LINK } });
-  open({ "/intents": posted.route });
+  const posted = recorder({ slack_connect: { applied: true, message: "", url: SLACK_LINK } });
+  open({ ...lanes(posted) });
 
   await record("Slack", "GitHub");
   await userEvent.click(await screen.findByRole("button", { name: "Connect Slack" }));
@@ -620,28 +696,41 @@ test("a link minted on one connector's step is not shown on the next one's", asy
   expect(screen.queryByRole("link")).toBeNull();
 });
 
-test("the GitHub row submits its own connect verb", async () => {
+test("the GitHub row submits the installation credential's own connect action", async () => {
   const posted = recorder({
     connect_github: { applied: true, message: "", url: "https://github.com/apps/ufo-ai" },
   });
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("GitHub");
   await userEvent.click(await screen.findByRole("button", { name: "Connect GitHub" }));
 
   await screen.findByRole("link", { name: "Open the GitHub install page" });
-  expect(intents(posted.calls).at(-1)).toEqual({ verb: "connect_github" });
+  expect(intents(posted.calls).at(-1)).toEqual(
+    install("credential", "github-app-installation", "connect_github"),
+  );
+});
+
+test("a connector whose object projects no act states the refusal and posts nothing", async () => {
+  const posted = recorder();
+  open({ ...lanes(posted), "/actions/surface/slack$": () => json({ actions: [] }) });
+
+  await record("Slack");
+  await userEvent.click(await screen.findByRole("button", { name: "Connect Slack" }));
+
+  await screen.findByText("This act is not available here.");
+  expect(intents(posted.calls).filter((act) => (act as { lane: string }).lane.startsWith("actions/surface/"))).toEqual([]);
 });
 
 test("a connect the tool minted no link for states what it answered instead", async () => {
   const posted = recorder({
-    connect_slack: {
+    slack_connect: {
       applied: true,
       message: "Ask a workspace admin to connect Slack — only they can install it.",
       url: null,
     },
   });
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Slack");
   await userEvent.click(await screen.findByRole("button", { name: "Connect Slack" }));
@@ -653,7 +742,7 @@ test("a connect the tool minted no link for states what it answered instead", as
 
 test("a member who is not an admin is told who installs, and presses nothing", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route }, MEMBER);
+  open({ ...lanes(posted) }, MEMBER);
 
   await record("Slack");
 
@@ -667,7 +756,7 @@ test("a member who is not an admin is told who installs, and presses nothing", a
 
 test("the invite step opens on three boxes and grows one at a time", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Notion");
 
@@ -682,7 +771,7 @@ test("the invite step opens on three boxes and grows one at a time", async () =>
 
 test("the first box takes the cursor as the step arrives", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Notion");
 
@@ -694,7 +783,7 @@ test("every address written is added on one press, and then iMessage is offered"
   const sent: string[] = [];
   const posted = recorder();
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/chat": (_url, init) => {
       sent.push(String(init?.body));
       return json(OPENED);
@@ -709,8 +798,8 @@ test("every address written is added on one press, and then iMessage is offered"
   // A blank box is not an address: only what was written is asked for, in the order it stands in.
   await waitFor(() =>
     expect(intents(posted.calls).slice(1)).toEqual([
-      { verb: "add_member", email: "sam@work.com", admin: false },
-      { verb: "add_member", email: "alex@work.com", admin: false },
+      { lane: "actions/member/add_member", body: { email: "sam@work.com", admin: false } },
+      { lane: "actions/member/add_member", body: { email: "alex@work.com", admin: false } },
     ]),
   );
   await screen.findByRole("heading", { name: "Use this agent in iMessage" });
@@ -721,7 +810,7 @@ test("skipping every invite offers iMessage before the chat opens", async () => 
   const sent: string[] = [];
   const posted = recorder();
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/chat": (_url, init) => {
       sent.push(String(init?.body));
       return json(OPENED);
@@ -742,7 +831,7 @@ test("a deploy without iMessage finishes when every invite is skipped", async ()
   const posted = recorder();
   open(
     {
-      "/intents": posted.route,
+      ...lanes(posted),
       "/chat": (_url, init) => {
         sent.push(String(init?.body));
         return json(OPENED);
@@ -766,14 +855,14 @@ test("a deploy without iMessage finishes when every invite is skipped", async ()
 test("the iMessage offer starts the phone claim through the intent lane", async () => {
   const sent: string[] = [];
   const posted = recorder({
-    connect_imessage: {
+    imessage_connect: {
       applied: true,
       message: 'Text "UFO ABC123" to (408) 555-0123 from that phone within 30 minutes.',
       url: IMESSAGE_LINK,
     },
   });
-  open({
-    "/intents": posted.route,
+  const { calls } = open({
+    ...lanes(posted),
     "/chat": (_url, init) => {
       sent.push(String(init?.body));
       return json(OPENED);
@@ -813,9 +902,14 @@ test("the iMessage offer starts the phone claim through the intent lane", async 
   expect(openSpy).not.toHaveBeenCalled();
   expect(textCode.getAttribute("target")).toBeNull();
   expect(intents(posted.calls).at(-1)).toEqual({
-    verb: "connect_imessage",
-    phone_number: "+15594259991",
+    lane: "actions/surface/imessage/imessage_connect",
+    body: { phone_number: "+15594259991" },
   });
+  // The act is the one the surface row's declaration projects, read before the press posts it.
+  const projected = calls.indexOf("/surface/web/actions/surface/imessage");
+  const posted_at = calls.findIndex((url) => url.endsWith("/actions/surface/imessage/imessage_connect"));
+  expect(projected).toBeGreaterThanOrEqual(0);
+  expect(projected).toBeLessThan(posted_at);
   await userEvent.click(screen.getByRole("button", { name: "Nevermind" }));
   await waitFor(() =>
     expect(sent).toEqual([
@@ -828,7 +922,7 @@ test("the pending iMessage step confirms once the phone proves its code", async 
   const sent: string[] = [];
   let claim = { state: "pending" };
   const posted = recorder({
-    connect_imessage: {
+    imessage_connect: {
       applied: true,
       message: 'Text "UFO ABC123" to (408) 555-0123 from that phone within 30 minutes.',
       url: IMESSAGE_LINK,
@@ -837,7 +931,7 @@ test("the pending iMessage step confirms once the phone proves its code", async 
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   try {
     open({
-      "/intents": posted.route,
+      ...lanes(posted),
       "/workspace/imessage-claim": () => json(claim),
       "/chat": (_url, init) => {
         sent.push(String(init?.body));
@@ -882,14 +976,14 @@ test("the pending iMessage step confirms once the phone proves its code", async 
 
 test("the pending iMessage step states the lapsed window when the claim expires", async () => {
   const posted = recorder({
-    connect_imessage: {
+    imessage_connect: {
       applied: true,
       message: 'Text "UFO ABC123" to (408) 555-0123 from that phone within 30 minutes.',
       url: IMESSAGE_LINK,
     },
   });
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/workspace/imessage-claim": () => json({ state: "expired" }),
   });
 
@@ -905,14 +999,14 @@ test("the pending iMessage step states the lapsed window when the claim expires"
 test("the lapsed iMessage step mints another code from the same page", async () => {
   let claim = { state: "expired" };
   const posted = recorder({
-    connect_imessage: {
+    imessage_connect: {
       applied: true,
       message: 'Text "UFO ABC123" to (408) 555-0123 from that phone within 30 minutes.',
       url: IMESSAGE_LINK,
     },
   });
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/workspace/imessage-claim": () => json(claim),
   });
 
@@ -933,14 +1027,14 @@ test("the lapsed iMessage step mints another code from the same page", async () 
   expect(screen.queryByText("That code expired. Connect iMessage again for a new one.")).toBeNull();
   expect(intents(posted.calls)).toEqual([
     toolingIntent("notion"),
-    { verb: "connect_imessage", phone_number: "+15594259991" },
-    { verb: "connect_imessage", phone_number: "+15594259991" },
+    { lane: "actions/surface/imessage/imessage_connect", body: { phone_number: "+15594259991" } },
+    { lane: "actions/surface/imessage/imessage_connect", body: { phone_number: "+15594259991" } },
   ]);
 });
 
 test("an invalid iMessage phone stays on the form with one instruction", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Notion");
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
@@ -959,7 +1053,7 @@ test("an invalid iMessage phone stays on the form with one instruction", async (
 
 test("an iMessage phone that states another country code is refused, not cut to ten digits", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Notion");
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
@@ -983,7 +1077,7 @@ test("an iMessage phone that states another country code is refused, not cut to 
 
 test("back from the iMessage offer returns to the invite fields", async () => {
   const posted = recorder();
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Notion");
   await userEvent.type(await screen.findByLabelText("Email 1"), "sam@work.com");
@@ -998,7 +1092,7 @@ test("a refused invite states the refusal and adds nobody", async () => {
   const posted = recorder({
     add_member: { applied: false, message: "only a workspace admin can add members" },
   });
-  open({ "/intents": posted.route });
+  open({ ...lanes(posted) });
 
   await record("Notion");
   await userEvent.type(await screen.findByLabelText("Email 1"), "teammate@work.com");
@@ -1014,7 +1108,7 @@ test("the last act says the picks and the question into the agent's new chat", a
   const sent: { url: string; body: string }[] = [];
   const posted = recorder();
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/chat": (url, init) => {
       sent.push({ url, body: String(init?.body) });
       return json(OPENED);
@@ -1048,7 +1142,7 @@ test("picking no connector records nothing and still sends the goal", async () =
   const sent: string[] = [];
   const posted = recorder();
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/chat": (_url, init) => {
       sent.push(String(init?.body));
       return json(OPENED);
@@ -1072,7 +1166,7 @@ test("free text becomes the initial prompt", async () => {
   const sent: string[] = [];
   const posted = recorder();
   open({
-    "/intents": posted.route,
+    ...lanes(posted),
     "/chat": (_url, init) => {
       sent.push(String(init?.body));
       return json(OPENED);
@@ -1100,7 +1194,7 @@ test("free text becomes the initial prompt", async () => {
 });
 
 test("a refused record keeps the member on the first step and states the refusal", async () => {
-  open({ "/intents": () => json({ applied: false, message: "No memory extension." }) });
+  open({ "/actions/": () => json({ applied: false, message: "No memory extension." }) });
 
   await record("Gmail");
 

@@ -469,11 +469,7 @@ function Acts({
       </DropdownMenu>
       <Dialog open={rebuilding} onOpenChange={setRebuilding}>
         {rebuilding ? (
-          <RebuildDialog
-            title="Rebuild Page Facts"
-            action="Rebuild page facts"
-            verb="rebuild_page_facts"
-          >
+          <RebuildDialog title="Rebuild Page Facts" kind="page">
             <p className="m-0">
               Rows derived from synced pages are written again from those pages, as the derivation
               pass reaches each one. No row is dropped before its replacement is written. Rows

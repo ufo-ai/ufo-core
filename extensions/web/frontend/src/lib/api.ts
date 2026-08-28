@@ -1,4 +1,4 @@
-import type { CredentialRequest } from "@/lib/types";
+import type { ActionCall, ActionInput, ActionView, CredentialRequest } from "@/lib/types";
 
 export const BASE = "/surface/web";
 
@@ -82,13 +82,58 @@ export type IntentOutcome = {
   url?: string | null;
 };
 
-export async function postIntent(agentId: string, envelope: unknown): Promise<IntentOutcome> {
+/** The route a presented action posts on: the agent's lane, then the target the view's call
+ *  template names — its kind, the row for an instance action — and the action. The body is the
+ *  action's own input and nothing else; the route binds the target, so a page never states where
+ *  an act lands, only what it says. */
+export function actionPath(agentId: string, call: ActionCall): string {
+  const target = call.name === undefined ? [call.kind] : [call.kind, call.name];
+  return (
+    "/agents/" + agentId + "/actions/" + [...target, call.action].map(encodeURIComponent).join("/")
+  );
+}
+
+export function postAction(
+  agentId: string,
+  call: ActionCall,
+  input: ActionInput,
+): Promise<IntentOutcome> {
+  return postLane(actionPath(agentId, call), input);
+}
+
+/** The object one act installs against, and the action on it: what a screen knows about the act it
+ *  offers before any read. */
+export type ObjectAction = { kind: string; name: string; action: string };
+
+/** One act on one object, read and posted in a single press: the row's acts are projected from
+ *  their declarations, and the named action posts with the call template that projection bound. An
+ *  action the deploy does not present answers as a refusal in the read's own words — the press never
+ *  authors a call the portal did not offer, and who may run it is the action's own gate. */
+export async function postObjectAction(
+  agentId: string,
+  target: ObjectAction,
+  input: ActionInput,
+): Promise<IntentOutcome> {
+  const projected = await getJson<{ actions: ActionView[] }>(
+    "/actions/" + encodeURIComponent(target.kind) + "/" + encodeURIComponent(target.name),
+  );
+  if (!projected.ok) return { applied: false, message: projected.message };
+  const view = projected.payload.actions.find((entry) => entry.name === target.action);
+  if (!view) return { applied: false, message: "This act is not available here." };
+  return postAction(agentId, view.call, input);
+}
+
+export function postIntent(agentId: string, envelope: unknown): Promise<IntentOutcome> {
+  return postLane("/agents/" + agentId + "/intents", envelope);
+}
+
+async function postLane(path: string, body: unknown): Promise<IntentOutcome> {
   let res: Response;
   try {
-    res = await fetch(BASE + "/agents/" + agentId + "/intents", {
+    res = await fetch(BASE + path, {
       method: "POST",
       credentials: "same-origin",
-      body: JSON.stringify(envelope),
+      body: JSON.stringify(body),
     });
   } catch {
     return { applied: false, message: "Network error — try again." };

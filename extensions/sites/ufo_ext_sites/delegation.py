@@ -12,9 +12,10 @@ instructions before its first round, and `extended_context`, which lifts its rou
 large build. The tool is `side_effecting` and keys its child on the call's `idempotency_key`, so
 a dispatch step re-executed on crash recovery reconnects to the build it already spawned."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
+from ufo_ext_sites.objects import SITE_KIND
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_NAME
 
 BUILD_WEBSITE_TOOL = "build_website"
@@ -29,6 +30,7 @@ BUILD_WEBSITE_DESCRIPTION = (
 
 
 class BuildWebsiteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     objective: str = Field(
         description="Self-contained description of the site to build: purpose, pages/sections, "
         "content, and any design or behavior requirements. The child has no conversation history."
@@ -68,5 +70,6 @@ DELEGATION_TOOLS: tuple[ToolDef, ...] = (
         input_model=BuildWebsiteInput,
         handler=_build_website,
         side_effecting=True,
+        bound=ObjectBinding(kind=SITE_KIND, binding="collection"),
     ),
 )

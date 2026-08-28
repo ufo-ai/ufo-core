@@ -35,6 +35,23 @@ const EMPTY_SLOT = {
   filled: false,
 };
 
+/** The credential collection's projected act, which the listing's Set and Replace address. */
+const CREDENTIAL_ACTIONS = [
+  {
+    name: "request_credentials",
+    description: "Ask the member for a credential through a private prompt.",
+    input_schema: {
+      properties: {
+        reason: { type: "string", title: "Reason" },
+        prompts: { type: "array", title: "Prompts" },
+      },
+      required: ["reason", "prompts"],
+    },
+    call: { kind: "credential", action: "request_credentials", input: {} },
+    label: "Set credential",
+  },
+];
+
 beforeEach(() => {
   useStreamFake();
 });
@@ -67,11 +84,11 @@ test("a connect intent opens the stream for the turn it reports and shows the co
 test("a credential intent that answers with a request renders the prompt carrying its seal", async () => {
   location.hash = "#/workspace/credentials";
   const posts: string[] = [];
-  const intents: string[] = [];
+  const intents: { url: string; body: unknown }[] = [];
   wire({
-    "/workspace/credentials": () => json({ slots: [SLOT] }),
-    "/intents": (_url, init) => {
-      intents.push(String(init?.body));
+    "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT] }),
+    "/request_credentials": (url, init) => {
+      intents.push({ url, body: JSON.parse(String(init?.body)) });
       return json({
         applied: true,
         message: "",
@@ -97,10 +114,12 @@ test("a credential intent that answers with a request renders the prompt carryin
   await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
 
   await waitFor(() => expect(posts.length).toBe(1));
-  expect(JSON.parse(intents[0])).toEqual({
-    verb: "request",
-    kind: "credential",
-    name: "openai",
+  expect(intents[0]).toEqual({
+    url: "/surface/web/agents/" + AGENT.id + "/actions/credential/request_credentials",
+    body: {
+      reason: "models authenticates with this value; it is stored encrypted and never shown again.",
+      prompts: [{ slot: "OPENAI_API_KEY", prompt: "the key" }],
+    },
   });
   const sent = new URLSearchParams(posts[0]);
   expect(sent.get("sealed")).toBe("seal-token");
@@ -111,7 +130,7 @@ test("a credential intent that answers with a request renders the prompt carryin
 test("credentials group, sort, and render slot state and literals", async () => {
   location.hash = "#/workspace/credentials";
   wire({
-    "/workspace/credentials": () => json({ slots: [SLOT, EMPTY_SLOT] }),
+    "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, EMPTY_SLOT] }),
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
@@ -141,7 +160,7 @@ test("credentials group, sort, and render slot state and literals", async () => 
  *  distance from them as from the family above, and headed neither. */
 test("a credential family stands further from the family above it than from its own cards", async () => {
   location.hash = "#/workspace/credentials";
-  wire({ "/workspace/credentials": () => json({ slots: [SLOT, EMPTY_SLOT] }) });
+  wire({ "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, EMPTY_SLOT] }) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await screen.findByText("Credential values are shared across the workspace.");
@@ -159,7 +178,7 @@ test("a credential family stands further from the family above it than from its 
  *  connector and agent tables were carrying. */
 test("a row's acts stand on one line, so the row keeps its pitch", async () => {
   location.hash = "#/workspace/credentials";
-  wire({ "/workspace/credentials": () => json({ slots: [SLOT, EMPTY_SLOT] }) });
+  wire({ "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, EMPTY_SLOT] }) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const replace = await screen.findByRole("button", { name: "Replace" });
@@ -174,9 +193,9 @@ test("a stored credential states the slot it stored and re-reads the listing", a
   wire({
     "/workspace/credentials": () => {
       reads += 1;
-      return json({ slots: [SLOT] });
+      return json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT] });
     },
-    "/intents": () =>
+    "/request_credentials": () =>
       json({
         applied: true,
         message: "",
@@ -204,8 +223,8 @@ test("a request whose second slot is refused keeps the first stored and asks onl
   const posts: string[] = [];
   let writable = false;
   wire({
-    "/workspace/credentials": () => json({ slots: [SLOT] }),
-    "/intents": () =>
+    "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT] }),
+    "/request_credentials": () =>
       json({
         applied: true,
         message: "",
@@ -252,7 +271,7 @@ test("a cleared credential states the outcome and re-reads the listing", async (
   wire({
     "/workspace/credentials": () => {
       reads += 1;
-      return json({ slots: [SLOT] });
+      return json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT] });
     },
     "/intents": () => json({ applied: true, message: "Cleared OPENAI_API_KEY." }),
   });
@@ -268,12 +287,14 @@ test("a cleared credential states the outcome and re-reads the listing", async (
 test("a destructive act posts nothing until a second click confirms it, and leaving it disarms", async () => {
   location.hash = "#/workspace/credentials";
   const intents: string[] = [];
+  const refused = (_url: string, init?: RequestInit) => {
+    intents.push(String(init?.body));
+    return json({ applied: false, message: "Only an admin may clear it." });
+  };
   wire({
-    "/workspace/credentials": () => json({ slots: [SLOT] }),
-    "/intents": (_url, init) => {
-      intents.push(String(init?.body));
-      return json({ applied: false, message: "Only an admin may clear it." });
-    },
+    "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT] }),
+    "/intents": refused,
+    "/request_credentials": refused,
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
@@ -296,7 +317,7 @@ test("two acts in a row each re-read, even though the server answers one constan
   wire({
     "/workspace/credentials": () => {
       reads += 1;
-      return json({ slots: [SLOT, { ...SLOT, name: "notion", slot: "NOTION_TOKEN" }] });
+      return json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, { ...SLOT, name: "notion", slot: "NOTION_TOKEN" }] });
     },
     "/intents": () => json({ applied: true, message: "Saved.", turn_id: TURN_ID }),
   });
@@ -328,8 +349,8 @@ const REQUESTED = {
 test("an empty slot offers Set, and a refused act states the refusal in place", async () => {
   location.hash = "#/workspace/credentials";
   wire({
-    "/workspace/credentials": () => json({ slots: [{ ...SLOT, filled: false }] }),
-    "/intents": () => json({ applied: false, message: "Only an admin may set it." }),
+    "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [{ ...SLOT, filled: false }] }),
+    "/request_credentials": () => json({ applied: false, message: "Only an admin may set it." }),
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
@@ -341,7 +362,7 @@ test("an empty slot offers Set, and a refused act states the refusal in place", 
 
 test("a workspace with no declared slots says so", async () => {
   location.hash = "#/workspace/credentials";
-  wire({ "/workspace/credentials": () => json({ slots: [] }) });
+  wire({ "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [] }) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByText("No credential slots are declared.")).toBeTruthy();
@@ -351,8 +372,8 @@ test("the secret field hides what a member types and refuses whitespace", async 
   location.hash = "#/workspace/credentials";
   const posts: string[] = [];
   wire({
-    "/workspace/credentials": () => json({ slots: [SLOT] }),
-    "/intents": () => json(REQUESTED),
+    "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT] }),
+    "/request_credentials": () => json(REQUESTED),
     "/credentials": (_url, init) => {
       posts.push(String(init?.body));
       return json({ stored: true });
@@ -372,8 +393,8 @@ test("the secret field hides what a member types and refuses whitespace", async 
 test("a refused store states the reason the server gave and keeps the field", async () => {
   location.hash = "#/workspace/credentials";
   wire({
-    "/workspace/credentials": () => json({ slots: [SLOT] }),
-    "/intents": () => json(REQUESTED),
+    "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT] }),
+    "/request_credentials": () => json(REQUESTED),
     "/credentials": () => new Response("that seal has expired", { status: 400 }),
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);

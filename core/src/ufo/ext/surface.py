@@ -92,6 +92,7 @@ from ufo.media.artifact_url import (
 from ufo.media.image_previews import raster_image_media_type
 from ufo.models.interface import Message, ModelRequest
 from ufo.o11y import emit_metric, log, warn
+from ufo.object_views import ActionView, presented_action_views
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.sandbox.containment import contained_leaf
 from ufo.sandbox.conversation import (
@@ -163,12 +164,14 @@ if TYPE_CHECKING:
     from ufo.listings import ListingCursor, ListingPage
     from ufo.memory import MemoryMatch, MemorySearch
     from ufo.objects import (
+        BoundAction,
         BoundKind,
         ConversationObjectGrant,
         MemberObject,
         ObjectListQuery,
         ObjectPage,
     )
+    from ufo.tools.registry import ActionBinding
 
 OPERATOR_EMAIL_DOMAIN = "metalcraft.ai"
 
@@ -789,10 +792,12 @@ class AgentSummary(BaseModel):
 
 
 class ArchivedAgent(BaseModel):
-    """One archived app as a surface lists it for restore."""
+    """One archived app as a surface lists it for restore: the name it held, and `object_name`,
+    the durable name its agent object answers to — what a restore targets."""
 
     id: UUID
     name: str
+    object_name: str
     icon: TablerIcon
     archived_at: datetime
     owner_member_id: UUID | None = None
@@ -1713,6 +1718,8 @@ class SurfaceContext:
     _memory: "MemorySearch | None" = None
     _model: "SurfaceModel | None" = None
     _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
+    _actions: "Mapping[str, Mapping[str, BoundAction]]" = MappingProxyType({})
+    _frame_admissible: frozenset[str] = frozenset()
     _conversation_slots: tuple["BoundConversationSlot", ...] = ()
     _preview_url: str | None = None
     _preview_token: str | None = None
@@ -2736,6 +2743,7 @@ class SurfaceContext:
                     sa.select(
                         tables.agent.c.id,
                         member_name.label("name"),
+                        tables.agent.c.name.label("object_name"),
                         tables.agent.c.icon,
                         tables.agent.c.archived_at,
                         tables.agent.c.owner_member_id,
@@ -2751,6 +2759,7 @@ class SurfaceContext:
             ArchivedAgent(
                 id=row.id,
                 name=row.name,
+                object_name=row.object_name,
                 icon=row.icon,
                 archived_at=row.archived_at,
                 owner_member_id=row.owner_member_id,
@@ -2852,6 +2861,28 @@ class SurfaceContext:
             spec_schema=self._object_schemas.get(kind),
         )
 
+    def object_actions(
+        self,
+        kind: str,
+        binding: "ActionBinding",
+        *,
+        name: str | None = None,
+        generation: UUID | None = None,
+    ) -> tuple[ActionView, ...]:
+        """The controls the portal draws for one target of `kind`: the presented actions of one
+        binding, built from the declarations and pre-bound to the name the route holds. No member
+        read gates them — a target the portal offers no row for (an archived app, the workspace,
+        another member's private conversation) still projects its acts, and dispatch's recheck and
+        the handler decide; `presented_action_views` states the rest of the rule."""
+        return presented_action_views(
+            self._actions, kind, binding, name=name, generation=generation
+        )
+
+    def frame_admits(self, callable_id: str) -> bool:
+        """Whether an embedded app page may post this callable — a global by its tool name, a bound
+        action by its canonical id — as its declaration says with `frame`."""
+        return callable_id in self._frame_admissible
+
     async def agent_skills(self, agent_id: UUID) -> tuple[PortalSkill, ...]:
         """The loadable skills of this workspace — the composition a turn of an agent that uses them
         loads (the deploy registry with the workspace's saved skills as its member tier, deploy
@@ -2941,15 +2972,6 @@ class SurfaceContext:
         if self._memory is None:
             raise RuntimeError("no memory-search provider is installed — gate on memory_available")
         return self._memory.listable_kinds()
-
-    @property
-    def memory_body_max_chars(self) -> int:
-        """How long a body the installed provider stores — what a portal form that records one
-        holds its member to, so the length is answered by whoever enforces it and a member is
-        stopped at the bound rather than refused after they submit."""
-        if self._memory is None:
-            raise RuntimeError("no memory-search provider is installed — gate on memory_available")
-        return self._memory.body_max_chars()
 
     async def agent_spend(self, agent_id: UUID, window_seconds: int | None) -> AgentSpendReport:
         """One agent's usage for a selected range or all time, plus its caps."""

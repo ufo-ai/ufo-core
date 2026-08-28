@@ -1,7 +1,8 @@
 """The member_add_notify grader is a pure decision over the tool trajectory: whether a successful
-`add_member` call carried `notify=false`. It reproduces the incident where an agent asked to add
-someone quietly accepted the tool's default (`notify=True`) and the workspace emailed a sign-in
-link to a person the member had explicitly asked not to be written to."""
+`add_member` dispatch on the member collection carried `notify=false`. It reproduces the incident
+where an agent asked to add someone quietly accepted the tool's default (`notify=True`) and the
+workspace emailed a sign-in link to a person the member had explicitly asked not to be written
+to."""
 
 from uuid import UUID, uuid4
 
@@ -26,8 +27,8 @@ def _add_member(notify: bool | None, is_error: bool = False) -> ToolInvocation:
     if notify is not None:
         input_payload["notify"] = notify
     return ToolInvocation(
-        name="add_member",
-        input=input_payload,
+        name="object_action",
+        input={"kind": "member", "action": "add_member", "input": input_payload},
         result="added" if not is_error else "already a member",
         has_result=True,
         is_error=is_error,

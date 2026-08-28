@@ -64,10 +64,10 @@ PAGE_ENTRY = "index.html"
 MEDIA_TYPES = {".html": "text/html", ".ts": "text/plain", ".tsx": "text/plain"}
 DIST_DIR = "dist"
 EDIT_TOOLS = ("write", "edit")
-DEPLOY_TOOL = "deploy_website"
+DEPLOY_TOOL = "action:site:deploy_website"
 READ_TOOL = "object_get"
 BASH_TOOL = "bash"
-HOMEPAGE_TOOL = "set_homepage"
+HOMEPAGE_TOOL = "action:agent:set_homepage"
 HASHED_SCRIPT = re_compile(r'src="[^"]*assets/[^"/]+\.js"')
 INSTALL_COMMANDS = ("npm install", "npm i ", "npm add", "yarn add", "pnpm add", "pnpm install")
 BUILD_COMMANDS = ("vite build", "npm run build", "pnpm build", "pnpm run build", "yarn build")
@@ -258,21 +258,40 @@ def _deployed_source_scorer(deploys: int) -> Grader:
         landed = tuple(
             call
             for call in output.calls
-            if call.name == DEPLOY_TOOL
+            if call.call == DEPLOY_TOOL
             and call.succeeded
-            and call.input.get("site_name") == SITE_NAME
+            and call.arguments.get("site_name") == SITE_NAME
         )
         if len(landed) < deploys:
             return CapabilityVerdict(
                 False, f"deployed {SITE_NAME} {len(landed)} time(s), needs {deploys}"
             )
         for call in landed:
-            named = str(call.input.get("project_path", ""))
+            named = str(call.arguments.get("project_path", ""))
             if Path(named).name == DIST_DIR:
                 return CapabilityVerdict(False, f"deployed the build directory {named}")
         return CapabilityVerdict(True, f"deployed source {len(landed)} time(s)")
 
     return DescribedGrader(f"{deploys} deploy(s) of source under {SITE_NAME}", grade)
+
+
+def _homepage_names_the_app_scorer() -> Grader:
+    """The bind lands on this app's own agent: the action is dispatched on `agent/<name>`, so a
+    name other than the app's would rewrite another agent's page."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        binds = tuple(
+            call for call in output.calls if call.call == HOMEPAGE_TOOL and call.succeeded
+        )
+        if not binds:
+            return CapabilityVerdict(False, "no homepage was bound")
+        targets = sorted({str(call.input.get("name", "")) for call in binds})
+        if targets != [APP_SLUG]:
+            named = ", ".join(target or "(no agent)" for target in targets)
+            return CapabilityVerdict(False, f"bound the homepage of {named}, not {APP_SLUG}")
+        return CapabilityVerdict(True, f"bound {APP_SLUG}'s own homepage")
+
+    return DescribedGrader(f"the homepage bind targets the {APP_SLUG} agent", grade)
 
 
 def _pull_between_deploys_scorer() -> Grader:
@@ -283,7 +302,7 @@ def _pull_between_deploys_scorer() -> Grader:
         deploys = tuple(
             index
             for index, call in enumerate(output.calls)
-            if call.name == DEPLOY_TOOL and call.succeeded
+            if call.call == DEPLOY_TOOL and call.succeeded
         )
         if len(deploys) < 2:
             return CapabilityVerdict(
@@ -343,9 +362,10 @@ CASES = (
             _deployed_source_scorer(1),
             _built_page_scorer(),
             required_tools_scorer((DEPLOY_TOOL, HOMEPAGE_TOOL), ((DEPLOY_TOOL, HOMEPAGE_TOOL),)),
+            _homepage_names_the_app_scorer(),
         ),
         seed=_rowless_page(),
-        digest_tag=f"app-home:{APP_SLUG}:one-change:wait-{WORKFLOW_WAIT_SECONDS:g}",
+        digest_tag=f"app-home:{APP_SLUG}:actions:target:one-change:wait-{WORKFLOW_WAIT_SECONDS:g}",
     ),
     CapabilityCase(
         "chat-home-second-change",
@@ -360,6 +380,6 @@ CASES = (
             restraint_scorer((HOMEPAGE_TOOL,)),
         ),
         seed=_deployed_page(),
-        digest_tag=f"app-home:{APP_SLUG}:second-change:wait-{WORKFLOW_WAIT_SECONDS:g}",
+        digest_tag=f"app-home:{APP_SLUG}:actions:target:second-change:wait-{WORKFLOW_WAIT_SECONDS:g}",
     ),
 )

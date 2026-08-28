@@ -123,7 +123,7 @@ async def _own_mailbox(_workspace_id: UUID, agent_id: UUID, _blob: BlobStore) ->
 
 
 def _over_budget(calls: tuple[ToolInvocation, ...]) -> CapabilityVerdict | None:
-    substantive = tuple(call.name for call in calls if call.name not in BOOKKEEPING_TOOLS)
+    substantive = tuple(call.call for call in calls if call.call not in BOOKKEEPING_TOOLS)
     if len(substantive) <= SUBSTANTIVE_CALL_BUDGET:
         return None
     return CapabilityVerdict(

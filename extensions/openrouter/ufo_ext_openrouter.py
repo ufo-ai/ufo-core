@@ -29,7 +29,7 @@ import httpx
 import openai
 from openai.types.chat import ChatCompletionChunk
 from openai.types.completion_usage import CompletionUsage
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ufo.sdk.accounting import MICRO_USD_PER_USD
 from ufo.sdk.context import CredentialAccess
@@ -54,7 +54,15 @@ from ufo.sdk.models import (
     openai_sdk_client,
 )
 from ufo.sdk.o11y import emit_metric, log
-from ufo.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.objects import ARTIFACT_KIND
+from ufo.sdk.tools import (
+    ImageContent,
+    ObjectBinding,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolResult,
+)
 
 NAME = "openrouter"
 VERSION = "0.1.0"
@@ -702,11 +710,12 @@ OPENROUTER_MODEL_SPECS = (
 
 
 class GenerateImageInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     prompt: str = Field(
         max_length=MAX_IMAGE_PROMPT_CHARS,
         description="What to draw. Describe subject, composition, lighting and any text verbatim.",
     )
-    name: str = Field(
+    file_name: str = Field(
         max_length=MAX_IMAGE_NAME_CHARS,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
         description="File name stem for the saved images, without a directory or extension.",
@@ -828,7 +837,7 @@ class OpenRouterImages:
         ) as http:
             response = await http.post(
                 IMAGES_PATH,
-                json=args.model_dump(exclude_none=True, exclude={"name"}),
+                json=args.model_dump(exclude_none=True, exclude={"file_name"}),
             )
         if response.is_error:
             return ToolResult(
@@ -910,7 +919,7 @@ class OpenRouterImages:
     ) -> str:
         """Write one returned image into the workspace, on disk under the member's own workspace."""
         suffix = IMAGE_SUFFIXES.get(image.media_type, IMAGE_SUFFIXES[DEFAULT_IMAGE_MEDIA_TYPE])
-        path = f"{IMAGE_DIR}/{args.name}-{index}{suffix}"
+        path = f"{IMAGE_DIR}/{args.file_name}-{index}{suffix}"
         await ctx.sandbox.write_file(path, image.raw)
         return path
 
@@ -938,10 +947,12 @@ GENERATE_IMAGE_TOOL = ToolDef(
     input_model=GenerateImageInput,
     handler=_generate_image,
     side_effecting=True,
+    bound=ObjectBinding(kind=ARTIFACT_KIND, binding="collection"),
 )
 
 
 class GenerateVideoInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     prompt: str = Field(
         max_length=MAX_VIDEO_PROMPT_CHARS,
         description=(
@@ -949,7 +960,7 @@ class GenerateVideoInput(BaseModel):
             "sound the shot should carry."
         ),
     )
-    name: str = Field(
+    file_name: str = Field(
         max_length=MAX_VIDEO_NAME_CHARS,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
         description="File name stem for the saved video, without a directory or extension.",
@@ -1060,7 +1071,7 @@ class OpenRouterVideos:
         ) as http:
             response = await http.post(
                 VIDEOS_PATH,
-                json=args.model_dump(exclude_none=True, exclude={"name"}),
+                json=args.model_dump(exclude_none=True, exclude={"file_name"}),
             )
             if response.is_error:
                 return ToolResult(
@@ -1178,7 +1189,7 @@ class OpenRouterVideos:
 
     async def _save(self, ctx: ToolContext, args: GenerateVideoInput, video: bytes) -> str:
         """Write the finished video into the workspace, on disk under the member's own workspace."""
-        path = f"{VIDEO_DIR}/{args.name}{VIDEO_SUFFIX}"
+        path = f"{VIDEO_DIR}/{args.file_name}{VIDEO_SUFFIX}"
         await ctx.sandbox.write_file(path, video)
         return path
 
@@ -1207,6 +1218,7 @@ GENERATE_VIDEO_TOOL = ToolDef(
     input_model=GenerateVideoInput,
     handler=_generate_video,
     side_effecting=True,
+    bound=ObjectBinding(kind=ARTIFACT_KIND, binding="collection"),
 )
 
 

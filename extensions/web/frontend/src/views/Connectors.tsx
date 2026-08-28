@@ -53,13 +53,13 @@ import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { Moment } from "@/lib/moments";
 import { agentName } from "@/lib/agentName";
-import { BASE, getJson, postIntent, type Fetched } from "@/lib/api";
+import { BASE, getJson, postIntent, postObjectAction, type Fetched } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { ProviderGlyph } from "@/lib/providerGlyph";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
 import {
-  CONNECT_VERB,
+  CONNECT_INSTALLS,
   FIRST_RUN_READ,
   WATCH_MS,
   type FirstRunPayload,
@@ -458,13 +458,15 @@ export function WorkspaceConnectors({
     // Opened on the press, before the round trip that mints the link: a window opened afterwards
     // has lost the gesture the browser opens one for.
     consent.current = openConsentWindow();
-    const install = CONNECT_VERB[name];
-    const outcome = await postIntent(
-      agent.id,
-      install
-        ? { verb: install }
-        : { verb: "connect", kind: "connection", name, spec: { shared: false } },
-    );
+    const install = CONNECT_INSTALLS[name];
+    const outcome = install
+      ? await postObjectAction(agent.id, install, {})
+      : await postIntent(agent.id, {
+          verb: "connect",
+          kind: "connection",
+          name,
+          spec: { shared: false },
+        });
     setBusy(null);
     if (!outcome.applied) {
       consent.current?.close();

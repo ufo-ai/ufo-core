@@ -51,7 +51,19 @@ resource "datadog_metric_tag_configuration" "tool_call_ms" {
   metric_name         = "ufo.tool_call_ms"
   metric_type         = "distribution"
   include_percentiles = true
-  tags                = ["env", "error_class", "host", "outcome", "profile", "service", "tool"]
+  tags = [
+    "binding",
+    "call",
+    "contributor",
+    "env",
+    "error_class",
+    "host",
+    "kind",
+    "outcome",
+    "profile",
+    "service",
+    "tool",
+  ]
 }
 
 # The unit each latency distribution is in. Datadog does not read it off the OTLP payload, so without

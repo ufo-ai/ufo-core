@@ -20,6 +20,7 @@ from uuid import UUID, uuid4, uuid5
 import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
+import ufo_ext_sources.manifest as sources_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import (
     CONSOLIDATE_EMBED_CHARS,
@@ -168,7 +169,7 @@ def _materializer(
         blob=blob,
         index=DefaultIndex(transaction=workspace_tx),
         embed=TopicEmbed(),
-        manifests=(memory_manifest.manifest(),),
+        manifests=(sources_manifest.manifest(), memory_manifest.manifest()),
         registry=_registry(client),
         background_model=BACKGROUND_MODEL,
         postgres=False,

@@ -63,6 +63,7 @@ from ufo.sdk.models import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.tools.registry import OBJECT_ACTION_TOOL
 from ufo.turns.transcript import (
     CompactionRecord,
     TranscriptDecodeError,
@@ -81,7 +82,7 @@ MAX_EVAL_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_EVAL_ARTIFACT_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_EVAL_TRAJECTORY_BYTES = 8 * 1024 * 1024
 MAX_EVAL_COMPACTION_BYTES = 8 * 1024 * 1024
-PRIVATE_HANDOFF_TOOL = "request_credentials"
+PRIVATE_HANDOFF_ACTION = ("credential", "request_credentials")
 PRIVATE_HANDOFF_REDACTED = "[private handoff redacted]"
 REASONING_EVIDENCE = "[reasoning]\n{summary}"
 REDACTED_REASONING_EVIDENCE = "[reasoning redacted by the provider]"
@@ -311,6 +312,16 @@ class InProcessTarget:
         return await self.mcp_atlas.run(prompt, enabled_tools, tool_servers)
 
     async def run(self, case: CapabilityCase) -> TargetResult:
+        if case.cleanup is None:
+            return await self._run_case(case)
+        if self.blob is None:
+            raise RuntimeError("a capability case with cleanup requires blob access")
+        try:
+            return await self._run_case(case)
+        finally:
+            await case.cleanup(ws_current().workspace_id, self.agent_id, self.blob)
+
+    async def _run_case(self, case: CapabilityCase) -> TargetResult:
         if case.seed is not None:
             if self.blob is None:
                 raise RuntimeError("a seeded capability case requires blob access")
@@ -815,7 +826,7 @@ class InProcessTarget:
         output = capability_output(messages)
         output = replace(
             output,
-            own_tools=tuple(call.name for call in output.calls),
+            own_tools=tuple(call.call for call in output.calls),
             own_calls=tuple(output.calls),
         )
         status = await self._turn_status(turn_id)
@@ -865,7 +876,7 @@ class InProcessTarget:
         output = capability_output(messages)
         output = replace(
             output,
-            own_tools=tuple(call.name for call in output.calls),
+            own_tools=tuple(call.call for call in output.calls),
             own_calls=tuple(output.calls),
         )
         output, descendant_ids, missing_child = await self._merge_descendants(
@@ -1316,12 +1327,17 @@ def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:
 
 
 def _private_handoffs(messages: tuple[Message, ...]) -> tuple[frozenset[str], tuple[str, ...]]:
+    """The credential collection's `request_credentials` calls and the sealed values their results
+    carry. The action dispatches through `object_action`, so the wire name says nothing and the
+    kind and action in the call's input are what mark a handoff."""
     private_results = frozenset(
         block.id
         for message in messages
         if not isinstance(message.content, str)
         for block in message.content
-        if isinstance(block, ToolUseBlock) and block.name == PRIVATE_HANDOFF_TOOL
+        if isinstance(block, ToolUseBlock)
+        and block.name == OBJECT_ACTION_TOOL
+        and (block.input.get("kind"), block.input.get("action")) == PRIVATE_HANDOFF_ACTION
     )
     values: list[str] = []
     for message in messages:

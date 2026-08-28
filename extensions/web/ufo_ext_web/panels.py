@@ -13,17 +13,28 @@ like every other portal read."""
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from typing import Literal, get_args
 from uuid import UUID
 
 import yaml
-from pydantic import BaseModel, Field, JsonValue, ValidationError, model_validator
+from pydantic import BaseModel, JsonValue, ValidationError, model_validator
+from ufo_ext_imessage.tools import IMESSAGE_CONNECT_ACTION
+from ufo_ext_slack.tools import SLACK_CONNECT_ACTION
 
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, Terminal
-from ufo.sdk.objects import AGENT_ICONS, AgentSpec, TablerIcon
-from ufo.sdk.surfaces import CredentialSlotView, SurfaceContext, TerminalFrame, ToolIntent
+from ufo.sdk.objects import (
+    AGENT_ICONS,
+    CREDENTIAL_KIND,
+    SURFACE_KIND,
+    WORKSPACE_KIND,
+    AgentSpec,
+    TablerIcon,
+)
+from ufo.sdk.surfaces import SurfaceContext, TerminalFrame, ToolIntent
+from ufo.sdk.tools import ActionBinding
 from ufo_ext_web.audience import granted_emails, web_extension
 
 INTENT_MAX_BYTES = 65_536
@@ -40,6 +51,14 @@ BILLING_PORTAL_LINK_KEY = "portal_url"
 IMESSAGE_STATE_KEY = "state"
 IMESSAGE_INSTRUCTION_KEY = "instruction"
 IMESSAGE_LINK_KEY = "opt_in_link"
+CONNECT_GITHUB_ACTION = "connect_github"
+MANAGE_BILLING_ACTION = "manage_billing"
+BILLING_OPERATION_KEY = "operation"
+BILLING_PORTAL_OPERATION = "portal"
+REPORT_KIND = "report"
+REBUILD_REPORT_DIGEST_ACTION = "rebuild_report_digest"
+PAGE_KIND = "page"
+REBUILD_PAGE_FACTS_ACTION = "rebuild_page_facts"
 
 
 class ApplyIntent(BaseModel):
@@ -120,107 +139,16 @@ class ApplyIntent(BaseModel):
         return self
 
 
-class CredentialIntent(BaseModel):
-    """One request for the private prompt that fills a member-fillable credential slot. The panel
-    never carries the secret: this mints the same sealed `request_credentials` handoff a chat turn
-    produces, the terminal frame returns it, and the value crosses only in the sealed fulfillment
-    the prompt posts."""
+ENVELOPE_FIELDS = frozenset({"kind", "action", "name", "agent", "generation", "input"})
+"""The `object_action` envelope's own fields, which the action lane writes from its route and never
+reads from a body — a body naming one is refused before a turn exists."""
 
-    verb: Literal["request"]
-    kind: Literal["credential"]
-    name: str
+FRAME_HEADER = "x-ufo-frame"
+"""The header the portal shell sets on a call it forwards for an embedded app page. A page speaks
+with the viewer's whole session, so the lane admits a marked post only for a callable whose
+declaration says `frame`."""
 
-
-class AudienceIntent(BaseModel):
-    """One web-audience change for the intent's agent — the same admin-only chat verbs
-    `grant_web_access`/`revoke_web_access`, prepared by the administration view and dispatched
-    verbatim on the target agent's own intent lane."""
-
-    verb: Literal["grant_web_access", "revoke_web_access"]
-    email: str
-
-
-class TranscriptIntent(BaseModel):
-    """One admin's acknowledgement that another member's private conversation may hold private
-    information, prepared by the conversations view and dispatched verbatim to
-    `read_private_transcript` on the conversation's own agent. It is a granting act — the row it
-    writes is what the content gate answers on — so it rides the lane rather than a route, and the
-    turn is its audit record."""
-
-    verb: Literal["read"]
-    kind: Literal["transcript"]
-    conversation_id: UUID
-
-
-class RefillIntent(BaseModel):
-    """An admin's standing authority to charge the card on file, given from the billing screen.
-
-    It is here rather than only in chat because the workspace that most needs it is the one whose
-    balance refuses every turn — the same reason `PaymentMethodIntent` sits beside it. Both figures
-    together arrange a refill and neither stops it, which is the shape `manage_billing` action
-    'autopay' already takes — the intent dispatches verbatim to that same verb, so the tool's own
-    admin gate and its refusals answer, and nothing about who may do this is decided twice."""
-
-    verb: Literal["refill"]
-    kind: Literal["billing"]
-    amount_dollars: int | None = None
-    below_dollars: int | None = None
-
-
-class PaymentMethodIntent(BaseModel):
-    """The portal link that saves a card, asked for from the billing screen.
-
-    A refill is an authority to charge a card, so it is refused until one is on file — and the only
-    other way to put one there is a chat act, which the balance that needs the card refuses. The
-    screen therefore carries the step before the refill as well: both dispatch to `manage_billing`,
-    the one verb a spent balance still admits, so an admin whose workspace has stopped can reach a
-    provider from a screen that still answers. The link is minted per submission and short-lived,
-    which is why nothing about it is stored here."""
-
-    verb: Literal["save_card"]
-    kind: Literal["billing"]
-
-
-class CorrectionIntent(BaseModel):
-    """One memory correction from the workspace memory view: a corrective memory recorded through
-    `memory_update`, exactly the write chat performs — a new item under the correcting member's own
-    audience, naming the corrected item in `source_ref`. The named item is never edited or removed:
-    the memory kind refuses apply and delete, and both statements stand until the dedup sweep
-    retires a near-duplicate original toward the newest statement — the correction — leaving the row
-    and its provenance in place.
-
-    A correction is therefore a row the member writes, whatever shape the item it names has, and how
-    long a row may run is the memory provider's answer rather than a number repeated here: the
-    memory read carries `body_max_chars`, and the form holds the member to it — an item longer than
-    that bound opens the form empty beside its current text, so what is collected is a statement
-    written to the bound rather than a body the tool refuses. A second copy of the bound in this
-    extension is a second answer that drifts the day the provider moves its own, and the tool stays
-    the enforcer either way."""
-
-    verb: Literal["record"]
-    kind: Literal["memory"]
-    corrects: UUID
-    body: str = Field(min_length=1)
-
-
-class DigestRebuildIntent(BaseModel):
-    """The radar's rebuild, prepared by the feed and dispatched verbatim to `rebuild_report_digest`
-    on the main agent's lane. The tool's own admin gate answers who may spend a workspace's balance
-    writing its whole feed again, and the tool marks the reports due rather than writing anything —
-    the digest job owns that text and drains the backlog on its own interval."""
-
-    verb: Literal["rebuild_reports"]
-
-
-class PageFactRebuildIntent(BaseModel):
-    """The wiki's rebuild, prepared by the page and dispatched verbatim to `rebuild_page_facts`. It
-    reaches exactly the rows a job can produce again — the facts derived from synced pages, which
-    the pages themselves still hold. The page's paragraphs are written again by the nightly passes
-    from the rows that survive this derivation, and an item an app recorded in a conversation came
-    from a turn that has ended, so neither is this intent's to redo; the page states both before the
-    member presses it."""
-
-    verb: Literal["rebuild_page_facts"]
+NO_FRAME_ACCESS = "This action is not available from an app page."
 
 
 class ProviderTile(BaseModel):
@@ -578,230 +506,31 @@ UNLOCKS_BY_NAME = {unlock.name: unlock for unlock in UNLOCKS}
 STARTER_APP_EXTENSIONS = frozenset(unlock.extension for unlock in APP_UNLOCKS)
 
 
-TOOLING_PREFIX = "My team uses "
-
-
-def _tools_recorded(labels: tuple[str, ...], budget: int) -> str:
-    """The first-run picks as one row of the member's wiki. A member may pick every tile and the
-    tiles carry labels rather than slugs, so the sentence is built to the row it is drawn as: it
-    names the tools that fit and counts the rest. A sentence cut at the ceiling instead loses
-    whichever names fall past it and says nothing about how many there were."""
-    for named in range(len(labels), 0, -1):
-        rest = len(labels) - named
-        tail = f", and {rest} more." if rest else "."
-        body = TOOLING_PREFIX + ", ".join(labels[:named]) + tail
-        if len(body) <= budget:
-            return body
-    return f"{TOOLING_PREFIX}{len(labels)} tools."
-
-
-class ToolingIntent(BaseModel):
-    """What the team already uses, picked on the first run and recorded through `memory_update` —
-    exactly the write chat performs when a member says it, so the item lands under the picking
-    member's own audience and every later turn recalls it. The picks name the offered tiles: a name
-    outside the catalog is refused before a turn exists, because the body the memory carries is
-    written from the catalog's own labels."""
-
-    verb: Literal["record_tooling"]
-    kind: Literal["memory"]
-    providers: list[str] = Field(min_length=1, max_length=len(FIRST_RUN_PROVIDERS))
-
-    @model_validator(mode="after")
-    def _picks_are_offered(self) -> "ToolingIntent":
-        unoffered = sorted(set(self.providers) - FIRST_RUN_PROVIDER_NAMES)
-        if unoffered:
-            raise ValueError(f"no provider tile named {unoffered[0]!r}")
-        return self
-
-
-class ConnectSlackIntent(BaseModel):
-    """The first run's Slack step: the `slack_connect` chat verb, dispatched verbatim so the tool's
-    own admin gate answers and nothing about who may install a workspace-wide bot is decided
-    twice. The tool seals the install link inside the turn and states it in its answer, so the
-    outcome carries that link back to the member who asked — `connect_account`'s per-member consent
-    URL is the one minted at stream time instead, because it authorizes a member's own account
-    rather than the workspace's."""
-
-    verb: Literal["connect_slack"]
-
-
-class ConnectGitHubIntent(BaseModel):
-    """The first run's GitHub step: the `connect_github` chat verb on the same terms as the Slack
-    step — dispatched verbatim, admin-gated by the tool, answered with the install link it sealed
-    for this workspace."""
-
-    verb: Literal["connect_github"]
-
-
-class ConnectImessageIntent(BaseModel):
-    """The first run's iMessage offer: the member's stated phone number dispatched verbatim to
-    the surface tool that binds the provider and proves the address."""
-
-    verb: Literal["connect_imessage"]
-    phone_number: str
-
-
-class AddMemberIntent(BaseModel):
-    """One member added from the team panel — the same admin-only `add_member` chat verb, which
-    mints the member at whatever email domain their address carries and reports whether they took a
-    seat. Changing an existing member's role or seat is an apply on the member kind, never this."""
-
-    verb: Literal["add_member"]
-    email: str
-    admin: bool = False
-
-
-class RestoreApplicationIntent(BaseModel):
-    verb: Literal["restore_application"]
-    app_id: UUID
-    name: str
-
-
 class PanelIntent(BaseModel):
-    """What a panel form submits: the closed set of mutations a panel produces today."""
+    """What a panel form submits on the intents lane: an object verb on the record panels' typed
+    lane. A presented action rides its own lane, whose route names the target."""
 
-    submitted: (
-        ApplyIntent
-        | AddMemberIntent
-        | AudienceIntent
-        | ConnectGitHubIntent
-        | ConnectImessageIntent
-        | ConnectSlackIntent
-        | CorrectionIntent
-        | CredentialIntent
-        | DigestRebuildIntent
-        | PageFactRebuildIntent
-        | PaymentMethodIntent
-        | RefillIntent
-        | RestoreApplicationIntent
-        | ToolingIntent
-        | TranscriptIntent
-    ) = Field(discriminator="verb")
+    submitted: ApplyIntent
 
 
-def _tool_intent(
-    submitted: (
-        ApplyIntent
-        | AddMemberIntent
-        | AudienceIntent
-        | ConnectGitHubIntent
-        | ConnectImessageIntent
-        | ConnectSlackIntent
-        | CorrectionIntent
-        | CredentialIntent
-        | DigestRebuildIntent
-        | PageFactRebuildIntent
-        | PaymentMethodIntent
-        | RefillIntent
-        | RestoreApplicationIntent
-        | ToolingIntent
-        | TranscriptIntent
-    ),
-    slot: CredentialSlotView | None,
-    body_max_chars: int,
+def _action_intent(
+    kind: str, name: str | None, action: str, body: dict[str, JsonValue]
 ) -> ToolIntent:
+    """The `object_action` call for one presented action: the target the route holds — kind, the
+    row for an instance action — written first and in one order, the action's own body under
+    `input`, and nothing the browser said about where it lands. The serialized intent is the turn's
+    inbound and its audit record, compared byte for byte at admission."""
+    call: dict[str, JsonValue] = {"kind": kind, "action": action}
+    if name is not None:
+        call["name"] = name
+    call["input"] = body
+    return ToolIntent(tool="object_action", input=call)
+
+
+def _tool_intent(submitted: ApplyIntent) -> ToolIntent:
     """Every panel intent that is a tool call, as the call it dispatches to. Every intent here is
     one: a panel act that needs a model round is asked for in the composer, not admitted here."""
     match submitted:
-        case RefillIntent():
-            return ToolIntent(
-                tool="manage_billing",
-                input={
-                    "action": "autopay",
-                    "autopay_dollars": submitted.amount_dollars,
-                    "autopay_below_dollars": submitted.below_dollars,
-                },
-            )
-        case PaymentMethodIntent():
-            return ToolIntent(
-                tool="manage_billing",
-                input={
-                    "action": "portal",
-                },
-            )
-        case RestoreApplicationIntent():
-            return ToolIntent(
-                tool="restore_application",
-                input={
-                    "app_id": str(submitted.app_id),
-                    "name": submitted.name,
-                },
-            )
-        case TranscriptIntent():
-            return ToolIntent(
-                tool="read_private_transcript",
-                input={
-                    "conversation_id": str(submitted.conversation_id),
-                },
-            )
-        case CredentialIntent():
-            assert slot is not None
-            return ToolIntent(
-                tool="request_credentials",
-                input={
-                    "reason": (
-                        f"{slot.extension} authenticates with this value; it is stored "
-                        "encrypted and never shown again."
-                    ),
-                    "prompts": [{"slot": slot.slot, "prompt": slot.description or slot.slot}],
-                },
-            )
-        case CorrectionIntent():
-            return ToolIntent(
-                tool="memory_update",
-                input={
-                    "body": submitted.body,
-                    "source_ref": f"corrects memory/{submitted.corrects}",
-                },
-            )
-        case DigestRebuildIntent():
-            return ToolIntent(
-                tool="rebuild_report_digest",
-                input={},
-            )
-        case PageFactRebuildIntent():
-            return ToolIntent(
-                tool="rebuild_page_facts",
-                input={},
-            )
-        case ToolingIntent():
-            picked = set(submitted.providers)
-            labels = tuple(tile.label for tile in FIRST_RUN_PROVIDERS if tile.name in picked)
-            return ToolIntent(
-                tool="memory_update",
-                input={
-                    "body": _tools_recorded(labels, body_max_chars),
-                    "source_ref": "first run",
-                },
-            )
-        case ConnectSlackIntent():
-            return ToolIntent(
-                tool="slack_connect",
-                input={},
-            )
-        case ConnectGitHubIntent():
-            return ToolIntent(
-                tool="connect_github",
-                input={},
-            )
-        case ConnectImessageIntent():
-            return ToolIntent(
-                tool="imessage_connect",
-                input={"phone_number": submitted.phone_number},
-            )
-        case AddMemberIntent():
-            return ToolIntent(
-                tool="add_member",
-                input={
-                    "email": submitted.email,
-                    "admin": submitted.admin,
-                },
-            )
-        case AudienceIntent():
-            return ToolIntent(
-                tool=submitted.verb,
-                input={"email": submitted.email},
-            )
         case ApplyIntent() if submitted.verb == "connect":
             return ToolIntent(
                 tool="connect_account",
@@ -855,30 +584,32 @@ def _outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
     return JSONResponse({"applied": False, "message": message, "turn_id": str(turn_id)})
 
 
-def _connect_outcome(
-    submitted: ConnectSlackIntent | ConnectGitHubIntent, frame: TerminalFrame, turn_id: UUID
-) -> Response:
-    """The install link the connect step asked for, taken off the turn's own answer and read the
-    way the answering tool writes it. Slack answers an install state: `authorize_url` is the link
-    and `hint` says why it minted none, and the object arrives inside the wall its tool's
-    `untrusted` declaration renders every result in — the deploy's own `events_url` sits in that
-    same object, so the key is read rather than the first address in the text. GitHub answers a
-    sentence carrying its link. Where no link was minted the tool's own words stand in its place:
-    the workspace already holds the connector, or only an admin may install it."""
+def _slack_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
+    """The install link the Slack step asked for, taken off the turn's own answer and read the way
+    the action writes it: an install state whose `authorize_url` is the link and whose `hint` says
+    why it minted none, arriving inside the wall the action's `untrusted` declaration renders every
+    result in — the deploy's own `events_url` sits in that same object, so the key is read rather
+    than the first address in the text. Where no link was minted the action's own words stand in
+    its place: the workspace already holds the connector, or only an admin may install it."""
     if frame.status != "done":
         return _outcome(frame, turn_id)
-    match submitted:
-        case ConnectSlackIntent():
-            stated_state = STATED_JSON_OBJECT.search(frame.text)
-            if stated_state is None:
-                raise RuntimeError("slack_connect answered no install state")
-            state = json.loads(stated_state.group())
-            link = state.get(SLACK_INSTALL_LINK_KEY)
-            stated = "" if link else state[SLACK_INSTALL_HINT_KEY]
-        case ConnectGitHubIntent():
-            found = INSTALL_LINK.search(frame.text)
-            link = found.group() if found else None
-            stated = "" if link else frame.text
+    stated_state = STATED_JSON_OBJECT.search(frame.text)
+    if stated_state is None:
+        raise RuntimeError("slack_connect answered no install state")
+    state = json.loads(stated_state.group())
+    link = state.get(SLACK_INSTALL_LINK_KEY)
+    stated = "" if link else state[SLACK_INSTALL_HINT_KEY]
+    return JSONResponse({"applied": True, "message": stated, "url": link, "turn_id": str(turn_id)})
+
+
+def _github_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
+    """The install link the GitHub step asked for: the action answers a sentence carrying it, and
+    where it minted none the sentence itself is the answer."""
+    if frame.status != "done":
+        return _outcome(frame, turn_id)
+    found = INSTALL_LINK.search(frame.text)
+    link = found.group() if found else None
+    stated = "" if link else frame.text
     return JSONResponse({"applied": True, "message": stated, "url": link, "turn_id": str(turn_id)})
 
 
@@ -933,6 +664,28 @@ def _rebuild_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
     return JSONResponse({"applied": True, "message": frame.text, "turn_id": str(turn_id)})
 
 
+ACTION_OUTCOMES: dict[tuple[str, str], Callable[[TerminalFrame, UUID], Response]] = {
+    (SURFACE_KIND, SLACK_CONNECT_ACTION): _slack_outcome,
+    (SURFACE_KIND, IMESSAGE_CONNECT_ACTION): _imessage_outcome,
+    (CREDENTIAL_KIND, CONNECT_GITHUB_ACTION): _github_outcome,
+    (REPORT_KIND, REBUILD_REPORT_DIGEST_ACTION): _rebuild_outcome,
+    (PAGE_KIND, REBUILD_PAGE_FACTS_ACTION): _rebuild_outcome,
+}
+"""The actions whose answer says more than done or refused, and how each is read: the install link
+Slack and GitHub mint, the connection state iMessage reports, the queued-work sentence a rebuild
+states. Every other action answers done, or the refusal in its own words."""
+
+
+def _action_outcome(
+    kind: str, action: str, body: dict[str, JsonValue], frame: TerminalFrame, turn_id: UUID
+) -> Response:
+    if (kind, action) == (WORKSPACE_KIND, MANAGE_BILLING_ACTION):
+        portal = body.get(BILLING_OPERATION_KEY) == BILLING_PORTAL_OPERATION
+        return _portal_outcome(frame, turn_id) if portal else _outcome(frame, turn_id)
+    read = ACTION_OUTCOMES.get((kind, action), _outcome)
+    return read(frame, turn_id)
+
+
 PORTAL_ROOM = "Portal actions"
 """What the portal's prepared-intent lane is called.
 
@@ -973,7 +726,11 @@ async def submit_intent(
     A panel that writes one part of an agent — its prompt, its icon — submits that part alone, so
     the fields `AgentSpec` requires are read from the agent and merged beneath what was submitted.
     Without it the spec fails validation on fields the member was never shown, and the panel is
-    told no model was named."""
+    told no model was named.
+
+    An action intent is admitted only for an action this deploy presents on its kind — the rule
+    the projection draws controls by — so a panel cannot prepare an act the portal never
+    offered."""
     body = await request.body()
     if len(body) > INTENT_MAX_BYTES:
         return JSONResponse(
@@ -987,16 +744,19 @@ async def submit_intent(
         submitted = PanelIntent.model_validate({"submitted": json.loads(body)}).submitted
     except (ValidationError, ValueError):
         return JSONResponse({"error": "malformed intent"}, status_code=400)
+    if (
+        FRAME_HEADER in request.headers
+        and submitted.verb == "connect"
+        and not ctx.frame_admits("connect_account")
+    ):
+        return JSONResponse({"applied": False, "message": NO_FRAME_ACCESS})
     submitted_fields = (
         frozenset(submitted.spec)
-        if isinstance(submitted, ApplyIntent)
-        and submitted.kind == "agent"
-        and submitted.spec is not None
+        if submitted.kind == "agent" and submitted.spec is not None
         else frozenset()
     )
     if (
-        isinstance(submitted, ApplyIntent)
-        and submitted.verb == "apply"
+        submitted.verb == "apply"
         and submitted.kind == "agent"
         and submitted.spec is not None
         and not AGENT_SPEC_REQUIRED <= submitted_fields
@@ -1023,18 +783,12 @@ async def submit_intent(
             return JSONResponse(
                 {"applied": False, "message": "This deploy does not offer sandbox sizes."}
             )
-    slot: CredentialSlotView | None = None
-    if isinstance(submitted, ApplyIntent | CredentialIntent) and submitted.kind == "credential":
-        by_name = {view.name: view for view in await ctx.list_credential_slots()}
-        slot = by_name.get(submitted.name)
-        if slot is None:
+    if isinstance(submitted, ApplyIntent) and submitted.kind == "credential":
+        if submitted.name not in {view.name for view in await ctx.list_credential_slots()}:
             return JSONResponse(
                 {"applied": False, "message": f"No credential slot named {submitted.name!r}."}
             )
-    if isinstance(submitted, CorrectionIntent | ToolingIntent) and not ctx.memory_available:
-        return JSONResponse({"applied": False, "message": "This deploy runs without memory."})
-    body_max_chars = ctx.memory_body_max_chars if ctx.memory_available else 0
-    intent = _tool_intent(submitted, slot, body_max_chars)
+    intent = _tool_intent(submitted)
     if intent.tool == "object_apply":
         manifest = intent.input.get("manifest")
         if not isinstance(manifest, str):
@@ -1067,15 +821,99 @@ async def submit_intent(
             async for _cursor, frame in frames:
                 match frame:
                     case Terminal():
-                        if isinstance(submitted, ConnectSlackIntent | ConnectGitHubIntent):
-                            return _connect_outcome(submitted, frame.frame, admitted.turn_id)
-                        if isinstance(submitted, ConnectImessageIntent):
-                            return _imessage_outcome(frame.frame, admitted.turn_id)
-                        if isinstance(submitted, PaymentMethodIntent):
-                            return _portal_outcome(frame.frame, admitted.turn_id)
-                        if isinstance(submitted, DigestRebuildIntent | PageFactRebuildIntent):
-                            return _rebuild_outcome(frame.frame, admitted.turn_id)
                         return _outcome(frame.frame, admitted.turn_id)
+                    case Parked():
+                        return JSONResponse(
+                            {
+                                "applied": False,
+                                "message": frame.message,
+                                "turn_id": str(admitted.turn_id),
+                            }
+                        )
+    except TimeoutError:
+        return JSONResponse(
+            {
+                "applied": False,
+                "message": "The change is still being applied — check back.",
+                "turn_id": str(admitted.turn_id),
+            },
+            status_code=504,
+        )
+    raise RuntimeError("the turn's tail ended without a terminal frame")
+
+
+async def submit_action(
+    ctx: SurfaceContext,
+    request: Request,
+    agent_id: UUID,
+    member_id: UUID,
+    email: str,
+    *,
+    kind: str,
+    name: str | None,
+    action: str,
+) -> Response:
+    """Admit one presented action for the selected agent and answer with its terminal outcome. The
+    route holds the target — the kind, the row for an instance action, the lane's agent — and the
+    body is the action's own input alone: a body naming an envelope field is refused before a turn
+    exists, so nothing a browser posts can address a different target. The action must be one the
+    deploy presents on that target, and a post the shell marks as an app page's must be one its
+    declaration admits from a frame; the handler's own gate decides who may, and dispatch's
+    instance recheck reads the row under the acting member."""
+    raw = await request.body()
+    if len(raw) > INTENT_MAX_BYTES:
+        return JSONResponse(
+            {"applied": False, "message": f"Intent exceeds {INTENT_MAX_BYTES} bytes."},
+            status_code=413,
+        )
+    try:
+        body = json.loads(raw) if raw else {}
+    except ValueError:
+        return JSONResponse({"error": "malformed intent"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "malformed intent"}, status_code=400)
+    named = sorted(ENVELOPE_FIELDS.intersection(body))
+    if named:
+        return JSONResponse(
+            {
+                "applied": False,
+                "message": f"The body names {', '.join(named)}; the route binds the target.",
+            }
+        )
+    binding: ActionBinding = "collection" if name is None else "instance"
+    view = next(
+        (entry for entry in ctx.object_actions(kind, binding, name=name) if entry.name == action),
+        None,
+    )
+    if view is None:
+        target = kind if name is None else f"{kind}/{name}"
+        return JSONResponse(
+            {"applied": False, "message": f"{target} has no portal action named {action!r}."}
+        )
+    if FRAME_HEADER in request.headers and not ctx.frame_admits(f"action:{kind}:{action}"):
+        return JSONResponse({"applied": False, "message": NO_FRAME_ACCESS})
+    intent = _action_intent(kind, name, action, body)
+    conversation_id = await ctx.conversation_for(
+        f"{PORTAL_LANE_PREFIX}{agent_id}/{email}",
+        conversation_audience(member_id),
+        agent_id=agent_id,
+    )
+    await ctx.retitle_conversation(conversation_id, PORTAL_ROOM)
+    admitted = await ctx.admit(
+        conversation_id,
+        intent.model_dump_json(),
+        speaker_member_id=member_id,
+        intent=intent,
+    )
+    try:
+        async with (
+            ctx.tail(admitted.turn_id) as frames,
+            asyncio.timeout(INTENT_RESULT_TIMEOUT_SECONDS),
+        ):
+            async for _cursor, frame in frames:
+                match frame:
+                    case Terminal():
+                        return _action_outcome(kind, action, body, frame.frame, admitted.turn_id)
                     case Parked():
                         return JSONResponse(
                             {

@@ -22,22 +22,44 @@ import {
   usePanelRead,
 } from "@/kernel/panel";
 import mark from "@brand/ufo-mark.svg";
-import { postIntent } from "@/lib/api";
+import { postAction, postObjectAction, type ObjectAction } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { setPendingAsk } from "@/lib/pendingAsk";
-import type { Agent, Member } from "@/lib/types";
+import type { ActionView, Agent, Member } from "@/lib/types";
 
 type ProviderTile = { name: string; label: string; summary: string; group: string };
 
 type Connector = ProviderTile & { installed: boolean };
 
+/** The read behind the run: the catalog, the two installs, whether iMessage is offered, and the acts
+ *  the run's steps write through — the member collection's add for the invite step, the memory
+ *  collection's write for the picks — as their kinds project them for this member. */
 export type FirstRunPayload = {
   providers: ProviderTile[];
   connectors: Connector[];
   imessage: boolean;
+  actions: { member: ActionView[]; memory: ActionView[] };
 };
+
+const ADD_MEMBER_ACTION = "add_member";
+const RECORD_FIRST_RUN_ACTION = "record_first_run";
+const TOOLING_PREFIX = "My team uses ";
+
+/** The picks as one row of the member's wiki, built to the row it is drawn as: a member may pick
+ *  every tile, so the sentence names the tools that fit the action's own bound on a body and counts
+ *  the rest. A sentence cut at the ceiling instead loses whichever names fall past it and says
+ *  nothing about how many there were. */
+export function toolsRecorded(labels: string[], budget: number): string {
+  for (let named = labels.length; named > 0; named -= 1) {
+    const rest = labels.length - named;
+    const tail = rest ? ", and " + rest + " more." : ".";
+    const body = TOOLING_PREFIX + labels.slice(0, named).join(", ") + tail;
+    if (body.length <= budget) return body;
+  }
+  return TOOLING_PREFIX + labels.length + " tools.";
+}
 
 const GOAL_STEP = "goal";
 
@@ -94,13 +116,22 @@ const IMESSAGE_CLAIM_READ = "/workspace/imessage-claim";
  *  be told when it lands — it asks. */
 export const IMESSAGE_WATCH_MS = 3_000;
 
-/** The intent a workspace install dispatches, keyed by the connector that takes one. The named
- *  tool mints the install link inside the turn and the outcome carries it back, so installing
- *  takes no message the member has to send. Every provider outside this map connects a member's
- *  own account through the broker verb instead. */
-export const CONNECT_VERB: Record<string, string> = {
-  slack: "connect_slack",
-  github: "connect_github",
+/** The object a workspace install acts on and the action that installs it, keyed by the connector
+ *  that takes one: Slack's is the surface object's connect, GitHub's the installation credential's.
+ *  The object's detail is read for the act it projects and the act mints the install link inside
+ *  the turn, so installing takes no message the member has to send. Every provider outside this map
+ *  connects a member's own account through the broker verb instead. */
+export const CONNECT_INSTALLS: Record<string, ObjectAction> = {
+  slack: { kind: "surface", name: "slack", action: "slack_connect" },
+  github: { kind: "credential", name: "github-app-installation", action: "connect_github" },
+};
+
+/** The iMessage offer's act: the surface object's connect, which binds the provider to the phone
+ *  the member states and proves the address with a code. */
+const IMESSAGE_CONNECT: ObjectAction = {
+  kind: "surface",
+  name: "imessage",
+  action: "imessage_connect",
 };
 
 /** The name a member types to reach the agent in that product, set apart from the sentence around
@@ -289,16 +320,23 @@ export function FirstRun({
    *  at least one pick, so clearing every pick after recording leaves the earlier answer standing —
    *  correcting that is a sentence to the agent, which is where memory is corrected everywhere
    *  else. */
-  async function record() {
+  async function record(payload: FirstRunPayload) {
     if (busy) return;
     const stated = [...picked].sort().join(" ");
     const written = recorded === null ? null : [...recorded].sort().join(" ");
     if (picked.length && stated !== written) {
+      const write = payload.actions.memory.find((view) => view.name === RECORD_FIRST_RUN_ACTION);
+      if (!write) {
+        setNotice({ text: "This deploy runs without memory.", refused: true });
+        return;
+      }
+      const labels = payload.providers
+        .filter((tile) => picked.includes(tile.name))
+        .map((tile) => tile.label);
+      const budget = write.input_schema.properties?.body?.maxLength ?? Number.POSITIVE_INFINITY;
       setBusy(true);
-      const outcome = await postIntent(agent.id, {
-        verb: "record_tooling",
-        kind: "memory",
-        providers: picked,
+      const outcome = await postAction(agent.id, write.call, {
+        body: toolsRecorded(labels, budget),
       });
       setBusy(false);
       if (!outcome.applied) {
@@ -372,9 +410,14 @@ export function FirstRun({
         const invite = async (event: FormEvent) => {
           event.preventDefault();
           if (busy) return;
+          const add = payload.actions.member.find((view) => view.name === ADD_MEMBER_ACTION);
+          if (!add) {
+            setNotice({ text: "Adding members is not available here.", refused: true });
+            return;
+          }
           setBusy(true);
           for (const email of wanted) {
-            const outcome = await postIntent(agent.id, { verb: "add_member", email, admin: false });
+            const outcome = await postAction(agent.id, add.call, { email, admin: false });
             if (!outcome.applied) {
               setBusy(false);
               setNotice(outcomeNotice(outcome));
@@ -399,8 +442,7 @@ export function FirstRun({
             return;
           }
           setBusy(true);
-          const outcome = await postIntent(agent.id, {
-            verb: "connect_imessage",
+          const outcome = await postObjectAction(agent.id, IMESSAGE_CONNECT, {
             phone_number: `+1${digits}`,
           });
           setBusy(false);
@@ -472,7 +514,7 @@ export function FirstRun({
                       (step === GOAL_STEP && !goal && !detail.trim()) ||
                       (connector !== undefined && !held)
                     }
-                    onClick={step === TOOLS_STEP ? record : advance}
+                    onClick={step === TOOLS_STEP ? () => record(payload) : advance}
                   >
                     Continue
                   </Button>
@@ -768,7 +810,7 @@ function Connect({
     // Opened on the press, before the round trip that mints the link: a window opened afterwards
     // has lost the gesture the browser opens one for. It waits on the provider's own page.
     const consent = openConsentWindow();
-    const outcome = await postIntent(agent.id, { verb: CONNECT_VERB[row.name] });
+    const outcome = await postObjectAction(agent.id, CONNECT_INSTALLS[row.name], {});
     setBusy(false);
     if (consent && outcome.url) consent.location.href = outcome.url;
     if (consent && !outcome.url) consent.close();

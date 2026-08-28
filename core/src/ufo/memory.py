@@ -32,9 +32,7 @@ class MemorySearchProvider(Protocol):
     pages by keyset (`cursor`), never by offset: items land while a member reads, and an offset
     would repeat or skip a row across that write. `kinds` narrows to item classes, and
     `listable_kinds` is the closed set a consumer offers — the provider's own classes, so a
-    class it starts writing cannot go missing from the filter, and `body_max_chars` is the
-    provider's own bound on a recorded body, so a form that collects one stops the member at the
-    length the provider enforces instead of refusing what they already wrote."""
+    class it starts writing cannot go missing from the filter."""
 
     async def search(
         self,
@@ -53,8 +51,6 @@ class MemorySearchProvider(Protocol):
     ) -> ListingPage[MemoryMatch]: ...
 
     def listable_kinds(self) -> tuple[str, ...]: ...
-
-    def body_max_chars(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -83,6 +79,3 @@ class MemorySearch:
 
     def listable_kinds(self) -> tuple[str, ...]:
         return self.provider.listable_kinds()
-
-    def body_max_chars(self) -> int:
-        return self.provider.body_max_chars()

@@ -83,7 +83,7 @@ function serve() {
         });
       }
       if (url.includes("/workspace/memory")) {
-        return json({ available: true, kinds: ["fact", "profile"], matches: [] });
+        return json({ available: true, actions: [], kinds: ["fact", "profile"], matches: [] });
       }
       if (url.includes("/workspace/credentials")) {
         return json({
@@ -633,7 +633,7 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
     vi.fn(async (url: string) => {
       if (url.includes("after=")) return new Response("malformed listing cursor", { status: 400 });
       if (url.includes("/workspace/memory")) {
-        return json({ available: true, kinds: ["fact"], matches: [] });
+        return json({ available: true, actions: [], kinds: ["fact"], matches: [] });
       }
       if (url.includes("/objects/conversation")) return json({ objects: [] });
       if (url.includes("/api/chats")) return json({ chats: [] });

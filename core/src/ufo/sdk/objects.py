@@ -10,17 +10,35 @@ from ufo.kinds.agents import (
 from ufo.kinds.agents import (
     AgentSpec as AgentSpec,
 )
+from ufo.kinds.artifacts import (
+    ARTIFACT_KIND as ARTIFACT_KIND,
+)
 from ufo.kinds.conversations import (
     CONVERSATION_KIND as CONVERSATION_KIND,
 )
 from ufo.kinds.credential_kind import (
     CREDENTIAL_KIND as CREDENTIAL_KIND,
 )
+from ufo.kinds.members import (
+    MEMBER_KIND as MEMBER_KIND,
+)
+from ufo.kinds.surface_kind import (
+    SURFACE_KIND as SURFACE_KIND,
+)
+from ufo.kinds.workspace_kind import (
+    WORKSPACE_KIND as WORKSPACE_KIND,
+)
 from ufo.object_name import (
     ObjectRef as ObjectRef,
 )
 from ufo.object_scope import (
+    ObjectActionTarget as ObjectActionTarget,
+)
+from ufo.object_scope import (
     object_agent_id as object_agent_id,
+)
+from ufo.object_views import (
+    ActionView as ActionView,
 )
 from ufo.objects import (
     OBJECT_LIST_PAGE as OBJECT_LIST_PAGE,

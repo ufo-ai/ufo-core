@@ -27,6 +27,7 @@ from ufo.workspace import ws_current
 GITHUB_ACCOUNT_ID = "eval-github-account"
 GITHUB_INSTALLATION_ID = "123456"
 GITHUB_PROVIDER = "github"
+CONNECT_GITHUB = "action:credential:connect_github"
 
 
 def _github_state(*, connector: bool, app: bool) -> CapabilitySeed:
@@ -148,14 +149,14 @@ CASES = (
             skill_scorer("coding", "create-skill"),
             attempted_tools_scorer(
                 (
-                    ("connect_github", {}),
+                    (CONNECT_GITHUB, {}),
                     ("connect_account", {"provider": "github"}),
                 ),
                 ("spawn",),
-                (("load_skill", "connect_github"), ("load_skill", "connect_account")),
+                (("load_skill", CONNECT_GITHUB), ("load_skill", "connect_account")),
             ),
         ),
-        digest_tag="github-connections:neither",
+        digest_tag="github-connections:neither:action",
         seed=_github_state(connector=False, app=False),
     ),
     CapabilityCase(
@@ -165,12 +166,12 @@ CASES = (
         combine(
             skill_scorer("coding", "create-skill"),
             attempted_tools_scorer(
-                (("connect_github", {}),),
+                ((CONNECT_GITHUB, {}),),
                 ("connect_account", "spawn"),
-                (("load_skill", "connect_github"),),
+                (("load_skill", CONNECT_GITHUB),),
             ),
         ),
-        digest_tag="github-connections:operations-work-prs-fail",
+        digest_tag="github-connections:operations-work-prs-fail:action",
         seed=_github_state(connector=True, app=False),
     ),
     CapabilityCase(
@@ -181,11 +182,11 @@ CASES = (
             skill_scorer("coding", "create-skill"),
             attempted_tools_scorer(
                 (("connect_account", {"provider": "github"}),),
-                ("connect_github", "spawn"),
+                (CONNECT_GITHUB, "spawn"),
                 (("load_skill", "connect_account"),),
             ),
         ),
-        digest_tag="github-connections:git-works-operations-fail",
+        digest_tag="github-connections:git-works-operations-fail:action",
         seed=_github_state(connector=False, app=True),
     ),
 )

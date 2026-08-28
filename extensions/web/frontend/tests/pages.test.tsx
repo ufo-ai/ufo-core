@@ -26,6 +26,27 @@ import {
   type Route,
 } from "./harness";
 
+/** jsdom delivers `postMessage` and drives `requestAnimationFrame` on the window's own timers. The
+ *  app lifecycle wraps the page's timers and clears every one it tracked when the page unmounts —
+ *  in a browser that reaches the page's timers alone, but here it would clear the environment's own
+ *  scheduling with them: a reply posted to a page as it unmounts would never land, and no release
+ *  the lifecycle schedules after paint would ever run. Both ride timers captured before the
+ *  lifecycle loads. The delivery keeps jsdom's own shape: `/` is not implemented there, any other
+ *  origin must be this window's, and the event carries the data alone. */
+const FRAME_MS = 16;
+const environmentTimeout = window.setTimeout.bind(window);
+const environmentClear = window.clearTimeout.bind(window);
+window.requestAnimationFrame = (callback) =>
+  environmentTimeout(() => callback(performance.now()), FRAME_MS);
+window.cancelAnimationFrame = (handle) => environmentClear(handle);
+window.postMessage = ((message: unknown, targetOrigin: string) => {
+  if (targetOrigin === "/") return;
+  if (targetOrigin !== "*" && new URL(targetOrigin).origin !== location.origin) return;
+  environmentTimeout(() => {
+    window.dispatchEvent(new MessageEvent("message", { data: message }));
+  }, 0);
+}) as typeof window.postMessage;
+
 const applicationLifecycle = await import("@/apps/lifecycle");
 vi.doMock("@/apps/lifecycle", () => applicationLifecycle);
 const lifecycle = (
@@ -114,15 +135,30 @@ async function runPage(
 ): Promise<{ calls: string[] }> {
   vi.resetModules();
   const { calls, handler } = wire(routes);
-  cleanups.push(shell(handler, init));
+  shells.push(shell(handler, init));
   const root = document.getElementById("root")!;
   await import(/* @vite-ignore */ pagePath(app));
   const { unmountApp } = await import("@/apps/shell");
-  cleanups.push(() => unmountApp(root));
+  unmounts.push(() => unmountApp(root));
   return { calls };
 }
 
-const cleanups: (() => void)[] = [];
+const shells: (() => void)[] = [];
+const unmounts: (() => void)[] = [];
+
+/** Tear the page down the way its frame goes: the app unmounts, its work drains to nothing while
+ *  the shell still answers, and only then does the shell go. A `call` the page posted rides
+ *  `postMessage`, which delivers on a later task — so a shell detached in the same tick as the
+ *  unmount leaves any call still in the queue unanswered, and the lease behind it never settles. */
+async function settle(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    for (const unmount of unmounts.splice(0)) unmount();
+  });
+  await vi.waitFor(() => expect(lifecycle.snapshot().blockingWork).toBe(0));
+  for (const detach of shells.splice(0)) detach();
+}
+
 const nativeFetch = window.fetch;
 const nativeEventSource = window.EventSource;
 
@@ -135,11 +171,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    for (const cleanup of cleanups.splice(0)) cleanup();
-  });
-  await vi.waitFor(() => expect(lifecycle.snapshot().blockingWork).toBe(0));
+  await settle();
   window.fetch = nativeFetch;
   (window as { EventSource: typeof EventSource }).EventSource = nativeEventSource;
 });
@@ -147,6 +179,7 @@ afterEach(async () => {
 test("the radar page mounts and draws its empty feed under its own band", async () => {
   const { calls } = await runPage("radar", {
     "/objects/report": () => json({ objects: [] }),
+    "/actions/report$": () => json({ actions: [] }),
   });
   expect(await screen.findByRole("heading", { name: "Radar" })).toBeTruthy();
   expect(await screen.findByRole("button", { name: "Rebuild entries" })).toBeTruthy();
@@ -155,9 +188,57 @@ test("the radar page mounts and draws its empty feed under its own band", async 
   expect(calls.some((url) => url.includes("/objects/report"))).toBe(true);
 });
 
+/** A bounded wait on a signal the environment must deliver: the assertion is on the signal, and the
+ *  clock is only what makes its absence observable. */
+function lapse(after: number): Promise<string> {
+  return new Promise((resolve) =>
+    applicationLifecycle.setNativeTimeout(() => resolve("nothing"), after),
+  );
+}
+
+test("a reply posted to a page as it unmounts still lands, so its work drains", async () => {
+  /** The page's unmount clears the page's timers. Its transport is `postMessage`, which the
+   *  environment delivers on a later task — a delivery the clearing must not reach, or a read in
+   *  flight at the unmount never answers, the lease behind it never settles, and the page never
+   *  drains. This is the drain the chat pages' teardown was losing under load. */
+  await runPage("radar", {
+    "/objects/report": () => json({ objects: [] }),
+    "/actions/report$": () => json({ actions: [] }),
+  });
+  await screen.findByRole("heading", { name: "Radar" });
+  const inFlight = window.fetch(BASE + "/objects/report").then((res) => (res.ok ? "reply" : "refused"));
+
+  await act(async () => {
+    for (const unmount of unmounts.splice(0)) unmount();
+  });
+
+  expect(await Promise.race([inFlight, lapse(500)])).toBe("reply");
+});
+
+test("a page's unmount leaves the animation frames running", async () => {
+  /** Every lease the lifecycle holds is released after paint, so the frames have to outlive the
+   *  unmount that clears the page's timers — jsdom drives them on the window's own interval, and a
+   *  frame requested before the unmount would otherwise never fire, nor any release after it. */
+  await runPage("radar", {
+    "/objects/report": () => json({ objects: [] }),
+    "/actions/report$": () => json({ actions: [] }),
+  });
+  await screen.findByRole("heading", { name: "Radar" });
+  const requested = new Promise<string>((resolve) =>
+    window.requestAnimationFrame(() => resolve("frame")),
+  );
+
+  await act(async () => {
+    for (const unmount of unmounts.splice(0)) unmount();
+  });
+
+  expect(await Promise.race([requested, lapse(500)])).toBe("frame");
+});
+
 test("page module resets reuse the installed lifecycle", async () => {
   await runPage("radar", {
     "/objects/report": () => json({ objects: [] }),
+    "/actions/report$": () => json({ actions: [] }),
   });
   expect(await screen.findByRole("heading", { name: "Radar" })).toBeTruthy();
 
