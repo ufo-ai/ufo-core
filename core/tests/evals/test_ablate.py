@@ -877,3 +877,26 @@ def test_every_committed_experiment_on_head_still_applies_to_the_tree() -> None:
                 )
                 checked += 1
     assert checked, "no HEAD-based experiment replacements were checked"
+
+
+def test_every_committed_experiment_can_afford_its_own_estimate() -> None:
+    """A committed experiment must pass its own budget preflight as written.
+
+    `_preflight` raises before the control arm materializes when the estimate is over `budget_usd`,
+    and `main` takes no flag that lowers the case count or raises the budget, so an experiment whose
+    budget sits under its own estimate cannot be run at all. The arithmetic is the runner's own: the
+    arms plus the control, times the repeats, times the cases its suites declare.
+    """
+    repo = Path(__file__).resolve().parents[3]
+    checked = 0
+    for path in sorted((repo / "evals").glob("*.toml")):
+        spec = load_experiment(path)
+        if spec.memory_ingestion is not None:
+            continue
+        runs, cases, cost = Ablation(repo=repo, spec=spec, out=repo / "out").estimate()
+        assert cost <= spec.budget_usd, (
+            f"{path.name} estimates ${cost:.2f} ({runs} runs x {cases} cases at "
+            f"${spec.est_usd_per_case}/case), over budget ${spec.budget_usd:.2f}"
+        )
+        checked += 1
+    assert checked, "no committed experiment budget was checked"

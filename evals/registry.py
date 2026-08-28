@@ -159,7 +159,7 @@ TASKS: tuple[EvalTask, ...] = (
         wait_seconds=app_home_change.WORKFLOW_WAIT_SECONDS,
     ),
     capability_task(
-        "delegated_response_register",
+        response_register.DELEGATED_TASK,
         response_register.DELEGATED_CASES,
         judge_model=SEMANTIC_JUDGE_MODEL,
     ),

@@ -420,9 +420,7 @@ class Ablation:
                 f"{EGRESS_BINARY} missing — build it: "
                 "cargo build --manifest-path servers/egress/Cargo.toml"
             )
-        cases = self._planned_cases()
-        runs = (len(self.spec.arm) + 1) * self.spec.repeats
-        cost = runs * cases * self.spec.est_usd_per_case
+        runs, cases, cost = self.estimate()
         if cost > self.spec.budget_usd:
             raise SystemExit(
                 f"estimated ${cost:.0f} ({runs} runs x {cases} cases at "
@@ -432,6 +430,12 @@ class Ablation:
             f"estimated ${cost:.0f} ({runs} runs x {cases} cases), "
             f"budget ${self.spec.budget_usd:.0f}"
         )
+
+    def estimate(self) -> tuple[int, int, float]:
+        """The runs, cases and dollars the preflight weighs against `budget_usd`."""
+        cases = self._planned_cases()
+        runs = (len(self.spec.arm) + 1) * self.spec.repeats
+        return runs, cases, runs * cases * self.spec.est_usd_per_case
 
     async def _preflight_remote_client(self) -> Path | None:
         if not self.spec.remote:

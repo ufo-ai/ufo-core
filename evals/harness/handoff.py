@@ -51,7 +51,9 @@ class HandoffDocument(BaseModel):
 
 class SubagentHandoff(BaseModel):
     """One delegated conversation's closing shape. `closing_chars` is the prose the child left
-    standing as its last durable message; `result_chars` is the payload that reached the parent;
+    standing as its last durable message; `interim_chars` is every earlier line of assistant prose
+    it wrote between tool calls, which no parent reads either and which forbidding the closing
+    message alone does not touch; `result_chars` is the payload that reached the parent;
     `result_json_object` says the complete payload parses as one JSON object; `duplication` is the
     share of the closing's word shingles that reappear in the payload; and `documents` is every
     file it wrote, largest first. The prose is counted, never stored: a transcript carries private
@@ -61,6 +63,7 @@ class SubagentHandoff(BaseModel):
 
     conversation_id: UUID
     closing_chars: int = Field(ge=0)
+    interim_chars: int = Field(default=0, ge=0)
     result_chars: int = Field(ge=0)
     result_json_object: bool = False
     duplication: float = Field(ge=0.0, le=1.0)
@@ -100,10 +103,11 @@ def handoff_record(
     """One child conversation's handoff: its whole transcript against the payload its last terminal
     turn carried, so a conversation a `message_spawn` follow-up extended is counted once and
     whole rather than attributed to its final turn."""
-    closing = _last_assistant_text(messages, terminal_texts)
+    closing, interim = _assistant_prose(messages, terminal_texts)
     return SubagentHandoff(
         conversation_id=conversation_id,
         closing_chars=len(closing),
+        interim_chars=interim,
         result_chars=len(result),
         result_json_object=_is_json_object(result),
         duplication=shingle_overlap(closing, result),
@@ -188,14 +192,17 @@ def _written_text(args: JsonObject) -> str:
     return "\n".join(inserted)
 
 
-def _last_assistant_text(messages: tuple[Message, ...], terminal_texts: tuple[str, ...]) -> str:
-    """The text of the last assistant message that carried any — the child's final standing prose.
-    Text blocks within that one message join, so a message split across blocks is measured whole.
+def _assistant_prose(
+    messages: tuple[Message, ...], terminal_texts: tuple[str, ...]
+) -> tuple[str, int]:
+    """The child's final standing prose, and the characters of every assistant text before it.
+    Text blocks within one message join, so a message split across blocks is measured whole.
     Every terminal turn persists its own payload as an assistant message, so each payload is
     skipped once: a child a `message_spawn` follow-up extended, whose last turn ends on a lone
     `finish` call, would otherwise stand on the payload of the turn before it."""
     omit = [text.strip() for text in terminal_texts if text.strip()]
-    for message in reversed(messages):
+    written: list[str] = []
+    for message in messages:
         if message.role != "assistant":
             continue
         if isinstance(message.content, str):
@@ -206,9 +213,14 @@ def _last_assistant_text(messages: tuple[Message, ...], terminal_texts: tuple[st
                 for block in message.content
                 if isinstance(block, TextBlock) and block.text
             ).strip()
+        if text:
+            written.append(text)
+    kept: list[str] = []
+    for text in reversed(written):
         if text in omit:
             omit.remove(text)
             continue
-        if text:
-            return text
-    return ""
+        kept.append(text)
+    if not kept:
+        return "", 0
+    return kept[0], sum(len(text) for text in kept[1:])

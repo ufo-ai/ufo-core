@@ -34,7 +34,11 @@ Every run needs a workspace no earlier run touched. The cases carry decisions an
 that read as durable facts, the agent stores them, and the next run recalls them: it acknowledges
 a decision it already holds and answers a question it has already worked through, so replies
 shorten with run order rather than with the prompt. Two runs are comparable only when each began
-from an empty workspace."""
+from an empty workspace.
+
+Delegation cases also record the child's completed model-round output. Intermediate output is every
+completed round before each child turn's final round. A missing round or usage record fails the
+case instead of reporting a partial low count."""
 
 import json
 import re
@@ -58,6 +62,7 @@ BULLET_RE = re.compile(r"^\s{0,3}(?:[-*•]\s+\S|\d{1,2}[.)]\s+\S)", re.MULTILIN
 BULLET_MARKER_RE = re.compile(r"^\s{0,3}(?:[-*•]|\d{1,2}[.)])\s+")
 FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,}).*?(?:^\s{0,3}\1\s*$|\Z)", re.MULTILINE | re.DOTALL)
 REPORT_GLOB = "*.md"
+DELEGATED_TASK = "delegated_response_register"
 DELEGATED_CLOSING_MAX_CHARS = 400
 DELEGATED_DUPLICATION_MAX = 0.3
 
@@ -87,6 +92,64 @@ class Shape:
     @property
     def bullet_evidence(self) -> JsonObject:
         return self.evidence | {"bulletWords": list(self.bullet_words)}
+
+
+@dataclass(frozen=True)
+class SubagentGeneration:
+    """Completed child model-round output, split between intermediate and delivered output."""
+
+    turns: int
+    rounds: int
+    output_tokens: int
+    intermediate_output_tokens: int
+
+    @property
+    def evidence(self) -> JsonObject:
+        return {
+            "turns": self.turns,
+            "rounds": self.rounds,
+            "outputTokens": self.output_tokens,
+            "intermediateOutputTokens": self.intermediate_output_tokens,
+            "finalOutputTokens": self.output_tokens - self.intermediate_output_tokens,
+            "intermediateShare": (
+                self.intermediate_output_tokens / self.output_tokens if self.output_tokens else 0.0
+            ),
+        }
+
+
+def _subagent_generation(output: CapabilityOutput) -> tuple[SubagentGeneration | None, str]:
+    if output.timing is None:
+        return None, "subagent generation was not measured"
+    if output.timing.error:
+        return None, f"subagent generation was not measured: {output.timing.error}"
+    turns = tuple(turn for turn in output.timing.turns if turn.role == "child")
+    if not turns:
+        return None, "subagent generation has no child turns"
+    incomplete = next(
+        (
+            turn
+            for turn in turns
+            if turn.output_tokens is None or turn.intermediate_output_tokens is None
+        ),
+        None,
+    )
+    if incomplete is not None:
+        return None, f"subagent generation for child turn {incomplete.turn_id} lacks output usage"
+    return (
+        SubagentGeneration(
+            turns=len(turns),
+            rounds=sum(turn.rounds for turn in turns),
+            output_tokens=sum(
+                turn.output_tokens for turn in turns if turn.output_tokens is not None
+            ),
+            intermediate_output_tokens=sum(
+                turn.intermediate_output_tokens
+                for turn in turns
+                if turn.intermediate_output_tokens is not None
+            ),
+        ),
+        "",
+    )
 
 
 def measure(text: str) -> Shape:
@@ -388,6 +451,9 @@ def delegated_written_report_scorer(
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         final = await final_delivery(output)
         failures = [] if final.passed else [final.reason]
+        generation, generation_error = _subagent_generation(output)
+        if generation_error:
+            failures.append(generation_error)
         if share_report and report_name not in output.response:
             failures.append(f"member summary does not name {report_name}")
         spawns = tuple(
@@ -480,6 +546,8 @@ def delegated_written_report_scorer(
             failures.append("the report was not written by the delegated subagent")
 
         evidence: JsonObject = {"final": final.evidence}
+        if generation is not None:
+            evidence["subagentGeneration"] = generation.evidence
         if task_shape is not None:
             evidence["delegatedSummary"] = task_shape.evidence
         if result_shape is not None:
@@ -528,6 +596,9 @@ def delegated_inline_result_scorer(
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         final = await final_delivery(output)
         failures = [] if final.passed else [final.reason]
+        generation, generation_error = _subagent_generation(output)
+        if generation_error:
+            failures.append(generation_error)
         spawns = tuple(
             call
             for call in output.calls
@@ -605,6 +676,8 @@ def delegated_inline_result_scorer(
                 )
 
         evidence: JsonObject = {"final": final.evidence}
+        if generation is not None:
+            evidence["subagentGeneration"] = generation.evidence
         if task_shape is not None:
             evidence["delegatedSummary"] = task_shape.evidence
         if result_shape is not None:
@@ -644,6 +717,9 @@ def wide_research_structured_scorer(expected: JsonObject) -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         final = await final_delivery(output)
         failures = [] if final.passed else [final.reason]
+        generation, generation_error = _subagent_generation(output)
+        if generation_error:
+            failures.append(generation_error)
         calls = tuple(
             call for call in output.calls if call.name == "wide_research" and call.succeeded
         )
@@ -691,6 +767,8 @@ def wide_research_structured_scorer(expected: JsonObject) -> Grader:
             "recoveryKeyed": recovery_keyed,
             "handoffs": len(output.handoffs),
         }
+        if generation is not None:
+            evidence["subagentGeneration"] = generation.evidence
         if failures:
             return CapabilityVerdict(False, "wide research: " + "; ".join(failures), evidence)
         return CapabilityVerdict(True, f"wide research: complete row; {final.reason}", evidence)

@@ -144,7 +144,7 @@ from evals.harness.target import (
     _turn_windows,
     capability_output,
 )
-from evals.harness.timing import CaseTiming, StepTiming, TurnStep, TurnTiming
+from evals.harness.timing import CaseTiming, StepTiming, TurnStep, TurnTiming, turn_timing
 from evals.harness.viewer import (
     AWS_S3_CONFIG,
     MAX_SHARE_EXPIRY_SECONDS,
@@ -194,13 +194,16 @@ from evals.suites.response_register import (
     NIGHTLY_RUNNER_REPORT,
     REPORT_GLOB,
     SOURCE_CREDENTIALS,
+    WIDE_RESEARCH_EXPECTED,
     Shape,
+    _subagent_generation,
     conversational_scorer,
     delegated_inline_result_scorer,
     delegated_written_report_scorer,
     measure,
     shared_report_scorer,
     unwritten_reply_scorer,
+    wide_research_structured_scorer,
     written_report_scorer,
 )
 from evals.suites.tool_activity import ACTIVITY_MODEL
@@ -5185,6 +5188,29 @@ async def test_unwritten_reply_scorer_closes_the_hole_the_chat_scorer_leaves(
     assert (await conversational_scorer(80, 4)(filed)).passed
 
 
+def _subagent_timing(intermediate_tokens: int = 80, final_tokens: int = 25) -> CaseTiming:
+    timing = turn_timing(
+        uuid4(),
+        "child",
+        (
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=0,
+                completed_at_epoch_ms=10,
+                output_tokens=intermediate_tokens,
+            ),
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=10,
+                completed_at_epoch_ms=20,
+                output_tokens=final_tokens,
+            ),
+        ),
+        {},
+    )
+    return CaseTiming(wall_ms=20, turns=(timing,))
+
+
 async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: Path) -> None:
     report_path = str(tmp_path / "evidence.md")
     sources = ("/workspace/note.md", "/workspace/code.py")
@@ -5239,6 +5265,7 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
         member_reply,
         (spawn, write),
         workspace_dir=tmp_path,
+        timing=_subagent_timing(),
         handoffs=(handoff,),
     )
 
@@ -5247,6 +5274,14 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
     assert verdict.passed
     assert verdict.evidence["delegatedSummary"]["words"] == 10
     assert verdict.evidence["subagentSummary"]["words"] == 20
+    assert verdict.evidence["subagentGeneration"] == {
+        "turns": 1,
+        "rounds": 2,
+        "outputTokens": 105,
+        "intermediateOutputTokens": 80,
+        "finalOutputTokens": 25,
+        "intermediateShare": 80 / 105,
+    }
     assert verdict.evidence["handoff"] == {
         "closingChars": 24,
         "resultChars": len(child_summary),
@@ -5276,6 +5311,9 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
     missing_handoff = await scorer(replace(output, handoffs=()))
     assert not missing_handoff.passed
     assert "expected one recorded subagent handoff, found 0" in missing_handoff.reason
+    unmeasured = await scorer(replace(output, timing=None))
+    assert not unmeasured.passed
+    assert "subagent generation was not measured" in unmeasured.reason
     verbose_handoff = await scorer(
         replace(output, handoffs=(handoff.model_copy(update={"closing_chars": 401}),))
     )
@@ -5428,6 +5466,7 @@ async def test_delegated_shared_report_requires_the_named_report_to_arrive(tmp_p
         (spawn, share, write),
         artifacts=(SharedArtifact("evidence.md", report.encode()),),
         workspace_dir=tmp_path,
+        timing=_subagent_timing(),
         handoffs=(handoff,),
     )
 
@@ -5467,6 +5506,7 @@ async def test_delegated_inline_result_rejects_a_report_file_and_duplicate_prose
         "The script reads line-delimited JSON as one document. Parse each nonempty line instead.",
         (spawn,),
         workspace_dir=tmp_path,
+        timing=_subagent_timing(),
         handoffs=(handoff,),
     )
     scorer = delegated_inline_result_scorer(sources, 100, 60, 6, 80, 6)
@@ -5491,6 +5531,135 @@ async def test_delegated_inline_result_rejects_a_report_file_and_duplicate_prose
     )
     assert not duplicated.passed
     assert "subagent repeated 80% of its standing prose in the finish result" in duplicated.reason
+
+
+def test_subagent_generation_refuses_each_unmeasured_record() -> None:
+    parent = turn_timing(
+        uuid4(),
+        "evaluated",
+        (
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=0,
+                completed_at_epoch_ms=10,
+                output_tokens=10,
+            ),
+        ),
+        {},
+    )
+    child_without_usage = turn_timing(
+        uuid4(),
+        "child",
+        (
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=0,
+                completed_at_epoch_ms=10,
+            ),
+        ),
+        {},
+    )
+    cases = (
+        (None, "subagent generation was not measured"),
+        (
+            CaseTiming(wall_ms=0, error="step log unavailable"),
+            "subagent generation was not measured: step log unavailable",
+        ),
+        (CaseTiming(wall_ms=10, turns=(parent,)), "subagent generation has no child turns"),
+        (
+            CaseTiming(wall_ms=10, turns=(child_without_usage,)),
+            f"subagent generation for child turn {child_without_usage.turn_id} lacks output usage",
+        ),
+    )
+
+    for timing, expected in cases:
+        generation, error = _subagent_generation(CapabilityOutput("Done.", (), timing=timing))
+        assert generation is None
+        assert error == expected
+
+
+def test_subagent_generation_sums_child_turns_and_ignores_the_parent() -> None:
+    parent = turn_timing(
+        uuid4(),
+        "evaluated",
+        (
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=0,
+                completed_at_epoch_ms=10,
+                output_tokens=100,
+            ),
+        ),
+        {},
+    )
+    first = _subagent_timing(80, 25).turns[0]
+    second = turn_timing(
+        uuid4(),
+        "child",
+        (
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=0,
+                completed_at_epoch_ms=10,
+                output_tokens=30,
+            ),
+        ),
+        {},
+        status="cancelled",
+    )
+
+    generation, error = _subagent_generation(
+        CapabilityOutput(
+            "Done.",
+            (),
+            timing=CaseTiming(wall_ms=20, turns=(parent, first, second)),
+        )
+    )
+
+    assert error == ""
+    assert generation is not None
+    assert generation.evidence == {
+        "turns": 2,
+        "rounds": 3,
+        "outputTokens": 135,
+        "intermediateOutputTokens": 110,
+        "finalOutputTokens": 25,
+        "intermediateShare": 110 / 135,
+    }
+
+
+async def test_wide_research_structured_scorer_requires_measured_child_generation(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "wide_research.json").write_text(
+        dumps(
+            {
+                "call_id": "a" * 64,
+                "untrusted": True,
+                "source": "wide_research",
+                "rows": [{"entity": "aster", "result": WIDE_RESEARCH_EXPECTED, "error": ""}],
+            }
+        )
+    )
+    handoff = SubagentHandoff(
+        conversation_id=uuid4(), closing_chars=20, result_chars=40, duplication=0.0
+    )
+    output = CapabilityOutput(
+        "The complete result is ready.",
+        (ToolInvocation("wide_research", {}, "complete", has_result=True),),
+        workspace_dir=tmp_path,
+        timing=_subagent_timing(),
+        handoffs=(handoff,),
+    )
+    scorer = wide_research_structured_scorer(WIDE_RESEARCH_EXPECTED)
+
+    verdict = await scorer(output)
+
+    assert verdict.passed
+    assert verdict.evidence["subagentGeneration"]["intermediateOutputTokens"] == 80
+    unmeasured = await scorer(replace(output, timing=None))
+    assert not unmeasured.passed
+    assert "subagent generation was not measured" in unmeasured.reason
 
 
 async def test_structured_answer_scorer_passes_a_short_list_of_whole_sentences() -> None:
@@ -7081,6 +7250,7 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
     assert result.output.tokens == 440_000
     assert result.output.cost_micro_usd == 3_000_000
     assert [turn.role for turn in result.output.timing.turns] == ["evaluated", "child"]
+    assert [turn.status for turn in result.output.timing.turns] == ["cancelled", "done"]
     assert len(result.output.handoffs) == 1
     assert result.output.timing.slowest[0].name == "bash"
 
@@ -7662,7 +7832,83 @@ async def test_step_resources_price_each_round_and_settle_the_terminals_residual
     )
 
     assert [step.tokens for step in steps] == [220_000, 110_000]
+    assert [step.output_tokens for step in steps] == [20_000, 10_000]
     assert [step.cost_micro_usd for step in steps] == [1_500_000, 750_007]
+
+
+def test_turn_timing_measures_output_before_each_childs_final_round() -> None:
+    turn_id = uuid4()
+    timing = turn_timing(
+        turn_id,
+        "child",
+        (
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=0,
+                completed_at_epoch_ms=10,
+                output_tokens=80,
+            ),
+            TurnStep(
+                function_name="Engine._dispatch_step",
+                started_at_epoch_ms=10,
+                completed_at_epoch_ms=20,
+            ),
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=20,
+                completed_at_epoch_ms=30,
+                output_tokens=25,
+            ),
+        ),
+        {},
+    )
+
+    assert timing.output_tokens == 105
+    assert timing.intermediate_output_tokens == 80
+    assert [step.output_tokens for step in timing.steps] == [80, None, 25]
+
+
+def test_turn_timing_does_not_report_partial_output_token_measurement() -> None:
+    timing = turn_timing(
+        uuid4(),
+        "child",
+        (
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=0,
+                completed_at_epoch_ms=10,
+                output_tokens=80,
+            ),
+            TurnStep(
+                function_name="Engine._stream_once",
+                started_at_epoch_ms=10,
+                completed_at_epoch_ms=20,
+            ),
+        ),
+        {},
+    )
+
+    assert timing.output_tokens is None
+    assert timing.intermediate_output_tokens is None
+
+
+def test_turn_timing_does_not_report_output_tokens_without_a_model_round() -> None:
+    timing = turn_timing(
+        uuid4(),
+        "child",
+        (
+            TurnStep(
+                function_name="Engine._dispatch_step",
+                started_at_epoch_ms=0,
+                completed_at_epoch_ms=10,
+            ),
+        ),
+        {},
+    )
+
+    assert timing.rounds == 0
+    assert timing.output_tokens is None
+    assert timing.intermediate_output_tokens is None
 
 
 async def test_step_resources_leave_the_residual_alone_when_a_compaction_spent_off_the_rounds(
@@ -7693,6 +7939,7 @@ async def test_step_resources_leave_the_residual_alone_when_a_compaction_spent_o
     )
 
     assert [step.tokens for step in steps] == [220_000, None, 110_000]
+    assert [step.output_tokens for step in steps] == [20_000, None, 10_000]
     assert [step.cost_micro_usd for step in steps] == [1_500_000, None, 750_000]
 
 

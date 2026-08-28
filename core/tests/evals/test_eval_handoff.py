@@ -105,6 +105,44 @@ def test_the_last_message_joins_its_own_text_blocks() -> None:
     assert record.duplication == 0.0
 
 
+def test_prose_between_tool_calls_is_measured_apart_from_the_closing() -> None:
+    """A child that narrates every round pays for lines no parent reads. Forbidding the closing
+    message moves that prose one round earlier, so the earlier rounds are counted on their own."""
+    messages = (
+        assistant("Reading both files now.", tool="read"),
+        assistant("Both read. Checking the resolver next.", tool="grep"),
+        assistant(NARRATION),
+    )
+    record = handoff_record(CONVERSATION, messages, REPORT)
+    assert record.closing_chars == len(NARRATION)
+    assert record.interim_chars == len("Reading both files now.") + len(
+        "Both read. Checking the resolver next."
+    )
+
+
+def test_a_child_that_never_narrated_measures_no_interim_prose() -> None:
+    record = handoff_record(CONVERSATION, (assistant(NARRATION, tool="bash"),), REPORT)
+    assert record.closing_chars == len(NARRATION)
+    assert record.interim_chars == 0
+
+
+def test_a_persisted_terminal_answer_is_not_interim_prose() -> None:
+    """The payload each terminal turn persists is delivered, so a follow-up conversation's earlier
+    payload must not be counted as prose the parent never read."""
+    first = '{"result":"the first turn payload, long enough to shingle against the next one."}'
+    second = '{"result":"' + REPORT + '"}'
+    messages = (
+        assistant(NARRATION, tool="bash"),
+        Message(role="assistant", content=first),
+        Message(role="user", content="follow up"),
+        assistant("Picking that back up.", tool="read"),
+        Message(role="assistant", content=second),
+    )
+    record = handoff_record(CONVERSATION, messages, REPORT, terminal_texts=(first, second))
+    assert record.closing_chars == len("Picking that back up.")
+    assert record.interim_chars == len(NARRATION)
+
+
 def test_overlap_ignores_a_fragment_too_short_to_shingle() -> None:
     assert shingle_overlap("done", "done") == 0.0
     assert shingle_overlap(REPORT, "") == 0.0

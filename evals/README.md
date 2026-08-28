@@ -78,6 +78,28 @@ Its S3 object key has 192 random bits. The presigned URL is valid for seven days
 share step selects the bucket in this order: `--s3-bucket`, then `UFO_EVAL_SHARE_BUCKET`, then the
 S3 `[blob]` bucket from the config.
 
+## What a delegated child generated: evals.delegated_generation
+
+A spawn returns one payload; every round a child paid for before the round that carried it reached
+nobody. `delegated_response_register` records each child turn's completed model-round output, and
+
+```bash
+uv run python -m evals.delegated_generation --metric-stdout
+```
+
+reads it back over the archive, so a run needs no re-run and a case that failed still reports what
+its child generated. Every archive under `--runs` is read, which is one arm of an ablation:
+
+```bash
+uv run python -m evals.delegated_generation --metric-stdout \
+  --runs eval-reports/experiments/<name>/runs/control
+```
+
+`delegated_intermediate_tokens: <mean>` is the output tokens per child turn that reached no parent —
+the number a change to the subagent contract has to move. It is per child turn, so an arm that
+delegated less often does not read as a reduction. An attempt whose child rounds carry no usage is
+excluded and named; a run with none refuses a metric and exits non-zero.
+
 ## Run many suites: evals.stack
 
 `python -m evals.stack matrix.toml` runs several suites at the same time. Each suite gets its own
