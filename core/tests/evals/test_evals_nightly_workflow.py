@@ -126,11 +126,12 @@ def test_the_smoke_subset_boots_every_arm_it_can_reach(planner) -> None:
 def test_a_written_shard_is_input_the_stack_accepts(planner, tmp_path: Path) -> None:
     for shard in (*planner.plan(smoke=False), *planner.plan(smoke=True)):
         directory = tmp_path / shard.label
-        planner.write(shard, directory)
+        planner.write(shard, directory, "z-ai/glm-5.3")
         matrix = Matrix.model_validate(tomllib.loads((directory / "matrix.toml").read_text()))
         config = tomllib.loads((directory / "ufo.toml").read_text())
 
         assert config["pack"]["name"] == shard.pack
+        assert config["models"]["auto_model"] == "z-ai/glm-5.3"
         assert [spec.label for spec in matrix.run] == [shard.label]
         assert matrix.run[0].args[-len(shard.suites) :] == shard.suites
         if shard.agent is not None:
@@ -150,6 +151,26 @@ def test_the_workflow_fans_out_over_the_planned_shards(workflow) -> None:
     assert sweep["strategy"]["fail-fast"] is False
     assert sweep["strategy"]["matrix"]["label"] == "${{ fromJSON(needs.plan.outputs.shards) }}"
     assert '--plan "$SWEEP_SMOKE"' in plan["steps"][-1]["run"]
+
+
+def test_the_dispatch_model_sets_the_sweep_auto_model(workflow) -> None:
+    trigger = workflow.get("on", workflow[True])
+    write = next(
+        step
+        for step in workflow["jobs"]["sweep"]["steps"]
+        if step.get("name") == "Write the shard's stack input"
+    )
+
+    assert trigger["workflow_dispatch"]["inputs"]["model"] == {
+        "description": "Evaluated agent model",
+        "type": "string",
+        "default": "claude-opus-5",
+    }
+    assert workflow["env"]["EVAL_MODEL"] == "${{ inputs.model || 'claude-opus-5' }}"
+    assert '--model "$EVAL_MODEL"' in write["run"]
+    assert workflow["jobs"]["sweep"]["env"]["OPENROUTER_API_KEY"] == (
+        "${{ secrets.OPENROUTER_API_KEY }}"
+    )
 
 
 def test_every_sweep_shard_receives_one_shared_sandbox_client(workflow) -> None:
@@ -370,7 +391,15 @@ def test_the_archive_carries_the_summary_the_viewer_and_the_records(workflow) ->
     assert "eval-reports" in s3["run"] and "--recursive" in s3["run"]
 
 
-def _archive(root: Path, label: str, name: str, passed: int, scored: int, digest: str) -> None:
+def _archive(
+    root: Path,
+    label: str,
+    name: str,
+    passed: int,
+    scored: int,
+    digest: str,
+    target_model: str = "z-ai/glm-5.3",
+) -> None:
     cases = [
         {
             "name": f"{name}-{index}",
@@ -387,7 +416,15 @@ def _archive(root: Path, label: str, name: str, passed: int, scored: int, digest
         "agent": "assistant",
         "ufo_version": "0",
         "revision": "0",
-        "reports": [{"name": name, "suite": "capability", "digest": digest, "cases": cases}],
+        "reports": [
+            {
+                "name": name,
+                "suite": "capability",
+                "digest": digest,
+                "target_model": target_model,
+                "cases": cases,
+            }
+        ],
     }
     (root / "runs").mkdir(parents=True, exist_ok=True)
     (root / "runs" / f"{run['id']}.json").write_text(json.dumps(run))
@@ -408,6 +445,24 @@ def test_the_trend_submits_counts_per_suite_never_a_rate(tmp_path: Path) -> None
     assert not any("rate" in point["metric"] for point in payload["series"])
 
 
+def test_the_summary_names_the_target_model(tmp_path: Path) -> None:
+    summary = _script("eval_sweep_summary")
+    _archive(
+        tmp_path,
+        "shard-a",
+        "basics",
+        passed=1,
+        scored=1,
+        digest="sha256:aa",
+        target_model="z-ai/glm-5.3-flash",
+    )
+
+    rendered = summary.render(tmp_path, smoke=True)
+
+    assert "| Suite | Shard | Target Model | Passed | Rate |" in rendered
+    assert "| basics | shard-a | z-ai/glm-5.3-flash | 1/1 | 100% |" in rendered
+
+
 def test_no_digest_rides_the_metric_tags(tmp_path: Path) -> None:
     """A digest changes whenever a suite's cases change, so as a tag it is an unbounded cardinality
     leak. It rides the sweep's event instead, which is where a graph reads the break in its line."""
@@ -419,10 +474,16 @@ def test_no_digest_rides_the_metric_tags(tmp_path: Path) -> None:
 
     assert all("deadbeef" not in tag for point in payload["series"] for tag in point["tags"])
     assert all(
-        sorted(point["tags"]) == ["mode:sweep", "shard:shard-a", "suite:basics"]
+        sorted(point["tags"])
+        == [
+            "mode:sweep",
+            "shard:shard-a",
+            "suite:basics",
+            "target_model:z-ai/glm-5.3",
+        ]
         for point in payload["series"]
     )
-    assert "sha256:deadbeef" in event["text"] and "basics" in event["text"]
+    assert "basics z-ai/glm-5.3 sha256:deadbeef" in event["text"]
 
 
 def test_memory_ingestion_state_reports_fact_and_empty_evidence_counts(tmp_path: Path) -> None:

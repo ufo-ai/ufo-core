@@ -1212,11 +1212,18 @@ resource "datadog_dashboard" "evals" {
     available_values = ["sweep", "smoke"]
   }
 
+  template_variable {
+    name             = "target_model"
+    prefix           = "target_model"
+    defaults         = ["claude-opus-5"]
+    available_values = ["claude-opus-5", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"]
+  }
+
   widget {
     timeseries_definition {
       title = "pass rate across every suite"
       request {
-        q            = "sum:ufo.evals.cases_passed{$mode} / sum:ufo.evals.cases_scored{$mode}"
+        q            = "sum:ufo.evals.cases_passed{$mode,$target_model} / sum:ufo.evals.cases_scored{$mode,$target_model}"
         display_type = "line"
       }
     }
@@ -1226,7 +1233,7 @@ resource "datadog_dashboard" "evals" {
     timeseries_definition {
       title = "pass rate by suite"
       request {
-        q            = "sum:ufo.evals.cases_passed{$mode} by {suite} / sum:ufo.evals.cases_scored{$mode} by {suite}"
+        q            = "sum:ufo.evals.cases_passed{$mode,$target_model} by {suite} / sum:ufo.evals.cases_scored{$mode,$target_model} by {suite}"
         display_type = "line"
       }
     }
@@ -1236,7 +1243,7 @@ resource "datadog_dashboard" "evals" {
     toplist_definition {
       title = "cases failing last night, by suite"
       request {
-        q = "top(sum:ufo.evals.cases_scored{$mode} by {suite} - sum:ufo.evals.cases_passed{$mode} by {suite}, 25, 'last', 'desc')"
+        q = "top(sum:ufo.evals.cases_scored{$mode,$target_model} by {suite} - sum:ufo.evals.cases_passed{$mode,$target_model} by {suite}, 25, 'last', 'desc')"
       }
     }
   }

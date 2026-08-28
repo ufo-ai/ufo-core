@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from evals.harness.registry import EvalTask
 from evals.registry import TASKS
+from ufo.config import DEFAULT_AUTO_MODEL
 
 CONCURRENCY = 4
 # A weight unit measured at roughly a minute of wall clock, so a shard of 45 runs under an
@@ -135,7 +136,7 @@ def _balance(tasks: tuple[EvalTask, ...]) -> tuple[tuple[EvalTask, ...], ...]:
     )
 
 
-def write(shard: Shard, directory: Path) -> None:
+def write(shard: Shard, directory: Path, model: str) -> None:
     arm = next(arm for arm in ARMS if arm.pack == shard.pack)
     directory.mkdir(parents=True, exist_ok=True)
     config = directory / "ufo.toml"
@@ -145,6 +146,7 @@ def write(shard: Shard, directory: Path) -> None:
                 "database": {"url": DATABASE_URL},
                 "blob": {"backend": "filesystem", "root": "./blobs"},
                 "connect": {"public_base_url": PUBLIC_BASE_URL},
+                "models": {"auto_model": model},
                 "pack": {"name": shard.pack},
                 **arm.knobs,
             }
@@ -180,6 +182,9 @@ def main(argv: list[str] | None = None) -> None:
         help="plan the cheap proving subset only",
     )
     parser.add_argument("--plan", action="store_true", help="print the job matrix as JSON")
+    parser.add_argument(
+        "--model", default=DEFAULT_AUTO_MODEL, help="concrete model that agents named auto use"
+    )
     parser.add_argument("--write", metavar="LABEL", help="write one shard's stack input")
     parser.add_argument("--dir", type=Path, help="directory the shard's input is written to")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
@@ -192,7 +197,7 @@ def main(argv: list[str] | None = None) -> None:
     named = next((shard for shard in shards if shard.label == args.write), None)
     if named is None:
         parser.error(f"no shard is labelled {args.write!r}")
-    write(named, args.dir)
+    write(named, args.dir, args.model)
 
 
 if __name__ == "__main__":

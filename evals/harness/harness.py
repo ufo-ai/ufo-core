@@ -114,9 +114,10 @@ class EvalReport(BaseModel):
                     f", {tier} tier, mean claim coverage {mean_claim_coverage:.0%} "
                     f"at {threshold:.0%} task threshold"
                 )
+        target = f", target model {self.target_model}" if self.target_model is not None else ""
         summary = (
             f"{self.name} {passed}/{len(self.scored)} passed, {self.excluded_count} excluded "
-            f"(rate {self.pass_rate:.0%}){benchmark}"
+            f"(rate {self.pass_rate:.0%}){benchmark}{target}"
         )
         metric_summary = ", ".join(
             f"{metric.name.replace('_', ' ')} {metric.value:.1%}" for metric in self.metrics

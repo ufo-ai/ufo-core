@@ -43,6 +43,8 @@ def series(root: Path, mode: str, timestamp: int) -> dict:
     for run in runs:
         for report in run.reports:
             tags = [f"suite:{report.name}", f"shard:{run.label}", f"mode:{mode}"]
+            if report.target_model is not None:
+                tags.append(f"target_model:{report.target_model}")
             passed = sum(1 for case in report.scored if case.passed)
             for metric, value in ((PASSED_METRIC, passed), (SCORED_METRIC, len(report.scored))):
                 points.append(
@@ -99,11 +101,16 @@ def series(root: Path, mode: str, timestamp: int) -> dict:
 def digest_event(root: Path, mode: str, run_url: str) -> dict:
     """The marker a trend graph breaks its line on: every suite's digest as the sweep saw it."""
     digests = sorted(
-        {(report.name, report.digest) for run in load_runs(root) for report in run.reports}
+        {
+            (report.name, report.target_model or "unknown", report.digest)
+            for run in load_runs(root)
+            for report in run.reports
+        }
     )
     return {
         "title": f"ufo evals {mode} suite digests",
-        "text": "\n".join(f"{name} {digest}" for name, digest in digests) + f"\n{run_url}",
+        "text": "\n".join(f"{name} {model} {digest}" for name, model, digest in digests)
+        + f"\n{run_url}",
         "tags": [f"mode:{mode}"],
         "source_type_name": "github",
     }

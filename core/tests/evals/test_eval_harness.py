@@ -8322,6 +8322,7 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert payload["judgeRevision"] == JUDGE_REVISION
     assert payload["metrics"] == [{"name": "f1", "value": 0.75}]
     assert "f1 75.0%" in report.console_summary
+    assert f"target model {MODEL}" in report.console_summary
 
 
 def test_eval_viewer_sums_attempt_cost_and_latency_per_archived_case() -> None:

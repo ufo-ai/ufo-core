@@ -48,12 +48,16 @@ def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
             f"{', '.join(missing)}",
             "",
         ]
-    lines += ["| Suite | Shard | Passed | Rate |", "| --- | --- | --- | --- |"]
+    lines += [
+        "| Suite | Shard | Target Model | Passed | Rate |",
+        "| --- | --- | --- | --- | --- |",
+    ]
     for label, report in sorted(reports, key=lambda pair: (pair[1].pass_rate, pair[1].name)):
         mark = "" if report.passed else " ⚠️"
         lines.append(
-            f"| {report.name}{mark} | {label} | {sum(1 for case in report.scored if case.passed)}"
-            f"/{len(report.scored)} | {report.pass_rate:.0%} |"
+            f"| {report.name}{mark} | {label} | {report.target_model or 'Not recorded'} | "
+            f"{sum(1 for case in report.scored if case.passed)}/{len(report.scored)} | "
+            f"{report.pass_rate:.0%} |"
         )
     failures = tuple(
         (report.name, case) for _, report in reports for case in report.scored if not case.passed

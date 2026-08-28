@@ -4376,8 +4376,20 @@ def test_the_rds_widgets_switch_fleet_on_the_instance_identifier() -> None:
         '"ufo-testing-postgres", "prod-postgres"',
         '"testing", "prod"',
         '"sweep", "smoke"',
+        '"claude-opus-5", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"',
         '"testing", "prod"',
     ]
+
+
+def test_eval_dashboard_scopes_every_score_to_the_target_model() -> None:
+    dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+
+    assert 'name             = "target_model"' in dashboard
+    assert 'defaults         = ["claude-opus-5"]' in dashboard
+    assert dashboard.count("ufo.evals.cases_passed{$mode,$target_model}") == 3
+    assert dashboard.count("ufo.evals.cases_scored{$mode,$target_model}") == 3
+    assert "ufo.evals.cases_passed{$mode}" not in dashboard
+    assert "ufo.evals.cases_scored{$mode}" not in dashboard
 
 
 def test_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:
