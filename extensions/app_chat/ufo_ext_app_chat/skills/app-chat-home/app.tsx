@@ -162,7 +162,7 @@ const OTHER_MEMBERS = "Other members";
  *  rather than a control beside it, so the column has one left edge and one pitch all the way
  *  down. */
 const ROW = cn(
-  "flex h-(--size-row) w-full items-center gap-md rounded-row border-0",
+  "flex h-(--size-row) w-full items-center gap-sm rounded-row border-0",
   "bg-transparent px-sm text-left text-inherit hover:bg-fill",
 );
 
@@ -462,7 +462,7 @@ function ChatApp({
         >
           {/* The bands — the controls and the runs of rows — are one column with one rhythm, so a
               run's heading sits nearer its own rows than the run above it. */}
-          <div className={cn(COLUMN, "flex flex-col gap-xl p-2xl")}>
+          <div className={cn(COLUMN, "flex flex-col gap-2xl p-2xl")}>
             {/* The narrowings behind one glyph, drawn the way every other listing in the portal
                 draws them. A sort is a pick between ladders and shuts the menu; a surface is a
                 choice turned on and off and leaves it standing, so a member names both in one
@@ -511,11 +511,11 @@ function ChatApp({
               <p className="m-0 text-ink-soft">No conversations yet.</p>
             ) : (
               drawn.map((run) => (
-                <section key={run.label} className="flex flex-col gap-xs">
+                <section key={run.label} className="flex flex-col gap-sm">
                   <h2 className="m-0 px-sm font-sans text-label font-medium text-ink-soft">
                     {run.label}
                   </h2>
-                  <ul className="m-0 flex list-none flex-col gap-px p-0">
+                  <ul className="m-0 flex list-none flex-col gap-hair p-0">
                     {run.rows.map((row) => (
                       <li key={row.name}>
                         <button type="button" onClick={() => place(row.name)} className={ROW}>
@@ -548,7 +548,7 @@ function ChatApp({
               ))
             )}
             {shown.walk || after ? (
-              <div className="flex gap-xs">
+              <div className="flex gap-sm">
                 {shown.walk ? (
                   <Button variant="quiet" size="bar" onClick={() => turn(shown.walk ?? undefined)}>
                     Older conversations

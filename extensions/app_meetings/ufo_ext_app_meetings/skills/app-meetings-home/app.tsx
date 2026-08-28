@@ -8,21 +8,27 @@
 
 import {
   AppConversations,
-  Avatar,
-  AvatarFallback,
+  AvatarStack,
+  Badge,
   Button,
+  Card,
+  Fragment,
   Header,
+  IconX,
   ObjectDetail,
   PanelEmpty,
   Section,
   SectionApp,
+  Separator,
+  cn,
   compose,
   mountApp,
   objectAt,
   slotOf,
   usePageHead,
+  useState,
 } from "ufo/kit";
-import type { Placement, ReactNode } from "ufo/kit";
+import type { Placement } from "ufo/kit";
 
 const APP = "Meetings";
 
@@ -33,69 +39,49 @@ const PURPOSE =
 
 /** The line under the title: when the app last ran, and the counts a member scans for. It is the
  *  page's own status, so it says what happened rather than what the app could do. */
-const STANDING = "Last brief 08:05 · 3 meetings today · 5 follow-ups open · 2 late";
+const STANDING = "Last brief 08:05 · 3 meetings ahead · 5 follow-ups open · 2 late";
 
-type Person = { name: string; initials: string };
+/** The one feature the page offers rather than reports: follow-ups wait for the ask, so the band
+ *  above the meetings states what turning them on gives and carries the ask that does it. A member
+ *  who does not want them closes it. */
+const OFFER = "Follow-ups after each meeting";
+const OFFER_NOTE =
+  "Turning this on writes down what each meeting committed to, with an owner and a date, and "
+  + "chases what is late.";
+const OFFER_ASK = "Turn on follow-ups.";
+const TURN_ON = "Turn on";
+const DISMISS = "Dismiss";
+
+type Person = { name: string; email: string };
 
 type Meeting = {
-  at: string;
+  day: string;
+  when: string;
   title: string;
   attendees: Person[];
-  lastTime: string;
-  live: { ref: string; what: string }[];
-  raise: string[];
 };
 
-/** The next meetings, each with what the app found for it: who is coming, what the last meeting
- *  with these people settled, what work is open against it, and what to raise. */
+/** The next meetings: when, who is coming, and the one act. The brief itself — what last time
+ *  settled, what work is open, what to raise — is what Prep fetches into chat, so a row stays one
+ *  line and the card stays a schedule a member scans rather than reads. */
 const MEETINGS: Meeting[] = [
   {
-    at: "09:30",
-    title: "Northstar renewal",
-    attendees: [
-      { name: "Rae Whitlock", initials: "RW" },
-      { name: "Cleo Marsh", initials: "CM" },
-    ],
-    lastTime: "They asked for SSO before signing. You said the quarter after next.",
-    live: [
-      { ref: "#2040", what: "SSO for enterprise plans" },
-      { ref: "Drive", what: "Renewal terms" },
-    ],
-    raise: [
-      "$48,000 renews 18 September; last year they asked for annual billing.",
-      "SSO is still unscheduled — say the quarter, or say it is not coming.",
-      "Their support volume halved since March; worth naming.",
-    ],
-  },
-  {
-    at: "11:00",
-    title: "Product design sync",
-    attendees: [
-      { name: "Tomas Ferrer", initials: "TF" },
-      { name: "Ines Okafor", initials: "IO" },
-    ],
-    lastTime: "Agreed the first run offers one button, and that editing built-in apps waits.",
-    live: [
-      { ref: "#2042", what: "First run offers one button" },
-      { ref: "Drive", what: "Design review" },
-    ],
-    raise: [
-      "The one-button first run has no copy yet.",
-      "#2042 has been open eleven days with no owner.",
-      "Decide whether forking a built-in app is in scope for launch.",
-    ],
-  },
-  {
-    at: "15:30",
+    day: "27",
+    when: "Today · 3:30p",
     title: "Investor update review",
-    attendees: [{ name: "Tomas Ferrer", initials: "TF" }],
-    lastTime: "Last month's update promised a 100-person waitlist number this time.",
-    live: [{ ref: "Drive", what: "Investor update draft" }],
-    raise: [
-      "The waitlist is at 100; the draft still says 60.",
-      "No revenue line yet this month.",
-      "Ask whether the design partner is named or kept anonymous.",
-    ],
+    attendees: [{ name: "Tomas Ferrer", email: "tomas@metalcraft.test" }],
+  },
+  {
+    day: "28",
+    when: "Thursday, 28 Aug · 11:00a",
+    title: "Product design sync",
+    attendees: [{ name: "Tomas Ferrer", email: "tomas@metalcraft.test" }, { name: "Ines Okafor", email: "ines@metalcraft.test" }],
+  },
+  {
+    day: "1",
+    when: "Monday, 1 Sept · 2:30p",
+    title: "Northstar renewal",
+    attendees: [{ name: "Rae Whitlock", email: "rae@metalcraft.test" }, { name: "Cleo Marsh", email: "cleo@metalcraft.test" }],
   },
 ];
 
@@ -112,59 +98,71 @@ type FollowUp = {
 const FOLLOW_UPS: FollowUp[] = [
   {
     commitment: "Send Northstar the SSO timeline in writing",
-    owner: { name: "Rae Whitlock", initials: "RW" },
+    owner: { name: "Rae Whitlock", email: "rae@metalcraft.test" },
     due: "22 Aug",
     state: "Late",
     meeting: "Northstar renewal",
   },
   {
     commitment: "Write the first-run copy for the one-button screen",
-    owner: { name: "Ines Okafor", initials: "IO" },
+    owner: { name: "Ines Okafor", email: "ines@metalcraft.test" },
     due: "26 Aug",
     state: "Open",
     meeting: "Product design sync",
   },
   {
     commitment: "Confirm the waitlist number for the investor update",
-    owner: { name: "Tomas Ferrer", initials: "TF" },
+    owner: { name: "Tomas Ferrer", email: "tomas@metalcraft.test" },
     due: "25 Aug",
     state: "Open",
     meeting: "Investor update review",
   },
   {
     commitment: "Decide whether built-in apps can be forked at launch",
-    owner: { name: "Tomas Ferrer", initials: "TF" },
+    owner: { name: "Tomas Ferrer", email: "tomas@metalcraft.test" },
     due: "21 Aug",
     state: "Late",
     meeting: "Product design sync",
   },
   {
     commitment: "Share the renewal terms doc with Cleo",
-    owner: { name: "Cleo Marsh", initials: "CM" },
+    owner: { name: "Cleo Marsh", email: "cleo@metalcraft.test" },
     due: "27 Aug",
     state: "Open",
     meeting: "Northstar renewal",
   },
 ];
 
-type Note = { decision: string; meeting: string; on: string };
+type Note = { decision: string; meeting: string };
 
-/** Decisions written into the workspace record, so the wiki and every later turn read them. */
-const NOTES: Note[] = [
+type Decided = { day: string; on: string; notes: Note[] };
+
+/** Decisions written into the workspace record, so the wiki and every later turn read them. They
+ *  stand under the day the meeting reached them, because a decision is read by when it was made. */
+const NOTES: Decided[] = [
   {
-    decision: "Built-in apps are not editable at launch; customising one means forking it.",
-    meeting: "Product design sync",
+    day: "24",
     on: "24 Aug",
+    notes: [
+      {
+        decision: "Built-in apps are not editable at launch; customising one means forking it.",
+        meeting: "Product design sync",
+      },
+      {
+        decision: "The first run offers one button, not a wizard.",
+        meeting: "Product design sync",
+      },
+    ],
   },
   {
-    decision: "The first run offers one button, not a wizard.",
-    meeting: "Product design sync",
-    on: "24 Aug",
-  },
-  {
-    decision: "Northstar renewal is annual billing at $48,000.",
-    meeting: "Northstar renewal",
+    day: "18",
     on: "18 Aug",
+    notes: [
+      {
+        decision: "Northstar renewal is annual billing at $48,000.",
+        meeting: "Northstar renewal",
+      },
+    ],
   },
 ];
 
@@ -174,101 +172,106 @@ const NOTES_TITLE = "Notes";
 const CONVERSATIONS = "Conversations";
 const NO_CONVERSATIONS = "Your chats with this app, and every run it makes on its own, land here.";
 
-const LAST_TIME = "Last time";
-const LIVE_WORK = "Live work";
-const RAISE = "Raise";
+/** The date a row is about, drawn as the tile the row leads with: the same square the controls on
+ *  that row are tall, so the day, the faces and the act sit on one line. */
+const DAY_TILE = cn(
+  "flex size-(--size-control) shrink-0 items-center justify-center rounded-avatar",
+  "bg-fill text-label font-medium text-ink-quiet",
+);
 
-function Who({ people }: { people: Person[] }) {
-  return (
-    <span className="flex items-center gap-2xs">
-      {people.map((person) => (
-        <Avatar key={person.name} title={person.name} className="size-(--size-glyph)">
-          <AvatarFallback className="text-small">{person.initials}</AvatarFallback>
-        </Avatar>
-      ))}
-    </span>
-  );
-}
+/** What a row outside a card leads with instead of a tile: one hairline standing the height of the
+ *  row, so a list of records reads down one left edge. */
+const LEAD = "w-(--spacing-hair) shrink-0 self-stretch rounded-row bg-fill-strong";
 
-function Line({ label, children }: { label: string; children: ReactNode }) {
+/** The name of the record and the line under it. It holds a measure of its own, so the acts at the
+ *  row's far edge wrap under it on a phone rather than squeezing the name to nothing. */
+const NAME = "flex min-w-(--container-control-row) flex-1 flex-col gap-sm";
+
+const ROW = "flex flex-wrap items-center gap-2xl py-2xl";
+
+function Brief({ meeting, ruled }: { meeting: Meeting; ruled: boolean }) {
   return (
-    <div className="flex gap-lg">
-      <span className="w-hint shrink-0 text-label text-ink-soft">{label}</span>
-      <div className="min-w-0 flex-1 text-label">{children}</div>
+    <div className={cn(ROW, ruled && "border-t border-edge")}>
+      <span className={DAY_TILE}>{meeting.day}</span>
+      <div className={NAME}>
+        <h3 className="m-0 truncate text-label font-medium tracking-ui">{meeting.title}</h3>
+        <p className="m-0 truncate text-label text-ink-quiet">{meeting.when}</p>
+      </div>
+      <AvatarStack people={meeting.attendees} />
+      <Button
+        variant="outline"
+        size="bar"
+        onClick={() => compose("Prep me for " + meeting.title + ".")}
+      >
+        Prep
+      </Button>
     </div>
   );
 }
 
-function Brief({ meeting }: { meeting: Meeting }) {
+function FollowUpRow({ item, ruled }: { item: FollowUp; ruled: boolean }) {
   return (
-    <article className="flex flex-col gap-lg border-t border-edge py-xl">
-      <header className="flex items-baseline gap-lg">
-        <span className="font-mono text-label text-ink-soft">{meeting.at}</span>
-        <h3 className="m-0 flex-1 text-body font-medium">{meeting.title}</h3>
-        <Who people={meeting.attendees} />
-      </header>
-      <Line label={LAST_TIME}>{meeting.lastTime}</Line>
-      <Line label={LIVE_WORK}>
-        <span className="flex flex-wrap gap-xs">
-          {meeting.live.map((item) => (
-            <span
-              key={item.ref + item.what}
-              className="rounded-control bg-fill px-sm py-2xs text-small"
-            >
-              <span className="font-mono">{item.ref}</span> {item.what}
-            </span>
-          ))}
+    <div className={cn(ROW, ruled && "border-t border-edge")}>
+      <span aria-hidden className={LEAD} />
+      <div className={NAME}>
+        <span className="truncate text-label font-medium tracking-ui">{item.commitment}</span>
+        <span className="truncate text-label text-ink-quiet">
+          {item.meeting} · {item.due}
         </span>
-      </Line>
-      <Line label={RAISE}>
-        <ul className="m-0 flex list-disc flex-col gap-2xs pl-xl">
-          {meeting.raise.map((point) => (
-            <li key={point}>{point}</li>
-          ))}
-        </ul>
-      </Line>
-      <div className="flex gap-xs">
-        <Button
-          variant="outline"
-          size="bar"
-          onClick={() => compose("Brief me on " + meeting.title + " again, with what changed.")}
-        >
-          Re-brief
-        </Button>
       </div>
-    </article>
+      <AvatarStack people={[item.owner]} />
+      <Badge tone={item.state === "Late" ? "attention" : "default"}>{item.state}</Badge>
+      <Button
+        variant="outline"
+        size="bar"
+        onClick={() => compose("Chase " + item.owner.name + " on: " + item.commitment)}
+      >
+        Chase
+      </Button>
+    </div>
   );
 }
 
-function FollowUpRow({ item }: { item: FollowUp }) {
+function NoteRow({ note, on, ruled }: { note: Note; on: string; ruled: boolean }) {
   return (
-    <tr className="border-t border-edge">
-      <td className="py-lg pr-lg align-top text-label">{item.commitment}</td>
-      <td className="py-lg pr-lg align-top">
-        <Who people={[item.owner]} />
-      </td>
-      <td className="py-lg pr-lg align-top font-mono text-small text-ink-soft">{item.due}</td>
-      <td className="py-lg pr-lg align-top">
-        <span
-          className={
-            item.state === "Late"
-              ? "rounded-control bg-attention px-sm py-2xs text-small"
-              : "text-small text-ink-soft"
-          }
-        >
-          {item.state}
-        </span>
-      </td>
-      <td className="py-lg align-top">
+    <div className={cn(ROW, ruled && "border-t border-edge")}>
+      <span aria-hidden className={LEAD} />
+      <div className={NAME}>
+        <span className="truncate text-label font-medium tracking-ui">{note.decision}</span>
+        <span className="truncate text-label text-ink-quiet">{note.meeting}</span>
+      </div>
+      <Button
+        variant="outline"
+        size="bar"
+        onClick={() => compose("Summarise " + note.meeting + " on " + on + ".")}
+      >
+        Summary
+      </Button>
+    </div>
+  );
+}
+
+/** One day of decisions: the date it was, the day's own act, and a row per decision under it. */
+function Day({ decided }: { decided: Decided }) {
+  return (
+    <div className="flex flex-col">
+      <div className="flex flex-wrap items-center gap-2xl py-sm">
+        <span className={DAY_TILE}>{decided.day}</span>
+        <h3 className="m-0 min-w-0 flex-1 truncate text-body font-medium tracking-ui">
+          {decided.on}
+        </h3>
         <Button
           variant="outline"
           size="bar"
-          onClick={() => compose("Chase " + item.owner.name + " on: " + item.commitment)}
+          onClick={() => compose("What did we decide on " + decided.on + "?")}
         >
-          Chase
+          Ask
         </Button>
-      </td>
-    </tr>
+      </div>
+      {decided.notes.map((note, index) => (
+        <NoteRow key={note.decision} note={note} on={decided.on} ruled={index > 0} />
+      ))}
+    </div>
   );
 }
 
@@ -290,36 +293,50 @@ function Home({
   // The one record a row opens stands beside the page, and closing it clears the track.
   const held = place.opens?.at(-1) ?? null;
   const at = held === null ? null : objectAt(held);
+  const [offered, setOffered] = useState(true);
   const band = usePageHead(
     <Header pinned heading={1} title={APP} lede={PURPOSE} note={STANDING} />,
   );
   return (
     <>
       {band}
+      {offered ? (
+        <div className="flex flex-wrap items-center gap-2xl">
+          <div className={NAME}>
+            <p className="m-0 text-label font-medium">{OFFER}</p>
+            <p className="m-0 text-label text-ink-quiet">{OFFER_NOTE}</p>
+          </div>
+          <span className="flex shrink-0 items-center gap-sm">
+            <Button variant="outline" size="bar" onClick={() => compose(OFFER_ASK)}>
+              {TURN_ON}
+            </Button>
+            <Button variant="quiet" size="icon" aria-label={DISMISS} onClick={() => setOffered(false)}>
+              <IconX aria-hidden />
+            </Button>
+          </span>
+        </div>
+      ) : null}
       <Section title={NEXT_MEETINGS}>
+        <Card rows>
+          {MEETINGS.map((meeting, index) => (
+            <Brief key={meeting.title} meeting={meeting} ruled={index > 0} />
+          ))}
+        </Card>
+      </Section>
+      <Section title={FOLLOW_UPS_TITLE}>
         <div className="flex flex-col">
-          {MEETINGS.map((meeting) => (
-            <Brief key={meeting.title} meeting={meeting} />
+          {FOLLOW_UPS.map((item, index) => (
+            <FollowUpRow key={item.commitment} item={item} ruled={index > 0} />
           ))}
         </div>
       </Section>
-      <Section title={FOLLOW_UPS_TITLE}>
-        <table className="w-full border-collapse text-left">
-          <tbody>
-            {FOLLOW_UPS.map((item) => (
-              <FollowUpRow key={item.commitment} item={item} />
-            ))}
-          </tbody>
-        </table>
-      </Section>
       <Section title={NOTES_TITLE}>
-        <div className="flex flex-col">
-          {NOTES.map((note) => (
-            <div key={note.decision} className="flex gap-lg border-t border-edge py-lg">
-              <span className="min-w-0 flex-1 text-label">{note.decision}</span>
-              <span className="shrink-0 text-small text-ink-soft">{note.meeting}</span>
-              <span className="shrink-0 font-mono text-small text-ink-soft">{note.on}</span>
-            </div>
+        <div className="flex flex-col gap-2xl">
+          {NOTES.map((decided, index) => (
+            <Fragment key={decided.on}>
+              {index > 0 ? <Separator /> : null}
+              <Day decided={decided} />
+            </Fragment>
           ))}
         </div>
       </Section>

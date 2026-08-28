@@ -1,6 +1,9 @@
 ---
 name: app-artifacts-home
 description: Load when building or updating the Artifacts app homepage — the workspace's files and hosted sites.
+metadata:
+  depends:
+  - ufo-style
 ---
 # Change the Artifacts homepage
 
@@ -12,7 +15,11 @@ To change it:
 
 1. Copy this skill's `app.tsx` and `index.html` into a directory of their own —
    `cp "$UFO_HOME/skills/app-artifacts-home/app.tsx" "$UFO_HOME/skills/app-artifacts-home/index.html" artifacts-home/`.
-2. Edit `app.tsx`. Import only from `ufo/kit` — React and its hooks, the portal's components,
+2. Edit `app.tsx`. `read` `$UFO_HOME/skills/ufo-style/references/kit.md` first — every
+   component the kit publishes and what each is — and reach for one before composing a
+   shape out of `div`s. Space the page with `gap-2xs` inside a word, `gap-sm` between the
+   parts of one thing, `gap-2xl` between things in one group and `gap-6xl` between groups,
+   and no other step. Import only from `ufo/kit` — React and its hooks, the portal's components,
    `SectionApp`, `mountApp`, `getJson`, `navigate`. Any other bare import fails the deploy with
    `failed to resolve import`; never install it, because a local `node_modules` makes that build
    pass and ships a second React whose hooks break in the page.

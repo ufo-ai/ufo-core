@@ -63,6 +63,8 @@ async function refusal(res: Response): Promise<string> {
   return body && body.length <= REFUSAL_MAX_CHARS ? body : fallback;
 }
 
+/** A GET of the portal API, answered as `{ok, payload}` or `{ok: false, message, status}`; the
+ * message is the route's own sentence to the member. */
 export async function getJson<T>(path: string, signal?: AbortSignal): Promise<Fetched<T>> {
   try {
     const res = await fetch(BASE + path, { credentials: "same-origin", signal });
@@ -123,6 +125,8 @@ export async function postObjectAction(
   return postAction(agentId, view.call, input);
 }
 
+/** Post a prepared intent to an agent — the one mutation path a page has; the turn is the chat
+ * transport and the audit record. */
 export function postIntent(agentId: string, envelope: unknown): Promise<IntentOutcome> {
   return postLane("/agents/" + agentId + "/intents", envelope);
 }

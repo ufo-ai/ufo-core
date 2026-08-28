@@ -97,8 +97,11 @@
   --spacing-7xl: 40px;
   --spacing-8xl: 64px;
 
-  /* One radius carries every panel, control, card and menu. A row is the one pill. */
+  /* A control and a panel take the base radius; a card and the plot inside it take their own,
+     which is softer because a card is a unit a member acts on rather than a surface. A row is
+     the one pill. */
   --radius: 0.25rem;
+  --radius-card: 12px;
   --radius-row: calc(infinity * 1px);
 
   --shadow-raised:

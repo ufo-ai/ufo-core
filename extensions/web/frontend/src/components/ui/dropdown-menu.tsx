@@ -3,12 +3,15 @@ import type { ComponentProps } from "react";
 
 import { cn } from "@/lib/cn";
 
+/** A menu's root: holds whether it is open, for the acts or narrowings behind one control. */
 export const DropdownMenu = DropdownMenuPrimitive.Root;
 
+/** The control that opens the DropdownMenu it stands in; `asChild` makes the child the trigger. */
 export const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 
 export const DropdownMenuSub = DropdownMenuPrimitive.Sub;
 
+/** A set of DropdownMenuRadioItem rows of which one is chosen — a sort, an order. */
 export const DropdownMenuRadioGroup = DropdownMenuPrimitive.RadioGroup;
 
 const POPUP =
@@ -72,6 +75,7 @@ export function DropdownMenuContent({
   );
 }
 
+/** One act in a menu: a row the pointer lights and a press performs, shutting the menu. */
 export function DropdownMenuItem({
   className,
   ...props
@@ -145,6 +149,7 @@ export function DropdownMenuCheckboxItem({
   );
 }
 
+/** One choice in a DropdownMenuRadioGroup, ticked when it is the one chosen. */
 export function DropdownMenuRadioItem({
   className,
   children,

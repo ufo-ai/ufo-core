@@ -20,6 +20,19 @@ The member's own direction outranks this skill wherever they gave one, including
 mid-build. Say in one line which style you took and why, so a member who wanted their own can say
 so before the build is finished.
 
+## A page built on the app kit
+
+An application's homepage is built against `ufo/kit`, and the kit is where the house style already
+is: its components carry these tokens, both colour schemes and every width, so a page composed from
+them is in the style before it states anything. `read` `references/kit.md` — every component the kit
+publishes and what each one is, written from the kit itself — and reach for one before building a
+shape out of `div`s. A measure is a `Stat`, a state a `Badge`, a unit a member acts on a `Card`, a
+named share a `Breakdown`, a series a `Chart`, and a graphic in more than one colour carries a
+`Legend`.
+
+Such a page takes no stylesheet of its own: the tokens below are for a build that has no kit — a
+deck, a document, a public site.
+
 ## The tokens
 
 `read` `references/tokens.css`. It is the copy-ready implementation: the eight palette declarations,
@@ -49,7 +62,8 @@ Paths are relative to this skill's directory (`$UFO_HOME/skills/ufo-style/`).
 - **Chrome.** The product supplies the page's header and everything in the top right — theme,
   settings, account. A screen of ours adds no bar that crosses the centre of the page and puts no
   control in that corner; it starts at its own title.
-- **Shape and motion.** One radius (`0.25rem`) for everything except a row, which is a pill. Motion
+- **Shape and motion.** One radius (`0.25rem`) for a control and a panel, `--radius-card` for a
+  card or a plot, and a pill for a row.  Motion
   is short and functional: `--ease-control` for a control, the enter/leave pair for anything that
   arrives over the page.
 

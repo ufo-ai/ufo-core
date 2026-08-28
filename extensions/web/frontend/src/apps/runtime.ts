@@ -148,6 +148,8 @@ export function connect(): Promise<AppInit> {
   });
 }
 
+/** Move the portal to an address: the page asks the shell framing it to go there, so a link inside
+ * an app lands on a portal screen rather than inside the frame. */
 export function navigate(to: string): void {
   send({ ufo: "navigate", to });
 }

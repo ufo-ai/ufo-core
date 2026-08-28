@@ -65,6 +65,8 @@ export function ConversationSlot({
   );
 }
 
+/** The chat screen for one agent's conversation: a header with the slot acts, the transcript, and
+ * the composer; a conversation founded here is reported through `onCreated`. */
 export function ChatPane({
   agent,
   member,

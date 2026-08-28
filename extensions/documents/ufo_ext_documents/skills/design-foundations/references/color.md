@@ -23,6 +23,7 @@ Color is emphasis — every non-neutral color must answer: **what does this help
 | `--bkgd-300`       | `#EBEAE9` | `#323535` | Dividers, card borders, hairlines            |
 | `--text-primary`   | `#191A1A` | `#F5F5F5` | Body text, headings                          |
 | `--text-secondary` | `#919090` | `#A7A9A9` | Secondary text                               |
+| `--text-tertiary` | `#919090` | `#7D7F7F` | Labels found, not read                       |
 
 The two accents are one hex each — they do not change with the surface.
 

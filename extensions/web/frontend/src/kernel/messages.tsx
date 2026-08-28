@@ -520,7 +520,7 @@ function Apps({ apps }: { apps: ChatApp[] }) {
       {apps.map((app, index) => (
         <Fragment key={app.id}>
           {index ? <ItemSeparator /> : null}
-          <Item className="p-0">
+          <Item size="flush">
             <a
               href={agentHash(app.id)}
               className={cn(

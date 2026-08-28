@@ -82,7 +82,7 @@ const AUTHORED = new RegExp(
 );
 
 const PALETTE_STEP =
-  /--(?:bkgd-\d+|text-(?:primary|secondary)|accent-(?:primary|secondary)|color-fill-ink|color-(?:live|blocked)):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
+  /--(?:bkgd-\d+|text-(?:primary|secondary|tertiary)|accent-(?:primary|secondary)|color-fill-ink|color-(?:live|blocked)):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
 
 const authoredColours = (css: string) =>
   css.replace(PROBES, "").replace(HUELESS, "").match(AUTHORED) ?? [];
@@ -95,7 +95,7 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("every colour the portal paints resolves through the palette's seven steps", () => {
+test("every colour the portal paints resolves through the palette's eight steps", () => {
   const css = builtStyles();
 
   expect(authoredColours(outsideThePalette(css))).toEqual([]);
@@ -106,6 +106,7 @@ test("every colour the portal paints resolves through the palette's seven steps"
     "--bkgd-300": "light-dark(#ebeae9,#323535)",
     "--text-primary": "light-dark(#191a1a,#f5f5f5)",
     "--text-secondary": "light-dark(#676767,#a7a9a9)",
+    "--text-tertiary": "light-dark(#919090,#7d7f7f)",
     "--accent-primary": "#0095ff",
     "--accent-secondary": "#ff6700",
   };
@@ -116,6 +117,7 @@ test("every colour the portal paints resolves through the palette's seven steps"
     "--color-surface": String.raw`var\(--bkgd-100\)`,
     "--color-ink": String.raw`var\(--text-primary\)`,
     "--color-ink-soft": String.raw`var\(--text-secondary\)`,
+    "--color-ink-quiet": String.raw`var\(--text-tertiary\)`,
     "--color-field": String.raw`var\(--bkgd-200\)`,
     "--color-edge": String.raw`var\(--bkgd-300\)`,
     "--color-fill": String.raw`var\(--bkgd-200\)`,
@@ -385,9 +387,22 @@ test("the shadcn contract carries the theme, and names nothing no component read
     expect(css).toContain(`--color-${token}:var(--${token})`);
   }
   // A contract name with no consumer is a colour nothing can account for, so it is not declared.
-  for (const token of ["secondary", "accent", "destructive", "success", "warning", "input"]) {
+  // `chart-1` is the one a chart would be expected to bring, and it stays out: a name declared
+  // `inline` is substituted into the utilities that read it and never emitted as a custom property,
+  // so recharts — which takes its colours as properties — could not resolve one. The series is
+  // declared in the portal's own vocabulary instead, against the palette's first accent.
+  for (const token of [
+    "secondary",
+    "accent",
+    "destructive",
+    "success",
+    "warning",
+    "input",
+    "chart-1",
+  ]) {
     expect(css).not.toContain(`--color-${token}:`);
   }
+  expect(css).toContain("--color-series:var(--accent-primary)");
   expect(css).toContain("--radius:0.25rem");
   expect(css).toContain("--muted:var(--bkgd-200)");
 });

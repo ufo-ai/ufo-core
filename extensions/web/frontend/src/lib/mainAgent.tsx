@@ -15,6 +15,7 @@ export function MainAgentProvider({ agents, children }: { agents: Agent[]; child
   );
 }
 
+/** The workspace's main agent, or null before the roster arrives. */
 export function useMainAgent(): Agent | null {
   return useAgents().find((agent) => agent.main) ?? null;
 }

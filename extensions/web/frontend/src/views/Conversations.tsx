@@ -217,6 +217,8 @@ export function ConversationTranscript({
   );
 }
 
+/** One conversation's transcript, read from the agent's transcript route, with a way back where
+ * the pane above has none. */
 export function ConversationDetail({
   agent,
   conversation,

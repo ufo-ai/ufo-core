@@ -109,6 +109,7 @@ const CELL = cn(
   "text-label text-ink-soft",
 );
 
+/** One table cell: the ruled, truncating cell every column is drawn with. */
 export function Td({ className, ...props }: ComponentProps<"td">) {
   return <td data-slot="table-cell" className={cn(CELL, "truncate", className)} {...props} />;
 }

@@ -553,7 +553,7 @@ def test_portal_style_gate_holds_an_app_page_to_the_portal_rules() -> None:
     rel = "extensions/app_chat/ufo_ext_app_chat/skills/app-gate-probe/app.tsx"
     assert failures == [
         f"{rel}: an app page imports no stylesheet — the kit's theme is the sheet",
-        f"{rel}: [#fff] names a raw value — resolve it through a theme token",
+        f"{rel}: bg-[#fff] names a raw value — resolve it through a theme token",
     ]
 
 
@@ -572,11 +572,30 @@ def test_portal_style_gate_refuses_a_raw_value_a_bracket_class_smuggles() -> Non
     finally:
         smuggled.unlink()
     assert failures == [
-        "extensions/web/frontend/src/views/smuggled.tsx: [20ch] names a raw value — "
+        "extensions/web/frontend/src/views/smuggled.tsx: max-w-[20ch] names a raw value — "
         "resolve it through a theme token",
-        "extensions/web/frontend/src/views/smuggled.tsx: [#fff] names a raw value — "
+        "extensions/web/frontend/src/views/smuggled.tsx: bg-[#fff] names a raw value — "
         "resolve it through a theme token",
     ]
+
+
+def test_portal_style_gate_reads_a_pages_own_data_as_data() -> None:
+    """An issue reference and a percentage are spelled exactly like a raw colour and a raw length,
+    and a page carries them as its content. A Tailwind arbitrary value is always a utility holding
+    one — `w-[3px]` — or an arbitrary property, which spells `[prop:value]`. A bare `[...]` is a
+    JavaScript array, and reading the whole file for brackets refused a page over its own data."""
+    source = gates.ROOT / gates.PORTAL_SOURCE
+    held = source / "views" / "held.tsx"
+    held.write_text(
+        'export const REFS = ["#2040", "#2051"];\n'
+        'export const SHARES = ["41.2%", "22.8%"];\n'
+        "export const first = REFS[0];\n"
+    )
+    try:
+        failures = gates._portal_style_failures()
+    finally:
+        held.unlink()
+    assert failures == []
 
 
 def test_portal_style_gate_refuses_the_long_spelling_of_a_class_that_has_a_short_one() -> None:

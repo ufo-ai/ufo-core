@@ -65,8 +65,10 @@ test("the built page names a hashed module and stylesheet under this surface", (
 /** The markdown chokepoint refuses a foreign image element, but a renderer can fetch without
  *  minting an element — mermaid's image shape prefetches `node.img` from any host during layout.
  *  The page's own policy is the boundary a library cannot go around: the browser refuses every
- *  image load off this origin, however it was asked for. */
-test("the page tells the browser images load only from this origin", () => {
+ *  image load off this origin, however it was asked for. The portal draws no face and no company
+ *  mark — an app page does, in its own document — so this one names no host at all, and a host
+ *  added here buys a picture nothing draws at the cost of that refusal. */
+test("the page tells the browser images load from this origin alone", () => {
   const meta = /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(builtPage());
   expect(meta?.[1]).toBe("img-src 'self' data:");
 });

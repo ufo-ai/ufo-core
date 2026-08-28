@@ -91,16 +91,24 @@
   font-display: swap;
 }
 
-/* The palette: three background steps, two text steps, two accents. `color-scheme` picks the pair
+/* The palette: three background steps, three text steps, two accents. `color-scheme` picks the pair
  * — the browser's preference, or the appearance control's class pinning one — so a scheme is these
- * seven declarations and nothing else, and no rule is written twice to answer a mode. Every colour
- * the portal paints is one of these steps or a composite of two; nothing else names a colour. */
+ * eight declarations and nothing else, and no rule is written twice to answer a mode. Every colour
+ * the portal paints is one of these steps or a composite of two; nothing else names a colour.
+ *
+ * The third text step is the one a member finds rather than reads: a stat's label, a chip's word, a
+ * caption under a graphic, a band's note. It sits a measured distance under the second — 3.03:1 on
+ * the light page against secondary's 5.38:1, 4.33:1 on the dark page against 7.38:1 — so a label
+ * recedes from the prose beside it by the same proportion in either scheme. The dark value is the
+ * light pair's own move read backwards: light steps 42 per channel from `#676767` towards the page,
+ * so dark steps 42 back from `#A7A9A9`, keeping the cast the dark steps carry. */
 :root {
   --bkgd-100: light-dark(#FAF9F7, #191A1A);
   --bkgd-200: light-dark(#F4F3F2, #262929);
   --bkgd-300: light-dark(#EBEAE9, #323535);
   --text-primary: light-dark(#191A1A, #F5F5F5);
   --text-secondary: light-dark(#676767, #A7A9A9);
+  --text-tertiary: light-dark(#919090, #7D7F7F);
   --accent-primary: #0095FF;
   --accent-secondary: #FF6700;
 }
@@ -147,8 +155,13 @@
   --color-surface: var(--bkgd-100);
   --color-ink: var(--text-primary);
   --color-ink-soft: var(--text-secondary);
-  /* The third and last text tone the comps draw: a placeholder, and an act the member cannot take
-     yet. Secondary held back over the pane, so it fades in both schemes without naming a colour. */
+  /* A word the member finds rather than reads, and never the sentence itself: the label over a
+     figure, the word in a chip, the caption under a graphic, the note on a band. Below `ink-soft`
+     so a tile is scanned for its number and the label around it stays out of the way. */
+  --color-ink-quiet: var(--text-tertiary);
+  /* The last text tone the comps draw: a placeholder, and an act the member cannot take yet.
+     Secondary held back over the pane, so it fades in both schemes without naming a colour — it
+     lands under `ink-quiet` (2.06:1 light, 2.84:1 dark) and carries no word the member must read. */
   --color-ink-faint: color-mix(in srgb, var(--text-secondary) 50%, var(--bkgd-100));
   --color-field: var(--bkgd-200);
   --color-field-ink: var(--text-primary);
@@ -179,6 +192,14 @@
      and status is all they paint — the accents keep marking links and asks. */
   --color-live: #16A34A;
   --color-blocked: #EAB308;
+
+  /* The tone a measure's own shape is drawn in: the curve over a trend, the columns under a count,
+     the lit cells of a meter. The first accent as the accent, not held towards a text step — a mark
+     is not a word, and a hold that clears 4.5:1 over the light pane lands too pale over the dark
+     one, where the raw accent already clears 3:1. It is stated here rather than taken from
+     `--color-live` because a series is a measure, not a state, and recharts reads it as a property
+     rather than as a class, so the name has to resolve to a value a browser can paint. */
+  --color-series: var(--accent-primary);
 
   --shadow-raised:
     0 8px 18px color-mix(in srgb, var(--text-primary) 10%, transparent),
@@ -265,7 +286,11 @@
   /* The tile an app's mark is drawn on. Rounder than a control and squarer than a pill: it reads as
      a thing the app owns rather than as a button. */
   --radius-avatar: 8px;
-  --radius-card: var(--radius);
+  /* One corner for every framed unit on a band — a tile, a record, a dialog, the sign-in panel.
+     Rounder than a control, so a card reads as a thing the band holds rather than as a big button,
+     and short of the menu's overlay corner, because a card is set into the page rather than
+     standing off it. Every ground drawn inside a card takes this same corner. */
+  --radius-card: 12px;
 
   --font-sans: "Inter", system-ui, sans-serif;
   --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -278,6 +303,9 @@
   --text-body: 15px;
   --text-subtitle: 16px;
   --text-title: 24px;
+  /* The figure a measure is read as: the one step above the scale's chrome, because a tile is
+     scanned for its number and every other word on it is there to qualify that number. */
+  --text-figure: 32px;
 
   /* The one tracking the type carries: half a percent, so a heading and a chip open by the same
      ratio at any size rather than each carrying its own hand-set figure. */
@@ -377,6 +405,11 @@
   --size-page-top: 56px;
   --size-record-gutter: 24px;
   --size-record: 40px;
+  /* One column of a run, and the track it stands in. A column is a hairline and a half so forty
+     of them read as a run rather than as a row of blocks; the track is the height the tallest
+     column fills, which is what lets a short one be read as a share without a scale beside it. */
+  --size-bar: 3px;
+  --size-plot: 51px;
   --size-fact-column: 152px;
   --size-prose-column: 160px;
   --size-act: 88px;

@@ -179,6 +179,9 @@ function ApplicationLifecycleBoundary({
   return children;
 }
 
+/** Mount an app page: connects to the portal over the bridge, waits for its `init`, and renders
+ * `render(init, agents)` into `root` inside the kit's providers. The one call a page's entry
+ * makes. */
 export function mountApp(
   root: HTMLElement,
   render: (init: AppInit, agents: Agent[]) => ReactNode,

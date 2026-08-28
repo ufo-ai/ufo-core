@@ -6,21 +6,41 @@
 
 import {
   AppConversations,
-  Avatar,
-  AvatarFallback,
+  AvatarStack,
+  Badge,
+  BrandMark,
+  Breakdown,
+  BreakdownHeader,
+  BreakdownLabel,
+  BreakdownMark,
+  BreakdownName,
+  BreakdownRow,
+  BreakdownRows,
+  BreakdownValue,
   Button,
+  DataTable,
+  Detail,
   Header,
   ObjectDetail,
   PanelEmpty,
   Section,
   SectionApp,
+  Separator,
+  Stat,
+  StatDelta,
+  StatDescription,
+  StatHeader,
+  StatLabel,
+  StatValue,
+  Td,
+  TdFact,
   compose,
   mountApp,
   objectAt,
   slotOf,
   usePageHead,
 } from "ufo/kit";
-import type { Placement, ReactNode } from "ufo/kit";
+import type { Placement } from "ufo/kit";
 
 const APP = "Issues";
 
@@ -34,7 +54,51 @@ const STANDING = "Last triage 08:12 · 6 triaged today · 3 approved to implemen
  *  issue itself by whoever opens it next, which is why it is a label and not a word in chat. */
 const IMPLEMENT_LABEL = "ufo:implement";
 
-type Person = { name: string; initials: string };
+const MEASURES_GRID = "grid grid-cols-4 gap-6xl max-narrow:grid-cols-1";
+
+type Person = { name: string; email: string };
+
+type Measure = {
+  label: string;
+  value: string;
+  move: string;
+  direction: "up" | "down";
+  rule: string;
+};
+
+/** What the app's own week came to, each figure beside the move it made. */
+const MEASURES: Measure[] = [
+  {
+    label: "Triaged",
+    value: "34",
+    move: "+18.5%",
+    direction: "up",
+    rule: "Issues the app read and answered on, a re-triage counted once.",
+  },
+  {
+    label: "Approved",
+    value: "12",
+    move: "+9.1%",
+    direction: "up",
+    rule: `Triaged issues carrying ${IMPLEMENT_LABEL} when the sweep ran.`,
+  },
+  {
+    label: "Median time to a plan",
+    value: "6m",
+    move: "-14.2%",
+    direction: "down",
+    rule: "From the issue opening to the plan landing on it.",
+  },
+];
+
+type Share = { provider: string; name: string; share: string };
+
+/** Which of the week's issues came in through each account the app reads. */
+const SOURCES: Share[] = [
+  { provider: "github", name: "GitHub", share: "62.4%" },
+  { provider: "sentry", name: "Sentry", share: "24.1%" },
+  { provider: "slack", name: "Slack", share: "13.5%" },
+];
 
 type Triaged = {
   ref: string;
@@ -52,7 +116,7 @@ const TRIAGED: Triaged[] = [
   {
     ref: "#2040",
     title: "SSO for enterprise plans",
-    owner: { name: "Rae Whitlock", initials: "RW" },
+    owner: { name: "Rae Whitlock", email: "rae@metalcraft.test" },
     kind: "Feature",
     asking: "Northstar cannot roll out without SAML; the ask is enterprise sign-in, not SSO itself.",
     plan: [
@@ -65,7 +129,7 @@ const TRIAGED: Triaged[] = [
   {
     ref: "#2042",
     title: "First run offers one button",
-    owner: { name: "Ines Okafor", initials: "IO" },
+    owner: { name: "Ines Okafor", email: "ines@metalcraft.test" },
     kind: "Feature",
     asking: "The first run asks four questions before it does anything useful.",
     plan: [
@@ -76,7 +140,7 @@ const TRIAGED: Triaged[] = [
   {
     ref: "#2051",
     title: "Sign-in loop on an expired session",
-    owner: { name: "Cleo Marsh", initials: "CM" },
+    owner: { name: "Cleo Marsh", email: "cleo@metalcraft.test" },
     kind: "Bug",
     asking: "An expired cookie redirects to sign-in, which redirects back, forever.",
     plan: [
@@ -99,29 +163,44 @@ const QUEUE: Queued[] = [
   {
     ref: "#2042",
     title: "First run offers one button",
-    owner: { name: "Ines Okafor", initials: "IO" },
+    owner: { name: "Ines Okafor", email: "ines@metalcraft.test" },
     state: "Pull request open",
     detail: "#2077 — one button, copy still to write",
   },
   {
     ref: "#2051",
     title: "Sign-in loop on an expired session",
-    owner: { name: "Cleo Marsh", initials: "CM" },
+    owner: { name: "Cleo Marsh", email: "cleo@metalcraft.test" },
     state: "Working",
     detail: "Started 08:12",
   },
   {
     ref: "#2033",
     title: "Portal reads stale app names after a rename",
-    owner: { name: "Rae Whitlock", initials: "RW" },
+    owner: { name: "Rae Whitlock", email: "rae@metalcraft.test" },
     state: "Approved",
     detail: "Waiting for the next sweep",
   },
 ];
 
+const WEEK_TITLE = "Triage this week";
+const WEEK_NOTE = "Counted from the issues the app read since Monday. A re-triage counts once.";
+const PERIOD = "vs last week";
+const SOURCES_LABEL = "Where issues arrive";
+const SOURCES_PERIOD = "This week";
+
 const TRIAGE_TITLE = "Triaged";
 const QUEUE_TITLE = "Approved to implement";
 const QUEUE_NOTE = `An issue carrying ${IMPLEMENT_LABEL} is picked up on the next sweep.`;
+const QUEUE_ASK = "What is holding up the approved issues?";
+const QUEUE_ACT = "Ask";
+const QUEUE_EMPTY = "Nothing is approved to implement.";
+const QUEUE_COLUMNS = [
+  "Issue",
+  "Owner",
+  { label: "State", fact: true },
+  "Detail",
+];
 const CONVERSATIONS = "Conversations";
 const NO_CONVERSATIONS = "Your chats with this app, and every run it makes on its own, land here.";
 
@@ -129,42 +208,25 @@ const ASKING = "Asking for";
 const PLAN = "Plan";
 const UNSETTLED = "Unsettled";
 
-function Who({ person }: { person: Person }) {
-  return (
-    <Avatar title={person.name} className="size-(--size-glyph)">
-      <AvatarFallback className="text-small">{person.initials}</AvatarFallback>
-    </Avatar>
-  );
-}
-
-function Line({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex gap-lg">
-      <span className="w-hint shrink-0 text-label text-ink-soft">{label}</span>
-      <div className="min-w-0 flex-1 text-label">{children}</div>
-    </div>
-  );
-}
-
 function TriagedIssue({ issue }: { issue: Triaged }) {
   return (
-    <article className="flex flex-col gap-lg border-t border-edge py-xl">
-      <header className="flex items-baseline gap-lg">
+    <article className="flex flex-col gap-sm border-t border-edge py-xl">
+      <header className="flex items-baseline gap-sm">
         <span className="font-mono text-label text-ink-soft">{issue.ref}</span>
         <h3 className="m-0 flex-1 text-body font-medium">{issue.title}</h3>
-        <span className="rounded-control bg-fill px-sm py-2xs text-small">{issue.kind}</span>
-        <Who person={issue.owner} />
+        <Badge>{issue.kind}</Badge>
+        <AvatarStack people={[issue.owner]} />
       </header>
-      <Line label={ASKING}>{issue.asking}</Line>
-      <Line label={PLAN}>
+      <Detail label={ASKING}>{issue.asking}</Detail>
+      <Detail label={PLAN}>
         <ul className="m-0 flex list-disc flex-col gap-2xs pl-xl">
           {issue.plan.map((step) => (
             <li key={step}>{step}</li>
           ))}
         </ul>
-      </Line>
-      {issue.unsettled ? <Line label={UNSETTLED}>{issue.unsettled}</Line> : null}
-      <div className="flex gap-xs">
+      </Detail>
+      {issue.unsettled ? <Detail label={UNSETTLED}>{issue.unsettled}</Detail> : null}
+      <div className="flex gap-sm">
         <Button
           variant="outline"
           size="bar"
@@ -202,24 +264,76 @@ function Home({
   return (
     <>
       {band}
-      <Section title={QUEUE_TITLE} note={QUEUE_NOTE}>
-        <table className="w-full border-collapse text-left">
-          <tbody>
-            {QUEUE.map((item) => (
-              <tr key={item.ref} className="border-t border-edge">
-                <td className="py-lg pr-lg align-top font-mono text-small text-ink-soft">
-                  {item.ref}
-                </td>
-                <td className="py-lg pr-lg align-top text-label">{item.title}</td>
-                <td className="py-lg pr-lg align-top">
-                  <Who person={item.owner} />
-                </td>
-                <td className="py-lg pr-lg align-top text-small">{item.state}</td>
-                <td className="py-lg align-top text-small text-ink-soft">{item.detail}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <Section title={WEEK_TITLE} note={WEEK_NOTE}>
+        <div className={MEASURES_GRID}>
+          {MEASURES.map((measure) => (
+            <Stat key={measure.label}>
+              <StatHeader>
+                <StatLabel>{measure.label}</StatLabel>
+                <Badge>{PERIOD}</Badge>
+              </StatHeader>
+              <StatValue>
+                {measure.value}
+                <StatDelta tone={measure.direction}>{measure.move}</StatDelta>
+              </StatValue>
+              <StatDescription>{measure.rule}</StatDescription>
+            </Stat>
+          ))}
+          <Breakdown>
+            <BreakdownHeader>
+              <BreakdownLabel>{SOURCES_LABEL}</BreakdownLabel>
+              <Badge>{SOURCES_PERIOD}</Badge>
+            </BreakdownHeader>
+            <BreakdownRows>
+              {SOURCES.map((source) => (
+                <BreakdownRow key={source.name}>
+                  <BreakdownName>
+                    <BreakdownMark>
+                      <BrandMark provider={source.provider} />
+                    </BreakdownMark>
+                    {source.name}
+                  </BreakdownName>
+                  <BreakdownValue>{source.share}</BreakdownValue>
+                </BreakdownRow>
+              ))}
+            </BreakdownRows>
+          </Breakdown>
+        </div>
+      </Section>
+      <Separator />
+      <Section
+        title={QUEUE_TITLE}
+        note={QUEUE_NOTE}
+        action={
+          <Button variant="outline" size="bar" onClick={() => compose(QUEUE_ASK)}>
+            {QUEUE_ACT}
+          </Button>
+        }
+      >
+        <DataTable
+          columns={QUEUE_COLUMNS}
+          rows={QUEUE}
+          rowKey={(item) => item.ref}
+          empty={QUEUE_EMPTY}
+          act={() => QUEUE_ACT}
+          open={(item) => () => compose(`What is the state of ${item.ref}?`)}
+        >
+          {(item) => (
+            <>
+              <Td className="text-ink">
+                <span className="flex min-w-0 items-center gap-sm">
+                  <span className="shrink-0 text-ink-soft">{item.ref}</span>
+                  <span className="min-w-0 truncate font-medium">{item.title}</span>
+                </span>
+              </Td>
+              <Td>
+                <AvatarStack people={[item.owner]} />
+              </Td>
+              <TdFact>{item.state}</TdFact>
+              <Td>{item.detail}</Td>
+            </>
+          )}
+        </DataTable>
       </Section>
       <Section title={TRIAGE_TITLE}>
         <div className="flex flex-col">

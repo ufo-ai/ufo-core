@@ -14,6 +14,7 @@ import {
   IconDots,
   IconFilter2,
   IconWorldWww,
+  IconX,
 } from "@tabler/icons-react";
 
 import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
@@ -40,7 +41,32 @@ import type { Crumb } from "@/lib/title";
 import type { Agent, Conversation, Member } from "@/lib/types";
 import type { PaneView } from "@/views/registry";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { AvatarStack } from "@/components/ui/avatar-stack";
+import type { AvatarStackPerson } from "@/components/ui/avatar-stack";
+import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Breakdown,
+  BreakdownHeader,
+  BreakdownLabel,
+  BreakdownMark,
+  BreakdownName,
+  BreakdownRow,
+  BreakdownRows,
+  BreakdownValue,
+} from "@/components/ui/breakdown";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Chart, ChartBars } from "@/components/ui/chart";
+import type { ChartBar } from "@/components/ui/chart";
+import { Detail } from "@/components/ui/detail";
 import { Dialog, DialogTrigger } from "@/components/ui/dialog";
 import {
   DropdownMenu,
@@ -54,10 +80,23 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Facts, Group } from "@/components/ui/facts";
+import { Legend, LegendItem } from "@/components/ui/legend";
+import { Meter } from "@/components/ui/meter";
+import type { MeterPart } from "@/components/ui/meter";
+import { Separator } from "@/components/ui/separator";
 import { Segmented } from "@/components/ui/filter";
 import { SurfaceGlyph } from "@/lib/surfaceMark";
 import { PressRow } from "@/components/ui/pressrow";
 import { Sheet } from "@/components/ui/sheet";
+import {
+  Stat,
+  StatDelta,
+  StatDescription,
+  StatHeader,
+  StatLabel,
+  StatMedia,
+  StatValue,
+} from "@/components/ui/stat";
 import { Lede, Td, TdFact } from "@/components/ui/table";
 import {
   ARTIFACT_TEXT_BYTES,
@@ -106,6 +145,7 @@ import { appended, beside, closed, opened } from "@/kernel/slots";
 import { DataTable } from "@/kernel/table";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
+import { BrandMark } from "@/lib/brandMark";
 import { getJson, postIntent } from "@/lib/api";
 import {
   IMESSAGE_SURFACE,
@@ -158,6 +198,9 @@ export type {
   Agent,
   ApplicationActionRecord,
   AppInit,
+  AvatarStackPerson,
+  ChartBar,
+  MeterPart,
   ChatRow,
   Conversation,
   Crumb,
@@ -200,6 +243,7 @@ export {
   IconDots,
   IconFilter2,
   IconWorldWww,
+  IconX,
   connect,
   founded,
   installShims,
@@ -210,8 +254,28 @@ export {
   useAppLinks,
   Avatar,
   AvatarFallback,
+  AvatarStack,
+  Badge,
+  Breakdown,
+  BreakdownHeader,
+  BreakdownLabel,
+  BreakdownMark,
+  BreakdownName,
+  BreakdownRow,
+  BreakdownRows,
+  BreakdownValue,
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+  Chart,
+  ChartBars,
   Button,
   buttonVariants,
+  Detail,
   Dialog,
   DialogTrigger,
   DropdownMenu,
@@ -225,9 +289,20 @@ export {
   DropdownMenuTrigger,
   Facts,
   Group,
+  Legend,
+  LegendItem,
+  Meter,
   Segmented,
+  Separator,
   PressRow,
   Sheet,
+  Stat,
+  StatDelta,
+  StatDescription,
+  StatHeader,
+  StatLabel,
+  StatMedia,
+  StatValue,
   Lede,
   Td,
   TdFact,
@@ -274,6 +349,7 @@ export {
   DataTable,
   AgentIcon,
   agentName,
+  BrandMark,
   getJson,
   postIntent,
   IMESSAGE_SURFACE,

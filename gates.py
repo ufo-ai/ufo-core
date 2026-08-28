@@ -47,13 +47,27 @@ APP_HOME_SKILL = "app-{slug}-home"
 APPS_CONFIG = PORTAL_SOURCE.parent / "vite.apps.config.ts"
 APPS_TYPECHECK = PORTAL_SOURCE.parent / "tsconfig.apps.json"
 APP_HOME_SKILL_FILE = "SKILL.md"
+KIT_CATALOGUE = Path("core/src/ufo/skills/ufo-style/references/kit.md")
+KIT_CATALOGUE_SCRIPT = Path("extensions/web/frontend/kit-catalogue.mjs")
+KIT_EXPORT = re.compile(r"^  ([A-Za-z][A-Za-z0-9]*),$", re.M)
+KIT_DESCRIBED = re.compile(r"^- \*\*`([A-Za-z][A-Za-z0-9]*)`\*\*", re.M)
+KIT_NAMED = re.compile(r"`([A-Za-z][A-Za-z0-9]*)`")
+KIT_NAMED_HEADING = "## Also published"
+COMPOSITION_STEPS = frozenset({"hair", "2xs", "sm", "2xl", "6xl", "8xl"})
+COMPOSITION_GAP = re.compile(r"(?<![\w-])gap-(?:x-|y-)?(\[[^\]]*\]|[\w.]+)")
+FRAMED_STAT = re.compile(r"<Stat[\s>][^>]*?(?<![\w-])(border)(?![\w-])", re.S)
 APP_REBUILD_LINE = "takes the platform kit as it stands today"
 APPS_LIST = re.compile(r"const APPS = \[(?P<apps>[^\]]*)\]")
 PORTAL_ENTRIES = frozenset({PORTAL_SOURCE / "main.tsx", PORTAL_SOURCE / "apps" / "kit.ts"})
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
 PORTAL_MODULE_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"})
 STYLESHEET_IMPORT = re.compile(r"""["'][^"']*\.css["']""")
-BRACKET_SEGMENT = re.compile(r"\[([^\][\n]*)\]")
+# A Tailwind arbitrary value is always a utility carrying one — `w-[3px]`, `text-[#fff]` — or an
+# arbitrary property, which spells `[prop:value]`. A bare `[...]` is JavaScript: an array of issue
+# references or percentages reads exactly like a raw colour or length, and refusing it would block a
+# page over its data.
+ARBITRARY_VALUE = re.compile(r"[a-z][\w-]*-\[([^\]\n]*)\]")
+ARBITRARY_PROPERTY = re.compile(r"\[([a-z-]+:[^\]\n]*)\]")
 PORTAL_CLASS_REFUSALS = (
     (re.compile(r"(?<![\w-])space-[xy]-"), "stack with flex and a gap"),
     (re.compile(r"(?<![\w-])dark:"), "color-scheme carries the scheme"),
@@ -115,7 +129,7 @@ PALETTE_RESTATEMENTS = (
 )
 HEX = r"#[0-9A-Fa-f]{6}"
 PALETTE_DECLARATION = re.compile(
-    rf"--((?:bkgd-[123]00)|(?:text|accent)-(?:primary|secondary)):\s*"
+    rf"--((?:bkgd-[123]00)|(?:text|accent)-(?:primary|secondary|tertiary)):\s*"
     rf"(?:light-dark\(({HEX}),\s*({HEX})\)|({HEX}));"
 )
 PALETTE_ROW = re.compile(rf"^\|\s*`--([\w-]+)`\s*\|\s*`({HEX})`\s*\|\s*(?:`({HEX})`\s*\|)?", re.M)
@@ -1610,7 +1624,8 @@ def _portal_style_failures() -> list[str]:
             failures.append(f"{rel}: only the entry module imports the theme")
         failures.extend(
             f"{rel}: {segment.group(0)} names a raw value — resolve it through a theme token"
-            for segment in BRACKET_SEGMENT.finditer(text)
+            for pattern in (ARBITRARY_VALUE, ARBITRARY_PROPERTY)
+            for segment in pattern.finditer(text)
             if RAW_CSS_VALUE.search(segment.group(1))
         )
         failures.extend(
@@ -1632,7 +1647,8 @@ def _portal_style_failures() -> list[str]:
             )
         failures.extend(
             f"{rel}: {segment.group(0)} names a raw value — resolve it through a theme token"
-            for segment in BRACKET_SEGMENT.finditer(text)
+            for pattern in (ARBITRARY_VALUE, ARBITRARY_PROPERTY)
+            for segment in pattern.finditer(text)
             if RAW_CSS_VALUE.search(segment.group(1))
         )
         failures.extend(
@@ -1766,6 +1782,78 @@ def _app_bundle_failures() -> list[str]:
     read = typecheck.read_text()
     typechecked = frozenset(slug for slug in built if f"app-{slug}-home/app.tsx" in read)
     return _app_slug_failures(shipped, homes, built, entries, typechecked)
+
+
+def _kit_catalogue_failures() -> list[str]:
+    """The catalogue is what an agent reads before it composes an app page — the one place the kit
+    describes itself. It is generated from `kit.ts`, and it is committed because the agent reads it
+    while it edits, long before anything is deployed. A generated file under version control goes
+    stale in silence, so this reads the kit's own export list against it: a component the kit
+    publishes and the catalogue never names is a component no page will be built out of.
+
+    It compares names and not bytes. The description of a component is the first sentence of its
+    docstring, which a reviewer may reword without regenerating anything; the surface is the thing
+    that must not drift."""
+    kit = ROOT / PORTAL_SOURCE / "apps" / "kit.ts"
+    catalogue = ROOT / KIT_CATALOGUE
+    if not kit.is_file() or not catalogue.is_file():
+        return [f"{KIT_CATALOGUE}: the kit or its catalogue is missing"]
+    if not (ROOT / KIT_CATALOGUE_SCRIPT).is_file():
+        return [f"{KIT_CATALOGUE_SCRIPT}: the catalogue's generator is missing"]
+    source = kit.read_text()
+    exported = set(KIT_EXPORT.findall(source[source.index("export {") :]))
+    page = catalogue.read_text()
+    if KIT_NAMED_HEADING not in page:
+        return [
+            f"{KIT_CATALOGUE}: no {KIT_NAMED_HEADING!r} section — the surface is not named whole"
+        ]
+    described = set(KIT_DESCRIBED.findall(page))
+    described |= set(KIT_NAMED.findall(page[page.index(KIT_NAMED_HEADING) :]))
+    # Both directions, because each is a different failure and only one of them announces itself.
+    # A name the catalogue carries that the kit no longer exports is a component an agent reaches
+    # for and fails to import — loud, at build time. A name the kit exports that the catalogue
+    # never mentions is the silent one: the component simply does not exist as far as the agent
+    # writing a page can tell, and no page is ever built out of it.
+    regenerate = f"regenerate with `node {KIT_CATALOGUE_SCRIPT.name}`"
+    return [
+        f"{KIT_CATALOGUE}: names {name}, which the kit does not export — {regenerate}"
+        for name in sorted(described - exported)
+    ] + [
+        f"{KIT_CATALOGUE}: never names {name}, which the kit exports — {regenerate}"
+        for name in sorted(exported - described)
+    ]
+
+
+def _framed_stat_failures() -> list[str]:
+    """A figure divides by the space around it. A tile is what a `Stat` already is, so a border
+    drawn on one is the second answer to a question the gap has answered — the same seam stated
+    twice, and the reason a screen of tiles reads as a grid of boxes rather than a row of figures.
+    The four ways to divide are one each: space, rule, fill, frame."""
+    return [
+        f"{path.relative_to(ROOT)}: a Stat carries a border — a figure divides by the space "
+        f"around it, and a tile is what a Stat already is"
+        for path in sorted(ROOT.glob(APP_PAGE_GLOB))
+        if FRAMED_STAT.search(path.read_text())
+    ]
+
+
+def _composition_rhythm_failures() -> list[str]:
+    """A page's vertical rhythm is six steps, each with one job, and a band that spaces its parts at
+    a seventh breaks the beat for every band under it. The ramp declares fourteen steps two pixels
+    apart, which is how one page came to carry six different gaps with no rule between them: too
+    many near-identical choices, each defensible alone. The rule is stated in the web guidelines;
+    this reads it off the app pages, where a page is composed rather than a control inset. A
+    control's own padding is left alone — `p-`, `px-`, `py-` are a component's inset, and the rule
+    governs the distance between two things a member reads, which is a gap."""
+    pages = sorted(ROOT.glob(APP_PAGE_GLOB))
+    if not pages:
+        return [f"{APP_PAGE_GLOB}: no app pages found — the gate lost its subjects"]
+    return [
+        f"{path.relative_to(ROOT)}: {found.group(0)!r} is not one of the six composition steps"
+        for path in pages
+        for found in COMPOSITION_GAP.finditer(path.read_text())
+        if found.group(1) not in COMPOSITION_STEPS
+    ]
 
 
 def _waiting_line_failures() -> list[str]:
@@ -1944,6 +2032,9 @@ def main() -> int:
     failures.extend(_migration_failures(trees))
     failures.extend(_registered_naming_failures())
     failures.extend(_portal_style_failures())
+    failures.extend(_composition_rhythm_failures())
+    failures.extend(_kit_catalogue_failures())
+    failures.extend(_framed_stat_failures())
     failures.extend(_waiting_line_failures())
     failures.extend(_app_bundle_failures())
     failures.extend(_app_rebuild_failures())

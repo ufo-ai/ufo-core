@@ -86,7 +86,10 @@ def test_the_built_page_is_the_apps_own_tsx() -> None:
     # to draw and a member nothing about what the app is for.
     for section in ("Next meetings", "Follow-ups", "Notes"):
         assert f'"{section}"' in source
-    for filled in ("Northstar renewal", "$48,000", "18 September", "#2040"):
+    # The brief a meeting gets — what last time settled, what work is open, what to raise — is what
+    # Prep fetches into the conversation, so a row states when, who and the act. The facts the page
+    # carries are the ones its rows draw: a meeting, a date, a commitment, a decision.
+    for filled in ("Northstar renewal", "$48,000", "1 Sept", "22 Aug"):
         assert filled in source
     assert "<AppConversations" in source
     # Setup is a portal screen, never a band here: the acts that wire an app — a workspace install

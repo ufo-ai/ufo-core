@@ -6843,6 +6843,10 @@ async def test_every_asset_the_portal_references_is_served_from_the_surface_itse
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     assert PORTAL_HTML is not None, f"portal app is not built — run `{PORTAL_BUILD}`"
     assert "<!doctype html>" in PORTAL_HTML
+    # The portal draws no face and no company mark, so its own policy names no host but this
+    # origin — the scan below then holds for the policy too, and a host added here without a
+    # picture to justify it fails this test rather than passing unnoticed.
+    assert "content=\"img-src 'self' data:\"" in PORTAL_HTML
     for scheme in ("http://", "https://", "//cdn"):
         assert scheme not in PORTAL_HTML
 

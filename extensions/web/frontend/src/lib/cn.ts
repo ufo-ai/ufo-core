@@ -14,11 +14,13 @@ const SPACING = [
   "4xl",
   "5xl",
   "6xl",
+  "7xl",
+  "8xl",
 ];
 
-const RADIUS = ["sm", "control", "panel", "bubble", "menu", "card"];
+const RADIUS = ["sm", "control", "row", "answer", "panel", "bubble", "menu", "avatar", "card"];
 
-const TEXT = ["mono", "small", "label", "ui", "body", "subtitle", "title"];
+const TEXT = ["fine", "mono", "small", "label", "ui", "body", "subtitle", "title", "figure"];
 
 const WEIGHT = ["strong"];
 
@@ -34,6 +36,10 @@ const merge = extendTailwindMerge({
  *  The type scale is worse than positional: a size and a colour are both spelled `text-…`, so an
  *  unrecognised `text-label` reads as a colour and is dropped by the `text-ink-soft` beside it. Every
  *  size stated next to a colour on one element was being discarded, silently and everywhere.
+ *
+ *  The lists are held against `theme.css` by a test, because a token added to the sheet without a
+ *  name added here is the same silent loss again — and the loss is invisible: the class compiles, the
+ *  sheet carries the rule, and only the element it was written for goes unstyled.
  *
  *  The weight scale carries one name of our own, and it loses the same way: `font-strong` beside a
  *  `font-normal` an override passes in reads as two unrelated classes, so both survive and the

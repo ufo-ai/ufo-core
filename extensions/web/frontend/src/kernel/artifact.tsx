@@ -29,6 +29,7 @@ const HTML_CSP =
 export const PICTURE_DID_NOT_LOAD =
   "The image did not load. Its link may have expired — reload the page.";
 
+/** Whether a media type is text the page can show as text — `text/*` and JSON. */
 export function isTextMedia(mediaType: string): boolean {
   return mediaType.startsWith("text/") || mediaType === "application/json";
 }
@@ -126,6 +127,8 @@ function FileDownload({ file }: { file: SharedFile }) {
   );
 }
 
+/** A shared file opened in a Sheet: its name, subject, type and size, a download act, and the
+ * file's body drawn by its media type. */
 export function FileSheet({
   file,
   onClose,

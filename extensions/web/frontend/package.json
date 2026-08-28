@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && tsc -p tsconfig.apps.json && vite build && vite build --config vite.apps.config.ts && vite build --config vite.sdk.config.ts",
+    "build": "tsc -b && tsc -p tsconfig.apps.json && vite build && vite build --config vite.apps.config.ts && vite build --config vite.sdk.config.ts && node kit-catalogue.mjs",
     "check": "tsc -b && tsc -p tsconfig.apps.json",
     "test": "vitest run"
   },
@@ -48,6 +48,7 @@
     "mermaid": "^11.16.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "recharts": "^3.10.1",
     "remark-breaks": "^4.0.0",
     "streamdown": "^2.5.0",
     "tailwind-merge": "^3.6.0",

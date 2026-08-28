@@ -3,6 +3,7 @@ import { createContext, useContext } from "react";
 /** The signed-in member's email — the address every `You` on a listing is judged against. */
 export const Viewer = createContext<string | null>(null);
 
+/** The signed-in member's email, from the provider mountApp installs. */
 export function useViewer(): string | null {
   return useContext(Viewer);
 }
@@ -21,6 +22,7 @@ export const SLACK_SURFACE = "slack";
 export const UFO_SURFACE = "ufo";
 export const IMESSAGE_SURFACE = "imessage";
 
+/** Whether a conversation's surface is the portal — the web surface or an extension's. */
 export function isPortalChat(surface: string): boolean {
   return surface === WEB_SURFACE || surface.startsWith("extension:");
 }

@@ -798,7 +798,8 @@ function Row({
         if (!beside(event)) return;
         alongside?.onClick?.(event);
       }}
-      className={cn(control?.className, open && "hover:bg-fill", current && "bg-fill")}
+      variant={current ? "muted" : undefined}
+      className={cn(control?.className, open && "hover:bg-fill")}
     >
       <span className={MARK_TILE}>
         <BrandMark provider={name} className="text-ink" />

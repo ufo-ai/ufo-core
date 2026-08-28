@@ -804,7 +804,7 @@ test("a section stacks heading, action bar, then records, and the bar runs from 
   expect(bar.previousElementSibling).toBe(heading.closest("div")?.parentElement);
 });
 
-test("a section's action stands on the heading line, over the bar and the records", () => {
+test("a section's action stands at the band's far edge, over the bar and the records", () => {
   render(
     <Section title="Members" action={<a href="https://example.test">Elsewhere</a>} bar={<button type="button">Add member</button>}>
       roster
@@ -812,8 +812,16 @@ test("a section's action stands on the heading line, over the bar and the record
   );
   const heading = screen.getByRole("heading", { name: "Members" });
   const out = screen.getByRole("link", { name: "Elsewhere" });
-  expect(heading.nextElementSibling).toBe(out);
-  expect(out.parentElement).toBe(heading.parentElement);
+  const band = heading.parentElement!.parentElement!;
+  // The act is the band's last child and the heading's column is what yields, so a column of bands
+  // puts every act on one right edge whether or not the band above it carried a note.
+  expect(band.lastElementChild).toBe(out.parentElement);
+  expect(out.parentElement!.className).toContain("shrink-0");
+  expect(heading.parentElement!.className).toContain("flex-1");
+  expect(band.previousElementSibling).toBeNull();
+  expect(screen.getByRole("button", { name: "Add member" }).closest("section")).toBe(
+    band.closest("section"),
+  );
 });
 
 test("a section's note stands under its heading, not under the bar", () => {
@@ -824,8 +832,8 @@ test("a section's note stands under its heading, not under the bar", () => {
   );
   const heading = screen.getByRole("heading", { name: "Credentials" });
   const note = screen.getByText("A slot is filled in chat.");
-  expect(heading.parentElement?.nextElementSibling).toBe(note);
-  expect(note.parentElement).toBe(heading.parentElement?.parentElement);
+  expect(heading.nextElementSibling).toBe(note);
+  expect(note.parentElement).toBe(heading.parentElement);
 });
 
 test("a table stands on the section's own ground, ruled only between its records", () => {

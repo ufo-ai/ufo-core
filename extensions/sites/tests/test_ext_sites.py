@@ -4834,6 +4834,72 @@ def test_application_source_rejects_literal_white_on_scheme_ink() -> None:
     _validate_application_source(source.replace('"#FFFFFF"', '"var(--color-surface)"'))
 
 
+def _page(body: str) -> str:
+    return (
+        'import { mountApp } from "ufo/kit";\n'
+        f"function App() {{ return {body}; }}\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "refusal"),
+    [
+        ('<p className="w-[3px]">x</p>', "names a raw value"),
+        ('<p className="text-[#676767]">x</p>', "names a raw value"),
+        ('<p className="[color:#676767]">x</p>', "names a raw value"),
+        ('<p className="flex gap-lg">x</p>', "is not a composition step"),
+        ('<p className="flex gap-px">x</p>', "is not a composition step"),
+        ('<p className="flex gap-0">x</p>', "is not a composition step"),
+        ('<p className="flex gap-4">x</p>', "is not a composition step"),
+        ('<p className="flex gap-[10px]">x</p>', "names a raw value"),
+        ('<Stat className="border border-edge">x</Stat>', "a Stat carries a border"),
+        ('<div className="space-y-2">x</div>', "stack with flex and a gap"),
+        ('<p className="dark:text-ink">x</p>', "carries itself"),
+        ("<style>{`p{color:red}`}</style>", "may not emit a <style> tag"),
+        ("<p className={`flex ${wide}`}>x</p>", "compose classes with cn()"),
+    ],
+)
+def test_application_source_holds_a_generated_page_to_the_shipped_page_rules(
+    body: str, refusal: str
+) -> None:
+    """A shipped app page is walked by `gates.py` in the repo; a generated one exists only in a
+    member's sandbox, so this validator is the one place the same rules can be true of it. Each
+    refusal is worded as the repair, because the builder's own repair loop is what reads it."""
+    with pytest.raises(ValueError, match=re.escape(refusal)):
+        _validate_application_source(_page(body))
+
+
+def test_application_source_accepts_a_page_that_follows_the_rules() -> None:
+    _validate_application_source(
+        _page('<p className="flex gap-2xl rounded-card bg-fill text-label text-ink-quiet">x</p>')
+    )
+    # The rule is the tile's own frame, not the word: a part of the stat may be bordered, and a
+    # Stat that spaces itself is what the rule asks for.
+    _validate_application_source(
+        _page('<Stat className="flex gap-sm"><StatValue>1</StatValue></Stat>')
+    )
+    _validate_application_source(_page('<StatLabel className="border-b border-edge">x</StatLabel>'))
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        'const REFS = ["#2040", "#2051"];',
+        'const SHARES = ["41.2%", "22.8%"];',
+        'const ROWS = [{ ref: "#12", pct: "80%" }];',
+        "const first = items[0];",
+    ],
+)
+def test_application_source_reads_a_members_own_data_as_data(data: str) -> None:
+    """An issue reference and a percentage are spelled exactly like a raw colour and a raw length,
+    and a page carries them as its content. The refusal is about a Tailwind arbitrary value, which
+    is always a utility holding one or an arbitrary property — never a bare `[...]`, which is a
+    JavaScript array. Reading the whole file for brackets refuses a page over its own data, and
+    tells the builder's repair loop to resolve an issue number through a theme token."""
+    _validate_application_source(_page("<p>x</p>").replace("function App", data + "\nfunction App"))
+
+
 async def test_application_builder_write_tool_rejects_the_old_runtime_global(
     tmp_path: Path,
 ) -> None:

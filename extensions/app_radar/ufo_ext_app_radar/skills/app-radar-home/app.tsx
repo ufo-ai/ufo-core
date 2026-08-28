@@ -310,7 +310,7 @@ function Feed({
               ))}
             </ol>
             {payload.next_cursor || after ? (
-              <div className="flex gap-xs">
+              <div className="flex gap-sm">
                 {payload.next_cursor ? (
                   <button
                     className={cn(buttonVariants({ variant: "row" }))}
@@ -359,7 +359,7 @@ function ReadNext({ pinned }: { pinned: string }) {
     .slice(0, READ_NEXT);
   if (!rest.length) return null;
   return (
-    <section className="mt-6xl flex flex-col gap-md">
+    <section className="mt-6xl flex flex-col gap-2xl">
       <h2 className="m-0 text-subtitle font-medium">More reports</h2>
       <div className="flex flex-col">
         {rest.map((run) => {
@@ -431,7 +431,7 @@ function Entry({
    *  report it left would read as though the run had delivered. */
   const summary = run.status === DONE ? (run.entry?.summary ?? null) : run.text || null;
   return (
-    <li className="group/entry flex gap-lg">
+    <li className="group/entry flex gap-2xl">
       <div className="flex flex-col items-center gap-sm">
         <Avatar>
           <AvatarFallback>
@@ -465,7 +465,7 @@ function Entry({
         </p>
         <a
           href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })}
-          className="flex items-start gap-xl text-inherit no-underline"
+          className="flex items-start gap-2xl text-inherit no-underline"
         >
           <div className="flex min-w-0 flex-1 flex-col gap-sm">
             <h3 className="m-0 line-clamp-2 text-subtitle font-medium text-ink group-hover/entry:underline">
@@ -572,7 +572,7 @@ function Story({
           ) : null}
         </p>
       ) : null}
-      <p className="m-0 flex flex-wrap gap-x-lg font-mono text-mono text-ink-soft">
+      <p className="m-0 flex flex-wrap gap-x-sm font-mono text-mono text-ink-soft">
         <a href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })} className={out}>
           <Moment at={run.fired_at} />
         </a>
@@ -595,7 +595,7 @@ function Story({
         ) : null}
       </p>
       {files.length ? (
-        <ul className="m-0 flex list-none flex-wrap gap-lg p-0">
+        <ul className="m-0 flex list-none flex-wrap gap-2xl p-0">
           {files.map((artifact) => (
             <li key={artifact.filename}>
               <Shared artifact={artifact} />

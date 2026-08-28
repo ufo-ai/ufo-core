@@ -147,6 +147,8 @@ export function PanelSkeleton({ shape }: { shape: PanelShape }) {
   );
 }
 
+/** Draws a read by its phase: a skeleton while loading, the refusal when failed, the empty
+ * sentence when the payload holds nothing, and `children(payload)` once it is ready. */
 export function Panel<T>({
   state,
   shape = "table",
@@ -182,6 +184,7 @@ export function Empty({ className, children }: { className?: string; children: R
   );
 }
 
+/** The empty sentence at a section's own height: what a section holding no records says. */
 export function PanelEmpty({ children }: { children: ReactNode }) {
   return <Empty className="my-7xl mx-auto block">{children}</Empty>;
 }
@@ -248,9 +251,11 @@ export function Notice({
  *  by pressing a tab has been named by that tab, and a second heading repeating the word under it
  *  states there are two things where there is one.
  *
- *  `action` is one act on what the heading names, drawn beside it rather than under it: a fact about
- *  the whole section belongs on the heading line, where `bar` is for the controls that narrow the
- *  records under it. */
+ *  `action` is one act on what the heading names, held at the band's far edge and centred against
+ *  the heading and its note together — so a column of bands puts every act on one right edge the eye
+ *  runs down, whether or not the band above carried a note. It is one act, where `bar` is for the
+ *  controls that narrow the records under it. The heading takes the width the act leaves and the act
+ *  never shrinks, so a long heading is what gives way. */
 export function Section({
   title,
   note,
@@ -267,14 +272,12 @@ export function Section({
   return (
     <section className="flex w-full flex-col gap-6xl">
       {title || note ? (
-        <div className="flex flex-col gap-2xs">
-          {title ? (
-            <div className="flex items-baseline gap-md">
-              <h2 className="m-0 text-subtitle font-medium">{title}</h2>
-              {action}
-            </div>
-          ) : null}
-          {note ? <p className="m-0 text-label text-ink-soft">{note}</p> : null}
+        <div className="flex w-full items-center gap-2xl">
+          <div className="flex min-w-0 flex-1 flex-col gap-2xs">
+            {title ? <h2 className="m-0 text-subtitle font-medium">{title}</h2> : null}
+            {note ? <p className="m-0 max-w-hint text-label text-ink-quiet">{note}</p> : null}
+          </div>
+          {action ? <div className="flex shrink-0 items-center gap-sm">{action}</div> : null}
         </div>
       ) : null}
       {bar ? <div className="flex items-stretch gap-sm">{bar}</div> : null}

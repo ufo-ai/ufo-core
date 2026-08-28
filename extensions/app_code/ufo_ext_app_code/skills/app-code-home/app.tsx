@@ -7,8 +7,7 @@
 
 import {
   AppConversations,
-  Avatar,
-  AvatarFallback,
+  AvatarStack,
   Header,
   ObjectDetail,
   PanelEmpty,
@@ -28,7 +27,7 @@ const PURPOSE =
 
 const STANDING = "Last review 08:21 · 4 open · 2 reviewed at head · 3 findings standing";
 
-type Person = { name: string; initials: string };
+type Person = { name: string; email: string };
 
 /** The impacts a finding may carry, exactly as the review procedure lists them. A reviewer that
  *  cannot name one of these does not report the defect at all. */
@@ -57,7 +56,7 @@ const REVIEWS: Review[] = [
   {
     ref: "#2077",
     title: "First run offers one button",
-    author: { name: "Ines Okafor", initials: "IO" },
+    author: { name: "Ines Okafor", email: "ines@metalcraft.test" },
     head: "a41c9e2",
     state: "Reviewed",
     findings: [
@@ -78,7 +77,7 @@ const REVIEWS: Review[] = [
   {
     ref: "#2071",
     title: "Clear the stale session cookie on refusal",
-    author: { name: "Cleo Marsh", initials: "CM" },
+    author: { name: "Cleo Marsh", email: "cleo@metalcraft.test" },
     head: "7be0d13",
     state: "Reviewed",
     findings: [
@@ -93,7 +92,7 @@ const REVIEWS: Review[] = [
   {
     ref: "#2069",
     title: "Speed app switching",
-    author: { name: "Rae Whitlock", initials: "RW" },
+    author: { name: "Rae Whitlock", email: "rae@metalcraft.test" },
     head: "1d55af0",
     state: "Reviewing",
     findings: [],
@@ -101,7 +100,7 @@ const REVIEWS: Review[] = [
   {
     ref: "#2064",
     title: "Add the sandbox tool bridge",
-    author: { name: "Rae Whitlock", initials: "RW" },
+    author: { name: "Rae Whitlock", email: "rae@metalcraft.test" },
     head: "c0a7742",
     state: "Reviewed",
     findings: [],
@@ -112,24 +111,16 @@ const QUEUE = "Review queue";
 const CONVERSATIONS = "Conversations";
 const NO_CONVERSATIONS = "Your chats with this app, and every run it makes on its own, land here.";
 
-function Who({ person }: { person: Person }) {
-  return (
-    <Avatar title={person.name} className="size-(--size-glyph)">
-      <AvatarFallback className="text-small">{person.initials}</AvatarFallback>
-    </Avatar>
-  );
-}
-
 function Pull({ review }: { review: Review }) {
   return (
-    <article className="flex flex-col gap-lg border-t border-edge py-xl">
-      <header className="flex items-baseline gap-lg">
+    <article className="flex flex-col gap-sm border-t border-edge py-xl">
+      <header className="flex items-baseline gap-sm">
         <span className="font-mono text-label text-ink-soft">{review.ref}</span>
         <h3 className="m-0 flex-1 text-body font-medium">{review.title}</h3>
         <span className="font-mono text-small text-ink-soft">{review.head}</span>
-        <Who person={review.author} />
+        <AvatarStack people={[review.author]} />
       </header>
-      <div className="flex items-baseline gap-lg">
+      <div className="flex items-baseline gap-sm">
         <span className="w-hint shrink-0 text-label text-ink-soft">{review.state}</span>
         <span className="text-small text-ink-soft">
           {review.findings.length === 0
@@ -139,7 +130,7 @@ function Pull({ review }: { review: Review }) {
       </div>
       {review.findings.map((finding) => (
         <div key={finding.where} className="flex flex-col gap-2xs border-l border-edge pl-lg">
-          <span className="flex items-baseline gap-xs">
+          <span className="flex items-baseline gap-2xs">
             <span className="rounded-control bg-fill px-sm py-2xs text-small">
               {finding.impact}
             </span>

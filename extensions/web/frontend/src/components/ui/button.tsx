@@ -3,6 +3,8 @@ import { useState, type ComponentProps } from "react";
 
 import { cn } from "@/lib/cn";
 
+/** The button's class recipe by `variant` and `size`, for an element that must read as a Button
+ * and cannot be one — a download link, a label. */
 export const buttonVariants = cva(
   cn(
     "inline-flex items-center justify-center gap-xs",

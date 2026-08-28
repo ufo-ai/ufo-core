@@ -374,7 +374,7 @@ function Article({
   return (
     <div className="flex flex-col gap-6xl">
       {header}
-      <div className="flex gap-7xl">
+      <div className="flex gap-6xl">
         <div className={cn("min-w-0 max-w-section flex-1", BANDS)}>
           {children}
         </div>
@@ -448,7 +448,7 @@ function Acts({
 }) {
   const [rebuilding, setRebuilding] = useState(false);
   return (
-    <div className="flex items-center gap-md">
+    <div className="flex items-center gap-sm">
       {updated === null ? null : (
         <span className="text-label leading-chrome text-ink-soft">
           Updated <Moment at={updated} />
@@ -940,7 +940,7 @@ function Band({
   }, [open, children]);
 
   const heading = (
-    <span className="flex w-full items-center gap-md text-body font-medium tracking-ui">
+    <span className="flex w-full items-center gap-2xs text-body font-medium tracking-ui">
       <span className="flex-1 text-start">{title}</span>
       {folded ? (
         open ? (

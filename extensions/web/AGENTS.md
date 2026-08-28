@@ -76,8 +76,11 @@ while iterating:
 
 ```bash
 uv run pytest extensions/web/tests/test_ext_web.py -k "sqlite and <name>"   # ~9s
-pnpm -C "$FRONTEND" test -- tests/chat.test.tsx                             # ~2s
+pnpm -C "$FRONTEND" test tests/chat.test.tsx                                # ~1s
 ```
+
+Pass the path bare. A `--` before it is swallowed by pnpm rather than handed to vitest, which then
+matches nothing and runs all 60 files — 1116 tests, 25s — while looking like it filtered.
 
 The whole of `test_ext_web.py` is ~45s; save it for the finished change. Five of its tests read
 `ufo_ext_web/static/index.html` and fail with the build command named when the frontend has never
@@ -89,6 +92,63 @@ Read the `ufoctl serve` log before rebuilding anything. Model calls, site buildi
 and another worker sharing the workspace dominate request time — a rebuild changes none of them.
 If startup fails, check the provider credential, ports `8710` and `5173`, and whether the pack's
 entry points are current.
+
+## Layout: the grid, the rhythm, and the four ways to divide
+
+A screen is composed out of six spacing steps and four kinds of division, and each has one job. A
+band that picks a fifth step or a second kind of edge for the same job is what makes two screens
+read as two products. The measures are the theme's; the rule is which one a job takes.
+
+### The rhythm — six steps, each with one job
+
+The ramp declares fourteen steps two pixels apart. Composition uses **six**; the rest exist for a
+control's own inset and never for the distance between two things a member reads.
+
+| Step | px | The one job |
+|---|---|---|
+| `hair` | 2 | a rule's weight, a column's gap in a dense run |
+| `2xs` | 4 | inside a word: a mark from its label, a delta from its figure, faces in a stack |
+| `sm` | 8 | between the parts of one thing: a title from its note, rows of a reference list |
+| `2xl` | 16 | between things in one group: cells on a band, cards in a grid, a header from its body |
+| `6xl` | 32 | between groups: one band from the next, one column from the next |
+| `8xl` | 64 | between a page's regions: the head from the first band |
+
+`BANDS` in `src/kernel/pane.tsx` is `gap-6xl` and `Section` stacks its parts at `gap-6xl`, so a
+page's vertical rhythm is 32 between bands and 16 within them, and a component that spaces itself
+at any other step breaks the beat for every band under it. A component owns the gaps *inside* it;
+the band owns the gap *around* it; nothing carries a margin.
+
+### The grid
+
+One measure, `--container-section` (728px), centred by `COLUMN`. A band divides it into equal
+columns at `gap-6xl` — two, three or four, never mixed on one band — and every column below the
+narrow breakpoint stacks (`max-narrow:grid-cols-1`). A cell never states its own width: the grid
+gives it one, so a tile is as wide as the tile beside it whatever each holds. A band whose cells
+need unequal widths is two bands.
+
+### The four ways to divide, and when
+
+| Division | Draws | Use it for | Never for |
+|---|---|---|---|
+| **Space** | nothing | parts of one thing, things in one group | — this is the default; reach for an edge only when space is not enough |
+| **Rule** (`Separator`, a row's `border-t`) | one hairline in `--color-edge` | the boundary between two **groups** that share a column, and between **records** in a list | around a single thing; under a heading; between cells on a band |
+| **Fill** (`bg-fill`) | a `bkgd-200` ground, no edge | a **plot** and a **chip**: something a member reads *into* rather than *across* — a chart's pane, a badge, a field | grouping rows; a card that also has a border |
+| **Frame** (`Card`) | edge **and** ground, `rounded-card` | a **self-contained unit a member acts on**: a record with its own title, prose and act; a tile in a grid of tiles | wrapping a whole band; a single stat; nesting inside another frame's padding |
+
+Two of these on one band means the band has not decided what it is. Copilot's widgets are all
+frames because every widget is a unit a member taps; a band of measures is **all** frames or **no**
+frames — `Stat` tiles beside a `Card` beside a filled `Chart` panel is three answers to one
+question.
+
+### Marks and figures
+
+A provider or a member is a **circle**, one size, everywhere it appears; several are a **stack** that
+overlaps by `2xs`. A figure is the largest type on its tile (`text-figure`) and its delta is a step
+below the chrome (`text-small`) with a direction glyph beside the sign, so direction reaches a
+reader who cannot see the colour. A graphic with more than one colour carries a `Legend`.
+
+What reads it: the six-step and four-division rules are `gates.py`'s (a composition gap outside the
+six, or a `border` on a `Stat`, is a text-level failure); the grid and the mark rules are a reviewer's.
 
 ## Rules the surface holds to
 

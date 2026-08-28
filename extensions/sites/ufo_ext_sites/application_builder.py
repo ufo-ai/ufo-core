@@ -459,6 +459,30 @@ SIDE_EFFECT_IMPORT = re.compile(r"(?m)^[ \t]*import\s*['\"]")
 ROOT_MOUNT = re.compile(
     r"\bmountApp\s*\(\s*document\.getElementById\(\s*['\"]root['\"]\s*\)\s*!?\s*,"
 )
+# The rules a shipped app page is held to by `gates.py`, restated for the one page nothing else
+# reads. A shipped page is walked in the repo; a generated page exists only in a member's sandbox,
+# so this validator is where the same rules have to be true or they are true of half the product.
+# The refusals are worded as the repair the builder should make, because its repair loop reads them.
+# A Tailwind arbitrary value is always a utility carrying one — `w-[3px]`, `text-[#fff]` — or an
+# arbitrary property, which spells `[prop:value]`. A bare `[...]` is JavaScript: an array of issue
+# references or percentages reads exactly like a raw colour or length, and refusing it would block a
+# page over its data.
+ARBITRARY_VALUE = re.compile(r"[a-z][\w-]*-\[([^\]\n]*)\]")
+ARBITRARY_PROPERTY = re.compile(r"\[([a-z-]+:[^\]\n]*)\]")
+RAW_CSS_VALUE = re.compile(
+    r"#[0-9a-fA-F]|\d+(?:\.\d+)?(?:px|rem|em|ch|ex|vh|vw|vmin|vmax|%)(?![\w-])"
+)
+COMPOSITION_STEPS = ("hair", "2xs", "sm", "2xl", "6xl", "8xl")
+COMPOSITION_GAP = re.compile(r"(?<![\w-])gap-(?:x-|y-)?(\[[^\]]*\]|[\w.]+)")
+FRAMED_STAT = re.compile(r"<Stat[\s>][^>]*?(?<![\w-])border(?![\w-])", re.S)
+PAGE_CLASS_REFUSALS = (
+    (re.compile(r"(?<![\w-])space-[xy]-"), "stack with flex and a gap"),
+    (re.compile(r"(?<![\w-])dark:"), "the colour scheme carries itself; write no dark variant"),
+    (re.compile(r"overflow-hidden text-ellipsis whitespace-nowrap"), "truncate says this"),
+    (re.compile(r"className=\{`"), "compose classes with cn()"),
+)
+STYLE_TAG = re.compile(r"<style[\s/>]")
+
 LITERAL_WHITE_ON_SCHEME_INK = re.compile(
     r"\bstyle\s*=\s*\{\{"
     r"(?=(?:(?!\}\}).)*\bbackground(?:Color)?\s*:(?:(?!\}\}).)*var\(--color-ink\))"
@@ -757,6 +781,30 @@ def _validate_application_source(source: str) -> None:
         raise ValueError(
             "a --color-ink background must use --color-surface text in both colour schemes"
         )
+    if STYLE_TAG.search(source):
+        raise ValueError("app.tsx may not emit a <style> tag — the kit's theme is the sheet")
+    for pattern, repair in PAGE_CLASS_REFUSALS:
+        found = pattern.search(source)
+        if found:
+            raise ValueError(f"app.tsx: {found.group(0)!r} — {repair}")
+    for pattern in (ARBITRARY_VALUE, ARBITRARY_PROPERTY):
+        for segment in pattern.finditer(source):
+            if RAW_CSS_VALUE.search(segment.group(1)):
+                raise ValueError(
+                    f"app.tsx: {segment.group(0)} names a raw value — "
+                    "resolve it through a theme token"
+                )
+    if FRAMED_STAT.search(source):
+        raise ValueError(
+            "app.tsx: a Stat carries a border — a figure divides by the space around it, and a "
+            "tile is what a Stat already is"
+        )
+    for gap in COMPOSITION_GAP.finditer(source):
+        if gap.group(1) not in COMPOSITION_STEPS:
+            raise ValueError(
+                f"app.tsx: {gap.group(0)!r} is not a composition step — a page spaces its parts "
+                f"with {', '.join('gap-' + step for step in COMPOSITION_STEPS)} and nothing else"
+            )
 
 
 def _validate_application_design(source: str) -> tuple[str, ...]:

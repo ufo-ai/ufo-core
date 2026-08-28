@@ -412,7 +412,7 @@ function Artifacts({
                   />
                 )}
                 {payload.files.next_cursor || after ? (
-                  <div className="flex gap-xs">
+                  <div className="flex gap-sm">
                     {payload.files.next_cursor ? (
                       <button
                         className={cn(buttonVariants({ variant: "row" }))}
@@ -578,8 +578,8 @@ function ArtifactDetails({ entry }: { entry: Artifact }) {
         {meta ? meta + " · " : null}
         <Moment at={entry.shared_at} />
       </div>
-      <div className="flex flex-wrap items-center gap-lg">
-        <span className="flex flex-wrap gap-x-lg font-mono text-small text-ink-soft">
+      <div className="flex flex-wrap items-center gap-sm">
+        <span className="flex flex-wrap gap-x-sm font-mono text-small text-ink-soft">
           <a href={chatHash(entry.conversation)} className={out}>
             Conversation
           </a>

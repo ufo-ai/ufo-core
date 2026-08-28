@@ -22,9 +22,19 @@ change them. Write the complete `source_path` once with `write_application_sourc
 candidate with the product Vite project before it accepts `app.tsx` and refreshes `dist`.
 
 Import components, hooks, and runtime only from `ufo/kit`; do not import other packages, copy portal
-components, replace the scaffold, or add a second style system. Prefer the kit components when they
-express the requested application. Compose the rest with standard HTML. Never call
-`mountApp(App)`; use `mountApp(document.getElementById("root")!, () => <App />)`. The loaded theme
+components, replace the scaffold, or add a second style system. `read` `$UFO_HOME/skills/ufo-style/references/kit.md`
+before you compose anything: it names every component the kit publishes and what each one is. Reach for one of
+them before building a shape out of `div`s — a measure is a `Stat`, a state is a `Badge`, a unit a
+member acts on is a `Card`, a named share is a `Breakdown`, a series is a `Chart`, and a graphic
+drawn in more than one colour carries a `Legend`. Compose the rest with standard HTML.
+
+Space the page with `gap-hair`, `gap-2xs`, `gap-sm`, `gap-2xl`, `gap-6xl` and `gap-8xl` and no other
+step: 2xs inside a word, sm between the parts of one thing, 2xl between things in one group, 6xl
+between groups. Divide with space first; a rule between groups that share a column, a fill for a
+plot or a chip, and a frame — a `Card` — for a unit a member acts on. Every cell on a band is a
+frame or none is.
+
+Never call `mountApp(App)`; use `mountApp(document.getElementById("root")!, () => <App />)`. The loaded theme
 provides `--accent-primary`, `--color-fill-ink`, `--color-surface`, `--color-ink`,
 `--color-ink-soft`, `--color-field`, `--color-edge`, `--color-link`, `--color-attention`,
 `--color-attention-ink`, `--font-sans`, and `--font-mono`. Filled primary controls pair an

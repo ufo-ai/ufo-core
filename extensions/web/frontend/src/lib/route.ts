@@ -610,13 +610,21 @@ export function bootRoute(hash: string, search: string): Route {
   return route;
 }
 
-/** The builders, each one its row's own `write`: the address a screen hands the browser is written
- *  by the row whose pattern reads it back. */
+/* The builders, each one its row's own `write`: the address a screen hands the browser is written
+   by the row whose pattern reads it back. */
+/** The address of the workspace home at a place. */
 export const homeHash = HOME.write;
+/** The address of one conversation, optionally at a slot. */
 export const chatHash = CHAT.write;
+/** The address of one slot in a conversation. */
 export const conversationSlotHash = CONVERSATION_SLOT.write;
+/** The address of a fresh chat with an agent. */
 export const newChatHash = NEW_CHAT.write;
+/** The address of an agent's screen at a place. */
 export const agentHash = AGENT.write;
+/** The address of an agent's setup screen. */
 export const agentSetupHash = AGENT_SETUP.write;
+/** The address of a workspace tab, optionally at a place. */
 export const workspaceHash = WORKSPACE.write;
+/** The address of a section, optionally at a place. */
 export const sectionHash = SECTION.write;
