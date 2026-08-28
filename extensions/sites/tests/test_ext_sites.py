@@ -92,6 +92,7 @@ from ufo_ext_sites.application_builder import (
     application_design_acceptance_relative,
     build_ufo_application,
     edit_application_source,
+    homepage_design_block,
     limit_application_builder_repair_reads,
     read_application_source,
     render_application_preview,
@@ -2031,6 +2032,14 @@ async def test_application_preview_is_one_fixed_product_render(
     rendered = ApplicationPreviewResult.model_validate_json(result.content[0].text)
     assert rendered.shared_filename == APPLICATION_PREVIEW_FILENAME
     assert len(rendered.design_digest) == 64
+    assert rendered.homepage_design == (
+        "## Homepage design\n"
+        "Purpose: Review support requests before assignment.\n"
+        "First screen: Overdue queue\n"
+        "Regions in order: Overdue, Unassigned, Recent activity\n"
+        "Layout: queue-detail\n"
+        "Direction: Compact and factual."
+    )
     assert sandbox.writes == {}
     assert [(filename, subject) for filename, _, subject in shared] == [
         (APPLICATION_PREVIEW_FILENAME, "Application preview")
@@ -2072,6 +2081,22 @@ async def test_application_preview_does_not_block_the_event_loop(
     assert await asyncio.to_thread(started.wait, 1)
     release.set()
     await task
+
+
+def test_the_design_block_names_the_house_style_the_preview_draws() -> None:
+    """A member who named no direction gets `House style` drawn on the picture, so the block the
+    application carries has to say the same thing the member was shown."""
+    block = homepage_design_block(
+        RenderApplicationPreviewInput(
+            purpose="Review support requests.",
+            first_screen_priority="Overdue queue",
+            regions=("Overdue", "Unassigned"),
+            layout="queue-detail",
+        )
+    )
+
+    assert block.endswith("\nDirection: House style")
+    assert block.startswith("## Homepage design\n")
 
 
 def test_application_preview_contract_has_bounded_regions() -> None:

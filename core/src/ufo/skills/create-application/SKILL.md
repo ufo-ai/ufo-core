@@ -109,8 +109,9 @@ inspect the PNG, or share it again. After the renderer returns, end with `ask_us
 
 On `Change the design`, replace the whole contract and call the renderer once. Put the member's
 revision in the exact contract field it changes. One page and at most two previews are the whole
-design pass. Put every field from the accepted contract in the application prompt under
-`Homepage design`. The application builds and binds its live homepage on its first homepage turn.
+design pass. The renderer returns the accepted design as a `homepage_design` block: copy that block
+into the application prompt exactly as returned, rather than writing the fields out yourself. The
+application builds and binds its live homepage on its first homepage turn.
 
 ## Create it
 

@@ -88,6 +88,7 @@ APPLICATION_PREVIEW_MARGIN = 32
 APPLICATION_PREVIEW_RADIUS = 4
 APPLICATION_PREVIEW_HEADER_HEIGHT = 72
 APPLICATION_PREVIEW_REGION_GAP = 16
+APPLICATION_PREVIEW_DEFAULT_DIRECTION = "House style"
 APPLICATION_BUILDER_PROMPT = (
     Path(__file__).parent / "prompts" / "subagent_ufo_application_builder.md"
 ).read_text()
@@ -408,10 +409,13 @@ class RenderApplicationPreviewInput(BaseModel):
 
 
 class ApplicationPreviewResult(BaseModel):
-    """The image and contract digest returned to the creation conversation."""
+    """The image, the contract digest, and the accepted design as the block the application prompt
+    carries — composed here so the conversation copies one string instead of retyping five fields
+    the worker then has to recognise."""
 
     shared_filename: Literal["application-preview.png"] = APPLICATION_PREVIEW_FILENAME
     design_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    homepage_design: str = Field(min_length=1)
 
 
 class ApplicationBuilderResult(BaseModel):
@@ -1309,7 +1313,7 @@ def _application_preview(args: RenderApplicationPreviewInput) -> bytes:
         args.regions, _preview_boxes(args.layout, len(args.regions)), strict=True
     ):
         _preview_card(draw, box, region, f"{region} content and controls appear here.")
-    direction = args.design_direction.strip() or "House style"
+    direction = args.design_direction.strip() or APPLICATION_PREVIEW_DEFAULT_DIRECTION
     draw.text(
         (32, 770),
         _preview_text(direction, 110, 1),
@@ -1327,6 +1331,22 @@ class _PillowApplicationPreview:
         return _application_preview(args)
 
 
+def homepage_design_block(contract: RenderApplicationPreviewInput) -> str:
+    """The accepted design as the exact lines the application prompt carries, so the worker reads
+    the regions, order, and layout the member was shown rather than a recomposition of them."""
+    direction = contract.design_direction.strip() or APPLICATION_PREVIEW_DEFAULT_DIRECTION
+    return "\n".join(
+        (
+            "## Homepage design",
+            f"Purpose: {contract.purpose}",
+            f"First screen: {contract.first_screen_priority}",
+            f"Regions in order: {', '.join(contract.regions)}",
+            f"Layout: {contract.layout}",
+            f"Direction: {direction}",
+        )
+    )
+
+
 async def render_application_preview(
     ctx: ToolContext, args: RenderApplicationPreviewInput
 ) -> ToolResult:
@@ -1337,7 +1357,9 @@ async def render_application_preview(
     digest = sha256(
         json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    result = ApplicationPreviewResult(design_digest=digest)
+    result = ApplicationPreviewResult(
+        design_digest=digest, homepage_design=homepage_design_block(args)
+    )
     return ToolResult(content=(TextContent(text=result.model_dump_json()),))
 
 

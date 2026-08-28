@@ -33,6 +33,8 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_SOURCE_PATH,
     ApplicationBuilderResult,
     ApplicationBuilderTask,
+    RenderApplicationPreviewInput,
+    homepage_design_block,
 )
 from ufo_ext_sites.store import hosted_site
 from ufo_ext_web.surface import SEED_PROMPT
@@ -366,42 +368,32 @@ def _design_pass_failure(
     return None
 
 
+def _accepted_contract(output: CapabilityOutput) -> RenderApplicationPreviewInput | None:
+    """The design the member accepted: the last one the run rendered before it created the
+    application. A render after the create asked the member nothing and settled nothing, so the
+    prompt and the page the worker builds both answer to the one that stood before the choice."""
+    applies = _agent_applies(output)
+    create = applies[0][0] if applies else len(output.calls)
+    rendered = tuple(
+        call
+        for index, call in enumerate(output.calls)
+        if index < create and call.name == PREVIEW_TOOL and call.succeeded
+    )
+    return RenderApplicationPreviewInput.model_validate(rendered[-1].input) if rendered else None
+
+
 def _accepted_contract_failure(output: CapabilityOutput, prompt: str) -> str | None:
-    previews = tuple(call for call in output.calls if call.name == PREVIEW_TOOL and call.succeeded)
-    if not previews:
+    """Whether the design block the renderer returned reaches the application prompt. The renderer
+    composes the block from the accepted contract and the skill places it, so this grader recomposes
+    nothing: it renders the same block from the same contract and reads it back out of the durable
+    prompt. Only the run of whitespace between words is free, because a block copied into a YAML
+    scalar is free to wrap where the line ends."""
+    contract = _accepted_contract(output)
+    if contract is None:
         return "the application has no accepted preview contract"
-    contract = previews[-1].input
-    regions = contract.get("regions", [])
-    values = [
-        contract.get("purpose", ""),
-        contract.get("first_screen_priority", ""),
-        contract.get("design_direction", ""),
-        *(regions if isinstance(regions, list) else []),
-    ]
-    lowered = " ".join(prompt.casefold().split())
-    prompt_terms = " ".join(
-        term for term in re.findall(r"[a-z0-9]+", lowered) if term not in CONTRACT_CONNECTIVE_WORDS
-    )
-    missing = tuple(
-        str(value)
-        for value in values
-        if str(value).strip()
-        and " ".join(
-            term
-            for term in re.findall(r"[a-z0-9]+", str(value).casefold())
-            if term not in CONTRACT_CONNECTIVE_WORDS
-        )
-        not in prompt_terms
-    )
-    layout = " ".join(
-        term
-        for term in re.findall(r"[a-z0-9]+", str(contract.get("layout", "")).casefold())
-        if term not in CONTRACT_CONNECTIVE_WORDS
-    )
-    if layout and layout not in prompt_terms:
-        missing = (*missing, layout)
-    if missing:
-        return f"the application prompt omits accepted design values: {', '.join(missing)}"
+    block = " ".join(homepage_design_block(contract).split())
+    if block not in " ".join(prompt.split()):
+        return f"the application prompt omits the accepted design block: {block}"
     return None
 
 
@@ -730,13 +722,10 @@ async def _homepage_journey_failure(outcome: ScenarioOutcome) -> str | None:
     task = ApplicationBuilderTask.model_validate_json(children[0].inbound)
     if application.prompt not in task.objective:
         return "the Gemini task omitted the created application's instructions"
-    previews = tuple(
-        call for call in outcome.output.calls if call.name == PREVIEW_TOOL and call.succeeded
-    )
-    regions = previews[-1].input.get("regions") if previews else None
-    if not isinstance(regions, list) or not regions:
-        return "the accepted design contract named no regions"
-    return _built_design_failure(followup.calls, tuple(str(region) for region in regions))
+    contract = _accepted_contract(outcome.output)
+    if contract is None:
+        return "the application has no accepted preview contract"
+    return _built_design_failure(followup.calls, contract.regions)
 
 
 async def _named_design_failure(outcome: ScenarioOutcome) -> str | None:
@@ -784,6 +773,28 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
         True,
         f"the skill loaded and {len(previews)} design(s) stood before the create",
     )
+
+
+async def _graded_carries_the_design(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    """The accepted design reaching the application, and nothing else: the renderer composed a
+    block, and the durable prompt carries it.
+
+    The worker implements the `Homepage design` it reads in the application's own instructions, so
+    a design that is accepted and then not carried is a page the member never chose. Whether it
+    was carried is a fact about the contract and the row — no judge and no rubric decide it. The
+    creating graders above measure the whole product, so a miss anywhere in a reply takes their
+    sample down; that says nothing about whether the accepted design survived the create."""
+    applies = _agent_applies(outcome.output)
+    if not applies:
+        return CapabilityVerdict(False, "no successful object_apply carried an agent manifest")
+    name = applies[0][1]
+    row = await _application(name)
+    if row is None:
+        return CapabilityVerdict(False, f"applied {name!r} but no such application stands")
+    failure = _accepted_contract_failure(outcome.output, row.prompt)
+    if failure is not None:
+        return CapabilityVerdict(False, failure)
+    return CapabilityVerdict(True, f"{name} carries the design block the member accepted")
 
 
 async def _graded_support_desk(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -1282,5 +1293,20 @@ SCENARIOS = (
         ),
         seed=_seeded(),
         digest_tag="new-application:guided-shows-the-design",
+    ),
+    ScenarioCase(
+        "A13-carries-the-design",
+        ScenarioUser(
+            reason_for_call="You want a private application that reads the invoices in your shared "
+            "inbox and files the totals.",
+            known_info="Only you use it.",
+            task_instructions=SATISFIED_INSTRUCTION,
+        ),
+        DescribedGrader(
+            "the design block the member accepted reaches the created application's instructions",
+            _graded_carries_the_design,
+        ),
+        seed=_seeded(),
+        digest_tag="new-application:carries-the-design",
     ),
 )

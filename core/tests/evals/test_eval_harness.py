@@ -37,6 +37,8 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DESIGN_TOOL,
     APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_WRITE_TOOL,
+    RenderApplicationPreviewInput,
+    homepage_design_block,
 )
 
 import evals.harness.capability as harness_capability
@@ -689,62 +691,71 @@ def test_the_built_design_must_carry_the_regions_the_member_accepted() -> None:
     )
 
 
-def test_the_accepted_preview_contract_must_reach_the_application_prompt() -> None:
-    preview = ToolInvocation(
-        "render_application_preview",
-        {
-            "purpose": "Review support requests.",
-            "first_screen_priority": "Overdue queue",
-            "regions": ["Overdue", "Unassigned", "Recent activity"],
-            "layout": "queue-detail",
-            "design_direction": "House style",
-        },
-        has_result=True,
-    )
+def test_the_accepted_design_block_must_reach_the_application_prompt() -> None:
+    """The renderer returns the block and the skill copies it, so the prompt either carries those
+    words or does not. A paraphrase is the failure this grades: the worker implements the
+    `Homepage design` it reads, and a reworded one is a page the member never accepted."""
+    contract = {
+        "purpose": "Review support requests.",
+        "first_screen_priority": "Overdue queue",
+        "regions": ["Overdue", "Unassigned", "Recent activity"],
+        "layout": "queue-detail",
+        "design_direction": "House style",
+    }
+    preview = ToolInvocation("render_application_preview", contract, has_result=True)
     output = CapabilityOutput("", (preview,))
-    prompt = (
-        "Homepage design: Review support requests. Put Overdue queue first. "
-        "Regions: Overdue, Unassigned, Recent\nactivity. Layout: queue-detail. House style."
-    )
+    block = homepage_design_block(RenderApplicationPreviewInput.model_validate(contract))
+    prompt = f"You answer support requests for the team.\n\n{block}\n\nAsk before replying.\n"
 
     assert _accepted_contract_failure(output, prompt) is None
-    paraphrased = prompt.replace(
-        "Review support requests.",
-        "Review the member's support requests.",
+    # A block copied into a YAML scalar is free to wrap where the line ends, and nothing about the
+    # design changes when it does.
+    assert (
+        _accepted_contract_failure(
+            output, prompt.replace("Regions in order: Overdue,", "Regions in order:\n  Overdue,")
+        )
+        is None
     )
-    assert _accepted_contract_failure(output, paraphrased) is None
-    priority_paraphrase = prompt.replace("Overdue queue", "The overdue queue for your review")
-    assert _accepted_contract_failure(output, priority_paraphrase) is None
-    natural_layout = prompt.replace("queue-detail", "a queue with detail beside it")
-    assert _accepted_contract_failure(output, natural_layout) is None
-    assert "Overdue queue" in str(
+    assert "omits the accepted design block" in str(
         _accepted_contract_failure(output, prompt.replace("Overdue queue", "Summary"))
     )
-    assert "Review support requests" in str(
-        _accepted_contract_failure(output, prompt.replace("support requests", "invoices"))
+    assert "omits the accepted design block" in str(
+        _accepted_contract_failure(output, prompt.replace("Review support requests", "Read mail"))
+    )
+    assert "omits the accepted design block" in str(
+        _accepted_contract_failure(output, prompt.replace("Layout: queue-detail", "queue-detail"))
+    )
+    assert "no accepted preview contract" in str(
+        _accepted_contract_failure(CapabilityOutput("", ()), prompt)
     )
 
-    shipping = ToolInvocation(
-        "render_application_preview",
-        {
-            "purpose": (
-                "Show what shipped across every repository this week, and let each merged pull "
-                "request be read in full."
-            ),
-            "first_screen_priority": "This week's shipping summary in plain language",
-            "regions": ["This week's summary", "Merged pull requests"],
-            "layout": "summary-detail",
-            "design_direction": "House style",
-        },
+    # The revision is the accepted design: the block the last preview composed is the one graded.
+    revised = {**contract, "first_screen_priority": "Paid this month"}
+    revised_render = ToolInvocation("render_application_preview", revised, has_result=True)
+    revised_block = homepage_design_block(RenderApplicationPreviewInput.model_validate(revised))
+    both = CapabilityOutput("", (preview, revised_render))
+    assert "omits the accepted design block" in str(
+        _accepted_contract_failure(both, f"You answer support requests.\n\n{block}\n")
+    )
+    assert (
+        _accepted_contract_failure(both, f"You answer support requests.\n\n{revised_block}\n")
+        is None
+    )
+
+    # A render after the create asked the member nothing. The prompt answers to the design that
+    # stood before the choice, so the later one cannot take a run down.
+    apply = ToolInvocation(
+        "object_apply",
+        {"manifest": "kind: agent\nname: helper\nspec:\n  prompt: p\n"},
         has_result=True,
     )
-    shipping_prompt = (
-        "Build a homepage that helps the member see what shipped across every repository this "
-        "week and read each merged pull request in full. Lead with this week's shipping summary "
-        "in plain language. Use summary and detail. Regions: This week's summary, Merged pull "
-        "requests. Use the house style."
+    assert (
+        _accepted_contract_failure(CapabilityOutput("", (preview, apply, revised_render)), prompt)
+        is None
     )
-    assert _accepted_contract_failure(CapabilityOutput("", (shipping,)), shipping_prompt) is None
+    assert "no accepted preview contract" in str(
+        _accepted_contract_failure(CapabilityOutput("", (apply, revised_render)), prompt)
+    )
 
 
 def test_internal_turn_messages_start_at_the_last_matching_inbound() -> None:
