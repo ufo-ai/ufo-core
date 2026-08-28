@@ -73,6 +73,7 @@ from ufo.o11y import (
     turn_span,
 )
 from ufo.object_name import ObjectRef
+from ufo.objects import BoundAction
 from ufo.sandbox.cache import cache_git_config
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.exec_env import (
@@ -125,7 +126,7 @@ from ufo.skills.selection import (
 )
 from ufo.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
 from ufo.tools.context import Spawn, UnknownSubagentProfile
-from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.tools.registry import OBJECT_ACTION_TOOL, ToolDef, ToolRegistry
 from ufo.turns.activity import (
     ACTIVITY_JOB,
     SKILL_LOAD_TOOL,
@@ -236,6 +237,74 @@ async def _shadow_skill_selection(
         )
 
 
+IMPLIED_GRANTS: dict[str, tuple[str, ...]] = {SKILL_LOAD_TOOL: (SKILL_SEARCH_TOOL,)}
+"""Allowlist names that imply companions: naming the key grants what rides beside it — a skill
+loader without its search would be directed at names it cannot reach. A companion is a wire tool
+name or a canonical action id; every selector intersects the widened set against the live
+registry it selects from, so an implied name nothing registers is inert."""
+
+
+def with_implied_grants(names: set[str]) -> set[str]:
+    for name in tuple(names):
+        names.update(IMPLIED_GRANTS.get(name, ()))
+    return names
+
+
+def _agent_actions(
+    actions: Mapping[str, Mapping[str, BoundAction]],
+    allowed: tuple[str, ...] | None,
+    admission: TurnAdmissionSource,
+    speaker_member_id: UUID | None = None,
+) -> frozenset[str]:
+    """The canonical action ids this turn's agent holds — `_agent_tools`' mirror over the action
+    registry, under the same rules: no allowlist (or a speaking prepared intent) grants every
+    non-`profile_only` action, an allowlist grants exactly the canonical ids it names, and a name
+    no active extension answers is simply absent. Naming the dispatcher itself is refused where
+    allowlists are written, never here."""
+    declared = tuple(bound.action for held in actions.values() for bound in held.values())
+    if allowed is None or (admission == INTENT_ADMISSION and speaker_member_id is not None):
+        return frozenset(action.canonical_id for action in declared if not action.profile_only)
+    names = with_implied_grants(set(allowed))
+    return frozenset(action.canonical_id for action in declared if action.canonical_id in names)
+
+
+def _subagent_actions(
+    actions: Mapping[str, Mapping[str, BoundAction]],
+    profile: SubagentProfile,
+    grants: frozenset[str],
+) -> frozenset[str]:
+    """`_subagent_tools`' mirror over the action registry: the profile's own names plus (unless
+    isolated) cross-extension grants select canonical ids, and a `subagent_default` action rides
+    along exactly as a `subagent_default` tool does."""
+    allowed = set(profile.tool_names)
+    if not profile.isolated_tools:
+        allowed.update(grants)
+    allowed = with_implied_grants(allowed)
+    return frozenset(
+        action.canonical_id
+        for held in actions.values()
+        for bound in held.values()
+        if (action := bound.action).canonical_id in allowed
+        or (action.subagent_default and not profile.isolated_tools)
+    )
+
+
+def _with_action_dispatcher(
+    selected: tuple[ToolDef, ...],
+    all_tools: tuple[ToolDef, ...],
+    granted_actions: frozenset[str],
+) -> tuple[ToolDef, ...]:
+    """Hold the `object_action` schema to its grant rule: the dispatcher rides the wire exactly
+    when the turn holds at least one canonical action id — an allowlist never names it, so
+    selection alone would withhold it from every allowlisted agent and hand it to every
+    unallowlisted one with nothing to dispatch."""
+    without = tuple(tool for tool in selected if tool.name != OBJECT_ACTION_TOOL)
+    if not granted_actions:
+        return without
+    dispatcher = tuple(tool for tool in all_tools if tool.name == OBJECT_ACTION_TOOL)
+    return (*without, *dispatcher)
+
+
 def _agent_tools(
     all_tools: tuple[ToolDef, ...],
     allowed: tuple[str, ...] | None,
@@ -249,10 +318,8 @@ def _agent_tools(
     primitive — a repository checkout bound to an admitted comparison is not a tool the workspace's
     general agent may reach. An allowlist *is* the naming: a specialist that declares the checkout
     holds it, and holds nothing else. So the primitive is reachable exactly where a declaration
-    says so, and the agent that never mentions it can neither hold it nor ask for it. The one
-    structural pair rides along: an allowlist naming `load_skill` also resolves `skill_search`,
-    exactly as a subagent profile's does — a loader without its search would be directed at names
-    it cannot reach.
+    says so, and the agent that never mentions it can neither hold it nor ask for it. The
+    structural pairs in `IMPLIED_GRANTS` ride along, exactly as a subagent profile's do.
 
     An allowlist governs what a model may call, so it does not reach a speaking prepared intent,
     which takes no model round: the panel's verb dispatches verbatim under the submitting member's
@@ -261,9 +328,7 @@ def _agent_tools(
     `bash`."""
     if allowed is None or (admission == INTENT_ADMISSION and speaker_member_id is not None):
         return tuple(tool for tool in all_tools if not tool.profile_only)
-    names = set(allowed)
-    if SKILL_LOAD_TOOL in names:
-        names.add(SKILL_SEARCH_TOOL)
+    names = with_implied_grants(set(allowed))
     return tuple(tool for tool in all_tools if tool.name in names)
 
 
@@ -291,8 +356,7 @@ def _subagent_tools(
     allowed = set(profile.tool_names)
     if not profile.isolated_tools:
         allowed.update(grants)
-    if SKILL_LOAD_TOOL in allowed:
-        allowed.add(SKILL_SEARCH_TOOL)
+    allowed = with_implied_grants(allowed)
     selected = tuple(
         tool
         for tool in all_tools
@@ -551,7 +615,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             return authorized.spawn, authorized
 
         with span("extensions.load"):
-            all_tools, tool_ext = turn_tools(
+            all_tools, tool_ext, verbs = turn_tools(
                 runtime.manifests,
                 runtime.credentials,
                 runtime.index,
@@ -604,12 +668,22 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         connector_read_only = False
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
+            granted_actions = _agent_actions(
+                verbs.actions,
+                agent.tools,
+                turn.admission_source,
+                turn.speaker_member_id,
+            )
             tools = ToolRegistry(
-                _agent_tools(
+                _with_action_dispatcher(
+                    _agent_tools(
+                        all_tools,
+                        agent.tools,
+                        turn.admission_source,
+                        turn.speaker_member_id,
+                    ),
                     all_tools,
-                    agent.tools,
-                    turn.admission_source,
-                    turn.speaker_member_id,
+                    granted_actions,
                 )
             ).with_catalog()
             waiting = await setup_skill(turn.agent_id, agent.is_main, turn.speaker_member_id)
@@ -644,11 +718,18 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 model=runtime.registry.resolve(profile.model or agent.model),
                 reasoning=profile.reasoning or agent.reasoning,
             )
+            granted_actions = _subagent_actions(
+                verbs.actions, profile, runtime.subagent_grants.get(profile.name, frozenset())
+            )
             tools = ToolRegistry(
-                _subagent_tools(
+                _with_action_dispatcher(
+                    _subagent_tools(
+                        all_tools,
+                        profile,
+                        runtime.subagent_grants.get(profile.name, frozenset()),
+                    ),
                     all_tools,
-                    profile,
-                    runtime.subagent_grants.get(profile.name, frozenset()),
+                    granted_actions,
                 )
             ).with_catalog()
             system_prompt = rendered_prompt(resolved.prompt)
@@ -818,6 +899,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 and not turn.spawned
                 and turn.admission_source != INTENT_ADMISSION
             ),
+            verbs=verbs,
+            granted_actions=granted_actions,
         )
         run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
         frame = await run()

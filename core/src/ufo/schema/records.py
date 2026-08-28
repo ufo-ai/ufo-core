@@ -209,6 +209,7 @@ class ToolIntent(BaseModel):
         "restore_application",
         "object_apply",
         "object_delete",
+        "object_action",
         "connect_account",
         "grant_web_access",
         "revoke_web_access",
@@ -372,6 +373,22 @@ class ConnectRequest(BaseModel):
 
 
 TERMINAL_ERROR_MESSAGE_MAX_CHARS = 2_000
+
+FinalActRule = Literal["last_call", "pending"]
+LAST_CALL_ACT: FinalActRule = "last_call"
+PENDING_ACT: FinalActRule = "pending"
+
+FINAL_ACT_FIELDS: dict[type[BaseModel], tuple[str, FinalActRule]] = {
+    AskUserInput: ("question", LAST_CALL_ACT),
+    CredentialRequest: ("credential_request", PENDING_ACT),
+    ConnectRequest: ("connect_request", PENDING_ACT),
+}
+"""Every final act a turn can leave open: the payload model a callable declares as
+`final_act_model`, the `TerminalFrame` field that carries it, and the rule that reads it from the
+round. A question is stale unless it was the round's last call; a credential or connect handoff is
+owed from anywhere in the round and persists until the turn ends, because only the member
+discharges it. A declared `final_act_model` outside this mapping fails boot — the frame has no
+field to carry it."""
 
 
 class TerminalFrame(BaseModel):

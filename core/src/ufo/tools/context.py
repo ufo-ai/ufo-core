@@ -18,10 +18,16 @@ hook — the browser tools build one per-turn surface from them on first use and
 on `cleanup`, the per-turn registry the loop drains at turn end so a CDP connection never outlives
 its turn. `search_provider` is the deploy's selected web-search backend (None when no research
 extension is active) — the research tools call it host-side, so the provider reads its key in the
-serve process and the sandbox never sees it. `idempotency_key` is `{turn}/{name}/{call_id}`, folded
+serve process and the sandbox never sees it. `idempotency_key` is `{turn}/{call}/{call_id}` where
+`call` is the semantic identity — a tool's name, or a bound action's canonical
+`action:<kind>:<name>` — folded
 on only for a `side_effecting` tool: its dedup key against a cross-attempt resume — an external
 write's header, a spawned child's identity — so the effect applies at most once; a read tool gets
-`None`. `meter_images` and `meter_videos` book what a paid image or video generation cost onto this
+`None`. `target` is the resolved `ObjectActionTarget` a dispatched object action acts on, folded on
+exactly as the idempotency key is; a global call carries `None`. `granted_actions` is the set of
+canonical action ids this turn's agent or profile holds — what the object verbs filter discovery
+views by.
+`meter_images` and `meter_videos` book what a paid image or video generation cost onto this
 turn's ledger: metering is core's, so a provider extension prices its own call and writes it through
 here. `store_preview` takes a picture a tool rendered inside the sandbox into the artifact
 namespace, which core alone names; `render_site_preview` instead gives the preview service a
@@ -53,6 +59,7 @@ from ufo.media.site_previewer import SitePreviewer
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.spec import ModelSpec
 from ufo.o11y import log
+from ufo.object_scope import ObjectActionTarget
 from ufo.sandbox.session import Sandbox, shell_path
 from ufo.schema import tables
 from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn
@@ -273,6 +280,8 @@ class ToolContext:
     subagents: SubagentControl | None = None
     read_paths: set[str] = field(default_factory=set)
     idempotency_key: str | None = None
+    target: ObjectActionTarget | None = None
+    granted_actions: frozenset[str] = frozenset()
     skills: SkillRegistry = CORE_SKILL_REGISTRY
     loaded_skills: LoadedSkills = field(default_factory=LoadedSkills)
     ext: ExtensionContext | None = None

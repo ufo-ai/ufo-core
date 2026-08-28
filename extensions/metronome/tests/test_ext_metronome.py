@@ -1003,7 +1003,7 @@ def _billing_tool(
     public_base_url: str | None = None,
     home_surface: str | None = HOME_SURFACE,
 ) -> tuple[ToolDef, ExtensionContext]:
-    declared, ext_by_tool = turn_tools(
+    declared, ext_by_tool, _ = turn_tools(
         (metronome.manifest(),),
         CredentialStore(fernet=Fernet(Fernet.generate_key())),
         audience=audience,

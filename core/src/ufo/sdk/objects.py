@@ -20,6 +20,9 @@ from ufo.object_name import (
     ObjectRef as ObjectRef,
 )
 from ufo.object_scope import (
+    ObjectActionTarget as ObjectActionTarget,
+)
+from ufo.object_scope import (
     object_agent_id as object_agent_id,
 )
 from ufo.objects import (

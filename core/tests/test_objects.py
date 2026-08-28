@@ -223,7 +223,7 @@ def _tool_context(
 def _object_tools() -> dict[str, ToolDef]:
     manifest = next((m for m in load_manifests() if m.name == sample.NAME), None)
     assert manifest is not None, "sample extension not discovered via entry points — run `uv sync`"
-    tools, ext_by_tool = turn_tools(
+    tools, ext_by_tool, _ = turn_tools(
         (manifest,),
         CredentialStore(fernet=Fernet(Fernet.generate_key())),
         audience=conversation_audience(None),
@@ -338,7 +338,7 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
         explained = json.loads(await _text(tools, "object_explain", ctx, kind=sample.WIDGET_KIND))
         assert "color" in explained["spec_schema"]["properties"]
         assert explained["guidance"] == sample.WIDGET_GUIDANCE
-        assert explained["agent_target_verbs"] == []
+        assert explained["agent_target_verbs"] == ["get"]
 
         deleted = json.loads(
             await _text(tools, "object_delete", ctx, kind=sample.WIDGET_KIND, name="anvil")

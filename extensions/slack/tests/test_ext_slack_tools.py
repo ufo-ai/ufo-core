@@ -141,7 +141,7 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
 def _registry(
     store: CredentialStore,
 ) -> tuple[dict[str, object], dict[str, ExtensionContext]]:
-    declared_tools, ext_by_tool = turn_tools(
+    declared_tools, ext_by_tool, _ = turn_tools(
         (slack_manifest(),), store, audience=conversation_audience(None)
     )
     return {tool.name: tool for tool in declared_tools}, ext_by_tool

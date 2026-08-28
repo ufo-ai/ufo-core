@@ -1218,6 +1218,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=AskUserCall,
         handler=ask_user_handler,
+        final_act_model=AskUserInput,
     ),
     ToolDef(
         name="load_skill",
@@ -1256,6 +1257,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=ConnectAccountInput,
         handler=connect_account_handler,
+        final_act_model=ConnectRequest,
     ),
     ToolDef(
         name="request_credentials",
@@ -1269,6 +1271,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=RequestCredentialsInput,
         handler=request_credentials_handler,
+        final_act_model=CredentialRequest,
     ),
     ToolDef(
         name="cancel_spawn",
@@ -1293,3 +1296,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         parallel_safe=True,
     ),
 )
+
+BUILTIN_ACTIONS: tuple[ToolDef, ...] = ()
+"""Core's own bound actions, registered by the loader beside every extension's — actions on the
+kinds core itself projects, dispatching with no extension context exactly as `BUILTIN_TOOLS` do."""

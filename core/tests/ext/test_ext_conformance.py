@@ -304,7 +304,17 @@ def _tool_context(workspace_id: UUID, ext: ExtensionContext, tmp_path: Path) -> 
 
 async def test_sample_is_discovered_via_its_entry_point() -> None:
     manifest = _sample_manifest()
-    assert {tool.name for tool in manifest.tools} == {sample.TOOL_NAME, sample.NOTE_TOOL_NAME}
+    assert {tool.name for tool in manifest.tools} == {
+        sample.TOOL_NAME,
+        sample.NOTE_TOOL_NAME,
+        sample.AUDIT_ACTION,
+        sample.POLISH_ACTION,
+        sample.ENGRAVE_ACTION,
+        sample.DIVINE_ACTION,
+        sample.CALIBRATE_ACTION,
+        sample.BLESS_ACTION,
+        sample.BESEECH_ACTION,
+    }
     assert {job.name for job in manifest.jobs} == {sample.JOB_NAME}
     assert {route.path for route in manifest.routes} == {sample.ROUTE_PATH}
     assert {slot.name for slot in manifest.credentials} == {sample.API_SLOT}
@@ -922,7 +932,7 @@ async def test_subagent_tool_grant_and_default_widen_a_child_beyond_its_named_to
     Resolved here exactly as the turn loop does (own names plus grants, plus any subagent-default
     tool) over the real tool pool."""
     manifest = _sample_manifest()
-    all_tools, _ = turn_tools(
+    all_tools, _, _ = turn_tools(
         (manifest,), _credential_store(), audience=conversation_audience(None)
     )
     profile = SubagentRegistry(turn_subagents((manifest,))).get(sample.SUBAGENT_NAME)
@@ -967,7 +977,7 @@ async def test_sample_model_provider_is_selected_priced_and_streams(tmp_path: Pa
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
-    tools, ext_by_tool = turn_tools(
+    tools, ext_by_tool, _ = turn_tools(
         (manifest,), _credential_store(), audience=conversation_audience(None)
     )
     tool = next(tool for tool in tools if tool.name == sample.TOOL_NAME)
@@ -1011,7 +1021,7 @@ async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_pa
     extension owns a real table and reaches only its own workspace's rows."""
     manifest = _sample_manifest()
     first, second = await _workspace(), await _workspace()
-    tools, ext_by_tool = turn_tools(
+    tools, ext_by_tool, _ = turn_tools(
         (manifest,), _credential_store(), audience=conversation_audience(None)
     )
     note = next(tool for tool in tools if tool.name == sample.NOTE_TOOL_NAME)
@@ -1024,7 +1034,7 @@ async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_pa
         assert write.is_error is False
         assert write.content[0].text == "first note"
 
-    _, other_ext = turn_tools(
+    _, other_ext, _ = turn_tools(
         (manifest,), _credential_store(), audience=conversation_audience(None)
     )
     with ws(second):
@@ -1066,7 +1076,7 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
             shared=False,
         )
     manifest = _sample_manifest()
-    tools, ext_by_tool = turn_tools(
+    tools, ext_by_tool, _ = turn_tools(
         (manifest,), _credential_store(), audience=conversation_audience(member_id)
     )
     tool = next(tool for tool in tools if tool.name == sample.CONNECTOR_EXECUTE_TOOL_NAME)
@@ -1132,7 +1142,7 @@ async def test_only_an_off_turn_role_carries_the_probe_seam(db: None, tmp_path: 
     assert jobs_role.probes is probes
     assert {name for name in dir(probes) if not name.startswith("_")} == {"run"}
 
-    _, ext_by_tool = turn_tools(
+    _, ext_by_tool, _ = turn_tools(
         (manifest,), _credential_store(), audience=conversation_audience(None)
     )
     hooks = turn_hooks((manifest,), _credential_store(), audience=conversation_audience(None))
@@ -1148,7 +1158,7 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
     is built for a job/route (`context_for`) or a tool (`turn_tools`)."""
     manifest = _sample_manifest()
     declared = frozenset(slot.name for slot in manifest.credentials)
-    _, ext_by_tool = turn_tools(
+    _, ext_by_tool, _ = turn_tools(
         (manifest,), _credential_store(), audience=conversation_audience(None)
     )
     for context in (
@@ -1263,7 +1273,7 @@ def test_a_tool_is_handed_the_deploy_base_and_the_browser_home() -> None:
     — reads it off its own context, so no extension carries a surface name of its own. Both halves
     come from core: a tool holding only the base would have to guess the name."""
     manifest = _sample_manifest()
-    _tools, ext_by_tool = turn_tools(
+    _tools, ext_by_tool, _ = turn_tools(
         (manifest,),
         _credential_store(),
         audience=conversation_audience(None),
@@ -2025,7 +2035,17 @@ def test_sample_pack_activates_its_bundled_extension_and_own_contributions() -> 
     assert [manifest.name for manifest in manifests] == [sample.NAME, sample_pack.NAME]
 
     bundled = next(manifest for manifest in manifests if manifest.name == sample.NAME)
-    assert {tool.name for tool in bundled.tools} == {sample.TOOL_NAME, sample.NOTE_TOOL_NAME}
+    assert {tool.name for tool in bundled.tools} == {
+        sample.TOOL_NAME,
+        sample.NOTE_TOOL_NAME,
+        sample.AUDIT_ACTION,
+        sample.POLISH_ACTION,
+        sample.ENGRAVE_ACTION,
+        sample.DIVINE_ACTION,
+        sample.CALIBRATE_ACTION,
+        sample.BLESS_ACTION,
+        sample.BESEECH_ACTION,
+    }
 
     pack_manifest = next(manifest for manifest in manifests if manifest.name == sample_pack.NAME)
     assert {spec.path.name for spec in pack_manifest.skills} == {sample_pack.SKILL_NAME}

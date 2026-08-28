@@ -465,7 +465,7 @@ async def _store(workspace_id: UUID, bot_token: str | None = BOT_TOKEN) -> Crede
 async def _register_slack(
     store: CredentialStore, workspace_id: UUID, team_id: str = TEAM_ID
 ) -> None:
-    _, contexts = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
+    _, contexts, _ = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
     with ws(workspace_id):
         await contexts["slack_connect"].installations.bind(
             slack.SURFACE_SLACK, slack.slack_installation_id(team_id)

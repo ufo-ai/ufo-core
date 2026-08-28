@@ -363,7 +363,7 @@ async def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_buil
         ),
         surfaces=(SurfaceSpec(name="slack", routes=(), identify=_identify_workspace),),
     )
-    tools, ext_by_tool = turn_tools((manifest,), store, audience=conversation_audience(None))
+    tools, ext_by_tool, _ = turn_tools((manifest,), store, audience=conversation_audience(None))
     names = {tool.name for tool in tools}
     assert {builtin.name for builtin in BUILTIN_TOOLS} <= names
     assert "record_note" in names
@@ -379,7 +379,7 @@ async def test_turn_tools_maps_extension_tools_to_owning_context_and_leaves_buil
 
 
 def test_turn_tools_without_manifests_is_builtins_object_verbs_and_empty_map() -> None:
-    tools, ext_by_tool = turn_tools((), None, audience=conversation_audience(None))
+    tools, ext_by_tool, _ = turn_tools((), None, audience=conversation_audience(None))
     assert tools[: len(BUILTIN_TOOLS)] == BUILTIN_TOOLS
     assert [tool.name for tool in tools[len(BUILTIN_TOOLS) :]] == [
         "object_list",
@@ -387,6 +387,7 @@ def test_turn_tools_without_manifests_is_builtins_object_verbs_and_empty_map() -
         "object_explain",
         "object_apply",
         "object_delete",
+        "object_action",
     ]
     assert ext_by_tool == {}
 
@@ -404,7 +405,7 @@ def test_turn_tools_fails_loud_when_credential_slots_declared_without_key() -> N
 
 def test_turn_tools_builds_slot_free_tools_without_a_credential_key() -> None:
     manifest = Manifest(name=EXTENSION, version="0.1.0", tools=(NOTE_TOOL,))
-    tools, ext_by_tool = turn_tools((manifest,), None, audience=conversation_audience(None))
+    tools, ext_by_tool, _ = turn_tools((manifest,), None, audience=conversation_audience(None))
     assert NOTE_TOOL in tools
     assert NOTE_TOOL.name in ext_by_tool
 

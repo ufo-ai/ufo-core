@@ -145,9 +145,16 @@ def _check_tools(manifest: Manifest, store: CredentialStore) -> None:
     )
     if not declared:
         return
-    tools, ext_by_tool = turn_tools((manifest,), store, audience=conversation_audience(None))
+    tools, ext_by_tool, verbs = turn_tools((manifest,), store, audience=conversation_audience(None))
     registry = ToolRegistry(tools)
     for tool in declared:
+        if tool.bound is not None:
+            bound = verbs.actions[tool.bound.kind][tool.name]
+            assert bound.action is tool
+            assert bound.extension == manifest.name
+            assert bound.context is not None
+            assert tool.name not in ext_by_tool
+            continue
         assert registry.get(tool.name).name == tool.name
         assert tool.name in ext_by_tool
 
@@ -397,7 +404,7 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
 
 
 def test_no_registered_tool_takes_a_user_description() -> None:
-    tools, _ = turn_tools(
+    tools, _, _ = turn_tools(
         load_manifests(), _credential_store(), audience=conversation_audience(None)
     )
     assert tools

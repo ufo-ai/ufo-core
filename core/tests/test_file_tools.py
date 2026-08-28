@@ -939,7 +939,7 @@ async def _dispatch(
     engine: TurnEngine, context: ToolContext, call: ToolUseBlock
 ) -> ToolResultBlock:
     with ws(context.turn.workspace_id):
-        bound = await engine._bind_or_error(context, call, {})
+        bound = await engine._bind_or_error(context, engine._resolve_call(call), {})
         return await engine._dispatch(bound)
 
 

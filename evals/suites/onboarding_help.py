@@ -102,11 +102,12 @@ from evals.harness.capability import (
 from evals.harness.scorers import combine
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL
 from ufo.schema import tables
 from ufo.skills.runtime import SKILLS_ROOT
 from ufo.turns.activity import SKILL_LOAD_TOOL
 from ufo.workspace import ws_current
+
+REQUEST_CREDENTIALS_TOOL = "request_credentials"
 
 ONBOARDING_HELP_PACKS = ("assistant_hosted",)
 CORPUS_SKILL = "customer-onboarding-help"

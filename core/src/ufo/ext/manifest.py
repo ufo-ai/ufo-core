@@ -38,6 +38,7 @@ from ufo.kinds.agent_setup import AgentSetup
 from ufo.kinds.agents import AgentSpec
 from ufo.memory import MemorySearchProvider
 from ufo.models.spec import ModelSpec
+from ufo.object_scope import ObjectActionTarget
 from ufo.objects import ObjectKind
 from ufo.runtime.candidates import WorkspaceCandidates
 from ufo.sandbox.session import Carrier
@@ -52,7 +53,7 @@ from ufo.schema.records import (
 from ufo.search import SearchProvider
 from ufo.skills.runtime import RuntimeSkill, SkillCard
 from ufo.sources.sync import PageChange, SourceBackend
-from ufo.tools.registry import ToolDef
+from ufo.tools.registry import OBJECT_ACTION_TOOL, ToolDef
 from ufo.turns.audience import SHARED_AUDIENCE, Audience
 from ufo.turns.delivery_register import SUBAGENT_RESULT_DESCRIPTION
 
@@ -383,21 +384,37 @@ the change that lands its real fire-point and a consumer together."""
 @dataclass(frozen=True)
 class PreToolUse:
     """A tool call about to dispatch. `tool_input` is the validated argument model; a hook may Deny
-    the call (it never dispatches) or ModifyInput (fold the args the handler receives)."""
+    the call (it never dispatches) or ModifyInput (fold the args the handler receives). `call` is
+    the semantic identity selectors match — the canonical action id for an object action riding
+    the `object_action` wire tool, the tool name itself otherwise — and `target` is the resolved
+    object an instance action acts on."""
 
     tool_name: str
     tool_input: BaseModel
+    call: str = ""
+    target: ObjectActionTarget | None = None
+
+    def __post_init__(self) -> None:
+        if not self.call:
+            object.__setattr__(self, "call", self.tool_name)
 
 
 @dataclass(frozen=True)
 class PostToolUse:
     """A tool call that dispatched successfully. A hook may ModifyOutput (replace the result the
     model sees) or InjectContext (append guidance to it). A call that errored fires
-    post_tool_use_failure instead, never this."""
+    post_tool_use_failure instead, never this. `call` and `target` carry the semantic identity
+    exactly as on PreToolUse."""
 
     tool_name: str
     tool_input: BaseModel
     output: str
+    call: str = ""
+    target: ObjectActionTarget | None = None
+
+    def __post_init__(self) -> None:
+        if not self.call:
+            object.__setattr__(self, "call", self.tool_name)
 
 
 @dataclass(frozen=True)
@@ -406,11 +423,18 @@ class PostToolUseFailure:
     a tool that actually ran and errored (its handler raised, or returned an error result); a bad
     tool name or an argument-validation failure is caught before dispatch and becomes an is_error
     result with no hook, so this never fires for a call that never ran. `output` is the error
-    content the model will see; the event takes no outcome, it only notifies."""
+    content the model will see; the event takes no outcome, it only notifies. `call` and `target`
+    carry the semantic identity exactly as on PreToolUse."""
 
     tool_name: str
     tool_input: BaseModel
     output: str
+    call: str = ""
+    target: ObjectActionTarget | None = None
+
+    def __post_init__(self) -> None:
+        if not self.call:
+            object.__setattr__(self, "call", self.tool_name)
 
 
 @dataclass(frozen=True)
@@ -543,7 +567,8 @@ class HookContext:
 @dataclass(frozen=True)
 class HookSpec:
     """One reactive lifecycle hook. `handler` runs with the extension's scoped context on `event`;
-    for the `*_tool_use` events `tools` matches by tool name (empty = every tool). A hook is a
+    for the `*_tool_use` events `tools` matches the payload's semantic `call` — a global tool's
+    name, or a bound action's canonical `action:<kind>:<name>` id (empty = every call). A hook is a
     runtime policy filter over the turn's granted tools, never a second grant path.
 
     A best-effort user-prompt hook may still return Deny, but a handler fault drops only its
@@ -591,6 +616,11 @@ class AgentProvision:
     def __post_init__(self) -> None:
         if not AGENT_NAME_RE.match(self.name):
             raise ValueError(f"agent provision name {self.name!r} is not an object name")
+        if self.tools is not None and OBJECT_ACTION_TOOL in self.tools:
+            raise ValueError(
+                f"agent provision {self.name!r} allowlists {OBJECT_ACTION_TOOL!r} — an allowlist "
+                "grants canonical action ids (action:<kind>:<name>), never the dispatcher"
+            )
         if self.icon is not None and (
             len(self.icon) > TABLER_ICON_MAX_LENGTH or not AGENT_ICON_RE.match(self.icon)
         ):
@@ -653,6 +683,12 @@ class SubagentProfile:
     connector_read_only: bool = False
 
     def __post_init__(self) -> None:
+        if OBJECT_ACTION_TOOL in self.tool_names:
+            raise ValueError(
+                f"subagent profile {self.name!r} allowlists {OBJECT_ACTION_TOOL!r} — an "
+                "allowlist grants canonical action ids (action:<kind>:<name>), never the "
+                "dispatcher"
+            )
         fields = self.output_model.model_fields
         concise_contract = (
             tuple(fields) == ("result",)
@@ -686,6 +722,13 @@ class SubagentToolGrant:
 
     profile: str
     tool_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if OBJECT_ACTION_TOOL in self.tool_names:
+            raise ValueError(
+                f"subagent tool grant for {self.profile!r} names {OBJECT_ACTION_TOOL!r} — a "
+                "grant names canonical action ids (action:<kind>:<name>), never the dispatcher"
+            )
 
 
 @dataclass(frozen=True)

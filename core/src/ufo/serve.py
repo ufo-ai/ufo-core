@@ -244,7 +244,7 @@ def run() -> None:
     threading.Thread(
         target=lambda: asyncio.run(heartbeat.run()), name="instance-heartbeat", daemon=True
     ).start()
-    validate_ext_tools(manifests, credentials)
+    deploy_actions = validate_ext_tools(manifests, credentials)
     _validate_requires(config, manifests, credentials)
     init_workspace_credentials(credentials)
     init_flags(_select_flag_provider(config, manifests))
@@ -293,6 +293,7 @@ def run() -> None:
         tools=bridge_tools(manifests),
         subagents=subagents,
         subagent_grants=subagent_grants,
+        actions=deploy_actions,
     )
     runtime = Runtime(
         config=config,

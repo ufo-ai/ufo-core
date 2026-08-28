@@ -681,7 +681,7 @@ async def test_sample_pre_deny_short_circuits_and_post_captures_the_other(
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), store, audience=conversation_audience(None))
+    tools, tool_ext, _ = turn_tools((manifest,), store, audience=conversation_audience(None))
     hooks = turn_hooks((manifest,), store, audience=conversation_audience(None))
     engine = _engine(turn, EchoAndBashModel(), tmp_path, hooks, tools=tools, tool_ext=tool_ext)
     with ws(turn.workspace_id):
@@ -710,7 +710,7 @@ async def test_stop_fires_with_the_final_answer(db: None, tmp_path: Path) -> Non
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), store, audience=conversation_audience(None))
+    tools, tool_ext, _ = turn_tools((manifest,), store, audience=conversation_audience(None))
     hooks = turn_hooks((manifest,), store, audience=conversation_audience(None))
     with ws(turn.workspace_id):
         frame = await _engine(
@@ -727,7 +727,7 @@ async def test_tool_failure_reaches_post_tool_use_failure_not_post_tool_use(
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), store, audience=conversation_audience(None))
+    tools, tool_ext, _ = turn_tools((manifest,), store, audience=conversation_audience(None))
     hooks = turn_hooks((manifest,), store, audience=conversation_audience(None))
     carrier = RecordingCarrier(result=ExecResult(stdout="", stderr="boom", exit_code=1))
     with ws(turn.workspace_id):
@@ -750,7 +750,7 @@ async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, tool_ext = turn_tools((manifest,), store, audience=conversation_audience(None))
+    tools, tool_ext, _ = turn_tools((manifest,), store, audience=conversation_audience(None))
     hooks = turn_hooks((manifest,), store, audience=conversation_audience(None))
     with ws(turn.workspace_id):
         frame = await _engine(

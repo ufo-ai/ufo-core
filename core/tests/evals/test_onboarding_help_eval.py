@@ -32,6 +32,7 @@ from evals.suites.onboarding_help import (
     CORPUS_SKILL,
     ONBOARDING_HELP_PACKS,
     REFERENCES_DIR,
+    REQUEST_CREDENTIALS_TOOL,
     SLACK_EVAL_BOT_TOKEN,
     SLACK_EVAL_BOT_USER_ID,
     SLACK_EVAL_CURRENT_SECRET,
@@ -50,7 +51,6 @@ from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.loader import load_manifests, skill_registry
-from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL
 from ufo.schema import tables
 from ufo.sdk.context import (
     CredentialAccess,

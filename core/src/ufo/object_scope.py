@@ -17,6 +17,24 @@ class ObjectAgent:
     name: str
 
 
+@dataclass(frozen=True)
+class ObjectActionTarget:
+    """What one dispatched object action acts on, resolved by the engine before the handler runs:
+    the bound kind, the instance name a collection action leaves None, the agent target an
+    `agent_targetable` action resolved through the cross-agent gate, the live generation the
+    instance read observed, and the generation the wire call supplied. Dispatch never refuses on
+    the two differing — a self-mutating action interrupted after its write and resumed by DBOS
+    re-reads the row at the generation it minted, and its idempotent dedup must run first — so a
+    handler that must fence compares them and fences its own write atomically. A bound handler
+    reads it from `ToolContext.target`; its input model never carries these fields."""
+
+    kind: str
+    name: str | None
+    agent: ObjectAgent | None
+    generation: UUID | None
+    expected_generation: UUID | None
+
+
 _target: ContextVar[ObjectAgent | None] = ContextVar("object_agent_target", default=None)
 
 

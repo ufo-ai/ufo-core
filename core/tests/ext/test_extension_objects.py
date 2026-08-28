@@ -88,7 +88,7 @@ def _context(workspace_id: UUID) -> ToolContext:
 
 
 def _tools(manifests: tuple[Manifest, ...]) -> dict[str, ToolDef]:
-    tools, _ = turn_tools(
+    tools, _, _ = turn_tools(
         manifests,
         CredentialStore(fernet=Fernet(Fernet.generate_key())),
         audience=conversation_audience(None),
@@ -122,9 +122,9 @@ async def test_an_active_extension_lists_and_reads_everything_it_declares(db: No
         assert listed == [
             {
                 "name": sample.NAME,
-                "summary": f"{sample.NAME} {manifest.version}, 3 tools, 1 credential slots",
+                "summary": f"{sample.NAME} {manifest.version}, 10 tools, 1 credential slots",
                 "version": manifest.version,
-                "tool_count": 3,
+                "tool_count": 10,
                 "credential_slot_count": 1,
             }
         ]
@@ -135,7 +135,18 @@ async def test_an_active_extension_lists_and_reads_everything_it_declares(db: No
         assert read["spec"] == {
             "extension": sample.NAME,
             "version": manifest.version,
-            "tools": ["sample_echo", "sample_note", "sample_connector_execute"],
+            "tools": [
+                "sample_echo",
+                "sample_note",
+                sample.AUDIT_ACTION,
+                sample.POLISH_ACTION,
+                sample.ENGRAVE_ACTION,
+                sample.DIVINE_ACTION,
+                sample.CALIBRATE_ACTION,
+                sample.BLESS_ACTION,
+                sample.BESEECH_ACTION,
+                "sample_connector_execute",
+            ],
             "object_kinds": [sample.WIDGET_KIND, sample.RELIC_KIND],
             "credential_slots": [sample.API_SLOT],
             "surfaces": [surface.name for surface in manifest.surfaces],
