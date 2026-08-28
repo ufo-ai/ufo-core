@@ -963,7 +963,7 @@ test("the pending iMessage step confirms once the phone proves its code", async 
     });
     await screen.findByText("Phone connected — you can now message UFO from iMessage.");
     expect(screen.queryByRole("link", { name: "Text code to UFO" })).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Start chatting" }));
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() =>
       expect(sent).toEqual([
         "I just set up this workspace. I want to develop products faster, and we use Notion.",

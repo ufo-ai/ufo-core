@@ -594,7 +594,7 @@ export function FirstRun({
                         <p className="m-0 text-label">Phone connected — you can now message UFO from iMessage.</p>
                       </div>
                       <Button variant="send" size="bar" className="h-10 w-full" onClick={finish}>
-                        Start chatting
+                        Continue
                       </Button>
                     </>
                   ) : (
