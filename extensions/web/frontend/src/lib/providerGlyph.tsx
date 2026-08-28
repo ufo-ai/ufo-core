@@ -17,9 +17,16 @@ import {
   IconBrandSlack,
   IconBrandStripe,
   IconBrandZoom,
+  IconBuildingBank,
   IconCalendar,
+  IconCreditCard,
+  IconFileText,
   IconPlug,
+  IconReportMoney,
+  IconSignature,
   IconTable,
+  IconUsersGroup,
+  IconWallet,
 } from "@tabler/icons-react";
 
 import { cn } from "@/lib/cn";
@@ -27,10 +34,13 @@ import { cn } from "@/lib/cn";
 /** The mark a provider is drawn by, keyed by the slug every read names it with. */
 export const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
   airtable: IconBrandAirtable,
+  apollo: IconUsersGroup,
   asana: IconBrandAsana,
   bitbucket: IconBrandBitbucket,
   attio: IconAddressBook,
+  brex: IconWallet,
   discord: IconBrandDiscord,
+  docusign: IconSignature,
   figma: IconBrandFigma,
   github: IconBrandGithub,
   gmail: IconBrandGmail,
@@ -40,11 +50,15 @@ export const PROVIDER_GLYPHS: Record<string, typeof IconPlug> = {
   instagram: IconBrandInstagram,
   intercom: IconBrandIntercom,
   jira: IconBrandJira,
+  mercury: IconBuildingBank,
   monday: IconBrandMonday,
   notion: IconBrandNotion,
+  pandadoc: IconFileText,
+  ramp: IconCreditCard,
   sentry: IconBrandSentry,
   slack: IconBrandSlack,
   stripe: IconBrandStripe,
+  xero: IconReportMoney,
   zoom: IconBrandZoom,
 };
 

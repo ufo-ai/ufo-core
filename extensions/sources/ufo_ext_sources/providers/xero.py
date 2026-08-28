@@ -6,10 +6,12 @@ of small collections ignore `page` and ship in one shot. Incremental sync rides 
 `If-Modified-Since` (RFC 1123) request header, not a query param, so `paginate` issues each GET
 directly with that header set. Each record carries its id under a typed key (`AccountID`,
 `InvoiceID`, …), so `flatten` lifts it to the `id` the streams key on. A refusal (401/403) raises
-`StreamSkipped`. Xero requires a `xero-tenant-id` header (one org within a grant); `_make_client`
-sets it when the connector was built with a tenant. The credential is resolved through the proxy
-the runner threads; this connector holds no token. The write path is intentionally absent — the
-source seam only reads."""
+`StreamSkipped`. Xero requires a `xero-tenant-id` header naming one org within a grant: the header
+is set when the connector was built with a tenant, and otherwise each run resolves it from the grant
+itself through `GET https://api.xero.com/connections`. A grant naming several organisations raises
+`StreamFault` rather than pick one, since either choice would sync one company's books as the
+workspace's. The credential is resolved through the proxy the runner threads; this connector holds
+no token. The write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -18,9 +20,18 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    RestConnector,
+    StreamFault,
+    StreamSkipped,
+    StreamSpec,
+    list_or_empty,
+)
 
 PAGE_SIZE = 100
+CONNECTIONS_URL = "https://api.xero.com/connections"
+TENANT_HEADER = "xero-tenant-id"
+ORGANISATION_TENANT = "ORGANISATION"
 _REFUSAL_STATUS = frozenset({401, 403})
 
 _ID_FIELD_OVERRIDES: dict[str, str] = {
@@ -134,8 +145,38 @@ class XeroConnector(RestConnector):
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         client = super()._make_client(base_url, credential)
         if self._tenant_id:
-            client.headers["xero-tenant-id"] = self._tenant_id
+            client.headers[TENANT_HEADER] = self._tenant_id
         return client
+
+    async def _ensure_tenant(self, client: httpx.AsyncClient) -> None:
+        """Set the org header every Accounting API call needs, resolved from the grant when the
+        connector was built without a tenant — Xero's token is tenant-agnostic, so the grant names
+        the organisations it covers and nothing else does. The header is set on the run's own
+        client, never cached on the connector, which one instance serves every workspace from.
+
+        A grant covering several organisations is a fault: this seam carries one tenant per run, and
+        picking one would land one company's books as the workspace's without saying so."""
+        if client.headers.get(TENANT_HEADER):
+            return
+        response = await self._get_raw(client, CONNECTIONS_URL)
+        connections = list_or_empty(response.json() if response.content else [])
+        tenants = sorted(
+            {
+                connection["tenantId"]
+                for connection in connections
+                if isinstance(connection.get("tenantId"), str)
+                and connection["tenantId"]
+                and connection.get("tenantType", ORGANISATION_TENANT) == ORGANISATION_TENANT
+            }
+        )
+        if not tenants:
+            raise StreamFault("xero: the grant names no organisation to read")
+        if len(tenants) > 1:
+            raise StreamFault(
+                f"xero: the grant names {len(tenants)} organisations "
+                f"({', '.join(tenants)}); reconnect the one organisation to sync"
+            )
+        client.headers[TENANT_HEADER] = tenants[0]
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
@@ -148,6 +189,7 @@ class XeroConnector(RestConnector):
             if modified_since:
                 headers["If-Modified-Since"] = modified_since
         try:
+            await self._ensure_tenant(client)
             if stream.name in _NON_PAGED_STREAMS:
                 response = await client.get(path, headers=headers or None)
                 response.raise_for_status()

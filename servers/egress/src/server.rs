@@ -1197,6 +1197,11 @@ fn proxy_authorization(headers: &[Vec<u8>]) -> String {
 
 // --- header rewriting -------------------------------------------------------------------------
 
+/// The auth schemes a sentinel may ride behind and keep its prefix through the swap. Closed on
+/// purpose: what a request may prefix the real secret with is decided here, never by the sandbox.
+/// `keyed_connectors`' `SWAPPABLE_SCHEMES` declares the same set, and a row may name no other.
+const SWAPPABLE_SCHEMES: [&str; 3] = ["bearer", "token", "api-key"];
+
 fn inject(headers: &[Vec<u8>], candidates: &[Inj<'_>]) -> Vec<u8> {
     let mut out = Vec::new();
     for line in headers {
@@ -1214,8 +1219,9 @@ fn inject(headers: &[Vec<u8>], candidates: &[Inj<'_>]) -> Vec<u8> {
             name == ascii_lower(c.header.as_bytes())
                 && (supplied == c.sentinel.as_bytes()
                     || (parts.len() == 2
-                        && (parts[0].eq_ignore_ascii_case(b"token")
-                            || parts[0].eq_ignore_ascii_case(b"bearer"))
+                        && SWAPPABLE_SCHEMES
+                            .iter()
+                            .any(|scheme| parts[0].eq_ignore_ascii_case(scheme.as_bytes()))
                         && parts[1] == c.sentinel.as_bytes()))
         });
         match chosen {
@@ -1884,6 +1890,32 @@ mod tests {
         }];
         let text = String::from_utf8(inject(&headers, &candidates)).unwrap();
         assert!(text.contains("authorization: Bearer OTHER"), "{text}");
+    }
+
+    #[test]
+    fn inject_keeps_a_declared_scheme_prefix_that_is_not_bearer() {
+        // PandaDoc takes its API key as `Authorization: API-Key <key>`, so the prefix has to
+        // survive the swap for the keyed row to reach the wire authenticated.
+        let headers = header_lines(&["authorization: API-Key SENT"]);
+        let candidates = [Inj {
+            header: "authorization",
+            sentinel: "SENT",
+            real: "real-key",
+        }];
+        let text = String::from_utf8(inject(&headers, &candidates)).unwrap();
+        assert!(text.contains("authorization: API-Key real-key"), "{text}");
+    }
+
+    #[test]
+    fn inject_leaves_an_undeclared_scheme_prefix_unswapped() {
+        let headers = header_lines(&["authorization: Basic SENT"]);
+        let candidates = [Inj {
+            header: "authorization",
+            sentinel: "SENT",
+            real: "real-key",
+        }];
+        let text = String::from_utf8(inject(&headers, &candidates)).unwrap();
+        assert!(text.contains("authorization: Basic SENT"), "{text}");
     }
 
     #[test]

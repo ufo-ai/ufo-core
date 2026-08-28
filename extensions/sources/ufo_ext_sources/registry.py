@@ -10,6 +10,7 @@ portal's per-row actions all name a binding through that one rule."""
 from ufo.sdk.sources import Connector
 from ufo_ext_sources.providers.active_campaign import ActiveCampaignConnector
 from ufo_ext_sources.providers.airtable import AirtableConnector
+from ufo_ext_sources.providers.apollo import ApolloConnector
 from ufo_ext_sources.providers.asana import AsanaConnector
 from ufo_ext_sources.providers.ashby import AshbyConnector
 from ufo_ext_sources.providers.attio import AttioConnector
@@ -20,6 +21,7 @@ from ufo_ext_sources.providers.chargebee import ChargebeeConnector
 from ufo_ext_sources.providers.clickup import ClickUpConnector
 from ufo_ext_sources.providers.confluence import ConfluenceConnector
 from ufo_ext_sources.providers.deel import DeelConnector
+from ufo_ext_sources.providers.docusign import DocuSignConnector
 from ufo_ext_sources.providers.facebook_ads import FacebookAdsConnector
 from ufo_ext_sources.providers.freshdesk import FreshdeskConnector
 from ufo_ext_sources.providers.github import GitHubConnector
@@ -38,12 +40,15 @@ from ufo_ext_sources.providers.jira import JiraConnector
 from ufo_ext_sources.providers.klaviyo import KlaviyoConnector
 from ufo_ext_sources.providers.linear import LinearConnector
 from ufo_ext_sources.providers.mailchimp import MailchimpConnector
+from ufo_ext_sources.providers.mercury import MercuryConnector
 from ufo_ext_sources.providers.microsoft_teams import MicrosoftTeamsConnector
 from ufo_ext_sources.providers.monday import MondayConnector
 from ufo_ext_sources.providers.notion import NotionConnector
 from ufo_ext_sources.providers.outlook import OutlookConnector
 from ufo_ext_sources.providers.pagerduty import PagerDutyConnector
+from ufo_ext_sources.providers.pandadoc import PandaDocConnector
 from ufo_ext_sources.providers.quickbooks import QuickBooksConnector
+from ufo_ext_sources.providers.ramp import RampConnector
 from ufo_ext_sources.providers.recruitee import RecruiteeConnector
 from ufo_ext_sources.providers.recurly import RecurlyConnector
 from ufo_ext_sources.providers.rippling import RipplingConnector
@@ -75,6 +80,7 @@ CONNECTORS = _connector_registry(
     (
         ActiveCampaignConnector,
         AirtableConnector,
+        ApolloConnector,
         AsanaConnector,
         AshbyConnector,
         AttioConnector,
@@ -85,6 +91,7 @@ CONNECTORS = _connector_registry(
         ClickUpConnector,
         ConfluenceConnector,
         DeelConnector,
+        DocuSignConnector,
         FacebookAdsConnector,
         FreshdeskConnector,
         GitHubConnector,
@@ -103,12 +110,15 @@ CONNECTORS = _connector_registry(
         KlaviyoConnector,
         LinearConnector,
         MailchimpConnector,
+        MercuryConnector,
         MicrosoftTeamsConnector,
         MondayConnector,
         NotionConnector,
         OutlookConnector,
         PagerDutyConnector,
+        PandaDocConnector,
         QuickBooksConnector,
+        RampConnector,
         RecruiteeConnector,
         RecurlyConnector,
         RipplingConnector,

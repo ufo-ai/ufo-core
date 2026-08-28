@@ -6,13 +6,17 @@ so a grant stores only the connected-account id (`apn_…`), never a secret. Exa
 model; this second broker holds an explicit allowlist (`CONNECTORS`) of providers Composio's open
 namespace does not serve: one whose consent Composio's shared client cannot pass (Gmail: Google
 blocks restricted Gmail scopes, so the deploy's own Google OAuth client rides Pipedream Connect via
-`custom_oauth_env`), or one Composio withholds by judgment where Pipedream's actions cover the gap
+`custom_oauth_env`), one Composio withholds by judgment where Pipedream's actions cover the gap
 (Linear: `linear-search-issues` and `linear-list-workflow-states` reach issue state, which
 Composio's toolkit cannot filter by; Attio: `attio-create-update-record` and the person/task/note
 writes reach what Composio's read-only grant cannot; Discord: the `discord-send-message` family
-posts to a channel, which Composio's identity-only user OAuth cannot). A provider no broker holds
-managed auth for at all is not an entry here — it authenticates with a workspace key through the
-`keyed_connectors` extension.
+posts to a channel, which Composio's identity-only user OAuth cannot), or one Composio holds no
+managed credentials for while Pipedream operates its own OAuth client (Ramp, Brex, Xero, DocuSign,
+PandaDoc: each is bring-your-own-credentials on Composio, so its connect leg dies at
+`POST /auth_configs`, and Pipedream's hosted consent is the only managed route — the evidence per
+app is in `docs/composio-provider-coverage.md`). A provider no broker holds managed auth for at all
+is not an entry here — it authenticates with a workspace key through the `keyed_connectors`
+extension.
 
 `connect_token` mints the hosted consent leg (pinning the success/error return legs);
 `newest_account` and `connected_account` correlate its return to the state-scoped external user,
@@ -62,7 +66,10 @@ PIPEDREAM_TRANSFER_HOSTS = ("pipedream-file-stash-production.s3.us-east-1.amazon
 class ConnectorSpec:
     """One brokered connector: the member-facing label, the Pipedream app slug whose managed OAuth
     grants the account, and the provider's own API `host` the derived grant admits and meters —
-    direct-provider-host, never Pipedream's backend. `custom_oauth_env` names the env var that may
+    direct-provider-host, never Pipedream's backend. `host` is empty for a provider that publishes
+    no single API host (DocuSign addresses each account on its own region host): the grant then
+    admits none, which costs nothing while every call runs server-side through Pipedream.
+    `custom_oauth_env` names the env var that may
     hold the deploy's own OAuth client id (`oa_…`) registered with Pipedream; set, the consent leg
     rides that client instead of Pipedream's shared one (which Google's consent accepts for
     restricted Gmail scopes — a member org that blocks it connects through the deploy's own)."""
@@ -75,11 +82,19 @@ class ConnectorSpec:
 
 CONNECTORS: dict[str, ConnectorSpec] = {
     "attio": ConnectorSpec("Attio", "attio", "api.attio.com"),
+    "brex": ConnectorSpec("Brex", "brex", "platform.brexapis.com"),
     "discord": ConnectorSpec("Discord", "discord", "discord.com"),
+    # DocuSign addresses each account on the region host its base URI names (na3.docusign.net,
+    # eu.docusign.net, demo.docusign.net); it publishes no single API host, so the grant admits
+    # none and every call runs server-side through Pipedream.
+    "docusign": ConnectorSpec("DocuSign", "docusign", ""),
     "gmail": ConnectorSpec(
         "Gmail", "gmail", "gmail.googleapis.com", custom_oauth_env="PIPEDREAM_GMAIL_OAUTH_APP_ID"
     ),
     "linear": ConnectorSpec("Linear", "linear", "api.linear.app"),
+    "pandadoc": ConnectorSpec("PandaDoc", "pandadoc", "api.pandadoc.com"),
+    "ramp": ConnectorSpec("Ramp", "ramp", "api.ramp.com"),
+    "xero": ConnectorSpec("Xero", "xero_accounting_api", "api.xero.com"),
 }
 
 

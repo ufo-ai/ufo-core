@@ -95,9 +95,22 @@ def test_posthog_keys_ride_the_authorization_header_with_its_bearer_scheme() -> 
     )
 
 
+def test_pandadoc_rides_its_own_api_key_scheme_on_the_authorization_header() -> None:
+    """PandaDoc takes its key as `Authorization: API-Key <key>` — neither a bearer nor a bare value,
+    and the third scheme the proxy re-prefixes. The recipe renders that scheme, so the agent sends
+    the one shape whose sentinel actually swaps."""
+    pandadoc = next(provider for provider in KEYED_PROVIDERS if provider.provider == "pandadoc")
+    assert pandadoc.target_host == "api.pandadoc.com"
+    assert (
+        'curl -sS "https://api.pandadoc.com/<path>" -H "Authorization: API-Key $PANDADOC_API_KEY"'
+        in manifest().prompt_sections[0].body
+    )
+
+
 def test_a_scheme_the_proxy_cannot_swap_is_refused_at_declaration() -> None:
-    """The proxy re-prefixes only `Bearer` and `Token` values, so a row declaring any other scheme
-    would ship a recipe whose sentinel never swaps — it fails at import, not on the wire."""
+    """The proxy re-prefixes only `Bearer`, `Token` and `API-Key` values, so a row declaring any
+    other scheme would ship a recipe whose sentinel never swaps — it fails at import, not on the
+    wire."""
     with pytest.raises(ValueError, match="scheme"):
         KeyedSecret(key="k", header="Authorization", scheme="Basic", env="K", description="k")
 

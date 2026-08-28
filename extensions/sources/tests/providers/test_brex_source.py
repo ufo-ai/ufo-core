@@ -89,6 +89,21 @@ async def test_budgets_use_the_budget_id_primary_key_and_advance_no_watermark() 
     assert result.next_cursor == "prior"
 
 
+async def test_transfers_read_the_payments_list_endpoint() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/transfers"
+        return httpx.Response(
+            200,
+            json={
+                "items": [{"id": "tr1", "description": "Payroll", "status": "PROCESSED"}],
+                "next_cursor": None,
+            },
+        )
+
+    result = await _fetch("transfers", handle)
+    assert {page.source_ref for page in result.pages} == {"transfers/tr1"}
+
+
 async def test_a_forbidden_response_fails_the_run_rather_than_skipping_it() -> None:
     """Brex declares no refuse-path: a 403 is a genuine fault the driver backs off on, not a
     `StreamSkipped`."""

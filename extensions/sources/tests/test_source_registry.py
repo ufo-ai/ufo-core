@@ -14,7 +14,7 @@ class SecondConnector(AsanaConnector):
 
 
 def test_registry_maps_every_connector_name_once() -> None:
-    assert len(CONNECTORS) == 48
+    assert len(CONNECTORS) == 53
     assert all(name == connector_type.name for name, connector_type in CONNECTORS.items())
 
 

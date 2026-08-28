@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { BRAND_MARKS } from "@/lib/brandMark";
+import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
 import { sectionHash } from "@/lib/route";
 
 import {
@@ -1169,4 +1171,12 @@ test("a connection outside the catalog stands only under every category", async 
 
   await pick("Category", "Communication");
   expect(screen.queryByLabelText("sentry connected")).toBeNull();
+});
+
+/** A connector no mark names draws the plain plug, so every biz-ops row beside a vendored provider
+ *  would read as the same unnamed connector. */
+test("each biz-ops connector is drawn by a mark of its own", () => {
+  for (const slug of ["apollo", "brex", "docusign", "mercury", "pandadoc", "ramp", "xero"]) {
+    expect(BRAND_MARKS.has(slug) || slug in PROVIDER_GLYPHS).toBe(true);
+  }
 });

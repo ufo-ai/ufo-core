@@ -464,6 +464,25 @@ def test_serve_registers_gmail_with_label_and_broker() -> None:
     assert isinstance(entry.broker, PipedreamBroker)
 
 
+def test_every_allowlist_entry_registers_under_its_own_app_slug() -> None:
+    """The consent leg opens the app slug its row names and `exchange` refuses an account from any
+    other, so a slug that drifts from the provider name has to be the row's word: Xero's Pipedream
+    app is `xero_accounting_api`, and a member connects it as `xero`. Two rows sharing one app slug
+    would let either one's consent bind the other's grant."""
+    flow = _connect_flow(_credentials(), _config(), (pipedream_manifest.manifest(),))
+    assert flow is not None
+    apps = [pipedream.CONNECTORS[name].app for name in flow.providers]
+    assert len(set(apps)) == len(apps)
+    assert pipedream.CONNECTORS["xero"].app == "xero_accounting_api"
+    registry = _registry()
+    assert [registry.entry(name).label for name in ("ramp", "brex", "docusign", "pandadoc")] == [
+        "Ramp",
+        "Brex",
+        "DocuSign",
+        "PandaDoc",
+    ]
+
+
 def test_composio_and_pipedream_register_disjoint_providers() -> None:
     """Both brokers install side by side: gmail resolves to Pipedream, everything else to
     Composio, in the one registry `serve` builds — the routing the user-visible split rides on."""

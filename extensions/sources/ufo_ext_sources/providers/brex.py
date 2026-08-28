@@ -1,13 +1,18 @@
-"""The Brex connector — spend-management objects (transactions, expenses, users, vendors, budgets,
-departments) synced into recallable pages.
+"""The Brex connector — spend-management objects (transactions, transfers, expenses, users, vendors,
+budgets, departments) synced into recallable pages.
 
 Brex paginates uniformly: every list endpoint returns `{items: [...], next_cursor: "<token>"}` and
 the next page is requested with `?cursor=<token>&limit=100`; the loop stops when `next_cursor` is
 null. Records arrive flat, so `flatten` stays the identity passthrough. Most endpoints expose no
 `updated_at` filter, so the sync is full-refresh; `transactions` and `expenses` carry a cursor field
 (`posted_at_date` / `purchased_at`) the adapter advances a watermark over, without a server-side
-filter. Auth is the OAuth bearer the resolved `Credential` carries. The write path is intentionally
-absent — the source seam only reads."""
+filter. Auth is the OAuth bearer the resolved `Credential` carries.
+
+`transfers` is the polled form of Brex's own `TRANSFER_PROCESSED`/`TRANSFER_FAILED` webhook: the
+list endpoint returns the same transfer objects the webhook's follow-up `GET /v1/transfers/{id}`
+hydrates, keyed by the same transfer id. The source seam is polled — core drives `fetch` on the sync
+interval and no surface receives provider callbacks — so the list read is what lands the transfer.
+The write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -22,6 +27,7 @@ PAGE_SIZE = 100
 # (everything else); tracking the path per-stream keeps the mapping explicit.
 _LIST_PATHS: dict[str, str] = {
     "transactions": "/v2/transactions/card/primary",
+    "transfers": "/v1/transfers",
     "users": "/v2/users",
     "departments": "/v2/departments",
     "vendors": "/v1/vendors",
@@ -44,12 +50,14 @@ def _stream(
     )
 
 
-# Stream set mirrors Airbyte's source-brex catalog (6 streams).
+# Stream set mirrors Airbyte's source-brex catalog (6 streams), plus `transfers`, which Airbyte
+# leaves out and Brex's own transfer events name.
 BREX_STREAMS: list[StreamSpec] = [
     _stream("budgets", primary_key="budget_id"),
     _stream("departments"),
     _stream("expenses", cursor_field="purchased_at", canonical=True),
     _stream("transactions", cursor_field="posted_at_date", canonical=True),
+    _stream("transfers", canonical=True),
     _stream("users"),
     _stream("vendors", canonical=True),
 ]

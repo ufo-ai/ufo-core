@@ -6,10 +6,11 @@ connect registry and the `ConnectorRegistry` the dynamic connector tools (the `c
 extension) and the sync runner route through, beside Composio's providers. This allowlist holds
 connectors Composio's open namespace does not serve — a consent its shared client cannot pass
 (Gmail: Google blocks restricted Gmail scopes, so a deploy's own Google OAuth client rides
-Pipedream Connect), or a toolkit Composio withholds by judgment where Pipedream's actions cover the
-gap (Linear); a provider no broker holds managed auth for reaches the agent as a keyed connector
-instead. Pipedream holds each account's token server-side, so no secret ever reaches this
-deploy."""
+Pipedream Connect), a toolkit Composio withholds by judgment where Pipedream's actions cover the
+gap (Linear), or a provider Composio holds no managed credentials for while Pipedream operates its
+own OAuth client (Ramp, Brex, Xero, DocuSign, PandaDoc); a provider no broker holds managed auth
+for reaches the agent as a keyed connector instead. Pipedream holds each account's token
+server-side, so no secret ever reaches this deploy."""
 
 from ufo.sdk.connectors import ConnectorBroker, connect_bridge_workspace
 from ufo.sdk.manifest import ConnectorProvider, Manifest, RouteSpec

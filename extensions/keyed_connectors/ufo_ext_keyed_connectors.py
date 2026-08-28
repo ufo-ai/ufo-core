@@ -38,7 +38,7 @@ SECTION_NAME = "keyed_connectors"
 REQUEST_DIMENSION = "requests"
 SENTINEL_PREFIX = "UFO_SENTINEL_KEYED_"
 HOST_SLOT_SUFFIX = "api_host"
-SWAPPABLE_SCHEMES = frozenset({"Bearer", "Token"})
+SWAPPABLE_SCHEMES = frozenset({"API-Key", "Bearer", "Token"})
 
 
 @dataclass(frozen=True)
@@ -190,6 +190,53 @@ KEYED_PROVIDERS: tuple[KeyedProvider, ...] = (
         site_description="PostHog private API host — `us.posthog.com` (US Cloud) or "
         "`eu.posthog.com` (EU Cloud). Read it off your PostHog URL; US Cloud orgs may leave it "
         "unset.",
+    ),
+    KeyedProvider(
+        provider="mercury",
+        label="Mercury",
+        host="api.mercury.com",
+        secrets=(
+            KeyedSecret(
+                key="api_key",
+                header="Authorization",
+                scheme="Bearer",
+                env="MERCURY_API_KEY",
+                description="Mercury API token (Settings → API tokens). A read-only token reads "
+                "accounts and transactions; payment initiation needs a read-write token, which "
+                "Mercury issues to approved partners only.",
+            ),
+        ),
+    ),
+    KeyedProvider(
+        provider="apollo",
+        label="Apollo",
+        host="api.apollo.io",
+        secrets=(
+            KeyedSecret(
+                key="api_key",
+                header="X-Api-Key",
+                env="APOLLO_API_KEY",
+                description="Apollo API key (Settings → Integrations → API). People and "
+                "organization search work with any key; sequences, tasks and deals answer 403 "
+                "unless the key is a master key.",
+            ),
+        ),
+    ),
+    KeyedProvider(
+        provider="pandadoc",
+        label="PandaDoc",
+        host="api.pandadoc.com",
+        secrets=(
+            KeyedSecret(
+                key="api_key",
+                header="Authorization",
+                scheme="API-Key",
+                env="PANDADOC_API_KEY",
+                description="PandaDoc API key (Settings → Integrations → API and Webhooks). It "
+                "reaches documents, templates, contacts and folders — the same surface as the "
+                "OAuth app, without the consent leg.",
+            ),
+        ),
     ),
 )
 
