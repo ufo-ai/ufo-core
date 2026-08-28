@@ -3407,6 +3407,30 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     assert set(payload) == {"providers", "connectors", "imessage"}
 
 
+async def test_the_first_run_offers_no_imessage_step_where_the_flag_reads_off(
+    web: tuple[AsyncClient, UUID, UUID], unbound_flags: None
+) -> None:
+    """The one thing that withholds the step from a deploy whose extensions hold the tool: this
+    environment's flag, answered off. The read is the whole gate — the page draws the step from
+    this boolean and from nothing else — and a service that answers nothing leaves it offered,
+    which the case above reads."""
+    client, workspace_id, _agent_id = web
+    init_flags(
+        InMemoryProvider(
+            {
+                web_surface.IMESSAGE_STEP_FLAG: InMemoryFlag(
+                    default_variant="off", variants={"on": True, "off": False}
+                )
+            }
+        )
+    )
+    _member_id, token = await _seed_member(workspace_id, "m@example.com")
+    read = await client.get(
+        "/surface/web/workspace/first-run", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert read.json()["imessage"] is False
+
+
 async def test_imessage_claim_reads_the_member_s_own_phone_claim(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

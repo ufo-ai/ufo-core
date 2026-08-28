@@ -32,6 +32,7 @@ locals {
       "enable-admin-settings"   = true
       "enable-assistant-app"    = true
       "enable-community-skills" = true
+      "enable-imessage-step"    = true
       "enable-installed-skills" = true
       "enable-issues-app"       = true
       "enable-memory-tab"       = true
@@ -41,6 +42,7 @@ locals {
       "enable-admin-settings"   = false
       "enable-assistant-app"    = false
       "enable-community-skills" = false
+      "enable-imessage-step"    = false
       "enable-installed-skills" = false
       "enable-issues-app"       = false
       "enable-memory-tab"       = false
