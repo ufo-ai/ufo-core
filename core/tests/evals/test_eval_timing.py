@@ -133,33 +133,6 @@ def test_a_turn_with_no_recorded_step_reports_no_span() -> None:
     assert timing.rounds == 0
 
 
-def test_a_cancelled_turn_counts_every_completed_round_as_intermediate() -> None:
-    timing = turn_timing(
-        TURN,
-        "child",
-        (
-            TurnStep(
-                function_name=f"E.{MODEL_ROUND_STEP}",
-                started_at_epoch_ms=0,
-                completed_at_epoch_ms=10,
-                output_tokens=20,
-            ),
-            TurnStep(
-                function_name=f"E.{MODEL_ROUND_STEP}",
-                started_at_epoch_ms=10,
-                completed_at_epoch_ms=20,
-                output_tokens=30,
-            ),
-        ),
-        {},
-        status="cancelled",
-    )
-
-    assert timing.status == "cancelled"
-    assert timing.output_tokens == 50
-    assert timing.intermediate_output_tokens == 50
-
-
 def test_the_engines_own_bookkeeping_is_neither_model_nor_tool() -> None:
     timing = turn_timing(TURN, "evaluated", (step("E._claim_arrivals", 0, 40),), {})
     assert timing.steps[0].kind == "other"

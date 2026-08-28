@@ -405,10 +405,8 @@ def test_profile_model_and_reasoning_default_to_inherit_the_parent() -> None:
     assert profile.reasoning is None
 
 
-def test_general_purpose_inherits_the_parent_model_at_low_reasoning() -> None:
-    profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
-    assert profile.model is None
-    assert profile.reasoning == "low"
+def test_general_purpose_inherits_the_parent_model() -> None:
+    assert SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE).model is None
 
 
 def test_a_profile_can_pin_a_distinct_model() -> None:

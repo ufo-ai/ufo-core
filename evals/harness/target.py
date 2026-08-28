@@ -638,13 +638,12 @@ class InProcessTarget:
         async with workspace_tx() as connection:
             parent_rows = (
                 await connection.execute(
-                    sa.select(
-                        tables.turn.c.id, tables.turn.c.parent_turn_id, tables.turn.c.status
-                    ).where(tables.turn.c.id.in_(turn_ids))
+                    sa.select(tables.turn.c.id, tables.turn.c.parent_turn_id).where(
+                        tables.turn.c.id.in_(turn_ids)
+                    )
                 )
             ).all()
         parents: dict[UUID, UUID | None] = {row.id: row.parent_turn_id for row in parent_rows}
-        statuses: dict[UUID, TurnStatus] = {row.id: row.status for row in parent_rows}
         names = {call.call_id: call.name for call in output.calls if call.call_id}
         turns: list[TurnTiming] = []
         for turn_id in turn_ids:
@@ -665,7 +664,6 @@ class InProcessTarget:
                     tokens,
                     cost_micro_usd,
                     messages if turn_id == turn_ids[0] else (),
-                    statuses[turn_id],
                 )
             )
         return case_timing(wall_ms, tuple(turns))

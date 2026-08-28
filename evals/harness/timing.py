@@ -10,11 +10,6 @@ A delegated case's cost is mostly its child's, so every turn is reported separat
 summed: a case that took twelve minutes because one coding child ran eleven of them reads
 differently from one that spent them in the parent.
 
-Output-token counts cover completed model rounds. `None` means the durable record has no completed
-round or lacks usage for at least one round. A done turn excludes its final round from intermediate
-output; a failed or cancelled turn has no delivered final round, so all its output is intermediate.
-Compaction is a separate step and is not included.
-
 Each completed model or tool step also carries the message that its durable output can rebuild. A
 timeout can therefore keep the work completed before cancellation and use the same call ids to
 join tool names to timing. A step whose id resolves to no call is named generically rather than
@@ -28,7 +23,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.schema.records import TurnStatus
 from ufo.sdk.models import Message, ToolUseBlock
 
 MODEL_ROUND_STEP = "_stream_once"
@@ -51,7 +45,6 @@ class TurnStep(BaseModel):
     call_id: str = ""
     call_ids: tuple[str, ...] = ()
     tokens: int | None = Field(default=None, ge=0)
-    output_tokens: int | None = Field(default=None, ge=0)
     cost_micro_usd: int | None = Field(default=None, ge=0)
     messages: tuple[Message, ...] = ()
 
@@ -65,7 +58,6 @@ class StepTiming(BaseModel):
     name: str
     duration_ms: int = Field(ge=0)
     tokens: int | None = Field(default=None, ge=0)
-    output_tokens: int | None = Field(default=None, ge=0)
     cost_micro_usd: int | None = Field(default=None, ge=0)
     message_index: int | None = Field(default=None, ge=1)
     call_id: str = ""
@@ -75,17 +67,12 @@ class TurnTiming(BaseModel):
     """One turn's own timing: its span, how that span divided between model rounds and tool calls,
     and what it spent. A round dispatches its tool calls concurrently, so each bucket is the wall
     those steps occupied — overlapping intervals merged, never summed — and `unaccounted_ms` is the
-    span the buckets do not cover: engine overhead, queue wait, and the gaps between steps.
-
-    `output_tokens` sums completed model rounds. For a done turn, `intermediate_output_tokens`
-    excludes the final completed round. For a failed or cancelled turn, it includes every round.
-    Both are `None` when no model round completed or any round lacks usage."""
+    span the buckets do not cover: engine overhead, queue wait, and the gaps between steps."""
 
     model_config = ConfigDict(frozen=True)
 
     turn_id: UUID
     role: TurnRole
-    status: TurnStatus = "done"
     span_ms: int = Field(ge=0)
     model_round_ms: int = Field(ge=0)
     tool_call_ms: int = Field(ge=0)
@@ -93,8 +80,6 @@ class TurnTiming(BaseModel):
     rounds: int = Field(ge=0)
     tool_calls: int = Field(ge=0)
     tokens: int = Field(ge=0)
-    output_tokens: int | None = Field(default=None, ge=0)
-    intermediate_output_tokens: int | None = Field(default=None, ge=0)
     cost_micro_usd: int = Field(ge=0)
     steps: tuple[StepTiming, ...] = ()
 
@@ -124,7 +109,6 @@ def turn_timing(
     tokens: int = 0,
     cost_micro_usd: int = 0,
     messages: tuple[Message, ...] = (),
-    status: TurnStatus = "done",
 ) -> TurnTiming:
     """One turn's timing from its durable steps, with each tool call named by the transcript entry
     its recorded call id belongs to."""
@@ -167,7 +151,6 @@ def turn_timing(
                     name=tool_names.get(step.call_id, UNNAMED_TOOL),
                     duration_ms=duration,
                     tokens=step.tokens,
-                    output_tokens=step.output_tokens,
                     cost_micro_usd=step.cost_micro_usd,
                     message_index=tool_messages.get(step.call_id),
                     call_id=step.call_id,
@@ -192,7 +175,6 @@ def turn_timing(
                     name="model round",
                     duration_ms=duration,
                     tokens=step.tokens,
-                    output_tokens=step.output_tokens,
                     cost_micro_usd=step.cost_micro_usd,
                     message_index=message_index,
                 )
@@ -207,7 +189,6 @@ def turn_timing(
                     name=step.function_name.rsplit(".", 1)[-1],
                     duration_ms=duration,
                     tokens=step.tokens,
-                    output_tokens=step.output_tokens,
                     cost_micro_usd=step.cost_micro_usd,
                 )
             )
@@ -220,27 +201,9 @@ def turn_timing(
     span = max(ends) - min(starts) if starts and ends else 0
     model_ms = _occupied(timed, MODEL_ROUND_STEP)
     tool_ms = _occupied(timed, TOOL_CALL_STEP)
-    output_measured = bool(model_steps) and all(
-        step.output_tokens is not None for step in model_steps
-    )
-    measured_output_tokens = (
-        sum(step.output_tokens for step in model_steps if step.output_tokens is not None)
-        if output_measured
-        else None
-    )
-    measured_intermediate_output_tokens = (
-        sum(
-            step.output_tokens
-            for step in (model_steps[:-1] if status == "done" else model_steps)
-            if step.output_tokens is not None
-        )
-        if output_measured
-        else None
-    )
     return TurnTiming(
         turn_id=turn_id,
         role=role,
-        status=status,
         span_ms=max(span, 0),
         model_round_ms=model_ms,
         tool_call_ms=tool_ms,
@@ -248,8 +211,6 @@ def turn_timing(
         rounds=sum(1 for entry in entries if entry.kind == "model_round"),
         tool_calls=len(dispatches),
         tokens=tokens,
-        output_tokens=measured_output_tokens,
-        intermediate_output_tokens=measured_intermediate_output_tokens,
         cost_micro_usd=cost_micro_usd,
         steps=tuple(entries),
     )

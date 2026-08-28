@@ -545,7 +545,6 @@ class WorkspaceDriver:
                     call_id = dispatched.tool_use_id
                     call_ids: tuple[str, ...] = ()
                     step_tokens: int | None = None
-                    step_output_tokens: int | None = None
                     step_cost_micro_usd: int | None = None
                     if dispatched.image_refs:
                         images: list[ImageBlock] = []
@@ -579,7 +578,6 @@ class WorkspaceDriver:
                     )
                 case StreamResult() as streamed:
                     step_tokens, step_cost_micro_usd = resources[index]
-                    step_output_tokens = stream_usage[index].output_tokens
                     call_id = ""
                     call_ids = tuple(call.id for call in streamed.tool_calls)
                     blocks = (
@@ -594,7 +592,7 @@ class WorkspaceDriver:
                 case _:
                     call_id = ""
                     call_ids = ()
-                    step_tokens = step_output_tokens = step_cost_micro_usd = None
+                    step_tokens = step_cost_micro_usd = None
             steps.append(
                 TurnStep(
                     function_name=step["function_name"],
@@ -603,7 +601,6 @@ class WorkspaceDriver:
                     call_id=call_id,
                     call_ids=call_ids,
                     tokens=step_tokens,
-                    output_tokens=step_output_tokens,
                     cost_micro_usd=step_cost_micro_usd,
                     messages=messages,
                 )
