@@ -192,6 +192,31 @@ _MEMBER_MESSAGE_RE = re.compile(
 _CONTEXT_TAG_RE = re.compile(r"\A<context>\n.*?\n</context>\n", re.DOTALL)
 _INJECTED_CONTEXT_RE = re.compile(r"\n\n<injected_context>\n.*\n</injected_context>\Z", re.DOTALL)
 
+SILENCE_SENTINEL = "<response></response>"
+"""The whole delivery of a turn that has nothing to say: an empty response element, which cannot
+occur in prose the way a bare word can."""
+SILENCE_LINE_BREAK = "<br>"
+"""The other whole answer that says nothing: a model with nothing to write sometimes emits a bare
+line-break tag and nothing else, which carries no words a member is owed."""
+_SILENCE_NAME = SILENCE_SENTINEL.removeprefix("<").partition(">")[0]
+_BREAK_NAME = SILENCE_LINE_BREAK.removeprefix("<").partition(">")[0]
+_SILENCE_RE = re.compile(
+    rf"<{_SILENCE_NAME}>\s*</{_SILENCE_NAME}>"
+    rf"|<{_SILENCE_NAME}\s*/>"
+    rf"|(?i:<{_BREAK_NAME}\s*/?>)"
+)
+
+
+def is_silence_sentinel(answer: str) -> bool:
+    """Whether a final answer says nothing and nothing else.
+
+    Strict about the whole answer: whitespace-stripped, it is the empty response element — the
+    paired form with any whitespace between the tags, or the self-closing one, since the model
+    produces both — or a bare line-break tag in any of its forms, whatever its case. An answer that
+    merely contains one of them among other text is a normal reply and is delivered as written,
+    because silence is only ever the whole delivery."""
+    return _SILENCE_RE.fullmatch(answer.strip()) is not None
+
 
 def mint_marker() -> str:
     """The token one member message's elements are named with.
@@ -4460,8 +4485,19 @@ class SurfaceAuth:
             return await self._credentials.get(workspace_id, slot)
 
 
+@dataclass(frozen=True)
+class NothingDelivered:
+    """What a durable surface's `post` returns when the delivery was to send nothing at all — a turn
+    whose answer is the silence sentinel. There is no message to reference, so no `reply_ref` is
+    recorded and `attach` never runs; the writeback is still marked delivered, because nothing is
+    what the turn owed. An explicit outcome rather than a `None` reply ref, which the poller reads
+    as "not posted yet" and would re-post forever."""
+
+
+NOTHING_DELIVERED = NothingDelivered()
+
 RouteHandler = Callable[[SurfaceContext, Request], Awaitable[Response]]
-PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str]]
+PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str | NothingDelivered]]
 AttachHandler = Callable[[SurfaceContext, Writeback, str], Awaitable[None]]
 SpeakHandler = Callable[[SurfaceContext, MidTurnReply], Awaitable[str]]
 WorkspaceResolver = Callable[[Request, SurfaceAuth], Awaitable[UUID | Response | None]]
@@ -4747,7 +4783,9 @@ class SurfaceSpec:
     bound to the surface's `SurfaceContext`. A **durable** surface also declares its two-phase
     writeback delivery: `post` sends the reply and returns its durable reference (recorded before
     any upload, so recovery skips the re-post), then `attach` uploads the turn's shared files into
-    that reply. Recovery repeats `attach`: attachment delivery is at-least-once because a crash
+    that reply. A `post` returning `NOTHING_DELIVERED` sent no message at all: no reference is
+    recorded and `attach` never runs, and the turn is delivered rather than retried.
+    Recovery repeats `attach`: attachment delivery is at-least-once because a crash
     after upload but before the delivered commit cannot distinguish the completed upload. A
     surface may make individual files best effort so one rejection does not block its siblings.
     `speak` is the same contract for a reply delivered before the turn ends: one message per marked
@@ -5065,9 +5103,17 @@ class WritebackPoller:
         context = self.context_for(workspace_id, surface_name)
         if reply_ref is None:
             try:
-                reply_ref = await spec.post(context, writeback)
+                posted = await spec.post(context, writeback)
             except Exception as error:
                 raise _WritebackDeliveryFailed("post", error) from error
+            if isinstance(posted, NothingDelivered):
+                log(
+                    "surface.writeback_nothing_delivered",
+                    turn_id=str(turn_id),
+                    surface=surface_name,
+                )
+                return
+            reply_ref = posted
             await self._record_ref(turn_id, reply_ref)
         try:
             await spec.attach(context, writeback, reply_ref)

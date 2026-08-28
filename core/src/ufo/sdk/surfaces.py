@@ -28,7 +28,16 @@ from ufo.ext.surface import (
     MEMBER_MESSAGE_ELEMENT as MEMBER_MESSAGE_ELEMENT,
 )
 from ufo.ext.surface import (
+    NOTHING_DELIVERED as NOTHING_DELIVERED,
+)
+from ufo.ext.surface import (
     OPERATOR_EMAIL_DOMAIN as OPERATOR_EMAIL_DOMAIN,
+)
+from ufo.ext.surface import (
+    SILENCE_LINE_BREAK as SILENCE_LINE_BREAK,
+)
+from ufo.ext.surface import (
+    SILENCE_SENTINEL as SILENCE_SENTINEL,
 )
 from ufo.ext.surface import (
     AddressClaim as AddressClaim,
@@ -71,6 +80,9 @@ from ufo.ext.surface import (
 )
 from ufo.ext.surface import (
     MidTurnReply as MidTurnReply,
+)
+from ufo.ext.surface import (
+    NothingDelivered as NothingDelivered,
 )
 from ufo.ext.surface import (
     PortalKind as PortalKind,
@@ -140,6 +152,9 @@ from ufo.ext.surface import (
 )
 from ufo.ext.surface import (
     inbox_name as inbox_name,
+)
+from ufo.ext.surface import (
+    is_silence_sentinel as is_silence_sentinel,
 )
 from ufo.ext.surface import (
     member_message_text as member_message_text,

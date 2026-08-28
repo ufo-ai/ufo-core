@@ -41,7 +41,10 @@ from ufo.db import workspace_tx
 from ufo.ext.surface import (
     CONVERSATION_TITLE_CHARS,
     MAX_CONVERSATION_SPEAKERS,
+    NOTHING_DELIVERED,
     OPERATOR_EMAIL_DOMAIN,
+    SILENCE_LINE_BREAK,
+    SILENCE_SENTINEL,
     TRANSCRIPT_ACCESS_WINDOW,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
@@ -49,6 +52,7 @@ from ufo.ext.surface import (
     WRITEBACK_MAX_AGE_SECONDS,
     WRITEBACK_WORKSPACE_BATCH,
     MidTurnReply,
+    NothingDelivered,
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
@@ -63,6 +67,7 @@ from ufo.ext.surface import (
     WritebackPoller,
     fence_member_message,
     inbox_name,
+    is_silence_sentinel,
     member_message_text,
     mint_marker,
     record_transcript_access,
@@ -183,6 +188,16 @@ class RecordingSurface:
         self.attached.append(
             (writeback.turn_id, reply_ref, tuple(a.filename for a in writeback.artifacts))
         )
+
+
+@dataclass
+class SilentSurface(RecordingSurface):
+    """A surface whose delivery for this turn was to send nothing — the shape Slack takes when a
+    turn's whole answer says nothing."""
+
+    async def post(self, ctx: SurfaceContext, writeback: Writeback) -> NothingDelivered:
+        self.posted.append(writeback.turn_id)
+        return NOTHING_DELIVERED
 
 
 @dataclass
@@ -1628,6 +1643,75 @@ async def test_an_undecided_ambient_reply_admits_the_turn(
     assert "unreadable" in undecided[1]
     assert "TimeoutError" in undecided[2]
     assert not [r for r in caplog.records if r.getMessage() == "surface.ambient_reply"]
+
+
+def test_the_silence_sentinel_is_the_whole_answer_or_it_is_not_silence() -> None:
+    """The predicate is the only reader of the tokens, and it decides whether a member sees nothing
+    at all — so both directions are pinned. Whitespace around and between the tags is tolerated and
+    the self-closing form counts, because the model produces both; the element inside a longer
+    reply, or discussed in prose, is a normal reply that must still be posted."""
+    assert is_silence_sentinel(SILENCE_SENTINEL)
+    assert is_silence_sentinel(f"  {SILENCE_SENTINEL}\n")
+    assert is_silence_sentinel("<response>   </response>")
+    assert is_silence_sentinel("<response>\n</response>")
+    assert is_silence_sentinel("<response/>")
+    assert is_silence_sentinel("<response />")
+    assert not is_silence_sentinel("")
+    assert not is_silence_sentinel("   ")
+    assert not is_silence_sentinel(f"Nothing further from me. {SILENCE_SENTINEL}")
+    assert not is_silence_sentinel(f"{SILENCE_SENTINEL} {SILENCE_SENTINEL}")
+    assert not is_silence_sentinel(
+        f"Send `{SILENCE_SENTINEL}` when the message is not for you — that is the whole delivery."
+    )
+    assert not is_silence_sentinel("<response>no</response>")
+    assert not is_silence_sentinel("<responses></responses>")
+
+
+def test_a_bare_line_break_answer_says_nothing_in_every_form_a_model_writes_it() -> None:
+    """A model with nothing to write sometimes answers with a line-break tag alone, which carries no
+    words, so the same predicate reads it as silence: the bare tag, the self-closing form with and
+    without a space, and any case. It is a real tag in ordinary content, so only the whole answer
+    counts — a reply that mentions it or holds it between words is a normal reply."""
+    assert is_silence_sentinel(SILENCE_LINE_BREAK)
+    assert is_silence_sentinel(f"  {SILENCE_LINE_BREAK}\n")
+    assert is_silence_sentinel("<br/>")
+    assert is_silence_sentinel("<br />")
+    assert is_silence_sentinel("<BR>")
+    assert is_silence_sentinel("<Br />")
+    assert not is_silence_sentinel("Nothing further from me. <br>")
+    assert not is_silence_sentinel("<br><br>")
+    assert not is_silence_sentinel("First line<br>second line")
+    assert not is_silence_sentinel("Use `<br>` to break the line.")
+    assert not is_silence_sentinel("<break>")
+    assert not is_silence_sentinel("<br>done</br>")
+
+
+async def test_a_surface_that_delivered_nothing_settles_the_writeback(
+    db: None, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A silent turn is delivered, not retried and not failed: nothing was owed, so the row closes
+    with no reply ref recorded and no attachment phase — there is no message to attach to. A `None`
+    ref instead of the explicit outcome would read as "not posted yet" and re-post every drain."""
+    workspace_id, _agent_id, _member_id = await _seed()
+    turn_id = await _seed_turn(workspace_id, "CQUIET:1.0", "done", SILENCE_LINE_BREAK)
+    poller, surface = _poller(workspace_id, SilentSurface(), FilesystemBlobStore(root=tmp_path))
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await poller.drain()
+        await poller.drain()
+
+    row = await _writeback(turn_id)
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref is None
+    assert row.last_error is None
+    assert surface.posted == [turn_id]
+    assert surface.attached == []
+    reported = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "surface.writeback_nothing_delivered"
+    )
+    assert reported.__dict__["ufo"]["turn_id"] == str(turn_id)
 
 
 def test_an_inbox_name_is_one_leaf_however_the_surface_was_handed_it() -> None:

@@ -68,6 +68,8 @@ from ufo.ext.surface import (
     ATTACHMENTS_ELEMENT,
     MEMBER_MESSAGE_ELEMENT,
     OPERATOR_EMAIL_DOMAIN,
+    SILENCE_LINE_BREAK,
+    SILENCE_SENTINEL,
     WRITEBACK_DELIVERED,
     fence_member_message,
     member_message_text,
@@ -104,6 +106,8 @@ from ufo.schema.records import (
     AskQuestion,
     AskUserInput,
     ConnectRequest,
+    CredentialPrompt,
+    CredentialRequest,
     QuestionOption,
     TerminalFrame,
     TerminalStatus,
@@ -3968,6 +3972,7 @@ async def _seed_done_turn(
     artifact_media_type: str = "application/pdf",
     question: AskUserInput | None = None,
     connect_request: ConnectRequest | None = None,
+    credential_request: CredentialRequest | None = None,
     speaker_member_id: UUID | None = None,
     status: TerminalStatus = "done",
 ) -> UUID:
@@ -4010,6 +4015,7 @@ async def _seed_done_turn(
                     reasoning="high",
                     question=question,
                     connect_request=connect_request,
+                    credential_request=credential_request,
                 ).model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -4347,6 +4353,160 @@ async def test_shared_slack_routes_two_installations_without_crossing_state(
         (turn_a, WRITEBACK_DELIVERED),
         (turn_b, WRITEBACK_DELIVERED),
     }
+
+
+@pytest.mark.parametrize("answer", [SILENCE_SENTINEL, SILENCE_LINE_BREAK, "<br/>", "<BR />"])
+async def test_a_turn_answering_with_silence_posts_nothing_at_all(
+    db: None, tmp_path, monkeypatch, caplog, answer: str
+) -> None:
+    """The whole point of the silence answer: a thread message that asked the agent nothing gets no
+    Slack message — no reply, no attribution footer, and not the `(no reply)` placeholder either —
+    while the writeback settles as delivered so the poller never comes back to it. An empty response
+    element and a bare line-break tag both say the same nothing.
+
+    Saying nothing is still the turn's delivery, so it drops every record the turn made on its way
+    out: the delivery record of the span it spoke mid-flight, and the DM anchor that span threaded
+    under. This path posts no message, so it records no ref and `attach` — which drops them for a
+    reply that did post — never runs, and no sweep or expiry would drop them later."""
+    caplog.set_level(logging.INFO, logger="ufo")
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "D5", answer, blob, artifact=False)
+    await _anchor_dm(workspace_id, turn_id, "100.5")
+    await _seed_spoken_reply(workspace_id, turn_id, "Filed it.", message_ref=turn_id)
+    await app.state.mid_turn_reply_poller.drain()
+    spoken = len(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL))
+    assert spoken == 1
+    assert await _reply_progress_keys(workspace_id) != []
+
+    await app.state.writeback_poller.drain()
+    await app.state.writeback_poller.drain()
+
+    assert len(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)) == spoken
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref is None
+    suppressed = [r for r in caplog.records if r.message == "slack.reply_suppressed"]
+    assert [(r.ufo["turn"], r.ufo["channel"]) for r in suppressed] == [(str(turn_id), "D5")]
+    assert await _reply_progress_keys(workspace_id) == []
+    assert await _dm_anchors(workspace_id) == []
+
+
+async def test_a_silent_turn_that_shared_a_file_still_posts_and_uploads_it(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """Silence must not swallow a delivery. `attach` only runs once a reply exists, so a turn that
+    shared a file posts as usual whatever its text says — the silence answer reaches the thread as
+    text rather than the file reaching nobody."""
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    with ws(workspace_id):
+        await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
+    await _seed_done_turn(workspace_id, "C5:200.0", SILENCE_SENTINEL, blob, artifact=True)
+
+    await app.state.writeback_poller.drain()
+
+    posts = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    assert len(posts) == 1
+    assert json.loads(posts[0].content)["blocks"][0] == {
+        "type": "markdown",
+        "text": SILENCE_SENTINEL,
+    }
+    uploads = [r for r in recorder if str(r.url) == UPLOAD_URL]
+    assert len(uploads) == 1 and uploads[0].content == b"PDF-CONTENT"
+
+
+@pytest.mark.parametrize(
+    ("act", "action_ids", "owed"),
+    [
+        pytest.param(
+            {"question": ASK_QUESTION},
+            [slack.ASK_SUBMIT_ACTION_ID],
+            "Need a decision",
+            id="question",
+        ),
+        pytest.param(
+            {
+                "connect_request": ConnectRequest(
+                    provider="google_calendar", requester_member_id=uuid4()
+                )
+            },
+            [slack.CONNECT_ACTION_ID],
+            "Connect google_calendar",
+            id="connect",
+        ),
+        pytest.param(
+            {
+                "credential_request": CredentialRequest(
+                    reason="reading the calendar",
+                    prompts=(CredentialPrompt(slot="calendar_token", prompt="API token"),),
+                    sealed="opaque",
+                )
+            },
+            [],
+            "reading the calendar",
+            id="credential",
+        ),
+    ],
+)
+async def test_a_silent_turn_that_still_owes_an_act_posts_it(
+    db: None,
+    tmp_path,
+    monkeypatch,
+    act: dict[str, object],
+    action_ids: list[str],
+    owed: str,
+) -> None:
+    """Silence covers the words alone. A done turn that asked a question, requested a connection, or
+    asked for a credential still owes the member that act, and this thread is the only place it
+    reaches them — nothing later re-asks it, and the act stays open until they answer. So the reply
+    posts however little its text says, carrying the ask controls, the connect button, or the
+    credential prompt, and the writeback records the message it posted."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        SILENCE_LINE_BREAK,
+        blob,
+        artifact=False,
+        speaker_member_id=member_id,
+        **act,
+    )
+
+    await app.state.writeback_poller.drain()
+
+    posts = _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    assert len(posts) == 1
+    posted = json.loads(posts[0].content)
+    assert posted["blocks"][0]["text"].startswith(SILENCE_LINE_BREAK)
+    assert owed in json.dumps(posted, ensure_ascii=False)
+    assert [
+        element["action_id"]
+        for block in posted["blocks"]
+        for element in (block.get("elements") or [])
+        if "action_id" in element
+    ] == action_ids
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == WRITEBACK_DELIVERED
+    assert row.reply_ref is not None
 
 
 async def test_every_outcome_line_a_turn_without_its_own_text_posts(
@@ -4709,6 +4869,20 @@ async def _dm_anchors(workspace_id: UUID) -> list[str]:
     return [row.key for row in rows]
 
 
+async def _reply_progress_keys(workspace_id: UUID) -> list[str]:
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.ext_store.c.key).where(
+                    tables.ext_store.c.workspace_id == workspace_id,
+                    tables.ext_store.c.extension == slack.SLACK_EXTENSION,
+                    tables.ext_store.c.key.startswith(slack.SLACK_REPLY_PROGRESS_PREFIX),
+                )
+            )
+        ).all()
+    return [row.key for row in rows]
+
+
 async def test_a_reply_the_turn_spoke_posts_in_the_thread_without_the_terminal_footer(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -4804,17 +4978,7 @@ async def test_the_terminal_delivery_drops_every_record_the_turns_replies_made(
     await app.state.writeback_poller.drain()
 
     assert spoken_record is not None
-    async with workspace_tx() as connection:
-        left = (
-            await connection.execute(
-                sa.select(tables.ext_store.c.key).where(
-                    tables.ext_store.c.workspace_id == workspace_id,
-                    tables.ext_store.c.extension == slack.SLACK_EXTENSION,
-                    tables.ext_store.c.key.startswith(slack.SLACK_REPLY_PROGRESS_PREFIX),
-                )
-            )
-        ).all()
-    assert left == []
+    assert await _reply_progress_keys(workspace_id) == []
 
 
 async def test_dm_spans_thread_under_the_messages_they_answer(

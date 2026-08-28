@@ -140,6 +140,7 @@ from ufo.sdk.o11y import log, warn
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
+    NOTHING_DELIVERED,
     WORKSPACE_WRITE_MAX_BYTES,
     Admitted,
     AmbientMessage,
@@ -152,6 +153,7 @@ from ufo.sdk.surfaces import (
     CredentialRequestState,
     CredentialSlotUnset,
     MidTurnReply,
+    NothingDelivered,
     QuestionOption,
     SharedArtifact,
     SurfaceAuth,
@@ -164,6 +166,7 @@ from ufo.sdk.surfaces import (
     Writeback,
     fence_member_message,
     inbox_name,
+    is_silence_sentinel,
     mint_marker,
 )
 from ufo_ext_slack.attribution import addressing_mention, message_bodies
@@ -2563,8 +2566,8 @@ async def _mirror_thread(conversation_id: UUID, thread: MirroredThread) -> None:
 def _dm_anchor_key(turn_id: UUID, message_ref: UUID | None = None) -> str:
     """The DM message one of a turn's replies threads under: the turn's founding message under the
     turn alone — the ref core gives a founding message is the turn's own id — and a message the turn
-    absorbed under that message's ref beneath it, so `attach` drops every anchor a turn used by
-    reading its one prefix."""
+    absorbed under that message's ref beneath it, so the turn's delivery drops every anchor it used
+    by reading its one prefix."""
     absorbed = "" if message_ref is None or message_ref == turn_id else f"/{message_ref}"
     return f"{SLACK_DM_ANCHOR_PREFIX}{turn_id}{absorbed}"
 
@@ -4018,8 +4021,8 @@ class _SlackReplyProgress(BaseModel):
 
 def _slack_reply_progress_key(turn_id: UUID, reply_id: UUID | None = None) -> str:
     """The delivery record of one turn's reply: the terminal reply under the turn alone, a reply the
-    turn spoke mid-flight under the span's id beneath it — so `attach` drops every record a turn
-    made by reading its one prefix."""
+    turn spoke mid-flight under the span's id beneath it — so the turn's delivery drops every record
+    it made by reading its one prefix."""
     span = "" if reply_id is None else f"/{reply_id}"
     return f"{SLACK_REPLY_PROGRESS_PREFIX}{turn_id}{span}"
 
@@ -4050,6 +4053,19 @@ async def _checkpoint_slack_reply(
     if not await store.put_if(key, encoded, expected=expected):
         raise SlackApiError("Slack reply progress changed during delivery")
     return progress, encoded
+
+
+async def _drop_turn_reply_records(store: ScopedStore, turn_id: UUID) -> None:
+    """Drop every record the turn's replies made: the terminal reply's delivery record, one per span
+    it spoke mid-flight, and the DM anchors those replies threaded under. Each is keyed under the
+    turn, so one prefix read per family finds them all.
+
+    Every delivery path ends here — `attach` for a reply that posted, `post` itself for one it
+    suppressed, which records no ref and so never reaches `attach`. Nothing needs these rows once
+    the turn is delivered, and no sweep or expiry would drop them later."""
+    for prefix in (_slack_reply_progress_key(turn_id), _dm_anchor_key(turn_id)):
+        for key, _value in await store.list(prefix):
+            await store.delete(key)
 
 
 def _slack_reply_delivery(message: object, delivery_id: str) -> str | None:
@@ -4189,8 +4205,21 @@ async def _reply_mentions_mapped(
     return progress, expected, mention_markup(text, ids)
 
 
-async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
+async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelivered:
     """Post the reply parts and return the first message ref (`channel:ts`), the delivery record.
+    A done turn whose whole answer says nothing — the silence sentinel, in any of the forms a model
+    writes it — sends no message at all, so the thread gets neither a footer nor the `(no reply)`
+    placeholder, and reports that it delivered nothing, which settles the writeback instead of
+    retrying it. Silence is only the whole delivery: a turn still owes the member every act the
+    frame carries besides its words — a shared file, a pending question, a connect handoff, a
+    credential prompt — and any one of them posts as usual whatever the text says, because this
+    surface is the only place the member reaches them and nothing later re-asks. A shared file needs
+    the message for its own sake too, since `attach` only runs once a reply exists. The failed and
+    cancelled lines are this surface's own words rather than the agent's, so they are never silence
+    either. A suppressed reply records no ref, so `attach` never runs and this path drops the turn's
+    own delivery records and DM anchors itself — the one cleanup it still owes, and all of it, since
+    it posts nothing and has no file to upload.
+
     Only the last part carries the standard footer (`_slack_footer`), with the turn's settled
     accounting and the model it ran on, so a reply split across messages ends with exactly one. An
     `invalid_blocks` rejection is deterministic, so the reply re-posts once — as conservative
@@ -4202,6 +4231,17 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
     accepted the message. The completed checkpoint survives until `attach`, after core has durably
     recorded the first message as the delivery ref."""
     channel = writeback.queue_key.partition(":")[0]
+    if (
+        writeback.terminal.status == "done"
+        and not writeback.artifacts
+        and writeback.terminal.question is None
+        and writeback.terminal.connect_request is None
+        and writeback.terminal.credential_request is None
+        and is_silence_sentinel(writeback.terminal.text)
+    ):
+        log("slack.reply_suppressed", turn=str(writeback.turn_id), channel=channel)
+        await _drop_turn_reply_records(ScopedStore(SLACK_EXTENSION), writeback.turn_id)
+        return NOTHING_DELIVERED
     thread = await _reply_thread(writeback.queue_key, writeback.turn_id)
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     store = ScopedStore(SLACK_EXTENSION)
@@ -4381,9 +4421,10 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
     retry reads it back from the thread rather than posting twice. That closes the one window core's
     claim leaves open, a claim that expires while this post is in flight.
 
-    Every record of a turn's replies is dropped in `attach`, once core has recorded the ref of the
-    terminal reply that ends the turn. It does carry mentions: these are the model's own words to
-    the member, like the terminal reply's, so a name it writes notifies the same person here."""
+    Every record of a turn's replies is dropped once the turn's own delivery ends — in `attach`
+    after core has recorded the ref of the terminal reply, or in `post` when that reply says
+    nothing and so posts no message at all. It does carry mentions: these are the model's own words
+    to the member, like the terminal reply's, so a name it writes notifies the same person here."""
     channel, _, root = reply.queue_key.partition(":")
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     store = ScopedStore(SLACK_EXTENSION)
@@ -4525,18 +4566,12 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
     effort: a file Slack refuses is logged and left out of the share, so the rest still arrive
     together, and an upload never re-posts the reply or blocks its siblings.
 
-    Every record the turn made is dropped first — the terminal reply's delivery record, one per span
-    it spoke mid-flight, and the DM anchors those replies threaded under — because core has now
+    Every record the turn made is dropped first (`_drop_turn_reply_records`), because core has now
     durably recorded the terminal ref and every span row carries the ref of the message it posted,
     so no attempt can arrive that needs them."""
     store = ScopedStore(SLACK_EXTENSION)
     thread = await _reply_thread(writeback.queue_key, writeback.turn_id)
-    for prefix in (
-        _slack_reply_progress_key(writeback.turn_id),
-        _dm_anchor_key(writeback.turn_id),
-    ):
-        for key, _value in await store.list(prefix):
-            await store.delete(key)
+    await _drop_turn_reply_records(store, writeback.turn_id)
     inline = tuple(a for a in writeback.artifacts if a.size_bytes <= SLACK_UPLOAD_MAX_BYTES)
     if not inline:
         return
