@@ -143,6 +143,16 @@ window.addEventListener("message",event=>{
   const path=String(message.path||"").replace(/^[/]+/,"");
   const route=path.split("?",1)[0];
   const request=typeof message.body==="string"?JSON.parse(message.body):message.body;
+  const streamParts=route.split("/");
+  if(message.method==="GET"&&streamParts.length===3&&streamParts[0]==="turns"&&streamParts[1]&&streamParts[2]==="stream"){
+    const terminal=JSON.stringify({
+      status:"done",text:"",model:"preview",tokens:0,cost_micro_usd:0
+    });
+    event.source.postMessage({ufo:"opened",id:message.id},"*");
+    event.source.postMessage({ufo:"frame",id:message.id,event:"terminal",data:terminal},"*");
+    event.source.postMessage({ufo:"end",id:message.id},"*");
+    return;
+  }
   const actions=JSON.parse(localStorage.getItem(actionKey)||"{}");
   let response={applied:true,message:"Prepared action accepted."};
   if(path==="api/agents"){

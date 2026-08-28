@@ -98,21 +98,28 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     assert run_argv[run_argv.index("-v") + 1] == f"/tmp/ws:{WORKSPACE_DIR}"
     assert run_argv[run_argv.index("--network") + 1] == (f"ufo-sandbox-{spec.conversation_id.hex}")
     assert run_argv[run_argv.index("--cap-drop") + 1] == "NET_RAW"
-    runtime_call = next(argv for argv in calls if "install" in argv)
+    runtime_call = next(
+        argv for argv in calls if len(argv) > 6 and argv[6].startswith("install -d")
+    )
+    runtime_root = sandbox_runtime_root(spec.conversation_id)
     assert runtime_call == (
         "exec",
         "-u",
         "root",
         "cid1",
-        "install",
-        "-d",
-        "-o",
+        "sh",
+        "-c",
+        'install -d -o 0 -g 0 -m 0755 "$1" && '
+        'if [ -f "$1/session" ] && [ ! -L "$1/session" ]; then '
+        'chown "$3:$4" "$1/session" && chmod 0600 "$1/session"; '
+        'else rm -f "$1/session" && '
+        'install -o "$3" -g "$4" -m 0600 /dev/null "$1/session"; fi && '
+        'install -d -o "$3" -g "$4" -m 0700 "$2"',
+        "sh",
+        str(Path(runtime_root).parents[1]),
+        runtime_root,
         str(SANDBOX_UID),
-        "-g",
         str(SANDBOX_GID),
-        "-m",
-        "0700",
-        sandbox_runtime_root(spec.conversation_id),
     )
 
     await carrier.exec(handle, ("bash", "-lc", "gh api user"), 30)

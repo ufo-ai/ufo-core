@@ -24,6 +24,14 @@ import {
   type Route,
 } from "./harness";
 
+const applicationLifecycle = await import("@/apps/lifecycle");
+vi.doMock("@/apps/lifecycle", () => applicationLifecycle);
+const lifecycle = (
+  window as unknown as {
+    __ufoApplicationLifecycle: { snapshot(): { blockingWork: number } };
+  }
+).__ufoApplicationLifecycle;
+
 /** Each app's real page, run the way a built page runs: the extension's own TSX imported as a
  *  module against the kit `ufo/kit` resolves to, mounting itself through the bridge handshake
  *  against a fake shell on this same window — jsdom's `window.top` is the window itself, so the
@@ -126,6 +134,7 @@ afterEach(async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     for (const cleanup of cleanups.splice(0)) cleanup();
   });
+  await vi.waitFor(() => expect(lifecycle.snapshot().blockingWork).toBe(0));
   window.fetch = nativeFetch;
   (window as { EventSource: typeof EventSource }).EventSource = nativeEventSource;
 });
@@ -141,6 +150,15 @@ test("the radar page mounts and draws its empty feed under its own band", async 
   expect(calls.some((url) => url.includes("/objects/report"))).toBe(true);
 });
 
+test("page module resets reuse the installed lifecycle", async () => {
+  await runPage("radar", {
+    "/objects/report": () => json({ objects: [] }),
+  });
+  expect(await screen.findByRole("heading", { name: "Radar" })).toBeTruthy();
+
+  vi.resetModules();
+  await expect(import("@/apps/runtime")).resolves.toBeDefined();
+});
 test("the wiki page mounts and draws the workspace article", async () => {
   const { calls } = await runPage("wiki", {
     "/objects/memory": () => json({ objects: [] }),

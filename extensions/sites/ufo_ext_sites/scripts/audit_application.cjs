@@ -32,6 +32,9 @@ const DESIGN_CLONE_BYTE_MAX = 2 * 1024 * 1024;
 const DESIGN_OUTPUT_BYTE_MAX = 2048;
 const DESIGN_ANIMATED_POINT_MAX = 4096;
 const DESIGN_ANIMATED_ATTRIBUTE_BYTE_MAX = 128 * 1024;
+const APPLICATION_LIFECYCLE_TIMEOUT_MS = 15000;
+const APPLICATION_INTERACTION_TIMEOUT_MS = 300;
+const APPLICATION_LIFECYCLE_DIAGNOSTIC_SUFFIX = '.lifecycle.json';
 const SVG_PRESENTATION_PROPERTIES = new Set(
   ('alignment-baseline baseline-shift clip-path clip-rule color color-interpolation ' +
     'color-interpolation-filters color-rendering cursor cx cy d direction display ' +
@@ -351,8 +354,154 @@ async function applicationFrame(page) {
   if (!element) return page;
   const frame = await element.contentFrame();
   if (!frame) throw new Error('application frame did not load');
-  await frame.waitForSelector('#root > *', { timeout: 15000 });
   return frame;
+}
+
+class ApplicationLifecycleError extends Error {
+  constructor(reason, snapshot = null) {
+    super(reason);
+    this.snapshot = snapshot;
+  }
+}
+
+function lifecycleStable(snapshot) {
+  return snapshot.mounted && snapshot.blockingWork === 0 && snapshot.state === 'idle';
+}
+
+function sameLifecycle(first, second) {
+  return first.generation === second.generation && first.epoch === second.epoch &&
+    first.revision === second.revision;
+}
+
+async function lifecycleEvaluate(frame, operation, argument, deadline, snapshot = null) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new ApplicationLifecycleError('application lifecycle did not become ready', snapshot);
+  }
+  let timer;
+  try {
+    return await Promise.race([
+      frame.evaluate(operation, argument),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new ApplicationLifecycleError(
+          'application lifecycle did not become ready', snapshot
+        )), remaining);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function lifecycleProbe(frame, deadline, snapshot) {
+  return lifecycleEvaluate(frame, async () => {
+    const controller = window.__ufoApplicationLifecycle;
+    if (!controller || typeof controller.snapshot !== 'function' ||
+        typeof controller.afterPaint !== 'function' ||
+        typeof controller.beginObservation !== 'function' ||
+        typeof controller.endObservation !== 'function') return null;
+    const before = controller.snapshot();
+    await controller.afterPaint();
+    return { before, after: controller.snapshot() };
+  }, undefined, deadline, snapshot);
+}
+
+async function waitForApplicationReadyUntil(frame, deadline) {
+  let last = null;
+  while (Date.now() < deadline) {
+    const probe = await lifecycleProbe(frame, deadline, last);
+    if (!probe) throw new ApplicationLifecycleError('application lifecycle signal is missing');
+    last = probe.after;
+    if (lifecycleStable(probe.before) && lifecycleStable(probe.after) &&
+        sameLifecycle(probe.before, probe.after)) return probe.after;
+  }
+  throw new ApplicationLifecycleError('application lifecycle did not become ready', last);
+}
+
+async function waitForApplicationReady(frame, timeoutMs = APPLICATION_LIFECYCLE_TIMEOUT_MS) {
+  return waitForApplicationReadyUntil(frame, Date.now() + timeoutMs);
+}
+
+async function measureApplication(
+  frame,
+  floor,
+  timeoutMs = APPLICATION_LIFECYCLE_TIMEOUT_MS
+) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const ready = await waitForApplicationReadyUntil(frame, deadline);
+    const measured = await lifecycleEvaluate(frame, measure, floor, deadline, ready);
+    last = await lifecycleEvaluate(
+      frame,
+      () => window.__ufoApplicationLifecycle.snapshot(),
+      undefined,
+      deadline,
+      ready
+    );
+    if (sameLifecycle(ready, last) && lifecycleStable(last)) return measured;
+  }
+  throw new ApplicationLifecycleError('application changed during measurement', last);
+}
+
+async function beginApplicationObservation(
+  frame,
+  timeoutMs = APPLICATION_LIFECYCLE_TIMEOUT_MS
+) {
+  return lifecycleEvaluate(
+    frame,
+    () => window.__ufoApplicationLifecycle.beginObservation(),
+    undefined,
+    Date.now() + timeoutMs
+  );
+}
+
+async function endApplicationObservation(
+  frame,
+  epoch,
+  timeoutMs = APPLICATION_LIFECYCLE_TIMEOUT_MS
+) {
+  const deadline = Date.now() + timeoutMs;
+  await lifecycleEvaluate(
+    frame,
+    (heldEpoch) => window.__ufoApplicationLifecycle.endObservation(heldEpoch),
+    epoch,
+    deadline
+  );
+  return waitForApplicationReadyUntil(frame, deadline);
+}
+
+async function waitForApplicationInteraction(
+  frame,
+  before,
+  timeoutMs = APPLICATION_INTERACTION_TIMEOUT_MS
+) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    let probe;
+    try {
+      probe = await lifecycleProbe(frame, deadline, last);
+    } catch (error) {
+      if (error instanceof ApplicationLifecycleError && last && lifecycleStable(last)) return null;
+      throw error;
+    }
+    if (!probe) throw new ApplicationLifecycleError('application lifecycle signal is missing');
+    last = probe.after;
+    if (!lifecycleStable(probe.before) || !lifecycleStable(probe.after) ||
+        !sameLifecycle(probe.before, probe.after)) continue;
+    const after = await lifecycleEvaluate(frame, visibleState, undefined, deadline, last);
+    last = await lifecycleEvaluate(
+      frame,
+      () => window.__ufoApplicationLifecycle.snapshot(),
+      undefined,
+      deadline,
+      last
+    );
+    if (lifecycleStable(last) && sameLifecycle(probe.after, last) && before !== after) return after;
+  }
+  if (last && lifecycleStable(last)) return null;
+  throw new ApplicationLifecycleError('application lifecycle did not become ready', last);
 }
 
 async function renderedDesignRegions(page) {
@@ -749,7 +898,7 @@ async function interactionAudit(browser, url) {
   const index = await source.newPage();
   await index.goto(url, { waitUntil: 'load' });
   const indexFrame = await applicationFrame(index);
-  await index.waitForTimeout(700);
+  await waitForApplicationReady(indexFrame);
   const controls = await indexFrame.evaluate(controlCandidates);
   const initial = JSON.parse(await indexFrame.evaluate(visibleState));
   await source.close();
@@ -782,12 +931,15 @@ async function interactionAudit(browser, url) {
     try {
       await page.goto(url, { waitUntil: 'load' });
       const frame = await applicationFrame(page);
-      await page.waitForTimeout(300);
+      await waitForApplicationReady(frame);
       let before = '';
+      let after = '';
       for (let index = 0; index < path.length; index += 1) {
         const step = path[index];
         const target = frame.locator(step.selector);
-        if (index === path.length - 1) before = await frame.evaluate(visibleState);
+        const stepBefore = await frame.evaluate(visibleState);
+        if (index === path.length - 1) before = stepBefore;
+        const epoch = await beginApplicationObservation(frame);
         if (step.tag === 'select') {
           const values = await target.locator('option').evaluateAll((options) =>
             options.map((option) => option.value)
@@ -798,9 +950,10 @@ async function interactionAudit(browser, url) {
         } else {
           await target.click({ timeout: 2000 });
         }
-        await page.waitForTimeout(index === path.length - 1 ? 300 : 100);
+        await endApplicationObservation(frame, epoch, APPLICATION_INTERACTION_TIMEOUT_MS);
+        const stepAfter = await waitForApplicationInteraction(frame, stepBefore);
+        if (index === path.length - 1) after = stepAfter || stepBefore;
       }
-      const after = await frame.evaluate(visibleState);
       const controlCalls = await page.evaluate(() => window.__ufoCalls || []);
       const controlNavigations = await page.evaluate(() => window.__ufoNavigations || []);
       calls.push(...controlCalls);
@@ -824,13 +977,15 @@ async function interactionAudit(browser, url) {
       )) {
         await page.reload({ waitUntil: 'load' });
         const reloadedFrame = await applicationFrame(page);
-        await page.waitForTimeout(300);
+        await waitForApplicationReady(reloadedFrame);
         reloadStates.push({ control: control.name, ...JSON.parse(
           await reloadedFrame.evaluate(visibleState)
         ) });
       }
     } catch (error) {
-      if (!String(error).includes('Timeout')) problems.push(`interaction: ${String(error)}`);
+      if (!(error instanceof ApplicationLifecycleError) && !String(error).includes('Timeout')) {
+        problems.push(`interaction: ${String(error)}`);
+      }
     } finally {
       await context.close();
     }
@@ -904,7 +1059,7 @@ async function interactiveDocument(frame) {
   });
 }
 
-(async () => {
+async function main() {
   if (process.argv[2] === '--design') {
     if (!process.argv[3] || process.argv.length !== 4) {
       console.error('usage: node app-audit.cjs --design <application-design.svg>');
@@ -952,8 +1107,7 @@ async function interactiveDocument(frame) {
     });
     await page.goto(url, { waitUntil: 'load' });
     const frame = await applicationFrame(page);
-    await page.waitForTimeout(700);
-    const measured = await frame.evaluate(measure, AA_FLOOR);
+    const measured = await measureApplication(frame, AA_FLOOR);
     const shot = view.shoot ? shots[view.scheme] : '';
     if (shot) await page.screenshot({ path: shot });
     if (view.scheme === 'light' && view.width === 1440) {
@@ -1023,4 +1177,35 @@ async function interactiveDocument(frame) {
   } finally {
     await browser.close();
   }
-})();
+}
+
+async function run() {
+  const reportPath = process.argv[2] === '--design' ? null : process.argv[3];
+  if (reportPath) fs.rmSync(reportPath + APPLICATION_LIFECYCLE_DIAGNOSTIC_SUFFIX, { force: true });
+  try {
+    await main();
+  } catch (error) {
+    if (error instanceof ApplicationLifecycleError) {
+      if (reportPath) fs.writeFileSync(reportPath + APPLICATION_LIFECYCLE_DIAGNOSTIC_SUFFIX, JSON.stringify({
+        code: 'application_lifecycle',
+        reason: error.message,
+        snapshot: error.snapshot,
+      }));
+      process.exitCode = 3;
+      return;
+    }
+    throw error;
+  }
+}
+
+module.exports = {
+  ApplicationLifecycleError,
+  beginApplicationObservation,
+  endApplicationObservation,
+  interactionAudit,
+  measure,
+  measureApplication,
+  waitForApplicationReady,
+};
+
+if (require.main === module) void run();

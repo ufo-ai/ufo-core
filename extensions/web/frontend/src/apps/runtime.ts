@@ -2,6 +2,13 @@ import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
 import type { WorkspacePlace } from "@/lib/route";
 import type { Crumb } from "@/lib/title";
 import type { Agent } from "@/lib/types";
+import {
+  beginLifecycleWork,
+  cancelLifecycleWork,
+  reviseLifecycleWork,
+  setNativeTimeout,
+  settleLifecycleWork,
+} from "@/apps/lifecycle";
 
 /** The app page's side of the bridge (RFC 0039, `docs/apps-prototype-contracts.md` Contract 1) and
  *  the whole of what a page needs from the portal: the page is a built bundle that imports this
@@ -41,6 +48,7 @@ type DataReply = {
 };
 
 type StreamHandlers = {
+  lease: number;
   opened: () => void;
   frame: (event: string, data: string) => void;
   end: (error?: string) => void;
@@ -90,11 +98,21 @@ window.addEventListener("message", (event: MessageEvent) => {
       return;
     }
     case "opened":
-      if (typeof message.id === "string") STREAMS.get(message.id)?.opened();
+      if (typeof message.id === "string") {
+        const stream = STREAMS.get(message.id);
+        if (stream) {
+          reviseLifecycleWork(stream.lease);
+          stream.opened();
+        }
+      }
       return;
     case "frame": {
       const frame = event.data as { id: string; event: string; data: string };
-      STREAMS.get(frame.id)?.frame(frame.event, frame.data);
+      const stream = STREAMS.get(frame.id);
+      if (stream) {
+        reviseLifecycleWork(stream.lease);
+        stream.frame(frame.event, frame.data);
+      }
       return;
     }
     case "end": {
@@ -124,7 +142,7 @@ export function connect(): Promise<AppInit> {
     const retry = () => {
       if (init || attempts++ >= READY_ATTEMPTS) return;
       send({ ufo: "ready" });
-      setTimeout(retry, READY_RETRY_MS);
+      setNativeTimeout(retry, READY_RETRY_MS);
     };
     retry();
   });
@@ -168,8 +186,12 @@ function call(
   form?: { name: string; value: string | File }[],
 ): Promise<DataReply> {
   const id = "r" + ++counter;
+  const lease = beginLifecycleWork("unary");
   return new Promise((resolve) => {
-    CALLS.set(id, resolve);
+    CALLS.set(id, (reply) => {
+      resolve(reply);
+      settleLifecycleWork(lease);
+    });
     send({
       ufo: "call",
       id,
@@ -220,7 +242,9 @@ class BridgeEventSource extends EventTarget {
     super();
     if (!url.startsWith(BASE + "/")) throw new Error("only portal streams reach the bridge");
     this.id = "s" + ++counter;
+    const lease = beginLifecycleWork("stream");
     STREAMS.set(this.id, {
+      lease,
       opened: () => {
         this.readyState = BridgeEventSource.OPEN;
         const event = new Event("open");
@@ -235,8 +259,12 @@ class BridgeEventSource extends EventTarget {
       end: () => {
         this.readyState = BridgeEventSource.CLOSED;
         const event = new Event("error");
-        this.onerror?.(event);
-        this.dispatchEvent(event);
+        try {
+          this.onerror?.(event);
+          this.dispatchEvent(event);
+        } finally {
+          settleLifecycleWork(lease);
+        }
       },
     });
     send({ ufo: "call", id: this.id, method: "GET", path: url.slice(BASE.length) });
@@ -245,7 +273,9 @@ class BridgeEventSource extends EventTarget {
   close(): void {
     if (this.readyState === BridgeEventSource.CLOSED) return;
     this.readyState = BridgeEventSource.CLOSED;
+    const stream = STREAMS.get(this.id);
     STREAMS.delete(this.id);
+    if (stream) cancelLifecycleWork(stream.lease);
     send({ ufo: "close", id: this.id });
   }
 }

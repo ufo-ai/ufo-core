@@ -639,20 +639,26 @@ class DockerCarrier:
             raise RuntimeError(f"CA install failed: {write[2].decode().strip()}")
 
     async def _ensure_runtime_root(self, container_id: str, conversation_id: UUID) -> None:
+        runtime_root = sandbox_runtime_root(conversation_id)
+        home_root = str(PurePosixPath(runtime_root).parents[1])
         code, _, stderr = await _docker(
             "exec",
             "-u",
             "root",
             container_id,
-            "install",
-            "-d",
-            "-o",
+            "sh",
+            "-c",
+            'install -d -o 0 -g 0 -m 0755 "$1" && '
+            'if [ -f "$1/session" ] && [ ! -L "$1/session" ]; then '
+            'chown "$3:$4" "$1/session" && chmod 0600 "$1/session"; '
+            'else rm -f "$1/session" && '
+            'install -o "$3" -g "$4" -m 0600 /dev/null "$1/session"; fi && '
+            'install -d -o "$3" -g "$4" -m 0700 "$2"',
+            "sh",
+            home_root,
+            runtime_root,
             str(SANDBOX_UID),
-            "-g",
             str(SANDBOX_GID),
-            "-m",
-            "0700",
-            sandbox_runtime_root(conversation_id),
             timeout_s=RUNTIME_ROOT_TIMEOUT_SECONDS,
         )
         if code != 0:

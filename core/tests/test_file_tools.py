@@ -48,6 +48,7 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
+    sandbox_runtime_root,
 )
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
@@ -79,6 +80,89 @@ pytestmark = pytest.mark.docker
 
 OVER_INMEMORY_BYTES = 25 * 1024 * 1024
 ARTIFACT_SECRET = "file-tools-secret"
+
+
+async def test_docker_runtime_root_allows_the_default_user_to_start_commands(
+    sandbox_container: tuple[str, Path],
+) -> None:
+    container, workspace = sandbox_container
+    conversation_id = uuid4()
+    carrier = DockerCarrier()
+    handle = SandboxHandle(
+        conversation_id=conversation_id,
+        container_id=container,
+        workspace_host_path=str(workspace),
+        runtime_root=sandbox_runtime_root(conversation_id),
+    )
+    seeded = await carrier.exec_skill(
+        handle,
+        (
+            "install",
+            "-d",
+            "-o",
+            "0",
+            "-g",
+            "0",
+            "-m",
+            "0755",
+            "/home/user/.ufo/skills",
+        ),
+        30,
+    )
+    assert seeded.exit_code == 0
+    await carrier._ensure_runtime_root(container, conversation_id)
+
+    direct = await carrier.exec(handle, ("ufo", "run", "--", "true"), 30)
+    assert direct.exit_code == 0
+    assert "Permission denied" not in direct.stderr
+    session = await carrier.exec(
+        handle,
+        (
+            "stat",
+            "-c",
+            "%u:%g %a",
+            "/home/user/.ufo",
+            "/home/user/.ufo/session",
+            sandbox_runtime_root(conversation_id),
+            "/home/user/.ufo/skills",
+        ),
+        30,
+    )
+    assert session.stdout.splitlines() == [
+        "0:0 755",
+        "1000:1000 600",
+        "1000:1000 700",
+        "0:0 755",
+    ]
+    session_id = await carrier.exec(handle, ("cat", "/home/user/.ufo/session"), 30)
+    await carrier._ensure_runtime_root(container, conversation_id)
+    assert await carrier.exec(handle, ("cat", "/home/user/.ufo/session"), 30) == session_id
+    rename = await carrier.exec(
+        handle,
+        ("mv", "/home/user/.ufo/skills", "/home/user/.ufo/skills-renamed"),
+        30,
+    )
+    assert rename.exit_code != 0
+    replacement = await carrier.exec(
+        handle,
+        (
+            "sh",
+            "-c",
+            "ln -s /tmp /tmp/replacement-skills && "
+            "mv -Tf /tmp/replacement-skills /home/user/.ufo/skills",
+        ),
+        30,
+    )
+    assert replacement.exit_code != 0
+    skills = await carrier.exec(
+        handle,
+        ("sh", "-c", "test -d /home/user/.ufo/skills && test ! -L /home/user/.ufo/skills"),
+        30,
+    )
+    assert skills.exit_code == 0
+    through_session = await SandboxSession(carrier=carrier, handle=handle).bash("true")
+    assert through_session.exit_code == 0
+    assert "Permission denied" not in through_session.stderr
 
 
 def _download_claims(url: str) -> ArtifactClaims:

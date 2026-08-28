@@ -50,6 +50,7 @@ import json
 import shlex
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
+from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -118,6 +119,7 @@ APPLICATION_AUDIT_PORT_SPAN = 20000
 APPLICATION_AUDIT_TIMEOUT_SECONDS = 120
 APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS = 15
 APPLICATION_AUDIT_REPORT_MAX_BYTES = 1024 * 1024
+APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES = 4096
 APPLICATION_AUDIT_MAX_ATTEMPTS = 2
 APPLICATION_AUDIT_SCRIPT = (
     Path(__file__).parent / "scripts" / "audit_application.cjs"
@@ -129,6 +131,34 @@ data = path.read_bytes()
 if len(data) > int(sys.argv[2]):
     raise SystemExit("application audit report is too large")
 sys.stdout.buffer.write(data)"""
+
+
+class _ApplicationLifecycleBlocking(BaseModel):
+    startup: int = Field(ge=0)
+    observation: int = Field(ge=0)
+    unary: int = Field(ge=0)
+    stream: int = Field(ge=0)
+    timeout: int = Field(ge=0)
+    interval: int = Field(ge=0)
+
+
+class _ApplicationLifecycleSnapshot(BaseModel):
+    version: Literal[1]
+    generation: int = Field(ge=1)
+    epoch: int = Field(ge=0)
+    mounted: bool
+    state: Literal["booting", "active", "idle", "unmounted"]
+    revision: int = Field(ge=0)
+    blocking_work: int = Field(alias="blockingWork", ge=0)
+    blocking: _ApplicationLifecycleBlocking
+
+
+class _ApplicationLifecycleDiagnostic(BaseModel):
+    code: Literal["application_lifecycle"]
+    reason: str = Field(min_length=1, max_length=400)
+    snapshot: _ApplicationLifecycleSnapshot | None
+
+
 PORT_STOP_PROG = """import os
 from pathlib import Path
 import signal
@@ -883,7 +913,30 @@ async def _audit_builder_application(
             timeout_s=APPLICATION_AUDIT_TIMEOUT_SECONDS,
         )
         if run.exit_code != 0:
-            detail = (run.stderr or run.stdout or "audit returned no error").strip()[:400]
+            detail = (run.stderr or run.stdout).strip()[:400]
+            if run.exit_code == 3:
+                diagnostic_read = await ctx.sandbox.python(
+                    APPLICATION_AUDIT_REPORT_READ,
+                    f"{report_path}.lifecycle.json",
+                    str(APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES),
+                )
+                if diagnostic_read.exit_code != 0:
+                    detail = (
+                        diagnostic_read.stderr
+                        or diagnostic_read.stdout
+                        or "application lifecycle diagnostic is absent"
+                    ).strip()[:400]
+                else:
+                    try:
+                        diagnostic = _ApplicationLifecycleDiagnostic.model_validate_json(
+                            diagnostic_read.stdout
+                        )
+                    except ValueError:
+                        detail = "application lifecycle diagnostic is invalid"
+                    else:
+                        detail = diagnostic.reason
+            if not detail:
+                detail = "audit returned no error"
             return await _application_audit_feedback(
                 ctx,
                 (

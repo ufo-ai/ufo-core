@@ -63,6 +63,7 @@ from evals.harness.capability import (
     ProbeCommandResult,
     SharedArtifact,
     ToolInvocation,
+    grading_statement,
 )
 from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.scorers import (
@@ -620,7 +621,10 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     assert "page.$('iframe[name=\"ufo-app\"]')" in source
     assert "if (!element) return page;" in source
     assert "await element.contentFrame()" in source
-    assert "frame.evaluate(measure, AA_FLOOR)" in source
+    assert "async function measureApplication(" in source
+    assert "const ready = await waitForApplicationReadyUntil(frame, deadline)" in source
+    assert "const measured = await measureApplication(frame, AA_FLOOR)" in source
+    assert "frame.evaluate(measure, AA_FLOOR)" not in source
     assert "designRegionAudit(browser, acceptedDesignUrl.href)" in source
     assert "document.querySelectorAll('[data-app-region]')" in source
     assert "}).slice(0, 20);" in source
@@ -1777,16 +1781,33 @@ async def test_ufo_app_bench_rejects_parent_user_input() -> None:
 
 async def test_ufo_app_bench_accepts_the_worker_preloaded_skill() -> None:
     base = _built_screen({})
+    scorer = _skill_scorer()
+    without_delegation = replace(
+        base,
+        calls=tuple(
+            call for call in base.calls if call.name != APPLICATION_BUILDER_DELEGATION_TOOL
+        ),
+        own_calls=tuple(
+            call for call in base.own_calls if call.name != APPLICATION_BUILDER_DELEGATION_TOOL
+        ),
+    )
     without_parent_load = replace(
         base,
         calls=tuple(call for call in base.calls if call.name != "load_skill"),
         own_calls=tuple(call for call in base.own_calls if call.name != "load_skill"),
     )
 
-    verdict = await _skill_scorer()(without_parent_load)
+    direct = await scorer(without_delegation)
+    verdict = await scorer(without_parent_load)
 
+    assert grading_statement(scorer) == (
+        "a direct turn loads 'website-building', or application-builder preloads 'ufo-style' "
+        "after build_ufo_application"
+    )
+    assert direct.passed, direct.reason
+    assert direct.reason == "loaded 'website-building'"
     assert verdict.passed, verdict.reason
-    assert "preloads 'website-building'" in verdict.reason
+    assert "preloads 'ufo-style'" in verdict.reason
 
 
 async def test_ufo_app_bench_rejects_a_routine_second_delegation() -> None:

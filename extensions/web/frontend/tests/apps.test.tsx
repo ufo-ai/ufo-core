@@ -5,6 +5,22 @@ import type { AppInit } from "@/apps/kit";
 
 import { objectIndex, wire, AGENT, MEMBER, TASK_KIND, TURN_ID } from "./harness";
 
+let nextAnimationFrame = 0;
+const animationFrames = new Map<number, FrameRequestCallback>();
+window.requestAnimationFrame = (callback) => {
+  const id = ++nextAnimationFrame;
+  animationFrames.set(id, callback);
+  queueMicrotask(() => {
+    const held = animationFrames.get(id);
+    animationFrames.delete(id);
+    held?.(performance.now());
+  });
+  return id;
+};
+window.cancelAnimationFrame = (id) => void animationFrames.delete(id);
+const applicationLifecycle = await import("@/apps/lifecycle");
+vi.doMock("@/apps/lifecycle", () => applicationLifecycle);
+
 /** The app page's side of the bridge, tested against a fake shell on this same window: jsdom's
  *  `window.top` is the window itself, so the runtime's posts land on our own listener and our
  *  replies land on the runtime's. Each test imports the module fresh — the correlation maps and
@@ -54,6 +70,32 @@ const BEYOND_READY_BUDGET_MS = 5000;
 const cleanups: (() => void)[] = [];
 const nativeFetch = window.fetch;
 const nativeEventSource = window.EventSource;
+const shellSetTimeout = window.setTimeout.bind(window);
+
+type LifecycleController = {
+  snapshot(): {
+    generation: number;
+    mounted: boolean;
+    state: string;
+    revision: number;
+    blockingWork: number;
+    blocking: Record<string, number>;
+  };
+  afterPaint(): Promise<void>;
+  beginObservation(): number;
+  endObservation(epoch: number): Promise<void>;
+};
+
+function lifecycle(): LifecycleController {
+  return (window as unknown as { __ufoApplicationLifecycle: LifecycleController })
+    .__ufoApplicationLifecycle;
+}
+
+async function painted(): Promise<void> {
+  await new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
+}
 
 beforeEach(() => {
   vi.useRealTimers();
@@ -227,6 +269,31 @@ test("closing the source tells the shell and swallows the end that follows", asy
   expect(source.readyState).toBe(EventSource.CLOSED);
 });
 
+test("a throwing stream error remains visible and releases lifecycle work", async () => {
+  const messages: Record<string, unknown>[] = [];
+  const runtime = await connected((message) => messages.push(message));
+  runtime.installShims();
+  const source = new EventSource("/surface/web/turns/t3/stream");
+  await vi.waitFor(() => expect(messages).toHaveLength(1));
+  const failures: string[] = [];
+  const onWindowError = (event: ErrorEvent) => {
+    failures.push(event.message);
+    event.preventDefault();
+  };
+  window.addEventListener("error", onWindowError);
+  cleanups.push(() => window.removeEventListener("error", onWindowError));
+  source.onerror = () => {
+    throw new Error("stream handler failed");
+  };
+
+  window.postMessage({ ufo: "end", id: messages[0].id }, "*");
+
+  await vi.waitFor(() => expect(source.readyState).toBe(EventSource.CLOSED));
+  await painted();
+  expect(failures).toEqual(["stream handler failed"]);
+  expect(lifecycle().snapshot().blocking.stream).toBe(0);
+});
+
 test("a section app hosts a screen inside the portal's own section chrome", async () => {
   vi.resetModules();
   const { SectionApp } = await import("@/apps/shell");
@@ -270,6 +337,7 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
 test("a page mounted through the kit alone greets the shell, reads over the bridge, and takes a frame", async () => {
   vi.resetModules();
   const { getJson, mountApp, useEffect, useState } = await import("@/apps/kit");
+  const { unmountApp } = await import("@/apps/shell");
   const answers: Record<string, string> = {
     "/api/chats": JSON.stringify({ chats: [{ title: "Weekly report" }] }),
   };
@@ -317,18 +385,25 @@ test("a page mounted through the kit alone greets the shell, reads over the brid
 
   const root = document.createElement("div");
   document.body.append(root);
-  cleanups.push(() => root.remove());
+  cleanups.push(() => {
+    unmountApp(root);
+    root.remove();
+  });
   mountApp(root, (init) => <Framed init={init} />);
 
   expect(root.dataset.ufoApplication).toBe("");
   expect(await screen.findByText(MEMBER.email)).toBeTruthy();
   expect(await screen.findByText("Weekly report")).toBeTruthy();
   expect(await screen.findByText("the turn spoke")).toBeTruthy();
+  unmountApp(root);
+  await painted();
+  await painted();
 });
 
 test("a page remounted across a deploy reads its audience when its standing shell cannot carry it", async () => {
   vi.resetModules();
   const { mountApp } = await import("@/apps/kit");
+  const { unmountApp } = await import("@/apps/shell");
   const calls: string[] = [];
   cleanups.push(
     shell(
@@ -358,12 +433,18 @@ test("a page remounted across a deploy reads its audience when its standing shel
   );
   const root = document.createElement("div");
   document.body.append(root);
-  cleanups.push(() => root.remove());
+  cleanups.push(() => {
+    unmountApp(root);
+    root.remove();
+  });
 
   mountApp(root, (_init, agents) => <p>{agents[0].name}</p>);
 
   expect(await screen.findByText(AGENT.name)).toBeTruthy();
   expect(calls).toEqual(["/api/agents"]);
+  unmountApp(root);
+  await painted();
+  await painted();
 });
 
 test("an application action reads its durable result and submits the exact prepared write", async () => {
@@ -447,7 +528,7 @@ test("readies stop at the budget, and an init after the last one still mounts th
   window.addEventListener("message", count);
   cleanups.push(() => window.removeEventListener("message", count));
 
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const pending = runtime.connect();
   await vi.advanceTimersByTimeAsync(BEYOND_READY_BUDGET_MS);
   const spent = readies.length;
@@ -457,4 +538,386 @@ test("readies stop at the budget, and an init after the last one still mounts th
 
   window.postMessage({ ufo: "init", ...INIT }, "*");
   expect((await pending).agentId).toBe(AGENT.id);
+});
+
+test("the private lifecycle closes only after terminal bridge, timer, interval, and render work", async () => {
+  vi.resetModules();
+  const { mountApp, useEffect, useState } = await import("@/apps/kit");
+  const { unmountApp } = await import("@/apps/shell");
+  let streamId = "";
+  let setups = 0;
+  let lifecycleCleanups = 0;
+  let crossClearedTimeoutRan = false;
+  let crossClearedIntervalRan = false;
+  cleanups.push(
+    shell((message) => {
+      if (String(message.path).endsWith("/stream")) {
+        streamId = String(message.id);
+        window.postMessage({ ufo: "opened", id: streamId }, "*");
+        shellSetTimeout(() => {
+          window.postMessage(
+            { ufo: "frame", id: streamId, event: "message", data: "streamed" },
+            "*",
+          );
+          window.postMessage({ ufo: "end", id: streamId }, "*");
+        }, 20);
+        return;
+      }
+      shellSetTimeout(
+        () =>
+          window.postMessage(
+            { ufo: "data", id: message.id, ok: true, status: 200, body: "loaded" },
+            "*",
+          ),
+        20,
+      );
+    }),
+  );
+
+  function Fixture() {
+    const [result, setResult] = useState("starting");
+    useEffect(() => {
+      setups += 1;
+      const canceled = window.setTimeout(() => setResult("wrong"), 1);
+      window.clearTimeout(canceled);
+      const timeoutClearedByInterval = window.setTimeout(() => {
+        crossClearedTimeoutRan = true;
+      }, 1);
+      window.clearInterval(timeoutClearedByInterval);
+      const intervalClearedByTimeout = window.setInterval(() => {
+        crossClearedIntervalRan = true;
+      }, 1);
+      window.clearTimeout(intervalClearedByTimeout);
+      let ticks = 0;
+      const interval = window.setInterval(() => {
+        ticks += 1;
+        if (ticks === 2) window.clearInterval(interval);
+      }, 5);
+      window.setTimeout(
+        () =>
+          window.setTimeout(async () => {
+            const response = await fetch("/surface/web/data");
+            setResult(await response.text());
+          }, 5),
+        5,
+      );
+      const source = new EventSource("/surface/web/run/stream");
+      return () => {
+        lifecycleCleanups += 1;
+        window.clearInterval(interval);
+        source.close();
+      };
+    }, []);
+    return <p>{result}</p>;
+  }
+
+  const root = document.createElement("div");
+  document.body.append(root);
+  mountApp(root, () => <Fixture />);
+  expect(await screen.findByText("loaded")).toBeTruthy();
+  await painted();
+  await painted();
+
+  const descriptor = Object.getOwnPropertyDescriptor(
+    window,
+    "__ufoApplicationLifecycle",
+  );
+  expect(descriptor?.configurable).toBe(false);
+  expect(descriptor?.set).toBeUndefined();
+  const symbolFor = Symbol.for;
+  Symbol.for = ((key: string) => Symbol(key)) as typeof Symbol.for;
+  expect(lifecycle()).toBe(descriptor?.get?.());
+  Symbol.for = symbolFor;
+  expect(Object.isFrozen(lifecycle())).toBe(true);
+  const immutableSnapshot = lifecycle().snapshot();
+  expect(Object.isFrozen(immutableSnapshot)).toBe(true);
+  expect(Object.isFrozen(immutableSnapshot.blocking)).toBe(true);
+  const currentRequestAnimationFrame = window.requestAnimationFrame;
+  let replacedAnimationFrameCalls = 0;
+  window.requestAnimationFrame = () => {
+    replacedAnimationFrameCalls += 1;
+    return 1;
+  };
+  await lifecycle().afterPaint();
+  window.requestAnimationFrame = currentRequestAnimationFrame;
+  expect(replacedAnimationFrameCalls).toBe(0);
+  expect(() => Object.assign(lifecycle(), { snapshot: () => ({}) })).toThrow();
+  expect(() =>
+    Object.assign(window, {
+      __ufoApplicationLifecycle: { snapshot: () => ({ state: "spoofed" }) },
+    }),
+  ).toThrow();
+  expect(() =>
+    Object.defineProperty(window, "__ufoApplicationLifecycle", {
+      value: { snapshot: () => ({ state: "spoofed" }) },
+    }),
+  ).toThrow();
+  expect(streamId).not.toBe("");
+  expect(setups).toBe(2);
+  expect(lifecycleCleanups).toBe(1);
+  await vi.waitFor(() => expect(lifecycle().snapshot().blockingWork).toBe(0));
+  expect(lifecycle().snapshot()).toEqual(
+    expect.objectContaining({ mounted: true, state: "idle", blockingWork: 0 }),
+  );
+  expect(root.dataset.ufoApplicationState).toBe("idle");
+
+  const before = lifecycle().snapshot().revision;
+  const epoch = lifecycle().beginObservation();
+  expect(() => lifecycle().beginObservation()).toThrow(
+    "application observation epoch is already active",
+  );
+  window.setTimeout(() => root.setAttribute("data-finished", "true"), 5);
+  await lifecycle().endObservation(epoch);
+  await new Promise((resolve) => shellSetTimeout(resolve, 10));
+  await painted();
+  expect(root.dataset.finished).toBe("true");
+  expect(lifecycle().snapshot().revision).toBeGreaterThan(before);
+  expect(lifecycle().snapshot().blockingWork).toBe(0);
+  expect(crossClearedTimeoutRan).toBe(false);
+  expect(crossClearedIntervalRan).toBe(false);
+
+  const otherRoot = document.createElement("div");
+  const blockingTimeout = window.setTimeout(() => undefined, 5000);
+  const heartbeat = window.setInterval(() => undefined, 30_000);
+  const active = lifecycle().snapshot();
+  expect(active.blocking.timeout).toBe(1);
+  expect(active.blocking.interval).toBe(0);
+  expect(() => applicationLifecycle.beginApplicationMount(root)).toThrow(
+    "application is already mounted",
+  );
+  expect(() => applicationLifecycle.beginApplicationMount(otherRoot)).toThrow(
+    "application is already mounted",
+  );
+  const afterRejectedMount = lifecycle().snapshot();
+  expect(afterRejectedMount.generation).toBe(active.generation);
+  expect(afterRejectedMount.blocking.timeout).toBe(1);
+  expect(afterRejectedMount.blocking.interval).toBe(0);
+  window.clearTimeout(blockingTimeout);
+  window.clearInterval(heartbeat);
+  await painted();
+
+  let staleTimerRan = false;
+  let staleIntervalTicks = 0;
+  const unmountedGeneration = lifecycle().snapshot().generation;
+  window.setTimeout(() => {
+    staleTimerRan = true;
+    root.dataset.stale = "true";
+  }, 10);
+  window.setInterval(() => {
+    staleIntervalTicks += 1;
+    root.dataset.staleInterval = "true";
+  }, 5);
+  unmountApp(root);
+  expect(lifecycleCleanups).toBe(2);
+  expect(lifecycle().snapshot()).toEqual(
+    expect.objectContaining({ mounted: false, state: "unmounted", blockingWork: 0 }),
+  );
+  window.setTimeout(() => {
+    root.textContent = "between mounts";
+  }, 10);
+  mountApp(root, () => <p>remounted</p>);
+  expect(await screen.findByText("remounted")).toBeTruthy();
+  await new Promise((resolve) => shellSetTimeout(resolve, 20));
+  await painted();
+  expect(staleTimerRan).toBe(false);
+  expect(staleIntervalTicks).toBe(0);
+  expect(root.dataset.stale).toBeUndefined();
+  expect(root.dataset.staleInterval).toBeUndefined();
+  expect(root.textContent).toBe("remounted");
+  expect(lifecycle().snapshot()).toEqual(
+    expect.objectContaining({
+      generation: unmountedGeneration + 1,
+      mounted: true,
+      state: "idle",
+      blockingWork: 0,
+    }),
+  );
+  unmountApp(root);
+  let lateTimerRan = false;
+  window.setTimeout(() => {
+    lateTimerRan = true;
+  }, 1);
+  await new Promise((resolve) => shellSetTimeout(resolve, 5));
+  expect(lateTimerRan).toBe(true);
+  expect(lifecycle().snapshot().blockingWork).toBe(0);
+  root.remove();
+});
+
+test("a polling page reaches idle between ticks, and a tick's own work still blocks", async () => {
+  vi.resetModules();
+  const { mountApp, useEffect, useState } = await import("@/apps/kit");
+  const { unmountApp } = await import("@/apps/shell");
+  cleanups.push(shell(() => {}));
+  await vi.waitFor(() => expect(lifecycle().snapshot().blockingWork).toBe(0));
+
+  function Polling() {
+    const [text, setText] = useState("polling");
+    useEffect(() => {
+      const poll = window.setInterval(() => setText("polled"), 30_000);
+      return () => window.clearInterval(poll);
+    }, []);
+    return <p>{text}</p>;
+  }
+
+  const root = document.createElement("div");
+  document.body.append(root);
+  mountApp(root, () => <Polling />);
+  expect(await screen.findByText("polling")).toBeTruthy();
+  await vi.waitFor(async () => {
+    const before = lifecycle().snapshot();
+    await lifecycle().afterPaint();
+    const after = lifecycle().snapshot();
+    expect(before).toEqual(
+      expect.objectContaining({ mounted: true, state: "idle", blockingWork: 0 }),
+    );
+    expect(after).toEqual(
+      expect.objectContaining({ mounted: true, state: "idle", blockingWork: 0 }),
+    );
+    expect(after.revision).toBe(before.revision);
+  });
+
+  const heldInsideTicks: number[] = [];
+  const ticking = window.setInterval(() => {
+    heldInsideTicks.push(lifecycle().snapshot().blocking.interval);
+  }, 5);
+  await vi.waitFor(() => expect(heldInsideTicks.length).toBeGreaterThan(1));
+  window.clearInterval(ticking);
+  expect(heldInsideTicks.every((held) => held === 1)).toBe(true);
+  expect(lifecycle().snapshot().blocking.interval).toBe(0);
+  await vi.waitFor(() => expect(lifecycle().snapshot().blockingWork).toBe(0));
+  expect(lifecycle().snapshot().state).toBe("idle");
+
+  let finishClearedTick: (() => void) | undefined;
+  let cleared = 0;
+  cleared = window.setInterval(() => {
+    window.clearInterval(cleared);
+    return new Promise<void>((resolve) => (finishClearedTick = resolve));
+  }, 5);
+  await vi.waitFor(() => expect(finishClearedTick).toBeTypeOf("function"));
+  expect(lifecycle().snapshot().blocking.interval).toBe(1);
+  finishClearedTick?.();
+  await painted();
+  await vi.waitFor(() => expect(lifecycle().snapshot().blocking.interval).toBe(0));
+
+  let finishUnmountedTick: (() => void) | undefined;
+  window.setInterval(
+    () => new Promise<void>((resolve) => (finishUnmountedTick = resolve)),
+    50,
+  );
+  await vi.waitFor(() => expect(finishUnmountedTick).toBeTypeOf("function"));
+  unmountApp(root);
+  expect(lifecycle().snapshot().blocking.interval).toBe(1);
+  expect(() => mountApp(root, () => <p>too soon</p>)).toThrow(
+    "application work is still settling",
+  );
+  finishUnmountedTick?.();
+  await painted();
+  await vi.waitFor(() => expect(lifecycle().snapshot().blockingWork).toBe(0));
+  mountApp(root, () => <p>ready again</p>);
+  expect(await screen.findByText("ready again")).toBeTruthy();
+  unmountApp(root);
+  root.remove();
+});
+
+test("a recursive timeout reaches idle between callbacks and blocks while a callback runs", async () => {
+  vi.resetModules();
+  const { mountApp, useEffect, useState } = await import("@/apps/kit");
+  const { unmountApp } = await import("@/apps/shell");
+  cleanups.push(shell(() => {}));
+  await vi.waitFor(() => expect(lifecycle().snapshot().blockingWork).toBe(0));
+
+  const heldInsideCallbacks: number[] = [];
+
+  function Polling() {
+    const [text, setText] = useState("waiting");
+    useEffect(() => {
+      let timer = 0;
+      const poll = () => {
+        heldInsideCallbacks.push(lifecycle().snapshot().blocking.timeout);
+        setText("polled");
+        timer = window.setTimeout(poll, 30_000);
+      };
+      timer = window.setTimeout(poll, 5);
+      return () => window.clearTimeout(timer);
+    }, []);
+    return <p>{text}</p>;
+  }
+
+  const root = document.createElement("div");
+  document.body.append(root);
+  mountApp(root, () => <Polling />);
+  expect(await screen.findByText("polled")).toBeTruthy();
+  expect(heldInsideCallbacks).toEqual([1]);
+  await vi.waitFor(async () => {
+    const before = lifecycle().snapshot();
+    await lifecycle().afterPaint();
+    const after = lifecycle().snapshot();
+    expect(before).toEqual(
+      expect.objectContaining({ mounted: true, state: "idle", blockingWork: 0 }),
+    );
+    expect(after).toEqual(
+      expect.objectContaining({ mounted: true, state: "idle", blockingWork: 0 }),
+    );
+    expect(after.revision).toBe(before.revision);
+  });
+
+  unmountApp(root);
+  root.remove();
+});
+
+test("unmount blocks remount until async timer and bridge work settle", async () => {
+  const { mountApp, useEffect } = await import("@/apps/kit");
+  const { unmountApp } = await import("@/apps/shell");
+  const calls: Record<string, unknown>[] = [];
+  cleanups.push(shell((message) => calls.push(message)));
+  const finishTimers: (() => void)[] = [];
+
+  function Holding() {
+    useEffect(() => {
+      window.setTimeout(
+        () =>
+          new Promise<void>((resolve) => {
+            finishTimers.push(resolve);
+          }),
+        0,
+      );
+    }, []);
+    return <p>holding</p>;
+  }
+
+  const root = document.createElement("div");
+  document.body.append(root);
+  mountApp(root, () => <Holding />);
+  expect(await screen.findByText("holding")).toBeTruthy();
+  await vi.waitFor(() => expect(finishTimers).toHaveLength(2));
+  const unary = fetch("/surface/web/pending").then((response) => response.text());
+  const stream = new EventSource("/surface/web/pending-stream");
+  await vi.waitFor(() => expect(calls.filter((call) => call.ufo === "call")).toHaveLength(2));
+
+  unmountApp(root);
+  expect(() => mountApp(root, () => <p>too soon</p>)).toThrow(
+    "application work is still settling",
+  );
+  for (const finish of finishTimers) finish();
+  const unaryCall = calls.find((call) => call.path === "/pending");
+  const streamCall = calls.find((call) => call.path === "/pending-stream");
+  window.postMessage(
+    { ufo: "data", id: unaryCall?.id, ok: true, status: 200, body: "settled" },
+    "*",
+  );
+  window.postMessage({ ufo: "end", id: streamCall?.id }, "*");
+  expect(await unary).toBe("settled");
+  await painted();
+  await painted();
+  await vi.waitFor(() => expect(lifecycle().snapshot().blockingWork).toBe(0));
+  expect(lifecycle().snapshot()).toEqual(
+    expect.objectContaining({ mounted: false, state: "unmounted", blockingWork: 0 }),
+  );
+
+  mountApp(root, () => <p>ready again</p>);
+  expect(await screen.findByText("ready again")).toBeTruthy();
+  expect(lifecycle().snapshot().generation).toBeGreaterThan(1);
+  stream.close();
+  unmountApp(root);
+  root.remove();
 });

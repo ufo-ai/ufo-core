@@ -81,7 +81,7 @@ The build path belongs to an extension. Core receives no application-builder wor
 The app benchmark uses the parent only to route the member request. The app-builder profile owns
 the build model and reasoning settings. The stack preparation gives the parent only
 `build_ufo_application`. The tool passes the application instructions and current request and
-preloads `website-building` in the worker, so Skill wording is not the enforcement boundary.
+preloads `ufo-style` in the worker, so Skill wording is not the enforcement boundary.
 
 | Owner | Work |
 |---|---|
@@ -458,6 +458,17 @@ Retained replay does not prove this timing property because the retained applica
 render fixed fixture data without bridge calls. Reject all four designs. A replacement needs an
 explicit application lifecycle signal for unary calls, streams, and delayed starts, with an
 executing browser regression for each case.
+
+The lifecycle implementation is private runtime state, not application source or model instruction.
+Startup stays active through passive effects. Unary calls, streams, one-shot timers, and
+observation epochs stay active through their terminal boundary. A repeating timer has no terminal
+boundary, so it holds blocking work only while one of its ticks runs, and a page that polls reaches
+idle between its ticks. Clearing a timer stops future ticks; work from a running tick stays active
+through settlement. The audit captures only when the mounted generation has no blocking work and
+its revision is stable across two animation frames. Missing, persistent, and unstable work fails
+with one bounded private lifecycle diagnostic.
+This unit supplies the lifecycle proof for Phase 2 Gate D. Gate D stays Active, and execution row
+22 stays Pending, until the unchanged presentation set runs.
 
 Run `1fec6df8-bc6b-4dce-b990-1f55208d2e30` also contains one stable scheme-token error. Three styles
 use `--color-ink` as a background and literal white as text. The pair passes light mode and fails
@@ -1198,10 +1209,10 @@ Only then compare worker models, reasoning settings, and component inputs.
 | Order | Work | Status | Gate |
 |---:|---|---|---|
 | 1 | Give the Gemini worker connector, source, browser, deployment, and homepage tools. | Done | The profile excludes subagent, member, sharing, and grant tools. |
-| 2 | Limit the parent to one fixed worker delegation and one final response. | Done | The app-eval setup grants only `build_ufo_application`; the tool passes the member request verbatim and preloads `website-building` in the worker. |
+| 2 | Limit the parent to one fixed worker delegation and one final response. | Done | The app-eval setup grants only `build_ufo_application`; the tool passes the member request verbatim and preloads `ufo-style` in the worker. |
 | 3 | Compile each source write and exact edit. Keep final acceptance independent. | Done | Tool tests and the artifact audit compile through `UfoAppKit`. |
 | 4 | Prove the fresh-REPL, React-binding, and pre-deployment QA gates. | Done | One focused case and five parallel cases complete with no exclusion; every worker passes delegation and QA. |
-| 5 | Make Skill routing and request transfer deterministic. | Done | The worker starts with `website-building` and the verbatim member request. The parent uses one tool and does no other work. |
+| 5 | Make Skill routing and request transfer deterministic. | Done | The worker starts with `ufo-style` and the verbatim member request. The parent uses one tool and does no other work. |
 | 6 | Run the typed data/copy contract arms. | Done | Both nested and deterministic fixture contracts are rejected and removed. Neither improves a product layer. |
 | 7 | Remove stable parent delegation input failures. | Done | Every passing case makes one parent tool call before the worker starts. |
 | 8 | Repair paired ablation serve termination and retain active trajectories. | Done | Lifecycle records name stack signals. The private serve name completes two matched screens without a missing record. Harness deadlines retain parent and completed child trajectories. |
@@ -1217,5 +1228,5 @@ Only then compare worker models, reasoning settings, and component inputs.
 | 18 | Reserve bounded worker rounds for a failed product audit. | Done | The product audit gets one second deployment attempt without a prompt or grader change. |
 | 19 | Repeat the unchanged presentation confirmation. | Done | The strict presentation gate fails. Keep the accepted topology and every product failure. |
 | 20 | Recheck reasoning through the Vite application builder. | Done | `medium` and `auto` each pass 1/2 after delivery repair. `auto` moves no case and costs more. Keep `medium`. |
-| 21 | Land the accepted Vite builder and benchmark path. | Active | Merge the benchmark boundary first, then the application-builder changes at an exact reviewed head. |
-| 22 | Reduce deterministic latency and recheck the complete presentation set. | Active | Reject four inferred-settlement designs and keep fixed waits. Require an explicit application lifecycle signal before another latency change. |
+| 21 | Land the accepted Vite builder and benchmark path. | Done | The benchmark boundary and application builder are merged at reviewed heads. |
+| 22 | Reduce deterministic latency and recheck the complete presentation set. | Pending | Replace fixed waits with the private lifecycle signal, then repeat the unchanged presentation gate. |

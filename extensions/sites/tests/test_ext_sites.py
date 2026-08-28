@@ -253,6 +253,7 @@ class FakeSandbox:
     without a real container."""
 
     scripted: dict[str, ExecResult] = field(default_factory=dict)
+    scripted_shells: dict[str, ExecResult] = field(default_factory=dict)
     scripted_programs: dict[str, ExecResult] = field(default_factory=dict)
     scripted_paths: dict[str, ExecResult] = field(default_factory=dict)
     commands: list[str] = field(default_factory=list)
@@ -373,6 +374,9 @@ class FakeSandbox:
             if self.design_audit_barrier is not None:
                 await self.design_audit_barrier.wait()
             return self.design_audit
+        for needle, result in self.scripted_shells.items():
+            if needle in script:
+                return result
         return self.shell
 
     async def write_file(self, path: str, content: bytes) -> None:
@@ -711,6 +715,16 @@ def test_application_audit_runs_views_in_parallel_in_declared_order() -> None:
 
     assert "await Promise.all(VIEWS.map(async (view) => {" in source
     assert "views.push(" not in source
+    assert "waitForTimeout(700)" not in source
+    assert "waitForTimeout(300)" not in source
+    assert "waitForTimeout(100)" not in source
+    assert "waitForApplicationReady(indexFrame)" in source
+    assert "beginApplicationObservation(frame)" in source
+    assert "endApplicationObservation(frame, epoch, APPLICATION_INTERACTION_TIMEOUT_MS)" in source
+    assert "waitForApplicationInteraction(frame, stepBefore)" in source
+    assert "APPLICATION_INTERACTION_TIMEOUT_MS = 300" in source
+    assert "if (!(error instanceof ApplicationLifecycleError)" in source
+    assert "sameLifecycle(probe.before, probe.after)" in source
     assert "finally {\n        await context.close();" in source
     assert "finally {\n    await browser.close();" in source
 
@@ -937,6 +951,57 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
     assert all(server_path in command for command, _base, _detach, _timeout in sandbox.tasks)
     port_stops = [program for program, _args in sandbox.programs if program == PORT_STOP_PROG]
     assert len(port_stops) == 4
+
+
+async def test_application_builder_lifecycle_failure_keeps_audit_feedback_bytes(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeSandbox(scripted_shells={'node "$1"': ExecResult("", "", 3)})
+    sandbox.scripted_paths[".lifecycle.json"] = ExecResult(
+        json.dumps(
+            {
+                "code": "application_lifecycle",
+                "reason": "application lifecycle did not become ready",
+                "snapshot": {
+                    "version": 1,
+                    "generation": 1,
+                    "epoch": 0,
+                    "mounted": True,
+                    "state": "active",
+                    "revision": 4,
+                    "blockingWork": 1,
+                    "blocking": {
+                        "startup": 0,
+                        "observation": 0,
+                        "unary": 0,
+                        "stream": 0,
+                        "timeout": 1,
+                        "interval": 0,
+                    },
+                },
+            }
+        ),
+        "",
+        0,
+    )
+    store = FakeHookStore()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+
+    feedback = await _audit_builder_application(ctx, "/workspace/ufo-app")
+
+    assert isinstance(feedback, ApplicationAuditFeedback)
+    assert feedback.model_dump_json() == (
+        '{"status":"repair_required","attempt":1,"attempts_remaining":1,"issues":'
+        '[{"code":"audit_run",'
+        '"message":"Run the browser audit successfully: '
+        'application lifecycle did not become ready",'
+        '"terms":[]}]}'
+    )
 
 
 def test_application_builder_port_cleanup_supports_hosts_without_procfs() -> None:
@@ -2048,6 +2113,7 @@ send({ufo:"ready"});
 send({ufo:"call",id:"list",method:"GET",path:"/objects/conversation?agent=preview-agent"});
 send({ufo:"call",id:"write",method:"POST",path:"/objects/eval_app_action",body:JSON.stringify({name:"assign",spec:{owner:"Alex"}})});
 send({ufo:"call",id:"read",method:"GET",path:"/objects/eval_app_action/assign"});
+send({ufo:"call",id:"stream",method:"GET",path:"/turns/t1/stream"});
 process.stdout.write(JSON.stringify(replies));
 """
 
@@ -2073,6 +2139,16 @@ process.stdout.write(JSON.stringify(replies));
         "state": "applied",
         "result": "Prepared action accepted.",
     }
+    assert [reply["ufo"] for reply in replies if reply.get("id") == "stream"] == [
+        "opened",
+        "frame",
+        "end",
+    ]
+    terminal = next(
+        reply for reply in replies if reply.get("id") == "stream" and reply["ufo"] == "frame"
+    )
+    assert terminal["event"] == "terminal"
+    assert json.loads(terminal["data"])["status"] == "done"
 
 
 def test_application_audit_excludes_hidden_text_from_contrast() -> None:

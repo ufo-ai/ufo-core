@@ -234,8 +234,9 @@ Run order:
 6. Screen one connector-heavy case per model and reasoning setting.
 7. Run the full set once for surviving settings, then three matched repeats for finalists.
 
-The evaluated turn must deploy the site and bind it with `set_homepage`. After the turn ends, the
-harness locates the generated HTML, serves it, runs the browser audit, exercises accessible
+The evaluated turn delegates once through `build_ufo_application`. The worker deploys through
+`deploy_ufo_application`, and deterministic acceptance binds the homepage. After the turn ends,
+the harness locates the generated HTML, serves it, runs the browser audit, exercises accessible
 controls, captures both colour schemes, and preserves the generated HTML beside a static DOM
 snapshot. The HTML report shows the screenshots, trajectory, grader verdicts, audit, downloads, an
 inert snapshot, and an interactive preview with local scripts and styles embedded but no network
@@ -279,7 +280,7 @@ Gate A — harness integrity:
 
 Gate B — three-app presentation baseline:
 
-- All three cases load `website-building` before the build.
+- All three workers preload `ufo-style` before the build.
 - Every case passes its deterministic artifact and browser audit.
 - Every case has a visual verdict for each criterion and both colour schemes.
 - The browser audit proves each exact connected fact above the fold in both desktop schemes. The
@@ -290,8 +291,8 @@ Gate B — three-app presentation baseline:
 
 Gate C — interaction:
 
-- All three cases load `website-building` before the build.
-- Every case completes `deploy_website` before `set_homepage`.
+- All three workers preload `ufo-style` before the build.
+- Every worker completes `deploy_ufo_application`; deterministic acceptance binds the homepage.
 - Every case passes its deterministic artifact and browser audit.
 - Every case exposes at least two accessible controls that produce distinct visible state changes.
 - Every case has a visual verdict for each criterion and both colour schemes.
@@ -393,7 +394,7 @@ Use the levers in this order:
 
 | Lever | Question | Treatment gate |
 |---|---|---|
-| Routing | Did `website-building`, its `webapp` child, and the house design dependency load instead of `create-application` or a neighboring skill? | Positive and negative loading cases improve before body text changes. |
+| Routing | Did `ufo-style` load in the application worker instead of `create-application` or a neighboring skill? | Positive and negative loading cases improve before body text changes. |
 | Skill content | Did the loaded material direct information structure, density, implementation, and browser proof? Does deleting a section remove a distraction or reduce cost without a quality loss? | Matched app quality improves, or cost and latency fall with no quality loss. |
 | Blocks or templates | Does a repeated implementation step remain expensive or unreliable after routing and skill-content treatments? | A reached-for block improves the named layer on matched runs; an unused or neutral block does not ship. |
 

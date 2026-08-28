@@ -71,6 +71,7 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_NAME,
     APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_READ_TOOL,
+    APPLICATION_BUILDER_SKILL,
     APPLICATION_BUILDER_WRITE_TOOL,
     ApplicationBuilderResult,
 )
@@ -105,8 +106,6 @@ from ufo.schema.records import TerminalFrame
 from ufo.sdk.context import ScopedStore
 from ufo.workspace import ws
 
-HOUSE_STYLE_SKILL = "ufo-style"
-SITE_SKILL = "website-building"
 COPY_CAPTURE_CONTENT = Path(__file__).with_name("ufo_app_copy_capture.cjs").read_bytes()
 COPY_CAPTURE_DIGEST = sha256(COPY_CAPTURE_CONTENT).hexdigest()
 APP_INDEX_CONTENT = (
@@ -1868,7 +1867,7 @@ def _application_builder_scorer() -> Grader:
 
 
 def _skill_scorer() -> Grader:
-    base = skill_scorer(SITE_SKILL, HOUSE_STYLE_SKILL)
+    base = skill_scorer("website-building", APPLICATION_BUILDER_SKILL)
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         verdict = await base(output)
@@ -1879,7 +1878,7 @@ def _skill_scorer() -> Grader:
         if delegated:
             return CapabilityVerdict(
                 True,
-                f"{APPLICATION_BUILDER_NAME} preloads '{SITE_SKILL}'",
+                f"{APPLICATION_BUILDER_NAME} preloads '{APPLICATION_BUILDER_SKILL}'",
                 _score_evidence("processSkill", 1, 1),
             )
         return replace(
@@ -1890,7 +1889,11 @@ def _skill_scorer() -> Grader:
             },
         )
 
-    return DescribedGrader(grading_statement(base), grade)
+    return DescribedGrader(
+        "a direct turn loads 'website-building', or application-builder preloads 'ufo-style' "
+        f"after {APPLICATION_BUILDER_DELEGATION_TOOL}",
+        grade,
+    )
 
 
 def _delivery_scorer() -> Grader:

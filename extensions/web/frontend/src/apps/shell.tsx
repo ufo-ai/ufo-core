@@ -2,6 +2,7 @@ import {
   StrictMode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -10,6 +11,12 @@ import {
 import { createRoot, type Root } from "react-dom/client";
 
 import { connect, installShims, navigate, onPlaced, type AppInit } from "@/apps/runtime";
+import {
+  beginApplicationMount,
+  finishApplicationStartup,
+  markApplicationMounted,
+  unmountApplication,
+} from "@/apps/lifecycle";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { BASE, getJson } from "@/lib/api";
 import { Viewer } from "@/lib/audience";
@@ -160,12 +167,28 @@ function Booted({
   );
 }
 
+function ApplicationLifecycleBoundary({
+  generation,
+  children,
+}: {
+  generation: number;
+  children: ReactNode;
+}) {
+  useLayoutEffect(() => markApplicationMounted(generation), [generation]);
+  useEffect(() => finishApplicationStartup(generation), [generation]);
+  return children;
+}
+
 export function mountApp(
   root: HTMLElement,
   render: (init: AppInit, agents: Agent[]) => ReactNode,
 ): void {
   root.dataset.ufoApplication = "";
-  const mounted = { active: true, root: null as Root | null };
+  const mounted = {
+    active: true,
+    generation: beginApplicationMount(root),
+    root: null as Root | null,
+  };
   mountedApps.set(root, mounted);
   void connect().then((init) => {
     if (!mounted.active) return;
@@ -173,18 +196,24 @@ export function mountApp(
     mounted.root = createRoot(root);
     mounted.root.render(
       <StrictMode>
-        <Booted init={init} render={render} />
+        <ApplicationLifecycleBoundary generation={mounted.generation}>
+          <Booted init={init} render={render} />
+        </ApplicationLifecycleBoundary>
       </StrictMode>,
     );
   });
 }
 
-const mountedApps = new WeakMap<HTMLElement, { active: boolean; root: Root | null }>();
+const mountedApps = new WeakMap<
+  HTMLElement,
+  { active: boolean; generation: number; root: Root | null }
+>();
 
 export function unmountApp(root: HTMLElement): void {
   const mounted = mountedApps.get(root);
   if (!mounted) return;
   mounted.active = false;
   mounted.root?.unmount();
+  unmountApplication(mounted.generation);
   mountedApps.delete(root);
 }
