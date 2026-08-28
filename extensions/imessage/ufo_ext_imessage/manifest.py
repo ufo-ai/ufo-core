@@ -1,18 +1,13 @@
 from ufo.sdk.manifest import Manifest
-from ufo.sdk.objects import SURFACE_KIND
 from ufo.sdk.surfaces import SurfaceSpec
-from ufo.sdk.tools import ActionPresentation, ObjectBinding, ToolDef
+from ufo.sdk.tools import ToolDef
 from ufo_ext_imessage.cloud import (
     SPECTRUM_PROJECT_ID_ENV,
     SPECTRUM_PROJECT_SECRET_ENV,
     spectrum_project,
 )
 from ufo_ext_imessage.surface import SURFACE_IMESSAGE, ImessageSurface
-from ufo_ext_imessage.tools import (
-    IMESSAGE_CONNECT_ACTION,
-    ImessageConnect,
-    ImessageConnectInput,
-)
+from ufo_ext_imessage.tools import ImessageConnect, ImessageConnectInput
 
 NAME = "imessage"
 VERSION = "0.1.0"
@@ -26,7 +21,7 @@ def manifest() -> Manifest:
         version=VERSION,
         tools=(
             ToolDef(
-                name=IMESSAGE_CONNECT_ACTION,
+                name="imessage_connect",
                 description=(
                     "Connect the requesting member's iMessage phone. An admin connects the "
                     "provider; each member proves control by texting the pending result's code to "
@@ -35,10 +30,8 @@ def manifest() -> Manifest:
                 ),
                 input_model=ImessageConnectInput,
                 handler=connect.run,
-                bound=ObjectBinding(kind=SURFACE_KIND, binding="instance"),
                 untrusted=True,
                 side_effecting=True,
-                presentation=ActionPresentation(label="Connect iMessage"),
             ),
         ),
         surfaces=(

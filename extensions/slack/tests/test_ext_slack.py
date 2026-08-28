@@ -85,7 +85,6 @@ from ufo.hub import (
     Terminal,
     TextDelta,
 )
-from ufo.kinds.surface_kind import SURFACE_KIND
 from ufo.loop.queue import _load_turn
 from ufo.media.artifact_url import verify_artifact_url
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
@@ -466,11 +465,11 @@ async def _store(workspace_id: UUID, bot_token: str | None = BOT_TOKEN) -> Crede
 async def _register_slack(
     store: CredentialStore, workspace_id: UUID, team_id: str = TEAM_ID
 ) -> None:
-    _, _, verbs = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
-    connect = verbs.actions[SURFACE_KIND]["slack_connect"].context
-    assert connect is not None
+    _, contexts = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
     with ws(workspace_id):
-        await connect.installations.bind(slack.SURFACE_SLACK, slack.slack_installation_id(team_id))
+        await contexts["slack_connect"].installations.bind(
+            slack.SURFACE_SLACK, slack.slack_installation_id(team_id)
+        )
 
 
 async def _write_identity(

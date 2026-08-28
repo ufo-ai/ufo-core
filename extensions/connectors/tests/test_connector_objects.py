@@ -179,7 +179,7 @@ def _tool_context(
 
 
 def _object_tool(name: str) -> ToolDef:
-    tools, _, _ = turn_tools((manifest(),), None, audience=conversation_audience(None))
+    tools, _ = turn_tools((manifest(),), None, audience=conversation_audience(None))
     return next(tool for tool in tools if tool.name == name)
 
 

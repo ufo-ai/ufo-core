@@ -59,7 +59,6 @@ from evals.suites import (
     site_build,
     skill_routing,
     slack_message_block,
-    surface_setup,
     tool_activity,
     tool_calling,
     ufo_app_bench,
@@ -199,7 +198,6 @@ TASKS: tuple[EvalTask, ...] = (
         judge_model=SEMANTIC_JUDGE_MODEL,
         serial=True,
     ),
-    capability_task("surface_setup", surface_setup.CASES, packs=surface_setup.SURFACE_SETUP_PACKS),
     capability_task("app_builder", app_builder.CASES),
     capability_task(
         "first_run",

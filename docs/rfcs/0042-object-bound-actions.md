@@ -323,10 +323,7 @@ actions:
 ```
 
 If the detail has a generation, the invocation template carries it. If the object read was
-agent-targeted, it carries that stable agent name, and the read publishes only the actions that
-declare `agent_targetable`: dispatch refuses an agent target on any other action, and the same
-template without the agent would resolve the calling agent's object rather than the one the read
-returned. Action order is lexical by short name.
+agent-targeted, it carries that stable agent name. Action order is lexical by short name.
 
 `object_explain(kind)` returns the kind's existing fields plus separate `collection_actions` and
 `instance_actions`. `object_list("")` continues to list kinds only, adding at most
@@ -337,8 +334,7 @@ Discovery is structural, not personalized capability minting:
 - a collection action appears when the caller can list the kind and the executing agent/profile is
   granted its canonical id;
 - an instance action appears only after the kind's own `get` returned that object and the executing
-  agent/profile is granted its canonical id, and an agent-targeted read publishes only its
-  `agent_targetable` actions, because every other template it could publish is uninvocable;
+  agent/profile is granted its canonical id;
 - schemas contain no secret defaults or values;
 - role and state do not remove an action;
 - invocation repeats every gate.

@@ -115,20 +115,15 @@ from ufo.o11y import (
     turn_profile,
 )
 from ufo.object_name import ObjectRef
-from ufo.object_scope import ObjectActionTarget
-from ufo.objects import ObjectActionInput, ObjectVerbs
 from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME, Sandbox
 from ufo.sandbox.terminal import TerminalAbsent, TerminalGone
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
-    FINAL_ACT_FIELDS,
     INTERNAL_ADMISSION,
-    LAST_CALL_ACT,
     MEMBER_ADMISSION,
     NON_TERMINAL_STATUSES,
     PARKED,
-    PENDING_ACT,
     ROUND_BUDGET_INCOMPLETE,
     RUNNING,
     SCHEDULED_ADMISSION,
@@ -160,13 +155,7 @@ from ufo.tools.context import (
     ToolContext,
     UntrustedContentError,
 )
-from ufo.tools.registry import (
-    OBJECT_ACTION_TOOL,
-    REQUESTED_BY,
-    TOOL_SEARCH,
-    ToolDef,
-    ToolRegistry,
-)
+from ufo.tools.registry import REQUESTED_BY, TOOL_SEARCH, ToolRegistry
 from ufo.turns.activity import SKILL_LOAD_TOOL, ActivitySummarizer
 from ufo.turns.audience import Audience, audience_member, audience_subjects
 from ufo.turns.contracts import Contract, freeform_result_contract
@@ -205,6 +194,9 @@ TRANSCRIPT_WRITE_ATTEMPTS = 3
 TRANSCRIPT_WRITE_RETRY_SECONDS = 0.5
 COMMIT_RETRY_INITIAL_SECONDS = 1.0
 COMMIT_RETRY_MAX_SECONDS = 30.0
+ASK_USER_TOOL = "ask_user"
+REQUEST_CREDENTIALS_TOOL = "request_credentials"
+CONNECT_ACCOUNT_TOOL = "connect_account"
 OBJECT_APPLY_TOOL = "object_apply"
 FINISH_TOOL = "finish"
 FINISH_DESCRIPTION = (
@@ -446,59 +438,18 @@ class _RoundInput:
 
 
 @dataclass(frozen=True, repr=False)
-class EffectiveCall:
-    """One wire call resolved into what every later consumer reads: the declaration behind it (a
-    global def, or the bound action an `object_action` call named), the semantic call id (the
-    canonical action id for a bound call, the tool name otherwise), and the contributor's
-    ExtensionContext its handler runs under. A bound call additionally carries the parsed wire
-    fields and its already-validated action input. Resolution happens once, before segmentation,
-    so requester policy, scheduling, hooks, idempotency keying, walls, replay, final acts,
-    activity, and metering all consume one identity instead of re-looking the name up."""
-
+class _ResolvedToolCall:
+    context: ToolContext
     call: ToolUseBlock
-    tool: ToolDef
-    call_id: str
-    ext: ExtensionContext | None
-    action: ObjectActionInput | None = None
-    action_args: BaseModel | None = None
-
-    def semantic_call(self) -> ToolUseBlock:
-        """The call under its semantic identity — what final-act parsing and the activity
-        summarizer read, so neither ever sees the wire dispatcher's name."""
-        if self.call_id == self.call.name:
-            return self.call
-        assert self.action is not None
-        return self.call.model_copy(
-            update={
-                "name": self.call_id,
-                "input": self.action.model_dump(mode="json", exclude_defaults=True),
-            }
-        )
-
-    def meter_dimensions(self) -> dict[str, str]:
-        """The semantic telemetry dimensions beside the wire `tool`: the call id, and for a bound
-        call its kind, binding, and contributor."""
-        if self.tool.bound is None:
-            return {"call": self.call_id}
-        return {
-            "call": self.call_id,
-            "kind": self.tool.bound.kind,
-            "binding": self.tool.bound.binding,
-            "contributor": "core" if self.ext is None else self.ext.store.extension,
-        }
 
     def __repr__(self) -> str:
-        return f"EffectiveCall(call={self.call_id}, call_id={self.call.id})"
+        return f"_ResolvedToolCall(tool={self.call.name}, call_id={self.call.id})"
 
 
 @dataclass(frozen=True, repr=False)
 class _BoundToolCall:
     context: ToolContext
-    effective: EffectiveCall
-
-    @property
-    def call(self) -> ToolUseBlock:
-        return self.effective.call
+    call: ToolUseBlock
 
     def __repr__(self) -> str:
         return f"_BoundToolCall(tool={self.call.name}, call_id={self.call.id})"
@@ -510,7 +461,6 @@ class _RejectedToolCall:
     text: str
     outcome: str
     error_class: str
-    dimensions: Mapping[str, str] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         return (
@@ -520,7 +470,7 @@ class _RejectedToolCall:
 
 
 type _DispatchInput = _BoundToolCall | _RejectedToolCall
-type _Resolution = EffectiveCall | _RejectedToolCall
+type _BindResult = _ResolvedToolCall | _RejectedToolCall
 
 
 @dataclass
@@ -612,26 +562,29 @@ class IntentRefused(Exception):
     text into the terminal frame's error_message for the submitting panel."""
 
 
-def _dispatch_segments(resolved: tuple[_Resolution, ...]) -> Iterator[tuple[_Resolution, ...]]:
-    """Split a round's resolved calls into dispatch groups that preserve the model's call order: a
-    run of consecutive parallel-safe calls executes concurrently (bounded by
-    MAX_PARALLEL_TOOL_CALLS), and every other call — a position-read final act, an unknown or
-    malformed call — is its own in-order barrier, so the act the round is read by stays where the
-    model put it. `parallel_safe` is the resolved declaration's, so a bound action schedules by
-    its own flag, never the wire dispatcher's."""
-    segment: list[_Resolution] = []
-    for item in resolved:
-        safe = isinstance(item, EffectiveCall) and item.tool.parallel_safe
+def _dispatch_segments(
+    tools: ToolRegistry, tool_calls: tuple[ToolUseBlock, ...]
+) -> Iterator[tuple[ToolUseBlock, ...]]:
+    """Split a round's calls into dispatch groups that preserve the model's call order: a run of
+    consecutive parallel-safe calls executes concurrently (bounded by MAX_PARALLEL_TOOL_CALLS),
+    and every other call — a position-read final act, an unknown name — is its own in-order
+    barrier, so the act the round is read by stays where the model put it."""
+    segment: list[ToolUseBlock] = []
+    for call in tool_calls:
+        try:
+            safe = tools.get(call.name).parallel_safe
+        except KeyError:
+            safe = False
         if safe:
             if len(segment) == MAX_PARALLEL_TOOL_CALLS:
                 yield tuple(segment)
                 segment = []
-            segment.append(item)
+            segment.append(call)
             continue
         if segment:
             yield tuple(segment)
             segment = []
-        yield (item,)
+        yield (call,)
     if segment:
         yield tuple(segment)
 
@@ -677,7 +630,6 @@ def _meter_dispatch(
     outcome: str,
     error_class: str | None,
     profile: str,
-    semantic: Mapping[str, str] | None = None,
 ) -> None:
     """One count and one wall-clock observation for a dispatched call, so a dashboard reads which
     tool the fleet spends its time in and where that time fails. `outcome` separates the ends a
@@ -687,18 +639,12 @@ def _meter_dispatch(
     `error_class` rides every end that carries an exception, and `profile` separates the dispatches
     a subagent makes from the main agent's.
 
-    The wall clock is what the round waited on. `tool` stays the wire transport; `semantic` adds
-    the resolved identity — `call`, and a bound action's `kind`, `binding`, and `contributor` —
-    so dashboards group on what ran, not what carried it. A name the registry does not hold
-    reports as UNREGISTERED_TOOL, and an `object_action` call naming an action no kind registers
-    folds its `call` the same way — either name arrives on an assistant message the model wrote,
-    so passing it through would mint one series per invented name."""
+    The wall clock is what the round waited on. A name the registry does not hold reports as
+    UNREGISTERED_TOOL — the name arrives on an assistant message the model wrote, so passing it
+    through would mint one series per invented name."""
     registered = any(tool.name == call.name for tool in tools.tools)
-    wire = call.name if registered else UNREGISTERED_TOOL
     dimensions = {
-        "tool": wire,
-        "call": wire if semantic is None else semantic.get("call", wire),
-        **({} if semantic is None else {k: v for k, v in semantic.items() if k != "call"}),
+        "tool": call.name if registered else UNREGISTERED_TOOL,
         "outcome": outcome,
         "profile": profile,
         **({} if error_class is None else {"error_class": error_class}),
@@ -807,47 +753,6 @@ def _pending_act[PayloadT: BaseModel](
         except (json.JSONDecodeError, ValidationError):
             return None
     return None
-
-
-def _round_acts(
-    resolved: tuple[_Resolution, ...], results: tuple[ToolResultBlock, ...]
-) -> dict[str, BaseModel]:
-    """The typed act payloads one round leaves open, keyed by the terminal-frame field each
-    declaration maps to. Selection is by the resolved declaration's `final_act_model`, matched
-    under each call's semantic identity, so a final act survives the `object_action` dispatcher
-    exactly as it rides a named call. The mapping's rule picks the parser: a last-call act reads
-    only the round's final call, a pending act the last successful such call anywhere in the
-    round."""
-    calls = tuple(
-        item.semantic_call() if isinstance(item, EffectiveCall) else item.call for item in resolved
-    )
-    acts: dict[str, BaseModel] = {}
-    settled: set[str] = set()
-    for item in reversed(resolved):
-        if not isinstance(item, EffectiveCall) or item.tool.final_act_model is None:
-            continue
-        frame_field, rule = FINAL_ACT_FIELDS[item.tool.final_act_model]
-        if rule != PENDING_ACT or frame_field in settled:
-            continue
-        settled.add(frame_field)
-        payload = _pending_act(calls, results, item.call_id, item.tool.final_act_model)
-        if payload is not None:
-            acts[frame_field] = payload
-    last = resolved[-1] if resolved else None
-    if isinstance(last, EffectiveCall) and last.tool.final_act_model is not None:
-        frame_field, rule = FINAL_ACT_FIELDS[last.tool.final_act_model]
-        if rule == LAST_CALL_ACT:
-            payload = _final_act(calls, results, last.call_id, last.tool.final_act_model)
-            if payload is not None:
-                acts[frame_field] = payload
-    return acts
-
-
-def _act[PayloadT: BaseModel](
-    acts: dict[str, BaseModel], frame_field: str, model: type[PayloadT]
-) -> PayloadT | None:
-    payload = acts.get(frame_field)
-    return payload if isinstance(payload, model) else None
 
 
 def _created_refs(
@@ -1137,8 +1042,6 @@ class TurnEngine:
     preload: tuple[LoadedSkill, ...] = ()
     output_model: Contract | None = None
     adoption: AdoptionReplay = field(default_factory=AdoptionReplay)
-    verbs: ObjectVerbs = field(default_factory=lambda: ObjectVerbs({}))
-    granted_actions: frozenset[str] = frozenset()
     _activity: _ActivityState = field(default_factory=_ActivityState, init=False, repr=False)
     _find_usages: ContextVar[list[Usage] | None] = field(
         default_factory=lambda: ContextVar("find_usages", default=None),
@@ -1228,7 +1131,6 @@ class TurnEngine:
             on_behalf_of_member_id=self.turn.on_behalf_of_member_id,
             artifact_token_secret=self.artifact_token_secret,
             grants=self.grants,
-            granted_actions=self.granted_actions,
             skills=self.skills,
             loaded_skills=self.compaction.loaded_skills,
             cdp_provider=self.cdp_provider,
@@ -1386,12 +1288,9 @@ class TurnEngine:
         """Run an intent turn: dispatch its one typed tool call verbatim and commit the result.
 
         A speaking intent is a prepared panel mutation and binds authority through its founding
-        member message. A speaking `object_action` intent reaches only an action that declares a
-        `presentation` — the one dispatch-point fence on the prepared-intent lane — while a
-        speakerless intent is a sandbox bridge call, carries the authority of the live parent run
-        on `on_behalf_of_member_id`, and is gated by the turn's granted actions instead. Both take
-        the same guarded, memoized dispatch as a model call, with no model round or turn-shaped
-        prompt hooks."""
+        member message. A speakerless intent is a sandbox bridge call and carries the authority of
+        the live parent run on `on_behalf_of_member_id`. Both take the same guarded, memoized
+        dispatch as a model call, with no model round or turn-shaped prompt hooks."""
         meter = _TurnMeter(started=time.monotonic(), profile=self.profile)
         emit_metric("turn_started_total", profile=self.profile)
         log(
@@ -1415,7 +1314,6 @@ class TurnEngine:
             on_behalf_of_member_id=self.turn.on_behalf_of_member_id,
             artifact_token_secret=self.artifact_token_secret,
             grants=self.grants,
-            granted_actions=self.granted_actions,
             skills=self.skills,
             loaded_skills=self.compaction.loaded_skills,
             cdp_provider=self.cdp_provider,
@@ -1452,24 +1350,18 @@ class TurnEngine:
                         member_id=self.turn.speaker_member_id, rendered=self.turn.inbound
                     )
                 }
-            semantic = self._resolve_call(call)
-            if (
-                self.turn.speaker_member_id is not None
-                and isinstance(semantic, EffectiveCall)
-                and semantic.tool.bound is not None
-                and semantic.tool.presentation is None
-            ):
-                semantic = self._rejected(
-                    call,
-                    ValueError(
-                        f"action {semantic.call_id} declares no presentation — prepared member "
-                        "intents reach only presented actions"
-                    ),
-                    dimensions=semantic.meter_dimensions(),
+            resolved = await self._bind_or_error(context, call, requesters)
+            if isinstance(resolved, _ResolvedToolCall):
+                self._start_activity(
+                    resolved.call,
+                    _activity_goal(requesters),
                 )
-            bound = await self._bind_or_error(context, semantic, requesters)
-            if isinstance(bound, _BoundToolCall):
-                self._start_activity(bound.effective.semantic_call(), _activity_goal(requesters))
+                bound: _DispatchInput = _BoundToolCall(
+                    context=resolved.context,
+                    call=resolved.call,
+                )
+            else:
+                bound = resolved
             result = await self._dispatch_step_recovering(bound, usage_events)
             if result.is_error:
                 frame = await self._commit(
@@ -1483,9 +1375,18 @@ class TurnEngine:
                         is_error=False,
                     ),
                 )
-                acts = _round_acts((semantic,), dispatched_result)
-                connect_request = _act(acts, "connect_request", ConnectRequest)
-                credential_request = _act(acts, "credential_request", CredentialRequest)
+                connect_request = _pending_act(
+                    (call,),
+                    dispatched_result,
+                    CONNECT_ACCOUNT_TOOL,
+                    ConnectRequest,
+                )
+                credential_request = _pending_act(
+                    (call,),
+                    dispatched_result,
+                    REQUEST_CREDENTIALS_TOOL,
+                    CredentialRequest,
+                )
                 frame = await self._commit(
                     "done",
                     usage_events,
@@ -1739,48 +1640,52 @@ class TurnEngine:
                 *((TextBlock(text=text),) if text else ()),
                 *tool_calls,
             )
-            resolved_calls = tuple(
-                self._resolve_call(
-                    call,
-                    (
-                        None
-                        if round_result.offered_tools is None
-                        else frozenset(round_result.offered_tools)
-                    ),
-                )
-                for call in tool_calls
-            )
             results: tuple[ToolResultBlock, ...] = ()
             try:
-                for segment in _dispatch_segments(resolved_calls):
-                    if finish_error is not None and segment[0].call.name == FINISH_TOOL:
+                for segment in _dispatch_segments(self.tools, tool_calls):
+                    if finish_error is not None and segment[0].name == FINISH_TOOL:
                         results = (
                             *results,
                             ToolResultBlock(
-                                tool_use_id=segment[0].call.id,
+                                tool_use_id=segment[0].id,
                                 content=_bounded(finish_error),
                                 is_error=True,
                             ),
                         )
                         continue
-                    bound_items = await asyncio.gather(
-                        *(self._bind_or_error(context, item, requesters) for item in segment),
+                    resolved = await asyncio.gather(
+                        *(
+                            self._bind_or_error(
+                                context,
+                                call,
+                                requesters,
+                                (
+                                    None
+                                    if round_result.offered_tools is None
+                                    else frozenset(round_result.offered_tools)
+                                ),
+                            )
+                            for call in segment
+                        ),
                         return_exceptions=True,
                     )
                     failures = [
-                        outcome for outcome in bound_items if isinstance(outcome, BaseException)
+                        outcome for outcome in resolved if isinstance(outcome, BaseException)
                     ]
                     if failures:
                         raise failures[0]
                     bound: list[_DispatchInput] = []
-                    for item in bound_items:
-                        if isinstance(item, BaseException):
-                            continue
-                        if isinstance(item, _BoundToolCall):
-                            self._start_activity(
-                                item.effective.semantic_call(), _activity_goal(requesters)
+                    for item in resolved:
+                        if isinstance(item, _ResolvedToolCall):
+                            self._start_activity(item.call, _activity_goal(requesters))
+                            bound.append(
+                                _BoundToolCall(
+                                    context=item.context,
+                                    call=item.call,
+                                )
                             )
-                        bound.append(item)
+                        elif not isinstance(item, BaseException):
+                            bound.append(item)
                     dispatched = await asyncio.gather(
                         *(self._dispatch(item, usage_events) for item in bound),
                         return_exceptions=True,
@@ -1796,12 +1701,15 @@ class TurnEngine:
                         raise failures[0]
             finally:
                 await self._fold_created(created, tool_calls, results)
-            acts = _round_acts(resolved_calls, results)
-            question = _act(acts, "question", AskUserInput)
+            question = _final_act(tool_calls, results, ASK_USER_TOOL, AskUserInput)
             credential_request = (
-                _act(acts, "credential_request", CredentialRequest) or credential_request
+                _pending_act(tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest)
+                or credential_request
             )
-            connect_request = _act(acts, "connect_request", ConnectRequest) or connect_request
+            connect_request = (
+                _pending_act(tool_calls, results, CONNECT_ACCOUNT_TOOL, ConnectRequest)
+                or connect_request
+            )
             messages = (
                 *messages,
                 Message(role="assistant", content=assistant_blocks),
@@ -2562,157 +2470,43 @@ class TurnEngine:
             _loaded_skill_closures(messages, self.skills), preloaded=self.preload
         )
 
-    def _resolve_call(
-        self, call: ToolUseBlock, offered_tools: frozenset[str] | None = None
-    ) -> _Resolution:
-        """Resolve one wire call into its declaration before anything reads it — the pass
-        segmentation, requester policy, and the dispatch step all consume. An `object_action`
-        call resolves into the bound action it names; every other name resolves in the wire
-        registry. A failure here is a pre-dispatch error: it still claims its dispatch step in
-        model order and fires no hooks, exactly as a malformed global call does."""
-        if (
-            offered_tools is not None
-            and call.name not in offered_tools
-            and any(tool.name == call.name for tool in self.tools.tools)
-        ):
-            guidance = "; call tool_search before using it" if TOOL_SEARCH in offered_tools else ""
-            return self._rejected(call, ValueError(f"tool {call.name!r} was not offered{guidance}"))
-        if call.name == OBJECT_ACTION_TOOL:
-            return self._resolve_action(call)
-        try:
-            tool = self.tools.get(call.name)
-        except KeyError as error:
-            return self._rejected(call, error)
-        return EffectiveCall(
-            call=call, tool=tool, call_id=tool.name, ext=self.tool_ext.get(call.name)
-        )
-
-    def _resolve_action(self, call: ToolUseBlock) -> _Resolution:
-        """Resolve an `object_action` wire call: parse the structured target, look the action up
-        on its kind, hold arity to the declared binding, enforce this turn's grant of the
-        canonical id, and validate the action input against the action's own model — in that
-        order, each failing loud before dispatch. A rejection BEFORE the lookup lands — a
-        malformed wire shape, an unknown kind or action — meters `call=unregistered`, since the
-        string it would name arrives on an assistant message the model wrote; a rejection on a
-        looked-up action meters its registered canonical id, so per-action refusal rates stay
-        readable at bounded cardinality."""
-        unresolved = {"call": UNREGISTERED_TOOL}
-        try:
-            wire = ObjectActionInput.model_validate(call.input)
-        except ValidationError as error:
-            return self._rejected(call, error, dimensions=unresolved)
-        held = self.verbs.actions.get(wire.kind, {})
-        if not held and wire.kind not in self.verbs.registry:
-            registered = ", ".join(sorted(self.verbs.registry)) or "none"
-            return self._rejected(
-                call,
-                ValueError(f"no object kind {wire.kind!r}; registered kinds: {registered}"),
-                dimensions=unresolved,
-            )
-        binding = held.get(wire.action)
-        if binding is None:
-            registered = ", ".join(sorted(held)) or "none"
-            return self._rejected(
-                call,
-                ValueError(
-                    f"no action {wire.action!r} on kind {wire.kind!r}; "
-                    f"registered actions: {registered}"
-                ),
-                dimensions=unresolved,
-            )
-        tool = binding.action
-        effective = EffectiveCall(
-            call=call, tool=tool, call_id=tool.canonical_id, ext=binding.context, action=wire
-        )
-        dimensions = effective.meter_dimensions()
-        declared = tool.bound
-        assert declared is not None
-        if declared.binding == "instance" and not wire.name:
-            return self._rejected(
-                call,
-                ValueError(f"{tool.canonical_id} is an instance action; pass the object name"),
-                dimensions=dimensions,
-            )
-        if declared.binding == "collection" and wire.name:
-            return self._rejected(
-                call,
-                ValueError(f"{tool.canonical_id} is a collection action; it takes no name"),
-                dimensions=dimensions,
-            )
-        if declared.binding == "collection" and wire.generation is not None:
-            return self._rejected(
-                call,
-                ValueError(f"{tool.canonical_id} is a collection action; it takes no generation"),
-                dimensions=dimensions,
-            )
-        if wire.agent and not tool.agent_targetable:
-            return self._rejected(
-                call,
-                ValueError(f"{tool.canonical_id} takes no agent target"),
-                dimensions=dimensions,
-            )
-        if tool.canonical_id not in self.granted_actions:
-            return self._rejected(
-                call,
-                ValueError(f"action {tool.canonical_id} is not granted to this agent"),
-                dimensions=dimensions,
-            )
-        try:
-            args = tool.input_model.model_validate(wire.input)
-        except ValidationError as error:
-            return self._rejected(call, error, dimensions=dimensions)
-        return replace(effective, action_args=args)
-
-    def _rejected(
-        self,
-        call: ToolUseBlock,
-        error: Exception,
-        dimensions: Mapping[str, str] | None = None,
-    ) -> _RejectedToolCall:
-        return _RejectedToolCall(
-            call=call,
-            text=f"{type(error).__name__}: {error}",
-            outcome="invalid_call" if isinstance(error, (ValueError, KeyError)) else "step_failed",
-            error_class=type(error).__name__,
-            dimensions={} if dimensions is None else dimensions,
-        )
-
     async def _bind_or_error(
         self,
         context: ToolContext,
-        item: _Resolution,
+        call: ToolUseBlock,
         requesters: dict[UUID, ActiveMessage],
-    ) -> _DispatchInput:
-        if isinstance(item, _RejectedToolCall):
-            return item
+        offered_tools: frozenset[str] | None = None,
+    ) -> _BindResult:
         started = time.monotonic()
         try:
-            bound_context, call = await self._bind_requester(context, item, requesters)
-            return _BoundToolCall(context=bound_context, effective=replace(item, call=call))
+            if (
+                offered_tools is not None
+                and call.name not in offered_tools
+                and any(tool.name == call.name for tool in self.tools.tools)
+            ):
+                guidance = (
+                    "; call tool_search before using it" if TOOL_SEARCH in offered_tools else ""
+                )
+                raise ValueError(f"tool {call.name!r} was not offered{guidance}")
+            context, call = await self._bind_requester(context, call, requesters)
+            return _ResolvedToolCall(context=context, call=call)
         except asyncio.CancelledError as error:
             _meter_dispatch(
-                self.tools,
-                item.call,
-                started,
-                "step_failed",
-                type(error).__name__,
-                self.profile,
-                item.meter_dimensions(),
+                self.tools, call, started, "step_failed", type(error).__name__, self.profile
             )
             raise
         except TerminalAbsent as error:
             _meter_dispatch(
-                self.tools,
-                item.call,
-                started,
-                "step_failed",
-                TerminalGone.__name__,
-                self.profile,
-                item.meter_dimensions(),
+                self.tools, call, started, "step_failed", TerminalGone.__name__, self.profile
             )
             raise TerminalGone(str(error)) from error
         except Exception as error:
-            return self._rejected(item.call, error, dimensions=item.meter_dimensions())
+            return _RejectedToolCall(
+                call=call,
+                text=f"{type(error).__name__}: {error}",
+                outcome="invalid_call" if isinstance(error, ValueError) else "step_failed",
+                error_class=type(error).__name__,
+            )
 
     async def _dispatch(
         self,
@@ -2782,13 +2576,15 @@ class TurnEngine:
     async def _bind_requester(
         self,
         context: ToolContext,
-        item: EffectiveCall,
+        call: ToolUseBlock,
         requesters: dict[UUID, ActiveMessage],
     ) -> tuple[ToolContext, ToolUseBlock]:
-        call = item.call
         tool_input = dict(call.input)
         requester: UUID | None = None
-        profile_only = item.tool.profile_only
+        try:
+            profile_only = self.tools.get(call.name).profile_only
+        except KeyError:
+            profile_only = False
         if self.turn.subagent_profile is not None and profile_only:
             tool_input.pop(REQUESTED_BY, None)
         elif REQUESTED_BY in tool_input:
@@ -2888,11 +2684,7 @@ class TurnEngine:
         pre_tool_use may Deny
         (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the sandbox
         with the folded args (a raising handler is an is_error result unless no terminal returned
-        within its reconnect grace, which ends the turn). A bound action's target is read under
-        the kind owner's context before the pre hook: a missing or refused object is an is_error
-        result (`invalid_call`, no hook fires), while a kind store that faults on the read is the
-        engine's failure, not the model's, and raises out of the step as `step_failed`. A
-        non-error result over
+        within its reconnect grace, which ends the turn). A non-error result over
         MAX_TOOL_RESULT_CHARS is offloaded — its full text written to the run's `tool-output`
         file and only a TOOL_RESULT_PREVIEW_CHARS preview plus that path kept in context, so no
         single result is re-ingested whole on every later round of the turn. The cap is a context
@@ -2913,9 +2705,7 @@ class TurnEngine:
         never rewritten. The pre-dispatch is_error result (a bad name or bad arguments) fires
         neither — it never ran. An extension tool gets its owning ExtensionContext; a builtin runs
         ext=None. A side-effecting tool additionally receives `ctx.idempotency_key`
-        (`{turn}/{call}/{call_id}`, keyed by the semantic call id — a bound action's canonical
-        id, never the wire dispatcher's name) to dedup its external write on a cross-attempt
-        resume; a read
+        (`{turn}/{name}/{call_id}`) to dedup its external write on a cross-attempt resume; a read
         tool receives None. A tool's image content (a read of an image/PDF, a browser screenshot)
         bypasses the text bound, wall, and hooks and rides a successful result as image blocks the
         model sees — bounded to TOOL_IMAGE_EDGE_LIMIT (Anthropic rejects any image over 2000px on
@@ -2935,12 +2725,7 @@ class TurnEngine:
         find_usages: list[Usage] = []
         started = time.monotonic()
         outcome, error_class = "ok", None
-        semantic = (
-            bound.dimensions
-            if isinstance(bound, _RejectedToolCall)
-            else bound.effective.meter_dimensions()
-        )
-        with span("tool.dispatch", tool=call.name, call=semantic.get("call", call.name)):
+        with span("tool.dispatch", tool=call.name):
             try:
                 if isinstance(bound, _RejectedToolCall):
                     outcome, error_class = bound.outcome, bound.error_class
@@ -2949,11 +2734,9 @@ class TurnEngine:
                         text=bound.text,
                         is_error=True,
                     )
-                effective = bound.effective
-                tool = effective.tool
                 if (
                     self.adoption.replaying
-                    and self._redoes_on_replay(tool)
+                    and self._redoes_on_replay(call.name)
                     and await self._pending_member_guidance()
                 ):
                     outcome = "guidance_preempted"
@@ -2961,7 +2744,6 @@ class TurnEngine:
                         "turn.dispatch_preempted_by_guidance",
                         turn_id=str(self.turn.id),
                         tool=call.name,
-                        call=effective.call_id,
                     )
                     return DispatchResult(
                         tool_use_id=call.id,
@@ -2970,39 +2752,20 @@ class TurnEngine:
                         activity=True,
                     )
                 context = bound.context
-                if effective.action_args is not None:
-                    args: BaseModel = effective.action_args
-                else:
-                    try:
-                        args = tool.input_model.model_validate(call.input)
-                    except Exception as error:
-                        outcome, error_class = "invalid_call", type(error).__name__
-                        return DispatchResult(
-                            tool_use_id=call.id,
-                            text=f"{type(error).__name__}: {error}",
-                            is_error=True,
-                            activity=True,
-                        )
-                target: ObjectActionTarget | None = None
-                if effective.action is not None:
-                    try:
-                        target = await self.verbs.action_target(context, tool, effective.action)
-                    except ValueError as error:
-                        outcome, error_class = "invalid_call", type(error).__name__
-                        return DispatchResult(
-                            tool_use_id=call.id,
-                            text=f"{type(error).__name__}: {error}",
-                            is_error=True,
-                            activity=True,
-                        )
+                try:
+                    tool = self.tools.get(call.name)
+                    args = tool.input_model.model_validate(call.input)
+                except Exception as error:
+                    outcome, error_class = "invalid_call", type(error).__name__
+                    return DispatchResult(
+                        tool_use_id=call.id,
+                        text=f"{type(error).__name__}: {error}",
+                        is_error=True,
+                        activity=True,
+                    )
                 pre = await self.hooks.fire(
                     "pre_tool_use",
-                    PreToolUse(
-                        tool_name=call.name,
-                        tool_input=args,
-                        call=effective.call_id,
-                        target=target,
-                    ),
+                    PreToolUse(tool_name=call.name, tool_input=args),
                     self.turn,
                     self.agent,
                     context.speaker_member_id,
@@ -3021,12 +2784,10 @@ class TurnEngine:
                     )
                 args = pre.tool_input if pre.tool_input is not None else args
                 images: list[ImageBlock] = []
-                key = (
-                    f"{self.turn.id}/{effective.call_id}/{call.id}" if tool.side_effecting else None
-                )
+                key = f"{self.turn.id}/{call.name}/{call.id}" if tool.side_effecting else None
                 try:
                     handler_context = replace(
-                        context, ext=effective.ext, idempotency_key=key, target=target
+                        context, ext=self.tool_ext.get(call.name), idempotency_key=key
                     )
                     find_usage_token = self._find_usages.set(find_usages)
                     try:
@@ -3063,17 +2824,11 @@ class TurnEngine:
                         else _bounded(content)
                     )
                 if untrusted:
-                    content = wall(effective.call_id, content)
+                    content = wall(tool.name, content)
                 if is_error:
                     await self.hooks.fire(
                         "post_tool_use_failure",
-                        PostToolUseFailure(
-                            tool_name=call.name,
-                            tool_input=args,
-                            output=content,
-                            call=effective.call_id,
-                            target=target,
-                        ),
+                        PostToolUseFailure(tool_name=call.name, tool_input=args, output=content),
                         self.turn,
                         self.agent,
                         context.speaker_member_id,
@@ -3081,13 +2836,7 @@ class TurnEngine:
                 else:
                     post = await self.hooks.fire(
                         "post_tool_use",
-                        PostToolUse(
-                            tool_name=call.name,
-                            tool_input=args,
-                            output=content,
-                            call=effective.call_id,
-                            target=target,
-                        ),
+                        PostToolUse(tool_name=call.name, tool_input=args, output=content),
                         self.turn,
                         self.agent,
                         context.speaker_member_id,
@@ -3127,18 +2876,18 @@ class TurnEngine:
                 outcome, error_class = "step_failed", type(error).__name__
                 raise
             finally:
-                _meter_dispatch(
-                    self.tools, call, started, outcome, error_class, self.profile, semantic
-                )
+                _meter_dispatch(self.tools, call, started, outcome, error_class, self.profile)
 
-    def _redoes_on_replay(self, tool: ToolDef) -> bool:
+    def _redoes_on_replay(self, name: str) -> bool:
         """Whether re-executing this call redoes its work, making it preemptible. A side-effecting
-        declaration's re-execution dedups through the call's idempotency key — a spawn reattaches
-        to its running child, a connector send dedups at the provider — and must keep that:
-        preempting it strands the keyed work, and a re-issued call would duplicate it under a
-        fresh call id. The flag is the resolved declaration's, so a bound action answers for
-        itself, never for the wire dispatcher."""
-        return not tool.side_effecting
+        tool's re-execution dedups through the call's idempotency key — a spawn reattaches to its
+        running child, a connector send dedups at the provider — and must keep that: preempting it
+        strands the keyed work, and a re-issued call would duplicate it under a fresh call id. An
+        unknown name never dispatches, so there is nothing to preempt."""
+        try:
+            return not self.tools.get(name).side_effecting
+        except KeyError:
+            return False
 
     async def _pending_member_guidance(self) -> bool:
         """Whether a member message is queued for this conversation that no drain has taken. Read

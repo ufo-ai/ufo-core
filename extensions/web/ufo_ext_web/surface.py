@@ -42,7 +42,6 @@ from uuid import UUID, uuid4
 import httpx
 from pydantic import BaseModel, JsonValue, ValidationError
 from ufo_ext_sites.surface import homepage_embed_url, shipped_homepage_url
-from ufo_ext_slack.surface import SURFACE_SLACK
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import SHARED_AUDIENCE, audience_subjects, conversation_audience
@@ -3437,13 +3436,14 @@ async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse({"installations": [entry.model_dump(mode="json") for entry in visible]})
 
 
+SLACK_SURFACE = "slack"
 GITHUB_PROVIDER = "github"
 IMESSAGE_EXTENSION = "imessage"
 IMESSAGE_STEP_FLAG = "enable-imessage-step"
 """Whether the first run offers the iMessage step. It reads open, like every flag withholding a
 screen the product already offers: a deploy with no flag service, an unseeded key and a Flagship
 outage all leave the step where it was."""
-CONNECT_STEP_NAMES = (SURFACE_SLACK, GITHUB_PROVIDER)
+CONNECT_STEP_NAMES = (SLACK_SURFACE, GITHUB_PROVIDER)
 CONNECTOR_CATALOG_LIMIT = 50
 CONNECTOR_CATALOG_QUERY_CHARS = 100
 CONNECTOR_CATALOG_CURSOR_CHARS = 500
@@ -3518,7 +3518,7 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     member_id, _email, audience = resolved
     surfaces = {entry.surface for entry in await ctx.list_installations()}
     coverage = await ctx.github_coverage(member_id, admin=audience.admin)
-    held = {SURFACE_SLACK: SURFACE_SLACK in surfaces, GITHUB_PROVIDER: coverage.git_push}
+    held = {SLACK_SURFACE: SLACK_SURFACE in surfaces, GITHUB_PROVIDER: coverage.git_push}
     imessage = any(
         extension.name == IMESSAGE_EXTENSION for extension in ctx.deploy_extensions
     ) and await flag_enabled(IMESSAGE_STEP_FLAG, default=True)
@@ -3623,8 +3623,8 @@ async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) 
     ago is never offered again."""
     connections = await ctx.list_connections(member_id, admin=admin)
     held = {view.provider for view in connections}
-    if SURFACE_SLACK in {entry.surface for entry in await ctx.list_installations()}:
-        held.add(SURFACE_SLACK)
+    if SLACK_SURFACE in {entry.surface for entry in await ctx.list_installations()}:
+        held.add(SLACK_SURFACE)
     if (await ctx.github_coverage(member_id, admin=admin)).git_push:
         held.add(GITHUB_PROVIDER)
     return frozenset(held)

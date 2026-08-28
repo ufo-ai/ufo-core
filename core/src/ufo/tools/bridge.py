@@ -20,7 +20,6 @@ type BridgeToolName = Literal[
     "object_explain",
     "object_apply",
     "object_delete",
-    "object_action",
     "list_external_tools",
     "describe_external_tools",
     "search_connector_tools",
@@ -33,7 +32,6 @@ BRIDGE_TOOL_NAMES = frozenset(
         "object_explain",
         "object_apply",
         "object_delete",
-        "object_action",
         "list_external_tools",
         "describe_external_tools",
         "search_connector_tools",
@@ -93,9 +91,6 @@ class ToolBridgeRequester(Protocol):
 
 
 def bridge_tools(manifests: tuple[Manifest, ...]) -> tuple[ToolDef, ...]:
-    """The bridge's callable set: the object verbs (with `object_action`, through which every
-    bound action is reached) plus the connector gateway tools. A bound def never enters — it is
-    named through `object_action`, and its short name may legally repeat a bridge tool's."""
     object_tools = ObjectVerbs({}).tools()
     extension_tools = tuple(
         tool
@@ -104,7 +99,7 @@ def bridge_tools(manifests: tuple[Manifest, ...]) -> tuple[ToolDef, ...]:
             *manifest.tools,
             *(tool for connector in manifest.connectors for tool in connector.tools),
         )
-        if tool.bound is None and tool.name in BRIDGE_TOOL_NAMES
+        if tool.name in BRIDGE_TOOL_NAMES
     )
     tools = (*object_tools, *extension_tools)
     ToolRegistry(tools)

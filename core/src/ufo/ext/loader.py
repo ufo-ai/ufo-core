@@ -75,25 +75,10 @@ from ufo.kinds.credential_kind import (
     CredentialSpec,
 )
 from ufo.kinds.members import MEMBER_OBJECT
-from ufo.kinds.surface_kind import (
-    SURFACE_DESCRIPTION,
-    SURFACE_GUIDANCE,
-    SURFACE_KIND,
-    SurfaceObjects,
-    SurfaceObjectSpec,
-    registered_surfaces,
-)
 from ufo.kinds.workspace_kind import WORKSPACE_OBJECT
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.o11y import log, log_error
-from ufo.objects import (
-    BoundAction,
-    BoundKind,
-    ObjectKind,
-    ObjectVerbs,
-    action_registry,
-    object_registry,
-)
+from ufo.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import (
     CORE_SKILLS_BY_NAME,
@@ -103,7 +88,7 @@ from ufo.skills.runtime import (
     SkillRegistry,
     discover_skills,
 )
-from ufo.tools.builtins import BUILTIN_ACTIONS, BUILTIN_TOOLS
+from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.turns.audience import SHARED_AUDIENCE, Audience
 
@@ -441,29 +426,22 @@ def turn_tools(
     artifact_token_secret: str = "",
     scheduled_member_id: UUID | None = None,
     member_context_blob: WorkspaceBlobStore | None = None,
-) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]:
+) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext]]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
-    tools and connector tools — the workspace-scoped ExtensionContext each extension tool's
-    handler receives, and the ObjectVerbs the engine resolves object calls through. A builtin has
-    no entry, so the engine dispatches it with ext=None. A connector
+    tools and connector tools — and, per extension tool, the workspace-scoped ExtensionContext its
+    handler receives. A builtin has no entry, so the engine dispatches it with ext=None. A connector
     tool is scoped to its declaring extension exactly as a plain tool is, so its egress reaches the
     provider host under that extension's context. Only an extension that declares credential slots
     needs the credential key — a tool-only extension with no slots (a todo list) builds its context
     with none; a slot-declaring extension with no key set fails loud. Installation registration is
     limited to the surfaces that same manifest declares. Declared object kinds join one registry
-    behind the six object verbs, each kind's store dispatching under its own extension's context
-    exactly as its tools do. A declared tool whose `bound` names a kind is an object action: it
-    joins the action registry under the same context instead of the wire set, validated only after
-    every manifest is collected so extension order cannot fail a cross-extension attachment.
-    `public_base_url` and `home_surface` are the two halves of a link into
+    behind the five object verbs, each kind's store dispatching under its own extension's context
+    exactly as its tools do. `public_base_url` and `home_surface` are the two halves of a link into
     the browser portal, so a tool answering with somewhere for the member to go renders it through
     `ctx.home_url` instead of assembling core's mount path itself."""
     tools: list[ToolDef] = list(BUILTIN_TOOLS)
     ext_by_tool: dict[str, ExtensionContext] = {}
     bound_kinds: list[BoundKind] = list(CORE_OBJECT_KINDS)
-    bound_actions: list[BoundAction] = [
-        BoundAction(action=action, extension=None, context=None) for action in BUILTIN_ACTIONS
-    ]
     for manifest in manifests:
         declared_tools = (
             *manifest.tools,
@@ -500,11 +478,6 @@ def turn_tools(
             member_context_blob=member_context_blob,
         )
         for tool in declared_tools:
-            if tool.bound is not None:
-                bound_actions.append(
-                    BoundAction(action=tool, extension=manifest.name, context=context)
-                )
-                continue
             tools.append(tool)
             ext_by_tool[tool.name] = context
         bound_kinds.extend(
@@ -519,10 +492,8 @@ def turn_tools(
             artifact_token_secret=artifact_token_secret,
         )
     )
-    kinds = object_registry(tuple(bound_kinds))
-    verbs = ObjectVerbs(kinds, action_registry(tuple(bound_actions), kinds))
-    tools.extend(verbs.tools())
-    return tuple(tools), ext_by_tool, verbs
+    tools.extend(ObjectVerbs(object_registry(tuple(bound_kinds))).tools())
+    return tuple(tools), ext_by_tool
 
 
 def member_object_registry(
@@ -536,23 +507,10 @@ def member_object_registry(
 ) -> dict[str, BoundKind]:
     """The deploy's object kinds bound for member reads outside a turn — the portal's registry.
     The same kinds and the same boot validation as `turn_tools`, but each extension context is
-    workspace-ambient rather than audience-scoped: a member read carries no conversation. Bound
-    actions pass the same registration gates here, in this flavor, so a portal build fails loud
-    exactly where a turn build would."""
+    workspace-ambient rather than audience-scoped: a member read carries no conversation."""
     bound: list[BoundKind] = list(CORE_OBJECT_KINDS)
-    actions: list[BoundAction] = [
-        BoundAction(action=action, extension=None, context=None) for action in BUILTIN_ACTIONS
-    ]
     for manifest in manifests:
-        declared_actions = tuple(
-            tool
-            for tool in (
-                *manifest.tools,
-                *(tool for connector in manifest.connectors for tool in connector.tools),
-            )
-            if tool.bound is not None
-        )
-        if not manifest.objects and not declared_actions:
+        if not manifest.objects:
             continue
         declared = frozenset(slot.name for slot in manifest.credentials)
         if declared and credential_store is None:
@@ -572,10 +530,6 @@ def member_object_registry(
             public_base_url=public_base_url,
             artifact_token_secret=artifact_token_secret,
         )
-        actions.extend(
-            BoundAction(action=tool, extension=manifest.name, context=context)
-            for tool in declared_actions
-        )
         bound.extend(
             BoundKind(kind=kind, extension=manifest.name, context=context)
             for kind in manifest.objects
@@ -588,9 +542,7 @@ def member_object_registry(
             artifact_token_secret=artifact_token_secret,
         )
     )
-    kinds = object_registry(tuple(bound))
-    action_registry(tuple(actions), kinds)
-    return kinds
+    return object_registry(tuple(bound))
 
 
 def core_object_kinds(
@@ -604,10 +556,8 @@ def core_object_kinds(
     context — their handlers read the ambient workspace directly. `credential` projects every
     manifest's declared slots, and reads a keyed slot's live host through the store so a read
     reports the host the wire uses; `extension` projects the manifests themselves, so two rendering
-    one object name fail loud here at boot; `surface` projects every manifest's registered
-    surfaces beside the workspace's installation bindings, refusing a duplicate surface name the
-    same way; `artifact` takes the deploy's public base and artifact secret so its listing rows
-    publish signed links."""
+    one object name fail loud here at boot; `artifact` takes the deploy's public base and artifact
+    secret so its listing rows publish signed links."""
     credential = ObjectKind(
         name=CREDENTIAL_KIND,
         description=CREDENTIAL_DESCRIPTION,
@@ -624,14 +574,6 @@ def core_object_kinds(
         store=ExtensionObjects(extensions=named_extensions(manifests)),
         list_fields=frozenset({"version", "tool_count", "credential_slot_count"}),
     )
-    surface = ObjectKind(
-        name=SURFACE_KIND,
-        description=SURFACE_DESCRIPTION,
-        guidance=SURFACE_GUIDANCE,
-        spec_model=SurfaceObjectSpec,
-        store=SurfaceObjects(surfaces=registered_surfaces(manifests)),
-        list_fields=frozenset({"extension", "addressed", "durable", "home", "bound"}),
-    )
     artifact = artifact_object(
         public_base_url=public_base_url, artifact_token_secret=artifact_token_secret
     )
@@ -639,7 +581,6 @@ def core_object_kinds(
         BoundKind(kind=artifact, extension=None, context=None),
         BoundKind(kind=credential, extension=None, context=None),
         BoundKind(kind=extension, extension=None, context=None),
-        BoundKind(kind=surface, extension=None, context=None),
     )
 
 
@@ -853,20 +794,14 @@ def memory_search(
 def validate_ext_tools(
     manifests: tuple[Manifest, ...],
     credential_store: CredentialStore | None,
-) -> dict[str, dict[str, BoundAction]]:
+) -> None:
     """Fail loud at boot on a misconfigured extension — a tool whose name collides with a builtin or
-    another extension, an object kind or bound action that collides or fails the registration
-    gates, or a tools-declaring extension with no credential key — so a deploy fails to start
-    rather than coming up healthy and then failing every turn that builds the registry.
-    Deploy-level: it checks the tool defs, kind and action gates, and key presence, never builds a
-    per-workspace context (a shared fleet has no workspace at boot; the turn builds each tool's
-    context per request). Returns the validated action registry, context-free — the deploy's
-    action names and flags for surfaces that answer capability questions outside a turn (the
-    sandbox tool bridge)."""
+    another extension, an object kind that collides or fails the registration gates, or a
+    tools-declaring extension with no credential key — so a deploy fails to start rather than
+    coming up healthy and then failing every turn that builds the registry. Deploy-level: it checks
+    the tool defs, kind gates, and key presence, never builds a per-workspace context (a shared
+    fleet has no workspace at boot; the turn builds each tool's context per request)."""
     tools: list[ToolDef] = list(BUILTIN_TOOLS)
-    actions: list[BoundAction] = [
-        BoundAction(action=action, extension=None, context=None) for action in BUILTIN_ACTIONS
-    ]
     for manifest in manifests:
         declared_tools = (
             *manifest.tools,
@@ -879,11 +814,7 @@ def validate_ext_tools(
                 f"extension {manifest.name!r} declares credential slots "
                 f"{sorted(slot.name for slot in manifest.credentials)} but no credential key is set"
             )
-        for tool in declared_tools:
-            if tool.bound is not None:
-                actions.append(BoundAction(action=tool, extension=manifest.name, context=None))
-                continue
-            tools.append(tool)
+        tools.extend(declared_tools)
     registry = object_registry(
         (
             *CORE_OBJECT_KINDS,
@@ -895,10 +826,8 @@ def validate_ext_tools(
             *core_object_kinds(manifests),
         )
     )
-    validated = action_registry(tuple(actions), registry)
-    tools.extend(ObjectVerbs(registry, validated).tools())
+    tools.extend(ObjectVerbs(registry).tools())
     ToolRegistry(tuple(tools))
-    return validated
 
 
 class HookOutcomeNotAllowed(TypeError):
@@ -970,7 +899,7 @@ class HookChain:
             current: HookPayload
             match payload:
                 case PreToolUse() | PostToolUse() | PostToolUseFailure() if hook.spec.tools and (
-                    payload.call not in hook.spec.tools
+                    payload.tool_name not in hook.spec.tools
                 ):
                     continue
                 case PreToolUse():

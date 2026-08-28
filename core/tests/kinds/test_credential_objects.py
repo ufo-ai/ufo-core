@@ -110,7 +110,7 @@ def _tool_context(workspace_id: UUID, speaker_member_id: UUID | None = None) -> 
 def _object_tool(name: str) -> ToolDef:
     manifest = next((m for m in load_manifests() if m.name == sample.NAME), None)
     assert manifest is not None, "sample extension not discovered via entry points — run `uv sync`"
-    tools, _, _ = turn_tools(
+    tools, _ = turn_tools(
         (manifest,),
         CredentialStore(fernet=Fernet(Fernet.generate_key())),
         audience=conversation_audience(None),
@@ -277,7 +277,7 @@ async def test_the_credential_kind_filters_and_orders_on_its_declared_fields(db:
             CredentialSlot(name="probe_api_host", description="Probe site."),
         ),
     )
-    tools, _, _ = turn_tools((probe,), store, audience=conversation_audience(None))
+    tools, _ = turn_tools((probe,), store, audience=conversation_audience(None))
     listing = next(tool for tool in tools if tool.name == "object_list")
     with ws(workspace_id):
         owner = await _member(workspace_id, ADMIN_CREATED_AT)
@@ -337,7 +337,7 @@ async def test_a_host_choice_slot_renders_its_options_through_tool_dispatch(db: 
             CredentialSlot(name="probe_api_host", description="Probe site."),
         ),
     )
-    tools, _, _ = turn_tools((probe,), store, audience=conversation_audience(None))
+    tools, _ = turn_tools((probe,), store, audience=conversation_audience(None))
     get_tool = next(tool for tool in tools if tool.name == "object_get")
     with ws(workspace_id):
         owner = await _member(workspace_id, ADMIN_CREATED_AT)

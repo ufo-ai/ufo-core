@@ -514,7 +514,7 @@ def _tool(
     blob: WorkspaceBlobStore | None = None,
 ) -> tuple[ToolDef, ToolContext]:
     """One real tool and the context the engine dispatches it with, its extension bound."""
-    tools, ext_by_tool, _ = turn_tools(
+    tools, ext_by_tool = turn_tools(
         (sites_manifest(),),
         None,
         audience=audience,

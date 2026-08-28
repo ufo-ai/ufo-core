@@ -172,7 +172,7 @@ def test_server_config_rejects_a_non_http_url() -> None:
 
 
 def test_turn_tools_registers_both_dynamic_mcp_tools() -> None:
-    tools, ext_by_tool, _ = turn_tools(
+    tools, ext_by_tool = turn_tools(
         (mcp.manifest(),),
         uuid4(),
         _credentials(),
@@ -476,7 +476,7 @@ async def _tool_context() -> ToolContext:
     await store.put(workspace_id, mcp.MCP_SERVERS_SLOT, config.model_dump_json())
     init_workspace_credentials(store)
     current_workspace.set(workspace_id)
-    _, ext_by_tool, _ = turn_tools((mcp.manifest(),), store, audience=conversation_audience(None))
+    _, ext_by_tool = turn_tools((mcp.manifest(),), store, audience=conversation_audience(None))
     return ToolContext(
         sandbox=None,
         blob=None,

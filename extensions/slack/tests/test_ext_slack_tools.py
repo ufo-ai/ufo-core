@@ -1,15 +1,11 @@
-"""The Slack install actions over real dispatch: `slack_connect` walks the install state machine off
+"""The Slack install tools over real dispatch: `slack_connect` walks the install state machine off
 the real credential store, identity record, and marker blob for both paths — the default OAuth path
 mints the owner an "Add to Slack" link (falling back to manifest when the deploy has no app), and
 `method="manifest"` walks not_configured → pending (identity derived via `auth.test`) → connected —
-and `slack_app_manifest` renders the exact YAML the skill teaches. The three are instance actions
-on core's `surface/slack` object: a read of that object lists them before Slack is connected, and
-the real TurnEngine dispatches an `object_action` call to each handler under this extension's
-context."""
+and `slack_app_manifest` renders the exact YAML the skill teaches."""
 
 import json
 import re
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,7 +18,6 @@ import sqlalchemy as sa
 import ufo_ext_slack.surface as slack
 import yaml
 from cryptography.fernet import Fernet
-from pydantic import ValidationError
 from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_slack.surface import (
     IDENTITY_BLOB_KEY,
@@ -35,14 +30,8 @@ from ufo_ext_slack.surface import (
     bot_token_fingerprint,
     signing_secret_fingerprint,
 )
-from ufo_ext_slack.tools import (
-    SLACK_SECRET_SLOTS,
-    SlackChannelsInput,
-    SlackConnectInput,
-    SlackManifestInput,
-)
+from ufo_ext_slack.tools import SLACK_SECRET_SLOTS
 
-from ufo.access.connectors import ConnectorRegistry
 from ufo.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequests,
@@ -52,27 +41,11 @@ from ufo.access.credentials import (
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext
-from ufo.ext.loader import skill_registry, turn_hooks, turn_tools
-from ufo.hub import InProcessHub
-from ufo.kinds.surface_kind import SURFACE_KIND
-from ufo.loop.compaction import Compaction
-from ufo.loop.engine import TurnEngine
-from ufo.loop.prompts.render import rendered_prompt
-from ufo.loop.queue import _agent_actions, _agent_tools, _with_action_dispatcher
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import (
-    ModelEvent,
-    ModelRequest,
-    TextDelta,
-    ToolCallDelta,
-    ToolCallStart,
-    ToolResultBlock,
-)
+from ufo.ext.loader import skill_registry, turn_tools
 from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.schema import tables
-from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn, Usage
+from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.sdk.objects import ObjectActionTarget
 from ufo.sdk.surfaces import (
     CredentialPrompt,
     CredentialRequest,
@@ -80,8 +53,6 @@ from ufo.sdk.surfaces import (
     Writeback,
 )
 from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ObjectBinding, ToolDef, ToolRegistry
-from ufo.turns.activity import ActivitySummarizer
 from ufo.workspace import init_workspace_credentials, ws
 
 TOOL_NARRATION = "getting Slack connected"
@@ -169,20 +140,16 @@ async def _seed() -> tuple[UUID, UUID, UUID]:
 
 def _registry(
     store: CredentialStore,
-) -> tuple[dict[str, ToolDef], dict[str, ExtensionContext | None]]:
-    """The Slack actions as the deploy registers them — bound to the `surface` kind, so they ride
-    the action registry rather than the wire tool set — beside the context each dispatches under."""
-    _, _, verbs = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
-    actions = verbs.actions[SURFACE_KIND]
-    return (
-        {name: bound.action for name, bound in actions.items()},
-        {name: bound.context for name, bound in actions.items()},
+) -> tuple[dict[str, object], dict[str, ExtensionContext]]:
+    declared_tools, ext_by_tool = turn_tools(
+        (slack_manifest(),), store, audience=conversation_audience(None)
     )
+    return {tool.name: tool for tool in declared_tools}, ext_by_tool
 
 
 def _context(
     workspace_id: UUID,
-    ext: ExtensionContext | None,
+    ext: ExtensionContext,
     blob: FilesystemBlobStore,
     member_id: UUID | None,
     store: CredentialStore | None = None,
@@ -211,13 +178,6 @@ def _context(
         artifact_token_secret="",
         ext=ext,
         public_base_url=public_base_url,
-        target=ObjectActionTarget(
-            kind=SURFACE_KIND,
-            name=slack.SURFACE_SLACK,
-            agent=None,
-            generation=None,
-            expected_generation=None,
-        ),
         requestable_credentials=(
             None
             if store is None
@@ -233,165 +193,12 @@ def _context(
 
 
 async def _run(
-    registry: dict[str, ToolDef], tool_name: str, ctx: ToolContext, **args: object
+    registry: dict[str, object], tool_name: str, ctx: ToolContext, **args: object
 ) -> str:
     tool = registry[tool_name]
     with ws(ctx.turn.workspace_id):
         result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     return result.content[0].text
-
-
-class _ActivityModel:
-    model = "gpt-5.6-luna"
-
-    async def complete(self, request: ModelRequest) -> str:
-        return "Connecting Slack."
-
-
-class _OneCallModel:
-    """Emits one tool call in its first round and answers once the result returns."""
-
-    def __init__(self, name: str, args: dict[str, object]) -> None:
-        self.name = name
-        self.args = args
-
-    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        answered = any(
-            isinstance(message.content, tuple)
-            and any(isinstance(block, ToolResultBlock) for block in message.content)
-            for message in request.messages
-        )
-        if answered:
-            yield TextDelta(text="done")
-            yield Usage(input_tokens=1, output_tokens=1)
-            return
-        yield ToolCallStart(id="c1", name=self.name)
-        yield ToolCallDelta(id="c1", partial_json=json.dumps(self.args))
-        yield Usage(input_tokens=1, output_tokens=1)
-
-
-async def _seed_turn(workspace_id: UUID, speaker_member_id: UUID) -> Turn:
-    conversation_id, turn_id = uuid4(), uuid4()
-    async with workspace_tx() as connection:
-        agent_id = (
-            await connection.execute(
-                sa.select(tables.agent.c.id).where(
-                    tables.agent.c.workspace_id == workspace_id, tables.agent.c.is_main
-                )
-            )
-        ).scalar_one()
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=conversation_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                surface="cli",
-                queue_key=uuid4().hex,
-                member_id=speaker_member_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="queued",
-                inbound="connect slack",
-                admission_source=MEMBER_ADMISSION,
-                speaker_member_id=speaker_member_id,
-                terminal=None,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    return Turn(
-        id=turn_id,
-        workspace_id=workspace_id,
-        conversation_id=conversation_id,
-        agent_id=agent_id,
-        seq=1,
-        status="queued",
-        inbound="connect slack",
-        admission_source=MEMBER_ADMISSION,
-        speaker_member_id=speaker_member_id,
-        created_at=datetime(2026, 8, 27, tzinfo=UTC),
-        terminal=None,
-    )
-
-
-async def _dispatch(
-    store: CredentialStore,
-    blob: FilesystemBlobStore,
-    turn: Turn,
-    action: str,
-    **args: object,
-) -> ToolResultBlock:
-    """One `object_action` call on `surface/slack` through the real TurnEngine: the model names the
-    action, the engine resolves it against the action registry, reads the surface row, and runs the
-    handler under the slack extension's context. Returns the round's tool result."""
-    audience = conversation_audience(turn.speaker_member_id)
-    all_tools, tool_ext, verbs = turn_tools(
-        (slack_manifest(),), store, audience=audience, public_base_url=PUBLIC_BASE_URL
-    )
-    granted = _agent_actions(verbs.actions, None, MEMBER_ADMISSION)
-    registry = ToolRegistry(
-        _with_action_dispatcher(_agent_tools(all_tools, None, MEMBER_ADMISSION), all_tools, granted)
-    )
-    model = _OneCallModel(
-        "object_action",
-        {"kind": SURFACE_KIND, "name": slack.SURFACE_SLACK, "action": action, "input": args},
-    )
-    workspace_blob = WorkspaceBlobStore(backend=blob)
-    engine = TurnEngine(
-        turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
-        byok=False,
-        system_prompt=rendered_prompt("p"),
-        model=model,
-        activity_summarizer=ActivitySummarizer(_ActivityModel()),
-        provider="anthropic",
-        transcript=Transcript(blob=workspace_blob, conversation_id=turn.conversation_id),
-        compaction=Compaction(
-            client=model,
-            model="claude-opus-4-8",
-            blob=workspace_blob,
-            conversation_id=turn.conversation_id,
-        ),
-        hub=InProcessHub(),
-        sandbox=SandboxSession(
-            carrier=_UntouchedCarrier(),
-            handle=SandboxHandle(conversation_id=turn.conversation_id, container_id="test"),
-        ),
-        cdp_provider=None,
-        search_provider=None,
-        connectors=ConnectorRegistry(entries={}),
-        tools=registry,
-        tool_ext=tool_ext,
-        hooks=turn_hooks((), store, audience=audience),
-        blob=workspace_blob,
-        spawn=_unavailable_spawn,
-        audience=audience,
-        artifact_token_secret="",
-        grants=None,
-        verbs=verbs,
-        granted_actions=granted,
-        public_base_url=PUBLIC_BASE_URL,
-    )
-    frame = await engine.run()
-    assert frame is not None and frame.status == "done"
-    stored = await engine.transcript.read()
-    assert stored is not None
-    return next(
-        block
-        for message in stored.messages
-        if isinstance(message.content, tuple)
-        for block in message.content
-        if isinstance(block, ToolResultBlock)
-    )
 
 
 async def _write_identity(blob: FilesystemBlobStore, workspace_id: UUID, bot_token: str) -> None:
@@ -627,7 +434,7 @@ async def test_manifest_tool_matches_the_skill_and_validates_the_name(
     registry, ext_by_tool = _registry(store)
     blob = FilesystemBlobStore(root=tmp_path)
     ctx = _context(workspace_id, ext_by_tool["slack_app_manifest"], blob, owner_id, store)
-    served = yaml.safe_load(await _run(registry, "slack_app_manifest", ctx, bot_name="acme bot"))
+    served = yaml.safe_load(await _run(registry, "slack_app_manifest", ctx, name="acme bot"))
     assert served["display_information"]["name"] == "acme bot"
     assert served["oauth_config"]["scopes"]["bot"] == [
         "app_mentions:read",
@@ -661,7 +468,7 @@ async def test_manifest_tool_matches_the_skill_and_validates_the_name(
     )
     assert served == skill_yaml
     with pytest.raises(ValueError, match="display name"):
-        await _run(registry, "slack_app_manifest", ctx, bot_name="<script>")
+        await _run(registry, "slack_app_manifest", ctx, name="<script>")
 
 
 def _channel_row(
@@ -1041,117 +848,3 @@ def test_reply_text_renders_a_cancelled_turns_reason() -> None:
     assert _reply_text(refusal) == refusal.terminal.text
     bare = replace(refusal, terminal=TerminalFrame(status="cancelled"))
     assert _reply_text(bare) == slack.SLACK_TURN_CANCELLED_TEXT
-
-
-def test_tool_inputs_refuse_an_extra_key() -> None:
-    for model, args in (
-        (SlackConnectInput, {"method": "oauth"}),
-        (SlackManifestInput, {"bot_name": "ufo"}),
-        (SlackChannelsInput, {"query": "general"}),
-    ):
-        with pytest.raises(ValidationError, match="surprise"):
-            model.model_validate({**args, "surprise": "x"})
-
-
-def test_the_slack_tools_are_instance_actions_on_the_slack_surface() -> None:
-    """Each setup tool binds to the `surface` kind as an instance action, so none rides the wire
-    tool set and each answers to `action:surface:<name>`. `slack_connect` binds an installation and
-    seals an install handoff — durable writes — so it is side-effecting and keyed; it declares the
-    presentation the portal's connect step submits through. `slack_channels` keeps its untrusted
-    wall over Slack's own text."""
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    wire, _, verbs = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
-    actions = verbs.actions[SURFACE_KIND]
-    assert set(actions) == {"slack_connect", "slack_app_manifest", "slack_channels"}
-    assert not {"slack_connect", "slack_app_manifest", "slack_channels"} & {t.name for t in wire}
-    for name, bound in actions.items():
-        assert bound.action.bound == ObjectBinding(kind=SURFACE_KIND, binding="instance")
-        assert bound.action.canonical_id == f"action:{SURFACE_KIND}:{name}"
-        assert bound.extension == slack_manifest().name
-    connect = actions["slack_connect"].action
-    assert connect.side_effecting is True
-    assert connect.untrusted is True
-    assert connect.presentation is not None and connect.presentation.label == "Connect Slack"
-    assert actions["slack_channels"].action.untrusted is True
-    assert actions["slack_channels"].action.side_effecting is False
-    assert actions["slack_app_manifest"].action.presentation is None
-
-
-async def test_reading_the_slack_surface_lists_its_actions_before_slack_is_connected(
-    db: None, tmp_path: Path
-) -> None:
-    """Discovery is the setup path's front door: a granted agent reading `surface/slack` on a
-    workspace with no installation sees the three actions with their call templates pre-bound to the
-    surface, so connecting Slack starts from an object read and never from a memorized tool name."""
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, _, verbs = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
-    get = next(tool for tool in tools if tool.name == "object_get")
-    ctx = replace(
-        _context(workspace_id, None, FilesystemBlobStore(root=tmp_path), owner_id, store),
-        target=None,
-        granted_actions=_agent_actions(verbs.actions, None, MEMBER_ADMISSION),
-    )
-    with ws(workspace_id):
-        result = await get.handler(
-            ctx, get.input_model.model_validate({"kind": SURFACE_KIND, "name": slack.SURFACE_SLACK})
-        )
-    read = yaml.safe_load(result.content[0].text)
-    assert read["status"] == {"bound": False}
-    assert [view["name"] for view in read["actions"]] == [
-        "slack_app_manifest",
-        "slack_channels",
-        "slack_connect",
-    ]
-    for view in read["actions"]:
-        assert view["call"] == {
-            "kind": SURFACE_KIND,
-            "action": view["name"],
-            "name": slack.SURFACE_SLACK,
-            "input": {},
-        }
-    manifest_view = read["actions"][0]
-    assert set(manifest_view["input_schema"]["properties"]) == {"bot_name"}
-
-
-async def test_dispatch_reaches_the_manifest_handler_under_the_slack_context(
-    db: None, tmp_path: Path
-) -> None:
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    turn = await _seed_turn(workspace_id, owner_id)
-    with ws(workspace_id):
-        result = await _dispatch(
-            store, FilesystemBlobStore(root=tmp_path), turn, "slack_app_manifest", bot_name="acme"
-        )
-    assert result.is_error is False
-    served = yaml.safe_load(str(result.content))
-    assert served["display_information"]["name"] == "acme"
-    assert served["settings"]["event_subscriptions"]["request_url"] == (
-        f"{PUBLIC_BASE_URL}/surface/slack"
-    )
-
-
-async def test_dispatch_holds_the_connect_admin_gate_and_the_channels_precondition(
-    db: None, tmp_path: Path
-) -> None:
-    """The handlers' own gates answer through dispatch exactly as they do in chat: a member who is
-    not an admin reads the install state and is told who installs, minting no link; a channel search
-    with no bot token fails loud toward `slack_connect` rather than searching blind."""
-    workspace_id, _, joiner_id = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    blob = FilesystemBlobStore(root=tmp_path)
-    with ws(workspace_id):
-        connect = await _dispatch(
-            store, blob, await _seed_turn(workspace_id, joiner_id), "slack_connect"
-        )
-        channels = await _dispatch(
-            store, blob, await _seed_turn(workspace_id, joiner_id), "slack_channels", query="eng"
-        )
-    assert connect.is_error is False
-    stated = json.loads(re.search(r"\{.*\}", str(connect.content), re.DOTALL).group())
-    assert stated["state"] == "not_installed"
-    assert "admin" in stated["hint"]
-    assert "authorize_url" not in stated
-    assert channels.is_error is True
-    assert "Slack is not connected" in str(channels.content)

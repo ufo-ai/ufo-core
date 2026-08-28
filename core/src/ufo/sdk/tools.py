@@ -32,15 +32,6 @@ from ufo.tools.registry import (
     REQUESTED_BY as REQUESTED_BY,
 )
 from ufo.tools.registry import (
-    ActionBinding as ActionBinding,
-)
-from ufo.tools.registry import (
-    ActionPresentation as ActionPresentation,
-)
-from ufo.tools.registry import (
-    ObjectBinding as ObjectBinding,
-)
-from ufo.tools.registry import (
     ToolDef as ToolDef,
 )
 from ufo.tools.tasks import (

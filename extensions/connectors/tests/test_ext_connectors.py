@@ -212,7 +212,7 @@ def _payload(result) -> dict:
 
 def test_manifest_declares_the_dynamic_tools_and_prompt_section() -> None:
     manifest = connectors.manifest()
-    tools, _, _ = turn_tools((manifest,), None, audience=conversation_audience(None))
+    tools, _ = turn_tools((manifest,), None, audience=conversation_audience(None))
     names = {tool.name for tool in tools}
     assert {
         "list_external_tools",

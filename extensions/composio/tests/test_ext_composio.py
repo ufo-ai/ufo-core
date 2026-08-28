@@ -1094,7 +1094,7 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
         ).one()
     assert (row.host, row.account_id) == (PROVIDER_HOST, COMPOSIO_ACCOUNT)
 
-    tools, ext_by_tool, _ = turn_tools(
+    tools, ext_by_tool = turn_tools(
         (connectors_manifest.manifest(), composio_manifest.manifest()),
         credentials,
         audience=conversation_audience(None),
