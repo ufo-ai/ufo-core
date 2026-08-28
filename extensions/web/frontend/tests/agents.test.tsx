@@ -483,7 +483,7 @@ test("the app the last phase creates reaches the rail when the turn settles", as
 
 /** The rows are the section's own list, and the act that adds to it is the section head's: the
  *  index states apps, and what to do about apps is behind the name it stands under. */
-test("the act that builds an app stands at the foot of the apps list", async () => {
+test("the acts stand above the places, and the apps list holds only apps", async () => {
   location.hash = "#/agents";
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
@@ -491,17 +491,25 @@ test("the act that builds an app stands at the foot of the apps list", async () 
   await userEvent.click(await screen.findByRole("button", { name: "Expand sidebar" }));
   const index = await agentIndex();
 
-  // The band folds the section and offers nothing else, so it holds no menu to hide the act in.
+  // The band folds the section and offers nothing else, so it holds no menu to hide an act in.
   const band = screen.getByRole("button", { name: "Apps" });
   expect(band.getAttribute("aria-haspopup")).toBeNull();
   expect(screen.queryByRole("button", { name: "Apps options" })).toBeNull();
 
+  // Starting a conversation and building an app are things a member does rather than screens they
+  // go to, so both stand at the head of the nav and neither is a row of the list.
+  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const names = within(sidebar)
+    .getAllByRole("button")
+    .map((row) => row.getAttribute("aria-label") ?? row.textContent);
+  expect(names.indexOf("New chat")).toBeGreaterThan(-1);
+  expect(names.indexOf("Create app")).toBe(names.indexOf("New chat") + 1);
+  expect(names.indexOf("Create app")).toBeLessThan(names.indexOf("Apps"));
+
   const rows = within(index)
     .getAllByRole("button")
     .map((row) => row.getAttribute("aria-label") ?? row.textContent);
-  // Making an app is what a member does having read the list and found none, so it stands under
-  // them rather than over them.
-  expect(rows.at(-1)).toBe("Create app");
+  expect(rows).not.toContain("Create app");
   expect(rows).not.toContain("New app");
 });
 
@@ -669,7 +677,7 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
-  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
   const index = await shownIndex();
   await userEvent.click(within(index).getByRole("button", { name: /App Builder/ }));
@@ -1092,7 +1100,7 @@ function status(agentId: string, held: Partial<AgentStatus>): AgentStatus {
   };
 }
 
-test("a working app leads the index, and a pin orders everything under it", async () => {
+test("the index stands by name, and a pin moves one row above them", async () => {
   wire({
     "/api/agents/status": () =>
       json({
@@ -1111,14 +1119,14 @@ test("a working app leads the index, and a pin orders everything under it", asyn
     within(index)
       .getAllByRole("button", { name: /^(Assistant|Research|Scribe)/ })
       .map((row) => row.querySelector(".text-label")!.textContent);
-  // Research is working, so it leads; under it the ladder stands as it was.
-  await waitFor(() => expect(drawn()).toEqual(["Research", "Assistant", "Scribe"]));
+  // Research is working and Assistant ran an hour ago, and neither moves a row: the column is the
+  // pins and then the names, so a member reaching for a row finds it where they left it.
+  await waitFor(() => expect(drawn()).toEqual(["Assistant", "Research", "Scribe"]));
 
-  // A pin moves a row up the order under the working one, and moves nothing else: Assistant keeps
-  // its place relative to Scribe, and the app doing work keeps the top.
+  // A pin takes the top and leaves the names under it in order.
   await userEvent.click(within(index).getByRole("button", { name: "Pin Scribe" }));
 
-  await waitFor(() => expect(drawn()).toEqual(["Research", "Scribe", "Assistant"]));
+  await waitFor(() => expect(drawn()).toEqual(["Scribe", "Assistant", "Research"]));
 });
 
 test("a working row prints its work under the name, in plain text and with no tooltip", async () => {

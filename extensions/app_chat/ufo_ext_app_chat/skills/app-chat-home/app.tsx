@@ -79,26 +79,53 @@ type ConversationRow = {
   last_at: string;
 };
 
-/** Which surfaces beside the portal's own the list admits. A Slack thread, a terminal session and
- *  an iMessage exchange are conversations the member had somewhere else, so each is admitted only
- *  once they name it. */
+/** The surfaces the member can put away. A Slack thread, a terminal session and an iMessage
+ *  exchange are conversations they had somewhere else, and they are still their conversations — so
+ *  the list holds every one of them until it is asked not to. */
 const SHOWN_OPTIONS: { surface: string; label: string }[] = [
   { surface: UFO_SURFACE, label: "Terminal" },
   { surface: SLACK_SURFACE, label: "Slack" },
   { surface: IMESSAGE_SURFACE, label: "iMessage" },
 ];
 
-/** Whether a row's surface is admitted. A portal chat always is: the list is the portal's own. */
-function admits(row: ConversationRow, shown: string[]): boolean {
-  return isPortalChat(row.surface) || shown.includes(row.surface);
+/** Whether a row's surface is drawn. Everything is, bar the surfaces the member has put away — so
+ *  the address carries what they hid rather than what they kept, and an address carrying nothing is
+ *  the whole of their history rather than none of it. A portal chat is never put away: the list is
+ *  the portal's own. */
+function admits(row: ConversationRow, hidden: string[]): boolean {
+  return isPortalChat(row.surface) || !hidden.includes(row.surface);
 }
 
-/** Which ladder the list runs its rows in. Recency is the one the page opens on, and the address
- *  spells it by carrying nothing. */
+/** Which ladder the list runs its rows in. Recency is the one the page opens on. */
 const CATEGORIES: { value: string; label: string }[] = [
   { value: "", label: "Recency" },
   { value: "app", label: "App" },
 ];
+
+const HELD_LADDER = "chat-ladder";
+const HELD_HIDDEN = "chat-hidden";
+
+/** The ladder and the put-away surfaces are standing choices rather than places: a member who asked
+ *  to see their terminal sessions asked about their own history, and a list that forgot on the way
+ *  to another screen and back would ask them again every visit. The cursor stays in the address,
+ *  where a page of a listing belongs.
+ *
+ *  A browser holding nothing has put nothing away, which is every surface drawn. */
+function heldLadder(): string {
+  return localStorage.getItem(HELD_LADDER) === "app" ? "app" : "";
+}
+
+function holdLadder(ladder: string): void {
+  localStorage.setItem(HELD_LADDER, ladder);
+}
+
+function heldHidden(): string[] {
+  return (localStorage.getItem(HELD_HIDDEN) ?? "").split(",").filter(Boolean);
+}
+
+function holdHidden(hidden: string[]): void {
+  localStorage.setItem(HELD_HIDDEN, hidden.join(","));
+}
 
 const DAY_MS = 86_400_000;
 
@@ -157,10 +184,10 @@ function origin(row: ConversationRow): string {
 function runs(
   rows: ConversationRow[],
   category: string,
-  shown: string[],
+  hidden: string[],
   now: Date,
 ): Run[] {
-  const admitted = rows.filter((row) => admits(row, shown));
+  const admitted = rows.filter((row) => admits(row, hidden));
   const own = admitted.filter((row) => row.mine);
   const theirs = admitted.filter((row) => !row.mine);
   const grouped = own.length ? bucketed(own, category, now) : [];
@@ -240,8 +267,8 @@ function ChatApp({
   standing.current = at;
   const wanted = wantedIn(at);
   const after = at.after ?? "";
-  const surfaces = (at.chip ?? "").split(",").filter(Boolean);
-  const category = at.group ?? "";
+  const [hidden, setHidden] = useState<string[]>(heldHidden);
+  const [category, setCategory] = useState<string>(heldLadder);
   // The listing, walked once and again only when the cursor steps — never when the open target, the
   // category or the Show set changes, because none of them changes which rows the read answers.
   // Held so opening a row resolves against it rather than re-walking it, and so a row the listing
@@ -373,17 +400,19 @@ function ChatApp({
     (token: string | undefined) => step({ after: token, opens: undefined }),
     [step],
   );
-  // The Show set and the category both redraw the rows already in hand, so each leaves the stride
-  // and the open conversation where they were.
-  const show = useCallback(
-    (surface: string, admitted: boolean) => {
-      const held = (standing.current.chip ?? "").split(",").filter(Boolean);
-      const next = admitted ? [...held, surface] : held.filter((name) => name !== surface);
-      step({ chip: next.join(",") || undefined });
-    },
-    [step],
-  );
-  const categorize = useCallback((value: string) => step({ group: value || undefined }), [step]);
+  // The Show set and the ladder both redraw the rows already in hand, so neither reads and neither
+  // touches the stride or the open conversation. Each is written to this browser as it is taken.
+  const show = useCallback((surface: string, admitted: boolean) => {
+    setHidden((held) => {
+      const next = admitted ? held.filter((name) => name !== surface) : [...held, surface];
+      holdHidden(next);
+      return next;
+    });
+  }, []);
+  const categorize = useCallback((value: string) => {
+    holdLadder(value);
+    setCategory(value);
+  }, []);
   useAppLinks(
     useCallback(
       (route) => {
@@ -415,7 +444,7 @@ function ChatApp({
     return <PaneNote>This conversation is not available here.</PaneNote>;
   }
   if (shown.kind === "list") {
-    const drawn = runs(shown.rows, category, surfaces, new Date());
+    const drawn = runs(shown.rows, category, hidden, new Date());
     if (!mainAgent) return <PaneNote>No such app.</PaneNote>;
     return (
       <Pane>
@@ -448,7 +477,7 @@ function ChatApp({
                       aria-label="Chats options"
                       className={cn(
                         "border-transparent text-ink-soft hover:bg-fill",
-                        (category || surfaces.length) && "bg-fill text-ink",
+                        (category || hidden.length) && "bg-fill text-ink",
                       )}
                     >
                       <IconFilter2 aria-hidden />
@@ -468,7 +497,7 @@ function ChatApp({
                     {SHOWN_OPTIONS.map((option) => (
                       <DropdownMenuCheckboxItem
                         key={option.surface}
-                        checked={surfaces.includes(option.surface)}
+                        checked={!hidden.includes(option.surface)}
                         onCheckedChange={(next) => show(option.surface, next)}
                       >
                         {option.label}

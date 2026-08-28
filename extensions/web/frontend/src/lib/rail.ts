@@ -77,51 +77,23 @@ export function holdPinned(pinned: string[]): void {
 }
 
 /** The apps in the order the sidebar draws them: the pinned ones in the order the member pinned
- *  them, then the rest by the app that worked most recently, and last the apps that have never
- *  worked, by name. A pin is a place the member put a row, so it holds that place whatever the app
- *  has been doing since; below the pins the column answers to the workspace instead, where an app
- *  that ran this morning is nearer the member's day than one that ran in March, and an app that
- *  has done nothing at all has only its name to stand by. Two apps sharing a moment keep the order
- *  they arrived in, so a read answering for neither settles the column rather than shuffling it.
- *  Whether work in flight is a moment now is the caller's read, which is why the moment arrives as
- *  a lookup. */
-export function appOrder(
-  apps: Agent[],
-  pinned: string[],
-  lastActiveAt: (agentId: string) => number | null,
-): Agent[] {
-  const byId = new Map(apps.map((app) => [app.id, app]));
-  const stood = pinned.map((id) => byId.get(id)).filter((app) => app !== undefined);
-  const drawn = new Set(stood);
-  const active: { app: Agent; at: number }[] = [];
-  const never: Agent[] = [];
-  for (const app of apps) {
-    if (drawn.has(app)) continue;
-    const at = lastActiveAt(app.id);
-    if (at === null) never.push(app);
-    else active.push({ app, at });
-  }
-  active.sort((left, right) => right.at - left.at);
-  never.sort((left, right) => left.name.localeCompare(right.name));
-  return stood.concat(
-    active.map((row) => row.app),
-    never,
-  );
-}
-
-/** The apps in the order the sidebar draws them, with work in flight at the top: an app that is
- *  working rises, and nothing else moves — the others keep the order `appOrder` gave them, and one
- *  arriving from below pushes them down by a row rather than reshuffling them. Work is the one fact
- *  worth the top of the column, and it is worth it for an app the member never pinned. Working is
- *  the caller's read, so an app's own status governs this and nothing here has to ask for it.
+ *  them, then every other app by name. A pin is a place the member put a row, so it holds that place
+ *  whatever the app has been doing since; below the pins the column is alphabetical, which is the
+ *  one order a member can predict — they know the app's name before they know when it last ran, and
+ *  a column that reordered itself as apps worked moved the row they were reaching for.
+ *
+ *  A stored pin no live app answers — an app since removed — resolves to nothing rather than a row.
  *
  *  Every app the workspace has is drawn. The list scrolls inside the height `--size-apps-open`
  *  allows, so a long one costs the column nothing — and an app the list refused to draw is one the
  *  member has no way to reach, which is what a pin they cannot see cannot be undone from. */
-export function appLadder(apps: Agent[], working: (agentId: string) => boolean): Agent[] {
-  const busy = apps.filter((app) => working(app.id));
-  const risen = new Set(busy.map((app) => app.id));
-  return busy.concat(apps.filter((app) => !risen.has(app.id)));
+export function appOrder(apps: Agent[], pinned: string[]): Agent[] {
+  const byId = new Map(apps.map((app) => [app.id, app]));
+  const stood = pinned.map((id) => byId.get(id)).filter((app) => app !== undefined);
+  const drawn = new Set(stood);
+  const rest = apps.filter((app) => !drawn.has(app));
+  rest.sort((left, right) => left.name.localeCompare(right.name));
+  return stood.concat(rest);
 }
 
 const HELD_SECTIONS_SHUT = "sections-shut";

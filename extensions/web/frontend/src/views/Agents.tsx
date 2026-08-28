@@ -2,7 +2,6 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconChevronDown,
-  IconCirclePlus,
   IconPin,
   IconPinFilled,
   IconX,
@@ -43,7 +42,7 @@ import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
-import { appLadder, appOrder, type ChatRow } from "@/lib/rail";
+import { appOrder, type ChatRow } from "@/lib/rail";
 import type { Agent, Member } from "@/lib/types";
 
 export type AgentsProps = {
@@ -66,7 +65,6 @@ export type AgentsProps = {
   buildWanted: boolean;
 };
 
-const CREATE_APP = "Create app";
 
 const RESPONDING = "Responding";
 
@@ -411,19 +409,7 @@ export function AppsIndex({
 }) {
   const mainAgent = useMainAgent();
   const { statuses } = useAppStatus();
-  /** Where an app stands in time — what it last did, and nothing about what it is doing now. Work
-   *  in flight lifts a row to the top of the list rather than moving it through this ladder: an app
-   *  that sorted as `now` while it worked would drop back down the column the moment it stopped,
-   *  and take every row it passed with it. */
-  const lastActiveAt = (agentId: string): number | null => {
-    const at = statuses[agentId]?.last_active_at;
-    return at ? Date.parse(at) : null;
-  };
-  const working = (agentId: string): boolean => {
-    const status = statuses[agentId];
-    return status?.turn === "running" || status?.turn === "queued";
-  };
-  const shown = appLadder(appOrder(agents, pinned, lastActiveAt), working);
+  const shown = appOrder(agents, pinned);
   // The run lives on the wizard's own store key — busy or spoken before it founds, a forwarding
   // record after — so it survives every unmount of this list; a reload clears the store, so no
   // phantom row survives one.
@@ -488,31 +474,6 @@ export function AppsIndex({
               onOpen={() => onOpen(agent.id)}
             />
           ))}
-          {/* Building an app is the one act this list carries, and it stands at the foot of the apps
-              it adds to rather than over them: the list is read for the app a member wants, and
-              making another is what they do having found none. Every member is offered it — the
-              `agent` kind admits a create from any speaking member and stamps them the owner — and
-              the wizard rides the main agent's own chat, so a workspace with no main agent offers
-              nothing to ride. */}
-          {mainAgent ? (
-            <li>
-              <button
-                type="button"
-                onClick={onBuild}
-                className={cn(
-                  "flex h-(--size-row) w-full items-center gap-md rounded-full border-0",
-                  "bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
-                  collapsed && "justify-center gap-0 px-0",
-                )}
-                aria-label={collapsed ? CREATE_APP : undefined}
-              >
-                <IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />
-                <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>
-                  {CREATE_APP}
-                </span>
-              </button>
-            </li>
-          ) : null}
         </ul>
       </div>
     </nav>

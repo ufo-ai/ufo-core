@@ -4,14 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { agentName } from "@/lib/agentName";
-import {
-  appLadder,
-  appOrder,
-  bumpChat,
-  mergeChats,
-  stampIso,
-  type ChatRow,
-} from "@/lib/rail";
+import { appOrder, bumpChat, mergeChats, stampIso, type ChatRow } from "@/lib/rail";
 import { railState } from "@/lib/railStore";
 import type { Agent } from "@/lib/types";
 
@@ -98,73 +91,49 @@ function ids(apps: Agent[]): string[] {
   return apps.map((one) => one.id);
 }
 
-const WORKED_AT: Record<string, number> = { radar: 300, wiki: 200, brief: 100 };
-
-function worked(agentId: string): number | null {
-  return WORKED_AT[agentId] ?? null;
-}
-
 test("pinned apps stand in the order the member pinned them, whatever their names", () => {
   const apps = [app("brief", "Brief"), app("radar", "Radar"), app("wiki", "Wiki")];
-  expect(ids(appOrder(apps, ["wiki", "brief", "radar"], worked))).toEqual([
-    "wiki",
-    "brief",
-    "radar",
-  ]);
-  expect(ids(appOrder(apps, ["brief"], worked))).toEqual(["brief", "radar", "wiki"]);
+  expect(ids(appOrder(apps, ["wiki", "brief", "radar"]))).toEqual(["wiki", "brief", "radar"]);
+  expect(ids(appOrder(apps, ["brief"]))).toEqual(["brief", "radar", "wiki"]);
 });
 
-test("an unpinned app that worked more recently stands above one that worked longer ago", () => {
-  const apps = [app("brief", "Brief"), app("radar", "Radar"), app("wiki", "Wiki")];
-  expect(ids(appOrder(apps, [], worked))).toEqual(["radar", "wiki", "brief"]);
-});
-
-test("an app that has never worked lands under the ones that have, by name", () => {
+test("the apps under the pins stand by name, whatever they have been doing", () => {
   const apps = [app("zed", "Zed"), app("radar", "Radar"), app("apollo", "Apollo")];
-  expect(ids(appOrder(apps, [], worked))).toEqual(["radar", "apollo", "zed"]);
-});
-
-test("apps sharing a moment keep the order they arrived in", () => {
-  const apps = [app("zed", "Zed"), app("apollo", "Apollo"), app("brief", "Brief")];
-  expect(ids(appOrder(apps, [], () => 500))).toEqual(["zed", "apollo", "brief"]);
+  /* The column below the pins is the one order a member can predict: they know an app's name before
+     they know when it last ran. */
+  expect(ids(appOrder(apps, []))).toEqual(["apollo", "radar", "zed"]);
+  expect(ids(appOrder(apps, ["zed"]))).toEqual(["zed", "apollo", "radar"]);
 });
 
 test("a pin no live app answers draws nothing", () => {
   const apps = [app("radar", "Radar")];
-  expect(ids(appOrder(apps, ["removed", "radar"], worked))).toEqual(["radar"]);
-});
-
-test("every app the workspace has is drawn, however many there are", () => {
-  const many = Array.from({ length: 30 }, (_, at) => app("a" + at, "A" + at));
-  /* An app the list refused to draw is one the member has no way to reach — and a pin they cannot
-     see is one they cannot undo. The list scrolls instead of ending. */
-  expect(ids(appLadder(many, () => false))).toEqual(ids(many));
-});
-
-test("a working app rises to the top and leaves the order under it alone", () => {
-  const apps = [app("brief", "Brief"), app("radar", "Radar"), app("wiki", "Wiki")];
-
-  expect(ids(appLadder(apps, (agentId) => agentId === "radar"))).toEqual([
-    "radar",
-    "brief",
-    "wiki",
-  ]);
-
-  /* The work ends and the app falls back to where the ladder already had it — the two rows it
-     passed are in the same order they were before it rose. */
-  expect(ids(appLadder(apps, () => false))).toEqual(["brief", "radar", "wiki"]);
+  expect(ids(appOrder(apps, ["removed", "radar"]))).toEqual(["radar"]);
 });
 
 test("a pin moves an app to the top and hides nothing", () => {
   const many = "abcdefghij".split("").map((id) => app(id, id.toUpperCase()));
-  const unpinned = appLadder(appOrder(many, [], () => null), () => false);
-  expect(ids(unpinned)).toEqual(ids(many));
+  expect(ids(appOrder(many, []))).toEqual(ids(many));
 
-  const pinned = appLadder(appOrder(many, ["i"], () => null), () => false);
-  expect(ids(pinned)).toEqual(["i", "a", "b", "c", "d", "e", "f", "g", "h", "j"]);
-  /* Unpinning puts it back where the ladder had it and drops no row, so the member can pin it
-     again. */
-  expect(ids(appLadder(appOrder(many, [], () => null), () => false))).toEqual(ids(many));
+  expect(ids(appOrder(many, ["i"]))).toEqual([
+    "i",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "j",
+  ]);
+  /* Unpinning puts it back among the names and drops no row, so the member can pin it again. An app
+     the list refused to draw is one they have no way to reach. */
+  expect(ids(appOrder(many, []))).toEqual(ids(many));
+});
+
+test("every app the workspace has is drawn, however many there are", () => {
+  const many = Array.from({ length: 30 }, (_, at) => app("a" + at, "A" + at));
+  expect(appOrder(many, []).length).toBe(30);
 });
 
 test("bumping a conversation moves it to the top", () => {
@@ -629,7 +598,7 @@ test("the ask row opens the chat app at its start screen when one is shipped", a
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(rail.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(rail.getByRole("button", { name: "New chat" }));
 
   expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
 });
@@ -637,14 +606,14 @@ test("the ask row opens the chat app at its start screen when one is shipped", a
 test("the ask control targets the main agent, and offers no other", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   single.unmount();
 
   location.hash = "";
   wire({});
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
@@ -664,7 +633,7 @@ test("the apps list opens the agent's page, and the sidebar starts the conversat
   expect(screen.getByRole("navigation", { name: "Apps" })).toBeTruthy();
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(rail.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(rail.getByRole("button", { name: "New chat" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
@@ -789,11 +758,11 @@ test("the sidebar marks the destination the member is in and leaves the others o
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   const marked = () =>
-    ["Ask assistant", "Connectors", "Workspace"].filter(
+    ["New chat", "Connectors", "Workspace"].filter(
       (name) => rail.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
-  expect(marked()).toEqual(["Ask assistant"]);
+  expect(marked()).toEqual(["New chat"]);
 
   await userEvent.click(rail.getByRole("button", { name: "Workspace" }));
   await waitFor(() => expect(marked()).toEqual(["Workspace"]));

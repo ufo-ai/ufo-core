@@ -4,7 +4,7 @@ import {
   IconDots,
   IconHistory,
   IconLayoutSidebarRight,
-  IconPencil,
+  IconMessage,
   IconPlug,
   IconPlus,
   IconSettings,
@@ -726,7 +726,7 @@ export function AgentPane({
                 variant="quiet"
                 size={held !== undefined ? "icon" : "bar"}
                 aria-label={
-                  (held !== undefined ? "Close edit of " : "Edit ") + agentName(agent.name)
+                  (held !== undefined ? "Close chat with " : "Chat with ") + agentName(agent.name)
                 }
                 aria-pressed={held !== undefined}
                 className={cn(
@@ -746,8 +746,8 @@ export function AgentPane({
                   <IconLayoutSidebarRight aria-hidden />
                 ) : (
                   <>
-                    <IconPencil className="size-(--size-glyph)" aria-hidden />
-                    Edit
+                    <IconMessage className="size-(--size-glyph)" aria-hidden />
+                    Chat
                   </>
                 )}
               </Button>

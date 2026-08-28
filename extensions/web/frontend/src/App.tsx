@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconChevronDown,
+  IconCirclePlus,
   IconDeviceDesktop,
   IconLayoutSidebarRight,
   IconLogout,
@@ -465,6 +466,8 @@ function AccountMenu({ member }: { member: Member }) {
 }
 
 const APPS = "Apps";
+const NEW_CHAT = "New chat";
+const CREATE_APP = "Create app";
 
 const NAV_ROW =
   "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill";
@@ -474,9 +477,6 @@ const NAV_ROW =
 const SECTION_HEAD_CHEVRON =
   "size-icon shrink-0 transition-transform duration-100 ease-control motion-reduce:transition-none";
 
-/** The rows the sidebar pins where the member has pinned none themselves: the workspace's shipped
- *  apps, in name order, so the sidebar arrives holding its own destinations. The chat app is not one
- *  of them — the Ask assistant row above is the way to it. */
 /** What stands pinned until the member pins for themselves: the chat app, and nothing else. Chat is
  *  where a member starts, so it holds the top of the column on a workspace nobody has arranged yet;
  *  every other app answers to the order the list already gives it. */
@@ -488,6 +488,7 @@ function defaultPins(agents: Agent[]): string[] {
 const GLYPH = "size-(--size-glyph) shrink-0";
 
 const AskGlyph = () => <IconPlus className={GLYPH} aria-hidden />;
+const CreateAppGlyph = () => <IconCirclePlus className={GLYPH} aria-hidden />;
 const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
 
 const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
@@ -702,23 +703,41 @@ function WorkspaceSidebar({
           </SidebarTooltip>
         </span>
       </div>
+      {/* The two acts the shell carries, above the places it reaches: starting a conversation and
+          building an app are the things a member does here rather than screens they go to, and every
+          member is offered both — the `agent` kind admits a create from any speaking member and
+          stamps them the owner, and the wizard rides the main agent's own chat, so a workspace with
+          no main agent offers neither. */}
       <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
         {mainAgent ? (
-          <li>
-            <NavRow
-              icon={<AskGlyph />}
-              current={standing(route, COMPOSING)}
-              collapsed={collapsed}
-              label="Ask assistant"
-              onClick={() =>
-                chatApp
-                  ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })
-                  : openNewChat(mainAgent.id)
-              }
-            >
-              Ask assistant
-            </NavRow>
-          </li>
+          <>
+            <li>
+              <NavRow
+                icon={<AskGlyph />}
+                current={standing(route, COMPOSING)}
+                collapsed={collapsed}
+                label={NEW_CHAT}
+                onClick={() =>
+                  chatApp
+                    ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })
+                    : openNewChat(mainAgent.id)
+                }
+              >
+                {NEW_CHAT}
+              </NavRow>
+            </li>
+            <li>
+              <NavRow
+                icon={<CreateAppGlyph />}
+                current={route.kind === "agents" && route.build === true}
+                collapsed={collapsed}
+                label={CREATE_APP}
+                onClick={onBuild}
+              >
+                {CREATE_APP}
+              </NavRow>
+            </li>
+          </>
         ) : null}
       </ul>
       {/* The workspace's apps, drawn where the member works rather than behind a hover: the column

@@ -76,7 +76,7 @@ test("a set homepage frames the bound site beside the conversation", async () =>
   // shell's two acts, floating in the page's gutter.
   expect(screen.queryByRole("heading", { name: "Assistant" })).toBeNull();
   expect(screen.getByRole("button", { name: "Menu for Assistant" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Edit Assistant" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Chat with Assistant" })).toBeTruthy();
 });
 
 test("focusing the tab keeps a live homepage frame", async () => {
@@ -224,7 +224,7 @@ test("the conversation beside a page is headed by the lane it stands in", async 
   open({}, SET);
 
   await screen.findByTitle("Assistant homepage");
-  await userEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=new");
   const conversation = await screen.findByRole("region", { name: "Assistant" });
@@ -248,7 +248,7 @@ test("the right-side chat's band starts another conversation, and carries no men
   await screen.findByTitle("Assistant homepage");
   expect(screen.queryByRole("region", { name: "Conversations" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
   expect(await screen.findByRole("heading", { level: 2, name: "Pick one thread" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "New conversation with Assistant" })).toBeTruthy();
@@ -268,23 +268,23 @@ test("the chat toggle states the act it will perform, and the band's act is spen
   open({}, SET);
 
   await screen.findByTitle("Assistant homepage");
-  const shut = screen.getByRole("button", { name: "Edit Assistant" });
-  expect(shut.textContent).toContain("Edit");
+  const shut = screen.getByRole("button", { name: "Chat with Assistant" });
+  expect(shut.textContent).toContain("Chat");
   expect(shut.getAttribute("aria-pressed")).toBe("false");
 
   await userEvent.click(shut);
 
-  const open_ = await screen.findByRole("button", { name: "Close edit of Assistant" });
-  expect(open_.textContent).not.toContain("Edit");
+  const open_ = await screen.findByRole("button", { name: "Close chat with Assistant" });
+  expect(open_.textContent).not.toContain("Chat");
   expect(open_.getAttribute("aria-pressed")).toBe("true");
-  expect(screen.queryByRole("button", { name: "Edit Assistant" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Chat with Assistant" })).toBeNull();
 
   // The lane stands on a conversation nobody has spoken in, so there is nothing to start.
   const founds = screen.getByRole("button", { name: "New conversation with Assistant" });
   expect(founds.hasAttribute("disabled")).toBe(true);
 
   await userEvent.click(open_);
-  expect(screen.getByRole("button", { name: "Edit Assistant" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Chat with Assistant" })).toBeTruthy();
 });
 
 /** The toggle opens the editing conversation: the newest the rail carries for this app, whatever
@@ -312,7 +312,7 @@ test("the chat toggle opens the newest directive conversation", async () => {
   );
 
   await screen.findByTitle("Assistant homepage");
-  await userEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + newer);
 });
@@ -324,7 +324,7 @@ test("the chat toggle opens the composer when no directive conversation exists",
   open({}, SET);
 
   await screen.findByTitle("Assistant homepage");
-  await userEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=new");
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
@@ -360,10 +360,10 @@ test("the chat toggle opens a rail chat the app's index does not answer", async 
   const { calls } = openApp();
 
   await screen.findByTitle("Assistant homepage");
-  await userEvent.click(screen.getByRole("button", { name: "Edit Assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + CONVO_ID);
-  const latched = await screen.findByRole("button", { name: "Close edit of Assistant" });
+  const latched = await screen.findByRole("button", { name: "Close chat with Assistant" });
   expect(latched.getAttribute("aria-pressed")).toBe("true");
   expect(await screen.findByRole("heading", { level: 2, name: "Pick one thread" })).toBeTruthy();
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
@@ -381,7 +381,7 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
   expect(await screen.findByRole("heading", { level: 2, name: "Pick one thread" })).toBeTruthy();
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(
-    screen.getByRole("button", { name: "Close edit of Assistant" }).getAttribute("aria-pressed"),
+    screen.getByRole("button", { name: "Close chat with Assistant" }).getAttribute("aria-pressed"),
   ).toBe("true");
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   await waitFor(() =>
@@ -422,8 +422,8 @@ test("a chat opened on the chat app stands in the page's column alone", async ()
   expect(screen.queryByRole("region", { name: "Pick one thread" })).toBeNull();
   expect(screen.queryByLabelText("Ask UFO")).toBeNull();
   // The page is the chat, so the act that opens a chat beside a page names nothing here.
-  expect(screen.queryByRole("button", { name: "Edit Assistant" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Close edit of Assistant" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Chat with Assistant" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Close chat with Assistant" })).toBeNull();
   expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(false);
 
   const sent: unknown[] = [];

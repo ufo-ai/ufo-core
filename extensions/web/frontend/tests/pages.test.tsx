@@ -128,6 +128,9 @@ const nativeEventSource = window.EventSource;
 
 beforeEach(() => {
   vi.useRealTimers();
+  // The list's ladder and Show set are held in this browser, so one test's choices must not open
+  // the next one's page.
+  localStorage.clear();
   document.body.innerHTML = '<div id="root"></div>';
 });
 
@@ -442,7 +445,7 @@ function chatListRow(id: string, title: string, extra: Record<string, unknown> =
   };
 }
 
-test("the Show set admits a surface into the list, and the read spans them all", async () => {
+test("every surface stands in the list until the member puts one away", async () => {
   const { calls } = await runPage("chat", {
     "/objects/conversation$": () =>
       json({
@@ -456,36 +459,67 @@ test("the Show set admits a surface into the list, and the read spans them all",
   const listReads = () => calls.filter((url) => url.includes("/objects/conversation"));
   await screen.findByRole("heading", { name: "Chat" });
 
-  // The read spans every surface the member can see; the set narrows the rows already in hand.
+  // The read spans every surface the member can see, and so does the list: a conversation they had
+  // elsewhere is still theirs.
   expect(listReads().every((url) => !url.includes("surface=") && !url.includes("portal="))).toBe(
     true,
   );
   expect(screen.getByText("Portal words")).toBeTruthy();
-  expect(screen.queryByText("Slack words")).toBeNull();
+  expect(screen.getByText("Slack words")).toBeTruthy();
 
   const reads = listReads().length;
   await userEvent.click(screen.getByRole("button", { name: "Chats options" }));
-  await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Slack" }));
+  const slack = await screen.findByRole("menuitemcheckbox", { name: "Slack" });
+  expect(slack.getAttribute("aria-checked")).toBe("true");
+  await userEvent.click(slack);
 
-  await vi.waitFor(() => expect(screen.getByText("Slack words")).toBeTruthy());
-  // A tick redraws the rows in hand rather than re-reading, and it leaves the menu standing so both
-  // surfaces are named in one visit.
+  await vi.waitFor(() => expect(screen.queryByText("Slack words")).toBeNull());
+  expect(screen.getByText("Portal words")).toBeTruthy();
+  // Putting one away redraws the rows in hand rather than re-reading, and it leaves the menu
+  // standing so a member names more than one in a visit.
   expect(listReads().length).toBe(reads);
   expect(screen.getByRole("menuitemcheckbox", { name: "iMessage" })).toBeTruthy();
+  // Written to this browser as it is taken, so leaving the page and coming back keeps it.
+  expect(localStorage.getItem("chat-hidden")).toBe("slack");
 });
 
-test("the chat list runs its rows under the ladder the address names", async () => {
+test("a surface the member put away is away on the next visit", async () => {
+  localStorage.setItem("chat-hidden", "slack");
+  await runPage("chat", {
+    "/objects/conversation$": () =>
+      json({
+        objects: [
+          chatListRow(CONVO_ID, "Portal words"),
+          chatListRow(ARRIVAL_ID, "Slack words", { surface: "slack", surface_label: "#ops" }),
+        ],
+        next_cursor: null,
+      }),
+  });
+
+  expect(await screen.findByText("Portal words")).toBeTruthy();
+  expect(screen.queryByText("Slack words")).toBeNull();
+
+  await userEvent.click(screen.getByRole("button", { name: "Chats options" }));
+  const ticked = async (label: string) =>
+    (await screen.findByRole("menuitemcheckbox", { name: label })).getAttribute("aria-checked");
+  expect(await ticked("Slack")).toBe("false");
+  // One surface put away leaves the others alone.
+  expect(await ticked("Terminal")).toBe("true");
+  expect(await ticked("iMessage")).toBe("true");
+});
+
+test("the chat list runs its rows under the ladder this browser holds", async () => {
   const rows = [
     chatListRow(CONVO_ID, "Alpha"),
     chatListRow(ARRIVAL_ID, "Bravo", { agent_id: SECOND_ID, agent_name: "support" }),
     chatListRow(TURN_ID, "Charlie", { surface: "slack", surface_label: "#ops" }),
   ];
-  await runPage(
-    "chat",
-    { "/objects/conversation$": () => json({ objects: rows, next_cursor: null }) },
-    { place: { group: "app", chip: "slack" } },
-  );
+  localStorage.setItem("chat-ladder", "app");
+  await runPage("chat", {
+    "/objects/conversation$": () => json({ objects: rows, next_cursor: null }),
+  });
 
+  // The ladder the member left the page on is the one it opens holding.
   await screen.findByRole("heading", { name: "Chat" });
   expect(await screen.findByRole("heading", { name: "Assistant" })).toBeTruthy();
   expect(screen.getByRole("heading", { name: "Support" })).toBeTruthy();
@@ -496,13 +530,15 @@ test("the chat list runs its rows under the ladder the address names", async () 
     screen.getByRole("button", { name: "Chats options" }).className.split(/\s+/),
   ).toContain("bg-fill");
 
-  // Recency is what the address carries nothing for, and it runs the rows under their day. The Show
-  // set is a different axis and stands where it was.
-  window.postMessage({ ufo: "place", place: { chip: "slack" } }, "*");
+  // Picking the other ladder redraws the rows in hand, reads nothing, and writes the choice down.
+  await userEvent.click(screen.getByRole("button", { name: "Chats options" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Recency" }));
+
   await vi.waitFor(() => expect(screen.queryByRole("heading", { name: "Support" })).toBeNull());
   expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
   expect(screen.getByText("Alpha")).toBeTruthy();
   expect(screen.getByText("Charlie")).toBeTruthy();
+  expect(localStorage.getItem("chat-ladder")).toBe("");
 });
 
 /** The day-runs are what the page opens on, and they are the runs the sidebar's own recency ladder
@@ -557,7 +593,6 @@ test("a row from another surface trails the source it came in on, and a portal r
           next_cursor: null,
         }),
     },
-    { place: { chip: "slack,ufo" } },
   );
 
   const row = async (title: string) =>

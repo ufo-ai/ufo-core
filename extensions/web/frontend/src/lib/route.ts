@@ -27,9 +27,6 @@ export type WorkspacePlace = {
   q?: string;
   chip?: string;
   face?: string;
-  /** Which category a listing runs its rows under — the headings it breaks them into, where the
-   *  screen offers more than the one order its read already answers in. */
-  group?: string;
   scope?: string;
   /** The slots standing on the screen, in track order, carried as one `~`-joined `open` key: a
    *  link to a screen carries every slot on it, and a link naming one thing is a track of one. A
@@ -128,7 +125,6 @@ const PLACE_CODEC: { [Key in PlaceKey]: PlaceField<Key> } = {
   q: text("q"),
   chip: text("chip"),
   face: text("face"),
-  group: text("group"),
   scope: text("scope"),
   range: text("range"),
   opens: TRACK,

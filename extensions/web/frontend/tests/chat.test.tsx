@@ -3165,7 +3165,7 @@ test("a route renaming the start screen keeps the same box, and the place in its
   await userEvent.type(box, "draft this");
   box.setSelectionRange(6, 6);
 
-  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   const after = screen.getByLabelText("Ask UFO") as HTMLTextAreaElement;
@@ -3188,7 +3188,7 @@ test("a route that renames the start screen's agent reads that agent's own draft
   const box = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
   await userEvent.type(box, "words for the second");
 
-  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
 
   await waitFor(() => expect(box.value).toBe("words for the main agent"));
   expect(localStorage.getItem("ufo.chat-draft." + MEMBER.id + "/new:" + SECOND_ID)).toBe(
