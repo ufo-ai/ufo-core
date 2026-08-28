@@ -7,9 +7,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-import conftest
 import pytest
 import yaml
+from ufo_testsupport import plugin
 
 from sandbox.build_template import (
     CLIENT_STAGE_PATH,
@@ -125,14 +125,14 @@ def _export(
     """The fixture's environment, with the client staging stubbed: what the image bakes comes from a
     compiled crate, and where that binary comes from is proven where it lives — here the question is
     which image the fixture runs."""
-    monkeypatch.setattr(conftest, "stage_client_binary", lambda: CLIENT_STAGE_PATH)
-    monkeypatch.setattr(conftest, "stage_system_skills", lambda: SYSTEM_SKILLS_STAGE_PATH)
+    monkeypatch.setattr(plugin, "stage_client_binary", lambda: CLIENT_STAGE_PATH)
+    monkeypatch.setattr(plugin, "stage_system_skills", lambda: SYSTEM_SKILLS_STAGE_PATH)
     for name, value in _env(root, **overrides).items():
         monkeypatch.setenv(name, value)
     if prebuilt is None:
-        monkeypatch.delenv(conftest.PREBUILT_IMAGE_ENV, raising=False)
+        monkeypatch.delenv(plugin.PREBUILT_IMAGE_ENV, raising=False)
     else:
-        monkeypatch.setenv(conftest.PREBUILT_IMAGE_ENV, prebuilt)
+        monkeypatch.setenv(plugin.PREBUILT_IMAGE_ENV, prebuilt)
 
 
 def _calls(root: Path) -> list[str]:
@@ -291,6 +291,34 @@ def test_the_rendered_definition_carries_the_one_tagged_base_the_script_pins() -
     ]
 
 
+def test_every_docker_gated_test_takes_the_image_from_the_fixture() -> None:
+    """No test resolves the sandbox image for itself. The fixture is the one place that reads
+    `UFO_SANDBOX_TEST_IMAGE`, and the one place that builds an image when it is unset — so a test
+    that reads the variable by hand carries its own fallback, and a fallback is a tag nothing here
+    builds. Three sites in the sites lifecycle proof did exactly that, naming `ufo-sandbox:latest`,
+    and passed for as long as the integration job's opportunistic pull kept hitting; the first miss
+    on main ran `docker run` against an image no runner had.
+
+    The fixture lives in the globally registered plugin rather than a conftest, which is what lets a
+    test outside `core/tests` ask for it at all."""
+    assert callable(plugin.sandbox_image)
+    tests = [
+        path
+        for path in ROOT.glob("**/tests/**/*.py")
+        if ".venv" not in path.parts and "node_modules" not in path.parts
+    ]
+    assert tests, "no test files found to check"
+    borrowed = [
+        path.relative_to(ROOT).as_posix()
+        for path in tests
+        if plugin.PREBUILT_IMAGE_ENV in path.read_text() and path != Path(__file__)
+    ]
+    assert borrowed == [], (
+        "these tests read the prebuilt-image variable themselves instead of taking the "
+        f"`sandbox_image` fixture: {borrowed}"
+    )
+
+
 def test_the_consumer_names_the_image_the_publisher_pushed(tmp_path: Path) -> None:
     """Both ends of `UFO_SANDBOX_TEST_IMAGE` over one definition: the publisher pushes a tag, the
     integration step writes that same tag under the name the fixture reads."""
@@ -305,7 +333,7 @@ def test_the_consumer_names_the_image_the_publisher_pushed(tmp_path: Path) -> No
     pushed = [call.removeprefix("push ") for call in _calls(publisher) if call.startswith("push ")]
     assert pushed == [f"{IMAGE_REPOSITORY}:{_derive_key(publisher).stdout.strip()}"]
     assert (consumer / "github-env").read_text().split() == [
-        f"{conftest.PREBUILT_IMAGE_ENV}={pushed[0]}"
+        f"{plugin.PREBUILT_IMAGE_ENV}={pushed[0]}"
     ]
     assert f"pull -q {pushed[0]}" in _calls(consumer)
     assert sum("stage_client_binary" in call for call in _uv_calls(publisher)) == 1
@@ -401,8 +429,8 @@ def test_every_input_that_moves_the_key_triggers_the_publisher() -> None:
 
     assert set(triggers) == KEY_INPUTS
     staged = {
-        str(CLIENT_STAGE_PATH.relative_to(conftest.ROOT)),
-        str(SYSTEM_SKILLS_STAGE_PATH.relative_to(conftest.ROOT)),
+        str(CLIENT_STAGE_PATH.relative_to(plugin.SANDBOX_CONTEXT_ROOT)),
+        str(SYSTEM_SKILLS_STAGE_PATH.relative_to(plugin.SANDBOX_CONTEXT_ROOT)),
     }
     prefixes = tuple(entry.removesuffix("/**") for entry in KEY_INPUTS)
     copied = [line.split()[1] for line in pod_dockerfile().splitlines() if line.startswith("COPY ")]
@@ -419,7 +447,7 @@ def test_a_named_prebuilt_image_replaces_the_build(
     root = _sandbox(tmp_path)
     _export(monkeypatch, root, prebuilt=f"{IMAGE_REPOSITORY}:abc")
 
-    assert conftest.sandbox_image.__wrapped__() == f"{IMAGE_REPOSITORY}:abc"
+    assert plugin.sandbox_image.__wrapped__() == f"{IMAGE_REPOSITORY}:abc"
     assert _calls(root) == [f"image inspect {IMAGE_REPOSITORY}:abc"]
 
 
@@ -427,8 +455,10 @@ def test_an_unnamed_image_is_built(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     root = _sandbox(tmp_path)
     _export(monkeypatch, root)
 
-    assert conftest.sandbox_image.__wrapped__() == conftest.SANDBOX_TEST_IMAGE
-    assert _calls(root) == [f"build -t {conftest.SANDBOX_TEST_IMAGE} -f - {conftest.ROOT}"]
+    assert plugin.sandbox_image.__wrapped__() == plugin.SANDBOX_TEST_IMAGE
+    assert _calls(root) == [
+        f"build -t {plugin.SANDBOX_TEST_IMAGE} -f - {plugin.SANDBOX_CONTEXT_ROOT}"
+    ]
 
 
 def test_a_named_image_that_is_absent_fails_and_never_skips(
@@ -437,7 +467,7 @@ def test_a_named_image_that_is_absent_fails_and_never_skips(
     root = _sandbox(tmp_path)
     _export(monkeypatch, root, prebuilt=f"{IMAGE_REPOSITORY}:gone", INSPECT_EXIT="1")
 
-    outcome = _outcome(conftest.sandbox_image.__wrapped__)
+    outcome = _outcome(plugin.sandbox_image.__wrapped__)
 
     assert outcome.startswith("AssertionError: "), outcome
     assert "image inspect" in outcome
@@ -450,9 +480,7 @@ def test_a_breached_wall_names_the_call_that_breached_it(
     _export(monkeypatch, root, INSPECT_SLEEP="5")
 
     outcome = _outcome(
-        lambda: conftest.docker_or_fail(
-            ["docker", "image", "inspect", "ufo-sandbox:test"], timeout=1
-        )
+        lambda: plugin.docker_or_fail(["docker", "image", "inspect", "ufo-sandbox:test"], timeout=1)
     )
 
     assert outcome.startswith("AssertionError: "), outcome

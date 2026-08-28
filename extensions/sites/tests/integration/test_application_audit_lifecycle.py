@@ -1,6 +1,5 @@
 import html
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -210,10 +209,8 @@ mountApp(document.getElementById('root'), () => h(Harness));
 
 
 @pytest.fixture(scope="module")
-def lifecycle_results(tmp_path_factory: pytest.TempPathFactory) -> dict:
-    image = os.environ.get("UFO_SANDBOX_TEST_IMAGE", "ufo-sandbox:latest")
-    if shutil.which("docker") is None:
-        pytest.skip("Docker executable is not available")
+def lifecycle_results(tmp_path_factory: pytest.TempPathFactory, sandbox_image: str) -> dict:
+    image = sandbox_image
     tmp_path = tmp_path_factory.mktemp("application-lifecycle")
     shutil.copytree(KIT_DIR, tmp_path / "kit")
     lifecycle_bundle = next(
@@ -477,10 +474,10 @@ def test_terminal_application_work_reaches_stable_render(lifecycle_results: dict
     assert lifecycle_results["final"]["state"] == "idle"
 
 
-def test_interaction_audit_waits_for_delayed_visible_state(tmp_path: Path) -> None:
-    image = os.environ.get("UFO_SANDBOX_TEST_IMAGE", "ufo-sandbox:latest")
-    if shutil.which("docker") is None:
-        pytest.skip("Docker executable is not available")
+def test_interaction_audit_waits_for_delayed_visible_state(
+    tmp_path: Path, sandbox_image: str
+) -> None:
+    image = sandbox_image
     shutil.copytree(KIT_DIR, tmp_path / "kit")
     shutil.copy2(AUDIT_SCRIPT, tmp_path / "audit_application.cjs")
     (tmp_path / "index.html").write_text(_page())
@@ -634,10 +631,8 @@ def test_full_cli_fails_quietly_with_private_lifecycle_artifact(lifecycle_result
     assert persistent["diagnostic"]["snapshot"]["blocking"]["stream"] == 1
 
 
-def test_success_removes_a_stale_lifecycle_artifact(tmp_path: Path) -> None:
-    image = os.environ.get("UFO_SANDBOX_TEST_IMAGE", "ufo-sandbox:latest")
-    if shutil.which("docker") is None:
-        pytest.skip("Docker executable is not available")
+def test_success_removes_a_stale_lifecycle_artifact(tmp_path: Path, sandbox_image: str) -> None:
+    image = sandbox_image
     shutil.copytree(KIT_DIR, tmp_path / "kit")
     shutil.copy2(AUDIT_SCRIPT, tmp_path / "audit_application.cjs")
     (tmp_path / "index.html").write_text(_page())
