@@ -1200,6 +1200,7 @@ class TurnEngine:
                 messages=(Message(role="user", content=user),),
                 max_tokens=FIND_MAX_TOKENS,
                 conversation_cache_ttl="5m",
+                session_id=str(self.turn.conversation_id),
                 reasoning=self.reasoning.internal_effort(),
             )
             parts: list[str] = []
@@ -2324,6 +2325,7 @@ class TurnEngine:
             messages=round_input.messages,
             max_tokens=MAX_OUTPUT_TOKENS,
             conversation_cache_ttl="5m" if self.turn.spawned else "1h",
+            session_id=str(self.turn.conversation_id),
             tools=tools,
             tool_choice=FINISH_TOOL if round_input.force_finish else None,
             reasoning=(

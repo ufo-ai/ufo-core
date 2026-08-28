@@ -229,12 +229,14 @@ class CapturingModel:
     seen: list[tuple[Message, ...]] = field(default_factory=list)
     seen_system: list[str] = field(default_factory=list)
     seen_conversation_cache_ttl: list[ConversationCacheTtl] = field(default_factory=list)
+    seen_session_id: list[str | None] = field(default_factory=list)
     seen_tools: list[tuple[ToolSchema, ...]] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.seen.append(request.messages)
         self.seen_system.append(request.system)
         self.seen_conversation_cache_ttl.append(request.conversation_cache_ttl)
+        self.seen_session_id.append(request.session_id)
         self.seen_tools.append(request.tools)
         yield TextDelta(text="ok")
         yield Usage(input_tokens=1, output_tokens=1)
@@ -476,9 +478,11 @@ class WriteThenAnswerModel:
 @dataclass
 class FindCallingModel:
     seen_conversation_cache_ttl: list[ConversationCacheTtl] = field(default_factory=list)
+    seen_session_id: list[str | None] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.seen_conversation_cache_ttl.append(request.conversation_cache_ttl)
+        self.seen_session_id.append(request.session_id)
         if request.system == "rank":
             yield TextDelta(text="first")
             yield Usage(input_tokens=1, output_tokens=1)
@@ -6641,6 +6645,33 @@ async def test_interrupted_side_effecting_dispatch_retries_with_the_same_idempot
     assert result.text == "written"
     assert replayed
     assert keys == [expected_key, expected_key]
+
+
+async def test_every_call_of_one_turn_names_the_conversation_as_its_cache_series(
+    db: None, tmp_path: Path
+) -> None:
+    """A router pins a session to one upstream provider, and its cache is the only warm one. So the
+    rounds of a conversation — and the host-side ranking call that runs between them — name the
+    conversation, or each lands on a provider that has never seen the prompt."""
+
+    async def rank(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        if ctx.find is None:
+            raise RuntimeError("find is not wired")
+        return ToolResult(content=(TextContent(text=await ctx.find("rank", "page")),))
+
+    turn = await _seed_turn("queued", None)
+    model = FindCallingModel()
+    engine = replace(
+        _engine(turn, model, tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="rank", description="d", input_model=_NoArgs, handler=rank),)
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame is not None and frame.status == "done"
+    assert model.seen_session_id == [str(turn.conversation_id)] * 3
 
 
 async def test_done_turn_persists_the_system_string_and_injected_context(

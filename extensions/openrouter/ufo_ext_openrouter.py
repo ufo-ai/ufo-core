@@ -383,7 +383,17 @@ class OpenRouterModelClient:
     `reasoning` effort rides `extra_body` as the thinking budget OpenRouter derives from max_tokens
     when the model's spec supports it; `off` rides there too, as `enabled: false`, because an
     omitted parameter leaves the upstream model reasoning at its own default effort through a
-    reasoning-inclusive budget."""
+    reasoning-inclusive budget.
+
+    `session_id` rides `extra_body` as OpenRouter's sticky routing key, and it is what makes prompt
+    caching work here at all: a slug names many upstream providers, each holding a cache of its own,
+    and a call that lands on a different one than the last pays the full prompt again. Named, the
+    key pins the series from its first successful call; unnamed, OpenRouter derives one by hashing
+    the opening messages, which a conversation loses the moment compaction rewrites its head — so a
+    request that names none is refused here, before the call. The field is optional on the request
+    because a direct client holds one cache and never reads it, which leaves this the only place
+    that can tell an unnamed series from one that does not matter: a caller that reaches a router
+    without naming its series gets an error rather than a cache that quietly never hits."""
 
     client: openai.AsyncOpenAI
     spec: ModelSpec
@@ -556,7 +566,13 @@ class OpenRouterModelClient:
     def _create_kwargs(
         self, request: ModelRequest, ignore_providers: frozenset[str]
     ) -> dict[str, Any]:
-        extra_body: dict[str, Any] = {}
+        if request.session_id is None:
+            raise RuntimeError(
+                "an OpenRouter request names no session_id; a router pins a prompt cache to a "
+                "session, so name the series this call belongs to — the conversation for a turn's "
+                "rounds, the job for a background call"
+            )
+        extra_body: dict[str, Any] = {"session_id": request.session_id}
         effort = self.spec.wire_reasoning(request.reasoning, request.tools)
         if effort == "off":
             extra_body["reasoning"] = {"enabled": False}

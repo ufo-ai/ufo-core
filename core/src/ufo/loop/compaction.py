@@ -444,6 +444,7 @@ class Compaction:
             messages=(Message(role="user", content=self._prepare(rounds, missed)),),
             max_tokens=self.summary_max_tokens,
             conversation_cache_ttl="5m",
+            session_id=str(self.conversation_id),
             reasoning=self.reasoning.internal_effort(),
         )
         parts: list[str] = []

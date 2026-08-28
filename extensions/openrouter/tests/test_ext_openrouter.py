@@ -72,12 +72,14 @@ SECOND_PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n-two").decode()
 MP4 = b"\x00\x00\x00\x18ftypmp42-frames-and-stereo-audio"
 VIDEO_JOB = "vid-01JB7"
 
+SESSION = "9a5b0c2e-conversation"
 REQUEST = ModelRequest(
     model="google/gemini-2.5-pro",
     system="be terse",
     messages=(Message(role="user", content="hi"),),
     max_tokens=64,
     conversation_cache_ttl="5m",
+    session_id=SESSION,
 )
 
 GEMINI_FLASH_REQUEST = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash"})
@@ -189,7 +191,7 @@ async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget
     assert events[-1] == Usage(input_tokens=3, output_tokens=2)
     kwargs = create.calls[0]
     assert kwargs["model"] == "google/gemini-2.5-pro"
-    assert kwargs["extra_body"] == {}
+    assert kwargs["extra_body"] == {"session_id": SESSION}
     assert kwargs["stream_options"] == {"include_usage": True}
 
 
@@ -490,13 +492,76 @@ async def test_priced_cache_writes_are_a_disjoint_usage_class() -> None:
     )
 
 
+async def test_the_session_id_reaches_the_wire_as_a_top_level_body_field() -> None:
+    """OpenRouter reads the sticky routing key off the body's own `session_id`, so the proof is the
+    JSON that was posted rather than the kwargs a stub recorded. The key is what makes prompt
+    caching work through a router at all: a slug names many upstream providers, each holding a
+    cache of its own, and the pin is what puts the next call back on the warm one."""
+    bodies: list[dict[str, object]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"x",'
+                b'"choices":[{"index":0,"finish_reason":"stop","delta":{"content":"ok"}}],'
+                b'"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+
+    client = openrouter.OpenRouterModelClient(
+        client=openai.AsyncOpenAI(
+            api_key=OPENROUTER_KEY,
+            base_url=openrouter.OPENROUTER_BASE_URL,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(upstream)),
+        ),
+        spec=openrouter.OPENROUTER_MODEL_SPECS[0],
+        key=OPENROUTER_KEY,
+    )
+
+    events = [event async for event in client.complete(REQUEST)]
+
+    assert events[-1] == Usage(input_tokens=3, output_tokens=2)
+    assert bodies[0]["session_id"] == SESSION
+
+
+async def test_the_session_id_rides_every_attempt_of_one_request() -> None:
+    """A re-issue past a dead upstream is the same series as the call it replaces, so it carries the
+    same key — a reroute that renamed the session would strand the conversation on a cold cache."""
+    dead = [_chunk(finish="stop", provider="deadco"), _chunk(usage=_usage(1, 0))]
+    good = [_chunk(content="recovered"), _chunk(finish="stop"), _chunk(usage=_usage(2, 3))]
+    create = ScriptedCreate(dead, good)
+    async for _ in _client(create).complete(REQUEST):
+        pass
+    assert [call["extra_body"]["session_id"] for call in create.calls] == [SESSION, SESSION]
+
+
+async def test_a_request_naming_no_session_is_refused_before_the_call() -> None:
+    """A direct client holds one cache and never reads the field, so an unnamed series only means
+    something here — and here it means a caller reached a router without saying what its prompt
+    prefix belongs to. Refused before the request goes out: the alternative is a cache that quietly
+    never hits, which nothing surfaces."""
+    create = ScriptedCreate(
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
+    )
+
+    with pytest.raises(RuntimeError, match="names no session_id"):
+        async for _ in _client(create).complete(REQUEST.model_copy(update={"session_id": None})):
+            pass
+
+    assert create.calls == []
+
+
 async def test_reasoning_effort_rides_from_the_request() -> None:
     create = ScriptedCreate(
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
     )
     async for _ in _client(create).complete(REQUEST.model_copy(update={"reasoning": "low"})):
         pass
-    assert create.calls[0]["extra_body"] == {"reasoning": {"effort": "low"}}
+    assert create.calls[0]["extra_body"] == {"session_id": SESSION, "reasoning": {"effort": "low"}}
 
 
 async def test_reasoning_off_disables_the_reasoning_budget() -> None:
@@ -507,7 +572,10 @@ async def test_reasoning_off_disables_the_reasoning_budget() -> None:
     )
     async for _ in _client(create).complete(REQUEST.model_copy(update={"reasoning": "off"})):
         pass
-    assert create.calls[0]["extra_body"] == {"reasoning": {"enabled": False}}
+    assert create.calls[0]["extra_body"] == {
+        "session_id": SESSION,
+        "reasoning": {"enabled": False},
+    }
 
 
 async def test_model_without_reasoning_omits_the_reasoning_budget() -> None:
@@ -520,7 +588,7 @@ async def test_model_without_reasoning_omits_the_reasoning_budget() -> None:
     )
     async for _ in _client(create, spec).complete(REQUEST):
         pass
-    assert create.calls[0]["extra_body"] == {}
+    assert create.calls[0]["extra_body"] == {"session_id": SESSION}
 
 
 async def test_model_without_tools_with_reasoning_omits_the_reasoning_budget() -> None:
@@ -540,7 +608,7 @@ async def test_model_without_tools_with_reasoning_omits_the_reasoning_budget() -
     )
     async for _ in _client(create, spec).complete(request):
         pass
-    assert create.calls[0]["extra_body"] == {}
+    assert create.calls[0]["extra_body"] == {"session_id": SESSION}
 
 
 def test_google_tool_result_with_json_reference_is_text_enveloped() -> None:

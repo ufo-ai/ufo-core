@@ -136,13 +136,19 @@ class ModelRequest(BaseModel):
     absent parameter as its default effort has to state it. `tool_choice` compels the named tool as
     the round's single act — it must name an offered tool. `conversation_cache_ttl` is
     how long the changing conversation tail stays warm; the Anthropic client keeps the tools and
-    system prefix for one hour, and clients whose provider caches on its own ignore it."""
+    system prefix for one hour, and clients whose provider caches on its own ignore it.
+    `session_id` names the series this call shares a prompt prefix with — the conversation for a
+    turn's rounds, the job for a background call. A router pins a session to one upstream so that
+    provider's cache is the one the next call meets, and a router client raises on a request that
+    names none; a client that speaks to a single provider has one cache and never reads it, so the
+    calls that reach only those leave it unset."""
 
     model: str
     system: str
     messages: tuple[Message, ...]
     max_tokens: int
     conversation_cache_ttl: ConversationCacheTtl
+    session_id: str | None = Field(default=None, min_length=1)
     tools: tuple[ToolSchema, ...] = ()
     tool_choice: str | None = None
     reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT

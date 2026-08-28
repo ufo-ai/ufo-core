@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -124,6 +124,19 @@ class ReasoningModel:
         yield Usage(input_tokens=1, output_tokens=1)
 
 
+@dataclass
+class RecordingModel:
+    """Records the request the seam actually sent, so a test reads what the seam fixed onto it
+    rather than what the caller wrote."""
+
+    sent: list[ModelRequest] = field(default_factory=list)
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.sent.append(request)
+        yield TextDelta(text="checking")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
 @dataclass(frozen=True)
 class FailingModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
@@ -229,6 +242,17 @@ async def test_model_turn_opens_a_tool_calling_message_with_its_reasoning_blocks
         TextBlock(text="checking"),
         ToolUseBlock(id="c1", name="bash", input={"command": "ls"}),
     )
+
+
+async def test_a_background_call_is_pinned_to_its_own_jobs_cache_series(db: None) -> None:
+    """A job sends one system prompt over and over with a small payload behind it, so the prefix a
+    router keeps warm is the job's. The seam fixes the series onto every completion the way it fixes
+    the model, and a caller cannot split a job's cache across upstream providers."""
+    model = RecordingModel()
+
+    await _turn(model)
+
+    assert [request.session_id for request in model.sent] == [JOB]
 
 
 async def test_model_turn_without_tool_calls_stays_plain_text(db: None) -> None:

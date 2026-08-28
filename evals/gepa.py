@@ -119,6 +119,8 @@ MAX_MODULE_CHARS = 24_000
 REFLECTOR_MAX_TOKENS = 16_000
 CLAIMS_MAX_TOKENS = 4_000
 REFLECTOR_FENCE = "<<<GEPA>>>"
+REFLECTOR_SESSION = "gepa:reflector"
+CLAIMS_SESSION = "gepa:claims"
 REFLECTOR_SYSTEM = (
     "You rewrite one file of standing instructions an AI agent reads. You are given the file's "
     "current text and, for each evaluation case it was measured on, the score and the recorded "
@@ -843,6 +845,7 @@ class ModelReflector:
             self.model,
             self.pricing,
             REFLECTOR_SYSTEM,
+            REFLECTOR_SESSION,
             payload,
             self.max_tokens,
             self.reasoning,
@@ -872,7 +875,14 @@ class ModelClaimsGate:
             }
         )
         answer, cost = await _complete(
-            self.client, self.model, self.pricing, CLAIMS_SYSTEM, payload, self.max_tokens, "low"
+            self.client,
+            self.model,
+            self.pricing,
+            CLAIMS_SYSTEM,
+            CLAIMS_SESSION,
+            payload,
+            self.max_tokens,
+            "low",
         )
         try:
             claims = json.loads(answer[answer.index("{") : answer.rindex("}") + 1])["unsupported"]
@@ -886,6 +896,7 @@ async def _complete(
     model: str,
     pricing: Pricing,
     system: str,
+    session_id: str,
     payload: str,
     max_tokens: int,
     reasoning: ReasoningEffort,
@@ -896,6 +907,7 @@ async def _complete(
         messages=(Message(role="user", content=payload),),
         max_tokens=max_tokens,
         conversation_cache_ttl="5m",
+        session_id=session_id,
         reasoning=reasoning,
     )
     parts: list[str] = []

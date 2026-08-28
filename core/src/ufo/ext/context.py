@@ -767,16 +767,19 @@ class ModelAccess:
     keyed to and billed to the ambient workspace. It resolves its client through the same
     `client_for` a turn uses (the workspace's BYOK key, else the platform key) and books usage
     through the same `billable_event`, so the key's workspace and the billed workspace are one, by
-    construction — never an unmetered direct egress. Both operations fix the request's model to the
-    deploy default, so the model billed is always the model called; `turn` preserves requested tool
-    calls in the existing assistant `Message` shape and `complete` returns only its text.
+    construction — never an unmetered direct egress. Both operations fix the request's model and its
+    cache series to this seam's own, so the model billed is always the model called; `turn`
+    preserves requested tool calls in the existing assistant `Message` shape and `complete` returns
+    only its text.
 
     `_job` is what its spend and latency are attributed to on the `ufo.model_*` series the turn
     engine already feeds: the job key this seam was wired for — `<extension>:<job>`, the key
     `bindings_from` registers, and the same shape for the two off-turn seams that run outside the
     job table (`core:ambient_reply`, the eval harness). The label is one bounded set, decided at
     boot by the installed extensions exactly as the `profile` dimension's set is, never a workspace,
-    conversation, or payload value."""
+    conversation, or payload value. It is also the cache series every call of this seam belongs to:
+    a job sends one system prompt over and over with a small payload behind it, so the prefix a
+    router keeps warm is the job's, and `session_id` names it."""
 
     _resolver: ModelResolver
     _job: str
@@ -843,7 +846,9 @@ class ModelAccess:
         started = time.monotonic()
         try:
             async with ws_current().billable_event() as bill:
-                async for event in client.complete(request.model_copy(update={"model": model})):
+                async for event in client.complete(
+                    request.model_copy(update={"model": model, "session_id": self._job})
+                ):
                     match event:
                         case TextDelta(text=text):
                             parts.append(text)
