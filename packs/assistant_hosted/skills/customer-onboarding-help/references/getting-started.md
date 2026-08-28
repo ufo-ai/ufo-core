@@ -4,10 +4,11 @@
 
 A new customer is invited by the UFO team, by email. The invitation opens the workspace's first-run
 page. The customer signs in with their work email, and sign-in continues to that page without
-another action. A member chats with the workspace's main agent there. An admin reaches every agent;
-every other member reaches the agents open to everyone in the workspace, the agents they created
-themselves, and any agent shared with them (see `capabilities.md`). The invitation also gives the
-terminal install command.
+another action: a short setup asks what they want help with, the tools their team uses, and who else
+to invite — then, where the deploy offers it, connecting iMessage — before the workspace's main agent
+answers them. An admin reaches every agent; every other member reaches the agents open to everyone in
+the workspace, the agents they created themselves, and any agent shared with them (see
+`capabilities.md`). The invitation also gives the terminal install command.
 
 ## Step by step, as the customer experiences it
 
@@ -34,11 +35,11 @@ terminal install command.
    sends it. Signing in opens the one workspace their verified address can enter, or asks them to
    choose when an exact membership and their email domain name different workspaces. An exact
    membership needs no invite.
-5. **A workspace admin is offered connecting Slack, then billing setup at the end.** In the terminal
-   the admin gets a choice on the concluding screen; picking one starts a chat with the agent, which
-   returns either an "Add to Slack" link or a link for saving a payment method. A joined teammate
-   gets the ordinary prompt instead. The web page opens the portal directly, where the workspace's
-   main agent already answers them.
+5. **A workspace admin is offered connecting Slack, billing setup, or a tour, at the end.** In the
+   terminal the admin gets a choice on the concluding screen — connect Slack, set up billing, or see
+   what the agent can do — and picking one starts a chat with the agent: the first two return a link,
+   the third talks through what the agent can do instead. A joined teammate gets the ordinary prompt
+   instead.
 6. **Slack comes next.** See `slack-install.md`.
 
 ## What to say when asked

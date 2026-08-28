@@ -57,6 +57,8 @@ TASKS_VIEW = "extensions/web/frontend/src/views/Tasks.tsx"
 WEB_OBJECTS = "extensions/web/frontend/src/kernel/objects.tsx"
 MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
 WEB_MEMORY_VIEW = "extensions/web/frontend/src/views/Memory.tsx"
+WEB_APP = "extensions/web/frontend/src/App.tsx"
+FIRST_RUN_VIEW = "extensions/web/frontend/src/views/FirstRun.tsx"
 
 
 @dataclass(frozen=True)
@@ -143,9 +145,10 @@ CLAIMS = (
         pattern=r'pub const GOOGLE_PROVIDER: &str = "GoogleOAuth";',
     ),
     Claim(
-        claim="an admin is offered connecting Slack, then billing setup, at the end of signup",
+        claim="an admin is offered connecting Slack, billing setup, or a tour, at the end of"
+        " signup",
         corpus="references/getting-started.md",
-        phrase="offered connecting Slack, then billing setup at the end",
+        phrase="offered connecting Slack, billing setup, or a tour, at the end",
         source=GATEWAY,
         pattern=(r"\[FIRST_MOVE_PROMPT, SLACK_CHOICE, BILLING_CHOICE, TOUR_CHOICE\]"),
     ),
@@ -619,6 +622,43 @@ CLAIMS = (
         " new turn instead",
         source=STOP,
         pattern=r"founded = await self\.admission\.redispatch\(workspace_id, conversation_id\)",
+    ),
+    Claim(
+        claim="sign-in from the invitation reaches a first-run setup before the agent answers,"
+        " not a chat directly",
+        corpus="references/getting-started.md",
+        phrase="a short setup asks what they want help with, the tools their team uses, and who"
+        " else\nto invite",
+        source=WEB_APP,
+        pattern=r'if \(route\.kind === "first-run"\) \{\n(?:.*\n)*?\s+<FirstRun',
+    ),
+    Claim(
+        claim="the first-run setup asks the goal, then the tools used, then who to invite,"
+        " in that order",
+        corpus="references/getting-started.md",
+        phrase="a short setup asks what they want help with, the tools their team uses, and who"
+        " else\nto invite",
+        source=FIRST_RUN_VIEW,
+        pattern=(
+            r"\[GOAL_STEP\]: \{\n(?:.*\n)*?\s+\[TOOLS_STEP\]: \{\n(?:.*\n)*?\s+\[TEAM_STEP\]: \{"
+        ),
+    ),
+    Claim(
+        claim="the first-run setup can offer connecting iMessage, gated by the deploy and a flag"
+        " that defaults on",
+        corpus="references/getting-started.md",
+        phrase="then, where the deploy offers it, connecting iMessage",
+        source=WEB_SURFACE,
+        pattern=r"and await flag_enabled\(IMESSAGE_STEP_FLAG, default=True\)",
+    ),
+    Claim(
+        claim="the terminal's concluding choice has a third option that talks instead of"
+        " returning a link",
+        corpus="references/getting-started.md",
+        phrase="the first two return a link,\n   the third talks through what the agent can do"
+        " instead",
+        source=GATEWAY,
+        pattern=r'TOUR_CHOICE: &str = "Show me what you can do";',
     ),
 )
 
