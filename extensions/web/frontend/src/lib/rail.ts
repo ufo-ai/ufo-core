@@ -1,5 +1,3 @@
-import { agentName } from "@/lib/agentName";
-import { IMESSAGE_SURFACE, SLACK_SURFACE, UFO_SURFACE } from "@/lib/audience";
 import type { Agent, OwnedConversation } from "@/lib/types";
 
 export type ChatRow = {
@@ -48,96 +46,11 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
   }));
 }
 
-/** A run of rows the rail draws together. A group the member can fold states its heading; the
- *  recency ladder is the rail's own order rather than a set of places, so it is drawn as one
- *  unheaded run of rows and carries no label. */
-export type RailGroup = { label: string | null; rows: ChatRow[] };
-
-export type RailSort = "recency" | "agent";
-
-const HELD_SORT = "rail-sort";
-
-/** Which ladder the rail draws its rows in, held across sessions. */
-export function heldRailSort(): RailSort {
-  return localStorage.getItem(HELD_SORT) === "agent" ? "agent" : "recency";
-}
-
-export function holdRailSort(sort: RailSort): void {
-  localStorage.setItem(HELD_SORT, sort);
-}
-
-/** The agent sort's groups. Rows bucket under the name as stored — that name is the agent's
- *  identity, and two agents whose names differ only in case are two agents — and the heading is
- *  that name drawn the way every other surface draws it. */
-function groupChatsByAgent(rows: ChatRow[]): RailGroup[] {
-  const buckets = new Map<string, ChatRow[]>();
-  for (const row of rows) {
-    buckets.set(row.agent_name, (buckets.get(row.agent_name) ?? []).concat(row));
-  }
-  return [...buckets.entries()].map(([name, grouped]) => ({
-    label: agentName(name),
-    rows: grouped,
-  }));
-}
-
-export type RailShown = { terminal: boolean; slack: boolean; imessage: boolean };
-
-export const RAIL_SHOWN_OPTIONS: { surface: keyof RailShown; label: string }[] = [
-  { surface: "terminal", label: "Terminal" },
-  { surface: "slack", label: "Slack" },
-  { surface: "imessage", label: "iMessage" },
-];
-
-const HELD_SHOWN = "rail-shown";
-
-/** Which surfaces beside the portal's own the rail admits, held across sessions. A Slack thread, a
- *  terminal session and an iMessage exchange are conversations the member had somewhere else, so
- *  each is admitted only once they name it, and a browser holding nothing admits none. */
-export function heldRailShown(): RailShown {
-  const held = (localStorage.getItem(HELD_SHOWN) ?? "").split(",");
-  return {
-    terminal: held.includes("terminal"),
-    slack: held.includes("slack"),
-    imessage: held.includes("imessage"),
-  };
-}
-
-export function holdRailShown(shown: RailShown): void {
-  const named = RAIL_SHOWN_OPTIONS.filter((option) => shown[option.surface]);
-  localStorage.setItem(HELD_SHOWN, named.map((option) => option.surface).join(","));
-}
-
-const HELD_SHUT = "rail-shut";
-
-/** The groups the member has shut, by label, held across sessions — a rail narrowed to the ladders
- *  someone works from would widen again on every reload otherwise. A label is the key under either
- *  sort, since an agent's name and a date bucket's name are both labels. A browser holding nothing
- *  has never had a heading clicked, which is not the same as one holding an empty set. */
-export function heldRailShut(): string[] | null {
-  const held = localStorage.getItem(HELD_SHUT);
-  return held === null ? null : held.split("\n").filter(Boolean);
-}
-
-export function holdRailShut(shut: string[]): void {
-  localStorage.setItem(HELD_SHUT, shut.join("\n"));
-}
-
-/** Which groups stand shut. Until the member has touched a heading the rail opens its first group
- *  and shuts the rest: the conversations someone is working from are the recent ones, and the rest
- *  of the history is a list they ask for. The unheaded run of rows counts as a group here and can
- *  never be shut, so a rail led by it opens nothing else. The first click writes that whole set
- *  down, so from then on the member's own set governs — including the set that holds nothing shut.
- *  A label the rail has stopped drawing stays in the set and governs nothing until it is drawn
- *  again. */
-export function railShut(held: string[] | null, labels: (string | null)[]): string[] {
-  return held ?? labels.slice(1).filter((label) => label !== null);
-}
-
 const HELD_SIDEBAR = "sidebar";
 
 /** Whether the sidebar stands folded to its glyph rail. The shell opens on the rail: the sidebar is
- *  a place a member goes to find a conversation by name, not the screen they came for, so the width
- *  it takes belongs to the screen until they ask for it — and once they have asked, that choice is
+ *  a place a member goes to reach another screen, not the screen they came for, so the width it
+ *  takes belongs to the screen until they ask for it — and once they have asked, that choice is
  *  theirs on every load after. */
 export function heldSidebar(): boolean {
   return localStorage.getItem(HELD_SIDEBAR) !== "expanded";
@@ -196,33 +109,19 @@ export function appOrder(
   );
 }
 
-/** The apps drawn while the list stands collapsed, and the tail the `More` row reveals. */
-export type AppRun = { shown: Agent[]; more: Agent[] };
-
-/** How many apps the sidebar states before the rest wait behind `More`. The column is shared with
- *  the member's conversations, so the list takes a run of it and no more. Opened, it draws every
- *  app the workspace has and scrolls inside the height `--size-apps-open` allows — the tail is
- *  never cut, because an app the list refused to draw is one the member has no way to reach. */
-const APPS_SHOWN = 8;
-
-/** Where the collapsed list ends, and what work in flight does to it.
+/** The apps in the order the sidebar draws them, with work in flight at the top: an app that is
+ *  working rises, and nothing else moves — the others keep the order `appOrder` gave them, and one
+ *  arriving from below pushes them down by a row rather than reshuffling them. Work is the one fact
+ *  worth the top of the column, and it is worth it for an app the member never pinned. Working is
+ *  the caller's read, so an app's own status governs this and nothing here has to ask for it.
  *
- *  The cut is a count, not a judgement about any one app: the same number of rows stands whatever
- *  the workspace is doing, so the column holds still. A run that admitted apps for being busy — or
- *  that stood for the pinned ones alone — would resize itself as work started and as the member
- *  pinned, and the list would collapse under them at the moment they acted on it. Pinning moves an
- *  app up the order; it does not decide what the sidebar draws.
- *
- *  An app that is working rises to the top, and nothing else moves: the others keep their order
- *  under it, and one arriving from the tail pushes them down by a row rather than reshuffling them.
- *  Work is the one fact worth the top of the column, and it is worth reaching for an app the member
- *  never pinned. Working is the caller's read, so an app's own status governs this and nothing here
- *  has to ask for it. */
-export function appRun(apps: Agent[], working: (agentId: string) => boolean): AppRun {
+ *  Every app the workspace has is drawn. The list scrolls inside the height `--size-apps-open`
+ *  allows, so a long one costs the column nothing — and an app the list refused to draw is one the
+ *  member has no way to reach, which is what a pin they cannot see cannot be undone from. */
+export function appLadder(apps: Agent[], working: (agentId: string) => boolean): Agent[] {
   const busy = apps.filter((app) => working(app.id));
   const risen = new Set(busy.map((app) => app.id));
-  const ladder = busy.concat(apps.filter((app) => !risen.has(app.id)));
-  return { shown: ladder.slice(0, APPS_SHOWN), more: ladder.slice(APPS_SHOWN) };
+  return busy.concat(apps.filter((app) => !risen.has(app.id)));
 }
 
 const HELD_SECTIONS_SHUT = "sections-shut";
@@ -237,49 +136,6 @@ export function heldSectionsShut(): string[] {
 
 export function holdSectionsShut(shut: string[]): void {
   localStorage.setItem(HELD_SECTIONS_SHUT, shut.join("\n"));
-}
-
-const HELD_APPS_EXPANDED = "apps-expanded";
-
-/** Whether the member has opened the apps list past the run the sidebar draws on its own. The
- *  column carries their conversations as well, so the apps take a run of it and the rest wait
- *  behind a row; a member who asked for the whole set asked about their own workspace, and that
- *  answer holds on every load after. */
-export function heldAppsExpanded(): boolean {
-  return localStorage.getItem(HELD_APPS_EXPANDED) === "expanded";
-}
-
-export function holdAppsExpanded(expanded: boolean): void {
-  localStorage.setItem(HELD_APPS_EXPANDED, expanded ? "expanded" : "collapsed");
-}
-
-function admits(row: ChatRow, shown: RailShown): boolean {
-  if (row.surface === UFO_SURFACE) return shown.terminal;
-  if (row.surface === SLACK_SURFACE) return shown.slack;
-  if (row.surface === IMESSAGE_SURFACE) return shown.imessage;
-  return true;
-}
-
-const OTHER_MEMBERS = "Other members";
-
-/** The rail's groups, in the order it draws them. The member's own conversations take the ladder
- *  the sort names — an app's name over each run, or, by recency, one unheaded run in the order the
- *  rows already stand in. A date the rail can state in the row's own words buys nothing as a
- *  heading, and five of them turn a column of a dozen conversations into a column of headings.
- *  The readable ones their colleagues are in follow as one group at the foot — never subdivided,
- *  and by recency under either sort: a sidebar column holds two heading weights, not three, and a
- *  colleague's thread is read for what happened lately in it. A group is drawn only when it holds
- *  a row.
- *
- *  The filter narrows the groups and never the rail itself: a permalink to a Slack thread opens it
- *  whether or not the rail is admitting Slack. */
-export function railGroups(rows: ChatRow[], sort: RailSort, shown: RailShown): RailGroup[] {
-  const admitted = rows.filter((row) => admits(row, shown));
-  const own = admitted.filter((row) => row.mine);
-  const theirs = admitted.filter((row) => !row.mine);
-  const grouped =
-    sort === "agent" ? groupChatsByAgent(own) : own.length ? [{ label: null, rows: own }] : [];
-  return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
 }
 
 export function stampIso(at: Date): string {

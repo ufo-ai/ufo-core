@@ -5,18 +5,10 @@ import { getJson } from "@/lib/api";
 import { isPortalChat } from "@/lib/audience";
 import {
   bumpChat,
-  heldAppsExpanded,
   heldPinned,
-  heldRailShown,
-  heldRailShut,
-  heldRailSort,
   heldSectionsShut,
   heldSidebar,
-  holdAppsExpanded,
   holdPinned,
-  holdRailShown,
-  holdRailShut,
-  holdRailSort,
   holdSectionsShut,
   holdSidebar,
   chatRows,
@@ -24,15 +16,14 @@ import {
   type ChatRow,
   type ChatsPayload,
   type ConversationsPayload,
-  type RailShown,
-  type RailSort,
 } from "@/lib/rail";
 import type { OwnedConversation } from "@/lib/types";
 
-/** The sidebar's own state, outside the shell: the rail of conversations, what a permalink to one
- *  outside it resolved to, and the choices the member has made about how the rail is drawn. It was
+/** The shell's own state, outside the render tree: the member's conversations, what a permalink to
+ *  one the read does not carry resolved to, and the choices they have made about the sidebar. It was
  *  ten pieces of `App` state feeding twenty-two props down two components, and every screen that
- *  reads the rail reads it here instead \u2014 the same shape `chatStore` gives a conversation.
+ *  reads the conversations reads them here instead \u2014 the same shape `chatStore` gives a
+ *  conversation.
  *
  *  A choice the member makes is written to this browser as it is taken, so the reads that seed the
  *  store are the reads a reload makes. */
@@ -55,12 +46,8 @@ export type RailState = {
   linked: Readonly<Record<string, OwnedConversation>>;
   /** A read that failed where no control on the screen can correct it. */
   fault: ToastState | null;
-  sort: RailSort;
-  shown: RailShown;
-  shut: string[] | null;
   collapsed: boolean;
   pinned: string[] | null;
-  appsExpanded: boolean;
   /** The sections the member has folded shut, by name. */
   sectionsShut: string[];
 };
@@ -74,12 +61,8 @@ function fresh(): RailState {
     sought: {},
     linked: {},
     fault: null,
-    sort: heldRailSort(),
-    shown: heldRailShown(),
-    shut: heldRailShut(),
     collapsed: heldSidebar(),
     pinned: heldPinned(),
-    appsExpanded: heldAppsExpanded(),
     sectionsShut: heldSectionsShut(),
   };
 }
@@ -108,10 +91,10 @@ export function useRail(): RailState {
  *  would otherwise put the older rows back. */
 let reads = 0;
 
-/** How many rows one rail read gathers before it stops walking. The listing pages, so a rail
- *  read follows the continuation until the walk is done or this many rows stand — comfortably
- *  past what the sidebar can usefully show, stated so a workspace with thousands of
- *  conversations costs a bounded number of reads. */
+/** How many rows one read gathers before it stops walking. The listing pages, so the read follows
+ *  the continuation until the walk is done or this many rows stand — comfortably past the
+ *  conversations a member works from, stated so a workspace with thousands of them costs a bounded
+ *  number of reads. */
 const RAIL_ROWS_MAX = 300;
 
 /** Read the rail: walk the listing's continuation, gathering pages until the walk is done or
@@ -205,21 +188,6 @@ export function quietRail(): void {
   update((held) => ({ ...held, fault: null }));
 }
 
-export function pickRailSort(sort: RailSort): void {
-  holdRailSort(sort);
-  update((held) => ({ ...held, sort }));
-}
-
-export function pickRailShown(shown: RailShown): void {
-  holdRailShown(shown);
-  update((held) => ({ ...held, shown }));
-}
-
-export function pickRailShut(shut: string[]): void {
-  holdRailShut(shut);
-  update((held) => ({ ...held, shut }));
-}
-
 export function foldSidebar(collapsed: boolean): void {
   holdSidebar(collapsed);
   update((held) => ({ ...held, collapsed }));
@@ -237,11 +205,6 @@ export function pickSectionShut(label: string, shut: boolean): void {
   const next = shut ? held.concat(label) : held;
   holdSectionsShut(next);
   update((state) => ({ ...state, sectionsShut: next }));
-}
-
-export function pickAppsExpanded(appsExpanded: boolean): void {
-  holdAppsExpanded(appsExpanded);
-  update((held) => ({ ...held, appsExpanded }));
 }
 
 export function resetRailStore(): void {

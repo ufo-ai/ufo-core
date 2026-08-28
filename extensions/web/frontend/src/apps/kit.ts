@@ -12,6 +12,7 @@ import {
   IconChevronDown,
   IconChevronUp,
   IconDots,
+  IconFilter2,
   IconWorldWww,
 } from "@tabler/icons-react";
 
@@ -43,12 +44,18 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Dialog, DialogTrigger } from "@/components/ui/dialog";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Facts, Group } from "@/components/ui/facts";
 import { Segmented } from "@/components/ui/filter";
+import { SurfaceGlyph } from "@/lib/surfaceMark";
 import { PressRow } from "@/components/ui/pressrow";
 import { Sheet } from "@/components/ui/sheet";
 import { Lede, Td, TdFact } from "@/components/ui/table";
@@ -101,7 +108,10 @@ import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { getJson, postIntent } from "@/lib/api";
 import {
+  IMESSAGE_SURFACE,
   SHARED_SUBJECT,
+  SLACK_SURFACE,
+  UFO_SURFACE,
   isMemberAudience,
   isPortalChat,
   ownerLabel,
@@ -126,6 +136,7 @@ import {
 } from "@/lib/route";
 import type { WorkspacePlace } from "@/lib/route";
 import { formatSize } from "@/lib/size";
+import { FoundingChat } from "@/views/Chat";
 import { ChatPane } from "@/views/ChatPane";
 import { ConversationDetail } from "@/views/Conversations";
 
@@ -186,6 +197,7 @@ export {
   IconChevronDown,
   IconChevronUp,
   IconDots,
+  IconFilter2,
   IconWorldWww,
   connect,
   founded,
@@ -202,8 +214,13 @@ export {
   Dialog,
   DialogTrigger,
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
   Facts,
   Group,
@@ -258,11 +275,16 @@ export {
   agentName,
   getJson,
   postIntent,
+  IMESSAGE_SURFACE,
   SHARED_SUBJECT,
+  SLACK_SURFACE,
+  UFO_SURFACE,
   isMemberAudience,
   isPortalChat,
   ownerLabel,
   slackLink,
+  /* The surface a conversation came in on, as the mark a listing row trails it with. */
+  SurfaceGlyph,
   surfaceWord,
   useViewer,
   cn,
@@ -285,5 +307,8 @@ export {
   workspaceHash,
   formatSize,
   ChatPane,
+  /* The chat screen's own shape around a caller's content: the box that founds a conversation
+     holds the bottom, and what the page draws scrolls above it. */
+  FoundingChat,
   ConversationDetail,
 };

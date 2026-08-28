@@ -30,7 +30,6 @@ import {
   agentIndex,
   atPhoneWidth,
   chatsOnWire,
-  expandApps,
   json,
   objectIndex,
   openAgentRow,
@@ -484,7 +483,7 @@ test("the app the last phase creates reaches the rail when the turn settles", as
 
 /** The rows are the section's own list, and the act that adds to it is the section head's: the
  *  index states apps, and what to do about apps is behind the name it stands under. */
-test("the act that builds an app stands as the apps list's first row", async () => {
+test("the act that builds an app stands at the foot of the apps list", async () => {
   location.hash = "#/agents";
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
@@ -500,7 +499,10 @@ test("the act that builds an app stands as the apps list's first row", async () 
   const rows = within(index)
     .getAllByRole("button")
     .map((row) => row.getAttribute("aria-label") ?? row.textContent);
-  expect(rows[0]).toBe("New app");
+  // Making an app is what a member does having read the list and found none, so it stands under
+  // them rather than over them.
+  expect(rows.at(-1)).toBe("Create app");
+  expect(rows).not.toContain("New app");
 });
 
 test("pressing a section's band folds it away, and the fold holds across a reload", async () => {
@@ -1105,7 +1107,6 @@ test("a working app leads the index, and a pin orders everything under it", asyn
   render(<App agents={[AGENT, RESEARCH, SCRIBE]} member={MEMBER} onAgents={() => {}} />);
 
   const index = await shownIndex();
-  await expandApps();
   const drawn = () =>
     within(index)
       .getAllByRole("button", { name: /^(Assistant|Research|Scribe)/ })
@@ -1199,7 +1200,6 @@ test("the avatar dot reads live on work in flight, blocked on parked or failed, 
   );
 
   const index = await shownIndex();
-  await expandApps();
   const dot = (name: RegExp, tone: string) =>
     within(index).getByRole("button", { name }).querySelector("." + tone);
   await waitFor(() => expect(dot(/^Assistant/, "bg-live")).toBeTruthy());
@@ -1241,7 +1241,6 @@ test("an app installed and not set up wears the blocked dot, and work outranks i
   );
 
   const index = await shownIndex();
-  await expandApps();
   const dot = (name: RegExp, tone: string) =>
     within(index).getByRole("button", { name }).querySelector("." + tone);
 

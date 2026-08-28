@@ -1,13 +1,20 @@
 ---
 name: app-chat-home
-description: Load when building or updating the Chat app homepage — the workspace's chat screen with one conversation's transcript and composer, streaming replies, and the starter prompts on a fresh chat.
+description: Load when building or updating the Chat app homepage — the workspace's chat screen with its list of conversations, one conversation's transcript and composer, streaming replies, and the starter prompts on a fresh chat.
 ---
 # Change the Chat homepage
 
 The homepage is served with the deploy: `app.tsx` in this skill is its source, built into the
-page every workspace reads until it changes one. It renders the chat screen: the conversation
-the page was opened at — transcript, composer, streamed replies — or the start screen with the
-workspace's starter prompts.
+page every workspace reads until it changes one. It renders the chat screen: the member's
+conversations as a list — narrowed to one source, run under a date, app or source category, and
+ending on the act that starts a new one — or the conversation the page was opened at, with its
+transcript, composer and streamed replies, or the start screen with the workspace's starter
+prompts.
+
+The list's narrowing, category and cursor ride the address rather than component state, so a
+reload, a Back and a shared link all land on the list the member was reading. The narrowing is the
+read's — each source is an exact filter the conversation kind declares — while the category groups
+the rows already in hand.
 
 To change it:
 

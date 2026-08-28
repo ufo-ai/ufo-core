@@ -199,10 +199,8 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Expand sidebar",
     "Ask assistant",
     "Apps",
-    "New app",
     agentName(AGENT.name),
-    "Chats",
-    "Chats options",
+    "Create app",
     "Connectors",
     "Workspace",
     "Theme",
@@ -211,32 +209,21 @@ test("the sidebar names the shell's destinations and states the member at its fo
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
 });
 
-test("a section heading folds its section, and holds its menu behind a mark drawn under the pointer", async () => {
+test("a section heading is the fold and states which way it stands, and carries no other act", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  for (const name of ["Apps", "Chats"]) {
-    /* The band is the fold and states which way it stands. It opens no menu: a heading is a place
-       before it is an act, and the act it does carry is the one a member does to a heading. */
-    const band = within(sidebar).getByRole("button", { name });
-    expect(band.getAttribute("aria-haspopup")).toBeNull();
-    expect(band.getAttribute("aria-expanded")).toBe("true");
-    const chevron = band.querySelector("svg");
-    if (!chevron) throw new Error(name + " states no fold mark");
-    expect(chevron.getAttribute("class")).not.toContain("opacity-0");
-  }
-
-  /* A menu is a second act on the same row, so it takes its own mark — held in the layout and drawn
-     transparent, so nothing under the pointer moves as it arrives. Only the section that has one
-     draws it: Apps carries its act as a row instead. */
+  /* The band is the fold and states which way it stands. It opens no menu: a heading is a place
+     before it is an act, and the act it does carry is the one a member does to a heading. */
+  const band = within(sidebar).getByRole("button", { name: "Apps" });
+  expect(band.getAttribute("aria-haspopup")).toBeNull();
+  expect(band.getAttribute("aria-expanded")).toBe("true");
+  const chevron = band.querySelector("svg");
+  if (!chevron) throw new Error("Apps states no fold mark");
+  expect(chevron.getAttribute("class")).not.toContain("opacity-0");
   expect(within(sidebar).queryByRole("button", { name: "Apps options" })).toBeNull();
-  const options = within(sidebar).getByRole("button", { name: "Chats options" });
-  expect(options.getAttribute("aria-haspopup")).toBe("menu");
-  expect(options.getAttribute("class")).toContain("opacity-0");
-  expect(options.getAttribute("class")).toContain("group-hover/head:opacity-100");
-  expect(options.getAttribute("class")).not.toContain("hidden");
 });
 
 test("the apps section yields its height rather than pushing the sidebar's foot off the screen", async () => {
@@ -362,13 +349,11 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Collapse sidebar",
     "Ask assistant",
     "Apps",
-    "New app",
     /* The drawer is always drawn whole, so the app's row states its name and the pin act every row
        wears. */
     agentName(AGENT.name),
     "Pin " + agentName(AGENT.name),
-    "Chats",
-    "Chats options",
+    "Create app",
     "Connectors",
     "Workspace",
     "Theme",

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -2944,8 +2944,10 @@ test("switching conversations remounts the log so scroll state never leaks acros
   first.scrollTop = 100;
   fireEvent.scroll(first);
 
-  await userEvent.click(screen.getByRole("button", { name: /The second thread/ }));
-  await screen.findByText("No messages in this conversation yet.");
+  act(() => {
+    location.hash = "#/c/" + other.conversation_id;
+  });
+  await waitFor(() => expect(screen.getByTestId("log")).not.toBe(first));
   expect(document.activeElement).toBe(screen.getByLabelText("Ask UFO"));
   const fresh = screen.getByTestId("log");
   expect(fresh).not.toBe(first);

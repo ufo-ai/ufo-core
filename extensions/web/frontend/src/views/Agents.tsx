@@ -3,7 +3,6 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconChevronDown,
   IconCirclePlus,
-  IconDots,
   IconPin,
   IconPinFilled,
   IconX,
@@ -44,7 +43,7 @@ import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
-import { appOrder, appRun, type ChatRow } from "@/lib/rail";
+import { appLadder, appOrder, type ChatRow } from "@/lib/rail";
 import type { Agent, Member } from "@/lib/types";
 
 export type AgentsProps = {
@@ -67,7 +66,7 @@ export type AgentsProps = {
   buildWanted: boolean;
 };
 
-const NEW_APP = "New app";
+const CREATE_APP = "Create app";
 
 const RESPONDING = "Responding";
 
@@ -393,9 +392,7 @@ export function AppsIndex({
   openId,
   building,
   pinned,
-  expanded,
   collapsed,
-  onExpand,
   onPin,
   onOpen,
   onBuild,
@@ -406,11 +403,8 @@ export function AppsIndex({
   /** Whether the wizard holds the pane, which draws its row as the place the member already is. */
   building: boolean;
   pinned: string[];
-  /** Whether the member has opened the list past the run it draws on its own. */
-  expanded: boolean;
   /** Whether the sidebar stands folded to its glyph rail. */
   collapsed: boolean;
-  onExpand: (expanded: boolean) => void;
   onPin: (agentId: string) => void;
   onOpen: (agentId: string) => void;
   onBuild: () => void;
@@ -429,9 +423,7 @@ export function AppsIndex({
     const status = statuses[agentId];
     return status?.turn === "running" || status?.turn === "queued";
   };
-  const ordered = appOrder(agents, pinned, lastActiveAt);
-  const run = appRun(ordered, working);
-  const shown = expanded ? run.shown.concat(run.more) : run.shown;
+  const shown = appLadder(appOrder(agents, pinned, lastActiveAt), working);
   // The run lives on the wizard's own store key — busy or spoken before it founds, a forwarding
   // record after — so it survives every unmount of this list; a reload clears the store, so no
   // phantom row survives one.
@@ -446,31 +438,6 @@ export function AppsIndex({
     <nav aria-label="Apps" className="flex min-h-0 flex-col">
       <div className="flex min-h-0 max-h-(--size-apps-open) flex-col overflow-y-auto">
         <ul className="m-0 flex list-none flex-col gap-px p-0">
-          {/* Building an app is the one act this list carries, so it stands as the list's first row
-              rather than behind a mark on the heading: a member who has not built one yet has no
-              reason to go looking under a control for it. Every member is offered it — the `agent`
-              kind admits a create from any speaking member and stamps them the owner — and the
-              wizard rides the main agent's own chat, so a workspace with no main agent offers
-              nothing to ride. */}
-          {mainAgent ? (
-            <li>
-              <button
-                type="button"
-                onClick={onBuild}
-                className={cn(
-                  "flex h-(--size-row) w-full items-center gap-md rounded-full border-0",
-                  "bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
-                  collapsed && "justify-center gap-0 px-0",
-                )}
-                aria-label={collapsed ? NEW_APP : undefined}
-              >
-                <IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />
-                <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>
-                  {NEW_APP}
-                </span>
-              </button>
-            </li>
-          ) : null}
           {/* The run in flight, named the way the wizard's own pane is until the conversation has
               a title of its own. While the pane shows it states where the member already is;
               while an app holds the pane instead, the row is the way back to the run. It is not
@@ -521,30 +488,33 @@ export function AppsIndex({
               onOpen={() => onOpen(agent.id)}
             />
           ))}
+          {/* Building an app is the one act this list carries, and it stands at the foot of the apps
+              it adds to rather than over them: the list is read for the app a member wants, and
+              making another is what they do having found none. Every member is offered it — the
+              `agent` kind admits a create from any speaking member and stamps them the owner — and
+              the wizard rides the main agent's own chat, so a workspace with no main agent offers
+              nothing to ride. */}
+          {mainAgent ? (
+            <li>
+              <button
+                type="button"
+                onClick={onBuild}
+                className={cn(
+                  "flex h-(--size-row) w-full items-center gap-md rounded-full border-0",
+                  "bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
+                  collapsed && "justify-center gap-0 px-0",
+                )}
+                aria-label={collapsed ? CREATE_APP : undefined}
+              >
+                <IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />
+                <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>
+                  {CREATE_APP}
+                </span>
+              </button>
+            </li>
+          ) : null}
         </ul>
       </div>
-      {/* The rest of the workspace's apps, behind one row. It states what it does rather than how
-          many it holds: a count is read as a badge of things wanting attention, and these are
-          only the apps nobody pinned. The row stands while there is a tail to open or a run to
-          close, so the member who opened the list can put it back. */}
-      {run.more.length || expanded ? (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          aria-label={expanded ? "Less applications" : "More applications"}
-          onClick={() => onExpand(!expanded)}
-          className={cn(
-            "flex h-(--size-row) w-full shrink-0 items-center gap-md rounded-full border-0",
-            "bg-transparent px-sm text-left text-label text-ink-soft hover:bg-fill",
-            collapsed && "justify-center gap-0 px-0",
-          )}
-        >
-          <IconDots className="size-(--size-glyph) shrink-0" aria-hidden />
-          <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>
-            {expanded ? "Less" : "More"}
-          </span>
-        </button>
-      ) : null}
     </nav>
   );
 }

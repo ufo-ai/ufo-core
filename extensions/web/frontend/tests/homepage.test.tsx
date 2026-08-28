@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -406,8 +406,8 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
 /** The chat app is the main agent, and its page is the conversation screen itself. So a chat the
  *  member picks in the sidebar is that page's own target: it stands in the page's column, and no
  *  lane over the page draws it a second time. */
-test("a sidebar chat on the chat app stands in the page's column alone", async () => {
-  location.hash = "#/";
+test("a chat opened on the chat app stands in the page's column alone", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
   const { calls } = wire({
     "/transcript": () => json({ messages: [] }),
     "/homepage": () => json(SET),
@@ -418,10 +418,6 @@ test("a sidebar chat on the chat app stands in the page's column alone", async (
     <App agents={[{ ...withHome(SET), app: "chat" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(await rail.findByRole("button", { name: /Pick one thread/ }));
-
-  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + CONVO_ID);
   const frame = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;
   expect(screen.queryByRole("region", { name: "Pick one thread" })).toBeNull();
   expect(screen.queryByLabelText("Ask UFO")).toBeNull();

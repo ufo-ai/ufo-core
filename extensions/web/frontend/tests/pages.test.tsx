@@ -1,10 +1,12 @@
 import { join } from "node:path";
 
 import { act, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { AppInit } from "@/apps/runtime";
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
+import { agentName } from "@/lib/agentName";
 import { agentHash } from "@/lib/route";
 
 import {
@@ -308,14 +310,7 @@ test("the chat page mounts and draws the empty conversation list", async () => {
 test("the chat page opens a conversation without re-listing, and switching opens does not re-list", async () => {
   const A = CONVO_ID;
   const B = ARRIVAL_ID;
-  const conversationRow = (id: string, title: string) => ({
-    name: id,
-    agent_id: AGENT.id,
-    agent_name: AGENT.name,
-    title,
-    surface: "web",
-    last_at: "2026-08-01T09:00:00.000Z",
-  });
+  const conversationRow = (id: string, title: string) => chatListRow(id, title);
   const resolvedChat = (id: string, title: string) => ({
     conversation_id: id,
     agent_id: AGENT.id,
@@ -428,15 +423,213 @@ test("the chat page opens a Slack or terminal conversation for comments", async 
 /** What the History act does to the page: it empties the track, and the page answers with the
  *  conversations it holds. The act is a navigation rather than a panel precisely because the page
  *  already draws this list — so this is the proof the portal needs to draw no second one. */
-test("the chat page answers an emptied track with its conversation list", async () => {
-  const row = (id: string, title: string) => ({
+/** One row of the chat page's listing, as the conversation kind answers it: the member's own web
+ *  chat unless the test says otherwise. */
+function chatListRow(id: string, title: string, extra: Record<string, unknown> = {}) {
+  return {
     name: id,
     agent_id: AGENT.id,
     agent_name: AGENT.name,
     title,
     surface: "web",
-    last_at: "2026-08-01T09:00:00.000Z",
+    surface_label: null,
+    mine: true,
+    speaker: null,
+    /* Now, so a row a test says nothing about the age of lands in Today rather than drifting into
+       Older as the calendar moves past a literal. */
+    last_at: new Date().toISOString(),
+    ...extra,
+  };
+}
+
+test("the Show set admits a surface into the list, and the read spans them all", async () => {
+  const { calls } = await runPage("chat", {
+    "/objects/conversation$": () =>
+      json({
+        objects: [
+          chatListRow(CONVO_ID, "Portal words"),
+          chatListRow(ARRIVAL_ID, "Slack words", { surface: "slack", surface_label: "#ops" }),
+        ],
+        next_cursor: null,
+      }),
   });
+  const listReads = () => calls.filter((url) => url.includes("/objects/conversation"));
+  await screen.findByRole("heading", { name: "Chat" });
+
+  // The read spans every surface the member can see; the set narrows the rows already in hand.
+  expect(listReads().every((url) => !url.includes("surface=") && !url.includes("portal="))).toBe(
+    true,
+  );
+  expect(screen.getByText("Portal words")).toBeTruthy();
+  expect(screen.queryByText("Slack words")).toBeNull();
+
+  const reads = listReads().length;
+  await userEvent.click(screen.getByRole("button", { name: "Chats options" }));
+  await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Slack" }));
+
+  await vi.waitFor(() => expect(screen.getByText("Slack words")).toBeTruthy());
+  // A tick redraws the rows in hand rather than re-reading, and it leaves the menu standing so both
+  // surfaces are named in one visit.
+  expect(listReads().length).toBe(reads);
+  expect(screen.getByRole("menuitemcheckbox", { name: "iMessage" })).toBeTruthy();
+});
+
+test("the chat list runs its rows under the ladder the address names", async () => {
+  const rows = [
+    chatListRow(CONVO_ID, "Alpha"),
+    chatListRow(ARRIVAL_ID, "Bravo", { agent_id: SECOND_ID, agent_name: "support" }),
+    chatListRow(TURN_ID, "Charlie", { surface: "slack", surface_label: "#ops" }),
+  ];
+  await runPage(
+    "chat",
+    { "/objects/conversation$": () => json({ objects: rows, next_cursor: null }) },
+    { place: { group: "app", chip: "slack" } },
+  );
+
+  await screen.findByRole("heading", { name: "Chat" });
+  expect(await screen.findByRole("heading", { name: "Assistant" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Support" })).toBeTruthy();
+
+  // A ladder other than the one the list opens on fills the glyph in, so the bar says so without
+  // being opened.
+  expect(
+    screen.getByRole("button", { name: "Chats options" }).className.split(/\s+/),
+  ).toContain("bg-fill");
+
+  // Recency is what the address carries nothing for, and it runs the rows under their day. The Show
+  // set is a different axis and stands where it was.
+  window.postMessage({ ufo: "place", place: { chip: "slack" } }, "*");
+  await vi.waitFor(() => expect(screen.queryByRole("heading", { name: "Support" })).toBeNull());
+  expect(screen.getByRole("heading", { name: "Today" })).toBeTruthy();
+  expect(screen.getByText("Alpha")).toBeTruthy();
+  expect(screen.getByText("Charlie")).toBeTruthy();
+});
+
+/** The day-runs are what the page opens on, and they are the runs the sidebar's own recency ladder
+ *  drew before this list took them over. */
+test("the list opens on the day-runs a conversation falls in, and skips the empty ones", async () => {
+  const at = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+  await runPage("chat", {
+    "/objects/conversation$": () =>
+      json({
+        objects: [
+          chatListRow(CONVO_ID, "This morning", { last_at: at(0) }),
+          chatListRow(ARRIVAL_ID, "Earlier this week", { last_at: at(3) }),
+          chatListRow(TURN_ID, "Last month", { last_at: at(20) }),
+          chatListRow(SECOND_ID, "Long ago", { last_at: at(400) }),
+        ],
+        next_cursor: null,
+      }),
+  });
+
+  const headings = async () =>
+    (await screen.findAllByRole("heading", { level: 2 })).map((entry) => entry.textContent);
+  // Named in a fixed order rather than the order the rows arrived in, and a run with nothing in it
+  // is not drawn: Yesterday holds none of these.
+  expect(await headings()).toEqual([
+    "Today",
+    "Previous 7 days",
+    "Previous 30 days",
+    "Older",
+  ]);
+
+  // The bar holds one glyph, and it is untinted while the list stands as it opens.
+  const options = screen.getByRole("button", { name: "Chats options" });
+  expect(options.textContent).toBe("");
+  expect(options.className.split(/\s+/)).not.toContain("bg-fill");
+});
+
+test("a row from another surface trails the source it came in on, and a portal row trails none", async () => {
+  await runPage(
+    "chat",
+    {
+      "/objects/conversation$": () =>
+        json({
+          objects: [
+            chatListRow(CONVO_ID, "Portal words"),
+            chatListRow(ARRIVAL_ID, "Slack words", { surface: "slack", surface_label: "#ops" }),
+            chatListRow(TURN_ID, "Terminal words", { surface: "ufo" }),
+            chatListRow(SECOND_ID, "Meeting words", {
+              agent_id: SECOND_ID,
+              agent_name: "meetings",
+            }),
+          ],
+          next_cursor: null,
+        }),
+    },
+    { place: { chip: "slack,ufo" } },
+  );
+
+  const row = async (title: string) =>
+    (await screen.findByText(title)).closest("button") as HTMLElement;
+  const slack = await row("Slack words");
+  expect(slack.textContent).toContain("#ops");
+  expect(slack.querySelectorAll("svg").length).toBe(1);
+
+  const terminal = await row("Terminal words");
+  expect(terminal.textContent).toContain("Terminal");
+
+  // The list is read in the portal, so a portal chat states no source.
+  const portal = await row("Portal words");
+  expect(portal.querySelectorAll("svg").length).toBe(0);
+
+  // Nor does a row name the app whose page this is — that states the screen the member is on. An
+  // app holding the conversation from somewhere else is named.
+  expect(portal.textContent).not.toContain(agentName(AGENT.name));
+  expect((await row("Meeting words")).textContent).toContain("Meetings");
+});
+
+test("one page of the chat list gathers the listing's own pages up to its bound", async () => {
+  // A listing that never runs out: each page answers one row and the cursor to the next, keyed off
+  // the cursor it was asked for, so the chain is the same whichever read starts the walk.
+  const { calls } = await runPage("chat", {
+    "/objects/conversation$": (url) => {
+      const held = /cursor=walk-(\d+)/.exec(url);
+      const page = held === null ? 1 : Number(held[1]) + 1;
+      return json({
+        objects: [chatListRow(CONVO_ID.slice(0, -2) + String(page).padStart(2, "0"), "Page " + page)],
+        next_cursor: "walk-" + page,
+      });
+    },
+  });
+
+  await screen.findByRole("heading", { name: "Chat" });
+  // Six of the listing's pages stand as one page of this list, and the walk stops on its own bound
+  // rather than on the listing.
+  await vi.waitFor(() => expect(screen.getByText("Page 6")).toBeTruthy());
+  expect(screen.getByText("Page 1")).toBeTruthy();
+  expect(screen.queryByText("Page 7")).toBeNull();
+  expect(calls.some((url) => url.includes("cursor=walk-5"))).toBe(true);
+  expect(calls.some((url) => url.includes("cursor=walk-6"))).toBe(false);
+  // The cursor the walk stopped at is what the step to the rest of the history carries.
+  expect(await screen.findByRole("button", { name: "Older conversations" })).toBeTruthy();
+});
+
+test("the chat list stands over the entry that starts a conversation, and a send founds one", async () => {
+  const { calls } = await runPage("chat", {
+    "/objects/conversation$": () =>
+      json({ objects: [chatListRow(CONVO_ID, "Warehouse restock")], next_cursor: null }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: ARRIVAL_ID, title: "fresh words" }),
+  });
+
+  await screen.findByRole("heading", { name: "Chat" });
+  // The conversations and the box are one screen: the member reads the list and writes the next
+  // conversation without leaving for another.
+  expect(screen.getByText("Warehouse restock")).toBeTruthy();
+  const box = await screen.findByLabelText("Ask UFO");
+  // The chat screen's own box, toolbar and all — not a control standing in for one.
+  expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+
+  await userEvent.type(box, "start something");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  await vi.waitFor(() =>
+    expect(calls.some((url) => url.includes("/chat?conversation=new"))).toBe(true),
+  );
+});
+
+test("the chat page answers an emptied track with its conversation list", async () => {
+  const row = (id: string, title: string) => chatListRow(id, title);
   await runPage(
     "chat",
     {

@@ -405,16 +405,9 @@ export function agentIndex(): Promise<HTMLElement> {
   return screen.findByRole("navigation", { name: "Apps" });
 }
 
-/** Open the list past the run it draws on its own, where an app nobody pinned stands. Asked of a
- *  list already whole, it does nothing. */
-export async function expandApps(): Promise<void> {
-  const more = screen.queryByRole("button", { name: "More applications" });
-  if (more) await userEvent.click(more);
-}
-
-/** The act that builds an app, which stands as the first row of the apps list. */
+/** The act that builds an app, which stands at the foot of the apps list. */
 export async function openNewApplication(): Promise<void> {
-  await userEvent.click(await screen.findByRole("button", { name: "New app" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Create app" }));
 }
 
 /** What the app pane's conversation half is headed by before a conversation names it. */
@@ -442,7 +435,6 @@ export async function heldConversation(app = "Assistant"): Promise<string> {
 export async function openAgentRow(name: string): Promise<void> {
   const index = await agentIndex();
   const row = new RegExp("^" + name);
-  if (!within(index).queryByRole("button", { name: row })) await expandApps();
   await userEvent.click(await within(index).findByRole("button", { name: row }));
 }
 

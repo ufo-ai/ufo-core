@@ -129,13 +129,7 @@ export function Chat({
       void refreshTranscript(live.current, true);
       return;
     }
-    const held = chatState(chatKey);
-    if (held.messages !== null && !held.busy && held.messages.at(-1)?.role === "error") {
-      clearChat(chatKey);
-    }
-    updateChat(chatKey, (current) =>
-      current.messages !== null ? current : { ...current, messages: [] },
-    );
+    readyToFound(chatKey);
   }, [chatKey, conversationId]);
 
   useEffect(() => {
@@ -245,6 +239,69 @@ export function Chat({
       <Toast
         state={stalled ? SILENT : state.fault ?? SILENT}
         onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
+      />
+    </TranscriptScroll>
+  );
+}
+
+/** The state a box that founds a conversation opens on: an empty transcript, so the box is live
+ *  rather than waiting on a read there is nothing to read, and no error left standing by a send that
+ *  failed before this one. Every screen that draws that box establishes it — the start screen and
+ *  the chat app's list both — so it is stated here once. */
+function readyToFound(chatKey: string): void {
+  const held = chatState(chatKey);
+  if (held.messages !== null && !held.busy && held.messages.at(-1)?.role === "error") {
+    clearChat(chatKey);
+  }
+  updateChat(chatKey, (current) =>
+    current.messages !== null ? current : { ...current, messages: [] },
+  );
+}
+
+/** A screen standing over the box that founds a conversation: whatever it draws scrolls in the pane,
+ *  and the box holds the bottom. It is the chat screen's own shape — the same `TranscriptScroll`,
+ *  the same pane, the same box with the same toolbar — with a caller's own content where the
+ *  transcript would be, which is what puts the chat entry at the foot of the chat app's list of
+ *  conversations.
+ *
+ *  The box is keyed on the agent's new chat, the key the start screen's box already uses, so words
+ *  a member leaves in one of them are the words the other opens holding. The send founds the
+ *  conversation and the draft moves to it, exactly as it does on the start screen — this draws the
+ *  box in a second place, never a second box. */
+export function FoundingChat({
+  agent,
+  member,
+  onCreated,
+  children,
+}: {
+  agent: ChatAgent;
+  member: Member;
+  onCreated: (conversationId: string, title: string) => void;
+  children: ReactNode;
+}) {
+  const composer = useRef<HTMLTextAreaElement>(null);
+  const chatKey = "new:" + agent.id;
+  const draftKey = member.id + "/" + chatKey;
+  useEffect(() => readyToFound(chatKey), [chatKey]);
+  const target: ChatTarget = {
+    key: chatKey,
+    agentId: agent.id,
+    conversationId: null,
+    onCreated: (created, title) => {
+      moveDraft(draftKey, member.id + "/" + created);
+      onCreated(created, title);
+    },
+  };
+  return (
+    <TranscriptScroll>
+      <TranscriptPane className="flex-1">{children}</TranscriptPane>
+      <Composer
+        target={target}
+        draftKey={draftKey}
+        input={composer}
+        starting={false}
+        eyebrow={agent.app === CHAT_SURFACE ? null : agentName(agent.name)}
+        eyebrowIcon={agent.icon}
       />
     </TranscriptScroll>
   );

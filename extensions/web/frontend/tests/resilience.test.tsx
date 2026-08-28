@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -18,6 +18,15 @@ beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
   useStreamFake();
 });
+
+/** Leave for another conversation and settle there. A conversation is reached by its own address,
+ *  so this is what switching between two of them is. */
+async function at(conversationId: string) {
+  act(() => {
+    location.hash = "#/c/" + conversationId;
+  });
+  await screen.findByText("No messages in this conversation yet.");
+}
 
 function fatal(stream: StreamFake) {
   stream.readyState = StreamFake.CLOSED;
@@ -248,17 +257,16 @@ test("a draft survives leaving the chat and is cleared by sending", async () => 
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "half a thought");
   window.dispatchEvent(new Event("pagehide"));
-  await userEvent.click(screen.getByRole("button", { name: /The other thread/ }));
-  await screen.findByText("No messages in this conversation yet.");
-  await userEvent.click(screen.getByRole("button", { name: /Pick one thread/ }));
+  await at(OTHER_ID);
+  await at(CONVO_ID);
 
   const input = screen.getByLabelText("Ask UFO") as HTMLInputElement;
   expect(input.value).toBe("half a thought");
 
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   window.dispatchEvent(new Event("pagehide"));
-  await userEvent.click(screen.getByRole("button", { name: /The other thread/ }));
-  await userEvent.click(screen.getByRole("button", { name: /Pick one thread/ }));
+  await at(OTHER_ID);
+  await at(CONVO_ID);
   expect((screen.getByLabelText("Ask UFO") as HTMLInputElement).value).toBe("");
 });
 

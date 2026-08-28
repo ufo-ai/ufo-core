@@ -1,21 +1,16 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
-  IconBrandSlack,
   IconChevronDown,
-  IconFilter2,
-  IconChevronRight,
   IconDeviceDesktop,
   IconLayoutSidebarRight,
   IconLogout,
   IconMenu2,
-  IconMessageCircle,
   IconMoon,
   IconPlug,
   IconPlus,
   IconSettings,
   IconSun,
-  IconTerminal2,
   IconUsers,
   IconX,
 } from "@tabler/icons-react";
@@ -23,12 +18,6 @@ import {
 import logo from "@/assets/ufo-logo.svg";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
@@ -45,35 +34,20 @@ import { SignIn } from "@/views/SignIn";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
-import {
-  IMESSAGE_SURFACE,
-  SLACK_SURFACE,
-  UFO_SURFACE,
-  WEB_SURFACE,
-  isPortalChat,
-  Viewer,
-  origin,
-  slackLink,
-  speakerName,
-  surfaceWord,
-  useViewer,
-} from "@/lib/audience";
+import { WEB_SURFACE, isPortalChat, Viewer, surfaceWord, useViewer } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { useAppStatus } from "@/lib/appStatusStore";
-import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
+import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
 import { Waiting } from "@/kernel/panel";
-import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
 import { SETUP, pageCrumb, pageTitle, type Crumb } from "@/lib/title";
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSub,
@@ -81,15 +55,12 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { RAIL_SHOWN_OPTIONS, railGroups, railShut, stampIso, type RailGroup } from "@/lib/rail";
+import { stampIso } from "@/lib/rail";
+import { SurfaceMark } from "@/lib/surfaceMark";
 import {
   foldSidebar,
-  pickAppsExpanded,
   pickPinned,
   pickSectionShut,
-  pickRailShown,
-  pickRailShut,
-  pickRailSort,
   quietRail,
   railActivity,
   railFounded,
@@ -184,8 +155,8 @@ export function App({
   useScrollMark();
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
   /** What the navigation draws. An app the deploy withholds is still the workspace's, still opens
-   *  from its address, and still answers a picker — it is kept out of the rail, the flyout and the
-   *  apps listing, which is the whole of what hiding one means. `mainAgent` reads the whole set
+   *  from its address, and still answers a picker — it is kept out of the sidebar, the flyout and
+   *  the apps listing, which is the whole of what hiding one means. `mainAgent` reads the whole set
    *  above, so withholding the assistant costs the composer and the first run nothing. */
   const listed = agents.filter((agent) => !agent.hidden);
 
@@ -494,33 +465,24 @@ function AccountMenu({ member }: { member: Member }) {
 }
 
 const APPS = "Apps";
-const CHATS = "Chats";
 
 const NAV_ROW =
   "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill";
 
-/** A sidebar section's heading — the muted band the whole line of which opens the section's menu.
- *  The glyph that states the menu is drawn only once the section is pointed at, reached by keyboard,
- *  or standing open: a column of headings each carrying a control the member is not using reads as
- *  a toolbar, and the heading is a place before it is an act. It holds its box while hidden, so
- *  nothing under the pointer moves. */
+/** Which way a section's fold stands, stated by the chevron on its heading: down over an open
+ *  section, along the row over a shut one. */
 const SECTION_HEAD_CHEVRON =
   "size-icon shrink-0 transition-transform duration-100 ease-control motion-reduce:transition-none";
-
-/** The menu the section holds, drawn only once the band is pointed at, reached by keyboard, or
- *  standing open: a column of headings each carrying a control the member is not using reads as a
- *  toolbar, and the heading is a place before it is an act. It holds its box while hidden, so
- *  nothing under the pointer moves. */
-const SECTION_HEAD_GLYPH =
-  "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none group-hover/head:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 data-[state=open]:bg-fill";
 
 /** The rows the sidebar pins where the member has pinned none themselves: the workspace's shipped
  *  apps, in name order, so the sidebar arrives holding its own destinations. The chat app is not one
  *  of them — the Ask assistant row above is the way to it. */
+/** What stands pinned until the member pins for themselves: the chat app, and nothing else. Chat is
+ *  where a member starts, so it holds the top of the column on a workspace nobody has arranged yet;
+ *  every other app answers to the order the list already gives it. */
 function defaultPins(agents: Agent[]): string[] {
-  const apps = agents.filter((agent) => agent.app && agent.app !== CHAT_SURFACE);
-  apps.sort((a, b) => a.name.localeCompare(b.name));
-  return apps.map((agent) => agent.id);
+  const chat = agents.find((agent) => agent.app === CHAT_SURFACE);
+  return chat ? [chat.id] : [];
 }
 
 const GLYPH = "size-(--size-glyph) shrink-0";
@@ -639,30 +601,21 @@ function SchemePick({ collapsed }: { collapsed: boolean }) {
   );
 }
 
-/** A sidebar section's head: the band folds the section, and the mark at its end opens the menu.
- *
- *  Two acts, two controls. The band is the section's name and the whole of it is the fold, because
- *  putting a section away is the thing a member does to a heading; the menu is a second act on the
- *  same row and gets its own mark rather than stealing the first. A chevron states which way the
+/** A sidebar section's head: the band is the section's name and the whole of it is the fold, because
+ *  putting a section away is the thing a member does to a heading. A chevron states which way that
  *  fold stands — pointing down over an open section, along the row over a shut one — so the band
- *  answers "is my column hiding anything" without being clicked.
- *
- *  The two are siblings rather than nested, because a control inside a control is neither. */
+ *  answers "is my column hiding anything" without being clicked. */
 function SectionHead({
   label,
   shut,
   collapsed,
   onShut,
-  children,
 }: {
   label: string;
   shut: boolean;
   /** Whether the sidebar stands folded to its glyph rail, which has no room for a section's name. */
   collapsed?: boolean;
   onShut: (shut: boolean) => void;
-  /** The menu the band's mark opens. A section with nothing to offer beyond its own rows passes
-   *  none, and draws no mark: a control that opens an empty menu is a control that lies. */
-  children?: React.ReactNode;
 }) {
   return (
     <div
@@ -683,25 +636,16 @@ function SectionHead({
         <span className="min-w-0 truncate">{label}</span>
         <IconChevronDown className={cn(SECTION_HEAD_CHEVRON, shut && "-rotate-90")} aria-hidden />
       </button>
-      {children ? (
-        <DropdownMenu modal={false}>
-          <DropdownMenuTrigger asChild>
-            <button type="button" aria-label={label + " options"} className={SECTION_HEAD_GLYPH}>
-              <IconFilter2 className="size-icon" aria-hidden />
-            </button>
-          </DropdownMenuTrigger>
-          {children}
-        </DropdownMenu>
-      ) : null}
     </div>
   );
 }
 
 /** The shell's one nav: the mark and its fold control, search, the new-conversation act, the
- *  Applications section with the cross-app reads under it, the conversations rail, and the
- *  workspace-wide destinations at the foot. At a desk width it is the left column, folding to a
- *  glyph rail; at a phone width the drawer holds it and the fold is ignored, because a drawer is
- *  always drawn whole. */
+ *  Applications section with the cross-app reads under it, and the workspace-wide destinations at
+ *  the foot. It is the way to another screen and nothing else — a member finds a conversation by
+ *  name on the chat app's own page, which is the screen that lists them. At a desk width it is the
+ *  left column, folding to a glyph rail; at a phone width the drawer holds it and the fold is
+ *  ignored, because a drawer is always drawn whole. */
 function WorkspaceSidebar({
   route,
   agents,
@@ -724,7 +668,6 @@ function WorkspaceSidebar({
   /* A folded section states nothing and its head is what opens it again — so on the glyph rail,
      where no head is drawn, the fold is ignored rather than leaving rows nobody can reach. */
   const appsShut = !collapsed && rail.sectionsShut.includes(APPS);
-  const chatsShut = !collapsed && rail.sectionsShut.includes(CHATS);
   const pinned = rail.pinned ?? defaultPins(agents);
   const chatApp = chatSurface(agents);
   return useDrawerList(
@@ -798,9 +741,7 @@ function WorkspaceSidebar({
           openId={route.kind === "agent" ? route.agentId : null}
           building={route.kind === "agents" && route.build === true}
           pinned={pinned}
-          expanded={rail.appsExpanded}
           collapsed={collapsed}
-          onExpand={pickAppsExpanded}
           onPin={(agentId) =>
             pickPinned(
               pinned.includes(agentId)
@@ -811,18 +752,6 @@ function WorkspaceSidebar({
           onOpen={openAgent}
           onBuild={onBuild}
         />
-        )}
-      </div>
-      {/* The conversations section is built the way the applications section above it is: the
-          heading and what stands under it are one column, so a section's first row sits the same
-          hair below its heading in both. Only the rows scroll — a heading that scrolled away would
-          leave the filter it carries unreachable at the foot of a long rail. */}
-      <div className={cn("flex min-h-0 flex-1 flex-col gap-px px-sm", collapsed && "hidden")}>
-        <RailSettingsFlyout shut={chatsShut} onShut={(shut) => pickSectionShut(CHATS, shut)} />
-        {chatsShut ? null : (
-          <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto">
-            <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
-          </div>
         )}
       </div>
       <ul className="m-0 mt-auto flex shrink-0 list-none flex-col gap-px px-sm py-0">
@@ -1229,44 +1158,6 @@ function NotShared() {
   return <PaneNote>This conversation is not shared with this account.</PaneNote>;
 }
 
-/** The chats header and the settings menu it holds: the same band and the same menu the apps
- *  header carries, so the two sections read and act as one system. A sort is a pick
- *  between ladders and a surface is a choice turned on and off, which is why one shuts the menu and
- *  the other leaves it standing — the surfaces are read as a set, and the rail adjusts behind the
- *  menu while the member reads what each tick did. */
-function RailSettingsFlyout({ shut, onShut }: { shut: boolean; onShut: (shut: boolean) => void }) {
-  const { sort, shown } = useRail();
-  const host = useDrawerHost();
-  return (
-    <SectionHead label={CHATS} shut={shut} onShut={onShut}>
-      <DropdownMenuContent side="right" align="start" container={host}>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>Sort by</DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            <DropdownMenuRadioGroup
-              value={sort}
-              onValueChange={(value) => pickRailSort(value === "agent" ? "agent" : "recency")}
-            >
-              <DropdownMenuRadioItem value="recency">Recency</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="agent">App</DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <DropdownMenuLabel>Show</DropdownMenuLabel>
-        {RAIL_SHOWN_OPTIONS.map((option) => (
-          <DropdownMenuCheckboxItem
-            key={option.surface}
-            checked={shown[option.surface]}
-            onCheckedChange={(next) => pickRailShown({ ...shown, [option.surface]: next })}
-          >
-            {option.label}
-          </DropdownMenuCheckboxItem>
-        ))}
-      </DropdownMenuContent>
-    </SectionHead>
-  );
-}
-
 export const NARROW = "(width < 720px)";
 
 /** Whether the shell is drawing its phone layout, where the hamburger stands on the bar and the
@@ -1321,247 +1212,4 @@ function useScrollMark(): void {
       }
     };
   }, []);
-}
-
-/** Where a rail row lands. A chat that directs an app — one whose agent is an app's own — reopens
- *  as that app's right-side chat, beside the page it edits. Every other conversation is a regular
- *  chat and loads in the chat app's single column, the way a new conversation does; the shell's own
- *  chat screen stands in where no chat app ships. */
-function openRailRow(
-  agents: Agent[],
-  chatApp: Agent | null,
-  conversationId: string,
-  agentId: string,
-): void {
-  const owner = agents.find((agent) => agent.id === agentId);
-  const pane = owner?.app ? owner : chatApp;
-  if (!pane) {
-    openChat(conversationId);
-    return;
-  }
-  openAgentPlace(pane.id, { opens: [conversationId] });
-}
-
-function RailList({
-  route,
-  agents,
-  mainAgent,
-  chatApp,
-}: {
-  route: Route;
-  agents: Agent[];
-  mainAgent: Agent | null;
-  chatApp: Agent | null;
-}) {
-  const rail = useRail();
-  const groups = railGroups(rail.rows, rail.sort, rail.shown);
-  const folded = railShut(
-    rail.shut,
-    groups.map((group) => group.label),
-  );
-  /** The rows a group holds, drawn the same whether a heading stands over them or not. */
-  const rows = (group: RailGroup) => (
-    <ul className="m-0 flex list-none flex-col gap-px p-0">
-      {group.rows.map((row) => {
-        const facts = [
-          row.speaker ? speakerName(row.speaker) : null,
-          isPortalChat(row.surface) ? null : origin(row),
-          mainAgent && row.agent_id !== mainAgent.id ? agentName(row.agent_name) : null,
-        ].filter((fact): fact is string => fact !== null);
-        return (
-          <li key={row.conversation_id}>
-            <RailRow
-              current={standing(route, `open:${row.conversation_id}`)}
-              facts={facts.length ? facts.join(" · ") : null}
-              title={row.title}
-              surface={row.surface}
-              onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
-            />
-          </li>
-        );
-      })}
-    </ul>
-  );
-  return (
-    <>
-      {rail.phase === "loading" ? (
-        <div className="p-sm text-ink-soft">
-          <Waiting />
-        </div>
-      ) : null}
-      {rail.phase === "failed" ? (
-        <div className="flex flex-col gap-2xs p-sm text-ink-soft">
-          <span>Couldn't load conversations.</span>
-          <button
-            type="button"
-            onClick={readRail}
-            className="w-fit border-0 bg-transparent px-0 py-2xs text-left text-inherit underline"
-          >
-            Retry
-          </button>
-        </div>
-      ) : null}
-      {groups.map((group) => {
-        const label = group.label;
-        if (label === null) return <Fragment key="rows">{rows(group)}</Fragment>;
-        return (
-          <Collapsible
-            key={label}
-            asChild
-            open={!folded.includes(label)}
-            onOpenChange={(open) =>
-              pickRailShut(open ? folded.filter((shut) => shut !== label) : [...folded, label])
-            }
-          >
-            <section>
-              <h2 className="m-0">
-                <CollapsibleTrigger className="group/rail flex h-(--size-row) w-full items-center gap-2xs rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill">
-                  <span className="min-w-0 truncate">{label}</span>
-                  <IconChevronRight
-                    aria-hidden
-                    className="size-icon shrink-0 transition-transform group-data-[state=open]/rail:rotate-90"
-                  />
-                </CollapsibleTrigger>
-              </h2>
-              <CollapsibleContent asChild>{rows(group)}</CollapsibleContent>
-            </section>
-          </Collapsible>
-        );
-      })}
-    </>
-  );
-}
-
-/** A fact the group above cannot state — the agent holding the conversation, the surface it came
- *  in on, whoever else spoke — is read on the way to a decision, not scanned. As a second line it
- *  doubles every row in the rail to serve the few that carry one, so it is held at the pointer and
- *  the rail keeps one pitch. A row with no such fact triggers nothing and draws no tooltip. The
- *  glyph is the exception: it costs the row no height, so the surface is scanned as well as read.
- *
- *  The title itself is the other half of that bargain. The rail is one column wide and a
- *  conversation is named in a sentence, so the row states as much of the title as it holds and
- *  ellipses the rest — until the member puts the pointer or the keyboard on it, when the title
- *  travels far enough left to state its tail and stays there until they leave. The travel is
- *  measured at that moment rather than held: a title that fits moves nothing, and one measured
- *  before the face it is set in had loaded would travel the wrong distance. It is the words' own
- *  width that is measured, not the frame's overflow, which reports the ellipsis rather than the
- *  text behind it.
- *
- *  The resting title is an inline run so that the frame ellipses it, the way every other truncated
- *  row in the sidebar is drawn; the moment it travels it becomes a box, because a transform does
- *  not move an inline one. The ellipsis goes with it — a mark that says "there is more" has
- *  nothing to say while the more is being read, and left standing it sits over the moving words. */
-function RailRow({
-  current,
-  facts,
-  title,
-  surface,
-  onClick,
-}: {
-  current: boolean;
-  facts: string | null;
-  title: string;
-  surface: string;
-  onClick: () => void;
-}) {
-  const [asks, setAsks] = useState(0);
-  const button = (
-    <button
-      type="button"
-      aria-current={current}
-      onClick={onClick}
-      onPointerEnter={() => setAsks((asked) => asked + 1)}
-      onPointerLeave={() => setAsks(0)}
-      onFocus={() => setAsks((asked) => asked + 1)}
-      onBlur={() => setAsks(0)}
-      className={cn(
-        "flex h-(--size-row) w-full items-center gap-xs rounded-row border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
-        current && "bg-fill",
-      )}
-    >
-      <Ticker asks={asks} className="flex-1">
-        {title}
-      </Ticker>
-      <SurfaceGlyph surface={surface} />
-    </button>
-  );
-  if (!facts) return button;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{button}</TooltipTrigger>
-      <TooltipContent>{facts}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-const SURFACE_GLYPH = "size-(--size-glyph) shrink-0 text-ink-faint";
-
-/** The surface a conversation came in on, drawn at the far end of its row. The portal draws none:
- *  the rail is read in the portal, so a glyph on every row would state where the member already is.
- *  The words for the same fact stay in the row's tooltip, which is what a reader unable to see the
- *  glyph gets.
- *
- *  Since most rows carry no glyph, one drawn ahead of the title would indent that row alone and
- *  leave the rail without a left edge to read down. It trails instead, where it marks the few rows
- *  that have it without moving the many that do not, and it is drawn faint: a title is what the
- *  member scans for, and the surface is the answer to a question they have already asked.
- *
- *  It is drawn at `--size-glyph`, the size every other mark in the sidebar takes, rather than at the
- *  row's own text size: a glyph scaled to a 13px label is read as a smudge beside a title that runs
- *  the width of the rail, and a mark nobody can name states no surface. */
-function SurfaceGlyph({ surface }: { surface: string }) {
-  if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_GLYPH} aria-hidden />;
-  if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_GLYPH} aria-hidden />;
-  if (surface === IMESSAGE_SURFACE) {
-    return <IconMessageCircle className={SURFACE_GLYPH} aria-hidden />;
-  }
-  return null;
-}
-
-const SURFACE_MARK = "size-(--size-surface-mark) shrink-0";
-
-function surfaceMark(surface: string): React.ReactNode {
-  if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_MARK} aria-hidden />;
-  if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_MARK} aria-hidden />;
-  if (surface === IMESSAGE_SURFACE) {
-    return <IconMessageCircle className={SURFACE_MARK} aria-hidden />;
-  }
-  return null;
-}
-
-/** The surface a conversation is happening on, at the head of the pane that reads it: the mark drawn
- *  larger than a rail row's glyph, and the room the surface named beside it. Where that surface
- *  reported where the conversation opened, the pair is the way out to it — drawn the way every act
- *  that leaves the portal is, keeping the line's own colour with no resting underline and the arrow
- *  muted beside the words. Where it reported none, the same pair states the fact and goes nowhere:
- *  a terminal session is not a place a link can land.
- *
- *  A surface with no mark of its own draws nothing at all. The header already names the agent, and
- *  a conversation read here is read-only whatever holds it, which the line under the transcript
- *  says in words. */
-function SurfaceMark({ conversation }: { conversation: OwnedConversation }) {
-  const mark = surfaceMark(conversation.surface);
-  if (mark === null) return null;
-  const where = origin(conversation);
-  const href = slackLink(conversation.surface, conversation.source);
-  if (href === null) {
-    return (
-      <span className="flex items-center gap-xs whitespace-nowrap text-ink-soft">
-        {mark}
-        {where}
-      </span>
-    );
-  }
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={"Open " + where + " in " + surfaceWord(conversation.surface)}
-      className="flex items-center gap-xs whitespace-nowrap text-inherit no-underline hover:underline focus-visible:underline"
-    >
-      {mark}
-      {where} <span className="text-ink-soft">↗</span>
-    </a>
-  );
 }
