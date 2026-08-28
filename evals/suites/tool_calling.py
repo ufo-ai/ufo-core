@@ -30,12 +30,6 @@ SPECS: list[tuple[str, str, Grader, bool]] = [
         required_tools_scorer(("memory_update",)),
         False,
     ),
-    (
-        "deferred-todo",
-        "Create a task list titled Launch with one pending task: Prepare the launch brief.",
-        required_tools_scorer(("update_todo_list",)),
-        False,
-    ),
     ("capital-restraint", "What is the capital of France?", restraint_scorer(WEB_TOOLS), False),
     ("math-restraint", "What is 17 multiplied by 23?", restraint_scorer(WEB_TOOLS), False),
     (

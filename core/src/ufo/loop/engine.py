@@ -155,7 +155,7 @@ from ufo.tools.context import (
     ToolContext,
     UntrustedContentError,
 )
-from ufo.tools.registry import REQUESTED_BY, TOOL_SEARCH, ToolRegistry
+from ufo.tools.registry import REQUESTED_BY, ToolRegistry
 from ufo.turns.activity import SKILL_LOAD_TOOL, ActivitySummarizer
 from ufo.turns.audience import Audience, audience_member, audience_subjects
 from ufo.turns.contracts import Contract, freeform_result_contract
@@ -387,7 +387,6 @@ class StreamResult(BaseModel):
     tool_calls: tuple[ToolUseBlock, ...] = ()
     reasoning: tuple[ReasoningBlock, ...] = ()
     usages: tuple[Usage, ...] = ()
-    offered_tools: tuple[str, ...] | None = None
     error_class: str | None = None
     error_message: str | None = None
     partial_output: str = ""
@@ -1138,7 +1137,6 @@ class TurnEngine:
             connectors=self.connectors,
             connector_read_only=self.connector_read_only,
             find=rank_find,
-            find_tools=self.tools.find_tools_json,
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
             site_previewer=self.site_previewer,
@@ -1654,19 +1652,7 @@ class TurnEngine:
                         )
                         continue
                     resolved = await asyncio.gather(
-                        *(
-                            self._bind_or_error(
-                                context,
-                                call,
-                                requesters,
-                                (
-                                    None
-                                    if round_result.offered_tools is None
-                                    else frozenset(round_result.offered_tools)
-                                ),
-                            )
-                            for call in segment
-                        ),
+                        *(self._bind_or_error(context, call, requesters) for call in segment),
                         return_exceptions=True,
                     )
                     failures = [
@@ -2220,11 +2206,8 @@ class TurnEngine:
                 raise RuntimeError("finish forced on a turn with no output model")
             tools: tuple[ToolSchema, ...] = (finish,)
         elif round_input.offer_tools:
-            exposed = self.tools.model_schemas(
-                round_input.messages,
-                include_requested_by=round_input.include_requested_by,
-            )
-            tools = exposed if finish is None else (*exposed, finish)
+            offered = self.tools.schemas(include_requested_by=round_input.include_requested_by)
+            tools = offered if finish is None else (*offered, finish)
         else:
             tools = ()
         request = ModelRequest(
@@ -2417,7 +2400,6 @@ class TurnEngine:
             )
             return StreamResult(
                 usages=tuple(usages),
-                offered_tools=tuple(tool.name for tool in tools),
                 error_class=type(error).__name__,
                 error_message=str(error),
                 partial_output="\n\n".join(
@@ -2437,7 +2419,6 @@ class TurnEngine:
             tool_calls=tool_calls,
             reasoning=tuple(reasoning),
             usages=tuple(usages),
-            offered_tools=tuple(tool.name for tool in tools),
         )
 
     async def _publish_cost(self, usage_events: list[Usage]) -> None:
@@ -2475,19 +2456,9 @@ class TurnEngine:
         context: ToolContext,
         call: ToolUseBlock,
         requesters: dict[UUID, ActiveMessage],
-        offered_tools: frozenset[str] | None = None,
     ) -> _BindResult:
         started = time.monotonic()
         try:
-            if (
-                offered_tools is not None
-                and call.name not in offered_tools
-                and any(tool.name == call.name for tool in self.tools.tools)
-            ):
-                guidance = (
-                    "; call tool_search before using it" if TOOL_SEARCH in offered_tools else ""
-                )
-                raise ValueError(f"tool {call.name!r} was not offered{guidance}")
             context, call = await self._bind_requester(context, call, requesters)
             return _ResolvedToolCall(context=context, call=call)
         except asyncio.CancelledError as error:

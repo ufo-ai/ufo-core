@@ -251,17 +251,6 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   private target resolves for its owner and workspace admins; a `workspace` target resolves for
   every member, and a refused name reads as absent.
   Everything else arrives via extensions.
-  Authorization and model exposure are separate. A registry of at most 24 tools is offered whole.
-  Above that, the model sees a measured eager set of workflow, memory, object, and broker-generic
-  connector tools plus `tool_search`; successful searches add the matching original tool
-  definitions on the next round. `memory_search` and `memory_update` are eager and absent from
-  catalog results. The catalog is core because only the engine owns model exposure and dispatch
-  across every extension. Dispatch still resolves the original `ToolDef`, so its validation,
-  requester binding, hooks, idempotency, trust wall, and metrics are unchanged. A tool omitted from
-  that round is refused even when the authorized registry contains it. Other extension tools are
-  deferred; a small explicit agent or subagent allowlist remains direct. Search results are derived
-  from the authorized registry and from completed calls in the transcript window, with no second
-  grant or stored catalog state.
   Two tools where one would do is a defect. `share_file` ports the shipped design: byte custody in
   the blob store, a TTL-bound token URL served by core's artifact route — no token, no bytes.
 

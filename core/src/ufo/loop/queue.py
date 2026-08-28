@@ -611,7 +611,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     turn.admission_source,
                     turn.speaker_member_id,
                 )
-            ).with_catalog()
+            )
             waiting = await setup_skill(turn.agent_id, agent.is_main, turn.speaker_member_id)
             if waiting is not None:
                 skills = skills.merged_with((waiting,))
@@ -650,7 +650,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     profile,
                     runtime.subagent_grants.get(profile.name, frozenset()),
                 )
-            ).with_catalog()
+            )
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
             output_model = profile.output_model

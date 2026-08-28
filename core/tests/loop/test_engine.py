@@ -184,7 +184,7 @@ from ufo.tools.context import (
     ToolResult,
     UntrustedContentError,
 )
-from ufo.tools.registry import DIRECT_TOOL_LIMIT, TOOL_SEARCH, ToolDef, ToolRegistry
+from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.turns.activity import ActivitySummarizer
 from ufo.turns.audience import Audience, audience_subjects, conversation_audience
 from ufo.turns.contracts import AgentResultOutput, ResultOutput
@@ -397,56 +397,6 @@ class ToolCallingModel:
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
         yield Usage(input_tokens=2, output_tokens=2)
-
-
-@dataclass
-class CatalogCallingModel:
-    offered: list[tuple[str, ...]] = field(default_factory=list)
-
-    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        self.offered.append(tuple(tool.name for tool in request.tools))
-        results = {
-            block.tool_use_id
-            for message in request.messages
-            if isinstance(message.content, tuple)
-            for block in message.content
-            if isinstance(block, ToolResultBlock)
-        }
-        if "target" in results:
-            yield TextDelta(text="done")
-        elif "search" in results:
-            yield ToolCallStart(id="target", name="archive_records")
-            yield ToolCallDelta(id="target", partial_json="{}")
-        else:
-            yield ToolCallStart(id="search", name=TOOL_SEARCH)
-            yield ToolCallDelta(
-                id="search",
-                partial_json='{"queries":["archive records"]}',
-            )
-        yield Usage(input_tokens=1, output_tokens=1)
-
-
-@dataclass
-class UnofferedToolModel:
-    errors: list[str] = field(default_factory=list)
-
-    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        results = [
-            block
-            for message in request.messages
-            if isinstance(message.content, tuple)
-            for block in message.content
-            if isinstance(block, ToolResultBlock)
-        ]
-        if results:
-            self.errors.extend(
-                result.content for result in results if isinstance(result.content, str)
-            )
-            yield TextDelta(text="done")
-        else:
-            yield ToolCallStart(id="target", name="archive_records")
-            yield ToolCallDelta(id="target", partial_json="{}")
-        yield Usage(input_tokens=1, output_tokens=1)
 
 
 class WriteThenAnswerModel:
@@ -7893,65 +7843,3 @@ async def test_a_byok_turn_is_never_parked_by_an_empty_balance(db: None, tmp_pat
         await set_reserve(connection, turn.workspace_id, 10_000_000)
     engine = _engine(turn, EchoModel(), tmp_path, byok=True)
     await engine._enforce_spend([Usage(input_tokens=1_000_000)], {})
-
-
-def _catalog_registry(seen_keys: list[str | None]) -> ToolRegistry:
-    async def target(ctx: ToolContext, args: _NoArgs) -> ToolResult:
-        seen_keys.append(ctx.idempotency_key)
-        return ToolResult(content=(TextContent(text="remembered"),))
-
-    async def filler(ctx: ToolContext, args: _NoArgs) -> ToolResult:
-        return ToolResult(content=(TextContent(text="unused"),))
-
-    tools = tuple(
-        ToolDef(
-            name="archive_records" if index == 0 else f"filler_{index}",
-            description=(
-                "Archive records after a retention review."
-                if index == 0
-                else f"Operate synthetic fixture {index}."
-            ),
-            input_model=_NoArgs,
-            handler=target if index == 0 else filler,
-            side_effecting=index == 0,
-        )
-        for index in range(DIRECT_TOOL_LIMIT + 1)
-    )
-    return ToolRegistry(tools).with_catalog()
-
-
-async def test_catalog_search_loads_and_dispatches_the_original_tool(
-    db: None, tmp_path: Path
-) -> None:
-    """The search round changes only model exposure; dispatch retains the target ToolDef flags."""
-    turn = await _seed_turn("queued", None)
-    model = CatalogCallingModel()
-    seen_keys: list[str | None] = []
-    engine = replace(
-        _engine(turn, model, tmp_path),
-        tools=_catalog_registry(seen_keys),
-    )
-    frame = await engine.run()
-    assert frame is not None and frame.status == "done"
-    assert model.offered == [
-        (TOOL_SEARCH,),
-        ("archive_records", TOOL_SEARCH),
-        ("archive_records", TOOL_SEARCH),
-    ]
-    assert seen_keys == [f"{turn.id}/archive_records/target"]
-
-
-async def test_catalog_refuses_a_deferred_tool_before_search(db: None, tmp_path: Path) -> None:
-    turn = await _seed_turn("queued", None)
-    model = UnofferedToolModel()
-    seen_keys: list[str | None] = []
-    engine = replace(
-        _engine(turn, model, tmp_path),
-        tools=_catalog_registry(seen_keys),
-    )
-    frame = await engine.run()
-    assert frame is not None and frame.status == "done"
-    assert seen_keys == []
-    assert model.errors == [
-        "ValueError: tool 'archive_records' was not offered; call tool_search before using it"
-    ]
