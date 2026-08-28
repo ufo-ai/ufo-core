@@ -2642,6 +2642,105 @@ test("a send the composer cannot answer leaves the attachment where the member p
   expect(chips().length).toBe(1);
 });
 
+test("a second press while the attachment travels sends the file once", async () => {
+  /** The send carries the bytes to the store before it admits the message, so the card still holds
+   *  the file while it runs. A member who presses Send again in that window means the one message
+   *  they wrote, not a second turn carrying the same file — and on the start screen, not a second
+   *  conversation. */
+  let mint: () => void = () => {};
+  const minting = new Promise<void>((resolve) => (mint = resolve));
+  const { handler } = wire({
+    ...transcript(),
+    "/uploads": async () => {
+      await minting;
+      return json({ key: "web-inbox-uploads/abc/notes.txt", put_url: "https://store/1" });
+    },
+    "store/1": () => new Response("", { status: 200 }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  const composer = document.querySelector("form[data-field-card]") as HTMLElement;
+  const chips = () => within(composer).queryAllByRole("listitem");
+  fireEvent.drop(composer, {
+    dataTransfer: { types: ["Files"], files: [new File(["body"], "notes.txt")] },
+  });
+  await waitFor(() => expect(chips().length).toBe(1));
+
+  const send = screen.getByRole("button", { name: "Send" });
+  await userEvent.click(send);
+  await userEvent.click(send);
+  mint();
+  await waitFor(() => expect(chips().length).toBe(0));
+
+  const sends = handler.mock.calls.filter(([url]) => String(url).includes("/chat?"));
+  expect(sends.length).toBe(1);
+  expect((sends[0][1]?.body as FormData).getAll("uploaded_key")).toEqual([
+    "web-inbox-uploads/abc/notes.txt",
+  ]);
+});
+
+test("the card refuses an eleventh file and says so while the member can still see it", async () => {
+  /** The surface refuses a send of more than ten attachments, so the card holds the same bound: the
+   *  member reads it with the files in front of them, rather than losing their words to a 413 the
+   *  send answers after it cleared the box. */
+  wire({
+    ...transcript(),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  const composer = document.querySelector("form[data-field-card]") as HTMLElement;
+  fireEvent.drop(composer, {
+    dataTransfer: {
+      types: ["Files"],
+      files: Array.from({ length: 11 }, (_unused, index) => new File(["body"], index + ".txt")),
+    },
+  });
+
+  await waitFor(() => expect(within(composer).queryAllByRole("listitem").length).toBe(10));
+  expect(within(composer).getByText("A message carries at most 10 files.")).toBeTruthy();
+  expect(within(composer).queryByText("10.txt")).toBeNull();
+});
+
+test("a file attached while the send runs stays in the card for the next message", async () => {
+  /** The send takes the files it read when the member pressed. A file attached while the upload runs
+   *  was never in that body, so it stays where the member put it instead of vanishing unsent. */
+  let mint: () => void = () => {};
+  const minting = new Promise<void>((resolve) => (mint = resolve));
+  wire({
+    ...transcript(),
+    "/uploads": async (_url, init) => {
+      await minting;
+      const named = JSON.parse(String(init?.body)) as { name: string };
+      return json({ key: "web-inbox-uploads/abc/" + named.name, put_url: "https://store/1" });
+    },
+    "store/1": () => new Response("", { status: 200 }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
+  });
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  const composer = document.querySelector("form[data-field-card]") as HTMLElement;
+  const chips = () => within(composer).queryAllByRole("listitem");
+  const drop = (name: string) =>
+    fireEvent.drop(composer, {
+      dataTransfer: { types: ["Files"], files: [new File(["body"], name)] },
+    });
+
+  drop("sent.txt");
+  await waitFor(() => expect(chips().length).toBe(1));
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  drop("later.txt");
+  await waitFor(() => expect(chips().length).toBe(2));
+  mint();
+
+  await waitFor(() => expect(chips().length).toBe(1));
+  expect(within(composer).getByText("later.txt")).toBeTruthy();
+});
+
 test("the composer draws a picked image as itself and a picked PDF as a badged card", async () => {
   wire({
     ...transcript(),

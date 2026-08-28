@@ -99,10 +99,11 @@ from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import AGENT_KIND, ObjectListQuery, ObjectRef, ObjectRow
-from ufo.sdk.sandbox import shipped_app_slug
+from ufo.sdk.sandbox import ContainmentError, contained_relative, shipped_app_slug
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     MEMBER_ADMISSION,
+    WORKSPACE_WRITE_MAX_BYTES,
     AgentSummary,
     BlobStore,
     ConnectRequestInvalid,
@@ -151,6 +152,14 @@ MAX_REQUEST_BYTES = 25 * 1024 * 1024
 MAX_FORM_BYTES = 64 * 1024
 MAX_SECRET_BYTES = 4_096
 UPLOAD_CHUNK_BYTES = 65_536
+UPLOAD_PUT_TTL_SECONDS = 900
+"""How long one minted upload URL stays good. Long enough for a browser to PUT a large file over
+a slow link; short enough that a leaked URL buys hours, not days."""
+UPLOAD_KEY_ROOT = "web-inbox-uploads"
+MAX_INBOUND_FILES = 10
+"""How many files one send carries. A presigned attachment costs the body nothing, so the framing
+cap bounds it no longer: this is what keeps one request from reading the store without end and
+writing it all into one workspace."""
 WEB_INBOX_DIR = "web-inbox"
 FILES_NOTE = "[Attached files, saved in the workspace: {paths}]"
 FILES_NOTE_RE = re.compile(r"\[Attached files, saved in the workspace: (?P<paths>[^]\n]+)\]\Z")
@@ -1211,16 +1220,25 @@ async def _bounded_body(request: Request, limit: int) -> bytes | Response:
     return bytes(body)
 
 
-async def _parse_inbound(request: Request) -> tuple[str, tuple[UploadFile, ...]] | Response:
-    """The composer's message text and attached files. A plain body is read under a hard byte
-    cap, so what bounds it is the bytes consumed rather than a declared length, and it must decode
-    as UTF-8 — bytes that don't are refused, never rewritten. A multipart submit must declare a
-    length and must not be chunked — the parse buffers each part whole (in memory up to
-    starlette's spool threshold, a temp file past it), so it runs only under a length the server
-    itself frames the body by; its `message` text arrives already decoded by that parser (UTF-8,
-    falling back to latin-1), so the strict-UTF-8 refusal is the plain path's — the decoded text
-    is admitted as received. A urlencoded body is not a shape the composer sends, so it is
-    refused."""
+async def _parse_inbound(
+    request: Request,
+) -> tuple[str, tuple[UploadFile, ...], tuple[str, ...]] | Response:
+    """The composer's message text, attached files, and the blob keys a presigned upload already
+    landed. A plain body is read under a hard byte cap, so what bounds it is the bytes consumed
+    rather than a declared length, and it must decode as UTF-8 — bytes that don't are refused,
+    never rewritten. A multipart submit must declare a length and must not be chunked — the parse
+    buffers each part whole (in memory up to starlette's spool threshold, a temp file past it), so
+    it runs only under a length the server itself frames the body by; its `message` text arrives
+    already decoded by that parser (UTF-8, falling back to latin-1), so the strict-UTF-8 refusal
+    is the plain path's — the decoded text is admitted as received. A urlencoded body is not a
+    shape the composer sends, so it is refused.
+
+    A body carrying `uploaded_key` parts carries no file bytes for those attachments — the browser
+    already PUT them to the blob store, so the framing bound applies to text and any inline
+    fallback files only, never to what the key names. Every such key must be one this surface
+    minted, so what a send can reach out of the store is what the member just uploaded, and one
+    send carries at most `MAX_INBOUND_FILES` attachments of both kinds together — the bytes a key
+    names cost the body nothing, so the count is what bounds what one request moves."""
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("application/x-www-form-urlencoded"):
         return Response("unsupported body type", status_code=415)
@@ -1229,7 +1247,7 @@ async def _parse_inbound(request: Request) -> tuple[str, tuple[UploadFile, ...]]
         if isinstance(body, Response):
             return body
         try:
-            return body.decode("utf-8"), ()
+            return body.decode("utf-8"), (), ()
         except UnicodeDecodeError:
             return Response("malformed message text", status_code=400)
     refused = _framed_length(request, MAX_REQUEST_BYTES)
@@ -1247,26 +1265,59 @@ async def _parse_inbound(request: Request) -> tuple[str, tuple[UploadFile, ...]]
         for upload in form.getlist("file")
         if isinstance(upload, UploadFile) and upload.filename
     )
-    return text, uploads
+    uploaded_keys = []
+    for raw in form.getlist("uploaded_key"):
+        key = _uploaded_key(raw) if isinstance(raw, str) else None
+        if key is None:
+            return Response("unknown upload key", status_code=403)
+        uploaded_keys.append(key)
+    if len(uploads) + len(uploaded_keys) > MAX_INBOUND_FILES:
+        return Response(f"a send carries at most {MAX_INBOUND_FILES} files", status_code=413)
+    return text, uploads, tuple(uploaded_keys)
 
 
-def _inbox_paths(uploads: tuple[UploadFile, ...]) -> tuple[str, ...]:
+def _uploaded_key(raw: str) -> str | None:
+    """The stored object one `uploaded_key` part names, or None for a string `upload_start` never
+    minted. A key sits plainly under one prefix of its own, so a send names what the member just
+    uploaded and nothing else the workspace store holds — a conversation's transcript, an artifact
+    its audience hides — whose bytes would otherwise land in the caller's own workspace."""
+    try:
+        resolved = contained_relative(f"/{raw}", f"/{UPLOAD_KEY_ROOT}")
+    except ContainmentError:
+        return None
+    return raw if resolved == f"/{raw}" else None
+
+
+def _inbox_paths(
+    uploads: tuple[UploadFile, ...], uploaded_keys: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Where each attachment lands in the conversation's workspace, inline files first. An uploaded
+    key is named by the member's own file too, so both kinds arrive under the same safe leaf and a
+    name taken twice in one send is numbered rather than overwritten."""
     used: set[str] = set()
-    return tuple(
-        f"{WEB_INBOX_DIR}/{inbox_name(upload.filename or 'file', used)}" for upload in uploads
+    names = (
+        *(upload.filename or "file" for upload in uploads),
+        *(PurePosixPath(key).name for key in uploaded_keys),
     )
+    return tuple(f"{WEB_INBOX_DIR}/{inbox_name(name, used)}" for name in names)
 
 
 async def _deliver_uploads(
     ctx: SurfaceContext,
     conversation_id: UUID,
     uploads: tuple[UploadFile, ...],
+    uploaded_keys: tuple[str, ...],
     paths: tuple[str, ...],
 ) -> None:
     """Stream each attached file into the conversation's `web-inbox/` before the turn runs, so the
-    sandbox mounts them already present under the paths the admitted text names."""
-    for upload, path in zip(uploads, paths, strict=True):
+    sandbox mounts them already present under the paths the admitted text names. An inline file
+    streams out of the parsed body and a presigned one out of the blob store it was PUT to; both
+    land under the same bound the carrier holds every workspace write to."""
+    inline, presigned = paths[: len(uploads)], paths[len(uploads) :]
+    for upload, path in zip(uploads, inline, strict=True):
         await ctx.write_workspace_file(conversation_id, path, _upload_chunks(upload))
+    for key, path in zip(uploaded_keys, presigned, strict=True):
+        await ctx.write_workspace_file(conversation_id, path, ctx.blob.get_stream(key))
 
 
 def _files_note(text: str, paths: tuple[str, ...]) -> str:
@@ -1406,13 +1457,16 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     parsed = await _parse_inbound(request)
     if isinstance(parsed, Response):
         return parsed
-    text, uploads = parsed
+    text, uploads, uploaded_keys = parsed
     if stop is not None:
-        if text or uploads:
+        if text or uploads or uploaded_keys:
             return Response("a stop admits no message", status_code=400)
-    elif not text.strip() and not uploads:
+    elif not text.strip() and not uploads and not uploaded_keys:
         return Response("empty message", status_code=400)
-    paths = _inbox_paths(uploads)
+    for uploaded in uploaded_keys:
+        if not await ctx.blob.exists(uploaded):
+            return Response("upload not found", status_code=404)
+    paths = _inbox_paths(uploads, uploaded_keys)
     inbound = _files_note(text, paths) if paths else text
     if len(inbound) > MAX_INBOUND_CHARS:
         return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
@@ -1468,7 +1522,7 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
             outcome["turn_id"] = str(stopped.founded_turn_id)
         return JSONResponse(outcome)
     key = None if answer is None else _answer_key(conversation_id, answer[0], answer[1])
-    await _deliver_uploads(ctx, conversation_id, uploads, paths)
+    await _deliver_uploads(ctx, conversation_id, uploads, uploaded_keys, paths)
     admitted = await ctx.admit(
         conversation_id,
         inbound,
@@ -4747,6 +4801,45 @@ async def preview(ctx: SurfaceContext, request: Request) -> Response:
     return Response(png, media_type="image/png")
 
 
+async def upload_start(ctx: SurfaceContext, request: Request) -> Response:
+    """Mint the URL one attachment's bytes travel by, so a send never carries them. The member
+    picks a file, the page names its size and sha256, the browser PUTs the bytes to the blob store
+    directly, and the send names the key they already sit under — the composer body then carries
+    text and references only, so the 25 MB framing bounds the message rather than the attachment.
+
+    The URL is measured: the size and the checksum ride the signature, so S3 stores exactly the
+    file the member picked and nothing else — the same bound `_store_artifact` holds a sandbox to,
+    and the reason a browser may hold the URL at all. The size is capped at what the write into the
+    conversation's workspace accepts, since bytes the send cannot deliver are bytes the store would
+    keep for nothing. A filesystem dev store signs nothing and says so: dev deploys stream
+    attachments through the composer body, under the framings `_parse_inbound` already bounds."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    raw = await _bounded_body(request, MAX_FORM_BYTES)
+    if isinstance(raw, Response):
+        return raw
+    try:
+        body = json.loads(raw)
+        size_bytes = int(body["size_bytes"])
+        checksum_sha256 = str(body["sha256"])
+        name = str(body.get("name") or "file")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return Response("malformed upload request", status_code=400)
+    if size_bytes <= 0:
+        return Response("size must be positive", status_code=400)
+    if size_bytes > WORKSPACE_WRITE_MAX_BYTES:
+        return Response(
+            f"an attachment is capped at {WORKSPACE_WRITE_MAX_BYTES} bytes", status_code=413
+        )
+    key = f"{UPLOAD_KEY_ROOT}/{uuid4()}/{inbox_name(name, set())}"
+    try:
+        url = await ctx.blob.presigned_put(key, size_bytes, checksum_sha256, UPLOAD_PUT_TTL_SECONDS)
+    except TypeError:
+        return Response("presigned upload requires the s3 blob store", status_code=409)
+    return JSONResponse({"key": key, "put_url": url})
+
+
 ROUTES = (
     SurfaceRoute(method="GET", path="", handler=portal_page),
     SurfaceRoute(method="POST", path="", handler=open_session),
@@ -4757,6 +4850,7 @@ ROUTES = (
     SurfaceRoute(method="GET", path="api/admin", handler=admin_index),
     SurfaceRoute(method="POST", path="agents/{agent_id}/chat", handler=chat),
     SurfaceRoute(method="POST", path="preview", handler=preview),
+    SurfaceRoute(method="POST", path="uploads", handler=upload_start),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
     SurfaceRoute(method="GET", path="agents/{agent_id}/settings", handler=settings),
     SurfaceRoute(method="GET", path="agents/{agent_id}/setup", handler=agent_setup),

@@ -14,7 +14,9 @@ CLUSTER_SERVICES_TEMPLATE = (
 PLATFORM_SECRETS = Path(__file__).resolve().parents[2] / "infra/modules/platform/secrets.tf"
 PLATFORM_EKS = Path(__file__).resolve().parents[2] / "infra/modules/platform/eks.tf"
 PLATFORM_VARIABLES = Path(__file__).resolve().parents[2] / "infra/modules/platform/variables.tf"
+PLATFORM_S3 = Path(__file__).resolve().parents[2] / "infra/modules/platform/s3.tf"
 TESTING_MAIN = Path(__file__).resolve().parents[2] / "infra/envs/testing/main.tf"
+PROD_MAIN = Path(__file__).resolve().parents[2] / "infra/envs/prod/main.tf"
 
 
 def _terraform_block(header: str) -> str:
@@ -489,11 +491,31 @@ def test_sites_answer_one_label_under_the_apex_behind_the_proxy() -> None:
     assert '- hosts: ["*.${apex_host}"]' in sites_ingress
     assert '- host: "*.${apex_host}"' in sites_ingress
     assert "sites." not in sites_ingress.replace("`sites.` prefix", "")
-    for env in (TESTING_CONFIG, PROD_CONFIG):
+    for env, apex in ((TESTING_CONFIG, "var.apex_host"), (PROD_CONFIG, "local.apex_host")):
         config = env.read_text()
         assert '    ingress_public_url = "https://${module.platform.hostname}"' in config
         assert "loadBalancerSourceRanges = local.cloudflare_ipv4_ranges" in config
-        assert '  shared_host         = "app.${module.platform.hostname}"' in config
+        assert f'  shared_host         = "app.${{{apex}}}"' in config
+
+
+def test_the_blob_bucket_admits_a_presigned_put_from_the_portal_and_nothing_else() -> None:
+    """A web attachment travels as one presigned PUT the member's browser sends straight to the
+    bucket, from the portal page and carrying the checksum header the mint signed — a header no
+    browser sends without asking S3 first. A bucket with no CORS rule refuses that ask, and every
+    attachment falls back to the composer body the presigned path exists to keep the bytes out of.
+    The rule stays as narrow as the URL it serves: PUT alone, from the portal origins each
+    environment names, never a wildcard and never a read."""
+    rule = (
+        PLATFORM_S3.read_text()
+        .split('resource "aws_s3_bucket_cors_configuration" "blob"', maxsplit=1)[1]
+        .split("\n}\n", maxsplit=1)[0]
+    )
+    assert 'allowed_methods = ["PUT"]' in rule
+    assert "allowed_origins = var.blob_origins" in rule
+    assert "x-amz-checksum-sha256" in rule
+    assert '"*"' not in rule
+    for main in (TESTING_MAIN, PROD_MAIN):
+        assert 'blob_origins         = ["https://${local.shared_host}"]' in main.read_text()
 
 
 def test_serve_mounts_the_rendered_config_and_the_proxy_reads_env() -> None:

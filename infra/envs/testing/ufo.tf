@@ -101,8 +101,11 @@ locals {
     manifest if strcontains(path, "/jobs/ufo-migrate-")
   ])
 
-  dns_zone_names      = ["ufo.ai"]
-  shared_host         = "app.${module.platform.hostname}"
+  dns_zone_names = ["ufo.ai"]
+  # The portal host comes off the variable rather than the module's output: the blob bucket's CORS
+  # rule names this origin, and a host built from a module output and fed back into that same
+  # module is a dependency cycle terraform refuses.
+  shared_host         = "app.${var.apex_host}"
   gateway_origin_host = "origin.${module.platform.hostname}"
 
   # The shared fleet configuration.

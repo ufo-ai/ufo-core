@@ -13,6 +13,12 @@ variable "hostname" {
   description = "Public apex FQDN the service serves (e.g. flyingobject.ai)."
 }
 
+variable "blob_origins" {
+  type        = list(string)
+  default     = []
+  description = "Origins whose pages may PUT one attachment straight to the blob bucket (e.g. https://app.ufo.ai). Each portal host the composer runs on belongs here; an origin the list omits is refused at the browser's preflight. Empty configures no CORS rule at all."
+}
+
 variable "dns_zone_names" {
   type        = list(string)
   description = "Cloudflare DNS zone names external-dns publishes into; the first owns hostname. Ingress hosts may live in any of them."

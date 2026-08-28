@@ -15,6 +15,7 @@ module "platform" {
   name                 = "ufo-testing"
   region               = var.region
   hostname             = var.apex_host
+  blob_origins         = ["https://${local.shared_host}"]
   dns_zone_names       = local.dns_zone_names
   cloudflare_api_token = var.cloudflare_api_token
 

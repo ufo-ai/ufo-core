@@ -26,6 +26,16 @@ function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem" | "
 }
 
 function installWhatJsdomLacks() {
+  // jsdom's Blob hands its bytes back only through FileReader, so an attached file a browser reads
+  // with `arrayBuffer()` throws here. Reading it through the reader keeps the two answering alike.
+  Blob.prototype.arrayBuffer ??= function arrayBuffer(this: Blob) {
+    return new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(this);
+    });
+  };
   Element.prototype.hasPointerCapture = () => false;
   Element.prototype.setPointerCapture = () => {};
   Element.prototype.releasePointerCapture = () => {};

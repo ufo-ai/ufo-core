@@ -17,11 +17,16 @@ import { cn } from "@/lib/cn";
 
 type Attached = { id: string; file: File };
 
+/** How many files one message carries. The surface refuses an eleventh (`MAX_INBOUND_FILES` in
+ *  `ufo_ext_web.surface`), and a refusal after the member let go of the files is a message they have
+ *  to build again — so the card holds the same bound where they can still see it. */
+export const MAX_ATTACHED = 10;
+
 type Held = {
   attached: Attached[];
+  full: boolean;
   attach: (files: FileList | File[]) => void;
   drop: (id: string) => void;
-  clear: () => void;
   choose: () => void;
 };
 
@@ -55,32 +60,56 @@ export function PromptInput({
   children,
   ...props
 }: Omit<ComponentProps<"form">, "onSubmit"> & {
-  onSend: (attached: File[]) => boolean;
+  onSend: (attached: File[]) => boolean | Promise<boolean>;
 }) {
   const [attached, setAttached] = useState<Attached[]>([]);
+  const [full, setFull] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
+  // A send carries its files to the store before it admits anything, so the card still holds them
+  // while it runs. A second press in that window would send the same files again, and on the start
+  // screen would open a second conversation, so one send at a time is what the card allows.
+  const sending = useRef(false);
   const held = useMemo<Held>(
     () => ({
       attached,
-      attach: (files) =>
+      full,
+      attach: (files) => {
+        const picking = Array.from(files);
+        const room = MAX_ATTACHED - attached.length;
+        setFull(picking.length > room);
         setAttached((current) => [
           ...current,
-          ...Array.from(files).map((file) => ({ id: String(++picked), file })),
-        ]),
-      drop: (id) => setAttached((current) => current.filter((entry) => entry.id !== id)),
-      clear: () => setAttached([]),
+          ...picking.slice(0, room).map((file) => ({ id: String(++picked), file })),
+        ]);
+      },
+      drop: (id) => {
+        setFull(false);
+        setAttached((current) => current.filter((entry) => entry.id !== id));
+      },
       choose: () => picker.current?.click(),
     }),
-    [attached],
+    [attached, full],
   );
   const carriesFiles = (event: DragEvent) => event.dataTransfer.types.includes("Files");
   return (
     <HELD.Provider value={held}>
       <form
         {...props}
-        onSubmit={(event) => {
+        onSubmit={async (event) => {
           event.preventDefault();
-          if (onSend(attached.map((entry) => entry.file))) held.clear();
+          if (sending.current) return;
+          sending.current = true;
+          // Only what this send took leaves the card. A file the member attaches while the upload
+          // runs was never in this body, so clearing the whole list would drop it unsent.
+          const sent = attached;
+          try {
+            if (await onSend(sent.map((entry) => entry.file))) {
+              setFull(false);
+              setAttached((current) => current.filter((entry) => !sent.includes(entry)));
+            }
+          } finally {
+            sending.current = false;
+          }
         }}
         onDragOver={(event) => {
           if (carriesFiles(event)) event.preventDefault();
@@ -155,33 +184,44 @@ export function PromptInputEyebrow({
  *  the member has attached something: an empty row is a band of nothing over the box they are
  *  writing in. */
 export function PromptInputAttachments() {
-  const { attached, drop } = useAttached();
+  const { attached, full, drop } = useAttached();
   if (!attached.length) return null;
   return (
-    <ul role="list" aria-label="Attached files" className="m-0 flex list-none flex-wrap gap-sm p-0">
-      {attached.map(({ id, file }) => (
-        <li key={id} className="flex">
-          <PickedThumbnail file={file}>
-            <Button
-              variant="row"
-              aria-label={"Remove " + file.name}
-              onClick={() => drop(id)}
-              className="absolute top-0 right-0 m-xs border-edge bg-card p-2xs text-ink-soft hover:text-ink"
-            >
-              <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
-                <path
-                  d="m4.5 4.5 7 7m0-7-7 7"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                />
-              </svg>
-            </Button>
-          </PickedThumbnail>
-        </li>
-      ))}
-    </ul>
+    <>
+      {full && (
+        <p className="m-0 text-small text-ink-soft">
+          A message carries at most {MAX_ATTACHED} files.
+        </p>
+      )}
+      <ul
+        role="list"
+        aria-label="Attached files"
+        className="m-0 flex list-none flex-wrap gap-sm p-0"
+      >
+        {attached.map(({ id, file }) => (
+          <li key={id} className="flex">
+            <PickedThumbnail file={file}>
+              <Button
+                variant="row"
+                aria-label={"Remove " + file.name}
+                onClick={() => drop(id)}
+                className="absolute top-0 right-0 m-xs border-edge bg-card p-2xs text-ink-soft hover:text-ink"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
+                  <path
+                    d="m4.5 4.5 7 7m0-7-7 7"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </Button>
+            </PickedThumbnail>
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 

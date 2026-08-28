@@ -14,7 +14,8 @@ module "platform" {
 
   name                 = "prod"
   region               = var.region
-  hostname             = "ufo.ai"
+  hostname             = local.apex_host
+  blob_origins         = ["https://${local.shared_host}"]
   dns_zone_names       = local.dns_zone_names
   cloudflare_api_token = var.cloudflare_api_token
 

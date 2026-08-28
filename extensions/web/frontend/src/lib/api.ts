@@ -2,6 +2,33 @@ import type { CredentialRequest } from "@/lib/types";
 
 export const BASE = "/surface/web";
 
+/** Carry one file's bytes to the blob store and answer the key they landed under, or null when
+ *  this deploy signs no upload URL and the send must carry the file itself. The surface measures
+ *  the URL by the size and the sha256 named here, so the PUT must be exactly this file and must
+ *  carry the checksum header the signature covers. */
+export async function uploadAttachment(file: File): Promise<string | null> {
+  try {
+    const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+    const sha256 = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    const res = await fetch(BASE + "/uploads", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: file.name, size_bytes: file.size, sha256 }),
+    });
+    if (!res.ok) return null;
+    const plan = (await res.json()) as { key: string; put_url: string };
+    const put = await fetch(plan.put_url, {
+      method: "PUT",
+      body: file,
+      headers: { "x-amz-checksum-sha256": sha256 },
+    });
+    return put.ok ? plan.key : null;
+  } catch {
+    return null;
+  }
+}
+
 export type Fetched<T> = { ok: true; payload: T } | { ok: false; message: string; status: number };
 
 export const SESSION_FAULT_HEADER = "x-ufo-session-fault";

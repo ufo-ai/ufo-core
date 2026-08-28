@@ -26,6 +26,25 @@ resource "aws_s3_bucket_public_access_block" "blob" {
   restrict_public_buckets = true
 }
 
+# A web attachment travels as one presigned PUT the member's own browser sends, from the portal
+# page to this bucket — a different origin, and a PUT carrying `x-amz-checksum-sha256`, which is
+# not a safelisted header, so the browser asks permission first. Without this rule S3 refuses that
+# preflight and every attachment falls back to the composer body the presigned path exists to keep
+# the bytes out of. The rule grants no read: only a PUT from a named portal origin, whose URL the
+# surface already signed for exactly one key, one length and one checksum.
+resource "aws_s3_bucket_cors_configuration" "blob" {
+  count  = length(var.blob_origins) > 0 ? 1 : 0
+  bucket = aws_s3_bucket.blob.id
+
+  cors_rule {
+    allowed_methods = ["PUT"]
+    allowed_origins = var.blob_origins
+    allowed_headers = ["content-type", "x-amz-checksum-sha256"]
+    expose_headers  = ["etag"]
+    max_age_seconds = 3600
+  }
+}
+
 resource "aws_s3_bucket_versioning" "blob" {
   bucket = aws_s3_bucket.blob.id
   versioning_configuration { status = "Enabled" }

@@ -79,6 +79,7 @@ from ufo_ext_web.panels import (
 )
 from ufo_ext_web.surface import (
     ASSET_MEDIA_TYPES,
+    MAX_INBOUND_FILES,
     NO_MEMBER_FAULT,
     PORTAL_BUILD,
     PORTAL_FILE,
@@ -171,7 +172,11 @@ from ufo.models.interface import (
 from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef
 from ufo.objects import OBJECT_LIST_PAGE
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.conversation import (
+    SANDBOX_IMAGE_REF,
+    WORKSPACE_WRITE_MAX_BYTES,
+    ConversationSandbox,
+)
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
@@ -8636,6 +8641,159 @@ async def test_preview_without_a_session_is_refused(
         files=[("file", ("report.pdf", b"%PDF-1.7", "application/pdf"))],
     )
     assert unauth.status_code in (401, 403, 404)
+
+
+async def test_upload_start_on_a_filesystem_store_is_refused(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A dev deploy runs the filesystem blob store, which mints no presigned URLs — dev
+    attachments stream through the composer body under its own framings, so the route says so
+    rather than pretending to serve what it cannot."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    refused = await client.post(
+        "/surface/web/uploads",
+        json={"name": "big.bin", "size_bytes": 1024, "sha256": "x" * 44},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 409
+
+
+async def test_upload_start_refuses_a_malformed_body_and_no_session(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    malformed = await client.post(
+        "/surface/web/uploads",
+        json={"size_bytes": "not a number", "sha256": "x" * 44},
+        headers=cookie,
+    )
+    assert malformed.status_code == 400
+    unmeasured = await client.post(
+        "/surface/web/uploads",
+        json={"name": "big.bin", "size_bytes": 1024},
+        headers=cookie,
+    )
+    assert unmeasured.status_code == 400
+    unauth = await client.post(
+        "/surface/web/uploads", json={"name": "f", "size_bytes": 1, "sha256": "x" * 44}
+    )
+    assert unauth.status_code in (401, 403, 404)
+
+
+async def test_upload_start_refuses_a_file_the_workspace_write_cannot_take(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The send writes the stored bytes into the conversation's workspace, and that write is capped.
+    A URL minted past the cap would take the member's whole upload and then refuse the message it
+    was for, leaving the object orphaned — so the size is refused before anything is signed."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    refused = await client.post(
+        "/surface/web/uploads",
+        json={
+            "name": "huge.bin",
+            "size_bytes": WORKSPACE_WRITE_MAX_BYTES + 1,
+            "sha256": "x" * 44,
+        },
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 413
+
+
+async def test_a_send_refuses_an_uploaded_key_outside_the_upload_prefix(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The send names which stored object it attaches, so a key that escapes the upload namespace —
+    a conversation's transcript, an artifact the member's audience hides — is refused whatever the
+    store holds under it, and the turn is never admitted."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    for key in (
+        f"conversations/{uuid4()}/messages.json.lz4",
+        "web-inbox-uploads/../conversations/elsewhere/messages.json.lz4",
+        "web-inbox/file.bin",
+    ):
+        refused = await client.post(
+            f"/surface/web/agents/{agent_id}/chat?conversation=new",
+            data={"message": "read this", "uploaded_key": key},
+            files=[("file", ("notes.txt", b"hello", "text/plain"))],
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert refused.status_code == 403
+
+
+async def test_a_send_naming_an_upload_the_store_never_took_is_refused(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A key of the right shape whose bytes never landed carries nothing to deliver, so the send
+    says so instead of opening a turn the delivery would fail behind."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        data={"message": "read this", "uploaded_key": f"web-inbox-uploads/{uuid4()}/absent.bin"},
+        files=[("file", ("notes.txt", b"hello", "text/plain"))],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 404
+
+
+async def test_a_send_carrying_more_attachments_than_the_cap_is_refused(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A key costs the body nothing, so one request could name stored objects without end and read
+    the store into a single workspace. The count is what bounds a send now that the framing bounds
+    the text alone, and inline files and keys count together against it."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    keys = [f"web-inbox-uploads/{uuid4()}/report.pdf" for _ in range(MAX_INBOUND_FILES)]
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        data={"message": "read these", "uploaded_key": keys},
+        files=[("file", ("notes.txt", b"hello", "text/plain"))],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 413
+
+
+async def test_presigned_files_land_in_the_workspace_beside_the_inline_ones(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, WorkspaceBlobStore, ConversationSandbox],
+) -> None:
+    """An attachment the browser PUT to the blob store travels as its key: the send streams those
+    bytes into the conversation's `web-inbox/` under the member's own filename, beside any file the
+    body still carried inline, and the admitted message names both paths."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, sandboxes = dbos_runtime
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    key = f"web-inbox-uploads/{uuid4()}/report.pdf"
+    with ws(workspace_id):
+        await blob.put(key, b"%PDF-1.7 stored")
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        data={"message": "read these", "uploaded_key": key},
+        files=[("file", ("notes.txt", b"hello", "text/plain"))],
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert admitted.status_code == 200
+    await _consume(client, token, admitted.json()["turn_id"])
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.inbound, tables.turn.c.conversation_id).where(
+                    tables.turn.c.id == UUID(admitted.json()["turn_id"])
+                )
+            )
+        ).one()
+    assert "web-inbox/notes.txt" in row.inbound
+    assert "web-inbox/report.pdf" in row.inbound
+    inbox = sandboxes.workspace_root / str(row.conversation_id) / "web-inbox"
+    assert (inbox / "notes.txt").read_bytes() == b"hello"
+    assert (inbox / "report.pdf").read_bytes() == b"%PDF-1.7 stored"
 
 
 async def test_an_oversize_request_is_refused_at_the_door(
