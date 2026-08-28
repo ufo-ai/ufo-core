@@ -370,7 +370,7 @@ Dispatch is fixed:
 6. Resolve an `agent` target only when the action declares `agent_targetable`; apply the existing
    main-agent, live-speaker, subagent, visibility, and workspace checks.
 7. For an instance action, call the kind owner's `get` and `status` under its context, rechecking
-   visibility, existence, and any supplied generation.
+   visibility and existence; the live generation and any the call supplied ride the target.
 8. Produce `EffectiveCall` with the contributor's context and semantic action id.
 9. Run the ordinary hook, handler, result bound/offload, trust wall, final-act, activity, ledger,
    and replay paths.
@@ -427,10 +427,13 @@ credential slot may discover `request_credentials`; a non-admin invocation reach
 admin refusal. This preserves RFC 0017's rule that domain refusal lives in executable behavior and
 avoids an authorization result cached in a transcript.
 
-Instance actions re-read the target before execution. A supplied generation is checked before the
-handler; the resolved generation is passed on `ObjectActionTarget` so an action that mutates the
-target can fence its write atomically. Actions against associated state still perform their own
-atomic existence/state check, as `set_homepage` and Stripe-backed billing do now.
+Instance actions re-read the target before execution for visibility and existence. A supplied
+generation is not refused ahead of the handler: dispatch passes both it and the live generation on
+`ObjectActionTarget`, and an action that mutates the target fences its own write atomically — the
+only place a fence is correct, because a dispatch interrupted after its write and resumed by the
+durable step would otherwise re-read the row at its new generation and refuse the very dedup its
+idempotency key exists for. Actions against associated state still perform their own atomic
+existence/state check, as `set_homepage` and Stripe-backed billing do now.
 
 The object change journal remains CRUD-only. An action is already audited by its turn, semantic
 call id, target, input, and result; inventing a generic before/after spec for an imperative action
@@ -650,7 +653,9 @@ read the result through public object/surface projections. They prove:
 2. kind-owner visibility runs before contributor code;
 3. contributor context reaches only the contributor's capabilities;
 4. allowlists grant individual action ids and never the dispatcher wholesale;
-5. `requested_by`, speakerless refusal, admin gates, cross-agent targets, and generation checks hold;
+5. `requested_by`, speakerless refusal, admin gates, and cross-agent targets hold, and an
+   interrupted self-mutating instance action resumes to its handler's fence, not a pre-dispatch
+   refusal;
 6. side-effecting replay receives one stable semantic key;
 7. parallel-safe actions segment correctly;
 8. pre/post/failure hooks match canonical ids and retain modified-input/output semantics;
@@ -873,12 +878,11 @@ false, since a handoff seal is not an external write and the flip would only for
 preemption — each named in its unit.
 
 A `ToolIntent` is persisted in the turn it admits and re-parsed at execution, and a parked intent
-can outlive a deploy. A family unit therefore keeps its moved names in the `ToolIntent` closed set
-(routes stop producing them) and fills a legacy mapping the intent dispatch uses to run an
-old-named intent as its canonical action; the entries and mapping drop in a follow-up change after
-a deploy separates — the same stop-writing-then-drop rule migrations follow. An in-flight turn
-whose un-executed dispatch names a moved wire tool recovers on the new image as one visible
-invalid-call refusal; the turn terminates and the model retries through discovery.
+can outlive a deploy. No compatibility machinery bridges that: a family unit removes its moved
+names from the `ToolIntent` closed set outright, and a persisted intent naming one fails loudly at
+execution — the member repeats the act on the new panel. An in-flight turn whose un-executed
+dispatch names a moved wire tool likewise recovers on the new image as one visible invalid-call
+refusal; the turn terminates and the model retries through discovery.
 
 1. **Registry and dispatch.** `ObjectBinding` on the one declaration, boot validation, canonical
    ids, `EffectiveCall`, `object_action`, object projections, SDK export, bridge exposure, and
