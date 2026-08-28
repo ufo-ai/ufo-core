@@ -6,6 +6,7 @@ import { App } from "@/App";
 import { agentName } from "@/lib/agentName";
 import { appOrder, bumpChat, mergeChats, stampIso, type ChatRow } from "@/lib/rail";
 import { railState } from "@/lib/railStore";
+import { newChatHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
 import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
@@ -13,6 +14,15 @@ import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOn
 beforeEach(() => {
   useStreamFake();
 });
+
+/** The workspace column, opened: the apps index and the destinations under it are read inside the
+ *  drawer, which the shell draws at a phone width alone. Every act that moves the page shuts it, so
+ *  a test that navigates and then reads the column again opens it again. */
+async function openRail() {
+  await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  return within(within(drawer).getByRole("navigation", { name: "Workspace" }));
+}
 
 const NOW = new Date(2026, 7, 1, 12, 0, 0);
 
@@ -199,6 +209,7 @@ test("a first message opens a conversation, lands it in the rail, and routes to 
       return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello there" });
     },
   });
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "hello there");
@@ -226,6 +237,7 @@ test("a second message sent before the first is answered opens no second convers
         : json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "first half" });
     },
   });
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "first half");
@@ -286,6 +298,7 @@ test("a first message sent before the rail resolves still lands, and the rail me
       }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "early words" }),
   });
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "early words");
@@ -593,27 +606,29 @@ test("a markdown file in a Slack conversation opens the attachment sheet", async
 });
 
 test("the ask row opens the chat app at its start screen when one is shipped", async () => {
+  atPhoneWidth();
   location.hash = "#/";
   wire({});
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
 
-  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
+  const rail = await openRail();
   await userEvent.click(rail.getByRole("button", { name: "New chat" }));
 
   expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
 });
 
 test("the ask control targets the main agent, and offers no other", async () => {
+  atPhoneWidth();
   wire({});
   const single = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  await userEvent.click((await openRail()).getByRole("button", { name: "New chat" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   single.unmount();
 
   location.hash = "";
   wire({});
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  await userEvent.click((await openRail()).getByRole("button", { name: "New chat" }));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
@@ -623,16 +638,18 @@ test("the ask control targets the main agent, and offers no other", async () => 
 });
 
 test("the apps list opens the agent's page, and the sidebar starts the conversation", async () => {
+  atPhoneWidth();
   location.hash = "#/";
   wire({ "/settings": () => json(SETTINGS), "/connections": () => json({ connections: [] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("main");
+  await openRail();
 
   await openAgentRow("Assistant");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  expect(screen.getByRole("navigation", { name: "Apps" })).toBeTruthy();
 
-  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
+  const rail = await openRail();
+  expect(rail.getByRole("navigation", { name: "Apps" })).toBeTruthy();
   await userEvent.click(rail.getByRole("button", { name: "New chat" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
@@ -643,6 +660,7 @@ test("an app with nothing in flight states nothing under its name", async () => 
   /** The second line is for work in flight. A column of apps that each printed a standing line
    *  would state the ones doing something and the ones doing nothing in the same weight, and the
    *  row that matters would stop being the one that catches the eye. */
+  atPhoneWidth();
   location.hash = "#/";
   wire({
     "/settings": () => json(SETTINGS),
@@ -653,9 +671,9 @@ test("an app with nothing in flight states nothing under its name", async () => 
   const purposeful = { ...AGENT, purpose: "Answers from what this workspace has recorded." };
   render(<App agents={[purposeful]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("main");
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+  const rail = await openRail();
 
-  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
+  const index = within(rail.getByRole("navigation", { name: "Apps" }));
   const row = await index.findByRole("button", { name: /^Assistant/ });
   expect(within(row).queryByText("Answers from what this workspace has recorded.")).toBeNull();
   expect(index.queryByText(/Idle|Active/)).toBeNull();
@@ -739,6 +757,7 @@ test("a hash naming an agent this member cannot reach reports it", async () => {
 });
 
 test("the sidebar marks the destination the member is in and leaves the others off", async () => {
+  atPhoneWidth();
   location.hash = "#/";
   wire({
     "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
@@ -756,22 +775,24 @@ test("the sidebar marks the destination the member is in and leaves the others o
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  const marked = () =>
+  const marked = (rail: ReturnType<typeof within>) =>
     ["New chat", "Connectors", "Workspace"].filter(
       (name) => rail.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
-  expect(marked()).toEqual(["New chat"]);
+  const home = await openRail();
+  expect(marked(home)).toEqual(["New chat"]);
 
-  await userEvent.click(rail.getByRole("button", { name: "Workspace" }));
-  await waitFor(() => expect(marked()).toEqual(["Workspace"]));
+  await userEvent.click(home.getByRole("button", { name: "Workspace" }));
   await waitFor(() => expect(destination()).toBe("Team"));
+  const team = await openRail();
+  expect(marked(team)).toEqual(["Workspace"]);
 
-  await userEvent.click(rail.getByRole("button", { name: "Connectors" }));
-  await waitFor(() => expect(marked()).toEqual(["Connectors"]));
+  await userEvent.click(team.getByRole("button", { name: "Connectors" }));
+  const connectors = await openRail();
+  await waitFor(() => expect(marked(connectors)).toEqual(["Connectors"]));
 
-  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
+  const index = within(connectors.getByRole("navigation", { name: "Apps" }));
   expect(index.getByRole("button", { name: "Assistant" })).toBeTruthy();
   expect(index.getByRole("button", { name: "Second" })).toBeTruthy();
 });

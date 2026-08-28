@@ -7,10 +7,8 @@ import {
   bumpChat,
   heldPinned,
   heldSectionsShut,
-  heldSidebar,
   holdPinned,
   holdSectionsShut,
-  holdSidebar,
   chatRows,
   mergeChats,
   type ChatRow,
@@ -46,7 +44,6 @@ export type RailState = {
   linked: Readonly<Record<string, OwnedConversation>>;
   /** A read that failed where no control on the screen can correct it. */
   fault: ToastState | null;
-  collapsed: boolean;
   pinned: string[] | null;
   /** The sections the member has folded shut, by name. */
   sectionsShut: string[];
@@ -61,7 +58,6 @@ function fresh(): RailState {
     sought: {},
     linked: {},
     fault: null,
-    collapsed: heldSidebar(),
     pinned: heldPinned(),
     sectionsShut: heldSectionsShut(),
   };
@@ -186,11 +182,6 @@ export function railActivity(conversationId: string): void {
 
 export function quietRail(): void {
   update((held) => ({ ...held, fault: null }));
-}
-
-export function foldSidebar(collapsed: boolean): void {
-  holdSidebar(collapsed);
-  update((held) => ({ ...held, collapsed }));
 }
 
 export function pickPinned(pinned: string[]): void {

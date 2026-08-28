@@ -8,10 +8,18 @@ import { agentHash } from "@/lib/route";
 import { agentCrumb } from "@/lib/title";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 
-import { AGENT, AGENT_ID, agentIndex, CHAT_ROW, chatsOnWire, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, agentIndex, atPhoneWidth, CHAT_ROW, chatsOnWire, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 beforeEach(() => {
   useStreamFake();
 });
+
+/** The workspace column, which the shell draws at a phone width alone: the drawer the hamburger
+ *  opens holds it, and it is drawn whole there. */
+async function openWorkspaceColumn(): Promise<HTMLElement> {
+  await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  return within(drawer).getByRole("navigation", { name: "Workspace" });
+}
 
 function usageDetails(totalMicroUsd: number, tokens: number = 1_200) {
   return {
@@ -320,6 +328,7 @@ test("a non-admin reads an agent prompt but cannot edit it", async () => {
 });
 
 test("the agents index states a row's name alone, and leaves the address list to its own page", async () => {
+  atPhoneWidth();
   wire({ "/transcript": () => json({ messages: [] }) });
   location.hash = "#/agents";
   render(
@@ -334,24 +343,26 @@ test("the agents index states a row's name alone, and leaves the address list to
     />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+  const page = within(await screen.findByRole("main"));
+  await openWorkspaceColumn();
   const index = within(await agentIndex());
   expect(index.getByText("Assistant")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
   expect(index.getByText("Private")).toBeTruthy();
   expect(index.queryByText("opus")).toBeNull();
-  expect(within(screen.getByRole("main")).queryByText("member@example.com")).toBeNull();
+  expect(page.queryByText("member@example.com")).toBeNull();
   expect(screen.queryByText("No member grants — admins only")).toBeNull();
 });
 
 test("a non-admin reads the same index rows", async () => {
+  atPhoneWidth();
   wire({ "/transcript": () => json({ messages: [] }) });
   location.hash = "#/agents";
   render(
     <App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+  await openWorkspaceColumn();
   const index = within(await agentIndex());
   expect(index.getByText("Assistant")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
@@ -829,10 +840,12 @@ test("a member with no rollup sees only their own figure and no workspace sectio
 });
 
 test("a member who is not an admin is offered no administration control", async () => {
+  atPhoneWidth();
   wire({ "/transcript": () => json({ messages: [] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  expect(await screen.findByRole("button", { name: "Theme" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
+  const foot = within(await openWorkspaceColumn());
+  expect(foot.getByRole("button", { name: "Theme" })).toBeTruthy();
+  expect(foot.queryByRole("button", { name: "Administration" })).toBeNull();
 });
 
 test("an app opens on the conversation that moved last, and an address names another", async () => {

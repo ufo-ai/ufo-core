@@ -57,6 +57,61 @@ let answered = false;
  *  read a sidebar saying the workspace was quiet until the resting tick came round. */
 let stirred = false;
 
+/** The turns this browser itself admitted, each held by the chat that carries it, mapped to the
+ *  app that runs it. Work the member watched begin is marked at once rather than when the next
+ *  poll lands: a short turn can start and finish wholly between ticks, and the sidebar would say
+ *  the workspace was quiet while the member read the reply arriving. The wire owns every other
+ *  agent's state; a held app the wire already shows working is the wire's row untouched. A hold
+ *  ends where the turn does — the stream's close, or the failure that ends the send — never on a
+ *  wire answer, because the answer may have been asked before the engine held the turn. */
+const heldTurns = new Map<string, string>();
+
+let wired: Readonly<Record<string, AgentStatus>> = {};
+
+function restate(): void {
+  const statuses: Record<string, AgentStatus> = { ...wired };
+  for (const agentId of heldTurns.values()) {
+    const known = statuses[agentId];
+    if (known && (known.turn === "running" || known.turn === "queued")) continue;
+    statuses[agentId] = {
+      agent_id: agentId,
+      turn: "queued",
+      activity: null,
+      last_active_at: known?.last_active_at ?? null,
+      last_failed: known?.last_failed ?? false,
+    };
+  }
+  state = {
+    statuses,
+    working:
+      heldTurns.size > 0 ||
+      Object.values(wired).some(
+        (status) => status.turn === "running" || status.turn === "queued",
+      ),
+  };
+  for (const listener of listeners) listener();
+}
+
+export function holdTurn(chatKey: string, agentId: string): void {
+  heldTurns.set(chatKey, agentId);
+  restate();
+  wakeAppStatus();
+}
+
+export function releaseTurn(chatKey: string): void {
+  if (!heldTurns.delete(chatKey)) return;
+  restate();
+}
+
+/** A founding chat settles onto the conversation the send opened, and the hold moves with it so
+ *  the close that ends the turn finds it under the key the stream carries. */
+export function moveTurnHold(from: string, to: string): void {
+  const agentId = heldTurns.get(from);
+  if (agentId === undefined) return;
+  heldTurns.delete(from);
+  heldTurns.set(to, agentId);
+}
+
 function appStatusState(): AppStatusState {
   return state;
 }
@@ -115,15 +170,19 @@ async function read(): Promise<void> {
 
 /** A read that fails keeps the answer before it: a poll that landed as a blank would take the
  *  status dots off a drawn row until the next tick. */
+let wiredSaid = "";
+
 function hold(statuses: AgentStatus[]): void {
   /* The read crosses the wire, so what it carries is checked before it is believed: an answer
-     without the rows it claims is no answer, and the last good one stands. */
+     without the rows it claims is no answer, and the last good one stands. A workspace at rest
+     answers the same thing every tick, and a listener told about it would redraw the rail and
+     every framed lane for nothing — an answer that changed nothing changes nothing. */
   if (!Array.isArray(statuses)) return;
-  state = {
-    statuses: Object.fromEntries(statuses.map((status) => [status.agent_id, status])),
-    working: statuses.some((status) => status.turn === "running" || status.turn === "queued"),
-  };
-  for (const listener of listeners) listener();
+  const said = JSON.stringify(statuses);
+  if (said === wiredSaid) return;
+  wiredSaid = said;
+  wired = Object.fromEntries(statuses.map((status) => [status.agent_id, status]));
+  restate();
 }
 
 function poll(): void {
@@ -151,6 +210,10 @@ export function wakeAppStatus(): void {
 function quiet(): void {
   generation += 1;
   reading = false;
+  heldTurns.clear();
+  wired = {};
+  wiredSaid = "";
+  state = QUIET;
   if (typeof document !== "undefined") {
     document.removeEventListener("visibilitychange", woken);
   }
@@ -166,4 +229,25 @@ export function resetAppStatusStore(): void {
   reading = false;
   answered = false;
   stirred = false;
+}
+
+/** The dot the mark wears, read before any words: the live tone while the app holds work in
+ *  flight, and the blocked tone while it is waiting on the member.
+ *
+ *  An app that is paused, whose last run failed, or that was installed and never set up are one
+ *  state to a member scanning a column — none of them is going to do anything until they act. They
+ *  differ in what to do next, which is the row's own screen to say, not a second colour's.
+ *
+ *  Work outranks the rest: an app that is running is telling the member something is happening now,
+ *  and that is true whether or not its setup is finished.
+ *
+ *  The waiting tone breathes: an app that wants the member keeps asking until they act, so its dot
+ *  carries the working pulse for as long as it stands — and stands still for a member who asked
+ *  motion to. */
+export function statusDot(status: AgentStatus | undefined, setupDue: boolean): string | null {
+  if (status?.turn === "running" || status?.turn === "queued") return "bg-live";
+  if (setupDue || status?.turn === "parked" || status?.last_failed) {
+    return "bg-blocked animate-working motion-reduce:animate-none";
+  }
+  return null;
 }

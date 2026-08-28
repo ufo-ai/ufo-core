@@ -174,11 +174,11 @@
   --color-affirm: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
   --color-attention: color-mix(in srgb, var(--accent-secondary) 15%, var(--bkgd-100));
   --color-attention-ink: color-mix(in srgb, var(--accent-secondary) 70%, var(--text-primary));
-  /* The two states a presence dot states, in the two accents the portal already answers with: the
-     first marks what is live the way it marks a link, and the second is the one saturated tone a
-     surface wears when it wants the member, which is what a stopped app is asking for. */
-  --color-live: var(--accent-primary);
-  --color-blocked: var(--accent-secondary);
+  /* The two states a presence dot states, in the two hues status is read by everywhere: green for
+     an app at work, yellow for one waiting on the member. They are the palette's two status hues
+     and status is all they paint — the accents keep marking links and asks. */
+  --color-live: #16A34A;
+  --color-blocked: #EAB308;
 
   --shadow-raised:
     0 8px 18px color-mix(in srgb, var(--text-primary) 10%, transparent),
@@ -298,8 +298,9 @@
      it. A connector is granted or it is not, so the column holds one act per provider and is sized
      for the longest of their names rather than for the sentence above it. */
   --container-connect: 300px;
-  /* The sidebar collapsed to its glyph column: wide enough for one control and its focus ring. */
-  --container-rail: 48px;
+  /* The column opening the shell on the left: one glyph wide, so the marks it stacks sit on the
+     page's edge rather than in a column the pane could have used. */
+  --container-minirail: 40px;
   /* The slot an app's own list of things is read down, beside whatever that list opens: enough for
      a name and the one fact that tells two rows apart, and no more, because every pixel the list
      holds is one the record beside it does without. */

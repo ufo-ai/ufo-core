@@ -5,11 +5,12 @@ import {
   AGENTS_HASH,
   BUILDER_HASH,
   FIRST_RUN_HASH,
-  HOME_HASH,
+  HOME_NEW_LANE,
   agentHash,
   artifactTarget,
   bootRoute,
   chatHash,
+  homeHash,
   newChatHash,
   parseHash,
   sectionHash,
@@ -33,7 +34,7 @@ import { heldTrack, holdTrack, type TrackScreen } from "@/lib/tracks";
  *  and nothing writes the address or the track store while React renders. */
 
 /** A screen a track can stand on: the screen's own name in the store, the track its address states,
- *  and what that screen becomes once a track is written back onto it. Three route kinds carry a
+ *  and what that screen becomes once a track is written back onto it. Four route kinds carry a
  *  place; a route carrying none carries no track either. */
 type Standing = {
   screen: TrackScreen;
@@ -43,6 +44,16 @@ type Standing = {
 
 function standingOn(route: Route | null): Standing | null {
   if (route === null) return null;
+  if (route.kind === "home") {
+    return {
+      screen: "home",
+      opens: route.place.opens,
+      land: (held) => {
+        const place = { ...route.place, opens: held };
+        return { route: { kind: "home", place }, hash: homeHash(place) };
+      },
+    };
+  }
   if (route.kind === "agent") {
     return {
       screen: `agent:${route.agentId}`,
@@ -96,24 +107,46 @@ function standingOn(route: Route | null): Standing | null {
  *  back to a screen is not a new place, so that address is replaced: pushed, Back would walk the
  *  member through their own arrivals instead of out of the screen.
  *
- *  Standing on the screen already, the address owns whatever it says, an empty track included —
- *  that is the member closing the last slot, and a store answering over it would reopen what they
- *  had just shut.
+ *  A track the address states, an empty one included, is the member's own statement and the store
+ *  obeys it — shutting the last slot spells the empty key. An address stating no track at all is
+ *  the member naming the screen and nothing on it — a rail mark, a sidebar row, a bare link — and
+ *  the screen answers with the track it was left holding, whether they come from elsewhere or press
+ *  the screen's own name while standing on it.
  *
  *  It writes the track store and it writes the address, so it runs when the router starts and when
  *  it navigates, never while a screen renders. */
-function arrive(next: Route, before: Route | null): Route {
+function arrive(next: Route, before: Route | null, pressed = false): Route {
   const standing = standingOn(next);
   if (!standing) return next;
-  if (standing.opens || standing.screen === standingOn(before)?.screen) {
-    holdTrack(standing.screen, standing.opens ?? []);
-    return next;
+  const same = standing.screen === standingOn(before)?.screen;
+  if (standing.opens !== undefined) {
+    const opens = standing.opens;
+    /* The picker stands only where a press just put it. The store never remembers it, so no later
+       arrival restores one, and an address carrying it in from outside — a boot, a bookmark, a
+       link, a Back — lands without it: the lane means "the member asked for a tab here", and
+       nobody asked. The router's own navigations are the presses, wherever they start from. */
+    const settled =
+      same || pressed ? opens : opens.filter((lane) => !fleeting(standing.screen, lane));
+    holdTrack(
+      standing.screen,
+      settled.filter((lane) => !fleeting(standing.screen, lane)),
+    );
+    if (settled.length === opens.length) return next;
+    const landed = standing.land(settled);
+    history.replaceState(null, "", landed.hash);
+    return landed.route;
   }
   const kept = heldTrack(standing.screen);
   if (!kept.length) return next;
   const landed = standing.land(kept);
   history.replaceState(null, "", landed.hash);
   return landed.route;
+}
+
+/** A lane that lives only in the moment it was opened: home's picker. It is state a press writes,
+ *  never state a screen is returned to. */
+function fleeting(screen: TrackScreen, lane: string): boolean {
+  return screen === "home" && lane === HOME_NEW_LANE;
 }
 
 let held: Route | null = null;
@@ -155,7 +188,7 @@ export function navigate(hash: string, step: PlaceStep = "push"): void {
   }
   if (step === "replace") history.replaceState(null, "", hash);
   else if (location.hash !== hash) location.hash = hash;
-  publish(arrive(parseHash(hash), heldRoute()));
+  publish(arrive(parseHash(hash), heldRoute(), true));
 }
 
 const readAddress = () => publish(arrive(parseHash(location.hash), heldRoute()));
@@ -183,8 +216,10 @@ export function startRouter(): () => void {
   };
 }
 
+/** Home at the lanes it was left holding: the address states none, so the arrival hands back the
+ *  track the screen kept and writes it in the same tick. */
 export function openHome(): void {
-  navigate(HOME_HASH);
+  navigate(homeHash());
 }
 
 export function openChat(conversationId: string): void {
@@ -237,6 +272,10 @@ function stepPlace(step: PlaceStep, standing: boolean, hash: () => string | null
   const to = hash();
   if (to === null) return;
   navigate(to, step);
+}
+
+export function placeHome(place: WorkspacePlace, step: PlaceStep = "push"): void {
+  stepPlace(step, heldRoute().kind === "home", () => homeHash(place));
 }
 
 export function placeAgent(place: WorkspacePlace, step: PlaceStep): void {

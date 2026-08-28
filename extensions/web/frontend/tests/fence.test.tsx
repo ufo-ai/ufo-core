@@ -12,6 +12,7 @@ import {
   SETTINGS,
   TASK_KIND,
   TRIGGER_KIND,
+  atPhoneWidth,
   json,
   openAgentSettings,
   objectIndex,
@@ -31,7 +32,10 @@ beforeEach(() => {
   useStreamFake();
 });
 
+/** The act that leaves the view is the workspace column's own, which the shell draws at a phone
+ *  width alone — so the drawer holding that column is where the member presses it. */
 test("leaving a view discards the read left behind rather than painting it", async () => {
+  atPhoneWidth();
   let releaseConnectors: ((value: Response) => void) | null = null;
   vi.stubGlobal(
     "fetch",
@@ -59,7 +63,9 @@ test("leaving a view discards the read left behind rather than painting it", asy
   await waitFor(() => expect(releaseConnectors).not.toBeNull());
 
   await userEvent.keyboard("{Escape}");
-  const sidebar = within(screen.getByRole("navigation", { name: "Workspace" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  const sidebar = within(within(drawer).getByRole("navigation", { name: "Workspace" }));
   await userEvent.click(sidebar.getByRole("button", { name: "New chat" }));
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
 

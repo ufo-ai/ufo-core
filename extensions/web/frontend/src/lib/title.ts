@@ -7,6 +7,7 @@ import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 
 const PRODUCT = "ufo";
 const TRAIL = " · ";
+const HOME = "Home";
 const NEW_CONVERSATION = "New conversation";
 const FIRST_RUN = "Set up this workspace";
 const WORKSPACE = "Workspace";
@@ -39,9 +40,8 @@ export function pageTitle(
   agents: Agent[],
   rows: ChatRow[],
   linked: Record<string, OwnedConversation>,
-  main: Agent | null,
 ): string {
-  return titled(...trail(route, agents, rows, linked, main).map((step) => step.label));
+  return titled(...trail(route, agents, rows, linked).map((step) => step.label));
 }
 
 /** The crumb a band draws before its own name, off the very trail the tab title is joined from: a
@@ -53,9 +53,8 @@ export function pageCrumb(
   agents: Agent[],
   rows: ChatRow[],
   linked: Record<string, OwnedConversation>,
-  main: Agent | null,
 ): Crumb | undefined {
-  return trail(route, agents, rows, linked, main)[1];
+  return trail(route, agents, rows, linked)[1];
 }
 
 /** The trail as every reader of it takes it: innermost first, and only the steps that came back
@@ -66,9 +65,8 @@ function trail(
   agents: Agent[],
   rows: ChatRow[],
   linked: Record<string, OwnedConversation>,
-  main: Agent | null,
 ): Crumb[] {
-  return where(route, agents, rows, linked, main).filter((step): step is Crumb =>
+  return where(route, agents, rows, linked).filter((step): step is Crumb =>
     Boolean(step?.label),
   );
 }
@@ -80,7 +78,6 @@ function where(
   agents: Agent[],
   rows: ChatRow[],
   linked: Record<string, OwnedConversation>,
-  main: Agent | null,
 ): (Crumb | undefined)[] {
   const named = (agentId: string) => {
     const found = agents.find((agent) => agent.id === agentId);
@@ -88,7 +85,7 @@ function where(
   };
   switch (route.kind) {
     case "home":
-      return [{ label: NEW_CONVERSATION }, main ? agentCrumb(main) : undefined];
+      return [{ label: HOME }];
     case "first-run":
       return [{ label: FIRST_RUN }];
     case "new-chat":

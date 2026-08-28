@@ -674,7 +674,7 @@ function Composer({
   // to on its first render.
   const committed = useRef<string | null>(null);
   const [text, setText] = useState(() => {
-    const handed = founding ? takePendingAsk(target.agentId) : null;
+    const handed = founding ? takePendingAsk(target.agentId, target.key) : null;
     if (handed?.send) committed.current = handed.text;
     return handed?.text ?? readDraft(draftKey);
   });
@@ -713,7 +713,7 @@ function Composer({
   useEffect(() => {
     if (!founding) return;
     const take = () => {
-      const handed = takePendingAsk(target.agentId);
+      const handed = takePendingAsk(target.agentId, target.key);
       if (!handed) return;
       if (handed.send) committed.current = handed.text;
       setText(handed.text);

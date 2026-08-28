@@ -55,7 +55,7 @@ const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
  *  and each takes the glyph its kind is drawn with wherever a hit of that kind stands. App-shipped
  *  screens stand in the palette as the apps themselves, so only the portal's own sections list. */
 const PLACES: { label: string; hash: string; icon: TablerIcon }[] = [
-  { label: "Chat", hash: HOME_HASH, icon: IconMessage },
+  { label: "Home", hash: HOME_HASH, icon: IconMessage },
   { label: "Apps", hash: AGENTS_HASH, icon: IconApps },
   ...SECTIONS.flatMap((section) => {
     const view = SECTION_VIEWS[section];
@@ -155,7 +155,7 @@ export function Spotlight({
           primary: named.name + ": " + wanted,
           icon: IconMessage,
           run: () => {
-            setPendingAsk(named.id, wanted, true);
+            setPendingAsk(named.id, wanted, true, "new:" + named.id);
             take(newChatHash(named.id));
           },
         }

@@ -1,8 +1,9 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { chatHash } from "@/lib/route";
 import { setReattachTimer } from "@/lib/turnStream";
 
 import { AGENT, ARRIVAL_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
@@ -19,13 +20,11 @@ beforeEach(() => {
   useStreamFake();
 });
 
-/** Leave for another conversation and settle there. A conversation is reached by its own address,
- *  so this is what switching between two of them is. */
-async function at(conversationId: string) {
-  act(() => {
-    location.hash = "#/c/" + conversationId;
-  });
-  await screen.findByText("No messages in this conversation yet.");
+/** Leave for another conversation. A conversation is reached by its own address, so this is what
+ *  switching between two of them is. */
+function follow(hash: string): void {
+  location.hash = hash;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 
 function fatal(stream: StreamFake) {
@@ -257,17 +256,19 @@ test("a draft survives leaving the chat and is cleared by sending", async () => 
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "half a thought");
   window.dispatchEvent(new Event("pagehide"));
-  await at(OTHER_ID);
-  await at(CONVO_ID);
+  follow(chatHash(OTHER_ID));
+  await screen.findByText("No messages in this conversation yet.");
+  follow(chatHash(CONVO_ID));
 
-  const input = screen.getByLabelText("Ask UFO") as HTMLInputElement;
-  expect(input.value).toBe("half a thought");
+  const draft = () => (screen.getByLabelText("Ask UFO") as HTMLInputElement).value;
+  await waitFor(() => expect(draft()).toBe("half a thought"));
 
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   window.dispatchEvent(new Event("pagehide"));
-  await at(OTHER_ID);
-  await at(CONVO_ID);
-  expect((screen.getByLabelText("Ask UFO") as HTMLInputElement).value).toBe("");
+  follow(chatHash(OTHER_ID));
+  await waitFor(() => expect(draft()).toBe(""));
+  follow(chatHash(CONVO_ID));
+  await waitFor(() => expect(draft()).toBe(""));
 });
 
 test("the terminal's full text overrides a gap-truncated replay", async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   IconClipboardCheck,
   IconDots,
@@ -10,7 +10,6 @@ import {
   IconSettings,
 } from "@tabler/icons-react";
 
-import { attachBridge, type BridgeHandle } from "@/lib/bridge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -41,13 +40,12 @@ import {
   COMPOSE,
   agentSetupHash,
   mergePlace,
-  serializePlace,
   type PlaceStep,
   type WorkspacePlace,
 } from "@/lib/route";
 import { navigate } from "@/lib/router";
-import { agentCrumb } from "@/lib/title";
-import type { Agent, Conversation, Homepage, Member } from "@/lib/types";
+import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";
+import type { Agent, Conversation, Member } from "@/lib/types";
 
 /** What the half is called before a conversation exists to name it, and the act that starts one.
  *  The act stands with the acts at the far end of the band, where every act on the whole surface
@@ -145,22 +143,6 @@ function AppMenu({
   );
 }
 
-/** How long the arriving frame takes to fade over the one it replaces, and how long after that the
- *  replaced frame is kept mounted under it. The page it swaps in has already fired `load`, so the
- *  fade is the whole wait — nothing here delays the swap past the paint it exists to smooth. */
-const FRAME_SWAP_MS = 200;
-const HOMEPAGE_POLL_MS = 30_000;
-
-const HOMEPAGE_SANDBOX =
-  "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock";
-
-/** One mounted copy of the homepage frame. A redeploy or ended session remounts the page at the
- *  same URL, and a frame torn down the instant its successor mounts leaves the member watching
- *  the successor's blank document paint — so the standing copy holds the screen until the
- *  arriving one has loaded, and the two cross-fade. `key` is the URL, deploy generation, and
- *  session refresh together, the identity the pane already remounts on. */
-type HeldFrame = { key: string; url: string; loaded: boolean };
-
 export type AgentPaneProps = {
   agent: Agent;
   member: Member;
@@ -209,28 +191,10 @@ export function AgentPane({
   onPlace,
 }: AgentPaneProps) {
   const [settles, setSettles] = useState(0);
-  const [frameRefresh, setFrameRefresh] = useState(0);
-  const sessionEnded = useRef(false);
-  const refreshEndedSession = useCallback(() => {
-    if (!sessionEnded.current) return;
-    sessionEnded.current = false;
-    setFrameRefresh((value) => value + 1);
-  }, []);
   const viewer = useViewer();
   const agents = useAgents();
   const target = place.opens?.[0];
-  const boot: Homepage = agent.homepage ?? { state: "none" };
-  const [homepagePolling, setHomepagePolling] = useState(false);
-  useEffect(() => {
-    const start = window.setTimeout(() => setHomepagePolling(true), HOMEPAGE_POLL_MS);
-    return () => window.clearTimeout(start);
-  }, []);
-  const site = usePanelRead<Homepage>(
-    homepagePolling ? "/agents/" + agent.id + "/homepage" : null,
-    settles,
-    HOMEPAGE_POLL_MS,
-  );
-  const home: Homepage = site.phase === "ready" ? site.payload : boot;
+  const home = useHomepage(agent, settles);
   // The chat app's page is the conversation screen itself, so a conversation it holds is that page's
   // own target rather than a chat beside it. The main agent is the chat app's row, so this is every
   // conversation the member has: each stands in the page's own column, never in a lane over it.
@@ -391,10 +355,6 @@ export function AgentPane({
 
   const url = home.state === "set" ? home.url : null;
   const generation = home.state === "set" ? (home.deploy_generation ?? 0) : 0;
-  useEffect(() => {
-    window.addEventListener("focus", refreshEndedSession);
-    return () => window.removeEventListener("focus", refreshEndedSession);
-  }, [refreshEndedSession]);
   // The half stands for a homepage that exists; an app with none draws one column, because a column
   // whose only content is the sentence that it is empty takes half the screen to say what the app
   // having no homepage already says.
@@ -416,101 +376,10 @@ export function AgentPane({
     !beside &&
     railAgent === null &&
     listed.phase === "ready";
-  // The bridge is how the framed page reads the member's data and drives navigation; it is bound to
-  // the live frame and rebound when a redeploy remounts it under a new key, so each set of bytes
-  // talks to exactly one listener. The page stands at this pane's own place, less the track the pane
-  // holds as a slot itself — one meaning per channel, so nothing is opened twice. The place rides
-  // `init` on a fresh frame and the bridge's own `place` message while the frame stands, because a
-  // rail click lands on a page that already booted. It crosses whole: a frame handed one key of a
-  // place could only stand the screen the address names by guessing the rest.
-  //
-  // The page's own step of the trail crosses with it, as the crumb its band draws over a name the
-  // shell never read. The app is where the page stands, so this is that step and the shell derives
-  // no second answer to it.
-  const frameRef = useRef<HTMLIFrameElement>(null);
-  const bridgeRef = useRef<BridgeHandle | null>(null);
+  // The framed page stands at this pane's own place, less the track the pane holds as a slot
+  // itself — one meaning per channel, so nothing is opened twice. It crosses whole: a frame handed
+  // one key of a place could only stand the screen the address names by guessing the rest.
   const framed = mergePlace(place, conversational ? { opens: undefined } : {});
-  const framedRef = useRef(framed);
-  framedRef.current = framed;
-  const framedAt = serializePlace(framed);
-  // The frames the pane is holding: the page showing, and — through a redeploy — the copy arriving
-  // under the new generation. Reconciled in render rather than an effect so the arriving frame
-  // mounts in the same commit that moves the bridge's dependencies, which is what points `frameRef`
-  // at it before the bridge attaches. At most two stand at once: the last loaded copy and the one
-  // arriving, so a redeploy racing another drops the copy that never showed.
-  const [frames, setFrames] = useState<HeldFrame[]>([]);
-  if (url === null) {
-    if (frames.length > 0) setFrames([]);
-  } else {
-    const frameKey = url + ":" + generation + ":" + frameRefresh;
-    if (frames.at(-1)?.key !== frameKey) {
-      setFrames([
-        ...frames.filter((frame) => frame.loaded).slice(-1),
-        { key: frameKey, url, loaded: false },
-      ]);
-    }
-  }
-  // A load promotes only the newest frame: one from a copy already being replaced would fade in
-  // bytes the next deploy has superseded. The replaced frame unmounts once the fade is over, and a
-  // frame that never loads leaves it standing — the member keeps the page they had.
-  const landed = (key: string) => {
-    setFrames((held) =>
-      held.at(-1)?.key === key
-        ? held.map((frame) => (frame.key === key ? { ...frame, loaded: true } : frame))
-        : held,
-    );
-    window.setTimeout(() => {
-      setFrames((held) =>
-        held.at(-1)?.key === key && held.at(-1)?.loaded ? held.slice(-1) : held,
-      );
-    }, FRAME_SWAP_MS);
-  };
-  const foundedRef = useRef<(agentId: string, conversationId: string, title: string) => void>(
-    () => {},
-  );
-  foundedRef.current = (agentId, conversationId, title) => {
-    const speaking = agents.find((entry) => entry.id === agentId);
-    if (speaking) {
-      onFounded(speaking, conversationId, title);
-      setSettles((count) => count + 1);
-    }
-  };
-  useEffect(() => {
-    const frame = frameRef.current;
-    if (!frame) return;
-    const handle = attachBridge({
-      iframe: frame,
-      member,
-      agents,
-      agentId: agent.id,
-      place: framedRef.current,
-      crumb: agentCrumb(agent),
-      chatSurface: agent.app === CHAT_SURFACE,
-      onCreated: (agentId, conversationId, title) =>
-        foundedRef.current(agentId, conversationId, title),
-      onSessionEnded: () => {
-        sessionEnded.current = true;
-        if (document.hasFocus()) refreshEndedSession();
-      },
-    });
-    bridgeRef.current = handle;
-    return () => {
-      bridgeRef.current = null;
-      handle.detach();
-    };
-  }, [
-    member,
-    agents,
-    agent.id,
-    agent.app,
-    url,
-    generation,
-    frameRefresh,
-    refreshEndedSession,
-  ]);
-  useEffect(() => {
-    bridgeRef.current?.place(framedRef.current);
-  }, [framedAt]);
 
   /** The conversation, whole. Its own band is drawn where the conversation is the screen; standing
    *  in a lane, the lane's header already states the name and draws the way out, and a second band
@@ -753,31 +622,17 @@ export function AgentPane({
               </Button>
             )}
           </div>
-          {/* Each frame's key carries the deploy generation, so a redeploy at the same URL mounts
-              a fresh copy rather than showing the page the member last loaded — arriving invisible
-              over the standing one and fading in on its own load, so the swap never paints the
-              blank document. The box and the frames wear the pane's own background and the portal's
-              color-scheme, so what shows through an empty frame is the pane rather than a browser's
-              white canvas. */}
-          <div className="relative min-h-0 flex-1 bg-surface">
-            {frames.map((frame, index) => (
-              <iframe
-                key={frame.key}
-                ref={index === frames.length - 1 ? frameRef : undefined}
-                src={frame.url}
-                title={agentName(agent.name) + " homepage"}
-                sandbox={HOMEPAGE_SANDBOX}
-                referrerPolicy="no-referrer"
-                allow="fullscreen"
-                onLoad={() => landed(frame.key)}
-                className={cn(
-                  "absolute inset-0 size-full border-0 bg-surface",
-                  "transition-opacity duration-200 ease-out [color-scheme:inherit]",
-                  frame.loaded ? "opacity-100" : "pointer-events-none opacity-0",
-                )}
-              />
-            ))}
-          </div>
+          <HomepageFrame
+            agent={agent}
+            member={member}
+            url={url}
+            generation={generation}
+            place={framed}
+            onFounded={(speaking, conversationId, title) => {
+              onFounded(speaking, conversationId, title);
+              setSettles((count) => count + 1);
+            }}
+          />
         </section>
         {slot}
       </>

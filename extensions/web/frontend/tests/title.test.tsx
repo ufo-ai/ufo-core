@@ -30,17 +30,17 @@ const LINKED: OwnedConversation = {
 };
 
 const titled = (route: Route, linked: Record<string, OwnedConversation> = {}) =>
-  pageTitle(route, [AGENT, SECOND], [CHAT_ROW], linked, AGENT);
+  pageTitle(route, [AGENT, SECOND], [CHAT_ROW], linked);
 
 const crumbed = (route: Route, linked: Record<string, OwnedConversation> = {}) =>
-  pageCrumb(route, [AGENT, SECOND], [CHAT_ROW], linked, AGENT);
+  pageCrumb(route, [AGENT, SECOND], [CHAT_ROW], linked);
 
 beforeEach(() => {
   useStreamFake();
 });
 
 test("every page names where the member is, innermost first, then the product", () => {
-  expect(titled({ kind: "home" })).toBe("New conversation · Assistant · ufo");
+  expect(titled({ kind: "home", ...PLACE })).toBe("Home · ufo");
   expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New conversation · Second · ufo");
   expect(titled({ kind: "agents" })).toBe("Apps · ufo");
   expect(titled({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBe("Assistant · ufo");
@@ -76,7 +76,6 @@ test("a conversation is named by its own subject, and one still unread by the pr
  *  states after that name: one derivation answers both, and the two cannot disagree. The step carries
  *  the address it stands at, and a page that is its own landmark has no step above it. */
 test("the crumb is the step the tab title names after the page", () => {
-  expect(crumbed({ kind: "home" })).toEqual({ label: "Assistant", at: agentHash(AGENT_ID) });
   expect(crumbed({ kind: "chat", conversationId: CONVO_ID })).toEqual({
     label: "Assistant",
     at: agentHash(AGENT_ID),
@@ -88,6 +87,15 @@ test("the crumb is the step the tab title names after the page", () => {
   expect(crumbed({ kind: "workspace", view: "team", ...PLACE })).toEqual({ label: "Workspace" });
   expect(crumbed({ kind: "agents" })).toBeUndefined();
   expect(crumbed({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBeUndefined();
+  expect(crumbed({ kind: "home", ...PLACE })).toBeUndefined();
+});
+
+/** Home is one screen however many lanes stand on it: the apps are the member's own arrangement of
+ *  the page, not places the trail passes through, so the tab names the screen and the track it
+ *  states leaves the title alone. */
+test("home is named for itself, whatever its track holds", () => {
+  expect(titled({ kind: "home", place: { opens: [AGENT_ID, SECOND_ID] } })).toBe("Home · ufo");
+  expect(crumbed({ kind: "home", place: { opens: [AGENT_ID] } })).toBeUndefined();
 });
 
 /** A conversation carried on an extension's own surface is held by an app no roster row of this
@@ -96,7 +104,7 @@ test("the crumb is the step the tab title names after the page", () => {
 test("a step no roster row reaches is the app's name and nothing to press", () => {
   const held = { ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "daily-brief" };
   const route: Route = { kind: "chat", conversationId: CONVO_ID };
-  expect(pageCrumb(route, [AGENT], [held], {}, AGENT)).toEqual({ label: "Daily-Brief" });
+  expect(pageCrumb(route, [AGENT], [held], {})).toEqual({ label: "Daily-Brief" });
 });
 
 test("the tab follows the hash the member opens", async () => {

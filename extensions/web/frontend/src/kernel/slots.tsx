@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MutableRefObject,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -99,6 +100,7 @@ type Track = {
   place: (entry: Entry, after: string | undefined) => void;
   drop: (id: string) => void;
   move: ((id: string, onto: string) => void) | undefined;
+  arrivals: MutableRefObject<Set<string>>;
 };
 
 const TrackContext = createContext<Track>({
@@ -107,6 +109,7 @@ const TrackContext = createContext<Track>({
   place: () => {},
   drop: () => {},
   move: undefined,
+  arrivals: { current: new Set() },
 });
 
 const HereContext = createContext<string | undefined>(undefined);
@@ -115,7 +118,7 @@ const LIFTED = "text/plain";
 
 const ROW = "flex min-h-0 gap-px overflow-x-auto bg-edge max-narrow:snap-x max-narrow:snap-mandatory";
 const TRACK = "relative flex-1 " + ROW;
-const OVER = "absolute inset-y-0 end-0 z-10 max-w-full " + ROW;
+const OVER = "absolute inset-0 z-10 border-x border-edge " + ROW;
 
 const PAGED =
   "max-narrow:min-w-full max-narrow:basis-full max-narrow:grow-0 max-narrow:shrink-0 " +
@@ -210,12 +213,10 @@ function inOrder(entries: Entry[], opens: string[]): Entry[] {
  *  `over` is the host a lane keeps for the acts raised inside it. Such an act cannot be drawn in
  *  the lane it is already standing in: filling that lane means emptying it of the panel, which
  *  unmounts the very tab that raised the act and takes the act with it. So the lane's own track
- *  lies over it instead — the opener stays mounted underneath, and the form still opens beside
- *  rather than over the middle of the screen. The cover reaches only as far as what stands in it:
- *  anchored at the track's end, no wider than its lanes, never over the openers it was raised from.
- *  A cover across the whole host takes the next act with it — an app's connections and the act that
- *  adds one sit side by side under it, so opening one lane would lock out the opener of the next,
- *  which is a thing only a real browser can feel. */
+ *  lies over it instead — the opener stays mounted underneath, and the track covers the whole of
+ *  the pane, edge to edge, its lanes splitting that width in equal shares. A screen whose every
+ *  lane is a lane — home — is the cover's whole use: the pane under it holds nothing a member
+ *  could press, so covering all of it locks nothing out. */
 export function SlotTrack({
   over = false,
   opens,
@@ -273,11 +274,25 @@ export function SlotTrack({
       }),
     [],
   );
+  /* The lanes that arrived by a press, told apart from a row the screen stood whole: a lane joining
+     a row already standing, or one lane joining an empty row, is an arrival — it scrolls into view
+     and may take focus as it lands. A screen mounting several lanes at once is restating a row the
+     member already arranged, and a track that scrolled or focused each of those in turn would open
+     paged to the last lane rather than the first. */
+  const arrivals = useRef<Set<string>>(new Set());
+  const prior = useRef<Set<string> | null>(null);
   const track = useMemo(
-    () => ({ hosted: true, hosts, place, drop, move }),
+    () => ({ hosted: true, hosts, place, drop, move, arrivals }),
     [hosts, place, drop, move],
   );
   const standing = opens === undefined ? entries : inOrder(entries, opens);
+  const ids = standing.map((entry) => entry.id);
+  if (prior.current !== null && (prior.current.size > 0 || ids.length === 1)) {
+    for (const id of ids) if (!prior.current.has(id)) arrivals.current.add(id);
+  }
+  useEffect(() => {
+    prior.current = new Set(ids);
+  });
   const shown = standing.length > 0;
   const lanes = standing.map((entry) => <SlotHost key={entry.id} id={entry.id} hold={hold} />);
   const full = shown && opens !== undefined && opens.length >= TRACK_MAX_SLOTS;
@@ -360,6 +375,15 @@ export function useSlot(
     id: string;
     kind?: SlotKind;
     title?: string;
+    /** The mark the band wears before the title, where the kind's own says less than the lane
+     *  holds — a lane standing an app wears that app's mark. Null is a band with no mark. */
+    glyph?: ReactNode;
+    /** The surface the lane wears where the track's own reads wrong — a lane that is an offer
+     *  rather than a page takes the filled tone, band and body in one coat. */
+    tone?: string;
+    /** A lane the member cannot carry: its band is never a handle, though the rest of the row still
+     *  reorders around it. */
+    fixed?: boolean;
     /** Controls the lane's own header carries — a panel whose acts belong to what it holds. */
     acts?: ReactNode;
     /** The id of the line inside the lane that states what it does. */
@@ -368,9 +392,20 @@ export function useSlot(
     onClose?: () => void;
   },
 ): ReactNode {
-  const { hosted, hosts, place, drop, move } = useContext(TrackContext);
+  const { hosted, hosts, place, drop, move, arrivals } = useContext(TrackContext);
   const here = useContext(HereContext);
-  const { id, kind = "reading", title, acts, describes, crumb, onClose } = slot;
+  const {
+    id,
+    kind = "reading",
+    title,
+    glyph,
+    tone,
+    fixed = false,
+    acts,
+    describes,
+    crumb,
+    onClose,
+  } = slot;
   const on = node !== null;
   const held = useRef<HTMLElement | null>(null);
   const host = hosts.get(id);
@@ -385,12 +420,13 @@ export function useSlot(
     place({ id, kind, title }, here);
   }, [on, id, kind, title, here, place]);
 
+  const arrived = useRef(false);
   const takes = on && host !== undefined && onClose !== undefined;
   useEffect(() => {
     if (!takes) return;
     const before = document.activeElement;
     const panel = held.current;
-    if (!panel?.contains(document.activeElement)) panel?.focus();
+    if (arrived.current && !panel?.contains(document.activeElement)) panel?.focus();
     return () => {
       if (!(before instanceof HTMLElement) || !document.body.contains(before)) return;
       const active = document.activeElement;
@@ -401,10 +437,15 @@ export function useSlot(
     };
   }, [takes]);
 
-  const land = useCallback((panel: HTMLElement | null) => {
-    held.current = panel;
-    panel?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, []);
+  const land = useCallback(
+    (panel: HTMLElement | null) => {
+      held.current = panel;
+      if (!panel || !arrivals.current.delete(id)) return;
+      arrived.current = true;
+      panel.scrollIntoView({ block: "nearest", inline: "nearest" });
+    },
+    [arrivals, id],
+  );
 
   if (!on) return null;
   if (!hosted) return node;
@@ -430,13 +471,13 @@ export function useSlot(
             move(event.dataTransfer.getData(LIFTED), id);
           })
         }
-        className={cn(SLOT, WIDTHS[kind])}
+        className={cn(SLOT, WIDTHS[kind], tone)}
         style={{ "--pane-acts-inset": "0px" } as CSSProperties}
       >
         <Header
           pinned
           heading={2}
-          {...(Glyph ? { glyph: <Glyph aria-hidden /> } : {})}
+          {...(glyph !== undefined ? { glyph } : Glyph ? { glyph: <Glyph aria-hidden /> } : {})}
           crumb={crumb}
           title={title}
           acts={
@@ -454,7 +495,9 @@ export function useSlot(
           }
           onClose={onClose}
           closes={title}
-          onLift={move && ((event) => event.dataTransfer.setData(LIFTED, id))}
+          onLift={
+            move && !fixed ? (event) => event.dataTransfer.setData(LIFTED, id) : undefined
+          }
         />
         <div className="flex min-h-0 flex-1 flex-col">{node}</div>
       </section>

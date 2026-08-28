@@ -46,19 +46,6 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
   }));
 }
 
-const HELD_SIDEBAR = "sidebar";
-
-/** Whether the sidebar stands folded to its glyph rail. The shell opens on the rail: the sidebar is
- *  a place a member goes to reach another screen, not the screen they came for, so the width it
- *  takes belongs to the screen until they ask for it — and once they have asked, that choice is
- *  theirs on every load after. */
-export function heldSidebar(): boolean {
-  return localStorage.getItem(HELD_SIDEBAR) !== "expanded";
-}
-
-export function holdSidebar(collapsed: boolean): void {
-  localStorage.setItem(HELD_SIDEBAR, collapsed ? "collapsed" : "expanded");
-}
 
 const HELD_PINNED = "pinned-rows";
 

@@ -11,11 +11,15 @@ import {
   AGENTS_HASH,
   BUILDER_HASH,
   FIRST_RUN_HASH,
+  HOME_NEW_LANE,
   agentHash,
   artifactTarget,
   bootRoute,
   chatHash,
   conversationSlotHash,
+  homeHash,
+  homeLaneAgent,
+  mintHomeLane,
   parseHash,
   routeIs,
   sectionHash,
@@ -214,9 +218,41 @@ test("a screen that carries no place is read whatever the address arrived holdin
   expect(parseHash(AGENTS_HASH + "?x=1")).toEqual({ kind: "agents" });
   expect(parseHash(BUILDER_HASH + "?x=1")).toEqual({ kind: "agents", build: true });
   expect(parseHash(FIRST_RUN_HASH + "?x=1")).toEqual({ kind: "first-run" });
-  expect(parseHash("")).toEqual({ kind: "home" });
-  expect(parseHash("#")).toEqual({ kind: "home" });
-  expect(parseHash("#/")).toEqual({ kind: "home" });
+});
+
+/** Home stands a track like every other screen: its lanes are the apps the member opened, in the
+ *  order the address states them, so a link to home hands someone else the row of lanes the member
+ *  is looking at rather than a screen they have to arrange again. */
+test("home carries its lanes, and the bare address is home standing none", () => {
+  expect(parseHash("")).toEqual({ kind: "home", place: {} });
+  expect(parseHash("#")).toEqual({ kind: "home", place: {} });
+  expect(parseHash("#/")).toEqual({ kind: "home", place: {} });
+  expect(parseHash("#/?ref=mail")).toEqual({ kind: "home", place: {} });
+
+  const lanes: WorkspacePlace = { opens: [AGENT.id, HOME_NEW_LANE] };
+  expect(homeHash()).toBe("#/");
+  expect(homeHash(lanes)).toBe("#/?open=" + AGENT.id + "%7E" + HOME_NEW_LANE);
+  expect(parseHash(homeHash(lanes))).toEqual({ kind: "home", place: lanes });
+  expect(parseHash("#/?open=a~~b")).toEqual({ kind: "bad-link" });
+});
+
+/** An app opened twice on home is two lanes over one app, so the lane names the app and the
+ *  instance both, and either lane says which app it stands. The picker names no app, which is what
+ *  tells it from every lane that does. */
+test("a home lane names the app it stands, and the instance of it", () => {
+  expect(mintHomeLane(AGENT.id, [])).toBe(AGENT.id);
+  expect(mintHomeLane(AGENT.id, [HOME_NEW_LANE])).toBe(AGENT.id);
+  expect(mintHomeLane(AGENT.id, [AGENT.id])).toBe(AGENT.id + ".2");
+  expect(mintHomeLane(AGENT.id, [AGENT.id, AGENT.id + ".2"])).toBe(AGENT.id + ".3");
+  expect(mintHomeLane(AGENT.id, [AGENT.id, AGENT.id + ".3"])).toBe(AGENT.id + ".2");
+
+  expect(homeLaneAgent(AGENT.id)).toBe(AGENT.id);
+  expect(homeLaneAgent(AGENT.id + ".2")).toBe(AGENT.id);
+  expect(homeLaneAgent(HOME_NEW_LANE)).toBeNull();
+  expect(parseHash(homeHash({ opens: [mintHomeLane(AGENT.id, [AGENT.id])] }))).toEqual({
+    kind: "home",
+    place: { opens: [AGENT.id + ".2"] },
+  });
 });
 
 /** The kind test the kit publishes: a page holds no route type at runtime, and this is the one
@@ -476,7 +512,7 @@ test("a hash under the torn-out subagent namespace names no route", () => {
 test("a conversation named as a query target boots on that conversation", () => {
   expect(bootRoute("", "?c=" + CONVO_ID)).toEqual({ kind: "chat", conversationId: CONVO_ID });
   expect(bootRoute("#/agents", "?c=" + CONVO_ID)).toEqual({ kind: "agents" });
-  expect(bootRoute("", "")).toEqual({ kind: "home" });
+  expect(bootRoute("", "")).toEqual({ kind: "home", place: {} });
 });
 
 test("the sign-in that founded the workspace boots on its opening chat", () => {
@@ -488,7 +524,7 @@ test("the sign-in that founded the workspace boots on its opening chat", () => {
     conversationId: CONVO_ID,
   });
   expect(bootRoute("#/agents", "?first=1")).toEqual({ kind: "agents" });
-  expect(bootRoute("", "")).toEqual({ kind: "home" });
+  expect(bootRoute("", "")).toEqual({ kind: "home", place: {} });
 });
 
 test("a conversation permalink that is not a lowercase uuid names no route", () => {

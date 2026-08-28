@@ -1,5 +1,5 @@
 import { BASE, getJson } from "@/lib/api";
-import { wakeAppStatus } from "@/lib/appStatusStore";
+import { holdTurn, moveTurnHold, releaseTurn } from "@/lib/appStatusStore";
 import { money } from "@/lib/money";
 import {
   chatState,
@@ -254,6 +254,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
    *  bubble by a stream that ended. */
   const close = () => {
     release();
+    releaseTurn(chatKey);
     updateChat(chatKey, (state) => ({
       ...state,
       busy: false,
@@ -647,7 +648,7 @@ export async function sendMessage(
     return "refused";
   }
   bumpEpoch(chatKey);
-  wakeAppStatus();
+  holdTurn(chatKey, target.agentId);
   const token = String(++SENDS);
   updateChat(chatKey, (state) => ({
     ...state,
@@ -729,6 +730,7 @@ export async function sendMessage(
       return "accepted";
     }
     streamKey = accepted.conversation_id;
+    moveTurnHold(chatKey, streamKey);
     migrateChat(chatKey, streamKey, accepted.title);
     target.onCreated?.(accepted.conversation_id, accepted.title);
   }
@@ -749,7 +751,7 @@ export async function answerQuestions(
   const state = chatState(chatKey);
   if (!answers.length || state.busy || state.messages === null) return;
   bumpEpoch(chatKey);
-  wakeAppStatus();
+  holdTurn(chatKey, target.agentId);
   updateChat(chatKey, (current) => ({ ...current, busy: true, live: liveTurn() }));
   for (const { index, body } of answers) {
     let res: Response;
@@ -828,6 +830,7 @@ export async function stopTurn(target: ChatTarget, turnId: string): Promise<void
  *  it: the failure is the POST's alone, and a turn already streaming goes on — taking its bubble
  *  down would collapse the reply the member is reading under a send that never reached it. */
 function failTurn(chatKey: string, message: string): void {
+  if (!(chatState(chatKey).turn !== null && SOURCES.has(chatKey))) releaseTurn(chatKey);
   updateChat(chatKey, (state) => {
     const tailing = state.turn !== null && SOURCES.has(chatKey);
     return {

@@ -349,7 +349,7 @@ test("Build app stands below the todos and hands the ask over unsent", async () 
   await userEvent.click(await screen.findByRole("button", { name: "Build app" }));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
-  const handed = takePendingAsk(AGENT_ID);
+  const handed = takePendingAsk(AGENT_ID, "new:" + AGENT_ID);
   expect(handed?.send).toBe(false);
   expect(handed?.text).toContain("Load your homepage skill");
   // The ask names the skill and stops: the steps live in the skill, and repeating them here would

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -44,8 +44,12 @@ beforeEach(() => {
   useStreamFake();
 });
 
-async function openAdministration() {
-  await userEvent.click(screen.getByRole("button", { name: "Administration" }));
+/** The workspace column, which the shell draws at a phone width alone: the drawer the hamburger
+ *  opens holds it, drawn whole. Every act that moves the page shuts the drawer. */
+async function openWorkspaceColumn(): Promise<HTMLElement> {
+  await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  return within(drawer).getByRole("navigation", { name: "Workspace" });
 }
 
 test("the built page names a hashed module and stylesheet under this surface", () => {
@@ -167,6 +171,7 @@ test("a boot whose network fails says so rather than sending a live session to s
 });
 
 test("an admin is offered administration, which reads the admin projection", async () => {
+  atPhoneWidth();
   wire({
     "/api/admin": () =>
       json({
@@ -179,7 +184,8 @@ test("an admin is offered administration, which reads the admin projection", asy
   });
   render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
 
-  await openAdministration();
+  const foot = within(await openWorkspaceColumn());
+  await userEvent.click(foot.getByRole("button", { name: "Administration" }));
   expect(await screen.findByText("Seated")).toBeTruthy();
   expect(screen.getByText("Every member")).toBeTruthy();
   expect(screen.getByText("No spend caps are set.")).toBeTruthy();
@@ -187,35 +193,45 @@ test("an admin is offered administration, which reads the admin projection", asy
   expect(document.querySelectorAll("h1").length).toBe(1);
 });
 
-test("the sidebar names the shell's destinations and states the member at its foot", () => {
+/** The shell at a desk width is the rail on the left: the mark that leads home, the act that opens a
+ *  tab, search, one tile per tab home stands, the act that builds an app, and the workspace at its
+ *  foot. The column is a glyph's own width, so every tile is a mark alone and the word it stands for
+ *  is held at the pointer. */
+test("the desk shell is a rail of marks, each holding its name at the pointer", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  const names = within(sidebar)
-    .getAllByRole("button")
-    .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
-  expect(names).toEqual([
-    "Search",
-    "Expand sidebar",
-    "New chat",
-    "Create app",
-    "Apps",
-    agentName(AGENT.name),
-    "Connectors",
-    "Workspace",
-    "Theme",
-    "Sign out",
-  ]);
-  expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
+  const rail = await screen.findByRole("navigation", { name: "Tabs" });
+  const names = () =>
+    within(rail)
+      .getAllByRole("button")
+      .map((entry) => entry.getAttribute("aria-label"));
+  await waitFor(() =>
+    expect(names()).toEqual([
+      "Home",
+      "New tab",
+      "Search",
+      agentName(AGENT.name),
+      "New app",
+      "Workspace",
+      MEMBER.email,
+    ]),
+  );
+
+  const tile = within(rail).getByRole("button", { name: agentName(AGENT.name) });
+  expect(tile.textContent).toBe("");
+  fireEvent.focus(tile);
+  expect((await screen.findByRole("tooltip")).textContent).toBe(agentName(AGENT.name));
 });
 
+/** The workspace column keeps one section, the apps, and the drawer that holds it at a phone width
+ *  draws it whole. */
 test("a section heading is the fold and states which way it stands, and carries no other act", async () => {
+  atPhoneWidth();
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const sidebar = await openWorkspaceColumn();
   /* The band is the fold and states which way it stands. It opens no menu: a heading is a place
      before it is an act, and the act it does carry is the one a member does to a heading. */
   const band = within(sidebar).getByRole("button", { name: "Apps" });
@@ -228,11 +244,11 @@ test("a section heading is the fold and states which way it stands, and carries 
 });
 
 test("the apps section yields its height rather than pushing the sidebar's foot off the screen", async () => {
+  atPhoneWidth();
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const sidebar = await openWorkspaceColumn();
   const apps = within(sidebar).getByRole("navigation", { name: "Apps" });
 
   /* The nav scrolls nowhere, so a section held at its natural height would push the rows under it
@@ -252,20 +268,11 @@ test("the apps section yields its height rather than pushing the sidebar's foot 
   expect(within(sidebar).getByRole("button", { name: "Workspace" })).toBeTruthy();
 });
 
-test("the shell opens on the rail, and a sidebar the member widened stays widened", async () => {
-  wire({});
-  const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
-  expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
-  first.unmount();
-
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  expect(screen.getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
-});
-
-/** A desk width draws the mark at the sidebar's head; a phone width keeps it on the bar, centred
-test("until the member pins for themselves, the workspace's apps stand pinned, chat first", () => {
+/** Until the member pins for themselves, the chat app stands pinned at the head of the index and
+ *  every other app follows it by name — the one order a member can predict before they have put a
+ *  row anywhere. */
+test("until the member pins for themselves, the chat app leads and the rest stand by name", async () => {
+  atPhoneWidth();
   wire({});
   const apps = [
     { id: SECOND_ID, name: "wiki", model: "auto", main: false, icon: "stele", app: "wiki" },
@@ -280,25 +287,25 @@ test("until the member pins for themselves, the workspace's apps stand pinned, c
   ];
   render(<App agents={[AGENT, ...apps]} member={MEMBER} onAgents={() => {}} />);
 
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const sidebar = await openWorkspaceColumn();
   const names = within(sidebar)
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
-  const chat = names.indexOf("Chat");
-  const wiki = names.indexOf("Wiki");
-  expect(chat).toBeGreaterThan(-1);
-  expect(wiki).toBeGreaterThan(chat);
-  expect(names).not.toContain("Assistant");
+  const at = (name: string) => names.indexOf(name);
+  expect(at("Chat")).toBeGreaterThan(-1);
+  expect(at("Assistant")).toBeGreaterThan(at("Chat"));
+  expect(at("Wiki")).toBeGreaterThan(at("Assistant"));
 });
 
 /** A stored pin no live agent answers — an app since removed, or the old fixed reads — resolves
  *  to nothing rather than a row. */
-test("a stored pin nothing answers draws no row", () => {
+test("a stored pin nothing answers draws no row", async () => {
+  atPhoneWidth();
   localStorage.setItem("pinned-rows", "wiki\nradar");
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const sidebar = await openWorkspaceColumn();
   const names = within(sidebar)
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
@@ -346,8 +353,6 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
-    "Search",
-    "Collapse sidebar",
     "New chat",
     "Create app",
     "Apps",
@@ -364,10 +369,11 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
 
 
 test("the sidebar's foot states who is signed in and offers the way back out", async () => {
+  atPhoneWidth();
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const sidebar = await openWorkspaceColumn();
   const foot = sidebar.querySelector("footer")!;
   expect(foot.querySelector("[data-slot=avatar-fallback]")!.textContent).toBe("M");
   expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
@@ -435,8 +441,11 @@ const ADMIN_TABLES = {
   },
 };
 
-async function administration(routes: Record<string, Route>) {
+/** The administration screen, opened at its own address: what these tests read is the screen, and
+ *  the control that reaches it is the workspace column's, held by the drawer at a phone width. */
+function administration(routes: Record<string, Route>) {
   wire({ "/transcript": () => json({ messages: [] }), ...routes });
+  location.hash = "#/admin";
   render(
     <App
       agents={[SECOND_AGENT]}
@@ -444,7 +453,6 @@ async function administration(routes: Record<string, Route>) {
       onAgents={() => {}}
     />,
   );
-  await openAdministration();
 }
 
 /** Revoking declares a confirm, so it arms on the first press and commits on the second, as every
@@ -458,7 +466,7 @@ async function revoke(record: HTMLElement): Promise<void> {
  *  width and the column scrolls sideways — and the act a row is pressed by is what falls off the
  *  right. Every table administration draws has to fit the page it is drawn on. */
 test("every administration table fits the desktop page it is read on", async () => {
-  await administration({ "/api/admin": () => json(ADMIN_TABLES) });
+  administration({ "/api/admin": () => json(ADMIN_TABLES) });
   await screen.findByText("Second");
 
   expect(tableFloors()).toEqual([
@@ -485,6 +493,7 @@ test("an agent's record carries its surfaces and a member's web access acts, and
     },
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/admin";
   render(
     <App
       agents={[SECOND_AGENT]}
@@ -493,7 +502,6 @@ test("an agent's record carries its surfaces and a member's web access acts, and
     />,
   );
 
-  await openAdministration();
   await screen.findByText("Second");
   expect(screen.queryByRole("combobox", { name: "Web Access Member" })).toBeNull();
   expect(screen.queryByText("Slack, Terminal")).toBeNull();
@@ -557,7 +565,7 @@ const GRANTED_AGENT = {
 /** `audience.ts` holds the one spelling of who reaches an agent on the web, so the row, the record,
  *  and every screen outside administration read one agent's audience the same way. */
 test("the row and the record spell a web audience the way the one audience map does", async () => {
-  await administration({
+  administration({
     "/api/admin": () =>
       json({ ...ADMIN_TABLES, agents: [SECOND_AGENT, GRANTED_AGENT], members: [], caps: [] }),
   });
@@ -573,7 +581,7 @@ test("the row and the record spell a web audience the way the one audience map d
 /** The table is the root of the path, so a second app row leads there rather than stacking on the
  *  one the member walked past — the rule every other index in the portal takes from `opened`. */
 test("a second app row takes the first record's place, and closing it leaves the table", async () => {
-  await administration({
+  administration({
     "/api/admin": () => json({ ...ADMIN_TABLES, agents: [ADMIN_AGENT, SECOND_AGENT], members: [] }),
   });
 
@@ -593,7 +601,7 @@ test("a second app row takes the first record's place, and closing it leaves the
 
 /** The main agent answers every member, so its record offers no address to grant. */
 test("the main agent's record states its audience and carries no grant form", async () => {
-  await administration({
+  administration({
     "/api/admin": () => json({ ...ADMIN_TABLES, agents: [ADMIN_AGENT] }),
   });
   await pressRow("Assistant");
@@ -623,9 +631,9 @@ test("a failed administration read stays inside the scrolling frame the view own
     "/api/admin": () => new Response("no", { status: 500 }),
     "/transcript": () => json({ messages: [] }),
   });
+  location.hash = "#/admin";
   render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
 
-  await openAdministration();
   const message = await screen.findByText("Error 500 — reload to retry.");
   expect(message.closest("main")).not.toBeNull();
 });

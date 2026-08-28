@@ -4,8 +4,12 @@ import type { Section, WorkspaceTab } from "@/lib/route";
  *  tab, a section — and a name means nothing across them: `connectors` is a section and a link to
  *  the workspace tab of that name reaches the same word, so a bare name would hand one screen
  *  another's slots. The space a name comes from leads it, which makes one key shape cover all
- *  three. */
-export type TrackScreen = `agent:${string}` | `workspace:${WorkspaceTab}` | `section:${Section}`;
+ *  three, and home, the one screen there is no second of, is its own name. */
+export type TrackScreen =
+  | "home"
+  | `agent:${string}`
+  | `workspace:${WorkspaceTab}`
+  | `section:${Section}`;
 
 const TRACK_PREFIX = "ufo.track.";
 const TRACK_SEPARATOR = "\n";

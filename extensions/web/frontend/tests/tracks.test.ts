@@ -7,6 +7,7 @@ const OTHER = "5b1e8c37-2d4a-4f61-9a08-3c7d5e2f1b06";
 const ARTIFACTS: TrackScreen = "section:connectors";
 const TEAM: TrackScreen = "workspace:team";
 const APP: TrackScreen = `agent:${AGENT}`;
+const HOME: TrackScreen = "home";
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -23,6 +24,7 @@ test("a track reads back on the screen that held it, whichever screen that is", 
     "object/" + AGENT + "/note/brief",
     "member/developer@local.test",
   ]);
+  holdTrack(HOME, [AGENT, OTHER]);
 
   expect(heldTrack(ARTIFACTS)).toEqual([
     "object/" + AGENT + "/report/august",
@@ -34,6 +36,7 @@ test("a track reads back on the screen that held it, whichever screen that is", 
     "object/" + AGENT + "/note/brief",
     "member/developer@local.test",
   ]);
+  expect(heldTrack(HOME)).toEqual([AGENT, OTHER]);
 });
 
 /** A lane names the app its record is read in as well as the record, so one track stands two apps'

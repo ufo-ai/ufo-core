@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import { SlotTrack, appended, beside, closed, opened, useSlot, type SlotKind } from "@/kernel/slots";
 import type { Crumb } from "@/lib/title";
@@ -64,9 +64,10 @@ function Standing({
 
 /** A screen with a place: the address holds the track, every act writes it, and the lanes are drawn
  *  from it. A lane is opened beside the ones already standing, and each lane holds a link to every
- *  other, which is the press that walks the path. */
-function Walk({ names }: { names: string[] }) {
-  const [opens, setOpens] = useState<string[]>([]);
+ *  other, which is the press that walks the path. `opening` is the row the screen stands whole on
+ *  its first render, which is a member arriving on an address that already names lanes. */
+function Walk({ names, opening = [] }: { names: string[]; opening?: string[] }) {
+  const [opens, setOpens] = useState<string[]>(opening);
   return (
     <SlotTrack opens={opens} onMove={setOpens}>
       <p data-testid="address">{opens.join(" ")}</p>
@@ -438,21 +439,18 @@ test("Escape leaves a slot, and focus goes back where it came from", async () =>
   expect(document.activeElement).toBe(act);
 });
 
-/** An act raised from inside a lane cannot be drawn in the lane it is already standing in: filling
- *  that lane empties it of the panel, which unmounts the tab that raised the act and takes the act
- *  with it. It lies over instead — and reaches only as far as its own lanes, so the openers it was
- *  raised from stay uncovered. A cover across the whole host takes the next act with it: an app's
- *  connections and the act that adds one sit side by side under it, and opening one lane locks out
- *  the opener of the next. jsdom honours neither `inert` nor geometry, so this is asserted as the
- *  DOM relationship a browser enforces rather than as a press that fails to land. */
-test("the cover an act opens over its lane stops at the standing lanes' edge", async () => {
+/** A screen whose every column is a lane hands the track its whole box. The row lies over that box —
+ *  edge to edge, above what is under it, with its own hairline either side — rather than standing
+ *  beside a body: a reading lane in all but name would take an equal share of the width, so one
+ *  open lane would hold half the screen instead of the whole of it. What the track was handed still
+ *  stands underneath, because that is what registers the lanes; it is not one of them. */
+test("a track handed the whole box lies over it, and holds only its own lanes", async () => {
   render(
     <SlotTrack>
       <p>the list</p>
       <Standing name="assistant" kind="panel">
         <SlotTrack over>
           <Opener name="New task" kind="panel" />
-          <Opener name="Second task" kind="panel" />
         </SlotTrack>
       </Standing>
     </SlotTrack>,
@@ -465,24 +463,48 @@ test("the cover an act opens over its lane stops at the standing lanes' edge", a
   expect(screen.getByText("the list")).toBeTruthy();
 
   const cover = slotFor("assistant").querySelector("[data-slot=slot-track]");
-  if (!cover) throw new Error("the lane holds no track for the acts raised inside it");
+  if (!cover) throw new Error("the lane holds no track for what stands in it");
   expect(cover.className).toContain("absolute");
+  expect(cover.className).toContain("inset-0");
   expect(cover.className).toContain("z-10");
-  expect(cover.className).toContain("end-0");
-  expect(cover.className).not.toContain("inset-0");
+  expect(cover.className).toContain("border-x");
+  expect(cover.className).toContain("border-edge");
 
   const band = slotFor("New task").querySelector("[data-slot=header]");
   if (!band) throw new Error("the lane draws no band");
   expect(band.getAttribute("draggable")).toBeNull();
 
-  const next = screen.getByRole("button", { name: "Open Second task" });
-  expect(cover.contains(next)).toBe(false);
-  expect(next.closest("[inert]")).toBeNull();
-  expect(document.querySelector("[inert]")).toBeNull();
+  const opener = screen.getByRole("button", { name: "Open New task" });
+  expect(cover.contains(opener)).toBe(false);
+  expect(slotFor("New task").closest("[data-slot=slot-track]")).toBe(cover);
+});
 
-  await open("Second task");
+/** A lane that arrived by a press is the one the member is looking for: it scrolls into view and
+ *  lands on itself. A screen mounting a row whole is restating lanes the member already arranged,
+ *  and a track that scrolled and focused each of those in turn would open paged to the lane at the
+ *  far end rather than the first. */
+test("a row stood whole scrolls to none of its lanes, where a lane joining it lands", async () => {
+  const scrolled: string[] = [];
+  const scrolls = vi
+    .spyOn(Element.prototype, "scrollIntoView")
+    .mockImplementation(function (this: Element) {
+      scrolled.push(this.getAttribute("aria-label") ?? "");
+    });
+  try {
+    render(<Walk names={["A", "B", "C", "D"]} opening={["A", "B", "C"]} />);
 
-  expect(standing()).toEqual(["assistant", "New task", "Second task"]);
+    expect(standing()).toEqual(["A", "B", "C"]);
+    expect(scrolled).toEqual([]);
+    expect(document.activeElement).toBe(document.body);
+
+    await open("D");
+
+    expect(standing()).toEqual(["A", "B", "C", "D"]);
+    expect(scrolled).toEqual(["D"]);
+    expect(slotFor("D").contains(document.activeElement)).toBe(true);
+  } finally {
+    scrolls.mockRestore();
+  }
 });
 
 /** The track is a row of open things, not a path: a link followed from a slot opens beside that

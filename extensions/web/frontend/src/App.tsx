@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconChevronDown,
   IconCirclePlus,
   IconDeviceDesktop,
-  IconLayoutSidebarRight,
   IconLogout,
   IconMenu2,
   IconMoon,
@@ -20,7 +19,7 @@ import logo from "@/assets/ufo-logo.svg";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { SILENT, Toast } from "@/components/ui/toast";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
 import { AgentSetup } from "@/views/AgentSetup";
 
@@ -30,7 +29,9 @@ import { Chat } from "@/views/Chat";
 import { ChatPane, ConversationSlot } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
+import { MinimalSidebar } from "@/components/MinimalSidebar";
 import { FirstRun } from "@/views/FirstRun";
+import { Home } from "@/views/Home";
 import { SignIn } from "@/views/SignIn";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
@@ -59,7 +60,6 @@ import {
 import { stampIso } from "@/lib/rail";
 import { SurfaceMark } from "@/lib/surfaceMark";
 import {
-  foldSidebar,
   pickPinned,
   pickSectionShut,
   quietRail,
@@ -82,6 +82,7 @@ import {
   openNewChat,
   openSlot,
   placeAgent,
+  placeHome,
   placeSection,
   placeWorkspace,
   startRouter,
@@ -90,13 +91,18 @@ import {
 import {
   COMPOSE,
   COMPOSING,
+  HOME_MAX_LANES,
+  HOME_NEW_LANE,
   WORKSPACE_TABS,
+  homeLaneAgent,
+  homeLaneConversation,
   standing,
   type Route,
   type Section,
   type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
+import { heldTrack } from "@/lib/tracks";
 import { ALL_SURFACES, SurfacesProvider, useSurfaces } from "@/lib/surfaces";
 import type { Agent, ArchivedApp, Member, OwnedConversation, Surfaces } from "@/lib/types";
 
@@ -118,6 +124,17 @@ export type AppProps = {
 function inSetup(route: Route, agents: Agent[]): boolean {
   if (route.kind !== "agent" && route.kind !== "agent-setup") return false;
   return agents.some((agent) => agent.id === route.agentId && agent.stands_on_setup === true);
+}
+
+/** The track a press on the rail's + leaves home standing. The picker is spelled one way, so it
+ *  stands at most once and a press while it stands is a press on the tab that is already there.
+ *  A new tab enters at the left end, beside the rail the press came from; under the cap the row
+ *  slides right to make room, and at the cap the right-hand lane falls off — the row ages
+ *  rightward, so the lane a member has read longest is the one that goes. */
+function newTab(opens: string[]): string[] {
+  if (opens.includes(HOME_NEW_LANE)) return opens;
+  if (opens.length < HOME_MAX_LANES) return [HOME_NEW_LANE, ...opens];
+  return [HOME_NEW_LANE, ...opens.slice(0, -1)];
 }
 
 /** Apps the workspace gained after this page loaded. A workspace ships its apps on its first turn,
@@ -161,6 +178,36 @@ export function App({
    *  above, so withholding the assistant costs the composer and the first run nothing. */
   const listed = agents.filter((agent) => !agent.hidden);
 
+  /** The lanes home stands, for the rail that lists them. The address answers while the member is
+   *  standing on home and the row home was left holding answers everywhere else — the two the
+   *  router keeps in step, so the rail names the lanes the member will find when they go back.
+   *
+   *  A tile is the app the lane stands, which a conversation's lane names through the rail row it
+   *  was picked off — the rail is where that lane was found and where it is resolved. A lane
+   *  resolving to no app this roster holds is not listed: the rail is a way to a lane, and a row it
+   *  cannot name is a row nobody can read. */
+  const homePlace: WorkspacePlace = route.kind === "home" ? route.place : {};
+  const homeOpens = useMemo(
+    () => (homePlace.opens ?? heldTrack("home")).slice(0, HOME_MAX_LANES),
+    [homePlace.opens, route],
+  );
+  const homeLanes = useMemo(
+    () =>
+      homeOpens
+        .map((lane) => {
+          const conversationId = homeLaneConversation(lane);
+          const agentId =
+            conversationId === null
+              ? homeLaneAgent(lane)
+              : (rail.rows.find((row) => row.conversation_id === conversationId)?.agent_id ??
+                null);
+          const agent = agents.find((entry) => entry.id === agentId);
+          return agent ? { lane, agent } : null;
+        })
+        .filter((row): row is { lane: string; agent: Agent } => row !== null),
+    [homeOpens, rail.rows, agents],
+  );
+
   /** The router owns the address: it states the boot address in the bar, lands the arrival on the
    *  track the screen was left holding, and follows the browser from there. It starts here rather
    *  than while the shell renders, because it writes the address and the track store both. */
@@ -181,8 +228,8 @@ export function App({
   }, [narrow]);
 
   useEffect(() => {
-    document.title = pageTitle(route, agents, rail.rows, rail.linked, mainAgent);
-  }, [route, agents, rail.rows, rail.linked, mainAgent]);
+    document.title = pageTitle(route, agents, rail.rows, rail.linked);
+  }, [route, agents, rail.rows, rail.linked]);
 
   // A workspace with no agent to talk to has no first run to stand in, so the member is sent to the
   // one screen they can act on.
@@ -259,25 +306,34 @@ export function App({
                 className={cn(
                   "grid h-dvh",
                   shell
-                    ? cn(
-                        "max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
-                        rail.collapsed
-                          ? "grid-cols-[var(--container-rail)_1fr]"
-                          : "grid-cols-[var(--container-sidebar)_1fr]",
-                      )
-                    : "grid-cols-1",
+                    ? "max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr] grid-cols-[var(--container-minirail)_1fr]"
+                    : "max-narrow:grid-cols-1 grid-cols-[var(--container-minirail)_1fr]",
                 )}
               >
                 {shell && narrow ? (
                   <NarrowBar agents={listed} member={member} menu={menu} onMenu={setMenu} />
                 ) : null}
-                {shell ? (
+                {shell && narrow ? (
                   <WorkspaceSidebar
                     route={route}
                     agents={listed}
                     member={member}
                     mainAgent={mainAgent}
-                    narrow={narrow}
+                    onBuild={startBuild}
+                  />
+                ) : null}
+                {/* The column opening the shell on the left, on every signed-in screen — an app's
+                    setup page drops the wide navigation but keeps this rail, so the way to the other
+                    apps never leaves. A phone width draws one column and the drawer holds what a
+                    desk width puts beside the pane, so the rail is not drawn there rather than
+                    stacked over the screen it stands beside. */}
+                {!narrow ? (
+                  <MinimalSidebar
+                    lanes={homeLanes}
+                    agents={listed}
+                    account={<AccountMenu member={member} />}
+                    onNewTab={() => placeHome({ ...homePlace, opens: newTab(homeOpens) })}
+                    onLane={() => placeHome({ ...homePlace, opens: homeOpens })}
                     onBuild={startBuild}
                   />
                 ) : null}
@@ -321,9 +377,7 @@ function founded(agent: Agent, conversationId: string, title: string): void {
     speaker: null,
   });
   const seen = heldRoute();
-  if (seen.kind === "home" || (seen.kind === "new-chat" && seen.agentId === agent.id)) {
-    openChat(conversationId);
-  }
+  if (seen.kind === "new-chat" && seen.agentId === agent.id) openChat(conversationId);
 }
 
 /** The bar a phone width keeps: the hamburger that opens the drawer holding the sidebar, the mark
@@ -499,74 +553,30 @@ const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
   connectors: <IconPlug className={GLYPH} aria-hidden />,
 };
 
-function SidebarTooltip({
-  collapsed,
-  label,
-  children,
-}: {
-  collapsed: boolean;
-  label: string;
-  children: React.ReactElement;
-}) {
-  if (!collapsed) return children;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-/** The two controls the sidebar header carries beside the mark. Their glyphs stand 8px apart and
- *  12px in from the sidebar's edge, on the pitch the rows under them keep. */
-const HEADER_CONTROL = "rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill";
-
-function SidebarToggle({ label, onClick }: { label: string; onClick: () => void }) {
-  return (
-    <button type="button" aria-label={label} onClick={onClick} className={HEADER_CONTROL}>
-      <IconLayoutSidebarRight className={GLYPH} aria-hidden />
-    </button>
-  );
-}
 
 function NavRow({
   icon,
   current,
-  collapsed,
-  label,
   className,
   onClick,
   children,
 }: {
   icon: React.ReactNode;
   current: boolean;
-  collapsed: boolean;
-  label: string;
   className?: string;
   onClick: () => void;
   children: React.ReactNode;
 }) {
-  const button = (
+  return (
     <button
       type="button"
-      aria-label={collapsed ? label : undefined}
       aria-current={current}
       onClick={onClick}
-      className={cn(
-        NAV_ROW,
-        collapsed && "justify-center gap-0 px-0",
-        current && "bg-fill",
-        className,
-      )}
+      className={cn(NAV_ROW, current && "bg-fill", className)}
     >
       {icon}
-      <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>{children}</span>
+      <span className="min-w-0 flex-1 truncate">{children}</span>
     </button>
-  );
-  return (
-    <SidebarTooltip collapsed={collapsed} label={label}>
-      {button}
-    </SidebarTooltip>
   );
 }
 
@@ -578,11 +588,10 @@ function SchemeGlyph({ scheme }: { scheme: Scheme }) {
   return <IconDeviceDesktop className={GLYPH} aria-hidden />;
 }
 
-function SchemePick({ collapsed }: { collapsed: boolean }) {
+function SchemePick() {
   const scheme = useScheme();
   return (
     <DropdownMenu>
-      <SidebarTooltip collapsed={collapsed} label="Theme">
         <DropdownMenuTrigger asChild>
           <button
             type="button"
@@ -592,7 +601,6 @@ function SchemePick({ collapsed }: { collapsed: boolean }) {
             <SchemeGlyph scheme={scheme} />
           </button>
         </DropdownMenuTrigger>
-      </SidebarTooltip>
       <DropdownMenuContent align="end">
         <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
           {SCHEME_OPTIONS.map((option) => (
@@ -613,21 +621,15 @@ function SchemePick({ collapsed }: { collapsed: boolean }) {
 function SectionHead({
   label,
   shut,
-  collapsed,
   onShut,
 }: {
   label: string;
   shut: boolean;
-  /** Whether the sidebar stands folded to its glyph rail, which has no room for a section's name. */
-  collapsed?: boolean;
   onShut: (shut: boolean) => void;
 }) {
   return (
     <div
-      className={cn(
-        "group/head flex h-(--size-row) w-full shrink-0 items-center rounded-control hover:bg-fill",
-        collapsed && "hidden",
-      )}
+      className="group/head flex h-(--size-row) w-full shrink-0 items-center rounded-control hover:bg-fill"
     >
       <button
         type="button"
@@ -656,23 +658,17 @@ function WorkspaceSidebar({
   agents,
   member,
   mainAgent,
-  narrow,
   onBuild,
 }: {
   route: Route;
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
-  narrow: boolean;
   onBuild: () => void;
 }) {
   const rail = useRail();
   const surfaces = useSurfaces();
-  /* A drawer is always drawn whole, so the fold a desk width holds is ignored while it stands. */
-  const collapsed = rail.collapsed && !narrow;
-  /* A folded section states nothing and its head is what opens it again — so on the glyph rail,
-     where no head is drawn, the fold is ignored rather than leaving rows nobody can reach. */
-  const appsShut = !collapsed && rail.sectionsShut.includes(APPS);
+  const appsShut = rail.sectionsShut.includes(APPS);
   const pinned = rail.pinned ?? defaultPins(agents);
   const chatApp = chatSurface(agents);
   return useDrawerList(
@@ -683,30 +679,6 @@ function WorkspaceSidebar({
         "max-narrow:flex-1 max-narrow:border-r-0 max-narrow:py-0",
       )}
     >
-      <div
-        className={cn(
-          "flex shrink-0 items-center max-narrow:hidden",
-          collapsed
-            ? "flex-col justify-center px-sm"
-            : "h-(--size-row) justify-between pl-2xl pr-sm",
-        )}
-      >
-        <span
-          role="img"
-          aria-label="ufo"
-          className={cn("h-(--size-wordmark) w-(--size-logo) bg-current", collapsed && "hidden")}
-          style={{ mask: `url(${logo}) center / contain no-repeat` }}
-        />
-        <span className={cn("flex items-center", collapsed && "flex-col")}>
-          <Spotlight agents={agents} className={HEADER_CONTROL} />
-          <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
-            <SidebarToggle
-              label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              onClick={() => foldSidebar(!collapsed)}
-            />
-          </SidebarTooltip>
-        </span>
-      </div>
       {/* The two acts the shell carries, above the places it reaches: starting a conversation and
           building an app are the things a member does here rather than screens they go to, and every
           member is offered both — the `agent` kind admits a create from any speaking member and
@@ -719,8 +691,6 @@ function WorkspaceSidebar({
               <NavRow
                 icon={<AskGlyph />}
                 current={standing(route, COMPOSING)}
-                collapsed={collapsed}
-                label={NEW_CHAT}
                 onClick={() =>
                   chatApp
                     ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })
@@ -734,8 +704,6 @@ function WorkspaceSidebar({
               <NavRow
                 icon={<CreateAppGlyph />}
                 current={route.kind === "agents" && route.build === true}
-                collapsed={collapsed}
-                label={CREATE_APP}
                 onClick={onBuild}
               >
                 {CREATE_APP}
@@ -755,7 +723,6 @@ function WorkspaceSidebar({
         <SectionHead
           label={APPS}
           shut={appsShut}
-          collapsed={collapsed}
           onShut={(shut) => pickSectionShut(APPS, shut)}
         />
         {appsShut ? null : (
@@ -764,7 +731,6 @@ function WorkspaceSidebar({
           openId={route.kind === "agent" ? route.agentId : null}
           building={route.kind === "agents" && route.build === true}
           pinned={pinned}
-          collapsed={collapsed}
           onPin={(agentId) =>
             pickPinned(
               pinned.includes(agentId)
@@ -782,8 +748,6 @@ function WorkspaceSidebar({
           <NavRow
             icon={SECTION_GLYPHS.connectors}
             current={standing(route, "section:connectors")}
-            collapsed={collapsed}
-            label={CONNECTORS.label}
             onClick={() => placeSection("connectors", {}, "push")}
           >
             {CONNECTORS.label}
@@ -793,8 +757,6 @@ function WorkspaceSidebar({
           <NavRow
             icon={<WorkspaceGlyph />}
             current={standing(route, "workspace")}
-            collapsed={collapsed}
-            label="Workspace"
             onClick={() => placeWorkspace("team", {}, "push")}
           >
             Workspace
@@ -802,23 +764,17 @@ function WorkspaceSidebar({
         </li>
       </ul>
       <footer
-        className={cn(
-          "flex shrink-0 items-center gap-sm px-lg",
-          collapsed && "flex-col justify-center px-sm",
-        )}
+        className="flex shrink-0 items-center gap-sm px-lg"
       >
-        <SidebarTooltip collapsed={collapsed} label={member.email}>
           <Avatar>
             <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
           </Avatar>
-        </SidebarTooltip>
-        <span className={cn("flex min-w-0 flex-1 flex-col", collapsed && "hidden")}>
+        <span className="flex min-w-0 flex-1 flex-col">
           <span className="truncate text-label">{member.email}</span>
           <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
         </span>
-        <SchemePick collapsed={collapsed} />
+        <SchemePick />
         {member.admin && surfaces.admin ? (
-          <SidebarTooltip collapsed={collapsed} label="Administration">
             <button
               type="button"
               aria-label="Administration"
@@ -827,9 +783,7 @@ function WorkspaceSidebar({
             >
               <IconSettings className={GLYPH} aria-hidden />
             </button>
-          </SidebarTooltip>
         ) : null}
-        <SidebarTooltip collapsed={collapsed} label="Sign out">
           <button
             type="button"
             aria-label="Sign out"
@@ -838,7 +792,6 @@ function WorkspaceSidebar({
           >
             <IconLogout className={GLYPH} aria-hidden />
           </button>
-        </SidebarTooltip>
       </footer>
     </nav>,
   );
@@ -888,7 +841,7 @@ function RoutedPane({
   /** Where the member came from, off the trail that makes the tab title: every band on this screen
    *  names the trail's innermost step, so they all draw this one step over it and none of them
    *  derives it a second time. */
-  const crumb = pageCrumb(route, agents, rail.rows, rail.linked, mainAgent);
+  const crumb = pageCrumb(route, agents, rail.rows, rail.linked);
   switch (route.kind) {
     case "admin":
       return <Admin />;
@@ -1072,6 +1025,20 @@ function RoutedPane({
        agent home, so `first-run` reaches here on neither path. It is answered all the same, because
        every kind the table declares is answered here or the switch does not compile. */
     case "home":
+      return (
+        <Home
+          place={route.place}
+          agents={agents}
+          member={member}
+          mainAgent={mainAgent}
+          onFounded={founded}
+          onActivity={railActivity}
+          onAgents={onAgents}
+        />
+      );
+    /* The shell draws the first run itself, above this dispatch, and sends a workspace with no main
+       agent home, so `first-run` reaches here on neither path. It is answered all the same, because
+       every kind the table declares is answered here or the switch does not compile. */
     case "first-run":
     case "new-chat": {
       const agent =

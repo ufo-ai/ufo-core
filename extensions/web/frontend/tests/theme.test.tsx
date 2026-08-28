@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -11,7 +11,7 @@ import { BRAND_MARKS } from "@/lib/brandMark";
 import { Notice } from "@/kernel/panel";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 
-import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, atPhoneWidth, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 const BRAND = join(import.meta.dirname, "..", "..", "..", "..", "assets", "brand");
@@ -82,7 +82,7 @@ const AUTHORED = new RegExp(
 );
 
 const PALETTE_STEP =
-  /--(?:bkgd-\d+|text-(?:primary|secondary)|accent-(?:primary|secondary)|color-fill-ink):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
+  /--(?:bkgd-\d+|text-(?:primary|secondary)|accent-(?:primary|secondary)|color-fill-ink|color-(?:live|blocked)):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
 
 const authoredColours = (css: string) =>
   css.replace(PROBES, "").replace(HUELESS, "").match(AUTHORED) ?? [];
@@ -122,11 +122,19 @@ test("every colour the portal paints resolves through the palette's seven steps"
     "--color-fill-ink": "#191a1a",
     "--color-link": String.raw`color-mix\(in srgb, var\(--accent-primary\) 70%, var\(--text-primary\)\)`,
     "--color-attention-ink": String.raw`color-mix\(in srgb, var\(--accent-secondary\) 70%, var\(--text-primary\)\)`,
-    "--color-live": String.raw`var\(--accent-primary\)`,
-    "--color-blocked": String.raw`var\(--accent-secondary\)`,
   };
   for (const [token, step] of Object.entries(basis)) {
     expect(new RegExp(`${token}:\\s*${step}`).test(css)).toBe(true);
+  }
+  // The two status hues are steps of the palette in their own right, and the only colours outside
+  // the seven a rule may name. One value answers both schemes: green means at work and yellow means
+  // waiting on the member wherever the member reads a dot, so neither turns with the appearance.
+  const hues = {
+    "--color-live": "#16a34a",
+    "--color-blocked": "#eab308",
+  };
+  for (const [token, value] of Object.entries(hues)) {
+    expect(packedStyles()).toContain(`${token}:${value}`);
   }
 });
 
@@ -515,13 +523,28 @@ test("both notice tones keep the chrome type size", () => {
   }
 });
 
+/** The bar the mark stands in is a phone's. A desk width opens the shell on the rail instead, whose
+ *  destinations are marks the whole way down — so the wordmark is drawn where a bar is drawn, and
+ *  nowhere is it spelled in words. */
 test("the wordmark is the drawn ufo mark in the top bar", async () => {
+  atPhoneWidth();
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const brand = await screen.findByRole("img", { name: "ufo" });
   expect(brand.getAttribute("class")).not.toContain("tracking");
   expect(brand.getAttribute("style")).toContain("ufo-logo.svg");
+});
+
+test("a desk width opens on the rail, which spells no name the marks already carry", async () => {
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = await screen.findByRole("navigation", { name: "Tabs" });
+  const account = within(rail).getByRole("button", { name: MEMBER.email });
+  expect(rail.textContent).toBe(account.textContent);
+  expect(account.textContent).toBe(MEMBER.email.slice(0, 1).toUpperCase());
+  expect(screen.queryByRole("img", { name: "ufo" })).toBeNull();
 });
 
 test("the favicons use the exact light and dark brand marks", () => {

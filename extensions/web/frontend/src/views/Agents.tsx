@@ -21,12 +21,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Ticker } from "@/components/ui/ticker";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ObjectPane } from "@/kernel/objects";
 import { Empty } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
-import { useAppStatus, type AgentStatus } from "@/lib/appStatusStore";
+import { statusDot, useAppStatus, type AgentStatus } from "@/lib/appStatusStore";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
@@ -112,20 +111,6 @@ function ActivityLine({
   );
 }
 
-/** The dot the mark wears, read before any words: the live tone while the app holds work in
- *  flight, and the blocked tone while it is waiting on the member.
- *
- *  An app that is paused, whose last run failed, or that was installed and never set up are one
- *  state to a member scanning a column — none of them is going to do anything until they act. They
- *  differ in what to do next, which is the row's own screen to say, not a second colour's.
- *
- *  Work outranks the rest: an app that is running is telling the member something is happening now,
- *  and that is true whether or not its setup is finished. */
-function statusDot(status: AgentStatus | undefined, setupDue: boolean): string | null {
-  if (status?.turn === "running" || status?.turn === "queued") return "bg-live";
-  if (setupDue || status?.turn === "parked" || status?.last_failed) return "bg-blocked";
-  return null;
-}
 
 /** One app's row: the whole row is the one control, and it opens the app. What acts on the open app
  *  is worn by that app's own pane, beside its name.
@@ -158,7 +143,6 @@ function AgentRow({
   status,
   open,
   pinned,
-  collapsed,
   onPin,
   onOpen,
 }: {
@@ -166,8 +150,6 @@ function AgentRow({
   status: AgentStatus | undefined;
   open: boolean;
   pinned: boolean;
-  /** Whether the sidebar stands folded to its glyph rail, where the row is its mark and its dot. */
-  collapsed: boolean;
   onPin: () => void;
   onOpen: () => void;
 }) {
@@ -184,12 +166,11 @@ function AgentRow({
     setHeld(said);
   }
   const dot = statusDot(status, agent.setup_due === true);
-  const row = (
+  return (
     <li className={cn("group/row flex items-center rounded-row hover:bg-fill", open && "bg-fill")}>
       <button
         type="button"
         aria-current={open}
-        aria-label={collapsed ? agentName(agent.name) : undefined}
         onClick={onOpen}
         onPointerEnter={() => setAsks((asked) => asked + 1)}
         onPointerLeave={() => setAsks(0)}
@@ -198,7 +179,6 @@ function AgentRow({
         className={cn(
           "flex min-h-(--size-row) min-w-0 flex-1 items-center gap-md border-0 bg-transparent",
           "px-sm py-2xs text-left text-inherit",
-          collapsed && "justify-center gap-0 px-0",
         )}
       >
         {/* The mark is the glyph a sidebar row draws, bare in the row's own ink, so the list reads
@@ -215,64 +195,51 @@ function AgentRow({
             )}
           />
         </span>
-        {collapsed ? null : (
-          <span className="flex min-w-0 flex-1 flex-col">
-            <Ticker asks={asks} className="text-label">
-              {agentName(agent.name)}
-            </Ticker>
-            <span
-              className={cn(
-                "grid transition-[grid-template-rows] duration-200 ease-control",
-                said === null ? "grid-rows-[0fr]" : "grid-rows-[1fr]",
+        <span className="flex min-w-0 flex-1 flex-col">
+          <Ticker asks={asks} className="text-label">
+            {agentName(agent.name)}
+          </Ticker>
+          <span
+            className={cn(
+              "grid transition-[grid-template-rows] duration-200 ease-control",
+              said === null ? "grid-rows-[0fr]" : "grid-rows-[1fr]",
+            )}
+            onTransitionEnd={(event) => {
+              /* The line inside this track travels on its own transition, and that one bubbles
+                 here too. Only the track's own end means the fold has shut. */
+              if (event.target !== event.currentTarget) return;
+              if (said === null) setHeld(null);
+            }}
+          >
+            <span className="min-h-0 min-w-0 overflow-hidden">
+              {held === null ? null : (
+                <ActivityLine asks={asks} text={held.text} shimmer={held.shimmer} />
               )}
-              onTransitionEnd={(event) => {
-                /* The line inside this track travels on its own transition, and that one bubbles
-                   here too. Only the track's own end means the fold has shut. */
-                if (event.target !== event.currentTarget) return;
-                if (said === null) setHeld(null);
-              }}
-            >
-              <span className="min-h-0 min-w-0 overflow-hidden">
-                {held === null ? null : (
-                  <ActivityLine asks={asks} text={held.text} shimmer={held.shimmer} />
-                )}
-              </span>
             </span>
           </span>
-        )}
+        </span>
       </button>
       {/* Pinning moves the app up the sidebar's order. The act rests until the pointer is on the
           row whether or not it is already done: a mark standing on every pinned row is a column of
           controls nobody is using, and where the pinned rows lead the column that is most of it.
           What the pin did is read off the order, which is the thing it changed. */}
-      {collapsed ? null : (
-        <button
-          type="button"
-          aria-label={(pinned ? "Unpin " : "Pin ") + agentName(agent.name)}
-          aria-pressed={pinned}
-          onClick={onPin}
-          className={cn(
-            "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
-            "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
-          )}
-        >
-          {pinned ? (
-            <IconPinFilled className="size-icon" aria-hidden />
-          ) : (
-            <IconPin className="size-icon" aria-hidden />
-          )}
-        </button>
-      )}
+      <button
+        type="button"
+        aria-label={(pinned ? "Unpin " : "Pin ") + agentName(agent.name)}
+        aria-pressed={pinned}
+        onClick={onPin}
+        className={cn(
+          "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
+          "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
+        )}
+      >
+        {pinned ? (
+          <IconPinFilled className="size-icon" aria-hidden />
+        ) : (
+          <IconPin className="size-icon" aria-hidden />
+        )}
+      </button>
     </li>
-  );
-  if (!collapsed) return row;
-  /* On the glyph rail a row is its mark, so the name it cannot draw is held at the pointer — the
-     same bargain every other folded row in the sidebar makes. */
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{row}</TooltipTrigger>
-      <TooltipContent side="right">{agentName(agent.name)}</TooltipContent>
-    </Tooltip>
   );
 }
 
@@ -390,7 +357,6 @@ export function AppsIndex({
   openId,
   building,
   pinned,
-  collapsed,
   onPin,
   onOpen,
   onBuild,
@@ -401,8 +367,6 @@ export function AppsIndex({
   /** Whether the wizard holds the pane, which draws its row as the place the member already is. */
   building: boolean;
   pinned: string[];
-  /** Whether the sidebar stands folded to its glyph rail. */
-  collapsed: boolean;
   onPin: (agentId: string) => void;
   onOpen: (agentId: string) => void;
   onBuild: () => void;
@@ -429,7 +393,7 @@ export function AppsIndex({
               while an app holds the pane instead, the row is the way back to the run. It is not
               an app: nothing here opens one, and the app's real row arrives from the apps read
               when it lands. */}
-          {(building || running) && !collapsed ? (
+          {building || running ? (
             <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
               {building ? (
                 <div
@@ -469,7 +433,6 @@ export function AppsIndex({
               status={statuses[agent.id]}
               open={!building && agent.id === openId}
               pinned={pinned.includes(agent.id)}
-              collapsed={collapsed}
               onPin={() => onPin(agent.id)}
               onOpen={() => onOpen(agent.id)}
             />

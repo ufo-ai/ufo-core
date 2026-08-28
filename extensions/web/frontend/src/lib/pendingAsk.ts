@@ -17,20 +17,33 @@
  *
  *  It is held in memory and taken once. A draft would outlive the press and reappear later under a
  *  key the member never typed into. */
-export type PendingAsk = { text: string; send: boolean };
+export type PendingAsk = { text: string; send: boolean; meant: string | null };
 
 const PENDING = new Map<string, PendingAsk>();
 
 const WAITING = new Set<() => void>();
 
-export function setPendingAsk(agentId: string, text: string, send: boolean): void {
-  PENDING.set(agentId, { text, send });
+/** `meant` names the one composer the words are for, by its chat key, where the setter is about to
+ *  route to it — home can stand a founding composer for the same agent, and an ask keyed by the
+ *  agent alone would be taken by that lane while the navigation tears it down, the words sent into
+ *  a screen the member just left. A setter whose composer is the screen it stands on passes null,
+ *  and the first founding composer for the agent takes it. */
+export function setPendingAsk(
+  agentId: string,
+  text: string,
+  send: boolean,
+  meant: string | null = null,
+): void {
+  PENDING.set(agentId, { text, send, meant });
   for (const wake of [...WAITING]) wake();
 }
 
-/** The pending ask for this agent, removed as it is read, or null when there is none. */
-export function takePendingAsk(agentId: string): PendingAsk | null {
+/** The pending ask for this agent, removed as this composer reads it, or null when there is none —
+ *  or when the ask names a different composer than the one asking. */
+export function takePendingAsk(agentId: string, chatKey: string): PendingAsk | null {
   const held = PENDING.get(agentId) ?? null;
+  if (held === null) return null;
+  if (held.meant !== null && held.meant !== chatKey) return null;
   PENDING.delete(agentId);
   return held;
 }

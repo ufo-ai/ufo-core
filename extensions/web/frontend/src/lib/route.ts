@@ -38,7 +38,7 @@ export type WorkspacePlace = {
 };
 
 export type Route =
-  | { kind: "home" }
+  | { kind: "home"; place: WorkspacePlace }
   | { kind: "chat"; conversationId: string; slot?: string }
   | {
       kind: "conversation-slot";
@@ -67,6 +67,55 @@ export type RouteOf<Kind extends RouteKind> = Extract<Route, { kind: Kind }>;
  *  composer and its starters rather than a conversation. It is an address token — it rides the
  *  track key — so it is declared with the table that reads and writes it. */
 export const COMPOSE = "compose";
+
+/** The lane a member opens to pick an app, as the address spells it. It names no app because none
+ *  has been picked yet, which is what tells it from every other home lane. */
+export const HOME_NEW_LANE = "new";
+
+/** How many lanes home stands. A press that would stand one more does nothing instead: the row is
+ *  what the member arranged, and shortening it from the head to make room would drop the lane they
+ *  reached the rest through. */
+export const HOME_MAX_LANES = 4;
+
+/** What stands between an app and the instance of it a lane holds: an app opened twice is two lanes
+ *  over one app, so the second lane names the app and the instance both. An app id is a uuid and
+ *  carries none of this character, so a lane splits back into the parts it was minted from. */
+const HOME_LANE_INSTANCE = ".";
+
+/** The lane an app takes on home, given the lanes already standing: the first instance is the app
+ *  itself, and every one after it carries the lowest instance number no lane holds. */
+export function mintHomeLane(agentId: string, taken: readonly string[]): string {
+  if (!taken.includes(agentId)) return agentId;
+  let instance = 2;
+  while (taken.includes(agentId + HOME_LANE_INSTANCE + instance)) instance += 1;
+  return agentId + HOME_LANE_INSTANCE + instance;
+}
+
+/** What marks a lane as a conversation's rather than an app's. An app id is a uuid and a uuid holds
+ *  no colon, so the mark cannot be read off an app's lane, off an instance of one, or off the
+ *  picker's one word. */
+const HOME_LANE_CONVERSATION = "c:";
+
+/** The lane a conversation takes on home. It carries no instance: a conversation is one record and
+ *  two lanes over it would be two hosts over one transcript, so the conversation is the lane. */
+export function homeConversationLane(conversationId: string): string {
+  return HOME_LANE_CONVERSATION + conversationId;
+}
+
+/** The conversation a home lane holds, or nothing where the lane holds an app or is the picker. */
+export function homeLaneConversation(lane: string): string | null {
+  return lane.startsWith(HOME_LANE_CONVERSATION)
+    ? lane.slice(HOME_LANE_CONVERSATION.length)
+    : null;
+}
+
+/** The app a home lane stands, or nothing where the lane holds a conversation, or is the picker and
+ *  stands none. */
+export function homeLaneAgent(lane: string): string | null {
+  if (lane === HOME_NEW_LANE || lane.startsWith(HOME_LANE_CONVERSATION)) return null;
+  const [agentId] = lane.split(HOME_LANE_INSTANCE);
+  return agentId;
+}
 
 const TRACK_KEY = "open";
 const TRACK_SEPARATOR = "~";
@@ -100,18 +149,22 @@ function text(key: string): {
 const TRACK: PlaceField<"opens"> = {
   read: (params) => {
     const track = params.get(TRACK_KEY);
-    if (!track) return undefined;
+    /* An absent key states nothing, and the screen's held track answers; a key present and empty is
+       the member having shut the last slot — a statement, and the store obeys it. */
+    if (track === null) return undefined;
+    if (track === "") return [];
     const opens = track.split(TRACK_SEPARATOR);
     return holdableTrack(opens) ? opens : null;
   },
-  write: (params, opens = []) => {
+  write: (params, opens) => {
+    if (opens === undefined) return;
     const carried = opens.find((id) => id.includes(TRACK_SEPARATOR));
     if (carried !== undefined) {
       throw new Error("A slot id cannot hold " + TRACK_SEPARATOR + ": " + JSON.stringify(carried));
     }
     const fault = unholdable(opens);
     if (fault) throw new Error(fault);
-    if (opens.length) params.set(TRACK_KEY, opens.join(TRACK_SEPARATOR));
+    params.set(TRACK_KEY, opens.join(TRACK_SEPARATOR));
   },
 };
 
@@ -258,11 +311,18 @@ function row<Kind extends RouteKind, Args extends unknown[]>(
   return { kind, pattern, read, write };
 }
 
+/** Home stands a track like any other screen — its lanes are the apps the member opened, in the
+ *  order the address states them — so it reads its place off the same tail every screen that carries
+ *  one does. The bare path is home holding nothing, which is the address a member lands on before
+ *  they have opened a lane. */
 const HOME = row(
   "home",
-  /^(?:#\/?)?(?:\?.*)?$/,
-  () => ({ kind: "home" }),
-  () => HOME_HASH,
+  new RegExp("^(?:#/?)?" + PLACE_TAIL),
+  (match) => {
+    const place = parsePlace(match[1]);
+    return place && { kind: "home", place };
+  },
+  (place: WorkspacePlace = {}) => HOME_HASH + serializePlace(place),
 );
 
 const FIRST_RUN = row(
@@ -552,6 +612,7 @@ export function bootRoute(hash: string, search: string): Route {
 
 /** The builders, each one its row's own `write`: the address a screen hands the browser is written
  *  by the row whose pattern reads it back. */
+export const homeHash = HOME.write;
 export const chatHash = CHAT.write;
 export const conversationSlotHash = CONVERSATION_SLOT.write;
 export const newChatHash = NEW_CHAT.write;

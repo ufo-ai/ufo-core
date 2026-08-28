@@ -114,16 +114,34 @@ const ASKED = {
   cost_micro_usd: 2_000_000,
 };
 
-/** The apps index with the sidebar standing open. A folded rail draws each app as its mark alone,
- *  so a row's own words — its name, the work under it, the pin act — are read only once the member
- *  has unfolded the column the index lives in. A sidebar already open is left as it stands. */
+/** The drawer holding the workspace column, opened. Every act that moves the page shuts it, so a
+ *  test that navigates and then reads the column again opens it again; one already standing is left
+ *  as it is. */
+async function openDrawer(): Promise<void> {
+  if (document.querySelector("[data-slot=nav-drawer]")) return;
+  await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
+  await screen.findByRole("dialog");
+}
+
+/** The apps index, which is a section of that column: its rows, the work printed under them, the pin
+ *  act beside them, and the run a build is standing in. The drawer draws the column whole. */
 async function shownIndex(): Promise<HTMLElement> {
-  const unfold = screen.queryByRole("button", { name: "Expand sidebar" });
-  if (unfold) await userEvent.click(unfold);
+  await openDrawer();
   return agentIndex();
 }
 
+/** The drawer stands over the page as a modal, so the page under it is out of reach until it is
+ *  shut — which is what a test that reads the column and then the screen does next. */
+async function shutDrawer(): Promise<void> {
+  if (!document.querySelector("[data-slot=nav-drawer]")) return;
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+}
+
+/** The act that builds an app is the apps section's own first row, so the wizard is opened out of
+ *  the same column. */
 async function openWizard() {
+  await openDrawer();
   await openNewApplication();
   return screen.findByRole("region", { name: "App Builder" });
 }
@@ -132,8 +150,12 @@ function progress(): HTMLElement {
   return screen.getByRole("progressbar", { name: "App Builder" });
 }
 
+/** The workspace column — the apps index, the act that builds one, the run a build stands in — is
+ *  drawn at a phone width alone, where the drawer the hamburger opens holds it. This suite is about
+ *  what stands in that column, so it reads the portal at the width that draws it. */
 beforeEach(() => {
   location.hash = "";
+  atPhoneWidth();
   useStreamFake();
 });
 
@@ -159,6 +181,12 @@ test("apps the workspace ships on its first turn reach the sidebar with no reloa
         await Promise.resolve();
       });
     };
+    await settle(0);
+    // The column stands in the drawer, which is opened once here and left standing: the rows under
+    // test change while the member is reading them.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Menu" }));
+    });
     await settle(0);
     const index = screen.getByRole("navigation", { name: "Apps" });
     const row = (name: string) =>
@@ -434,6 +462,7 @@ test("an answer to the wizard's question rides the turn that asked it", async ()
   // the conversation — so the emit waits for the bind the rail's title states, the way a real
   // terminal can only follow a stream the page already tails.
   expect(await within(await shownIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
+  await shutDrawer();
   StreamFake.last().emit("terminal", {
     ...ASKED,
     question: {
@@ -488,8 +517,7 @@ test("the acts stand above the places, and the apps list holds only apps", async
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Expand sidebar" }));
-  const index = await agentIndex();
+  const index = await shownIndex();
 
   // The band folds the section and offers nothing else, so it holds no menu to hide an act in.
   const band = screen.getByRole("button", { name: "Apps" });
@@ -518,10 +546,7 @@ test("pressing a section's band folds it away, and the fold holds across a reloa
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   const first = render(<Portal />);
 
-  // The band is only drawn once the sidebar stands open — the glyph rail has no room for it, and
-  // a fold with no head to undo it is a dead end, so the rail ignores one.
-  await userEvent.click(await screen.findByRole("button", { name: "Expand sidebar" }));
-  const index = await agentIndex();
+  const index = await shownIndex();
   expect(within(index).queryByRole("button", { name: /^Research/ })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Apps" }));
@@ -530,10 +555,10 @@ test("pressing a section's band folds it away, and the fold holds across a reloa
   );
   expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-expanded")).toBe("false");
 
-  // A column narrowed to the part someone works from would widen again on every reload otherwise.
+  // A section shut to the part someone works from would open again on every reload otherwise.
   first.unmount();
   render(<Portal />);
-  // The sidebar opens as this browser holds it, so the band is drawn without asking again.
+  await openDrawer();
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-expanded")).toBe("false"),
   );
@@ -581,6 +606,7 @@ test("closing the wizard gives the pane back to the app and clears the run's row
 
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
   expect(within(await shownIndex()).queryByText("App Builder")).toBeNull();
+  await shutDrawer();
   expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
 });
 
@@ -677,6 +703,7 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
+  await openDrawer();
   await userEvent.click(screen.getByRole("button", { name: "New chat" }));
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
   const index = await shownIndex();
@@ -926,6 +953,7 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
   );
   const index = within(await shownIndex());
   expect(index.queryByText("Invoice Intake")).toBeNull();
+  await shutDrawer();
   expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Restore" }));
@@ -1238,19 +1266,6 @@ test("the avatar dot reads live on work in flight, blocked on parked or failed, 
   expect(dot(/^Watcher/, "bg-blocked")).toBeNull();
 });
 
-test("a folded rail holds each app's name at the pointer", async () => {
-  wire({ "/transcript": () => json({ messages: [] }) });
-  location.hash = "#/agents";
-  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
-
-  // The shell opens folded, so the rows are marks: the name they cannot draw is held at the pointer.
-  const index = await agentIndex();
-  const row = within(index).getByRole("button", { name: "Research" });
-  expect(row.textContent).toBe("");
-  fireEvent.focus(row);
-  expect((await screen.findByRole("tooltip")).textContent).toBe("Research");
-});
-
 test("an app installed and not set up wears the blocked dot, and work outranks it", async () => {
   wire({
     "/api/agents/status": () => json({ statuses: [status(AGENT_ID, { turn: "running" })] }),
@@ -1340,6 +1355,10 @@ test("a status read that fails after answering keeps polling and recovers", asyn
       });
     };
     await settle(0);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Menu" }));
+    });
+    await settle(0);
     const index = screen.getByRole("navigation", { name: "Apps" });
     const row = () => within(index).getByRole("button", { name: /^Research/ });
     expect(row().querySelector(".bg-live")).toBeTruthy();
@@ -1377,6 +1396,7 @@ test("the index row and the pane header draw the app's name in Title Case", asyn
   const index = within(await shownIndex());
   expect(index.getByRole("button", { name: /^Code Reviewer/ })).toBeTruthy();
   expect(index.queryByText("code reviewer")).toBeNull();
+  await shutDrawer();
 
   const pane = within(await screen.findByRole("region", { name: "Code Reviewer" }));
   expect(pane.getByRole("button", { name: "Menu for Code Reviewer" })).toBeTruthy();
@@ -1502,10 +1522,13 @@ test("an app in setup draws no sidebar, on its own address or on the setup one",
   );
 
   // The first render already draws none of it: the boot read carries the fact, so no frame stands
-  // in which the column is on screen.
+  // in which the column is on screen. The hamburger is the whole way to it at this width, so its
+  // absence is the column's.
+  expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
   expect(screen.queryByRole("navigation", { name: "Workspace" })).toBeNull();
   await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "/setup"));
   await screen.findByText(/Set up your .* app/);
+  expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
   expect(screen.queryByRole("navigation", { name: "Workspace" })).toBeNull();
 });
 
@@ -1532,7 +1555,7 @@ test("a built app's setup screen keeps the sidebar", async () => {
   );
 
   await screen.findByText(/Set up your .* app/);
-  expect(screen.getByRole("navigation", { name: "Workspace" })).toBeTruthy();
+  expect(await shownIndex()).toBeTruthy();
 });
 
 test("a shipped app that declares no setup stands on its page", async () => {
@@ -1687,9 +1710,9 @@ test("an app that has been built once stands on its page, and the setup screen i
 
   expect(await screen.findByLabelText(/^Menu for/)).toBeTruthy();
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  // And it is somewhere the member moves around from, so the column stands beside it: the setup
-  // screen is the one place it does not.
-  expect(screen.getByRole("navigation", { name: "Workspace" })).toBeTruthy();
+  // And it is somewhere the member moves around from, so the column is theirs to open: the setup
+  // screen is the one place it is not.
+  expect(await shownIndex()).toBeTruthy();
 });
 
 /** Starting a conversation with the open app is an act of its own band, standing with the acts at

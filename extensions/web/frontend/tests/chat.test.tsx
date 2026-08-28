@@ -1,11 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import type { EarlierMessages } from "@/lib/earlier";
-import { conversationSlotHash } from "@/lib/route";
+import { chatHash, conversationSlotHash, newChatHash } from "@/lib/route";
 import { ConversationTranscript } from "@/views/Conversations";
 
 import { AGENT, AGENT_ID, ARRIVAL_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
@@ -39,6 +39,11 @@ function open() {
 
 function waiting(text: string): boolean {
   return screen.getByText(text).classList.contains("italic");
+}
+
+function follow(hash: string): void {
+  location.hash = hash;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 const REFUSED_TURN = "44444444-4444-4444-8444-444444444444";
 /** The id of a reply the turn delivered mid-flight, as its `reply` frame carries it. */
@@ -2324,10 +2329,9 @@ test("a streamed chunk never steals focus from where the member put it", async (
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
-  const elsewhere = within(screen.getByRole("navigation", { name: "Workspace" })).getByRole(
-    "button",
-    { name: "Connectors" },
-  );
+  const elsewhere = within(screen.getByRole("navigation", { name: "Tabs" })).getByRole("button", {
+    name: "Workspace",
+  });
   elsewhere.focus();
   StreamFake.last().emit("message", { text: "chunk" });
   await screen.findByText(saying("chunk"));
@@ -2944,10 +2948,8 @@ test("switching conversations remounts the log so scroll state never leaks acros
   first.scrollTop = 100;
   fireEvent.scroll(first);
 
-  act(() => {
-    location.hash = "#/c/" + other.conversation_id;
-  });
-  await waitFor(() => expect(screen.getByTestId("log")).not.toBe(first));
+  follow(chatHash(other.conversation_id));
+  await screen.findByText("No messages in this conversation yet.");
   expect(document.activeElement).toBe(screen.getByLabelText("Ask UFO"));
   const fresh = screen.getByTestId("log");
   expect(fresh).not.toBe(first);
@@ -3153,44 +3155,23 @@ test("a new conversation's composer offers no way to switch app", async () => {
   expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
 });
 
-/** One pane stands for every start screen, so a route naming another agent renames the composer
- *  already on the screen rather than mounting one beside it: the box is the same element after the
- *  rename, and the member's place in the words is where they left it. */
-test("a route renaming the start screen keeps the same box, and the place in its words", async () => {
-  wire({ ...transcript() });
-  location.hash = "#/";
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-
-  const box = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
-  await userEvent.type(box, "draft this");
-  box.setSelectionRange(6, 6);
-
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
-
-  expect(location.hash).toBe("#/new/" + AGENT_ID);
-  const after = screen.getByLabelText("Ask UFO") as HTMLTextAreaElement;
-  expect(after).toBe(box);
-  expect(after.value).toBe("draft this");
-  expect(after.selectionStart).toBe(6);
-  expect(after.selectionEnd).toBe(6);
-});
-
-/** One pane stands for every start screen, so a route that names another agent — the rail's "Ask
- *  assistant" names the main one — renames the composer already on the screen rather than
- *  mounting one that would read the named agent's draft. The box must read that draft itself, and
- *  the words it was holding stay stored under the agent they were written for. */
+/** One pane stands for every start screen, so a route that names another agent renames the composer
+ *  already on the screen rather than mounting one that would read the named agent's draft. The box
+ *  is the same element after the rename, it reads that draft itself, and the words it was holding
+ *  stay stored under the agent they were written for. */
 test("a route that renames the start screen's agent reads that agent's own draft", async () => {
   wire({ ...transcript() });
   localStorage.setItem("ufo.chat-draft." + MEMBER.id + "/new:" + AGENT_ID, "words for the main agent");
-  location.hash = "#/new/" + SECOND_ID;
+  location.hash = newChatHash(SECOND_ID);
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   const box = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
   await userEvent.type(box, "words for the second");
 
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  follow(newChatHash(AGENT_ID));
 
   await waitFor(() => expect(box.value).toBe("words for the main agent"));
+  expect(screen.getByLabelText("Ask UFO")).toBe(box);
   expect(localStorage.getItem("ufo.chat-draft." + MEMBER.id + "/new:" + SECOND_ID)).toBe(
     "words for the second",
   );

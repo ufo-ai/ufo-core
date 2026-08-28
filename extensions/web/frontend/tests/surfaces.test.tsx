@@ -1,11 +1,20 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { ALL_SURFACES } from "@/lib/surfaces";
 import type { Surfaces } from "@/lib/types";
 
-import { AGENT, json, MEMBER, SECOND, useStreamFake, wire } from "./harness";
+import { AGENT, atPhoneWidth, json, MEMBER, SECOND, useStreamFake, wire } from "./harness";
+
+/** The workspace column, which the shell draws at a phone width alone: the drawer the hamburger
+ *  opens holds it, so a test reading the rows or the foot opens it first. */
+async function openWorkspaceColumn(): Promise<HTMLElement> {
+  await userEvent.click(await screen.findByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  return within(drawer).getByRole("navigation", { name: "Workspace" });
+}
 
 beforeEach(() => {
   useStreamFake();
@@ -30,6 +39,7 @@ const WITHHELD: Surfaces = {
 const HIDDEN_APP = { ...SECOND, name: "wiki", app: "wiki", hidden: true };
 
 test("an app the deploy offers is a row the sidebar pins itself", async () => {
+  atPhoneWidth();
   render(
     <App
       agents={[AGENT, { ...HIDDEN_APP, hidden: false }]}
@@ -39,16 +49,17 @@ test("an app the deploy offers is a row the sidebar pins itself", async () => {
     />,
   );
 
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
+  const rail = await openWorkspaceColumn();
   expect(within(rail).getByRole("button", { name: "Wiki" })).toBeTruthy();
 });
 
 test("an app the deploy withholds is no such row", async () => {
+  atPhoneWidth();
   render(
     <App agents={[AGENT, HIDDEN_APP]} member={MEMBER} surfaces={ALL_SURFACES} onAgents={() => {}} />,
   );
 
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
+  const rail = await openWorkspaceColumn();
   expect(within(rail).queryByRole("button", { name: "Wiki" })).toBeNull();
 });
 
@@ -95,13 +106,17 @@ test("an offered workspace screen keeps its tab", async () => {
 });
 
 test("the administration gear goes where the deploy withholds it, admin or not", async () => {
+  atPhoneWidth();
   const withheld = render(
     <App agents={[AGENT]} member={ADMIN} surfaces={WITHHELD} onAgents={() => {}} />,
   );
-  await waitFor(() => expect(screen.queryByRole("button", { name: "Sign out" })).toBeTruthy());
-  expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
+  const foot = within(await openWorkspaceColumn());
+  expect(foot.getByRole("button", { name: "Sign out" })).toBeTruthy();
+  expect(foot.queryByRole("button", { name: "Administration" })).toBeNull();
   withheld.unmount();
 
   render(<App agents={[AGENT]} member={ADMIN} surfaces={ALL_SURFACES} onAgents={() => {}} />);
-  expect(await screen.findByRole("button", { name: "Administration" })).toBeTruthy();
+  expect(
+    within(await openWorkspaceColumn()).getByRole("button", { name: "Administration" }),
+  ).toBeTruthy();
 });

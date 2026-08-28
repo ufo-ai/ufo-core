@@ -404,8 +404,8 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
 });
 
 /** The chat app is the main agent, and its page is the conversation screen itself. So a chat the
- *  member picks in the sidebar is that page's own target: it stands in the page's column, and no
- *  lane over the page draws it a second time. */
+ *  member opens is that page's own target: it stands in the page's column, and no lane over the
+ *  page draws it a second time. */
 test("a chat opened on the chat app stands in the page's column alone", async () => {
   location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
   const { calls } = wire({
@@ -512,7 +512,7 @@ test("History sends the chat app's page to the conversations it holds", async ()
 
   await userEvent.click(await screen.findByRole("button", { name: "History for Chat" }));
 
-  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID);
+  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=");
   // One column still: the list is the page's, never a panel the portal draws beside it.
   expect(screen.queryByRole("region", { name: CHAT_ROW.title })).toBeNull();
 });

@@ -4,10 +4,13 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, atPhoneWidth, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
+/** The bar the palette is opened from stands on the phone bar and in the workspace column the
+ *  drawer holds, so the width these are read at is the one that draws it. */
 beforeEach(() => {
   location.hash = "";
+  atPhoneWidth();
   useStreamFake();
 });
 
@@ -328,7 +331,7 @@ test("an unopened term lists what to do and where to go, and reads nothing", asy
   expect(headings()).toEqual(["Actions", "Places"]);
   expect(
     found.getAllByRole("option").map((row) => row.textContent),
-  ).toEqual(["New chat", "Chat", "Apps", "Connectors", "Workspace"]);
+  ).toEqual(["New chat", "Home", "Apps", "Connectors", "Workspace"]);
   expect(calls.some((url) => url.includes("q="))).toBe(false);
 });
 
@@ -338,21 +341,21 @@ test("the arrow keys move the cursor and Enter takes the row under it", async ()
 
   await screen.findByRole("dialog");
   await userEvent.keyboard("{ArrowDown}");
+  await userEvent.keyboard("{ArrowDown}");
   await userEvent.keyboard("{Enter}");
 
-  expect(location.hash).toBe("#/");
+  expect(location.hash).toBe("#/agents");
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
-
-/** The words are the member's own and they pressed Enter on them, so the row says them: it lands on
- *  a new chat with the term already sent, not with the box filled and waiting for a second press.
- *  The conversation is founded by the composer on the screen, so it is theirs like any other. */
+/** The row says the term to the agent the palette names, which is the main one, from any screen —
+ *  including the start screen of another agent. One pane stands for every start screen, so the route
+ *  renames the agent of the composer already on the screen rather than mounting a second one, and
+ *  the words must be read under that new name. Left unread they would be said into a later chat. */
 test("the term is said to the agent, by the composer on the screen it lands on", async () => {
-  wire({
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "deploy" }),
+  const { calls } = wire({
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
     "/slots": () => json({ slots: [] }),
-    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
     "/objects/artifact": () => json({ objects: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
@@ -360,22 +363,21 @@ test("the term is said to the agent, by the composer on the screen it lands on",
     ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  await open();
+  location.hash = "#/";
+  portal();
+  await userEvent.click(await screen.findByRole("button", { name: "Search" }));
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
   await userEvent.click(found.getByRole("option", { name: "assistant: deploy" }));
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
-  const composer = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
-  expect(composer.value).toBe("");
+  const said = calls.filter((url) => url.includes("/chat?conversation="));
+  expect(said).toHaveLength(1);
+  expect(said[0]).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
+  expect(location.hash).toBe("#/c/" + FOUNDED_ID);
 });
 
-/** The row says the term to the agent the palette names, which is the main one, from any screen —
- *  including the start screen of another agent. One pane stands for every start screen, so the route
- *  renames the agent of the composer already on the screen rather than mounting a second one, and
- *  the words must be read under that new name. Left unread they would be said into a later chat. */
 test("the term is said to the agent the row names, from another agent's start screen", async () => {
   const { calls } = wire({
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
