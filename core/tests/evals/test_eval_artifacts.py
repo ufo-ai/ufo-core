@@ -577,6 +577,64 @@ def test_svg_geometry_wording_materializes_only_the_builder_prompt(
     assert spec.reasoning is reference.reasoning is None
 
 
+def test_wireframe_kit_wording_materializes_only_the_builder_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = Path(__file__).parents[3]
+    reference = load_experiment(repo / "evals/app-builder-svg-geometry-wording.toml")
+    spec = load_experiment(repo / "evals/app-builder-wireframe-kit-components.toml")
+    builder_path = "extensions/sites/ufo_ext_sites/application_builder.py"
+    prompt_path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
+    paths = (builder_path, prompt_path)
+    source = {path: (repo / path).read_text() for path in paths}
+    base = spec.base
+    arms = (
+        ArmSpec.model_construct(name="control", files={}, replacements=()),
+        spec.arm[0],
+    )
+    monkeypatch.setattr(Ablation, "_sync", lambda self, root: None)
+    _stub_egress_binary_copy(monkeypatch, repo)
+    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
+    roots: list[Path] = []
+    materialized: dict[str, dict[str, str]] = {}
+
+    try:
+        for arm in arms:
+            root = tmp_path / arm.name
+            roots.append(root)
+            ablation._materialize(arm, base, root, None)
+            changed = subprocess.run(
+                ("git", "-C", str(root), "diff", "--name-only"),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+            assert changed == ([] if arm.name == "control" else [prompt_path])
+            materialized[arm.name] = {path: (root / path).read_text() for path in paths}
+    finally:
+        for root in roots:
+            ablation._remove_worktree(root)
+
+    control = materialized["control"]
+    treatment = materialized["kit-annotations"]
+    assert treatment[prompt_path] == source[prompt_path]
+    assert treatment[builder_path] == control[builder_path]
+    replacement = spec.arm[0].replacements[0]
+    assert replacement.path == prompt_path
+    assert treatment[prompt_path].replace(replacement.new, replacement.old) == control[prompt_path]
+    assert "data-kit-component" not in control[prompt_path]
+    assert '<g data-kit-component="Card">' in treatment[prompt_path]
+    assert "same named components directly in `app.tsx`" in treatment[prompt_path]
+    assert spec.cases == reference.cases
+    assert spec.suites == reference.suites
+    assert spec.repeats == reference.repeats == 1
+    assert spec.concurrency == reference.concurrency == 3
+    assert spec.max_stacks == len(arms) == 2
+    assert spec.template == reference.template
+    assert spec.model is reference.model is None
+    assert spec.reasoning is reference.reasoning is None
+
+
 READER_REWRITES = {
     "pre-meeting-briefs": "Confirm the SSO date before the renewal call.",
     "meeting-tasks": "Create the agreed tasks and confirm their owners and dates.",
@@ -1402,40 +1460,64 @@ async def test_app_bench_probe_retains_the_final_application_source(tmp_path: Pa
     )
 
     assert result.error == ""
+    assert SharedArtifact("meeting-tasks-design.svg", b"design.svg") in result.artifacts
     assert result.artifacts[-1] == SharedArtifact("meeting-tasks-source.tsx", source)
 
 
-async def test_app_bench_kit_component_scorer_requires_an_import_used_as_jsx() -> None:
+async def test_app_bench_kit_component_scorer_requires_wireframe_and_source_match() -> None:
     scorer = _kit_component_scorer()
+
+    def output(design: str, source: str) -> CapabilityOutput:
+        return CapabilityOutput(
+            "",
+            (),
+            artifacts=(
+                SharedArtifact("meeting-tasks-design.svg", design.encode()),
+                SharedArtifact("meeting-tasks-source.tsx", source.encode()),
+            ),
+        )
+
     real = await scorer(
-        _output(
-            "meeting-tasks-source.tsx",
-            b'import { Card, mountApp } from "ufo/kit";\n'
-            b"const App = () => <Card>Queue</Card>;\n"
-            b'mountApp(document.getElementById("root")!, () => <App />);',
+        output(
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            '<g data-kit-component="Card"/><g data-kit-component="Badge"/></svg>',
+            'import { Badge, Card, mountApp } from "ufo/kit";\n'
+            "const App = () => <main><Badge>Ready</Badge><Card>Queue</Card></main>;\n"
+            'mountApp(document.getElementById("root")!, () => <App />);',
         )
     )
-    mount_only = await scorer(
-        _output(
-            "meeting-tasks-source.tsx",
-            b'import { mountApp } from "ufo/kit";\n'
-            b'mountApp(document.getElementById("root")!, () => <main>Queue</main>);',
+    missing = await scorer(
+        output(
+            '<svg xmlns="http://www.w3.org/2000/svg"><g/></svg>',
+            'import { Card, mountApp } from "ufo/kit";\n'
+            "const App = () => <Card>Queue</Card>;\n"
+            'mountApp(document.getElementById("root")!, () => <App />);',
         )
     )
-    lookalike = await scorer(
-        _output(
-            "meeting-tasks-source.tsx",
-            b'import { mountApp } from "ufo/kit";\n'
-            b"const Card = ({ children }: any) => <div>{children}</div>;\n"
-            b"const App = () => <Card>Queue</Card>;\n"
-            b'mountApp(document.getElementById("root")!, () => <App />);',
+    unknown = await scorer(
+        output(
+            '<svg xmlns="http://www.w3.org/2000/svg"><g data-kit-component="DashboardTile"/></svg>',
+            'import { Card, mountApp } from "ufo/kit";\n'
+            "const App = () => <Card>Queue</Card>;\n"
+            'mountApp(document.getElementById("root")!, () => <App />);',
         )
     )
-    unused = await scorer(
-        _output(
-            "meeting-tasks-source.tsx",
-            b'import { Card, mountApp } from "ufo/kit";\n'
-            b'mountApp(document.getElementById("root")!, () => <main>Queue</main>);',
+    mismatch = await scorer(
+        output(
+            '<svg xmlns="http://www.w3.org/2000/svg"><g data-kit-component="Badge"/></svg>',
+            'import { Badge, Card, mountApp } from "ufo/kit";\n'
+            'const example = "<Badge>Not rendered</Badge>";\n'
+            "const App = () => <Card>Queue</Card>;\n"
+            'mountApp(document.getElementById("root")!, () => <App />);',
+        )
+    )
+    shadowed = await scorer(
+        output(
+            '<svg xmlns="http://www.w3.org/2000/svg"><g data-kit-component="Badge"/></svg>',
+            'import { Badge as KitBadge, Card, mountApp } from "ufo/kit";\n'
+            "function KitBadge() { return <span>Local</span>; }\n"
+            "const App = () => <main><Card>Queue</Card><KitBadge /></main>;\n"
+            'mountApp(document.getElementById("root")!, () => <App />);',
         )
     )
 
@@ -1443,14 +1525,47 @@ async def test_app_bench_kit_component_scorer_requires_an_import_used_as_jsx() -
     assert real.evidence == {
         "appKitPassed": 1,
         "appKitTotal": 1,
-        "appKitComponents": ["Card"],
+        "appKitWireframeComponents": ["Card", "Badge"],
+        "appKitComponents": ["Badge", "Card"],
     }
-    assert not mount_only.passed
-    assert not lookalike.passed
-    assert not unused.passed
-    assert mount_only.evidence["appKitPassed"] == 0
-    assert lookalike.evidence["appKitComponents"] == []
-    assert "no imported Kit component is used as JSX" in unused.reason
+    assert not missing.passed
+    assert missing.evidence["appKitWireframeComponents"] == []
+    assert "wireframe has no Kit component annotations" in missing.reason
+    assert not unknown.passed
+    assert unknown.evidence["appKitWireframeComponents"] == ["DashboardTile"]
+    assert "unknown Kit component" in unknown.reason
+    assert not mismatch.passed
+    assert mismatch.evidence["appKitComponents"] == ["Card"]
+    assert "wireframe Kit component(s) not rendered in app.tsx: Badge" in mismatch.reason
+    assert not shadowed.passed
+    assert shadowed.evidence["appKitComponents"] == ["Card"]
+
+
+async def test_app_bench_kit_component_scorer_rejects_a_destructured_local_shadow() -> None:
+    scorer = _kit_component_scorer()
+    result = await scorer(
+        CapabilityOutput(
+            "",
+            (),
+            artifacts=(
+                SharedArtifact(
+                    "meeting-tasks-design.svg",
+                    b'<svg xmlns="http://www.w3.org/2000/svg"><g data-kit-component="Card"/></svg>',
+                ),
+                SharedArtifact(
+                    "meeting-tasks-source.tsx",
+                    b'import { Card, mountApp } from "ufo/kit";\n'
+                    b"const local = { Card: () => <main /> };\n"
+                    b"function App() { const { Card } = local; return <Card />; }\n"
+                    b'mountApp(document.getElementById("root")!, () => <App />);',
+                ),
+            ),
+        )
+    )
+
+    assert not result.passed
+    assert result.evidence["appKitComponents"] == []
+    assert "wireframe Kit component(s) not rendered in app.tsx: Card" in result.reason
 
 
 def _output(name: str, content: bytes) -> CapabilityOutput:
@@ -1997,6 +2112,10 @@ def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
         "Built the app.",
         (*own_calls, *worker_calls),
         artifacts=(
+            SharedArtifact(
+                "built-design.svg",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><g data-kit-component="Card"/></svg>',
+            ),
             *(SharedArtifact(name, content) for name, content in files.items()),
             SharedArtifact(
                 "built-source.tsx",

@@ -121,6 +121,7 @@ class AcceptedApplicationDesignEvidence(BaseModel):
 
     version: Literal[1] = 1
     design_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    kit_components: tuple[str, ...] = Field(min_length=1)
     regions: tuple[ApplicationAuditRegion, ...] = Field(
         min_length=DESIGN_REGION_MIN, max_length=DESIGN_REGION_MAX
     )
@@ -130,6 +131,8 @@ class AcceptedApplicationDesignEvidence(BaseModel):
         names = tuple(region.name for region in self.regions)
         if len(names) != len(set(names)):
             raise ValueError("accepted application design regions must be unique")
+        if len(self.kit_components) != len(set(self.kit_components)):
+            raise ValueError("accepted application design Kit components must be unique")
         return self
 
 

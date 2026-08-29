@@ -481,12 +481,39 @@ SOURCE_LITERAL_OR_COMMENT = re.compile(
 )
 JSX_COMPONENT = re.compile(r"<\s*([A-Z][A-Za-z0-9_$]*)\b")
 LOCAL_NAMED_DECLARATION = re.compile(r"\b(?:class|function|const|let|var)\s+([A-Za-z_$][\w$]*)")
+LOCAL_DESTRUCTURED_DECLARATION = re.compile(r"\b(?:const|let|var)\s*\{(?P<bindings>[^{}]*)\}\s*=")
+LOCAL_DESTRUCTURED_BINDING = re.compile(
+    r"(?:^|,)\s*(?:[A-Za-z_$][\w$]*\s*:\s*)?(?:\.\.\.)?"
+    r"([A-Za-z_$][\w$]*)\s*(?=[,}=]|$)"
+)
 FUNCTION_PARAMETERS = re.compile(
     r"\bfunction\b[^()]*\((?P<function>[^()]*)\)"
     r"|\((?P<arrow>[^()]*)\)\s*=>"
     r"|(?P<single>\b[A-Za-z_$][\w$]*)\s*=>",
     re.DOTALL,
 )
+
+
+def _local_source_bindings(code: str) -> set[str]:
+    bindings = set(LOCAL_NAMED_DECLARATION.findall(code))
+    for declaration in LOCAL_DESTRUCTURED_DECLARATION.finditer(code):
+        bindings.update(LOCAL_DESTRUCTURED_BINDING.findall(declaration.group("bindings")))
+    for parameters in FUNCTION_PARAMETERS.finditer(code):
+        single = parameters.group("single")
+        if single:
+            bindings.add(single)
+            continue
+        values = parameters.group("function") or parameters.group("arrow") or ""
+        bindings.update(
+            re.findall(
+                r"(?:^|,)\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)\s*(?=[:,?=]|$)",
+                values,
+            )
+        )
+        bindings.update(re.findall(r"(?:\{|,|:\s)([A-Za-z_$][\w$]*)\s*(?=[,}=])", values))
+    return bindings
+
+
 APPLICATION_KIT_COMPONENTS = frozenset(
     {
         "AgentIcon",
@@ -620,6 +647,7 @@ LITERAL_WHITE_ON_SCHEME_INK = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 APPLICATION_DESIGN_REGION = re.compile(r"[a-z][a-z0-9-]{0,79}")
+APPLICATION_DESIGN_KIT_COMPONENT = re.compile(r"[A-Z][A-Za-z0-9]*")
 SOURCE_EDIT_PATCH = re.compile(
     r"\A<<<<<<< SEARCH\n(?P<old>.*?)\n=======\n(?P<new>.*?)\n>>>>>>>(?: REPLACE)?\n?\Z",
     re.DOTALL,
@@ -903,7 +931,9 @@ class EditApplicationSourceInput(BaseModel):
         return tuple(edits)
 
 
-def _validate_application_source(source: str) -> None:
+def _validate_application_source(
+    source: str, designed_kit_components: tuple[str, ...] = ()
+) -> None:
     modules = tuple(left or right for left, right in IMPORT_MODULE.findall(source))
     if IMPORT_DECLARATION.search(source) is None or "ufo/kit" not in modules:
         raise ValueError("app.tsx must import its runtime and components from ufo/kit")
@@ -917,7 +947,7 @@ def _validate_application_source(source: str) -> None:
         raise ValueError("app.tsx must import from ufo/kit instead of using UfoAppKit")
     if ROOT_MOUNT.search(source) is None:
         raise ValueError("mountApp must receive the root element and a render callback")
-    imported_components: set[str] = set()
+    imported_components: dict[str, set[str]] = {}
     for declaration in NAMED_KIT_IMPORT.finditer(source):
         if declaration.group("type"):
             continue
@@ -928,25 +958,28 @@ def _validate_application_source(source: str) -> None:
                 and imported.group("type") is None
                 and imported.group("export") in APPLICATION_KIT_COMPONENTS
             ):
-                imported_components.add(imported.group("local") or imported.group("export"))
+                imported_components.setdefault(imported.group("export"), set()).add(
+                    imported.group("local") or imported.group("export")
+                )
     code = SOURCE_LITERAL_OR_COMMENT.sub("", source)
-    local_declarations = set(LOCAL_NAMED_DECLARATION.findall(code))
-    for parameters in FUNCTION_PARAMETERS.finditer(code):
-        single = parameters.group("single")
-        if single:
-            local_declarations.add(single)
-            continue
-        values = parameters.group("function") or parameters.group("arrow") or ""
-        local_declarations.update(
-            re.findall(
-                r"(?:^|,)\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)\s*(?=[:,?=]|$)",
-                values,
-            )
-        )
-        local_declarations.update(re.findall(r"(?:\{|,|:\s)([A-Za-z_$][\w$]*)\s*(?=[,}=])", values))
+    local_declarations = _local_source_bindings(code)
     rendered_components = set(JSX_COMPONENT.findall(code)) - local_declarations
-    if imported_components.isdisjoint(rendered_components):
+    rendered_kit_components = {
+        exported
+        for exported, local_names in imported_components.items()
+        if not local_names.isdisjoint(rendered_components)
+    }
+    if not rendered_kit_components:
         raise ValueError("app.tsx must render at least one UI component imported from ufo/kit")
+    missing_designed_components = tuple(
+        name for name in designed_kit_components if name not in rendered_kit_components
+    )
+    if missing_designed_components:
+        label = "component" if len(missing_designed_components) == 1 else "components"
+        raise ValueError(
+            f"app.tsx must directly render designed Kit {label}: "
+            f"{', '.join(missing_designed_components)}"
+        )
     if LITERAL_WHITE_ON_SCHEME_INK.search(source):
         raise ValueError(
             "a --color-ink background must use --color-surface text in both colour schemes"
@@ -979,7 +1012,9 @@ def _validate_application_source(source: str) -> None:
             )
 
 
-def _validate_application_design(source: str) -> tuple[tuple[str, ...], int]:
+def _validate_application_design(
+    source: str,
+) -> tuple[tuple[str, ...], tuple[str, ...], int]:
     if "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
         raise ValueError("application design must not declare XML entities")
     try:
@@ -1008,6 +1043,7 @@ def _validate_application_design(source: str) -> tuple[tuple[str, ...], int]:
             "integer height H from 844 through 4096"
         )
     regions = []
+    kit_components: list[str] = []
     ids = set()
     drawing_elements = 0
     for element in root.iter():
@@ -1072,6 +1108,25 @@ def _validate_application_design(source: str) -> tuple[tuple[str, ...], int]:
                     "application design regions must be lowercase slugs on SVG g elements"
                 )
             regions.append(element)
+        kit_component = element.attrib.get("data-kit-component")
+        if kit_component is not None:
+            if tag != "g":
+                raise ValueError(
+                    "application design data-kit-component must be on an SVG g element"
+                )
+            if not kit_component.strip():
+                raise ValueError(
+                    "application design data-kit-component must name one visual ufo/kit export"
+                )
+            if APPLICATION_DESIGN_KIT_COMPONENT.fullmatch(kit_component) is None:
+                raise ValueError("application design data-kit-component must be one ComponentName")
+            if kit_component not in APPLICATION_KIT_COMPONENTS:
+                raise ValueError(
+                    f"application design data-kit-component {kit_component!r} is not a visual "
+                    "ufo/kit export"
+                )
+            if kit_component not in kit_components:
+                kit_components.append(kit_component)
         for name, value in element.attrib.items():
             attribute = name.rsplit("}", 1)[-1].casefold()
             lowered = value.casefold()
@@ -1092,7 +1147,11 @@ def _validate_application_design(source: str) -> tuple[tuple[str, ...], int]:
         for descendant in region.iter()
     ):
         raise ValueError("application design regions must not be nested")
-    return names, int(view_box[3])
+    if not kit_components:
+        raise ValueError(
+            "application design requires data-kit-component on at least one SVG g element"
+        )
+    return names, tuple(kit_components), int(view_box[3])
 
 
 async def _build_application_project(
@@ -1247,7 +1306,9 @@ async def _require_application_source(ctx: ToolContext, task: ApplicationBuilder
         raise RuntimeError(claim.stderr or "application source claim could not be read")
 
 
-async def _require_application_design(ctx: ToolContext, task: ApplicationBuilderTask) -> None:
+async def _require_application_design(
+    ctx: ToolContext, task: ApplicationBuilderTask
+) -> tuple[str, ...]:
     claim = await ctx.sandbox.python(
         APPLICATION_SOURCE_REQUIRE_CLAIM,
         await _design_claim_path(ctx, task, ctx.turn.id),
@@ -1260,7 +1321,8 @@ async def _require_application_design(ctx: ToolContext, task: ApplicationBuilder
     result = await ctx.sandbox.python(APPLICATION_SOURCE_READ, _design_path(task), WORKSPACE_DIR)
     if result.exit_code != 0 or not result.stdout:
         raise ValueError("write_application_design must complete before write_application_source")
-    _validate_application_design(result.stdout)
+    _, kit_components, _ = _validate_application_design(result.stdout)
+    return kit_components
 
 
 async def write_application_design(
@@ -1271,7 +1333,7 @@ async def write_application_design(
     if ctx.idempotency_key is None:
         raise RuntimeError("write_application_design requires an idempotency key")
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
-    names, page_height = _validate_application_design(args.content)
+    names, kit_components, page_height = _validate_application_design(args.content)
     design_path = _design_path(task)
     content = args.content.encode()
     content_sha256 = sha256(content).hexdigest()
@@ -1289,6 +1351,7 @@ async def write_application_design(
         raise ValueError(size_failure)
     evidence = AcceptedApplicationDesignEvidence(
         design_sha256=content_sha256,
+        kit_components=kit_components,
         regions=rendered_regions,
     )
     evidence_content = evidence.model_dump_json(by_alias=True).encode()
@@ -1486,6 +1549,7 @@ async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceI
 
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
     await _require_application_source(ctx, task)
+    designed_kit_components = await _require_application_design(ctx, task)
     candidate_path = await _source_candidate_path(ctx, task, ctx.turn.id)
     result = await ctx.sandbox.python(
         APPLICATION_SOURCE_READ, candidate_path, await _runtime_root(ctx)
@@ -1509,7 +1573,7 @@ async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceI
     if len(source) > APPLICATION_SOURCE_MAX_CHARS:
         raise ValueError(f"app.tsx exceeds {APPLICATION_SOURCE_MAX_CHARS} characters")
     await ctx.sandbox.write_runtime_path(candidate_path, source.encode())
-    _validate_application_source(source)
+    _validate_application_source(source, designed_kit_components)
     await _compile_application_source(ctx, task, source)
     await ctx.sandbox.write_file(task.source_path, source.encode())
     await _build_application_project(ctx, task.scaffold_path)
@@ -1538,7 +1602,7 @@ async def write_application_source(
     """Write only the `app.tsx` path admitted in this child turn's typed input."""
 
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
-    await _require_application_design(ctx, task)
+    designed_kit_components = await _require_application_design(ctx, task)
     claim = await ctx.sandbox.python(
         APPLICATION_SOURCE_CLAIM,
         await _source_claim_path(ctx, task, ctx.turn.id),
@@ -1555,7 +1619,7 @@ async def write_application_source(
         await _source_candidate_path(ctx, task, ctx.turn.id), args.content.encode()
     )
     try:
-        _validate_application_source(args.content)
+        _validate_application_source(args.content, designed_kit_components)
         await _compile_application_source(ctx, task, args.content)
     except ValueError as error:
         raise ValueError(

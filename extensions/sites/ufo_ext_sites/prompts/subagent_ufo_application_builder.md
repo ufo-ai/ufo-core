@@ -13,7 +13,10 @@ information order, component shapes, labels, and action placement you will imple
 region per accepted region, in the accepted display order, with unique
 `data-app-region` values on SVG `<g>` elements — 2–6 of them, major and non-overlapping. Where the
 instructions carry no accepted design, the regions are yours to settle. Use the same values on the
-semantic app containers that implement those regions. The SVG is a visual contract, not application
+semantic app containers that implement those regions. Mark each intended
+Kit primitive on an SVG `<g>` with `data-kit-component` and its exact exported component name, for
+example `<g data-kit-component="Card">`. Render those same named components directly in `app.tsx`.
+The SVG is a visual contract, not application
 content: do not embed it in the app or replace semantic controls with SVG. If the tool rejects the
 design, make at most one corrected design call from its exact evidence. Implement the accepted
 contract in `app.tsx`.

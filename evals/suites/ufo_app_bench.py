@@ -16,6 +16,7 @@ from hashlib import sha256
 from importlib.resources import files
 from pathlib import Path
 from uuid import UUID, uuid4
+from xml.etree import ElementTree
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -73,7 +74,9 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_READ_TOOL,
     APPLICATION_BUILDER_SKILL,
     APPLICATION_BUILDER_WRITE_TOOL,
+    APPLICATION_KIT_COMPONENTS,
     ApplicationBuilderResult,
+    _local_source_bindings,
 )
 
 from evals.driver import EVAL_SURFACE, WorkspaceDriver
@@ -210,9 +213,14 @@ KIT_NAMED_IMPORT = re.compile(
     r"\bimport\s*\{(?P<bindings>[^{}]+)\}\s*from\s*['\"]ufo/kit['\"]", re.DOTALL
 )
 KIT_IMPORT_BINDING = re.compile(
-    r"(?:type\s+)?(?P<imported>[A-Za-z_$][\w$]*)(?:\s+as\s+(?P<local>[A-Za-z_$][\w$]*))?"
+    r"(?P<type>type\s+)?(?P<imported>[A-Za-z_$][\w$]*)"
+    r"(?:\s+as\s+(?P<local>[A-Za-z_$][\w$]*))?"
 )
-KIT_NON_UI_EXPORTS = frozenset({"Fragment", "React", "StrictMode", "Suspense"})
+KIT_SOURCE_LITERAL_OR_COMMENT = re.compile(
+    r"//[^\n]*|/\*.*?\*/|(?<![\w$])'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`",
+    re.DOTALL,
+)
+KIT_JSX_COMPONENT = re.compile(r"<\s*(?P<local>[A-Z][A-Za-z0-9_$]*)(?=[\s/>])")
 BROWSER_PROBE_LOCK = Path(tempfile.gettempdir()) / "ufo-app-browser-probe.lock"
 BROWSER_PROBE_LOCK_POLL_SECONDS = 0.05
 _BROWSER_PROBE_TASK_LOCK = asyncio.Lock()
@@ -1761,54 +1769,101 @@ def _page_scorer() -> Grader:
 
 
 def _kit_component_scorer() -> Grader:
+    def evidence(
+        wireframe: tuple[str, ...], rendered: tuple[str, ...], *, passed: bool
+    ) -> JsonObject:
+        return {
+            **_score_evidence("appKit", 1 if passed else 0, 1),
+            "appKitWireframeComponents": list(wireframe),
+            "appKitComponents": list(rendered),
+        }
+
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        artifacts = tuple(
+        source_artifacts = tuple(
             artifact for artifact in output.artifacts if artifact.name.endswith("-source.tsx")
         )
-        if len(artifacts) != 1:
+        design_artifacts = tuple(
+            artifact for artifact in output.artifacts if artifact.name.endswith("-design.svg")
+        )
+        if len(source_artifacts) != 1 or len(design_artifacts) != 1:
             return CapabilityVerdict(
                 False,
-                f"captured {len(artifacts)} final app.tsx source artifact(s)",
-                {**_score_evidence("appKit", 0, 1), "appKitComponents": []},
+                f"captured {len(design_artifacts)} accepted design SVG and "
+                f"{len(source_artifacts)} final app.tsx source artifact(s)",
+                evidence((), (), passed=False),
             )
         try:
-            source = artifacts[0].content.decode()
+            design = design_artifacts[0].content.decode()
+            source = source_artifacts[0].content.decode()
         except UnicodeDecodeError:
             return CapabilityVerdict(
                 False,
-                "final app.tsx source is not UTF-8",
-                {**_score_evidence("appKit", 0, 1), "appKitComponents": []},
+                "accepted design SVG or final app.tsx source is not UTF-8",
+                evidence((), (), passed=False),
             )
-        imported = set()
+        try:
+            root = ElementTree.fromstring(design)
+        except ElementTree.ParseError:
+            return CapabilityVerdict(
+                False,
+                "accepted design SVG is not valid XML",
+                evidence((), (), passed=False),
+            )
+        wireframe = tuple(
+            component.strip()
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "g"
+            and (component := element.attrib.get("data-kit-component")) is not None
+        )
+        imported: dict[str, str] = {}
         for declaration in KIT_NAMED_IMPORT.finditer(source):
             for raw_binding in declaration.group("bindings").split(","):
                 binding = KIT_IMPORT_BINDING.fullmatch(raw_binding.strip())
-                if binding is None:
+                if binding is None or binding.group("type"):
                     continue
+                exported = binding.group("imported")
                 local = binding.group("local") or binding.group("imported")
-                if local[0].isupper() and local not in KIT_NON_UI_EXPORTS:
-                    imported.add(local)
-        rendered = sorted(
-            name for name in imported if re.search(rf"<\s*{re.escape(name)}(?=[\s/>])", source)
+                if exported in APPLICATION_KIT_COMPONENTS:
+                    imported[local] = exported
+        code = KIT_SOURCE_LITERAL_OR_COMMENT.sub("", source)
+        local_declarations = _local_source_bindings(code)
+        rendered = tuple(
+            imported[local]
+            for match in KIT_JSX_COMPONENT.finditer(code)
+            if (local := match.group("local")) in imported and local not in local_declarations
         )
-        evidence = {
-            **_score_evidence("appKit", 1 if rendered else 0, 1),
-            "appKitComponents": rendered,
-        }
-        if not rendered:
+        proof = evidence(wireframe, rendered, passed=False)
+        if not wireframe:
             return CapabilityVerdict(
                 False,
-                "no imported Kit component is used as JSX in final app.tsx",
-                evidence,
+                "wireframe has no Kit component annotations",
+                proof,
+            )
+        unknown = tuple(
+            dict.fromkeys(name for name in wireframe if name not in APPLICATION_KIT_COMPONENTS)
+        )
+        if unknown:
+            return CapabilityVerdict(
+                False,
+                f"wireframe has unknown Kit component(s): {', '.join(unknown)}",
+                proof,
+            )
+        missing = tuple(dict.fromkeys(name for name in wireframe if name not in rendered))
+        if missing:
+            return CapabilityVerdict(
+                False,
+                f"wireframe Kit component(s) not rendered in app.tsx: {', '.join(missing)}",
+                proof,
             )
         return CapabilityVerdict(
             True,
-            f"final app.tsx renders imported Kit component(s): {', '.join(rendered)}",
-            evidence,
+            "wireframe Kit components are rendered in final app.tsx",
+            evidence(wireframe, rendered, passed=True),
         )
 
     return DescribedGrader(
-        "final app.tsx imports and renders at least one shipped ufo/kit UI component",
+        "the accepted wireframe names at least one shipped ufo/kit UI component and final app.tsx "
+        "renders every named component",
         grade,
     )
 
@@ -2286,7 +2341,8 @@ def _screen(
         judge_on_deterministic_failure=True,
         digest_tag=(
             f"ufo-app-bench:{name}:interactive-homepage:actions:qa-bounded-product:"
-            f"kit-source-use:audit-{AUDIT_DIGEST[:12]}:wait-{WORKFLOW_WAIT_SECONDS:g}{data_digest}"
+            f"kit-wireframe-source-use:audit-{AUDIT_DIGEST[:12]}:"
+            f"wait-{WORKFLOW_WAIT_SECONDS:g}{data_digest}"
         ),
         artifact_probe=(
             _AppBenchProbe(name)

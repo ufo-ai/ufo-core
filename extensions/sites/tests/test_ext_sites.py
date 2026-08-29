@@ -231,7 +231,7 @@ HOUSE_STYLE_TOKENS = "references/tokens.css"
 PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
 APPLICATION_QA_GUIDANCE = "shared/13-ufo-application-qa.md"
 APPLICATION_DESIGN = """<svg viewBox="0 0 305 844" width="305" height="844">
-<g data-app-region="queue"><rect width="183" height="844" /></g>
+<g data-app-region="queue"><g data-kit-component="Card"><rect width="183" height="844" /></g></g>
 <g data-app-region="detail"><rect x="183" width="122" height="844" /></g>
 </svg>"""
 AUDIT_DESIGN_REGIONS = (
@@ -599,6 +599,7 @@ def _seed_accepted_application_design(sandbox: FakeSandbox, turn_id: UUID) -> No
     sandbox.writes[evidence] = (
         AcceptedApplicationDesignEvidence(
             design_sha256=sha256(design).hexdigest(),
+            kit_components=("Card",),
             regions=tuple(
                 ApplicationAuditRegion.model_validate(region) for region in AUDIT_DESIGN_REGIONS
             ),
@@ -3504,6 +3505,7 @@ async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) 
         sandbox.writes[accepted_evidence_path]
     )
     assert accepted_evidence.design_sha256 == payload["design_digest"]
+    assert accepted_evidence.kit_components == ("Card",)
     assert accepted_evidence.regions == tuple(
         ApplicationAuditRegion.model_validate(region) for region in AUDIT_DESIGN_REGIONS
     )
@@ -3912,8 +3914,8 @@ async def test_write_application_design_recovers_each_partial_pair_and_passes_qa
         ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN)
     )
     source = (
-        'import { Group, mountApp } from "ufo/kit";\n'
-        'mountApp(document.getElementById("root")!, () => <Group>Queue</Group>);'
+        'import { Card, mountApp } from "ufo/kit";\n'
+        'mountApp(document.getElementById("root")!, () => <Card>Queue</Card>);'
     )
     await write_application_source(ctx, WriteApplicationSourceInput(content=source))
     qa = await qa_ufo_application(ctx, QaUfoApplicationInput())
@@ -3927,6 +3929,7 @@ async def test_write_application_design_recovers_each_partial_pair_and_passes_qa
         evidence_state[0]
     )
     assert accepted_evidence_value.design_sha256 == sha256(APPLICATION_DESIGN.encode()).hexdigest()
+    assert accepted_evidence_value.kit_components == ("Card",)
     assert evidence_state[1] == 0o400
     assert all(program != APPLICATION_FIXED_CALL_CLAIM for program, _ in sandbox.programs)
     assert sandbox.acceptance_calls == 4
@@ -4543,7 +4546,8 @@ async def test_application_builder_accepts_a_compact_band_on_a_tall_page(tmp_pat
     band_height = 80
     design = (
         f'<svg viewBox="0 0 305 {page_height}" width="305" height="{page_height}">'
-        f'<g data-app-region="queue"><rect width="305" height="{band_height}" /></g>'
+        f'<g data-app-region="queue" data-kit-component="Card">'
+        f'<rect width="305" height="{band_height}" /></g>'
         f'<g data-app-region="detail"><rect y="{band_height + 16}" width="305" '
         f'height="{page_height - band_height - 16}" /></g>'
         "</svg>"
@@ -4821,11 +4825,13 @@ async def test_application_builder_rejects_svg_effect_before_one_correction(
 
 
 def test_application_builder_design_uses_rendered_region_contract() -> None:
-    names, page_height = _validate_application_design(
+    names, kit_components, page_height = _validate_application_design(
         '<svg viewBox="0 0 305 844" width="305" height="844">'
-        '<g transform="translate(183 0)"><g data-app-region="detail">'
+        '<g transform="translate(183 0)"><g data-app-region="detail" '
+        'data-kit-component="Card">'
         '<text y="100">Detail</text></g></g>'
-        '<g data-app-region="queue"><use href="#card" /></g>'
+        '<g data-app-region="queue"><g data-kit-component="Badge">'
+        '<use href="#card" /></g><g data-kit-component="Card" /></g>'
         '<defs><symbol id="card"><path d="M0 0H122V844H0Z" /></symbol></defs>'
         "</svg>"
     )
@@ -4836,6 +4842,7 @@ def test_application_builder_design_uses_rendered_region_contract() -> None:
     beyond_slop = within_slop.model_copy(update={"left": 0.579})
 
     assert names == ("detail", "queue")
+    assert kit_components == ("Card", "Badge")
     assert page_height == APPLICATION_DESIGN_FOLD
     assert application_region_relation(first, within_slop) == ("horizontal", -1)
     assert application_region_relation(first, beyond_slop) is None
@@ -4860,7 +4867,53 @@ def test_application_builder_design_requires_the_native_lane() -> None:
             "</svg>"
         )
 
-    assert _validate_application_design(APPLICATION_DESIGN) == (("queue", "detail"), 844)
+    assert _validate_application_design(APPLICATION_DESIGN) == (
+        ("queue", "detail"),
+        ("Card",),
+        844,
+    )
+
+
+@pytest.mark.parametrize(
+    ("annotation", "message"),
+    [
+        ("", "application design requires data-kit-component on at least one SVG g element"),
+        (
+            '<g data-kit-component="" />',
+            "application design data-kit-component must name one visual ufo/kit export",
+        ),
+        (
+            '<g data-kit-component="Card Badge" />',
+            "application design data-kit-component must be one ComponentName",
+        ),
+        (
+            '<g data-kit-component=" Card" />',
+            "application design data-kit-component must be one ComponentName",
+        ),
+        (
+            '<g data-kit-component="MadeUp" />',
+            "application design data-kit-component 'MadeUp' is not a visual ufo/kit export",
+        ),
+        (
+            '<rect data-kit-component="Card" width="1" height="1" />',
+            "application design data-kit-component must be on an SVG g element",
+        ),
+    ],
+)
+def test_application_builder_design_requires_individual_kit_components(
+    annotation: str, message: str
+) -> None:
+    design = (
+        '<svg viewBox="0 0 305 844" width="305" height="844">'
+        '<g data-app-region="queue"><rect width="183" height="844" /></g>'
+        '<g data-app-region="detail"><rect x="183" width="122" height="844" /></g>'
+        f"{annotation}</svg>"
+    )
+
+    with pytest.raises(ValueError) as error:
+        _validate_application_design(design)
+
+    assert str(error.value) == message
 
 
 def test_ufo_style_uses_the_application_audit_narrow_width() -> None:
@@ -5252,9 +5305,9 @@ async def test_application_builder_write_tool_writes_only_the_contract_source(
     )
 
     source = (
-        'import { Group, mountApp } from "ufo/kit";\nmountApp(document.getElementById("root")!, '
-        '() => <Group><main style={{ backgroundColor: "var(--color-ink)", '
-        'color: "var(--color-surface)" }} /></Group>);'
+        'import { Card, mountApp } from "ufo/kit";\nmountApp(document.getElementById("root")!, '
+        '() => <Card><main style={{ backgroundColor: "var(--color-ink)", '
+        'color: "var(--color-surface)" }} /></Card>);'
     )
     assert WriteApplicationSourceInput.model_fields["content"].description == (
         "Complete app.tsx source. Use named ufo/kit imports and no export declarations."
@@ -5316,6 +5369,43 @@ async def test_application_builder_write_tool_rejects_another_module(tmp_path: P
 
     assert "/workspace/application/app.tsx" not in sandbox.writes
     assert [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
+
+
+async def test_application_builder_write_tool_requires_each_designed_kit_component(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    _seed_application_design(sandbox)
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError) as error:
+        await write_application_source(
+            ctx,
+            WriteApplicationSourceInput(
+                content=(
+                    'import { Group, mountApp } from "ufo/kit";\n'
+                    'mountApp(document.getElementById("root")!, () => <Group />);'
+                )
+            ),
+        )
+
+    assert str(error.value).startswith(
+        "app.tsx must directly render designed Kit component: Card Candidate retained;"
+    )
 
 
 async def test_application_builder_write_tool_allows_apostrophes_in_jsx_text(
@@ -5422,6 +5512,23 @@ def test_application_source_accepts_a_rendered_aliased_kit_component_and_hooks()
     )
 
 
+def test_application_source_renders_each_designed_kit_component_through_aliases() -> None:
+    source = (
+        'import { Badge as State, Card as Panel, mountApp } from "ufo/kit";\n'
+        "function App() { return <Panel><State>Ready</State></Panel>; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+
+    _validate_application_source(source, ("Card", "Badge"))
+
+    with pytest.raises(ValueError) as error:
+        _validate_application_source(
+            source.replace("<State>Ready</State>", "Ready"), ("Card", "Badge")
+        )
+
+    assert str(error.value) == "app.tsx must directly render designed Kit component: Badge"
+
+
 def test_application_source_rejects_namespace_and_local_look_alike_components() -> None:
     namespace = (
         'import * as Kit from "ufo/kit";\n'
@@ -5456,6 +5563,18 @@ def test_application_source_rejects_namespace_and_local_look_alike_components() 
     )
     with pytest.raises(ValueError, match="render at least one UI component"):
         _validate_application_source(parameter_alias)
+
+
+def test_application_source_rejects_a_destructured_local_kit_shadow() -> None:
+    source = (
+        'import { Card, mountApp } from "ufo/kit";\n'
+        "const local = { Card: () => <main /> };\n"
+        "function App() { const { Card } = local; return <Card />; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+
+    with pytest.raises(ValueError, match="render at least one UI component"):
+        _validate_application_source(source)
 
 
 @pytest.mark.parametrize(
@@ -5795,13 +5914,18 @@ async def test_application_builder_edit_tool_applies_one_bounded_repair(tmp_path
         source_path="/workspace/application/app.tsx",
     )
     source = (
-        'import { Group, mountApp } from "ufo/kit";\n'
-        "function App() { return <Group />; }\n"
+        'import { Card, mountApp } from "ufo/kit";\n'
+        "function App() { return <Card />; }\n"
         "mountApp(App);"
     )
     replacement = 'mountApp(document.getElementById("root")!, () => <App />);'
     corrected = source.replace("mountApp(App);", replacement)
-    sandbox = FakeSandbox(claim=ExecResult(stdout=source, stderr="", exit_code=0))
+    sandbox = FakeSandbox(
+        scripted_paths={
+            "/workspace/application/application-design.svg": ExecResult(APPLICATION_DESIGN, "", 0)
+        },
+        claim=ExecResult(stdout=source, stderr="", exit_code=0),
+    )
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
         ctx,
@@ -5846,11 +5970,14 @@ async def test_application_builder_edit_tool_rejects_structural_damage(tmp_path:
         source_path="/workspace/application/app.tsx",
     )
     source = (
-        'import { Group, mountApp } from "ufo/kit";\n'
-        "function App() { return <Group><main><section>Old</section></main></Group>; }\n"
+        'import { Card, mountApp } from "ufo/kit";\n'
+        "function App() { return <Card><main><section>Old</section></main></Card>; }\n"
         'mountApp(document.getElementById("root")!, () => <App />);'
     )
     sandbox = FakeSandbox(
+        scripted_paths={
+            "/workspace/application/application-design.svg": ExecResult(APPLICATION_DESIGN, "", 0)
+        },
         claim=ExecResult(stdout=source, stderr="", exit_code=0),
         shell=ExecResult(stdout="", stderr="Unexpected closing tag", exit_code=1),
     )
@@ -5892,7 +6019,12 @@ async def test_application_builder_edit_tool_rejects_ambiguous_old_text(tmp_path
         "function App() { return <main>Old Old</main>; }\n"
         'mountApp(document.getElementById("root")!, () => <App />);'
     )
-    sandbox = FakeSandbox(claim=ExecResult(stdout=source, stderr="", exit_code=0))
+    sandbox = FakeSandbox(
+        scripted_paths={
+            "/workspace/application/application-design.svg": ExecResult(APPLICATION_DESIGN, "", 0)
+        },
+        claim=ExecResult(stdout=source, stderr="", exit_code=0),
+    )
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
         ctx,
