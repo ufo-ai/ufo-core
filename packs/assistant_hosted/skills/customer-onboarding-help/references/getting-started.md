@@ -30,9 +30,9 @@ the workspace, the agents they created themselves, and any agent shared with the
    and nothing for the admin to pass on, and the verification code arrives when they sign in with
    that work email — unless the admin asked for the add to be silent ("don't notify them"), in
    which case no email goes out. When an admin asks you to add someone, notice whether they want
-   the person emailed; if they ask for no message, say so when adding and add them silently. An
-   admin asking the agent can ask for no message; the portal's Team view always
-   sends it. Signing in opens the one workspace their verified address can enter, or asks them to
+   the person emailed; if they ask for no message, say so when adding and add them silently. The
+   portal's Team view carries the same choice, as a Notify toggle on the add form. Signing in opens
+   the one workspace their verified address can enter, or asks them to
    choose when an exact membership and their email domain name different workspaces. An exact
    membership needs no invite.
 5. **A workspace admin is offered connecting Slack, billing setup, or a tour, at the end.** In the

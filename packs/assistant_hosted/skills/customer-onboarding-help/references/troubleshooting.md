@@ -22,7 +22,7 @@ second-hand, from an admin asking about someone else.
 | --- | --- |
 | "My colleague's messages are being refused" | Nothing limits how many people a workspace has, so this is about who they resolve to rather than a limit: check that the address their account carries is on a domain the workspace admits. |
 | "How many people can we add?" | As many as they want, at no extra charge. Members are counted but nothing is gated on the count. |
-| An admin asks why a new teammate never got their sign-in code | It goes to the address they typed: check spam and confirm the address. A personal address is refused outright — it has to be a work address. Someone added at another company's domain signs in with that address and chooses the workspace when more than one is available. If the address was right and nothing arrived, say you are raising it. |
+| An admin asks why a new teammate never got their sign-in code | It goes to the address they typed: check spam and confirm the address. A personal address (Gmail, Outlook, and the like) is accepted, but only that one address — not its whole domain — so a colleague at the same personal provider still needs adding separately; only a disposable, throwaway address is refused outright. Someone added at another company's domain signs in with that address and chooses the workspace when more than one is available. If the address was right and nothing arrived, say you are raising it. |
 
 ## Memory and context
 

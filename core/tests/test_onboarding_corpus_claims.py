@@ -58,6 +58,8 @@ MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
 WEB_MEMORY_VIEW = "extensions/web/frontend/src/views/Memory.tsx"
 WEB_APP = "extensions/web/frontend/src/App.tsx"
 FIRST_RUN_VIEW = "extensions/web/frontend/src/views/FirstRun.tsx"
+WEB_TEAM_VIEW = "extensions/web/frontend/src/views/Team.tsx"
+SIGNUP_EMAIL = "servers/control/src/email.rs"
 
 
 @dataclass(frozen=True)
@@ -315,9 +317,23 @@ CLAIMS = (
     Claim(
         claim="adding someone writes to them unless the admin asks for no message",
         corpus="references/getting-started.md",
-        phrase="An admin asking the agent can ask for no message",
+        phrase="if they ask for no message, say so when adding and add them silently",
         source=MEMBERS,
         pattern=r"notify: bool = Field\(\n\s+default=True,",
+    ),
+    Claim(
+        claim="the portal's Team view offers the same notify choice as the agent, not a"
+        " send-always form",
+        corpus="references/getting-started.md",
+        phrase="The portal's Team view carries the same choice, as a Notify toggle on the add form",
+        source=WEB_TEAM_VIEW,
+        pattern=(
+            r"<ActionControls\n"
+            r"\s+views=\{state\.payload\.actions\}\n"
+            r"\s+post=\{\(view, input\) => postAction\(mainAgent\.id, view\.call, input\)\}\n"
+            r"\s+onApplied=\{\(_view, outcome\) => onPlace\(\{ notice: outcome\.message \}\)\}\n"
+            r"\s+/>"
+        ),
     ),
     Claim(
         claim="that message carries a link to the sign-in page, and no invite code",
@@ -658,6 +674,21 @@ CLAIMS = (
         " instead",
         source=GATEWAY,
         pattern=r'TOUR_CHOICE: &str = "Show me what you can do";',
+    ),
+    Claim(
+        claim="only a disposable address is refused outright; a personal address is accepted but"
+        " scoped to itself, not its whole domain",
+        corpus="references/troubleshooting.md",
+        phrase="A personal address (Gmail, Outlook, and the like) is accepted, but only that one"
+        " address",
+        source=SIGNUP_EMAIL,
+        pattern=(
+            r"if self\.disposable_domains\.contains\(domain\.as_str\(\)\) \{\n"
+            r"\s+return Err\(EmailError::Disposable\(domain\)\);\n"
+            r"\s+\}\n"
+            r"\s+let subject = if self\.personal_domains\.contains\(domain\.as_str\(\)\) \{\n"
+            r"\s+address\.clone\(\)"
+        ),
     ),
 )
 
