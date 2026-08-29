@@ -577,6 +577,9 @@ def test_svg_geometry_wording_materializes_only_the_builder_prompt(
     assert spec.reasoning is reference.reasoning is None
 
 
+SUITE_PATH = "evals/suites/ufo_app_bench.py"
+
+
 def test_wireframe_kit_wording_materializes_only_the_builder_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -597,6 +600,7 @@ def test_wireframe_kit_wording_materializes_only_the_builder_prompt(
     ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
     roots: list[Path] = []
     materialized: dict[str, dict[str, str]] = {}
+    scorer: dict[str, str] = {}
 
     try:
         for arm in arms:
@@ -611,20 +615,24 @@ def test_wireframe_kit_wording_materializes_only_the_builder_prompt(
             ).stdout.splitlines()
             assert changed == ([] if arm.name == "control" else [prompt_path])
             materialized[arm.name] = {path: (root / path).read_text() for path in paths}
+            scorer[arm.name] = (root / SUITE_PATH).read_text()
     finally:
         for root in roots:
             ablation._remove_worktree(root)
 
     control = materialized["control"]
-    treatment = materialized["kit-annotations"]
-    assert treatment[prompt_path] == source[prompt_path]
+    treatment = materialized["no-kit-annotations"]
+    assert control[prompt_path] == source[prompt_path]
     assert treatment[builder_path] == control[builder_path]
     replacement = spec.arm[0].replacements[0]
     assert replacement.path == prompt_path
-    assert treatment[prompt_path].replace(replacement.new, replacement.old) == control[prompt_path]
-    assert "data-kit-component" not in control[prompt_path]
-    assert '<g data-kit-component="Card">' in treatment[prompt_path]
-    assert "same named components directly in `app.tsx`" in treatment[prompt_path]
+    assert control[prompt_path].replace(replacement.old, replacement.new) == treatment[prompt_path]
+    assert "data-kit-component" not in treatment[prompt_path]
+    assert '<g data-kit-component="Card">' in control[prompt_path]
+    assert "same named components directly in `app.tsx`" in control[prompt_path]
+    # Each arm grades with the suite code of its own worktree, so a base whose scorer cannot read
+    # the attribute the arm varies scores both arms the same and reports a flat difference.
+    assert all("data-kit-component" in text for text in scorer.values())
     assert spec.cases == reference.cases
     assert spec.suites == reference.suites
     assert spec.repeats == reference.repeats == 1

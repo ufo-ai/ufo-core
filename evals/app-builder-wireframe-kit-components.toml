@@ -1,5 +1,5 @@
 name = "app-builder-wireframe-kit-components"
-base = "14cd5f23f4aef14d2d736f26e508820171bf287c"
+base = "HEAD"
 suites = ["ufo-app-bench"]
 cases = ["pre-meeting-briefs", "meeting-tasks", "issue-owner"]
 repeats = 1
@@ -17,12 +17,12 @@ research = { search_provider = "perplexity" }
 sandbox = { backend = "docker" }
 
 [[arm]]
-name = "kit-annotations"
+name = "no-kit-annotations"
 
 [[arm.replacements]]
 path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
-old = '''semantic app containers that implement those regions. The SVG is a visual contract'''
-new = '''semantic app containers that implement those regions. Mark each intended
+old = '''semantic app containers that implement those regions. Mark each intended
 Kit primitive on an SVG `<g>` with `data-kit-component` and its exact exported component name, for
 example `<g data-kit-component="Card">`. Render those same named components directly in `app.tsx`.
 The SVG is a visual contract'''
+new = '''semantic app containers that implement those regions. The SVG is a visual contract'''
