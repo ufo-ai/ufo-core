@@ -1,7 +1,7 @@
 """Plan the nightly eval sweep's shards from the suite registry.
 
-`--plan` prints the shard labels the job matrix fans out over; `--write LABEL --dir DIR` writes
-that shard's template
+`--plan` prints shard labels, `--models` prints target models, and `--jobs` prints their valid
+combinations. `--write LABEL --dir DIR` writes that shard's template
 `ufo.toml` and its one-block `evals.stack` matrix. Both derive from `evals.registry.TASKS`, so a
 suite added, renamed, or newly bound to a pack moves through the sweep without a hand-kept list.
 """
@@ -52,6 +52,21 @@ UNSAFE_LABEL_CHARS = re.compile(r"[^A-Za-z0-9.-]+")
 
 
 @dataclass(frozen=True)
+class NightlyModel:
+    """One target model and its artifact-safe label."""
+
+    id: str
+    label: str
+
+
+NIGHTLY_MODELS = (
+    NightlyModel("claude-opus-5", "claude-opus-5"),
+    NightlyModel("z-ai/glm-5.3-flash", "z-ai-glm-5.3-flash"),
+)
+FIXED_MODEL_LABEL = "fixed-model"
+
+
+@dataclass(frozen=True)
 class Arm:
     """One pack a shard can run under, with the knobs that pack's extensions register. A knob
     naming an extension the pack does not ship fails `serve` at boot, so the arms differ."""
@@ -79,6 +94,15 @@ class Shard:
     pack: str
     agent: str | None
     suites: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SweepJob:
+    """One shard execution and the target model its report must record."""
+
+    shard: Shard
+    config_model: NightlyModel
+    expected_model: str | None
 
 
 def _label_token(value: str) -> str:
@@ -125,6 +149,25 @@ def plan(smoke: bool) -> tuple[Shard, ...]:
                 label = stem if len(groups) == 1 else f"{stem}-{index}"
                 shards.append(Shard(label, arm.pack, agent, tuple(task.name for task in group)))
     return tuple(shards)
+
+
+def sweep_jobs(smoke: bool) -> tuple[SweepJob, ...]:
+    """Pair auto-model shards with both targets and fixed-model shards with one execution."""
+    jobs = []
+    for shard in plan(smoke):
+        fixed_model = not APP_SUITES.isdisjoint(shard.suites) or (
+            shard.agent is not None and shard.agent.startswith("profile:")
+        )
+        models = NIGHTLY_MODELS[:1] if fixed_model else NIGHTLY_MODELS
+        jobs.extend(
+            SweepJob(
+                shard=shard,
+                config_model=model,
+                expected_model=None if fixed_model else model.id,
+            )
+            for model in models
+        )
+    return tuple(jobs)
 
 
 def _arm_of(task: EvalTask) -> Arm:
@@ -209,6 +252,8 @@ def main(argv: list[str] | None = None) -> None:
         help="plan the cheap proving subset only",
     )
     parser.add_argument("--plan", action="store_true", help="print the job matrix as JSON")
+    parser.add_argument("--jobs", action="store_true", help="print shard and model jobs as JSON")
+    parser.add_argument("--models", action="store_true", help="print the nightly models as JSON")
     parser.add_argument(
         "--model", default=DEFAULT_AUTO_MODEL, help="concrete model that agents named auto use"
     )
@@ -221,6 +266,28 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--write", metavar="LABEL", help="write one shard's stack input")
     parser.add_argument("--dir", type=Path, help="directory the shard's input is written to")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.models:
+        print(json.dumps([{"id": model.id, "label": model.label} for model in NIGHTLY_MODELS]))
+        return
+    if args.jobs:
+        print(
+            json.dumps(
+                [
+                    {
+                        "label": job.shard.label,
+                        "model": job.config_model.id,
+                        "target": job.expected_model or "fixed model",
+                        "artifact": (
+                            job.config_model.label
+                            if job.expected_model is not None
+                            else FIXED_MODEL_LABEL
+                        ),
+                    }
+                    for job in sweep_jobs(args.smoke)
+                ]
+            )
+        )
+        return
     shards = plan(args.smoke)
     if args.plan:
         print(json.dumps([shard.label for shard in shards]))

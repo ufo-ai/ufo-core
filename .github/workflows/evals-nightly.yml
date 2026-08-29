@@ -1,6 +1,6 @@
 name: Nightly evals
 
-# Every registered capability, scenario, and arc suite, once a night.
+# Every registered capability, scenario, and arc suite, on Opus and GLM 5.3 Flash each night.
 # `.github/scripts/nightly_eval_matrix.py` reads `evals.registry.TASKS` and splits it into shards,
 # so a suite that is added, renamed, or bound to a pack moves through the sweep with no list here
 # to keep in step. One shard is one job: a GitHub-hosted runner stops a job at six hours, and the
@@ -8,10 +8,10 @@ name: Nightly evals
 # ceiling and let a shard fail without taking the night's other records with it.
 #
 # A pull request touching the sweep, and a dispatch asking for it, run the proving subset instead:
-# a handful of cases per arm, each arm booting its own serve, so the machinery is exercised for a
-# few dollars before a night's run depends on it.
+# a handful of cases per arm and model, each arm booting its own serve, so the machinery is
+# exercised before a night's run depends on it.
 #
-# The full sweep spends real provider money (hundreds of dollars a night at ~350-450 target turns).
+# The full sweep spends real provider money (hundreds of dollars a night at ~700-900 target turns).
 # It ends red when any case fails: a failing case is the finding, so read the job summary and the
 # archived records, not only the job status.
 #
@@ -29,10 +29,6 @@ on:
         description: Run the proving subset instead of the sweep
         type: boolean
         default: false
-      model:
-        description: Evaluated agent model
-        type: string
-        default: claude-opus-5
       reasoning:
         description: Evaluated agent reasoning effort
         type: choice
@@ -64,7 +60,6 @@ env:
     ${{ (github.event_name == 'pull_request' || inputs.smoke) && '--smoke' || '--no-smoke' }}
   SWEEP_MODE: >-
     ${{ (github.event_name == 'pull_request' || inputs.smoke) && 'smoke' || 'sweep' }}
-  EVAL_MODEL: ${{ inputs.model || 'claude-opus-5' }}
   EVAL_REASONING: ${{ inputs.reasoning || 'auto' }}
   AWS_REGION: us-east-1
   ARCHIVE_ROLE_ARN: arn:aws:iam::899147036157:role/github-deploy
@@ -106,7 +101,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      shards: ${{ steps.shards.outputs.shards }}
+      jobs: ${{ steps.matrix.outputs.jobs }}
+      models: ${{ steps.matrix.outputs.models }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -114,11 +110,14 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
-      - id: shards
+      - id: matrix
         run: |
-          shards="$(uv run python .github/scripts/nightly_eval_matrix.py --plan "$SWEEP_SMOKE")"
-          echo "$shards"
-          echo "shards=$shards" >>"$GITHUB_OUTPUT"
+          jobs="$(uv run python .github/scripts/nightly_eval_matrix.py --jobs "$SWEEP_SMOKE")"
+          models="$(uv run python .github/scripts/nightly_eval_matrix.py --models)"
+          echo "$jobs"
+          echo "$models"
+          echo "jobs=$jobs" >>"$GITHUB_OUTPUT"
+          echo "models=$models" >>"$GITHUB_OUTPUT"
 
   sandbox-client:
     name: sandbox client
@@ -176,7 +175,7 @@ jobs:
           retention-days: 1
 
   sweep:
-    name: ${{ matrix.label }}
+    name: ${{ matrix.label }} (${{ matrix.target }})
     needs: [plan, sandbox-client, web-build]
     # The org-hosted larger runner `integration.yaml` already uses: 4 vCPU, 16 GB, ~87 GB free
     # disk. GitHub stops any job at six hours; the step deadline below fires first, so a shard that
@@ -186,7 +185,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        label: ${{ fromJSON(needs.plan.outputs.shards) }}
+        include: ${{ fromJSON(needs.plan.outputs.jobs) }}
     services:
       # A serve fleet, its scheduler, and the eval driver on one server: SQLite's single writer
       # cannot carry that, and `index_default` retrieves through pgvector.
@@ -219,6 +218,7 @@ jobs:
       # `browserbase` CDP provider needs no key here: `serve` resolves the provider at boot without
       # one, and only suites bound to that pack reach the shard, none of which browse.
       TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+      EVAL_MODEL: ${{ matrix.model }}
     steps:
       - uses: actions/checkout@v4
 
@@ -271,7 +271,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-run-records-${{ matrix.label }}
+          name: eval-run-records-${{ matrix.label }}-${{ matrix.artifact }}
           path: eval-reports/runs/*.json
           # A shard that died before it recorded a run has nothing to upload and already said so.
           # The archive below is where a missing suite is caught, once, for the whole sweep.
@@ -284,16 +284,20 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-stack-logs-${{ matrix.label }}
+          name: eval-stack-logs-${{ matrix.label }}-${{ matrix.artifact }}
           path: .local/evals/**/*.log
           if-no-files-found: warn
           retention-days: 14
 
   memory-ingestion:
-    name: memory ingestion
-    needs: credentials
+    name: memory ingestion (${{ matrix.model.id }})
+    needs: [credentials, plan]
     runs-on: linux-4-core
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        model: ${{ fromJSON(needs.plan.outputs.models) }}
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -314,6 +318,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+      EVAL_MODEL: ${{ matrix.model.id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -371,17 +376,20 @@ jobs:
           echo "eval stack exit $stack_status; verifying the complete score record"
           uv run python .github/scripts/nightly_memory_ingestion.py verify \
             --reports eval-reports --runs-root .local/evals \
-            --state-output memory-ingestion-state/readiness.json "$SWEEP_SMOKE" \
+            --state-output "memory-ingestion-state/$MODEL_LABEL/readiness.json" \
+            "$SWEEP_SMOKE" \
             --model "$EVAL_MODEL"
           # `verify` reads the record's shape, never `case.passed`, so a failing case reaches the
           # job status only through the stack's own code — carried here so `verify` still runs.
           exit "$stack_status"
+        env:
+          MODEL_LABEL: ${{ matrix.model.label }}
 
       - name: Upload the run records
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-run-records-memory-ingestion
+          name: eval-run-records-memory-ingestion-${{ matrix.model.label }}
           path: eval-reports/runs/*.json
           if-no-files-found: warn
           retention-days: 90
@@ -390,8 +398,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-memory-ingestion-state
-          path: memory-ingestion-state/readiness.json
+          name: eval-memory-ingestion-state-${{ matrix.model.label }}
+          path: memory-ingestion-state
           if-no-files-found: warn
           retention-days: 90
 
@@ -399,7 +407,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-stack-logs-memory-ingestion
+          name: eval-stack-logs-memory-ingestion-${{ matrix.model.label }}
           path: .local/evals/**/*.log
           if-no-files-found: warn
           retention-days: 14
@@ -434,7 +442,7 @@ jobs:
       # pattern tolerates zero matches; a name would stop the archive here.
       - uses: actions/download-artifact@v4
         with:
-          pattern: eval-memory-ingestion-state
+          pattern: eval-memory-ingestion-state-*
           merge-multiple: true
           path: eval-reports/state
 
@@ -485,7 +493,7 @@ jobs:
 
       # The trend, last: a point Datadog holds for years must not outlive the records that
       # substantiate it, so nothing is submitted until the durable archive above has landed. One
-      # point per suite per sweep, as counts, so a query can divide them. A pull request's smoke is
+      # point per suite and model, as counts, so a query can divide them. A pull request's smoke is
       # not a trend point, so only a schedule or a dispatch reports. The digest event beside it is
       # where a graph learns a suite's cases changed, which is the one way a score drop means
       # nothing.

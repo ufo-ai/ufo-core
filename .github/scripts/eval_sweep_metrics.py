@@ -17,6 +17,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from nightly_eval_matrix import NIGHTLY_MODELS
 
 from evals.harness.viewer import load_runs
 from evals.memory_ingestion.materialize import IngestionReadiness
@@ -34,7 +37,7 @@ MEMORY_FACT_METRIC = "ufo.evals.memory_ingestion.facts"
 MEMORY_CHUNK_METRIC = "ufo.evals.memory_ingestion.chunks"
 MEMORY_EVIDENCE_METRIC = "ufo.evals.memory_ingestion.evidence_refs"
 MEMORY_EMPTY_EVIDENCE_METRIC = "ufo.evals.memory_ingestion.empty_evidence_refs"
-MEMORY_STATE = Path("state/readiness.json")
+MEMORY_STATE_ROOT = Path("state")
 
 
 def series(root: Path, mode: str, timestamp: int) -> dict:
@@ -71,10 +74,17 @@ def series(root: Path, mode: str, timestamp: int) -> dict:
                             "points": [{"timestamp": timestamp, "value": value}],
                         }
                     )
-    state_path = root / MEMORY_STATE
-    if state_path.exists():
+    for model in NIGHTLY_MODELS:
+        state_path = root / MEMORY_STATE_ROOT / model.label / "readiness.json"
+        if not state_path.exists():
+            continue
         readiness = IngestionReadiness.model_validate_json(state_path.read_bytes())
-        tags = ["suite:memory_ingestion", "shard:memory-ingestion", f"mode:{mode}"]
+        tags = [
+            "suite:memory_ingestion",
+            "shard:memory-ingestion",
+            f"mode:{mode}",
+            f"target_model:{model.id}",
+        ]
         for metric, value in (
             (MEMORY_PAGE_METRIC, readiness.page_count),
             (MEMORY_FACT_METRIC, readiness.memory_count),

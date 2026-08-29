@@ -15,32 +15,58 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from nightly_eval_matrix import plan
+from nightly_eval_matrix import NIGHTLY_MODELS, sweep_jobs
 from nightly_memory_ingestion import FULL_REPORT_CASES, SMOKE_REPORT_CASES
 
 from evals.harness.viewer import load_runs, write_viewer
 from evals.registry import TASKS
 
 REASON_LIMIT = 240
+NOT_RECORDED = "Not recorded"
 EXPECTED_FULL_EXCLUSIONS = frozenset(
     {
         ("skill_loading_member", "bias-ach-explainer-block-off"),
         ("skill_loading_member", "bias-deploy-pdf-merge-block-off"),
     }
 )
+type PlannedRun = tuple[str, str, str | None]
+type RecordedRun = tuple[str, str, str]
+
+
+def _planned_runs(smoke: bool, memory_ingestion: bool) -> tuple[PlannedRun, ...]:
+    planned = tuple(
+        (job.shard.label, suite, job.expected_model)
+        for job in sweep_jobs(smoke)
+        for suite in job.shard.suites
+    )
+    if memory_ingestion:
+        cases = SMOKE_REPORT_CASES if smoke else FULL_REPORT_CASES
+        planned += tuple(
+            ("memory-ingestion", name, model.id) for model in NIGHTLY_MODELS for name in cases
+        )
+    return planned
+
+
+def _matches(planned: PlannedRun, recorded: RecordedRun) -> bool:
+    return planned[:2] == recorded[:2] and (planned[2] is None or planned[2] == recorded[2])
+
+
+def _format_run(run: PlannedRun | RecordedRun) -> str:
+    label, suite, model = run
+    return f"{label}/{suite} ({model or 'fixed agent model'})"
 
 
 def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
-    planned = tuple(suite for shard in plan(smoke) for suite in shard.suites)
-    if memory_ingestion:
-        planned += tuple(SMOKE_REPORT_CASES if smoke else FULL_REPORT_CASES)
+    planned = _planned_runs(smoke, memory_ingestion)
     runs = load_runs(root)
     reports = tuple((run.label, report) for run in runs for report in run.reports)
     scored = sum(len(report.scored) for _, report in reports)
     passed = sum(1 for _, report in reports for case in report.scored if case.passed)
     excluded = sum(report.excluded_count for _, report in reports)
-    recorded = {report.name for _, report in reports}
-    missing = tuple(dict.fromkeys(suite for suite in planned if suite not in recorded))
+    recorded = tuple(
+        (label, report.name, report.target_model or NOT_RECORDED) for label, report in reports
+    )
+    missing = tuple(item for item in planned if not any(_matches(item, row) for row in recorded))
     lines = [
         f"# Nightly evals — {passed}/{scored} cases passed",
         "",
@@ -51,8 +77,8 @@ def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
     if missing:
         lines += [
             f"**{len(missing)} planned "
-            f"{'suite' if len(missing) == 1 else 'suites'} produced no report:** "
-            f"{', '.join(missing)}",
+            f"{'suite run' if len(missing) == 1 else 'suite runs'} produced no report:** "
+            f"{', '.join(_format_run(item) for item in missing)}",
             "",
         ]
     lines += [
@@ -62,76 +88,97 @@ def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
     for label, report in sorted(reports, key=lambda pair: (pair[1].pass_rate, pair[1].name)):
         mark = "" if report.passed else " ⚠️"
         lines.append(
-            f"| {report.name}{mark} | {label} | {report.target_model or 'Not recorded'} | "
+            f"| {report.name}{mark} | {label} | {report.target_model or NOT_RECORDED} | "
             f"{sum(1 for case in report.scored if case.passed)}/{len(report.scored)} | "
             f"{report.pass_rate:.0%} |"
         )
     failures = tuple(
-        (report.name, case) for _, report in reports for case in report.scored if not case.passed
+        (report.name, report.target_model, case)
+        for _, report in reports
+        for case in report.scored
+        if not case.passed
     )
     if failures:
         lines += ["", f"## {len(failures)} failed cases", ""]
         lines += [
-            f"- `{suite}` / `{case.name}` — {' '.join(case.reason.split())[:REASON_LIMIT]}"
-            for suite, case in failures
+            f"- `{suite}` / `{model or NOT_RECORDED}` / `{case.name}` — "
+            f"{' '.join(case.reason.split())[:REASON_LIMIT]}"
+            for suite, model, case in failures
         ]
     return "\n".join(lines) + "\n"
 
 
 def require_comparable(root: Path, smoke: bool, memory_ingestion: bool = False) -> None:
     """Require one complete fixed case cohort before the sweep becomes a trend point."""
-    planned_pairs = tuple((shard.label, suite) for shard in plan(smoke) for suite in shard.suites)
-    planned = tuple(suite for _, suite in planned_pairs)
+    planned_runs = _planned_runs(smoke, memory_ingestion)
+    planned = tuple(suite for _, suite, _ in planned_runs)
     expected_counts = {task.name: len(task.cases) for task in TASKS if task.name in set(planned)}
     if memory_ingestion:
         memory_counts = SMOKE_REPORT_CASES if smoke else FULL_REPORT_CASES
-        planned += tuple(memory_counts)
-        planned_pairs += tuple(("memory-ingestion", name) for name in memory_counts)
         expected_counts.update(memory_counts)
     labelled_reports = tuple(
         (run.label, report) for run in load_runs(root) for report in run.reports
     )
     reports = tuple(report for _, report in labelled_reports)
-    recorded_pairs = [(label, report.name) for label, report in labelled_reports]
-    missing = sorted(set(planned_pairs) - set(recorded_pairs))
-    unexpected = sorted(set(recorded_pairs) - set(planned_pairs))
-    repeated = sorted(pair for pair in set(recorded_pairs) if recorded_pairs.count(pair) != 1)
+    recorded_runs = [
+        (label, report.name, report.target_model or NOT_RECORDED)
+        for label, report in labelled_reports
+    ]
+    missing = tuple(
+        item for item in planned_runs if not any(_matches(item, row) for row in recorded_runs)
+    )
+    unexpected = sorted(
+        {row for row in recorded_runs if not any(_matches(item, row) for item in planned_runs)}
+    )
+    repeated = tuple(
+        item for item in planned_runs if sum(_matches(item, row) for row in recorded_runs) > 1
+    )
     wrong_counts = sorted(
-        f"{report.name} {len(report.cases)}/{expected_counts[report.name]}"
+        f"{report.name} ({report.target_model or NOT_RECORDED}) "
+        f"{len(report.cases)}/{expected_counts[report.name]}"
         for report in reports
         if report.name in expected_counts and len(report.cases) != expected_counts[report.name]
     )
-    excluded = {
-        (report.name, case.name) for report in reports for case in report.cases if case.excluded
-    }
-    expected_exclusions = set() if smoke else set(EXPECTED_FULL_EXCLUSIONS)
-    expected_exclusions = {item for item in expected_exclusions if item[0] in expected_counts}
-    unexpected_exclusions = sorted(excluded - expected_exclusions)
-    absent_exclusions = sorted(expected_exclusions - excluded)
+    excluded = tuple(
+        (report.name, case.name, report.target_model or NOT_RECORDED)
+        for report in reports
+        for case in report.cases
+        if case.excluded
+    )
+    expected_exclusions = (
+        ()
+        if smoke
+        else tuple(
+            (suite, case, model)
+            for _, suite, model in planned_runs
+            for expected_suite, case in EXPECTED_FULL_EXCLUSIONS
+            if suite == expected_suite
+        )
+    )
+    unexpected_exclusions = sorted(
+        {row for row in excluded if not any(_matches(item, row) for item in expected_exclusions)}
+    )
+    absent_exclusions = tuple(
+        item for item in expected_exclusions if not any(_matches(item, row) for row in excluded)
+    )
     errors = []
     if missing:
-        errors.append(
-            "missing reports: " + ", ".join(f"{label}/{suite}" for label, suite in missing)
-        )
+        errors.append("missing reports: " + ", ".join(_format_run(item) for item in missing))
     if unexpected:
-        errors.append(
-            "unexpected reports: " + ", ".join(f"{label}/{suite}" for label, suite in unexpected)
-        )
+        errors.append("unexpected reports: " + ", ".join(_format_run(item) for item in unexpected))
     if repeated:
-        errors.append(
-            "repeated reports: " + ", ".join(f"{label}/{suite}" for label, suite in repeated)
-        )
+        errors.append("repeated reports: " + ", ".join(_format_run(item) for item in repeated))
     if wrong_counts:
         errors.append(f"wrong case counts: {', '.join(wrong_counts)}")
     if unexpected_exclusions:
         errors.append(
             "unexpected exclusions: "
-            + ", ".join(f"{suite}/{case}" for suite, case in unexpected_exclusions)
+            + ", ".join(f"{suite}/{case} ({model})" for suite, case, model in unexpected_exclusions)
         )
     if absent_exclusions:
         errors.append(
             "expected exclusions absent: "
-            + ", ".join(f"{suite}/{case}" for suite, case in absent_exclusions)
+            + ", ".join(f"{suite}/{case} ({model})" for suite, case, model in absent_exclusions)
         )
     if errors:
         raise RuntimeError("incomparable sweep — " + "; ".join(errors))

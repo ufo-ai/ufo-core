@@ -149,6 +149,38 @@ def test_the_smoke_subset_boots_every_arm_it_can_reach(planner) -> None:
     assert sum(len(shard.suites) for shard in shards) < len(TASKS)
 
 
+def test_the_nightly_models_have_artifact_safe_labels(planner, capsys) -> None:
+    assert [model.id for model in planner.NIGHTLY_MODELS] == [
+        "claude-opus-5",
+        "z-ai/glm-5.3-flash",
+    ]
+    assert all(
+        planner.UNSAFE_LABEL_CHARS.search(model.label) is None for model in planner.NIGHTLY_MODELS
+    )
+    planner.main(["--models"])
+    assert json.loads(capsys.readouterr().out) == [
+        {"id": model.id, "label": model.label} for model in planner.NIGHTLY_MODELS
+    ]
+
+
+def test_fixed_model_shards_run_once_while_auto_model_shards_run_twice(planner, capsys) -> None:
+    jobs = planner.sweep_jobs(smoke=False)
+    for shard in planner.plan(smoke=False):
+        carried = tuple(job for job in jobs if job.shard == shard)
+        fixed_model = not planner.APP_SUITES.isdisjoint(shard.suites) or (
+            shard.agent is not None and shard.agent.startswith("profile:")
+        )
+
+        assert len(carried) == (1 if fixed_model else len(planner.NIGHTLY_MODELS))
+        assert all((job.expected_model is None) == fixed_model for job in carried)
+
+    planner.main(["--jobs", "--smoke"])
+    payload = json.loads(capsys.readouterr().out)
+    fixed = next(job for job in payload if job["target"] == "fixed model")
+    assert fixed["artifact"] == planner.FIXED_MODEL_LABEL
+    assert fixed["model"] == planner.NIGHTLY_MODELS[0].id
+
+
 def test_a_written_shard_is_input_the_stack_accepts(planner, tmp_path: Path) -> None:
     for shard in (*planner.plan(smoke=False), *planner.plan(smoke=True)):
         directory = tmp_path / shard.label
@@ -198,11 +230,12 @@ def test_the_workflow_fans_out_over_the_planned_shards(workflow) -> None:
 
     assert sweep["needs"] == ["plan", "sandbox-client", "web-build"]
     assert sweep["strategy"]["fail-fast"] is False
-    assert sweep["strategy"]["matrix"]["label"] == "${{ fromJSON(needs.plan.outputs.shards) }}"
-    assert '--plan "$SWEEP_SMOKE"' in plan["steps"][-1]["run"]
+    assert sweep["strategy"]["matrix"] == {"include": "${{ fromJSON(needs.plan.outputs.jobs) }}"}
+    assert '--jobs "$SWEEP_SMOKE"' in plan["steps"][-1]["run"]
+    assert "--models" in plan["steps"][-1]["run"]
 
 
-def test_the_dispatch_sets_the_sweep_model_and_reasoning(workflow) -> None:
+def test_the_nightly_models_and_dispatch_reasoning_reach_the_sweep(workflow) -> None:
     trigger = workflow.get("on", workflow[True])
     write = next(
         step
@@ -210,12 +243,7 @@ def test_the_dispatch_sets_the_sweep_model_and_reasoning(workflow) -> None:
         if step.get("name") == "Write the shard's stack input"
     )
 
-    assert trigger["workflow_dispatch"]["inputs"]["model"] == {
-        "description": "Evaluated agent model",
-        "type": "string",
-        "default": "claude-opus-5",
-    }
-    assert workflow["env"]["EVAL_MODEL"] == "${{ inputs.model || 'claude-opus-5' }}"
+    assert "model" not in trigger["workflow_dispatch"]["inputs"]
     assert trigger["workflow_dispatch"]["inputs"]["reasoning"] == {
         "description": "Evaluated agent reasoning effort",
         "type": "choice",
@@ -223,6 +251,7 @@ def test_the_dispatch_sets_the_sweep_model_and_reasoning(workflow) -> None:
         "default": "auto",
     }
     assert workflow["env"]["EVAL_REASONING"] == "${{ inputs.reasoning || 'auto' }}"
+    assert workflow["jobs"]["sweep"]["env"]["EVAL_MODEL"] == "${{ matrix.model }}"
     assert '--model "$EVAL_MODEL"' in write["run"]
     assert '--reasoning "$EVAL_REASONING"' in write["run"]
     assert workflow["jobs"]["sweep"]["env"]["OPENROUTER_API_KEY"] == (
@@ -251,7 +280,7 @@ def test_required_eval_credentials_fail_before_the_sweep_starts(workflow) -> Non
     assert all(name in check for name in required)
     assert workflow["jobs"]["sandbox-client"]["needs"] == "credentials"
     assert workflow["jobs"]["web-build"]["needs"] == "credentials"
-    assert workflow["jobs"]["memory-ingestion"]["needs"] == "credentials"
+    assert workflow["jobs"]["memory-ingestion"]["needs"] == ["credentials", "plan"]
 
 
 def test_every_sweep_shard_receives_one_shared_sandbox_client(workflow) -> None:
@@ -283,7 +312,7 @@ def test_every_sweep_shard_receives_one_shared_sandbox_client(workflow) -> None:
     assert f"chmod +x {staged / CLIENT_BINARY_NAME}" in install["run"]
     assert f'{staged}" >> "$GITHUB_PATH"' in install["run"]
     memory = workflow["jobs"]["memory-ingestion"]
-    assert memory["needs"] == "credentials"
+    assert memory["needs"] == ["credentials", "plan"]
     assert memory["env"]["OPENROUTER_API_KEY"] == "${{ secrets.OPENROUTER_API_KEY }}"
     assert memory["env"]["AWS_BEARER_TOKEN_BEDROCK"] == ("${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}")
 
@@ -383,8 +412,8 @@ def test_every_shard_archives_its_own_records_and_the_archive_merges_them(workfl
     )
 
     assert [step["with"]["name"] for step in uploads] == [
-        "eval-run-records-${{ matrix.label }}",
-        "eval-stack-logs-${{ matrix.label }}",
+        "eval-run-records-${{ matrix.label }}-${{ matrix.artifact }}",
+        "eval-stack-logs-${{ matrix.label }}-${{ matrix.artifact }}",
     ]
     assert uploads[0]["if"] == "always()" and uploads[1]["if"] == "failure()"
     assert archive["if"] == "always()" and archive["needs"] == ["sweep", "memory-ingestion"]
@@ -401,22 +430,23 @@ def test_the_summary_names_a_planned_suite_that_produced_no_report(planner, tmp_
     rendered = summary.render(tmp_path, smoke=True)
 
     assert "0 of 0 planned suites ran" not in rendered
-    assert "planned suites produced no report" in rendered
+    assert "planned suite runs produced no report" in rendered
     assert all(suite in rendered for suite in planner.SMOKE_SUITES)
 
 
 def test_only_a_complete_fixed_case_cohort_is_comparable(planner, tmp_path: Path) -> None:
     summary = _script("eval_sweep_summary")
     tasks = {task.name: task for task in TASKS}
-    for shard in planner.plan(smoke=True):
-        for suite in shard.suites:
+    for job in planner.sweep_jobs(smoke=True):
+        for suite in job.shard.suites:
             _archive(
                 tmp_path,
-                shard.label,
+                job.shard.label,
                 suite,
                 passed=len(tasks[suite].cases),
                 scored=len(tasks[suite].cases),
                 digest=f"sha256:{suite}",
+                target_model=job.expected_model or "google/gemini-3.7-flash",
             )
 
     summary.require_comparable(tmp_path, smoke=True)
@@ -426,6 +456,28 @@ def test_only_a_complete_fixed_case_cohort_is_comparable(planner, tmp_path: Path
     payload["reports"][0]["cases"][0]["excluded"] = True
     record.write_text(json.dumps(payload))
     with pytest.raises(RuntimeError, match="unexpected exclusions"):
+        summary.require_comparable(tmp_path, smoke=True)
+
+
+def test_one_model_cannot_satisfy_a_comparable_cohort(planner, tmp_path: Path) -> None:
+    summary = _script("eval_sweep_summary")
+    tasks = {task.name: task for task in TASKS}
+    omitted = planner.NIGHTLY_MODELS[1]
+    for job in planner.sweep_jobs(smoke=True):
+        if job.expected_model == omitted.id:
+            continue
+        for suite in job.shard.suites:
+            _archive(
+                tmp_path,
+                job.shard.label,
+                suite,
+                passed=len(tasks[suite].cases),
+                scored=len(tasks[suite].cases),
+                digest=f"sha256:{suite}",
+                target_model=job.expected_model or "google/gemini-3.7-flash",
+            )
+
+    with pytest.raises(RuntimeError, match=r"z-ai/glm-5\.3-flash"):
         summary.require_comparable(tmp_path, smoke=True)
 
 
@@ -468,6 +520,11 @@ def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly
     ]
 
     assert run["timeout-minutes"] < job["timeout-minutes"] < RUNNER_CEILING_MINUTES
+    assert job["strategy"] == {
+        "fail-fast": False,
+        "matrix": {"model": "${{ fromJSON(needs.plan.outputs.models) }}"},
+    }
+    assert job["env"]["EVAL_MODEL"] == "${{ matrix.model.id }}"
     assert fetch["env"]["LONGMEM_URL"] == LONGMEM_CLEANED.url
     assert fetch["env"]["LOCOMO_URL"] == LOCOMO.url
     assert '"$SWEEP_SMOKE"' in prepare["run"] and '"$SWEEP_SMOKE"' in run["run"]
@@ -476,10 +533,18 @@ def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly
     assert '--model "$EVAL_MODEL"' in run["run"]
     assert "nightly_memory_ingestion.py verify" in run["run"]
     assert uploads == [
-        "eval-run-records-memory-ingestion",
-        "eval-memory-ingestion-state",
-        "eval-stack-logs-memory-ingestion",
+        "eval-run-records-memory-ingestion-${{ matrix.model.label }}",
+        "eval-memory-ingestion-state-${{ matrix.model.label }}",
+        "eval-stack-logs-memory-ingestion-${{ matrix.model.label }}",
     ]
+    assert "memory-ingestion-state/$MODEL_LABEL/readiness.json" in run["run"]
+    state_upload = next(
+        step
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact")
+        and step["with"]["name"].startswith("eval-memory-ingestion-state-")
+    )
+    assert state_upload["with"]["path"] == "memory-ingestion-state"
 
 
 def test_a_failing_memory_ingestion_case_ends_the_step_red(workflow) -> None:
@@ -577,9 +642,9 @@ def test_the_archive_survives_a_memory_ingestion_job_that_wrote_no_state(workflo
     state = next(step for step in downloads if "memory-ingestion" in step["with"]["pattern"])
 
     assert all("name" not in step["with"] for step in downloads)
-    assert state["with"]["pattern"] == "eval-memory-ingestion-state"
+    assert state["with"]["pattern"] == "eval-memory-ingestion-state-*"
     assert state["with"]["merge-multiple"] is True
-    assert state["with"]["path"] == str(Path("eval-reports") / metrics.MEMORY_STATE.parent)
+    assert state["with"]["path"] == str(Path("eval-reports") / metrics.MEMORY_STATE_ROOT)
 
 
 def test_the_archive_carries_the_summary_the_viewer_and_the_records(workflow) -> None:
@@ -602,7 +667,7 @@ def _archive(
     passed: int,
     scored: int,
     digest: str,
-    target_model: str = "z-ai/glm-5.3",
+    target_model: str = "claude-opus-5",
 ) -> None:
     cases = [
         {
@@ -614,7 +679,7 @@ def _archive(
         for index in range(scored)
     ]
     run = {
-        "id": str(uuid5(NAMESPACE_URL, f"{label}/{name}")),
+        "id": str(uuid5(NAMESPACE_URL, f"{label}/{name}/{target_model}")),
         "created_at": "2026-08-19T05:00:00Z",
         "label": label,
         "agent": "assistant",
@@ -683,11 +748,11 @@ def test_no_digest_rides_the_metric_tags(tmp_path: Path) -> None:
             "mode:sweep",
             "shard:shard-a",
             "suite:basics",
-            "target_model:z-ai/glm-5.3",
+            "target_model:claude-opus-5",
         ]
         for point in payload["series"]
     )
-    assert "basics z-ai/glm-5.3 sha256:deadbeef" in event["text"]
+    assert "basics claude-opus-5 sha256:deadbeef" in event["text"]
 
 
 def test_memory_ingestion_state_reports_fact_and_empty_evidence_counts(tmp_path: Path) -> None:
@@ -709,7 +774,8 @@ def test_memory_ingestion_state_reports_fact_and_empty_evidence_counts(tmp_path:
             DerivedEvidence(source_ref="two", memory_ids=()),
         ),
     )
-    state = tmp_path / metrics.MEMORY_STATE
+    model = metrics.NIGHTLY_MODELS[0]
+    state = tmp_path / metrics.MEMORY_STATE_ROOT / model.label / "readiness.json"
     state.parent.mkdir(parents=True)
     state.write_text(readiness.model_dump_json())
 
@@ -727,6 +793,12 @@ def test_memory_ingestion_state_reports_fact_and_empty_evidence_counts(tmp_path:
         metrics.MEMORY_EVIDENCE_METRIC: 2,
         metrics.MEMORY_EMPTY_EVIDENCE_METRIC: 1,
     }
+    memory_points = [
+        point
+        for point in payload["series"]
+        if point["metric"].startswith("ufo.evals.memory_ingestion.")
+    ]
+    assert all(f"target_model:{model.id}" in point["tags"] for point in memory_points)
 
 
 def test_a_sweep_that_scored_nothing_submits_nothing(tmp_path: Path) -> None:
