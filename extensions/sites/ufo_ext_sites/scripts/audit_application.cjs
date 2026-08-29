@@ -38,7 +38,6 @@ const DESIGN_ANIMATED_POINT_MAX = 4096;
 const DESIGN_ANIMATED_ATTRIBUTE_BYTE_MAX = 128 * 1024;
 const APPLICATION_LIFECYCLE_TIMEOUT_MS = 15000;
 const APPLICATION_INTERACTION_TIMEOUT_MS = 300;
-const TEXT_FRAGMENT_TOUCH_PX = 1;
 const APPLICATION_LIFECYCLE_DIAGNOSTIC_SUFFIX = '.lifecycle.json';
 const SVG_PRESENTATION_PROPERTIES = new Set(
   ('alignment-baseline baseline-shift clip-path clip-rule color color-interpolation ' +
@@ -337,6 +336,7 @@ async function closeApplicationAudit(browser, server, sockets) {
 }
 
 async function measure(floor) {
+  const TEXT_FRAGMENT_TOUCH_PX = 1;
   // A computed colour carries whatever syntax the engine chose: a color-mix() token resolves to
   // `color(srgb …)`, which no rgb() pattern reads. The browser paints the value into one pixel and
   // the pixel is the answer. An unpaintable value leaves both probe fills in place, so it reads as

@@ -57,7 +57,7 @@ def _function_source(name: str) -> str:
 
 
 def _measure_source() -> str:
-    return "const TEXT_FRAGMENT_TOUCH_PX = 1;\n" + _function_source("measure")
+    return _function_source("measure")
 
 
 def _page() -> str:
