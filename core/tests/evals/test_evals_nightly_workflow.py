@@ -73,6 +73,13 @@ def test_an_agent_specific_suite_runs_in_its_own_shard(planner) -> None:
     assert shard.suites == ("code_review",)
 
 
+def test_the_chat_home_suite_runs_in_the_chat_agent_context(planner) -> None:
+    shard = next(shard for shard in planner.plan(smoke=False) if "app_home_change" in shard.suites)
+
+    assert shard.agent == "chat"
+    assert shard.suites == ("app_home_change",)
+
+
 def test_agent_specific_shard_labels_are_artifact_safe(planner) -> None:
     profile = next(shard for shard in planner.plan(smoke=False) if "coding_profile" in shard.suites)
 

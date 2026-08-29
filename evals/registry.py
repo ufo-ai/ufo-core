@@ -162,6 +162,7 @@ TASKS: tuple[EvalTask, ...] = (
     capability_task(
         "app_home_change",
         app_home_change.CASES,
+        agent=app_home_change.APP_SLUG,
         wait_seconds=app_home_change.WORKFLOW_WAIT_SECONDS,
     ),
     capability_task(
