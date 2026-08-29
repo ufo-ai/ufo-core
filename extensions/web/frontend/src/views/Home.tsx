@@ -21,7 +21,6 @@ import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
 import { clearChat, useChat } from "@/lib/chatStore";
 import { CHAT_SURFACE } from "@/lib/mainAgent";
-import { day } from "@/lib/moments";
 import {
   CHAT_LADDERS,
   CHAT_SHOWN_OPTIONS,
@@ -371,7 +370,7 @@ function PastList({
       key={row.conversation_id}
       line={row.title || agentName(row.agent_name)}
       note={isPortalChat(row.surface) ? undefined : surfaceWord(row.surface)}
-      when={day(row.last_at) ?? undefined}
+      when={row.last_at}
       onPress={() => onOpens(taken(opens, lane, homeConversationLane(row.conversation_id)))}
     />
   );
@@ -481,7 +480,7 @@ function History({
                      word for the surface. A portal chat states none: the history is read in the
                      portal, so a source on every row would name where the member already is. */
                   note={isPortalChat(row.surface) ? undefined : origin(row)}
-                  when={day(row.last_at) ?? undefined}
+                  when={row.last_at}
                   onPress={() =>
                     onOpens(taken(opens, lane, homeConversationLane(row.conversation_id)))
                   }

@@ -966,11 +966,9 @@ function StarterMark({ row }: { row: StarterRow }) {
 }
 
 /** A row is one line, and the sentence it holds is the member's own work said back to them, so a
- *  measure too narrow to hold it must not be where it goes unread. The cut text is stated in full
- *  on hover, and a row that already fits states nothing a second time — a tooltip repeating a line
- *  the eye has just read is noise the member did not ask for. Whether a row is cut is measured, not
- *  assumed: the same sentence fits one viewport and not the next, so the answer is re-measured
- *  whenever the row's width changes. */
+ *  measure too narrow to hold it must not be where it goes unread: the cut sentence travels under
+ *  the pointer until its last word has been read. A row that already fits stands still — a line
+ *  moving under a sentence the eye has just read whole is noise the member did not ask for. */
 function Starters({ agentId }: { agentId: string }) {
   const read = usePanelRead<StartersPayload>(STARTERS_READ, 0, STARTERS_EVERY_MS);
   const answered = read.phase === "ready" ? read.payload : null;

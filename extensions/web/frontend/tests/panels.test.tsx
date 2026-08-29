@@ -1357,9 +1357,10 @@ test("the lane's History lists the app's conversations, and one press opens it i
   // the row's own end rather than in the line the member scans down.
   const row = await screen.findByRole("button", { name: "Newest thread Jul 30 2026" });
   const other = screen.getByRole("button", { name: "Older thread Slack Jul 30 2026" });
-  expect(within(row).getByText("Jul 30 2026").previousElementSibling?.textContent).toBe(
-    "Newest thread",
-  );
+  const line = within(row).getByText("Newest thread");
+  const stamp = within(row).getByText("Jul 30 2026");
+  expect(line.contains(stamp)).toBe(false);
+  expect(line.compareDocumentPosition(stamp) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
   await userEvent.click(other);
 

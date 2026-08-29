@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useState, type ReactNode } from "react";
 import { IconChevronRight } from "@tabler/icons-react";
 
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Ticker } from "@/components/ui/ticker";
 import { cn } from "@/lib/cn";
+import { Moment } from "@/lib/moments";
 
 /** One thing offered on a list of things to open: its mark, what it says, and the way in. What the
  *  row says shares one line and one truncation, so a long sentence takes the room a short one
@@ -27,36 +28,24 @@ const STAMP = cn(
   "group-hover:opacity-100 group-focus-visible:opacity-100",
 );
 
-/** Whether the line is cut, so a row that fits is never given a tooltip saying what it already
- *  says. */
-function useCutLine(): [RefObject<HTMLSpanElement | null>, boolean] {
-  const line = useRef<HTMLSpanElement>(null);
-  const [cut, setCut] = useState(false);
-  useEffect(() => {
-    const node = line.current;
-    if (!node) return;
-    const measure = () => setCut(node.scrollWidth > node.clientWidth);
-    measure();
-    const watch = new ResizeObserver(measure);
-    watch.observe(node);
-    return () => watch.disconnect();
-  }, []);
-  return [line, cut];
-}
-
 /** A row that opens something. `onPress` where the caller holds the verb, `href` where the thing has
  *  an address of its own — the row is a link then, so it opens the way every other link does.
  *
- *  `line` is what the row says: one sentence that reads on its own. `note` is the trailing detail
- *  a few rows carry — what a listed row costs, or when it last moved — and it is set in the same
- *  type as the line, because a row drawn in two registers is a row the eye assembles out of two
- *  pieces rather than reads as one thing.
+ *  `line` is what the row says: one sentence that reads on its own, cut to the measure the row
+ *  leaves it and travelling out to its last word while the pointer or the keyboard is on the row —
+ *  the way a name in the sidebar states its tail, so a lane too narrow for a title is not where the
+ *  title goes unread. `note` is the trailing detail a few rows carry — what a listed row costs, or
+ *  when it last moved — and it is set in the same type as the line, because a row drawn in two
+ *  registers is a row the eye assembles out of two pieces rather than reads as one thing.
  *
- *  `when` is the stamp a list of one kind of record scans down: it stands at the row's own end,
- *  muted, and shows under the pointer, because a column of dates every row carries is the same
- *  fact repeated against the names the member came to read. It holds its width at rest, so a name
- *  is cut to the same measure whether the pointer is on the row or not, and it is drawn rather than
- *  withheld, so a reader who never hovers is still told it.
+ *  `when` is the moment the record last moved, as the stamp it was sent in: a list of one kind of
+ *  record scans that column down. It stands at the row's own end, muted, and shows under the
+ *  pointer, because a date every row carries is the same fact repeated against the names the member
+ *  came to read. It reads as the distance from now while that is what says a row is recent, and as
+ *  its own day once the day is what matters — so the column is a few characters wide rather than a
+ *  full date, and the words the row came to say keep the width. It holds that width at rest, so a
+ *  name is cut to the same measure whether the pointer is on the row or not, and it is drawn rather
+ *  than withheld, so a reader who never hovers is still told it.
  *
  *  `glyph` is the mark for the kind of thing the row opens, and a list whose rows are all one kind
  *  draws none: a mark repeated down every row states nothing that tells two rows apart, and takes
@@ -76,35 +65,39 @@ export function PressRow({
   onPress?: () => void;
   href?: string;
 }) {
-  const [measured, cut] = useCutLine();
+  /* Every ask is a fresh measurement rather than a flag, the way the sidebar's rows count theirs: a
+     row the pointer already rests on can be reached again by the keyboard, and the words under it
+     can have changed width since it landed. Zero is rest. */
+  const [asks, setAsks] = useState(0);
   const says = note ? line + " " + note : line;
+  const held = {
+    onPointerEnter: () => setAsks((asked) => asked + 1),
+    onPointerLeave: () => setAsks(0),
+    onFocus: () => setAsks((asked) => asked + 1),
+    onBlur: () => setAsks(0),
+  };
   const inside = (
     <>
       {glyph}
-      <span ref={measured} className="min-w-0 flex-1 truncate">
+      <Ticker asks={asks} className="min-w-0 flex-1">
         {says}
-      </span>
-      {when ? <span className={STAMP}>{when}</span> : null}
+      </Ticker>
+      {when ? (
+        <span className={STAMP}>
+          <Moment at={when} />
+        </span>
+      ) : null}
       <IconChevronRight className={CHEVRON} aria-hidden />
     </>
   );
-  return (
-    <Tooltip open={cut ? undefined : false}>
-      <TooltipTrigger asChild>
-        {href ? (
-          <a href={href} className={ROW}>
-            {inside}
-          </a>
-        ) : (
-          <button type="button" onClick={onPress} className={ROW}>
-            {inside}
-          </button>
-        )}
-      </TooltipTrigger>
-      <TooltipContent className="max-w-hint rounded-panel">
-        {says}
-      </TooltipContent>
-    </Tooltip>
+  return href ? (
+    <a href={href} className={ROW} {...held}>
+      {inside}
+    </a>
+  ) : (
+    <button type="button" onClick={onPress} className={ROW} {...held}>
+      {inside}
+    </button>
   );
 }
 

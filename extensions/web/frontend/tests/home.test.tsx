@@ -372,6 +372,20 @@ test("the chat lane's unsaid state stands the member's history over the new chat
   expect(rows.filter((row) => row.includes("Terminal"))).toHaveLength(1);
 });
 
+/** The stamp on a row is the moment its conversation last moved, read as the distance from now
+ *  while that is what says a row is recent and as the day itself once it is not — a few characters
+ *  either way, so a narrow lane spends its width on the title rather than on a full date per row. */
+test("a history row stamps when its conversation last moved", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([AGENT_ID]);
+
+  const lane = await screen.findByRole("region", { name: "Assistant" });
+  await within(lane).findByRole("heading", { name: "History", level: 3 });
+
+  const stamp = within(lane).getByText("Aug 1 2026");
+  expect(stamp.getAttribute("datetime")).toBe(CHAT_ROW.last_at);
+});
+
 /** The ladder and the surfaces the member keeps are the history's own narrowings, held in this
  *  browser: a member who asked to see their terminal sessions asked about their own history. */
 test("the history runs the rows in the ladder the member picks and drops the surfaces they put away", async () => {

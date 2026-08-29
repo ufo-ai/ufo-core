@@ -26,7 +26,6 @@ import { agentName } from "@/lib/agentName";
 import { holdTrack } from "@/lib/tracks";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
-import { day } from "@/lib/moments";
 import type { ChatRow } from "@/lib/rail";
 import type { SetupState } from "@/views/AgentSetup";
 import { Chat } from "@/views/Chat";
@@ -464,11 +463,11 @@ export function AgentPane({
    *  answered in Slack stands here beside the ones started in this lane, and one the member may not
    *  read is named by whose it is. The row states what the conversation is about and where and when
    *  it last moved — the three facts the app's own band states, so one conversation is named the
-   *  same wherever it is listed. The day stands at the row's end rather than after its name, since
-   *  what the member scans for is the name and every row carries a day; the surface is named only
-   *  where it is not this one, the way the rail names none on a conversation the portal holds; and
-   *  no mark, because every row here is a conversation and a glyph repeated down the list tells no
-   *  two of them apart. The read carries the newest of them and no cursor, so where it says it
+   *  same wherever it is listed. The moment stands at the row's end rather than after its name,
+   *  since what the member scans for is the name and every row carries one; the surface is named
+   *  only where it is not this one, the way the rail names none on a conversation the portal holds;
+   *  and no mark, because every row here is a conversation and a glyph repeated down the list tells
+   *  no two of them apart. The read carries the newest of them and no cursor, so where it says it
    *  stopped at its bound the list says so under the rows rather than ending as though the app had
    *  spoken that many times. Picking a row opens it at its own address, which names a different
    *  lane and puts this list away. */
@@ -486,7 +485,7 @@ export function AgentPane({
                 key={row.id}
                 line={subject(row, viewer)}
                 note={isPortalChat(row.surface) ? undefined : surfaceWord(row.surface)}
-                when={day(row.last_turn_at) ?? undefined}
+                when={row.last_turn_at ?? undefined}
                 onPress={() => onPlace({ ...place, opens: [row.id] }, "push")}
               />
             ))}
