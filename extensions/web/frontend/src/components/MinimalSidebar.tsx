@@ -104,7 +104,10 @@ export function MinimalSidebar({
       {/* Search keeps its one component and its chord: the desk shell has no wide column to carry
           it, so the rail does. */}
       <Spotlight agents={agents} className={TILE} />
-      <ul className="scrollbar-none m-0 flex min-h-0 w-full flex-1 list-none flex-col items-center gap-2xl overflow-y-auto p-0">
+      {/* The tiles scroll, and a scrolling box clips both axes — so the track carries a gutter the
+          width of the dot's overhang, and the mark's own column stays where it stood. Without it the
+          rail is 16px wide inside its padding and the dot loses its outer half at every width. */}
+      <ul className="scrollbar-none my-0 -mx-2xs flex min-h-0 flex-1 list-none flex-col items-center gap-2xl self-stretch overflow-y-auto px-2xs py-0">
         {lanes.map(({ lane, agent }) => {
           const dot = statusDot(statuses[agent.id], agent.setup_due === true);
           return (

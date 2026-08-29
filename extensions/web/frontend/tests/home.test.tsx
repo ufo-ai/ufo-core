@@ -552,6 +552,23 @@ test("the dot is live while an app works, blocked while it waits on the member, 
   expect(statusDot(undefined, false)).toBeNull();
 });
 
+/** The dot stands outside the mark's own box, and the track the tiles scroll in clips both axes: a
+ *  box that scrolls one way clips the other. So the track carries a gutter as wide as the overhang
+ *  and pulls back out over the rail's padding, leaving the marks in the column they stood in. Held
+ *  to the rail's own width instead, the clip edge cuts every dot in half. */
+test("the rail's tile track keeps the dot's overhang inside the scroll box", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([AGENT_ID]);
+
+  const rail = await screen.findByRole("navigation", { name: "Tabs" });
+  const track = rail.querySelector("ul");
+
+  expect(track?.className).toContain("overflow-y-auto");
+  expect(track?.className).toContain("px-2xs");
+  expect(track?.className).toContain("-mx-2xs");
+  expect(track?.className).not.toContain("w-full");
+});
+
 test("a turn held here marks its app at work until the hold is released", () => {
   wire({ "/api/agents/status": () => json({ statuses: [] }) });
   const view = renderHook(() => useAppStatus());
