@@ -1,0 +1,73 @@
+# Does the member need to be named for the system to know who is asking, and when it does, does
+# telling the model how to name them help?
+#
+# Two model-facing changes ride PR #2679. In a member's own conversation the engine binds an omitted
+# `requested_by` to that member and stops offering the field; in a shared conversation the field
+# stays, and a handler refusing for want of a member gets its error extended with the active member
+# refs. O11 is the shared case: the founding admin asks the assistant to archive an app they own in a
+# shared room, so the archive lands only if the call carries the ref — first try, or after the
+# refusal says how. A02 is the own-conversation case the report came from: a member states the whole
+# app in their first message and the create must land, ref or no ref.
+#
+# `base = "HEAD"` is the PR. Each arm takes one piece away.
+name = "requested-by-hint"
+base = "HEAD"
+suites = ["object_tools", "new_application"]
+cases = ["O11-archive-in-a-shared-conversation", "A02-stated-up-front"]
+repeats = 4
+concurrency = 2
+max_stacks = 1
+budget_usd = 60.0
+est_usd_per_case = 1.20
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+sandbox = { backend = "docker" }
+research = { search_provider = "perplexity" }
+
+# The refusal stands alone: no refs, no instruction. What the model does with a bare
+# "requires its owner or a workspace admin" in a room where it is one message ref away.
+[[arm]]
+name = "no-hint"
+
+[[arm.replacements]]
+path = "core/src/ufo/loop/engine.py"
+old = """REQUESTED_BY_HINT = (
+    " Set requested_by to the message_ref of the member who asked; active member messages: {refs}."
+)"""
+new = """REQUESTED_BY_HINT = ""
+"""
+
+# The field is offered in the member's own conversation too, as before. The binding stays, so the
+# only question is whether a field that can say nothing new costs anything.
+[[arm]]
+name = "offer-ref-always"
+
+[[arm.replacements]]
+path = "core/src/ufo/loop/engine.py"
+old = """        if self._own_member(requesters) is not None:
+            return ()
+        return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""
+new = """        return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""
+
+# main's behavior on the own-conversation lane: nothing binds an omitted ref, and the field is
+# offered. The report's failure, reproduced as an arm.
+[[arm]]
+name = "no-own-binding"
+
+[[arm.replacements]]
+path = "core/src/ufo/loop/engine.py"
+old = """        elif (member := self._own_member(requesters)) is not None:
+            requester = member
+"""
+new = ""
+
+[[arm.replacements]]
+path = "core/src/ufo/loop/engine.py"
+old = """        if self._own_member(requesters) is not None:
+            return ()
+        return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""
+new = """        return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""

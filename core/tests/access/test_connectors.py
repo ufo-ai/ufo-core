@@ -405,7 +405,7 @@ async def test_connector_account_prefers_the_acting_members_private_account(db: 
         scheduled = replace(
             ctx_m,
             speaker_member_id=None,
-            on_behalf_of_member_id=member_m,
+            turn=ctx_m.turn.model_copy(update={"on_behalf_of_member_id": member_m}),
         )
         assert await scheduled.connector_account(sample.CONNECTOR_PROVIDER) == "acct-m"
 

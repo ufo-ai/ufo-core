@@ -2088,7 +2088,9 @@ async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerles
     on_behalf = replace(
         _turn_context(workspace_id, agent_id, conversation_id, None),
         grants=store,
-        on_behalf_of_member_id=initiator_id,
+        turn=_turn_context(workspace_id, agent_id, conversation_id, None).turn.model_copy(
+            update={"on_behalf_of_member_id": initiator_id}
+        ),
     )
     assert on_behalf.speaker_member_id is None
     with ws(workspace_id), agent(agent_id):

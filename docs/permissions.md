@@ -45,15 +45,22 @@ flowchart TD
 The engine builds each turn's tool context with **no speaker**. A tool call names the member it
 acts for via `requested_by` — a message ref the model copies from a visible, absorbed member
 inbound — and the engine re-binds the call's context and sandbox run token to that member
-(`_bind_requester`, `core/src/ufo/loop/engine.py`). Omission means common work, except a turn
-carrying a durable `on_behalf_of` member — a scheduled fire, a subagent, a monitor's arrival —
-retains it.
+(`_bind_requester`, `core/src/ufo/loop/engine.py`). In a member's own conversation — the
+audience is theirs — an omitted ref binds that member while one of their messages is active, since
+nobody else can be asking there, and the schema does not offer the field; a denied message is absent
+from those, so a denial withholds that member's authority here exactly as it does for a named ref.
+Elsewhere omission means common work, except a turn carrying a durable `on_behalf_of` member — a
+scheduled fire, a subagent, a monitor's arrival — retains it; a handler that refuses for want of a
+member raises `SpeakerRequired`, and the tool error then lists the active member refs so the model
+retries with the right one.
 
 ```mermaid
 flowchart TD
     TC["tool call"] --> RB{"requested_by names a live<br/>member message?"}
     RB -->|yes| SP["speaker = that member"]
-    RB -->|omitted| OB{"turn carries an<br/>on_behalf_of member?"}
+    RB -->|omitted| OWN{"the member's own conversation,<br/>with a live message of theirs?"}
+    OWN -->|yes| SP
+    OWN -->|no| OB{"turn carries an<br/>on_behalf_of member?"}
     OB -->|yes| BEH["acting member = on_behalf_of member<br/>(task creator, spawn requester, monitor armer)"]
     OB -->|no| NONE["no member — common work:<br/>shared grants only"]
     SP --> ACT["acting member"]

@@ -78,8 +78,12 @@ terminal frame. A client's wait always ends — the terminal state commits on th
 - **Tool calling** — typed registry; per-call metering; results bounded before hitting the model.
   Every member inbound carries a stable `message_ref` from its existing turn/message id. A tool
   call's optional `requested_by` must name a visible, non-denied message already absorbed by this
-  turn; core strips it before input validation and binds the call's member capabilities. Omission
-  means common work, except a scheduled turn or subagent retains its durable `on_behalf` member.
+  turn; core strips it before input validation and binds the call's member capabilities. In a
+  member's own conversation an omitted ref binds that member while one of their messages is active —
+  nobody else can be asking there, a denied message is active for neither route, and the field is
+  not offered. Elsewhere omission means common work, except a scheduled turn or subagent retains its
+  durable `on_behalf` member, and a handler refusing for want of a member (`SpeakerRequired`) has its
+  error carry the active member refs so the model retries with one.
   Reads combine the conversation's subjects with that member's own subject — never the shared atom
   their private audience also reads, so a sealed conversation stays sealed however it is driven.
   A write takes the member's private subject only in a workspace-shared conversation; a private room

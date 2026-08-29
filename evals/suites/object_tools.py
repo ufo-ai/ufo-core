@@ -3,8 +3,10 @@
 `CASES` are single-turn capability probes on a shared workspace, each grader scoped to its own
 subject so no case depends on another's leftovers. Scheduled-task cases grade database rows and
 structured tool trajectories. The user-skill case grades skill loading, persistence, and
-agent-scoped confirmation. `SCENARIOS` are seeded multi-turn conversations whose trials reset and
-seed their scheduled tasks through the real `ScheduleStore`."""
+agent-scoped confirmation. The shared-conversation case grades an act that needs a bound member
+where the model alone can bind one: the archive lands only if the call names its `requested_by`,
+on the first try or after the refusal tells it how. `SCENARIOS` are seeded multi-turn
+conversations whose trials reset and seed their scheduled tasks through the real `ScheduleStore`."""
 
 from __future__ import annotations
 
@@ -23,15 +25,19 @@ from evals.driver import EVAL_SURFACE
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
+    CapabilitySeed,
     CapabilityVerdict,
     DescribedGrader,
     Grader,
 )
+from evals.harness.harness import JsonObject
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.harness.scorers import combine, required_tools_scorer, skill_scorer
 from ufo.agent_scope import agent
+from ufo.blob import BlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
+from ufo.models.interface import AUTO_MODEL
 from ufo.schema import tables
 
 KIND = "scheduled_task"
@@ -269,7 +275,85 @@ async def _mccarren_final_fire(_output: CapabilityOutput) -> str | None:
     )
 
 
+SHARED_ARCHIVE_APP = "stale-standup-digest"
+
+
+def _shared_conversation_seed() -> CapabilitySeed:
+    async def seed(workspace_id: UUID, agent_id: UUID, blob: BlobStore) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.agent).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    sa.or_(
+                        tables.agent.c.name == SHARED_ARCHIVE_APP,
+                        tables.agent.c.archived_name == SHARED_ARCHIVE_APP,
+                    ),
+                )
+            )
+            owner = (
+                await connection.execute(
+                    sa.select(tables.member.c.id)
+                    .where(
+                        tables.member.c.workspace_id == workspace_id,
+                        tables.member.c.is_admin.is_(True),
+                    )
+                    .order_by(tables.member.c.created_at)
+                    .limit(1)
+                )
+            ).scalar_one()
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    name=SHARED_ARCHIVE_APP,
+                    prompt="You post yesterday's standup notes every morning.",
+                    purpose="Posts the standup digest.",
+                    model=AUTO_MODEL,
+                    visibility="workspace",
+                    owner_member_id=owner,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
+    return seed
+
+
+async def _graded_shared_archive(output: CapabilityOutput) -> CapabilityVerdict:
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.agent.c.archived_at).where(
+                    tables.agent.c.archived_name == SHARED_ARCHIVE_APP,
+                    tables.agent.c.archived_at.is_not(None),
+                )
+            )
+        ).all()
+    deletes = [call for call in output.calls if call.name == "object_delete"]
+    evidence: JsonObject = {
+        "archived": len(rows),
+        "object_delete_calls": len(deletes),
+        "object_delete_errors": sum(1 for call in deletes if call.is_error),
+        "retry_hints": sum(1 for error in output.tool_errors if "requested_by" in error),
+    }
+    if len(rows) != 1:
+        return CapabilityVerdict(False, "the app was not archived", evidence)
+    return CapabilityVerdict(True, "the app is archived", evidence)
+
+
 CASES = (
+    CapabilityCase(
+        "O11-archive-in-a-shared-conversation",
+        f"Archive the {SHARED_ARCHIVE_APP} app. It has not posted anything useful in weeks.",
+        DescribedGrader(
+            "in a shared conversation the archive lands, named to the member who asked",
+            _graded_shared_archive,
+        ),
+        shared_audience=True,
+        seed=_shared_conversation_seed(),
+        cleanup=_shared_conversation_seed(),
+        digest_tag="object-tools:shared-archive",
+    ),
     CapabilityCase(
         "O01-one-shot-refusal",
         "Remind me once next Tuesday at 3pm to call the bank.",

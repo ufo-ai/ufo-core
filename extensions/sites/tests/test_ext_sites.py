@@ -760,9 +760,10 @@ async def test_deploy_website_keys_its_server_task_on_the_call(
     base = _context(sandbox, tmp_path)
     ctx = replace(
         base,
-        turn=base.turn.model_copy(update={"workspace_id": workspace_id}),
+        turn=base.turn.model_copy(
+            update={"workspace_id": workspace_id, "on_behalf_of_member_id": uuid4()}
+        ),
         blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
-        on_behalf_of_member_id=uuid4(),
         idempotency_key=f"{base.turn.id}/deploy_website/call-1",
         public_base_url="https://ufo.example.test",
         ext=context_for("sites", frozenset()),
@@ -792,8 +793,9 @@ async def test_publish_website_keys_its_server_task_on_the_call(
     base = _context(sandbox, tmp_path)
     ctx = replace(
         base,
-        turn=base.turn.model_copy(update={"workspace_id": workspace_id}),
-        on_behalf_of_member_id=uuid4(),
+        turn=base.turn.model_copy(
+            update={"workspace_id": workspace_id, "on_behalf_of_member_id": uuid4()}
+        ),
         idempotency_key=f"{base.turn.id}/publish_website/call-1",
         public_base_url="https://ufo.example.test",
         ext=context_for("sites", frozenset()),
@@ -2486,9 +2488,9 @@ async def test_application_worker_redeploy_uses_the_exact_parent_speaker(
             update={
                 "parent_turn_id": parent_turn_id,
                 "subagent_profile": APPLICATION_BUILDER_NAME,
+                "on_behalf_of_member_id": member_id,
             }
         ),
-        on_behalf_of_member_id=member_id,
         ext=cast(ExtensionContext, FakeHookExt(store)),
     )
     bound = HostedSite(
@@ -2648,7 +2650,6 @@ async def test_application_build_acceptance_binds_only_verified_worker_output(
             ),
             spawn=_capture,
             speaker_member_id=None,
-            on_behalf_of_member_id=member_id,
             audience=SHARED_AUDIENCE,
             artifact_token_secret="",
             ext=ext,

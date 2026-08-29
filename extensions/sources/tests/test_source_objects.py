@@ -58,7 +58,7 @@ from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.manifest import HookContext, PageChangeBatch
 from ufo.sdk.objects import AdminRequired, ObjectListQuery, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
-from ufo.sdk.tools import ToolContext
+from ufo.sdk.tools import SpeakerRequired, ToolContext
 from ufo.sources.sync import SyncDriver
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.registry import ToolDef
@@ -1977,13 +1977,16 @@ async def test_source_delete_needs_a_live_speaker(
     state = await _workspace()
     member_ctx = _context(state, None, speaker_id=state.member_id)
     speakerless = replace(
-        _context(state, None, no_speaker=True), on_behalf_of_member_id=state.member_id
+        _context(state, None, no_speaker=True),
+        turn=_context(state, None, no_speaker=True).turn.model_copy(
+            update={"on_behalf_of_member_id": state.member_id}
+        ),
     )
     delete_tool = _TOOLS["object_delete"]
     member_name = binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(member_ctx, _manifest_text(GREENHOUSE, ("jobs",), member_name))
-        with pytest.raises(AdminRequired):
+        with pytest.raises(SpeakerRequired):
             await delete_tool.handler(
                 speakerless,
                 delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),

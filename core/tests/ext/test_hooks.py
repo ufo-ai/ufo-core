@@ -640,7 +640,6 @@ def _engine(
             hooks=hooks,
             turn=turn,
             agent=agent,
-            speaker_member_id=None,
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier or RecordingCarrier(), handle=handle),

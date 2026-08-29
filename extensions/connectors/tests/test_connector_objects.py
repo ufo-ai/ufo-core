@@ -44,7 +44,7 @@ from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, Sandb
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.context import SpawnResult, ToolContext
+from ufo.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
 
@@ -1412,9 +1412,12 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
         speakerless = replace(
-            _tool_context(workspace_id, agent_id), on_behalf_of_member_id=grantor_id
+            _tool_context(workspace_id, agent_id),
+            turn=_tool_context(workspace_id, agent_id).turn.model_copy(
+                update={"on_behalf_of_member_id": grantor_id}
+            ),
         )
-        with pytest.raises(AdminRequired):
+        with pytest.raises(SpeakerRequired):
             await apply_tool.handler(
                 speakerless,
                 apply_tool.input_model.model_validate(
@@ -1423,7 +1426,7 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
                     }
                 ),
             )
-        with pytest.raises(AdminRequired):
+        with pytest.raises(SpeakerRequired):
             await delete_tool.handler(
                 speakerless,
                 delete_tool.input_model.model_validate(

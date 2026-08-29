@@ -75,7 +75,7 @@ from ufo.sdk.sources import (
     binding_name,
 )
 from ufo.sdk.subjects import SHARED_SUBJECT, member_subject, subject_shared
-from ufo.sdk.tools import ConnectUnavailable, ToolContext
+from ufo.sdk.tools import ConnectUnavailable, SpeakerRequired, ToolContext
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
 from ufo_ext_sources.triggers import (
@@ -523,7 +523,7 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
     ) -> None:
         ext = _require_ext(ctx.ext)
         if ctx.speaker_member_id is None:
-            raise ValueError("registering a source requires a speaking member")
+            raise SpeakerRequired("registering a source requires a speaking member")
         connector_cls = CONNECTORS.get(spec.provider)
         if connector_cls is None:
             raise ValueError(

@@ -24,7 +24,7 @@ from ufo.sdk.objects import (
     OwnedRow,
     VerbNotSupported,
 )
-from ufo.sdk.tools import ToolContext
+from ufo.sdk.tools import SpeakerRequired, ToolContext
 
 CONNECTION_KIND = "connection"
 CONNECTOR_GRANT_KIND = "connector_grant"
@@ -136,7 +136,7 @@ class ConnectionObjects(MemberReadableObjects[ConnectionSpec, GeneratedObjectOwn
         if ctx.grants is None:
             raise RuntimeError("grants unavailable: no credential key configured")
         if ctx.speaker_member_id is None:
-            raise RuntimeError("disconnect requires a speaking member")
+            raise SpeakerRequired("disconnect requires a speaking member")
         disconnected = await ctx.grants.disconnect(
             owner.generation,
             actor_member_id=ctx.speaker_member_id,
@@ -244,8 +244,10 @@ class ConnectorGrantObjects(MemberReadableObjects[ConnectorGrantSpec, GeneratedO
         owner: GeneratedObjectOwner | None,
     ) -> None:
         if old is None and owner is None:
-            if ctx.grants is None or ctx.speaker_member_id is None:
-                raise RuntimeError("attaching requires a speaking member and connector access")
+            if ctx.grants is None:
+                raise RuntimeError("grants unavailable: no credential key configured")
+            if ctx.speaker_member_id is None:
+                raise SpeakerRequired("attaching requires a speaking member")
             attached = await ctx.grants.attach(
                 provider=spec.provider,
                 account_id=spec.account_id,
@@ -261,7 +263,7 @@ class ConnectorGrantObjects(MemberReadableObjects[ConnectorGrantSpec, GeneratedO
         if ctx.grants is None:
             raise RuntimeError("grants unavailable: no credential key configured")
         if ctx.speaker_member_id is None:
-            raise RuntimeError("changing disclosure requires a speaking member")
+            raise SpeakerRequired("changing disclosure requires a speaking member")
         row = next(
             (summary for summary in await grant_summaries() if summary.id == owner.generation),
             None,
@@ -289,7 +291,7 @@ class ConnectorGrantObjects(MemberReadableObjects[ConnectorGrantSpec, GeneratedO
         if ctx.grants is None:
             raise RuntimeError("grants unavailable: no credential key configured")
         if ctx.speaker_member_id is None:
-            raise RuntimeError("revoking access requires a speaking member")
+            raise SpeakerRequired("revoking access requires a speaking member")
         revoked = await ctx.grants.revoke(
             owner.generation,
             actor_member_id=ctx.speaker_member_id,

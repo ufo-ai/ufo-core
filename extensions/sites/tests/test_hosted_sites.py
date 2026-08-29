@@ -141,6 +141,7 @@ from ufo.sdk.audience import (
 )
 from ufo.sdk.sandbox import serve_port, shipped_anchor
 from ufo.sdk.skills import RuntimeSkill
+from ufo.sdk.tools import SpeakerRequired
 from ufo.serve import RESERVED_HOST_PREFIXES, _mount_shared_surfaces
 from ufo.skills.runtime import SkillRegistry
 from ufo.tools.context import SpawnResult, ToolContext
@@ -867,10 +868,13 @@ async def test_a_speakerless_turn_cannot_name_a_visibility(db: None) -> None:
     await _deploy(workspace, conversation_id, audience, creator_id)
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
     scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=creator_id
+        _bind(ctx, workspace, conversation_id, None),
+        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
+            update={"on_behalf_of_member_id": creator_id}
+        ),
     )
 
-    with ws(workspace.id), pytest.raises(RuntimeError, match="needs a live member"):
+    with ws(workspace.id), pytest.raises(SpeakerRequired):
         await _dispatch(
             tool,
             scheduled,
@@ -894,7 +898,10 @@ async def test_a_speakerless_turn_may_still_redeploy(db: None) -> None:
     await _deploy(workspace, conversation_id, audience, creator_id)
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
     scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=creator_id
+        _bind(ctx, workspace, conversation_id, None),
+        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
+            update={"on_behalf_of_member_id": creator_id}
+        ),
     )
 
     with ws(workspace.id):
@@ -921,10 +928,13 @@ async def test_a_speakerless_turn_cannot_unhost_a_site(db: None) -> None:
     name = str((await _deploy(workspace, conversation_id, audience, creator_id))["site"])
     tool, ctx = _tool("object_delete", audience)
     scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=creator_id
+        _bind(ctx, workspace, conversation_id, None),
+        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
+            update={"on_behalf_of_member_id": creator_id}
+        ),
     )
 
-    with ws(workspace.id), pytest.raises(AdminRequired):
+    with ws(workspace.id), pytest.raises(SpeakerRequired):
         await _dispatch(tool, scheduled, kind=SITE_KIND, name=name)
 
     assert len(await _stored(workspace)) == 1
@@ -956,7 +966,14 @@ async def test_a_subagent_hosts_against_the_conversation_whose_sandbox_serves_it
             serving_conversation_id=member_conversation,
             subagent_profile="website_building",
         ),
-        on_behalf_of_member_id=member_id,
+        turn=_bind(
+            ctx,
+            workspace,
+            child_conversation,
+            None,
+            serving_conversation_id=member_conversation,
+            subagent_profile="website_building",
+        ).turn.model_copy(update={"on_behalf_of_member_id": member_id}),
     )
 
     with ws(workspace.id):
@@ -1008,7 +1025,9 @@ async def test_a_subagent_rebuilds_its_site_but_cannot_unhost_another(db: None) 
     child = replace(
         _bind(ctx, workspace, conversation_id, None, subagent_profile="website_building"),
         sandbox=RefusingSandbox(conversation_id=conversation_id),
-        on_behalf_of_member_id=creator_id,
+        turn=_bind(
+            ctx, workspace, conversation_id, None, subagent_profile="website_building"
+        ).turn.model_copy(update={"on_behalf_of_member_id": creator_id}),
     )
     with ws(workspace.id), pytest.raises(UnhostNeedsASpeaker, match="unhost") as refusal:
         await _dispatch(
@@ -1030,7 +1049,9 @@ async def test_a_subagent_rebuilds_its_site_but_cannot_unhost_another(db: None) 
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
     rebuild = replace(
         _bind(ctx, workspace, conversation_id, None, subagent_profile="website_building"),
-        on_behalf_of_member_id=creator_id,
+        turn=_bind(
+            ctx, workspace, conversation_id, None, subagent_profile="website_building"
+        ).turn.model_copy(update={"on_behalf_of_member_id": creator_id}),
     )
     with ws(workspace.id):
         await _dispatch(
@@ -2183,10 +2204,13 @@ async def test_a_speakerless_turn_cannot_change_who_can_open_a_site(db: None) ->
     name = str((await _deploy(workspace, conversation_id, audience, creator_id))["site"])
     tool, ctx = _tool("object_apply", audience)
     scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=creator_id
+        _bind(ctx, workspace, conversation_id, None),
+        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
+            update={"on_behalf_of_member_id": creator_id}
+        ),
     )
 
-    with ws(workspace.id), pytest.raises(AdminRequired):
+    with ws(workspace.id), pytest.raises(SpeakerRequired):
         await _dispatch(
             tool,
             scheduled,
@@ -2268,9 +2292,11 @@ async def test_a_refused_deploy_never_touches_the_members_running_site(db: None)
         child = replace(
             _bind(ctx, workspace, conversation_id, None, subagent_profile="website_building"),
             sandbox=RefusingSandbox(),
-            on_behalf_of_member_id=member_id,
+            turn=_bind(
+                ctx, workspace, conversation_id, None, subagent_profile="website_building"
+            ).turn.model_copy(update={"on_behalf_of_member_id": member_id}),
         )
-        with ws(workspace.id), pytest.raises(RuntimeError, match="needs a live member"):
+        with ws(workspace.id), pytest.raises(SpeakerRequired):
             await _dispatch(
                 tool, child, project_path="/workspace/dist", visibility="workspace", **args
             )
@@ -2736,7 +2762,10 @@ async def test_set_homepage_binds_speakerlessly_and_reports_the_agents_visibilit
     (before,) = await _stored(workspace)
     tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
     scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=member_id
+        _bind(ctx, workspace, conversation_id, None),
+        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
+            update={"on_behalf_of_member_id": member_id}
+        ),
     )
 
     with ws(workspace.id):
@@ -2767,14 +2796,17 @@ async def test_a_standing_site_binds_for_its_creator_speaking_and_refuses_speake
     hosted = await _deploy(workspace, conversation_id, audience, member_id)
     tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
     scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None), on_behalf_of_member_id=member_id
+        _bind(ctx, workspace, conversation_id, None),
+        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
+            update={"on_behalf_of_member_id": member_id}
+        ),
     )
     later = replace(
         scheduled,
         turn=scheduled.turn.model_copy(update={"created_at": datetime(2027, 1, 1, tzinfo=UTC)}),
     )
 
-    with ws(workspace.id), pytest.raises(RuntimeError, match="needs its creator speaking"):
+    with ws(workspace.id), pytest.raises(SpeakerRequired):
         await _dispatch(tool, later, site=str(hosted["site"]))
     (row,) = await _stored(workspace)
     assert row.homepage_agent_id is None

@@ -848,7 +848,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 hooks=hooks,
                 turn=turn,
                 agent=resolved,
-                speaker_member_id=None,
                 reasoning=runtime.registry.spec(resolved.model).reasoning,
             ),
             hub=runtime.hub,

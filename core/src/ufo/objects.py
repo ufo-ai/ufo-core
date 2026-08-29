@@ -48,7 +48,7 @@ from ufo.object_scope import ObjectActionTarget, ObjectAgent, object_agent
 from ufo.object_views import action_view
 from ufo.schema import tables
 from ufo.seats import member_is_admin
-from ufo.tools.context import TextContent, ToolContext, ToolResult
+from ufo.tools.context import SpeakerRequired, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import (
     OBJECT_ACTION_TOOL,
     REQUESTED_BY,
@@ -401,8 +401,11 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
     admin; a row whose owner `member_id` is None is admin-only. A kind whose mutation or deletion is
     a grant/disclosure act sets `mutate_requires_speaker`/`delete_requires_speaker` so the gate also
     refuses it on a speakerless (scheduled/subagent) turn — an act that discloses or revokes access
-    needs a live member, never a background turn acting on someone's behalf. The class vars name the
-    kind and the two gate messages the refusals carry.
+    needs a live member, never a background turn acting on someone's behalf. That refusal
+    (`SpeakerRequired`) is answered before ownership is: with nobody bound there is no one to be the
+    owner, and the engine turns the typed refusal into the retry the model can make where a
+    `requested_by` ref would bind someone. The class vars name the kind and the two gate messages
+    the refusals carry.
 
     A kind handing up `GeneratedObjectOwner` is fenced on that generation: every active verb refuses
     once the name holds a different row than its read saw, and `status` re-checks after the read so
@@ -481,13 +484,13 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         if not self._visible(owner, ctx.acting_member_id, is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         self._require_current_generation(name, owner, expected_generation, "editing")
+        if self.mutate_requires_speaker and ctx.speaker_member_id is None:
+            raise SpeakerRequired(self.mutate_gate)
         if not self._owned(owner, ctx.acting_member_id) and (
             not is_admin
             or old is None
             or (owner.member_id is not None and not self._admin_can_apply(old, spec))
         ):
-            raise AdminRequired(self.mutate_gate)
-        if self.mutate_requires_speaker and ctx.speaker_member_id is None:
             raise AdminRequired(self.mutate_gate)
         await self._apply_owned(ctx, name, spec, old, owner)
 
@@ -505,9 +508,9 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         is_admin = await ctx.speaker_is_admin()
         if not self._visible(owner, ctx.acting_member_id, is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
-        if not self._owned(owner, ctx.acting_member_id) and not is_admin:
-            raise AdminRequired(self.delete_gate)
         if self.delete_requires_speaker and ctx.speaker_member_id is None:
+            raise SpeakerRequired(self.delete_gate)
+        if not self._owned(owner, ctx.acting_member_id) and not is_admin:
             raise AdminRequired(self.delete_gate)
         await self._delete_owned(ctx, name, owner)
 
@@ -1396,7 +1399,7 @@ class ObjectVerbs:
             if ctx.turn.subagent_profile is not None:
                 raise ValueError("a typed subagent may not target another agent")
             if ctx.speaker_member_id is None:
-                raise ValueError(
+                raise SpeakerRequired(
                     "targeting another agent requires an exact live member-requested call"
                 )
             is_admin = await member_is_admin(

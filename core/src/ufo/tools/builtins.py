@@ -70,6 +70,7 @@ from ufo.skills.runtime import load_skills, loaded_context
 from ufo.tools.context import (
     AmbiguousSpawnTarget,
     ImageContent,
+    SpeakerRequired,
     TextContent,
     ToolContext,
     ToolResult,
@@ -979,7 +980,7 @@ async def _grantee_agent_id(ctx: ToolContext, name: str) -> UUID | None:
 async def connect_account_handler(ctx: ToolContext, args: ConnectAccountInput) -> ToolResult:
     """Leave a provider-validated private OAuth handoff for the speaking member."""
     if ctx.speaker_member_id is None:
-        raise ValueError("connect requires a speaking member to gate the grant")
+        raise SpeakerRequired("connect requires a speaking member to gate the grant")
     grantee = await _grantee_agent_id(ctx, args.agent.strip())
     await installed_connect_flow().validate_provider(args.provider)
     request = ConnectRequest(
@@ -1010,7 +1011,7 @@ async def request_credentials_handler(
     are workspace-global, so only an admin may fill them; a non-admin speaker, an undeclared slot,
     or a deploy without a credential key raises, surfacing as a recoverable tool error."""
     if ctx.speaker_member_id is None:
-        raise ValueError("collecting credentials requires a speaking member")
+        raise SpeakerRequired("collecting credentials requires a speaking member")
     if ctx.requestable_credentials is None:
         raise ValueError("no credential key is configured — this deploy cannot store secrets")
     if not await ctx.speaker_is_admin():

@@ -27,7 +27,6 @@ from ufo.ext.context import JsonValue
 from ufo.models.interface import AUTO_MODEL
 from ufo.object_name import ObjectRef, validate_object_name
 from ufo.objects import (
-    AdminRequired,
     MemberOwnedObjects,
     ObjectDetail,
     ObjectKind,
@@ -50,7 +49,7 @@ from ufo.schema.records import (
     TablerIcon,
     auto_agent_icon,
 )
-from ufo.tools.context import TextContent, ToolContext, ToolResult
+from ufo.tools.context import SpeakerRequired, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.turns.contracts import check_declared_schema
 from ufo.workspace import ws_current
@@ -431,7 +430,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
         constraint arbitrates a concurrent create of the same name; the loser reads back as a name
         refusal, not a second row."""
         if ctx.speaker_member_id is None:
-            raise ValueError(AGENT_CREATE_GATE)
+            raise SpeakerRequired(AGENT_CREATE_GATE)
         if spec.prompt is None or not spec.prompt.strip():
             raise ValueError(AGENT_PROMPT_REQUIRED)
         _known_model(ctx, spec.model, spec.reasoning)
@@ -578,7 +577,7 @@ class RestoreApplication:
             raise RuntimeError("restore_application dispatched without its archived agent target")
         archived_name = ctx.target.name
         if ctx.speaker_member_id is None:
-            raise AdminRequired(AGENT_RESTORE_GATE)
+            raise SpeakerRequired(AGENT_RESTORE_GATE)
         validate_object_name(args.new_name)
         try:
             archived_id = UUID(archived_name.removeprefix(ARCHIVED_AGENT_NAME_PREFIX))

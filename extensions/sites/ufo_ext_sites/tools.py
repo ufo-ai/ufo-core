@@ -58,7 +58,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ufo.sdk.objects import AGENT_KIND
 from ufo.sdk.sandbox import WORKSPACE_DIR, serve_port, shell_path, workspace_path
-from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import (
+    ObjectBinding,
+    SpeakerRequired,
+    TextContent,
+    ToolContext,
+    ToolDef,
+    ToolResult,
+)
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
@@ -759,7 +766,7 @@ async def _refuse_before_serving(
     if creator_member_id is None:
         raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
     if visibility is not None and ctx.speaker_member_id is None:
-        raise RuntimeError(VISIBILITY_NEEDS_A_SPEAKER)
+        raise SpeakerRequired(VISIBILITY_NEEDS_A_SPEAKER)
     workspace_id = ctx.ext.store.workspace_id
     name = site_name(raw_name)
     site_url(ctx.public_base_url, workspace_id, ctx.sandbox.conversation_id, name)
@@ -798,7 +805,7 @@ async def _host(
     if creator_member_id is None:
         raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
     if visibility is not None and ctx.speaker_member_id is None:
-        raise RuntimeError(VISIBILITY_NEEDS_A_SPEAKER)
+        raise SpeakerRequired(VISIBILITY_NEEDS_A_SPEAKER)
     workspace_id = ctx.ext.store.workspace_id
     name = site_name(raw_name)
     serving = ctx.sandbox.conversation_id
@@ -1320,7 +1327,7 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
         and agent_id == ctx.turn.agent_id
     )
     if ctx.speaker_member_id is None and not deployed_this_turn:
-        raise RuntimeError(HOMEPAGE_BIND_NEEDS_A_SPEAKER)
+        raise SpeakerRequired(HOMEPAGE_BIND_NEEDS_A_SPEAKER)
     bound = await sites.set_homepage(agent_id, site.conversation_id, site.name)
     if bound is None:
         raise ValueError(f"site {args.site!r} was unhosted while it was being bound")

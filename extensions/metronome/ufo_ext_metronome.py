@@ -83,6 +83,7 @@ from ufo.sdk.seats import (
 from ufo.sdk.tools import (
     ActionPresentation,
     ObjectBinding,
+    SpeakerRequired,
     TextContent,
     ToolContext,
     ToolDef,
@@ -422,7 +423,7 @@ async def _billing_autopay(
 
 async def _admin_billing(ctx: ToolContext) -> ExtensionContext:
     if ctx.speaker_member_id is None:
-        raise ValueError("billing requires a speaking member")
+        raise SpeakerRequired("billing requires a speaking member")
     if not await ctx.speaker_is_admin():
         raise ValueError("only a workspace admin can manage billing")
     assert ctx.ext is not None

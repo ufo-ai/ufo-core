@@ -109,7 +109,7 @@ from ufo.sandbox.session import (
 from ufo.schema import tables
 from ufo.schema.records import MAIN_AGENT_ICON, SCHEDULED_ADMISSION, Agent, Turn
 from ufo.sdk.objects import AgentTargetVerb
-from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
+from ufo.tools.context import SpawnResult, SpeakerRequired, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
 from ufo.turns.audience import (
     SHARED_AUDIENCE,
@@ -999,7 +999,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
         args = apply_tool.input_model.model_validate({"manifest": manifest})
         with pytest.raises(AdminRequired):
             await apply_tool.handler(_tool_context(workspace_id, speaker_member_id=joiner), args)
-        with pytest.raises(AdminRequired):
+        with pytest.raises(SpeakerRequired):
             await apply_tool.handler(_tool_context(workspace_id), args)
 
         prompt_write = apply_tool.input_model.model_validate(
@@ -3924,7 +3924,11 @@ async def test_private_conversation_metadata_stays_closed_without_a_speaking_adm
             speaker_member_id=carol,
         )
         admin_ctx = replace(ctx, speaker_member_id=admin, audience=conversation_audience(admin))
-        speakerless = replace(ctx, speaker_member_id=None, on_behalf_of_member_id=admin)
+        speakerless = replace(
+            ctx,
+            speaker_member_id=None,
+            turn=ctx.turn.model_copy(update={"on_behalf_of_member_id": admin}),
+        )
         foreign_admin = replace(ctx, turn=foreign_turn, speaker_member_id=admin, audience=foreign)
         get_tool = tools["object_get"]
         name = str(private.conversation_id)

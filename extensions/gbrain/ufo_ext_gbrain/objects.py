@@ -35,7 +35,7 @@ from ufo.sdk.objects import (
     VerbNotSupported,
 )
 from ufo.sdk.subjects import SHARED_SUBJECT, member_subject, subject_shared
-from ufo.sdk.tools import ToolContext
+from ufo.sdk.tools import SpeakerRequired, ToolContext
 from ufo_ext_gbrain.folder import FOLDER_BACKEND, GbrainFolderConfig
 from ufo_ext_gbrain.git import GIT_BACKEND, GbrainGitConfig
 
@@ -349,7 +349,7 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
         ext = _require_ext(ctx.ext)
         speaker = ctx.speaker_member_id
         if speaker is None:
-            raise ValueError("registering a gbrain source requires a speaking member")
+            raise SpeakerRequired("registering a gbrain source requires a speaking member")
         if spec.root is not None:
             raise VerbNotSupported(ROOT_REFUSAL)
         origin = _origin(spec)

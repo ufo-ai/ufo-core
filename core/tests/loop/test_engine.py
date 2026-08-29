@@ -78,6 +78,7 @@ from ufo.loop.engine import (
     OBJECT_APPLY_TOOL,
     OFFLOAD_NOTICE,
     PREEMPTED,
+    REQUESTED_BY_HINT,
     ROUND_BUDGET_INCOMPLETE,
     TOOL_IMAGE_BLOB_DIR,
     TOOL_IMAGE_EDGE_LIMIT,
@@ -185,6 +186,7 @@ from ufo.tools.builtins import (
 from ufo.tools.context import (
     ImageContent,
     SpawnResult,
+    SpeakerRequired,
     TextContent,
     ToolContext,
     ToolResult,
@@ -1271,6 +1273,196 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
     assert len(authorized) == 3
 
 
+async def test_an_omitted_ref_binds_the_member_in_their_own_conversation_only(
+    db: None, tmp_path: Path
+) -> None:
+    """A call the model left unattributed binds the turn's member when the conversation is theirs —
+    nobody else can be asking — and nobody otherwise: a shared conversation keeps omission as
+    common work, and a background turn has no speaker to bind."""
+
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    seen: list[tuple[UUID | None, UUID | None]] = []
+
+    async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        seen.append((ctx.speaker_member_id, ctx.acting_member_id))
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    probe = ToolDef(name="bind_probe", description="d", input_model=StrictInput, handler=capture)
+    member = uuid4()
+    own = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    background = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
+    engines = (
+        _engine(own, EchoModel(), tmp_path, member_id=member),
+        replace(
+            _engine(shared, EchoModel(), tmp_path),
+            turn=shared.model_copy(update={"speaker_member_id": member}),
+        ),
+        _engine(background, EchoModel(), tmp_path),
+    )
+    for engine in engines:
+        engine = replace(engine, tools=ToolRegistry((probe,)))
+        result = await _dispatch(
+            engine,
+            ToolContext(
+                sandbox=engine.sandbox,
+                blob=engine.blob,
+                turn=engine.turn,
+                agent=engine.agent,
+                spawn=engine.spawn,
+                speaker_member_id=None,
+                audience=engine.audience,
+                artifact_token_secret=engine.artifact_token_secret,
+            ),
+            ToolUseBlock(id="probe", name="bind_probe", input={}),
+            {engine.turn.id: ActiveMessage(member_id=engine.turn.speaker_member_id, rendered="x")},
+        )
+        assert not result.is_error
+
+    assert seen == [
+        (member, member),
+        (None, None),
+        (None, background.on_behalf_of_member_id),
+    ]
+
+
+async def test_a_member_creates_an_app_in_their_own_conversation_without_the_ref(
+    db: None, tmp_path: Path
+) -> None:
+    """The reported failure: a member in their own chat asks for an app, the model applies the
+    agent manifest without `requested_by`, and the create must land owned by that member."""
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    owner = await _seeded_member(turn.workspace_id)
+    engine = _engine(turn, EchoModel(), tmp_path, member_id=owner, actions=True)
+    manifest = (
+        "kind: agent\nname: open-pr-list\nspec:\n  model: claude-opus-4-8\n"
+        "  reasoning: medium\n  visibility: private\n  internet_access_allowed: true\n"
+        "  prompt: list the open pull requests\n"
+    )
+    with ws(turn.workspace_id):
+        result = await _dispatch(
+            engine,
+            ToolContext(
+                sandbox=engine.sandbox,
+                blob=engine.blob,
+                turn=engine.turn,
+                agent=engine.agent,
+                spawn=engine.spawn,
+                speaker_member_id=None,
+                audience=engine.audience,
+                artifact_token_secret=engine.artifact_token_secret,
+                granted_actions=engine.granted_actions,
+            ),
+            ToolUseBlock(
+                id="create",
+                name="object_apply",
+                input={"manifest": manifest, "create_only": True},
+            ),
+            {turn.id: ActiveMessage(member_id=owner, rendered="Build it")},
+        )
+        assert not result.is_error, result.content
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.agent.c.owner_member_id, tables.agent.c.is_main).where(
+                        tables.agent.c.workspace_id == turn.workspace_id,
+                        tables.agent.c.name == "open-pr-list",
+                    )
+                )
+            ).one()
+    assert (row.owner_member_id, row.is_main) == (owner, False)
+
+
+async def test_requested_by_is_offered_only_where_another_member_could_ask(
+    db: None, tmp_path: Path
+) -> None:
+    """In a member's own conversation the ref can only ever name them, and they are bound already,
+    so the schema leaves it out; a shared conversation with a member speaking offers it."""
+    own = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    own_model, shared_model = CapturingModel(), CapturingModel()
+
+    own_frame = await _engine(
+        own, own_model, tmp_path, member_id=await _seeded_member(own.workspace_id)
+    ).run()
+    shared_frame = await replace(
+        _engine(shared, shared_model, tmp_path),
+        turn=shared.model_copy(
+            update={"speaker_member_id": await _seeded_member(shared.workspace_id)}
+        ),
+    ).run()
+
+    assert own_frame.status == "done" and shared_frame.status == "done"
+    assert all("requested_by" not in s.input_schema["properties"] for s in own_model.seen_tools[0])
+    assert all("requested_by" in s.input_schema["properties"] for s in shared_model.seen_tools[0])
+
+
+async def test_a_speaker_refusal_names_the_member_refs_where_the_ref_was_offered(
+    db: None, tmp_path: Path
+) -> None:
+    """A handler refusing for want of a member gets its error extended with the active member
+    message refs exactly where `requested_by` could have carried one — a shared conversation with
+    members speaking. A background turn has no member to name; the member's own conversation was
+    not offered the ref, so the refusal stands alone there too."""
+
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    async def refuse(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        raise SpeakerRequired("this act requires a speaking member")
+
+    probe = ToolDef(name="gate_probe", description="d", input_model=StrictInput, handler=refuse)
+    founder, colleague, arrival = uuid4(), uuid4(), uuid4()
+    shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    own = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    background = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
+    cases = (
+        (
+            replace(
+                _engine(shared, EchoModel(), tmp_path),
+                turn=shared.model_copy(update={"speaker_member_id": founder}),
+            ),
+            {
+                shared.id: ActiveMessage(member_id=founder, rendered="mine"),
+                arrival: ActiveMessage(member_id=colleague, rendered="no, mine"),
+            },
+        ),
+        (
+            _engine(own, EchoModel(), tmp_path, member_id=founder),
+            {own.id: ActiveMessage(member_id=founder, rendered="mine")},
+        ),
+        (_engine(background, EchoModel(), tmp_path), {}),
+    )
+    texts: list[str] = []
+    for engine, requesters in cases:
+        engine = replace(engine, tools=ToolRegistry((probe,)))
+        result = await _dispatch(
+            engine,
+            ToolContext(
+                sandbox=engine.sandbox,
+                blob=engine.blob,
+                turn=engine.turn,
+                agent=engine.agent,
+                spawn=engine.spawn,
+                speaker_member_id=None,
+                audience=engine.audience,
+                artifact_token_secret=engine.artifact_token_secret,
+            ),
+            ToolUseBlock(id="gate", name="gate_probe", input={}),
+            requesters,
+        )
+        assert result.is_error
+        assert isinstance(result.content, str)
+        texts.append(result.content)
+
+    refusal = "SpeakerRequired: this act requires a speaking member"
+    assert texts[0] == refusal + REQUESTED_BY_HINT.format(refs=f"{shared.id}, {arrival}")
+    assert texts[1] == refusal
+    assert texts[2] == refusal
+
+
 async def test_speakerless_turn_does_not_offer_requested_by(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None, acts_on_behalf=True)
     model = CapturingModel()
@@ -1315,7 +1507,6 @@ async def test_profile_tool_keeps_inherited_authority_when_it_sends_requested_by
     )
     context = replace(
         _dispatch_context(engine),
-        on_behalf_of_member_id=turn.on_behalf_of_member_id,
     )
 
     result = await _dispatch(
@@ -1793,6 +1984,80 @@ async def test_denied_founding_message_loses_its_authority_when_an_arrival_keeps
     assert "The founding message was refused." in first
     assert "allowed follow-up" in first
     assert str(allowed_ref) in first
+
+
+async def test_a_denied_message_withholds_authority_from_a_call_in_the_members_own_conversation(
+    db: None, tmp_path: Path
+) -> None:
+    """A gating hook denies the founding message and the one behind it, and a second message pending
+    keeps the turn running past the denial. The member's own conversation binds an omitted ref off
+    the turn's active messages, which a denial never enters, so the unattributed call gets no member
+    authority — the turn row still naming the speaker does not restore it."""
+    blocked = "founding secret that the model must not see"
+    turn = (await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)).model_copy(
+        update={"inbound": blocked}
+    )
+    member = await _seeded_member(turn.workspace_id)
+    await _queue_arrival(turn, "a second secret", member)
+    seen: list[tuple[UUID | None, UUID | None]] = []
+
+    class AuthorityInput(BaseModel):
+        pass
+
+    async def capture(ctx: ToolContext, args: AuthorityInput) -> ToolResult:
+        seen.append((ctx.speaker_member_id, ctx.acting_member_id))
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    @dataclass
+    class UnattributedProbe:
+        calls: int = 0
+
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            self.calls += 1
+            if self.calls > 1:
+                yield TextDelta(text="done")
+                yield Usage(input_tokens=1, output_tokens=1)
+                return
+            yield ToolCallStart(id="probe", name="authority_probe")
+            yield ToolCallDelta(id="probe", partial_json="{}")
+            yield Usage(input_tokens=1, output_tokens=1)
+
+    async def deny_secrets(ctx: HookContext) -> HookOutcome:
+        if isinstance(ctx.payload, UserPromptSubmit) and "secret" in ctx.payload.text:
+            return Deny(reason="That message was refused.")
+        return None
+
+    engine = _engine(turn, UnattributedProbe(), tmp_path, member_id=member)
+    engine = replace(
+        engine,
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="authority_probe",
+                    description="d",
+                    input_model=AuthorityInput,
+                    handler=capture,
+                ),
+            )
+        ),
+        hooks=HookChain(
+            hooks={
+                "user_prompt_submit": (
+                    BoundHook(
+                        spec=HookSpec(event="user_prompt_submit", handler=deny_secrets),
+                        ext=context_for("probe", frozenset(), audience=engine.audience),
+                    ),
+                )
+            },
+            audience=engine.audience,
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert engine.turn.speaker_member_id == member
+    assert seen == [(None, None)]
 
 
 async def test_scheduled_turn_searches_memory_after_claim(db: None, tmp_path: Path) -> None:

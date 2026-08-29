@@ -1762,7 +1762,6 @@ async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db
             spawn=_unavailable_spawn,
             speaker_member_id=None,
             audience=conversation_audience(None),
-            on_behalf_of_member_id=on_behalf_of_member_id,
             artifact_token_secret="",
         )
         assert ctx.acting_member_id == on_behalf_of_member_id

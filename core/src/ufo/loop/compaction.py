@@ -231,7 +231,6 @@ class Compaction:
     loaded_skills: LoadedSkills = field(default_factory=LoadedSkills)
     turn: Turn | None = None
     agent: Agent | None = None
-    speaker_member_id: UUID | None = None
     reasoning: ReasoningSupport = field(
         default_factory=lambda: ReasoningSupport(supported=True, tools_with_reasoning=True)
     )
@@ -320,7 +319,7 @@ class Compaction:
             PreCompact(reason=request.reason, before_tokens=before_tokens),
             self.turn,
             self.agent,
-            self.speaker_member_id,
+            None,
         )
         drained = self.loaded_skills.drain()
         boundary = _Boundary(
@@ -368,7 +367,7 @@ class Compaction:
             ),
             self.turn,
             self.agent,
-            self.speaker_member_id,
+            None,
         )
         return candidate.after, usages
 

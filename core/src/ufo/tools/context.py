@@ -148,6 +148,12 @@ class ToolResult(BaseModel):
     untrusted: bool = False
 
 
+class SpeakerRequired(ValueError):
+    """A handler refused because no member is bound to the call. The engine reads the type: where
+    the round offered `requested_by`, the tool error names the active member messages so the model
+    can retry with the ref; elsewhere there is nothing to correct and the message stands alone."""
+
+
 @dataclass(frozen=True)
 class SpawnResult:
     """The exact child and, once finished, its terminal and validated output — a profile child's
@@ -275,7 +281,6 @@ class ToolContext:
     speaker_member_id: UUID | None
     audience: Audience
     artifact_token_secret: str
-    on_behalf_of_member_id: UUID | None = None
     grants: GrantStore | None = None
     subagents: SubagentControl | None = None
     read_paths: set[str] = field(default_factory=set)
@@ -309,7 +314,7 @@ class ToolContext:
         return (
             self.speaker_member_id
             if self.speaker_member_id is not None
-            else self.on_behalf_of_member_id
+            else self.turn.on_behalf_of_member_id
         )
 
     @property
@@ -503,7 +508,7 @@ class ToolContext:
 
     async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]:
         if self.speaker_member_id is None:
-            raise ValueError("credential authorization requires a speaking member")
+            raise SpeakerRequired("credential authorization requires a speaking member")
         if self.ext is None or slot not in self.ext.credentials.declared:
             raise ValueError(f"this extension does not declare credential slot {slot!r}")
         if self.requestable_credentials is None:
@@ -566,7 +571,8 @@ class ToolContext:
         """The connected-account ids this turn may use for one provider: the acting member's own
         grants plus any grant shared with the agent's audience — the runtime check that makes
         a connection private by default. The acting member is the speaker, or the member the turn
-        acts on behalf of (`on_behalf_of_member_id`) for a speakerless scheduled fire or subagent,
+        acts on behalf of (the turn's `on_behalf_of_member_id`) for a speakerless scheduled fire or
+        subagent,
         so a member's own scheduled job and delegated subagents keep their private connections; a
         turn with no member at all resolves only shared grants."""
         private, shared = await self._connector_account_tiers(provider)

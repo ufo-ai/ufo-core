@@ -17,6 +17,9 @@ from ufo.tools.context import (
     ImageContent as ImageContent,
 )
 from ufo.tools.context import (
+    SpeakerRequired as SpeakerRequired,
+)
+from ufo.tools.context import (
     TextContent as TextContent,
 )
 from ufo.tools.context import (

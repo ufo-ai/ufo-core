@@ -155,6 +155,7 @@ from ufo.tools.bridge import ToolBridgeIntent
 from ufo.tools.context import (
     ImageContent,
     Spawn,
+    SpeakerRequired,
     SubagentControl,
     TextContent,
     ToolContext,
@@ -194,6 +195,9 @@ TRUNCATION_SALVAGE_NOTICE = (
     "read it and salvage what it already contains instead of regenerating it."
 )
 DENIED_INBOUND_NOTICE = "<denied_member_message>{reason}</denied_member_message>"
+REQUESTED_BY_HINT = (
+    " Set requested_by to the message_ref of the member who asked; active member messages: {refs}."
+)
 INJECTED_CONTEXT = "{content}\n\n<injected_context>\n{injected}\n</injected_context>"
 CONTEXT_TIME_FORMAT = "%A %Y-%m-%d %H:%M %Z"
 FORCE_FINAL_PROMPT = (
@@ -493,6 +497,7 @@ class EffectiveCall:
 class _BoundToolCall:
     context: ToolContext
     effective: EffectiveCall
+    member_refs: tuple[UUID, ...] = ()
 
     @property
     def call(self) -> ToolUseBlock:
@@ -1235,7 +1240,6 @@ class TurnEngine:
             subagents=self.subagents,
             speaker_member_id=None,
             audience=self.audience,
-            on_behalf_of_member_id=self.turn.on_behalf_of_member_id,
             artifact_token_secret=self.artifact_token_secret,
             grants=self.grants,
             granted_actions=self.granted_actions,
@@ -1421,7 +1425,6 @@ class TurnEngine:
             subagents=self.subagents,
             speaker_member_id=None,
             audience=self.audience,
-            on_behalf_of_member_id=self.turn.on_behalf_of_member_id,
             artifact_token_secret=self.artifact_token_secret,
             grants=self.grants,
             granted_actions=self.granted_actions,
@@ -1667,9 +1670,7 @@ class TurnEngine:
                     system,
                     active_requests=active_requests,
                     first_round=meter.rounds == 1,
-                    include_requested_by=any(
-                        requester.member_id is not None for requester in requesters.values()
-                    ),
+                    include_requested_by=bool(self._member_refs(requesters)),
                 )
                 text, tool_calls = round_result.text, round_result.tool_calls
             except ModelStreamError as error:
@@ -2672,7 +2673,11 @@ class TurnEngine:
         started = time.monotonic()
         try:
             bound_context, call = await self._bind_requester(context, item, requesters)
-            return _BoundToolCall(context=bound_context, effective=replace(item, call=call))
+            return _BoundToolCall(
+                context=bound_context,
+                effective=replace(item, call=call),
+                member_refs=self._member_refs(requesters),
+            )
         except asyncio.CancelledError as error:
             _meter_dispatch(
                 self.tools,
@@ -2771,6 +2776,13 @@ class TurnEngine:
         item: EffectiveCall,
         requesters: dict[UUID, ActiveMessage],
     ) -> tuple[ToolContext, ToolUseBlock]:
+        """Bind the member this call acts for. A `requested_by` ref names one of the turn's active
+        messages and binds its author. Without the ref, a call in a member's own conversation — the
+        audience is that member's — binds that member while one of their messages is active, because
+        nobody else can be asking there; the ref carries information only where more than one member
+        could be, and there its omission means conversation-common work. Both routes read the same
+        active messages, so a message a hook denied — absorbed without ever entering them —
+        withholds its author's authority whichever route the model takes."""
         call = item.call
         tool_input = dict(call.input)
         requester: UUID | None = None
@@ -2790,7 +2802,9 @@ class TurnEngine:
             requester = requesters[message_id].member_id
             if requester is None:
                 raise ValueError(f"{REQUESTED_BY} message has no member requester")
-        acting_member = requester if requester is not None else context.on_behalf_of_member_id
+        elif (member := self._own_member(requesters)) is not None:
+            requester = member
+        acting_member = requester if requester is not None else self.turn.on_behalf_of_member_id
         sandbox = (
             self.sandbox if self.sandbox_for is None else await self.sandbox_for(acting_member)
         )
@@ -2809,6 +2823,24 @@ class TurnEngine:
             ),
             call.model_copy(update={"input": tool_input}),
         )
+
+    def _own_member(self, requesters: Mapping[UUID, ActiveMessage]) -> UUID | None:
+        """The member whose conversation this is, while one of their messages is active — the one
+        member who can be asking here, so an omitted `requested_by` binds them. Read off the active
+        messages, never the turn row: a message a hook denied never enters them, so the denial
+        withholds authority on this route exactly as it does for a named ref."""
+        member = audience_member(self.audience)
+        if member is None or all(message.member_id != member for message in requesters.values()):
+            return None
+        return member
+
+    def _member_refs(self, requesters: Mapping[UUID, ActiveMessage]) -> tuple[UUID, ...]:
+        """The message refs `requested_by` may name this round: the active member messages, where
+        more than one member could be asking. In the member's own conversation the ref says nothing
+        the binding does not already know, so none are offered and the schema omits the field."""
+        if self._own_member(requesters) is not None:
+            return ()
+        return tuple(ref for ref, message in requesters.items() if message.member_id is not None)
 
     async def _offload(self, name: str, content: str) -> str | None:
         """Write `content` into the turn's private runtime output dir and return its path, ensuring
@@ -3040,6 +3072,10 @@ class TurnEngine:
                     raise TerminalGone(str(error)) from error
                 except Exception as error:
                     content, is_error = f"{type(error).__name__}: {error}", True
+                    if isinstance(error, SpeakerRequired) and bound.member_refs:
+                        content += REQUESTED_BY_HINT.format(
+                            refs=", ".join(str(ref) for ref in bound.member_refs)
+                        )
                     untrusted = tool.untrusted or isinstance(error, UntrustedContentError)
                     outcome, error_class = "handler_raised", type(error).__name__
                 if is_error:
