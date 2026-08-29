@@ -13,6 +13,8 @@ MEASURED_VIEWS = tuple(
 )
 AA_BODY = 4.5
 AA_LARGE = 3.0
+KIT_QUIET_TEXT_MIN = 2.8
+KitQuietTextSlot = Literal["badge", "chart-caption", "stat-label"]
 LARGE_PX = 24.0
 LARGE_BOLD_PX = 18.66
 BOLD_WEIGHT = 700
@@ -79,6 +81,7 @@ class ApplicationAuditText(BaseModel):
     ratio: float
     colour: str = ""
     background: str = ""
+    slot: KitQuietTextSlot | None = None
 
 
 class ApplicationAuditRegion(BaseModel):
@@ -241,8 +244,10 @@ class ApplicationDesignFidelity:
     failures: tuple[str, ...]
 
 
-def _needed_ratio(px: float, weight: int) -> float:
-    if px >= LARGE_PX or (px >= LARGE_BOLD_PX and weight >= BOLD_WEIGHT):
+def _needed_ratio(item: ApplicationAuditText) -> float:
+    if item.slot is not None:
+        return KIT_QUIET_TEXT_MIN
+    if item.px >= LARGE_PX or (item.px >= LARGE_BOLD_PX and item.weight >= BOLD_WEIGHT):
         return AA_LARGE
     return AA_BODY
 
@@ -388,7 +393,8 @@ def audit_application(
     contrast = []
     for view in measured:
         for item in view.text:
-            if item.ratio >= _needed_ratio(item.px, item.weight):
+            needed = _needed_ratio(item)
+            if item.ratio >= needed:
                 continue
             label = f' "{item.text}"' if item.text else ""
             colours = (
@@ -396,7 +402,7 @@ def audit_application(
             )
             contrast.append(
                 f"{view.scheme} {view.width}px{label} at {item.selector}{colours} "
-                f"is {item.ratio}:1; needs {_needed_ratio(item.px, item.weight)}:1"
+                f"is {item.ratio}:1; needs {needed}:1"
             )
     if contrast:
         issues.append(_issue("contrast", f"Fix text contrast: {'; '.join(contrast[:4])}."))

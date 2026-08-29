@@ -3,9 +3,9 @@
 // the narrow width, console errors, and one screenshot per scheme for the vision judge.
 //
 // The script reports measurements, not verdicts. Every text leaf whose ratio is under the strictest
-// AA floor is reported with its own size and weight, and the grader recomputes which threshold the
-// element owed — so the numbers decide the case and this file cannot soften it. A page whose text
-// all clears 4.5:1 reports no text entry at all.
+// AA floor is reported with its size, weight and exact Kit quiet-label slot. The grader applies the
+// body, large-text or Kit quiet-label floor from that evidence. A page whose text all clears 4.5:1
+// reports no text entry at all.
 //
 // Usage: node app-audit.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <accepted-design.svg> <accepted-design-evidence.json>
 //        node app-audit.cjs --design <application-design.svg>
@@ -337,6 +337,7 @@ async function closeApplicationAudit(browser, server, sockets) {
 
 async function measure(floor) {
   const TEXT_FRAGMENT_TOUCH_PX = 1;
+  const KIT_QUIET_TEXT_SLOTS = new Set(['badge', 'chart-caption', 'stat-label']);
   // A computed colour carries whatever syntax the engine chose: a color-mix() token resolves to
   // `color(srgb …)`, which no rgb() pattern reads. The browser paints the value into one pixel and
   // the pixel is the answer. An unpaintable value leaves both probe fills in place, so it reads as
@@ -501,7 +502,10 @@ async function measure(floor) {
     const selector =
       element.tagName.toLowerCase() +
       (element.className ? '.' + String(element.className).trim().split(/\s+/)[0] : '');
-    const key = `${selector}|${style.fontSize}|${style.fontWeight}|${rounded}`;
+    const slotted = element.closest('[data-slot]');
+    const slot = slotted && KIT_QUIET_TEXT_SLOTS.has(slotted.dataset.slot) ?
+      slotted.dataset.slot : null;
+    const key = `${selector}|${style.fontSize}|${style.fontWeight}|${rounded}|${slot || ''}`;
     // One entry per distinct selector, size, weight and ratio: the grader fails the view on any one
     // of them, so a repeated row's every cell would add bytes and no verdict.
     if (seen.has(key)) continue;
@@ -514,6 +518,7 @@ async function measure(floor) {
       ratio: rounded,
       colour: style.color,
       background: `rgb(${Math.round(behind.r)}, ${Math.round(behind.g)}, ${Math.round(behind.b)})`,
+      slot,
     });
   }
 

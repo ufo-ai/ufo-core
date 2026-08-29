@@ -32,6 +32,7 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_REGION_MIN_HEIGHT,
     APPLICATION_REGION_MIN_WIDTH,
     DESIGN_VISIBLE_TEXT_MAX_CHARS,
+    KIT_QUIET_TEXT_MIN,
     MAX_PRODUCT_QA_CONTROLS,
     AcceptedApplicationDesignEvidence,
     ApplicationAuditContract,
@@ -936,6 +937,58 @@ def test_application_audit_accepts_measured_interactive_facts() -> None:
     assert {issue.code for issue in audit_application(without_design, contract).issues} == {
         "design"
     }
+
+
+def test_application_audit_uses_the_quiet_floor_only_for_exact_kit_slots() -> None:
+    def report(text: dict[str, object]) -> ApplicationAuditReport:
+        return ApplicationAuditReport.model_validate(
+            {
+                "designRegions": AUDIT_DESIGN_REGIONS,
+                "views": [
+                    {
+                        "scheme": scheme,
+                        "width": width,
+                        "textChecked": 1,
+                        "text": [text],
+                        "documentWidth": width,
+                        "clipped": [],
+                        "console": [],
+                        "aboveFoldText": "Open issues 42",
+                        "regions": AUDIT_DESIGN_REGIONS,
+                    }
+                    for width in (1440, 390)
+                    for scheme in ("light", "dark")
+                ],
+                "interaction": {
+                    "controls": [
+                        {"selector": "#first", "name": "First"},
+                        {"selector": "#second", "name": "Second"},
+                    ],
+                    "successes": [
+                        {"selector": "#first", "name": "First"},
+                        {"selector": "#second", "name": "Second"},
+                    ],
+                    "console": [],
+                },
+            }
+        )
+
+    measured = {
+        "text": "Open issues",
+        "selector": "span.text-label",
+        "px": 13,
+        "weight": 500,
+        "ratio": KIT_QUIET_TEXT_MIN,
+    }
+    kit = report({**measured, "slot": "stat-label"})
+    authored = report(measured)
+    unreadable = report({**measured, "slot": "stat-label", "ratio": 2.0})
+
+    assert "contrast" not in {issue.code for issue in audit_application(kit).issues}
+    assert "contrast" in {issue.code for issue in audit_application(authored).issues}
+    assert "contrast" in {issue.code for issue in audit_application(unreadable).issues}
+    with pytest.raises(ValidationError):
+        report({**measured, "slot": "author-quiet"})
 
 
 def test_application_design_fidelity_compares_only_the_separating_axis() -> None:
@@ -4880,6 +4933,17 @@ def test_application_source_accepts_a_page_that_follows_the_rules() -> None:
         _page('<Stat className="flex gap-sm"><StatValue>1</StatValue></Stat>')
     )
     _validate_application_source(_page('<StatLabel className="border-b border-edge">x</StatLabel>'))
+
+
+def test_application_source_reserves_kit_slot_ownership() -> None:
+    with pytest.raises(ValueError, match="data-slot is reserved for ufo/kit components"):
+        _validate_application_source(_page('<p data-slot="stat-label">x</p>'))
+
+    _validate_application_source(
+        _page("<Stat><StatLabel>x</StatLabel><StatValue>1</StatValue></Stat>").replace(
+            "{ mountApp }", "{ mountApp, Stat, StatLabel, StatValue }"
+        )
+    )
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,38 @@
+name = "app-builder-kit-rubric-alignment"
+base = "79fe94e532a285ba927347e4afc1ff59c4bb14c1"
+suites = ["ufo-app-bench"]
+cases = ["pre-meeting-briefs", "meeting-tasks", "issue-owner"]
+repeats = 1
+concurrency = 3
+max_stacks = 2
+budget_usd = 40.0
+est_usd_per_case = 3.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+[[arm]]
+name = "kit-aligned-rubric"
+
+[[arm.replacements]]
+path = "evals/suites/ufo_app_bench.py"
+old = '''    "are neutral, blue is the primary accent, and orange marks attention. Green, red, or purple "
+    "status and decorative hues fail this criterion.",'''
+new = '''    "are neutral, blue is the primary accent, and orange marks attention. The Kit uses green and "
+    "yellow for live and blocked status, and for matching chart or legend marks. Accept those "
+    "semantic uses. Red, purple, or decorative hues fail this criterion.",'''
+
+[[arm.replacements]]
+path = "evals/suites/ufo_app_bench.py"
+old = '''    "Panels, cards, controls, and menus have consistent near-square corners. Full pills appear "
+    "only on compact rows, tags, filters, or statuses. Do not fail minor radius differences that "
+    "are not visibly inconsistent.",'''
+new = '''    "Corner shape follows component role: panels and controls are near-square; cards and app marks "
+    "have a moderate radius; menus and answer choices are rounder; compact rows, badges, filters, "
+    "status chips, and icon controls can be pills or circles. Judge consistency within one role. "
+    "Do not fail the role-specific differences shipped by the Kit.",'''

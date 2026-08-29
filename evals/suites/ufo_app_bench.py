@@ -1506,8 +1506,9 @@ PY"""
 HOUSE_CRITERIA = (
     "The two screenshots intentionally show different light and dark schemes. Judge each image "
     "independently: one screenshot must not split or mix schemes within itself. Surfaces and text "
-    "are neutral, blue is the primary accent, and orange marks attention. Green, red, or purple "
-    "status and decorative hues fail this criterion.",
+    "are neutral, blue is the primary accent, and orange marks attention. The Kit uses green and "
+    "yellow for live and blocked status, and for matching chart or legend marks. Accept those "
+    "semantic uses. Red, purple, or decorative hues fail this criterion.",
     "The screen is neutral with the accent carried by a few small elements: an accent is a fill, a "
     "marker or a link, never the colour of body text or of a whole pane, and the second accent "
     "appears only where something wants attention.",
@@ -1516,9 +1517,10 @@ HOUSE_CRITERIA = (
     "or visibly mismatched faces fail this criterion.",
     "Type uses a small number of deliberate, readable steps. The compact screen title can be the "
     "largest text once; metrics, cards, and section headings do not compete with it.",
-    "Panels, cards, controls, and menus have consistent near-square corners. Full pills appear "
-    "only on compact rows, tags, filters, or statuses. Do not fail minor radius differences that "
-    "are not visibly inconsistent.",
+    "Corner shape follows component role: panels and controls are near-square; cards and app marks "
+    "have a moderate radius; menus and answer choices are rounder; compact rows, badges, filters, "
+    "status chips, and icon controls can be pills or circles. Judge consistency within one role. "
+    "Do not fail the role-specific differences shipped by the Kit.",
     "Gaps, padding and alignment are even and deliberate: elements sit on a shared grid, "
     "comparable gaps match, columns and baselines line up, and related controls use consistent "
     "interior padding.",
@@ -1561,7 +1563,9 @@ def _measured_screen(content: bytes) -> ArtifactCheck:
     if issues:
         return ArtifactCheck(False, issues[0].message)
     return ArtifactCheck(
-        True, "every string clears AA in both schemes, and nothing clips or overflows horizontally"
+        True,
+        "body text clears AA in both schemes, Kit quiet labels clear their role floor, and nothing "
+        "clips or overflows horizontally",
     )
 
 

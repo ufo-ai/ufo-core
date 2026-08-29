@@ -1576,8 +1576,8 @@ def _measured(**overrides: object) -> bytes:
 async def test_measured_screen_scorer_recomputes_the_aa_threshold_per_string() -> None:
     """The audit reports every string under the strict AA floor with its own size and weight, and
     the grader decides which threshold each string owed: body text at 3.03:1 fails, a 32px title at
-    3.4:1 clears the large-text threshold and passes. The script cannot soften the verdict, because
-    it reports measurements and no thresholds."""
+    3.4:1 clears the large-text threshold and passes. The script reports the exact Kit quiet-label
+    slot as evidence for the one role-specific threshold."""
     grader = shared_artifact_scorer(".json", _measured_screen)
 
     clean = await grader(_output("audit.json", _measured()))
@@ -3015,4 +3015,66 @@ def test_ufo_app_bench_rubric_asks_only_for_visible_design_judgments() -> None:
     assert all("tokens.css" not in criterion for criterion in HOUSE_CRITERIA)
     assert all("licensed" not in criterion for criterion in HOUSE_CRITERIA)
     assert any("Judge each image independently" in criterion for criterion in HOUSE_CRITERIA)
-    assert any("minor radius differences" in criterion for criterion in HOUSE_CRITERIA)
+    assert any(
+        "green and yellow for live and blocked status" in criterion for criterion in HOUSE_CRITERIA
+    )
+    assert any("Corner shape follows component role" in criterion for criterion in HOUSE_CRITERIA)
+    assert any(
+        "role-specific differences shipped by the Kit" in criterion for criterion in HOUSE_CRITERIA
+    )
+    assert all("Green, red, or purple status" not in criterion for criterion in HOUSE_CRITERIA)
+    assert all("consistent near-square corners" not in criterion for criterion in HOUSE_CRITERIA)
+
+
+def test_kit_rubric_alignment_ablation_changes_only_the_two_kit_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = Path(__file__).parents[3]
+    spec = load_experiment(repo / "evals/app-builder-kit-rubric-alignment.toml")
+    suite_path = "evals/suites/ufo_app_bench.py"
+    audit_path = "extensions/sites/ufo_ext_sites/scripts/audit_application.cjs"
+    assert spec.base == "79fe94e532a285ba927347e4afc1ff59c4bb14c1"
+    control = subprocess.run(
+        ("git", "-C", str(repo), "show", f"{spec.base}:{suite_path}"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    treatment = control
+
+    assert len(spec.arm) == 1
+    assert spec.arm[0].name == "kit-aligned-rubric"
+    assert tuple(replacement.path for replacement in spec.arm[0].replacements) == (
+        suite_path,
+        suite_path,
+    )
+    for replacement in spec.arm[0].replacements:
+        assert treatment.count(replacement.old) == 1
+        treatment = treatment.replace(replacement.old, replacement.new)
+
+    current = (repo / suite_path).read_text()
+    rubric_start = treatment.index("HOUSE_CRITERIA = (")
+    rubric_end = treatment.index("\n\nTASTE_CRITERIA =", rubric_start)
+    current_start = current.index("HOUSE_CRITERIA = (")
+    current_end = current.index("\n\nTASTE_CRITERIA =", current_start)
+    assert treatment[rubric_start:rubric_end] == current[current_start:current_end]
+
+    root = tmp_path / "kit-aligned-rubric"
+    monkeypatch.setattr(Ablation, "_sync", lambda self, root: None)
+    _stub_egress_binary_copy(monkeypatch, repo)
+    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
+    try:
+        ablation._materialize(spec.arm[0], spec.base, root, None)
+        assert (root / suite_path).read_text() == treatment
+        assert (
+            "async function measure(floor) {\n  const TEXT_FRAGMENT_TOUCH_PX = 1;"
+            in (root / audit_path).read_text()
+        )
+    finally:
+        ablation._remove_worktree(root)
+
+    assert spec.cases == ("pre-meeting-briefs", "meeting-tasks", "issue-owner")
+    assert spec.suites == ("ufo-app-bench",)
+    assert spec.repeats == 1
+    assert spec.concurrency == 3
+    assert spec.max_stacks == 2

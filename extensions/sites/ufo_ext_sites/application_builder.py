@@ -482,6 +482,7 @@ PAGE_CLASS_REFUSALS = (
     (re.compile(r"className=\{`"), "compose classes with cn()"),
 )
 STYLE_TAG = re.compile(r"<style[\s/>]")
+DATA_SLOT_ATTRIBUTE = re.compile(r"(?<![\w-])data-slot\s*=")
 
 LITERAL_WHITE_ON_SCHEME_INK = re.compile(
     r"\bstyle\s*=\s*\{\{"
@@ -783,6 +784,8 @@ def _validate_application_source(source: str) -> None:
         )
     if STYLE_TAG.search(source):
         raise ValueError("app.tsx may not emit a <style> tag — the kit's theme is the sheet")
+    if DATA_SLOT_ATTRIBUTE.search(source):
+        raise ValueError("app.tsx: data-slot is reserved for ufo/kit components")
     for pattern, repair in PAGE_CLASS_REFUSALS:
         found = pattern.search(source)
         if found:
