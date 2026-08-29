@@ -5,6 +5,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from json import JSONDecodeError
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -12,8 +13,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from evals.terminal_bench.configure import CONFIG_DIGEST_FILE, CONFIG_FILE
 from evals.terminal_bench.models import UpstreamMetadata
 from evals.terminal_bench.setup import UPSTREAM_FILE, load_upstream
+from ufo.config import load_config
 
 CUSTOM_AGENT = "evals.terminal_bench.agent:UfoAgent"
 CLIENT = "bin/x86_64/ufo"
@@ -173,6 +176,7 @@ class TerminalBenchRun:
     cases: tuple[str, ...]
     concurrency: int
     credentials: BenchCredentials
+    config_file: Path
     backend: HarborBackend = DAYTONA_BACKEND
     upstream_file: Path = UPSTREAM_FILE
 
@@ -193,11 +197,15 @@ class TerminalBenchRun:
             upstream.harbor_version,
             self.backend,
         )
+        config = self.config_file.read_bytes()
         print(shlex.join(command))
         completed = subprocess.run(
             command, check=False, env=harbor_environment(os.environ, self.credentials)
         )
         job_dir = jobs_dir / job_name
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / CONFIG_FILE).write_bytes(config)
+        (job_dir / CONFIG_DIGEST_FILE).write_text(f"{sha256(config).hexdigest()}\n")
         if completed.returncode:
             print(f"Harbor exited {completed.returncode}; retained job {job_dir}")
             return completed.returncode
@@ -229,3 +237,6 @@ class TerminalBenchRun:
             raise PermissionError(
                 f"Terminal-Bench client is not executable: {self.credentials.client}"
             )
+        if not self.config_file.is_file():
+            raise FileNotFoundError(f"Terminal-Bench ufo config is missing: {self.config_file}")
+        load_config(self.config_file)

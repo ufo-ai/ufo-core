@@ -1,0 +1,45 @@
+[database]
+url = "sqlite+aiosqlite:///ufo.db"
+owner_url = "sqlite+aiosqlite:///ufo.db"
+
+[blob]
+backend = "filesystem"
+root = "./blobs"
+
+[models]
+auto_model = "z-ai/glm-5.3-flash"
+ambient_reply_model = "gpt-5.6-luna"
+background_jobs_model = "gpt-5.6-luna"
+
+[serve]
+host = "127.0.0.1"
+port = 8710
+disabled_jobs = [
+    "metronome:usage_shipper",
+    "metronome:balance_topup",
+]
+
+[connect]
+public_base_url = "http://localhost:8710"
+
+[memory]
+index_backend = "turbopuffer"
+
+[sandbox]
+backend = "local"
+workspace_root = "./workspaces"
+
+[hub]
+backend = "in_process"
+
+[terminal]
+backend = "in_process"
+
+[browser]
+cdp_provider = "browserbase"
+
+[research]
+search_provider = "perplexity"
+
+[pack]
+name = "assistant_hosted"
