@@ -1,3870 +1,3822 @@
-# Chat, Terminal, and Messaging Surfaces  `stage-6.2`
+# Web portal, hosted-site, and sandbox ingress routes  `stage-6.2`
 
-This stage is the set of “front doors” where people talk to the system through Slack, iMessage, or the command-line terminal. It sits around the main work loop: it accepts outside messages, turns them into the project’s common conversation format, then delivers the agent’s replies back to the same place.
+This stage is the web-facing front door for people using UFO in a browser. It sits in the main running system, after startup has configured servers and storage, and it decides what a visitor is allowed to see. The web portal file serves the main app, signs users in, carries chat messages, streams live agent replies, and shows workspace pages like settings, memory, sources, usage, and admin. The sites surface is the doorway for hosted sites: it checks access, shows a protected frame, redirects portal iframes, serves share images, or hides private details behind a plain 404.
 
-The Slack surface is the busiest doorway. It receives Slack messages, button clicks, file shares, app installs, and thread changes, then sends replies and files back. Slack mentions are translated both ways: hidden Slack codes become readable names, and selected names become real Slack mentions when replying. Slack attribution adds a visible bot reference to connector-sent messages, while making sure that added mention is not later treated as a fresh request.
-
-The iMessage surface does the same kind of translation for iMessage conversations. Its cloud bridge handles the lower-level connection to Spectrum’s service: credentials, network calls, attachments, incoming events, and provider-ready message objects.
-
-The terminal surface exposes the system to the ufo command-line client using simple tab-separated text commands for messages, progress, files, prompts, and local terminal actions.
+The sandbox ingress pieces let browser pages safely reach work happening inside isolated workspaces. One file builds temporary port URLs, another signs and checks the short-lived tokens inside those URLs, and another creates safe per-conversation hostnames so guessed names cannot expose private data. The ingress server then verifies the visitor and either serves saved static files or proxies traffic to a live sandbox port. Two supporting web surfaces let operators inspect stored memory and let users browse community skills from skills.sh with friendly error messages.
 
 ## Files in this stage
 
-### iMessage Provider Bridge
-Spectrum cloud transport and the iMessage surface translate between raw provider events and UFO conversations.
+### Core sandbox ingress
+Builds signed sandbox access URLs and hostnames, serves public site ingress traffic, and validates short-lived port tokens.
 
-### `extensions/imessage/ufo_ext_imessage/cloud.py`
+### `core/src/ufo/sandbox/ingress_url.py`
 
-`io_transport` · `request handling and background message streaming`
+`domain_logic` · `request handling`
 
-This file lets the project use iMessage without talking to Apple directly. Spectrum provides the remote service that owns the iMessage line, and this code is the client for that service. Without it, the extension could not authenticate with Spectrum, send texts, upload or download attachments, or listen for incoming iMessages.
+A sandbox may run a web app on an internal port, but a browser outside the system needs a safe public URL to reach it. This file creates that URL. Think of it like printing a time-limited visitor badge: the badge says which workspace, which conversation, which port, and when it expires.
 
-There are two kinds of network work here. First, normal HTTPS requests are used for project setup tasks, such as getting a short-lived shared-line token or registering a phone number. Second, gRPC is used for message traffic. gRPC is a network protocol where code calls remote service methods almost like local functions; here it is used to stream events and send message commands.
+The main function starts with the system’s public ingress URL. If there is no public URL configured, it returns nothing, because there is nowhere public to send the browser. It then creates claims, which are pieces of trusted information that will be sealed into an ingress token. The token includes the workspace, conversation, port, expiry time, and optional “shipped” details that identify a packaged version of the app.
 
-The central object is `SpectrumProject`. Think of it like a key ring and phone switchboard combined: it stores the project credentials, fetches and caches a temporary bearer token, opens secure channels to Spectrum, and exposes simple actions such as `send_text`, `subscribe`, and `download_attachment`. It also filters noisy message events so the rest of the extension only sees real inbound messages from other people, not spam, system messages, hidden stickers, or messages sent by this project itself.
+The URL host also gets a site label derived from the conversation and port, so different sandbox ports can be separated by subdomain. The final path includes a fixed ingress view path, the minted token, and the requested entry path.
 
-One important detail is that token and HTTP-client state is kept per asyncio event loop. An event loop is the scheduler that runs asynchronous tasks. Keeping separate state avoids sharing async objects across loops, which can break in Python.
+There is also a helper for framed pages. If the sandbox page is being shown inside another sandbox page, it checks whether the outer page comes from the same ingress base host and then records which conversation and port framed it. Invalid or unrelated framing origins are ignored rather than trusted.
 
 #### Function details
 
-##### `SpectrumProject.installation_id`  (lines 91–92)
+##### `mint_ingress_view_url`  (lines 17–50)
 
 ```
-def installation_id(self) -> str
+def mint_ingress_view_url(public_url: str | None, workspace_id: UUID, conversation_id: UUID, port: int, entry_path: str, *, framed_from: str | None=None, shipped_slug: str | None=None, shipped_digest:
 ```
 
-**Purpose**: This gives the project a stable identity string used by the provider layer. It labels this connection as a Spectrum project rather than, for example, a local device.
+**Purpose**: This function creates the full temporary URL a browser can use to view one sandbox port. It is used when the system needs to expose a workspace’s running web service safely, with an expiry time and enough identity information for later access checks.
 
-**Data flow**: It reads the stored `project_id` on the `SpectrumProject` object, prefixes it with `project:`, and returns that combined text. It does not contact the network or change anything.
+**Data flow**: It receives the public ingress URL, workspace and conversation IDs, a port, an entry path, and optional framing or shipped-app details. It first returns nothing if no public URL exists. Otherwise it splits the public URL into parts, builds optional shipped information, creates signed token claims with an expiry time, asks for a host label for this conversation and port, safely escapes the entry path, and returns one complete URL string. It does not change stored state; its output is the minted URL.
 
-**Call relations**: Other parts of the provider can ask the project for this identifier when they need a consistent name for the installed messaging backend. It stands alone and does not hand work to other functions.
+**Call relations**: This is the file’s main outward-facing function. While building the token it asks `_framer_claim` whether the request came from another trusted sandbox URL, then passes the gathered claims to the ingress token code for signing and uses the ingress host code to create the subdomain label.
 
-
-##### `SpectrumProject.line`  (lines 94–115)
-
-```
-async def line(self) -> SpectrumLine
-```
-
-**Purpose**: This gets the temporary shared-line token needed to call Spectrum's iMessage services. It reuses a still-valid token when possible, and asks Spectrum for a fresh one when the old token is missing or close to expiring.
-
-**Data flow**: It looks inside the current event loop's token state for a cached `SpectrumLine` and its expiry time. If the token is still safely valid, it returns it. Otherwise it sends a cloud request for a new token, checks that Spectrum's reply has the expected shape, stores the new token and expiry time, and returns the new `SpectrumLine`.
-
-**Call relations**: Before message-related work can happen, `catch_up`, `subscribe`, `send_text`, `send_attachment`, and `download_attachment` call this function to get authorization. It relies on `_loop` to find the right per-loop state and `_request` to talk to Spectrum's HTTPS API.
-
-*Call graph*: calls 2 internal fn (_loop, _request); called by 5 (catch_up, download_attachment, send_attachment, send_text, subscribe); 4 external calls (__init__, __init__, TypeAdapter, monotonic).
+*Call graph*: calls 1 internal fn (_framer_claim); 7 external calls (__init__, __init__, now, site_label, mint_ingress_token, quote, urlsplit).
 
 
-##### `SpectrumProject._loop`  (lines 117–133)
+##### `_framer_claim`  (lines 53–73)
 
 ```
-def _loop(self) -> SpectrumLoop
+def _framer_claim(base: SplitResult, framed_from: str | None) -> FramerClaim | None
 ```
 
-**Purpose**: This finds or creates the network state for the currently running asynchronous event loop. It prevents async objects such as locks and HTTP clients from being accidentally shared across event loops.
+**Purpose**: This helper decides whether a `framed_from` URL is a trusted sandbox page that is embedding the new page. If it is trusted, it turns that source page into a small claim describing the framing conversation and port; otherwise it returns nothing.
 
-**Data flow**: It reads Python's current running event loop, checks a dictionary for existing `SpectrumLoop` state, and returns it if present. If this is the first loop, it reuses the project's original HTTP client, lock, and token state. If it is an additional loop, it creates a new HTTP client, lock, and token store just for that loop, saves them, and returns them.
+**Data flow**: It receives the already-parsed base public URL and an optional URL for the page doing the framing. It parses the framing URL, compares its scheme, port, and host against the base ingress host, and only continues if the framing host is a subdomain of that base host. It then removes the base host suffix, parses the remaining site label into a conversation ID and port, and returns a `FramerClaim`. If any part is missing, malformed, or not from the expected host family, the result is `None`.
 
-**Call relations**: `line`, `_request`, and `invalidate` call this whenever they need loop-local state. It is the quiet safety layer underneath token caching and HTTP calls.
+**Call relations**: `mint_ingress_view_url` calls this helper while preparing token claims. The helper delegates label decoding to the ingress host parser, and only hands a `FramerClaim` back when the framing page can be tied to another sandbox site under the same public ingress address.
 
-*Call graph*: called by 3 (_request, invalidate, line); 4 external calls (__init__, Lock, get_running_loop, AsyncClient).
+*Call graph*: called by 1 (mint_ingress_view_url); 3 external calls (__init__, parse_site_label, urlsplit).
 
 
-##### `SpectrumProject.assign_line`  (lines 135–165)
+### `core/src/ufo/sandbox/ingress_host.py`
 
-```
-async def assign_line(self, phone_number: str, idempotency_key: str) -> str
-```
+`domain_logic` · `request handling and sandbox URL creation`
 
-**Purpose**: This makes sure a user's phone number is registered with Spectrum and returns the Spectrum phone line assigned to that user. It matters because a shared iMessage line cannot start a conversation with a phone number that has never messaged it first.
+Hosted sandbox sites need their own web address so that browser cookies, storage, redirects, and root-based asset paths stay separate from every other site. This file builds the single DNS label for that address from two facts: the conversation's unique ID and the sandbox port. It then adds a short cryptographic signature, like a tamper-evident seal, so the server can reject made-up labels before doing any deeper work.
 
-**Data flow**: It asks Spectrum for the project's current users, validates the reply, and searches for the requested phone number. If the user already exists, it returns the assigned phone number. If not, it sends a registration request with an idempotency key, validates the created user, and returns the newly assigned phone number.
+The label is not the main permission check. A valid token or session cookie still decides whether a visitor may see the site. The label's job is earlier and narrower: it proves that the hostname was minted by this deployment and says which conversation and port it points to.
 
-**Call relations**: This function uses `_request` for the HTTPS calls and Pydantic validation to make sure Spectrum's replies match what the code expects. It is a setup step for connecting an outside phone number to the shared Spectrum line.
+The file also keeps the spelling of labels strict. Base32 text can sometimes decode to the same bytes in more than one written form, and browsers would treat those spellings as different origins. To avoid sixteen lookalike addresses for the same site, parsing re-encodes the bytes and accepts only the one canonical lowercase spelling.
 
-*Call graph*: calls 1 internal fn (_request); 2 external calls (__init__, TypeAdapter).
-
-
-##### `SpectrumProject._request`  (lines 167–190)
-
-```
-async def _request(self, method: str, path: str, *, json: dict[str, str] | None=None, idempotency_key: str | None=None) -> object
-```
-
-**Purpose**: This is the common helper for Spectrum Cloud HTTPS API calls. It adds project authentication, optional duplicate-protection headers, checks for HTTP failures, and returns the JSON body.
-
-**Data flow**: It receives an HTTP method, a path, optional JSON data, and an optional idempotency key. It builds the full Spectrum Cloud URL, authenticates with the project ID and secret, sends the request through the event loop's HTTP client, raises a project-specific error if Spectrum returns a bad HTTP status, and returns the decoded JSON response.
-
-**Call relations**: `line` uses this to fetch shared-line tokens, and `assign_line` uses it to list or register users. It depends on `_loop` to choose the correct HTTP client for the current async loop.
-
-*Call graph*: calls 1 internal fn (_loop); called by 2 (assign_line, line); 2 external calls (__init__, BasicAuth).
-
-
-##### `SpectrumProject.channel`  (lines 192–193)
-
-```
-def channel(self) -> grpc.aio.Channel
-```
-
-**Purpose**: This opens a secure gRPC channel to Spectrum's iMessage service. A channel is the network connection used for streaming events and sending message commands.
-
-**Data flow**: It uses Spectrum's fixed iMessage service address and creates a TLS-secured gRPC channel. The returned channel is later used inside `async with` blocks so it is closed after the operation.
-
-**Call relations**: `catch_up`, `subscribe`, `send_text`, `send_attachment`, and `download_attachment` call this before using Spectrum's gRPC service stubs. It is the doorway from local code into Spectrum's message services.
-
-*Call graph*: called by 5 (catch_up, download_attachment, send_attachment, send_text, subscribe); 1 external calls (ssl_channel_credentials).
-
-
-##### `SpectrumProject.invalidate`  (lines 195–198)
-
-```
-async def invalidate(self) -> None
-```
-
-**Purpose**: This forgets the cached shared-line token. It is useful when the token may no longer be trusted, so the next operation must fetch a fresh one.
-
-**Data flow**: It gets the current loop's token state, takes the async lock so no other task edits it at the same time, and clears the stored token and expiry information. It returns nothing.
-
-**Call relations**: Higher-level retry or error-handling code can call this after authentication trouble. It uses `_loop` to clear only the token cache tied to the current event loop.
-
-*Call graph*: calls 1 internal fn (_loop).
-
-
-##### `SpectrumProject.invalid_cursor`  (lines 200–204)
-
-```
-def invalid_cursor(self, error: Exception) -> bool
-```
-
-**Purpose**: This recognizes one specific streaming error: Spectrum saying that an event cursor or sequence marker is invalid. A cursor is like a bookmark that tells the service where to resume reading events.
-
-**Data flow**: It receives an exception, checks whether it is a gRPC error, and then checks whether the gRPC status code is `INVALID_ARGUMENT`. It returns `true` for that case and `false` otherwise.
-
-**Call relations**: Code that consumes event streams can use this to decide whether it should reset its saved event position and catch up differently. It does not call Spectrum; it only classifies an error it was given.
-
-*Call graph*: 1 external calls (code).
-
-
-##### `SpectrumProject.external_error`  (lines 206–207)
-
-```
-def external_error(self, error: Exception) -> bool
-```
-
-**Purpose**: This tells the rest of the provider whether an exception came from the outside world: Spectrum gRPC, Spectrum Cloud, or HTTP networking. That helps separate remote-service failures from programming bugs.
-
-**Data flow**: It receives an exception and checks whether it is a gRPC error, a `SpectrumCloudError`, or an HTTP client error. It returns a boolean answer and changes nothing.
-
-**Call relations**: Higher-level error handling can call this when deciding what to retry, report, or treat as provider downtime. It is a classification helper for failures produced by the network functions in this file.
-
-
-##### `SpectrumProject.error_code`  (lines 209–212)
-
-```
-def error_code(self, error: Exception) -> str
-```
-
-**Purpose**: This turns an exception into a short error label for logging or reporting. For gRPC errors, it uses the remote status code; for other errors, it uses the Python exception type name.
-
-**Data flow**: It receives an exception. If it is a gRPC error, it asks the error for its status code name and returns that. Otherwise it returns the class name of the exception.
-
-**Call relations**: Error-reporting code can use this after `external_error` or other exception handling. It gives callers a compact, consistent label without making them know the details of gRPC exceptions.
-
-*Call graph*: 1 external calls (code).
-
-
-##### `SpectrumProject.catch_up`  (lines 214–235)
-
-```
-async def catch_up(self, after_sequence: int | None) -> AsyncIterator[ProviderEvent]
-```
-
-**Purpose**: This reads older missed message events from Spectrum, starting after an optional saved sequence number. It lets the extension recover after downtime without losing messages.
-
-**Data flow**: It first gets a valid shared-line token. It builds a catch-up request and includes `after_sequence` if one was provided. Then it opens a secure gRPC channel, sends the request with authorization metadata, and reads the stream of frames. Completion frames become `ProviderEvent` objects with the latest head sequence; message-change frames are filtered through `_inbound_message` and yielded as provider events.
-
-**Call relations**: This is called when the provider needs to replay missed events before live streaming. It uses `line` for authorization, `channel` for the gRPC connection, `rpc_metadata` for request headers, and `_inbound_message` to convert Spectrum's raw message event into the extension's clean inbound-message shape.
-
-*Call graph*: calls 4 internal fn (channel, line, _inbound_message, rpc_metadata); 3 external calls (__init__, CatchUpEventsRequest, EventServiceStub).
-
-
-##### `SpectrumProject.subscribe`  (lines 237–253)
-
-```
-async def subscribe(self, ready: asyncio.Event) -> AsyncIterator[ProviderEvent]
-```
-
-**Purpose**: This listens for new live iMessage events from Spectrum. It is the ongoing feed that lets the extension react when someone sends a message.
-
-**Data flow**: It gets a valid token, creates an empty subscribe request, opens a secure gRPC channel, and starts Spectrum's live message-event stream. Once the stream is created, it sets the `ready` event so the caller knows listening has begun. For each incoming frame, it yields a `ProviderEvent`, including a cleaned inbound message only when the frame is a real received message.
-
-**Call relations**: This is used during background message listening. It relies on `line`, `channel`, and `rpc_metadata` to connect safely, and calls `_inbound_message` to remove irrelevant or unsafe message changes before handing events to the provider.
-
-*Call graph*: calls 4 internal fn (channel, line, _inbound_message, rpc_metadata); 4 external calls (__init__, set, SubscribeMessageEventsRequest, MessageServiceStub).
-
-
-##### `SpectrumProject.send_text`  (lines 255–268)
-
-```
-async def send_text(self, conversation_id: str, text: str, idempotency_key: str) -> str
-```
-
-**Purpose**: This sends a plain text iMessage into an existing Spectrum conversation. It returns Spectrum's message identifier so the caller can track what was sent.
-
-**Data flow**: It receives a conversation ID, text, and idempotency key. It gets a valid shared-line token, builds a send-text gRPC request using the conversation and text, opens a secure channel, sends the request with authorization and idempotency metadata, and returns the GUID of the message Spectrum created.
-
-**Call relations**: Higher-level provider code calls this when it needs to send a text reply. It uses `line` for the bearer token, `channel` for the gRPC connection, and `rpc_metadata` so Spectrum can authenticate the request and avoid duplicate sends.
-
-*Call graph*: calls 3 internal fn (channel, line, rpc_metadata); 2 external calls (SendTextMessageRequest, MessageServiceStub).
-
-
-##### `SpectrumProject.send_attachment`  (lines 270–297)
-
-```
-async def send_attachment(self, conversation_id: str, filename: str, data: bytes, idempotency_key: str) -> str
-```
-
-**Purpose**: This sends a file attachment in an iMessage conversation. It first uploads the file to Spectrum, then sends a message that refers to that uploaded attachment.
-
-**Data flow**: It receives a conversation ID, filename, file bytes, and idempotency key. It gets a valid token and opens a secure channel. First it uploads the attachment bytes with a separate upload idempotency key. Then it sends an attachment-message request that points to the uploaded attachment's GUID. It returns the GUID of the final message.
-
-**Call relations**: Provider code calls this when sending images or other files. It uses `line`, `channel`, and `rpc_metadata` like `send_text`, but also talks to Spectrum's attachment service before handing the uploaded attachment to the message service.
-
-*Call graph*: calls 3 internal fn (channel, line, rpc_metadata); 4 external calls (UploadAttachmentRequest, AttachmentServiceStub, SendAttachmentMessageRequest, MessageServiceStub).
-
-
-##### `SpectrumProject.download_attachment`  (lines 299–309)
-
-```
-async def download_attachment(self, attachment_id: str) -> AsyncGenerator[bytes, None]
-```
-
-**Purpose**: This downloads an attachment from Spectrum as a stream of byte chunks. Streaming means the file can be read piece by piece instead of loaded all at once.
-
-**Data flow**: It receives an attachment ID, gets a valid token, opens a secure gRPC channel, and asks Spectrum's attachment service to download that attachment. As frames arrive from the stream, it yields only the primary file chunks as raw bytes.
-
-**Call relations**: Higher-level code calls this when it needs the contents of an incoming attachment listed on an inbound message. It uses `line`, `channel`, and `rpc_metadata` to authenticate and connect to Spectrum's attachment service.
-
-*Call graph*: calls 3 internal fn (channel, line, rpc_metadata); 2 external calls (DownloadAttachmentRequest, AttachmentServiceStub).
-
-
-##### `spectrum_project`  (lines 313–327)
-
-```
-def spectrum_project() -> SpectrumProject
-```
-
-**Purpose**: This creates the shared `SpectrumProject` object from environment credentials. It is cached, so callers get the same project object instead of rebuilding clients and locks each time.
-
-**Data flow**: It reads the Spectrum project ID and secret from deployment environment variables. If either is missing, it raises `ProviderNotConfigured` with instructions for what to set. If both exist, it creates an HTTP client, an async lock, an empty token cache, and returns a new `SpectrumProject`.
-
-**Call relations**: This is the usual factory function other parts of the extension call to obtain the Spectrum connection. It prepares the object whose methods perform all later cloud and gRPC work.
-
-*Call graph*: 5 external calls (__init__, __init__, Lock, AsyncClient, deploy_env).
-
-
-##### `rpc_metadata`  (lines 330–334)
-
-```
-def rpc_metadata(token: str, idempotency_key: str | None=None) -> tuple[tuple[str, str], ...]
-```
-
-**Purpose**: This builds the small set of gRPC request headers Spectrum needs. It always includes bearer-token authorization and may include an idempotency key to prevent duplicate actions.
-
-**Data flow**: It receives a token and optionally an idempotency key. It creates an authorization metadata pair using `Bearer <token>`, adds an `x-idempotency-key` pair if one was provided, and returns the metadata as an immutable tuple.
-
-**Call relations**: `catch_up`, `subscribe`, `send_text`, `send_attachment`, and `download_attachment` call this right before making gRPC requests. It keeps authentication header formatting in one place.
-
-*Call graph*: called by 5 (catch_up, download_attachment, send_attachment, send_text, subscribe).
-
-
-##### `_inbound_message`  (lines 337–375)
-
-```
-def _inbound_message(event: object) -> InboundMessage | None
-```
-
-**Purpose**: This turns Spectrum's raw message-change event into the extension's simpler `InboundMessage`, but only when the event is a real incoming user message. It filters out sent-by-me messages, system/service/spam/corrupt messages, hidden stickers, and empty messages.
-
-**Data flow**: It receives a raw event object. If the object is not the expected message-change type, is not a received-message change, or was sent by this project, it returns nothing. It then checks the message flags, finds the sender address, collects visible non-sticker attachments, reads any text, and returns an `InboundMessage` containing the message ID, conversation ID, sender, text, attachments, and whether the chat looks direct. If there is no usable sender or content, it returns nothing.
-
-**Call relations**: `catch_up` and `subscribe` call this while reading Spectrum event streams. It is the filter and translator between Spectrum's detailed protocol objects and the clean provider event model used by the rest of the extension.
-
-*Call graph*: called by 2 (catch_up, subscribe); 2 external calls (__init__, __init__).
-
-
-### `extensions/imessage/ufo_ext_imessage/surface.py`
-
-`io_transport` · `main loop and message handling`
-
-This file sits between two worlds: Apple-style messages coming from an iMessage provider, and UFO’s internal conversation system. Without it, a text sent to the shared iMessage line would never become a UFO turn, and UFO’s answers would never make it back to the chat.
-
-The main class, ImessageSurface, keeps a long-running listener connected to the provider’s event stream. It remembers a cursor, which is like a bookmark in the message stream, so restarts do not replay old messages or skip new ones. If the provider disconnects, it waits briefly, reconnects, and catches up from the last known place.
-
-The file also controls phone-number opt-in. When someone is proving that a phone number belongs to them, it checks a short code, confirms the address, and sends a contact card so the chat looks like a known contact. After that, normal direct messages or group messages are admitted into UFO conversations.
-
-Attachments are treated carefully. Incoming files are downloaded only up to a size limit and saved into the workspace inbox. Outgoing files are sent through iMessage only if they fit; otherwise the final text can include a link instead. In short, this file is the adapter, gatekeeper, and safety buffer for iMessage traffic.
+Besides labels, the file derives stable ports for conversation sites and stable synthetic IDs for shipped app pages that do not have a normal conversation row behind them.
 
 #### Function details
 
-##### `read_claim`  (lines 63–73)
+##### `serve_port`  (lines 57–63)
 
 ```
-def read_claim(stored: object) -> PendingClaim | None
+def serve_port(conversation_id: UUID) -> int
 ```
 
-**Purpose**: Reads a stored phone-number claim and turns it into a PendingClaim object if it is valid. If the stored data is missing or malformed, it quietly treats it as no usable claim so one bad row does not block all incoming messages.
+**Purpose**: This chooses the stable local port for a conversation's hosted sandbox site. It means the system does not have to store a separate port value; everyone can recompute the same answer from the conversation ID.
 
-**Data flow**: It receives an arbitrary stored value. If the value is empty, it returns nothing. If the value matches the expected claim shape, it returns a PendingClaim; if validation fails, it writes a log note and returns nothing.
+**Data flow**: It receives a conversation UUID. It treats that ID as a large number, folds it into the allowed app-port range, adds the configured floor, and returns the resulting port number. It does not change anything outside itself.
 
-**Call relations**: ImessageSurface._prove calls this while checking whether a sender typed the correct opt-in code. It gives _prove a safe yes-or-no answer instead of letting bad stored data crash the message listener.
-
-*Call graph*: called by 1 (_prove); 1 external calls (log).
+**Call relations**: Other code that needs to publish or reach a conversation's hosted site can call this before building the site's address. Its result is commonly paired with site_label so the hostname and port agree.
 
 
-##### `MessageStreamDisconnected.__init__`  (lines 87–90)
+##### `shipped_app_slug`  (lines 66–74)
 
 ```
-def __init__(self, cursor: int | None, error: Exception) -> None
+def shipped_app_slug(provisioned_by: str | None) -> str | None
 ```
 
-**Purpose**: Packages a stream failure together with the last known cursor. This lets the listener know both what went wrong and where it may be able to resume.
+**Purpose**: This extracts the stable page slug from the name of a provisioned shipped app, if the name has the expected form. The slug is used because app identity should not depend on a display name that might be changed or suffixed after a naming collision.
 
-**Data flow**: It receives a cursor and an error. It stores both on the exception object and sets the exception message to the original error text.
+**Data flow**: It receives a provision name, or nothing. If there is no name, it returns nothing. If the name exactly matches the pattern app_<letters-and-digits>, it returns the slug part after app_; otherwise it returns nothing.
 
-**Call relations**: ImessageSurface._consume_connected creates this when the provider stream ends or hits an outside/provider error. ImessageSurface.listen catches it and uses the saved cursor to decide how to reconnect.
-
-*Call graph*: called by 1 (_consume_connected).
+**Call relations**: Code dealing with shipped app origins can call this before creating stable addresses or bundle paths. It is a small filter that turns a provision record's naming convention into the slug used by shipped_anchor and related origin-building code.
 
 
-##### `contact_card`  (lines 103–115)
+##### `shipped_anchor`  (lines 77–82)
 
 ```
-def contact_card(assigned_phone_number: str) -> bytes
+def shipped_anchor(workspace_id: UUID, slug: str) -> UUID
 ```
 
-**Purpose**: Builds a small digital contact card for the assigned iMessage phone number. The user can save it so the chat is recognized as a known contact, which helps remove Apple’s “Report Junk” banner.
+**Purpose**: This creates a stable synthetic UUID for a shipped app page inside a workspace. It gives a shipped page its own browser storage and cookies even though there is no normal conversation record behind it.
 
-**Data flow**: It receives a phone number. It places that number into a vCard text format and returns the finished card as bytes ready to send as an attachment.
+**Data flow**: It receives a workspace UUID and an app slug. It combines them with a fixed anchor label and feeds that text into UUID version 5, which is a repeatable way to turn a name into a UUID. The same workspace and slug always produce the same UUID; different workspaces or slugs produce different anchors.
 
-**Call relations**: ImessageSurface._send_contact_card calls this after a phone number is successfully connected. The bytes it returns are handed to the message provider as an outgoing attachment.
+**Call relations**: After code has identified a shipped app slug, it can call this to get the conversation-like identity used for origins. Internally it hands the combined name to uuid.uuid5 so the identity is deterministic rather than random.
 
-*Call graph*: called by 1 (_send_contact_card).
-
-
-##### `claim_key`  (lines 118–119)
-
-```
-def claim_key(member_id: UUID, phone_number: str) -> str
-```
-
-**Purpose**: Creates the storage key used for a member’s pending claim on a phone number. It hides the raw member-and-phone pair behind a hash, which is a one-way fingerprint.
-
-**Data flow**: It receives a member ID and phone number. It combines them, hashes the result, adds a fixed prefix, and returns the final string key.
-
-**Call relations**: ImessageSurface._prove uses this key to find and later delete the pending opt-in claim stored for that member and sender phone number.
-
-*Call graph*: called by 1 (_prove); 1 external calls (sha256).
+*Call graph*: 1 external calls (uuid5).
 
 
-##### `queue_key`  (lines 122–123)
+##### `site_label`  (lines 85–90)
 
 ```
-def queue_key(conversation_id: str, *, direct: bool) -> str
+def site_label(conversation_id: UUID, port: int) -> str
 ```
 
-**Purpose**: Creates a compact identifier for an iMessage conversation queue. It records both the iMessage conversation ID and whether the chat is direct or group.
+**Purpose**: This builds the DNS label for one conversation's sandbox port. The label is the compact hostname piece that says, in signed form, "this conversation at this port."
 
-**Data flow**: It receives a conversation ID and a direct/group flag. It turns those two pieces into a small JSON string and returns it.
+**Data flow**: It receives a conversation UUID and a port. It first rejects ports outside the valid network range. Then it joins the conversation bytes and the two-byte port, signs those bytes, appends the signature, and turns the result into lowercase base32 text. The returned string is safe to use as a DNS label.
 
-**Call relations**: ImessageSurface._admit_message uses this when asking UFO for the matching internal conversation. Later, post, speak, and attach decode this same key to know where to send replies.
+**Call relations**: When the system needs to publish or link to a hosted sandbox site, this is the function that mints the label. It relies on _signature to add the tamper-evident seal and _encode to turn the raw bytes into DNS-friendly text. parse_site_label later performs the reverse check on incoming hostnames.
 
-*Call graph*: called by 1 (_admit_message); 1 external calls (dumps).
-
-
-##### `conversation_from_queue`  (lines 126–134)
-
-```
-def conversation_from_queue(queue: str) -> ConversationAddress
-```
-
-**Purpose**: Turns a stored queue key back into a usable conversation address. It also rejects queue keys that do not match the expected direct-or-group shape.
-
-**Data flow**: It receives a queue key string. It parses the JSON, checks that it contains a non-empty conversation ID tagged as direct or group, and returns a ConversationAddress. If the format is wrong, it raises an error.
-
-**Call relations**: ImessageSurface.post, ImessageSurface.speak, and ImessageSurface.attach call this before sending anything out to iMessage. It translates UFO’s saved queue key back into the provider’s conversation ID.
-
-*Call graph*: called by 3 (attach, post, speak); 2 external calls (__init__, loads).
+*Call graph*: calls 2 internal fn (_encode, _signature).
 
 
-##### `_attachment_content`  (lines 137–138)
+##### `parse_site_label`  (lines 93–105)
 
 ```
-async def _attachment_content(data: bytes) -> AsyncIterator[bytes]
+def parse_site_label(label: str) -> tuple[UUID, int]
 ```
 
-**Purpose**: Wraps attachment bytes in an async stream, which is the format the workspace file writer expects. Think of it as putting a whole file into a one-piece conveyor belt.
+**Purpose**: This reads a DNS label back into the conversation ID and port it claims to address, but only if the label is well-formed, canonical, and signed by this deployment. It is the guard at the door before the server trusts a sandbox hostname.
 
-**Data flow**: It receives bytes. When iterated, it yields those same bytes once and then ends.
+**Data flow**: It receives the label text from a hostname. It decodes the base32 text, checks that re-encoding gives exactly the canonical lowercase spelling, separates the address bytes from the signature bytes, verifies the signature using a constant-time comparison, and returns the UUID plus port. If any step fails, it raises SiteLabelError instead of returning possibly unsafe data.
 
-**Call relations**: ImessageSurface._downloaded_files uses this after downloading an incoming attachment. It gives SurfaceContext.write_workspace_file the file content in the streaming shape it requires.
+**Call relations**: Request-handling code can call this when a sandbox hostname arrives. It hands decoding to base64.b32decode, canonical spelling to _encode, signature recreation to _signature, safe signature comparison to hmac.compare_digest, and UUID construction to uuid.UUID. Its output is meant to be checked against the visitor's token or session before any sandbox is contacted.
 
-*Call graph*: called by 1 (_downloaded_files).
-
-
-##### `ImessageSurface.listen`  (lines 145–169)
-
-```
-async def listen(self, context: SurfaceListenerContext) -> None
-```
-
-**Purpose**: Runs the long-lived iMessage listener. It connects to the provider, resumes from the saved stream position, and keeps reconnecting when provider-side failures happen.
-
-**Data flow**: It receives a listener context that can store cursors and route addresses. It creates or obtains a provider, reads the saved cursor, calls the connected-consumer loop, and on disconnection updates or clears the cursor as needed before trying again.
-
-**Call relations**: This is the top-level listening method for the surface. It calls ImessageSurface._consume_connected for each connected session, logs inactive or disconnected states, and uses the context cursor methods to preserve progress across reconnects.
-
-*Call graph*: calls 3 internal fn (clear_cursor, cursor, _consume_connected); 3 external calls (Event, sleep, log).
+*Call graph*: calls 2 internal fn (_encode, _signature); 4 external calls (__init__, b32decode, compare_digest, UUID).
 
 
-##### `ImessageSurface._consume_connected`  (lines 171–216)
+##### `_encode`  (lines 108–109)
 
 ```
-async def _consume_connected(self, context: SurfaceListenerContext, provider: MessageProvider, installation_id: str, cursor: int | None) -> None
+def _encode(raw: bytes) -> str
 ```
 
-**Purpose**: Consumes messages while the provider is connected. It starts live listening, catches up missed events first, filters out duplicate or old frames, and sends each new message onward.
+**Purpose**: This converts raw label bytes into the project's one accepted DNS-label spelling. It hides the base32 details so label creation and label checking use exactly the same text format.
 
-**Data flow**: It receives the listener context, provider, installation ID, and optional cursor. It starts a background pump for live frames, optionally replays older missed frames, then processes new frames in order. It updates its cursor as each frame succeeds, or raises a disconnection wrapper when the provider fails.
+**Data flow**: It receives bytes. It base32-encodes them, removes padding equals signs, lowercases the result, and returns that string. It does not read or change outside state.
 
-**Call relations**: ImessageSurface.listen calls this for each connection attempt. It coordinates ImessageSurface._pump_live, ImessageSurface._catch_up, and ImessageSurface._process_event, and reports provider failures back through MessageStreamDisconnected.
+**Call relations**: site_label calls this after assembling and signing label bytes. parse_site_label calls it again to make sure an incoming label is the canonical spelling of the bytes it decoded, which prevents multiple browser origins for the same underlying site.
 
-*Call graph*: calls 5 internal fn (external_error, _catch_up, _process_event, _pump_live, __init__); called by 1 (listen); 4 external calls (Event, Queue, create_task, gather).
-
-
-##### `ImessageSurface._pump_live`  (lines 218–236)
-
-```
-async def _pump_live(self, provider: MessageProvider, ready: asyncio.Event, frames: asyncio.Queue[LiveFrame | LiveFailure]) -> None
-```
-
-**Purpose**: Reads the provider’s live message stream in the background and places each event into a queue. This separates receiving messages from processing them, so the main loop can catch up and then consume live events cleanly.
-
-**Data flow**: It receives a provider, a readiness signal, and a queue. It subscribes to the provider, wraps each incoming provider event in a LiveFrame, and puts it into the queue. If the stream fails or ends, it puts a LiveFailure instead and marks the stream as ready before exiting.
-
-**Call relations**: ImessageSurface._consume_connected starts this as a background task. The queued frames or failures become the input that _consume_connected reads while deciding whether to process a message or reconnect.
-
-*Call graph*: calls 1 internal fn (subscribe); called by 1 (_consume_connected); 4 external calls (__init__, __init__, __init__, set).
+*Call graph*: called by 2 (parse_site_label, site_label); 1 external calls (b32encode).
 
 
-##### `ImessageSurface._catch_up`  (lines 238–257)
+##### `_signature`  (lines 112–114)
 
 ```
-async def _catch_up(self, context: SurfaceListenerContext, provider: MessageProvider, installation_id: str, cursor: int | None) -> int
+def _signature(address: bytes) -> bytes
 ```
 
-**Purpose**: Replays missed provider events after a reconnect or restart. It is the safety net that prevents messages from being lost while the listener was offline.
+**Purpose**: This creates the short cryptographic signature attached to a site label. The signature proves that the label bytes were made with this deployment's secret, without exposing that secret.
 
-**Data flow**: It receives a cursor and asks the provider for events after that point. For each real message frame, it sends the event to ImessageSurface._process_event. It tracks the newest stream position and stores that cursor before returning it.
+**Data flow**: It receives the raw address bytes, reads the ingress secret, and computes an HMAC, which is a keyed hash used as a tamper check. It includes a fixed label kind so this signature cannot be confused with signatures for another purpose, then returns only the first four bytes of the digest.
 
-**Call relations**: ImessageSurface._consume_connected calls this before accepting live frames when there is a saved cursor. It hands each catch-up message to ImessageSurface._process_event and records the final position through the listener context.
+**Call relations**: site_label calls this when minting a new label, and parse_site_label calls it to recreate the expected signature for an incoming label. It depends on ingress_secret for the shared deployment secret and hmac.new for the cryptographic calculation.
 
-*Call graph*: calls 3 internal fn (store_cursor, catch_up, _process_event); called by 1 (_consume_connected).
+*Call graph*: called by 2 (parse_site_label, site_label); 2 external calls (new, ingress_secret).
 
 
-##### `ImessageSurface._process_event`  (lines 259–274)
+### `core/src/ufo/sandbox/ingress_serve.py`
 
-```
-async def _process_event(self, context: SurfaceListenerContext, provider: MessageProvider, installation_id: str, sequence: int, message: InboundMessage | None) -> None
-```
+`entrypoint` · `startup and request handling`
 
-**Purpose**: Processes one provider event and records that the stream has advanced. A message from an unclaimed phone number is still counted as seen, but it is not delivered to any workspace.
+Think of this file as a guarded receptionist for many temporary websites. Each site gets its own hostname, and the hostname itself encodes which conversation and port the browser is trying to reach. Before any bytes are served, the server checks a signed token stored in a cookie, so one site link cannot be reused for another site.
 
-**Data flow**: It receives a stream sequence number and an optional inbound message. If there is a message, it asks the context whether that sender maps to a workspace; if so, it passes the message to ImessageSurface._admit_message. In every case, it stores the cursor for the sequence afterward.
+There are two main ways a site can be served. A “stored” site is like a published folder: its files were copied into blob storage, so requests are answered directly from stored bytes. A “dialed” site is still running inside a sandbox container, so this server finds the right sandbox port and streams the request and response between the browser and that live process.
 
-**Call relations**: Both ImessageSurface._catch_up and ImessageSurface._consume_connected call this for provider frames. It is the narrow bridge from provider events into workspace-specific surface logic.
-
-*Call graph*: calls 3 internal fn (addressed, store_cursor, _admit_message); called by 2 (_catch_up, _consume_connected).
-
-
-##### `ImessageSurface._admit_message`  (lines 276–320)
-
-```
-async def _admit_message(self, ctx: SurfaceContext, provider: MessageProvider, message: InboundMessage) -> None
-```
-
-**Purpose**: Decides whether an inbound iMessage should become a UFO conversation turn. It checks phone ownership, opt-in state, group-chat relevance, attachments, and the right audience before admitting the message.
-
-**Data flow**: It receives a workspace surface context, provider, and inbound message. It reads the address claim for the sender. If the sender is still proving ownership, it routes to ImessageSurface._prove. Otherwise it may ignore duplicates or unwanted group chatter, find or create the right UFO conversation, download allowed attachments, wrap the member text, and admit the turn.
-
-**Call relations**: ImessageSurface._process_event calls this only after the sender has been matched to a workspace. It may call ImessageSurface._prove for opt-in, queue_key to identify the conversation, ImessageSurface._downloaded_files for attachments, and finally the context’s admit method to create the UFO turn.
-
-*Call graph*: calls 7 internal fn (address_claim, admit, ambient_reply_wanted, conversation_for, _downloaded_files, _prove, queue_key); called by 1 (_process_event); 7 external calls (__init__, __init__, sha256, conversation_audience, room_audience, fence_member_message, mint_marker).
-
-
-##### `ImessageSurface._prove`  (lines 322–361)
-
-```
-async def _prove(self, ctx: SurfaceContext, provider: MessageProvider, message: InboundMessage, claim: AddressClaim) -> None
-```
-
-**Purpose**: Handles the phone-number opt-in proof step. It checks whether the sender’s message contains the expected code, expires old claims, respects opt-out words, and confirms the phone number when the code matches.
-
-**Data flow**: It receives the context, provider, inbound message, and address claim. It ignores messages that cannot prove a direct pending claim. It reads the pending claim from scoped storage, compares the cleaned message text with the stored code, sends helpful texts for expired or wrong codes, and on success sends a confirmation, sends a contact card, confirms the address, and deletes the stored claim.
-
-**Call relations**: ImessageSurface._admit_message calls this whenever an address claim still has an expiration time, meaning the sender is not fully proved yet. It uses claim_key and read_claim to find the pending claim, provider.send_text for user feedback, ImessageSurface._send_contact_card for the vCard, and context methods to confirm or release the address.
-
-*Call graph*: calls 6 internal fn (confirm_address, release_address, send_text, _send_contact_card, claim_key, read_claim); called by 1 (_admit_message); 2 external calls (__init__, now).
-
-
-##### `ImessageSurface._send_contact_card`  (lines 363–384)
-
-```
-async def _send_contact_card(self, provider: MessageProvider, message: InboundMessage, assigned_phone_number: str) -> None
-```
-
-**Purpose**: Sends the shared line’s contact card after a successful connection. If the provider refuses this attachment for an outside reason, it logs the problem but does not undo the phone connection.
-
-**Data flow**: It receives a provider, the proving message, and the assigned phone number. It builds contact-card bytes, sends them as an attachment to the same conversation, and logs provider-side attachment failures that should not stop the stream.
-
-**Call relations**: ImessageSurface._prove calls this after the opt-in code is accepted. It calls contact_card to build the attachment and then hands it to the provider’s send_attachment method.
-
-*Call graph*: calls 4 internal fn (error_code, external_error, send_attachment, contact_card); called by 1 (_prove); 1 external calls (log).
-
-
-##### `ImessageSurface._downloaded_files`  (lines 386–435)
-
-```
-async def _downloaded_files(self, ctx: SurfaceContext, provider: MessageProvider, conversation_id: UUID, attachments: tuple[MessageAttachment, ...]) -> str
-```
-
-**Purpose**: Downloads incoming iMessage attachments and saves the allowed ones into the workspace inbox. It also produces a human-readable note saying which files were saved, too large, or unavailable.
-
-**Data flow**: It receives the workspace context, provider, UFO conversation ID, and attachment list. For each attachment it chooses a safe unique inbox name, skips files over the size limit, streams downloadable content into memory up to the limit, writes successful files into the workspace, and collects status notes. It returns those notes as text to append to the admitted message.
-
-**Call relations**: ImessageSurface._admit_message calls this before admitting a message that has attachments. It uses the provider to download each attachment, _attachment_content to pass bytes to the workspace writer, and the context to save files.
-
-*Call graph*: calls 4 internal fn (write_workspace_file, download_attachment, external_error, _attachment_content); called by 1 (_admit_message); 1 external calls (inbox_name).
-
-
-##### `ImessageSurface.post`  (lines 437–444)
-
-```
-async def post(self, ctx: SurfaceContext, writeback: Writeback) -> str
-```
-
-**Purpose**: Sends the final UFO turn reply back to the matching iMessage chat. This is used when a turn has finished and there is a terminal response to deliver.
-
-**Data flow**: It receives a surface context and writeback object. It decodes the saved queue key to find the iMessage conversation, builds the final text through ImessageSurface._terminal_text, sends that text through the provider, and returns the provider’s message reference.
-
-**Call relations**: UFO’s surface system calls this when a completed turn needs to be written back. It depends on conversation_from_queue for the destination and ImessageSurface._terminal_text for text that fits iMessage’s plain-message format.
-
-*Call graph*: calls 2 internal fn (_terminal_text, conversation_from_queue).
-
-
-##### `ImessageSurface.speak`  (lines 446–450)
-
-```
-async def speak(self, _ctx: SurfaceContext, reply: MidTurnReply) -> str
-```
-
-**Purpose**: Sends an intermediate reply before the current UFO turn has fully ended. This lets the assistant say something mid-turn in the iMessage chat.
-
-**Data flow**: It receives a mid-turn reply. It decodes the queue key, sends the reply text to that iMessage conversation through the provider, and returns the provider’s message reference.
-
-**Call relations**: UFO’s surface system calls this for mid-turn messages. It uses conversation_from_queue to turn the saved queue key into the provider conversation ID before sending.
-
-*Call graph*: calls 1 internal fn (conversation_from_queue).
-
-
-##### `ImessageSurface.attach`  (lines 452–464)
-
-```
-async def attach(self, ctx: SurfaceContext, writeback: Writeback, _reply_ref: str) -> None
-```
-
-**Purpose**: Uploads completed-turn artifacts as iMessage attachments when they fit the size limit. Oversized artifacts are skipped here because the final text can point to them by link instead.
-
-**Data flow**: It receives the surface context, writeback, and an unused reply reference. It decodes the iMessage destination, loops over each artifact, skips files above the limit, reads each allowed artifact’s bytes, and sends it as an attachment through the provider.
-
-**Call relations**: UFO’s surface system calls this after or alongside a final writeback when files should be shared. It uses conversation_from_queue for the destination and ImessageSurface._artifact_bytes to safely load each file before upload.
-
-*Call graph*: calls 2 internal fn (_artifact_bytes, conversation_from_queue).
-
-
-##### `ImessageSurface._terminal_text`  (lines 466–488)
-
-```
-async def _terminal_text(self, ctx: SurfaceContext, writeback: Writeback, *, direct: bool) -> str
-```
-
-**Purpose**: Builds the plain text that should be sent for a completed UFO turn. It combines the answer, any question prompts, connection instructions, credential instructions, and links for files too large to send through iMessage.
-
-**Data flow**: It receives a context, writeback, and whether the chat is direct. It starts with the terminal response text and question text, adds a direct connect URL or direct-message instruction when account connection is requested, adds a home/member-portal hint for credential requests, and adds links or names for oversized artifacts. It returns the joined message, or a status fallback if there is no text.
-
-**Call relations**: ImessageSurface.post calls this before sending the final iMessage. It calls ImessageSurface._question_text for question formatting and uses context URL helpers when the reply requires the user to continue elsewhere.
-
-*Call graph*: calls 4 internal fn (artifact_link, connect_url, home_url, _question_text); called by 1 (post).
-
-
-##### `ImessageSurface._question_text`  (lines 490–501)
-
-```
-def _question_text(self, writeback: Writeback) -> str
-```
-
-**Purpose**: Formats any question included in a terminal writeback into readable plain text. This makes structured prompts understandable inside a simple iMessage bubble.
-
-**Data flow**: It receives the writeback. If there is no question, it returns an empty string. If there is one, it writes the title, each question, any answer options, and any current chosen answer into a newline-separated text block.
-
-**Call relations**: ImessageSurface._terminal_text calls this while building the final outgoing text. It converts UFO’s structured question data into something iMessage can display without special UI.
-
-*Call graph*: called by 1 (_terminal_text).
-
-
-##### `ImessageSurface._artifact_bytes`  (lines 503–513)
-
-```
-async def _artifact_bytes(self, ctx: SurfaceContext, blob_key: str, size_bytes: int) -> bytes
-```
-
-**Purpose**: Reads an outgoing artifact from blob storage and verifies it is safe to send as an iMessage attachment. It protects the provider from files that are too large or whose size changed while being read.
-
-**Data flow**: It receives a context, blob key, and expected size. It rejects the file immediately if the expected size is over the iMessage limit, streams the blob into memory while checking the limit, verifies the final byte count matches the expected size, and returns the bytes.
-
-**Call relations**: ImessageSurface.attach calls this for each artifact it plans to upload. The returned bytes are passed directly to the provider’s send_attachment method.
-
-*Call graph*: called by 1 (attach).
-
-
-### Slack Message Surface
-Slack helpers normalize attribution and mentions before the main surface ingests workspace activity and delivers replies.
-
-### `extensions/slack/ufo_ext_slack/attribution.py`
-
-`domain_logic` · `outbound Slack connector sends and inbound Slack message checks`
-
-When this system sends a Slack message through a connector, the message is not rendered by the normal Slack-facing code. That means the usual place for adding a clear “this came from UFO” marker is skipped. This file fills that gap by adding an attribution footer to connector-sent Slack messages, but with the workspace’s actual bot user mentioned instead of just writing the product name. In Slack terms, a mention like `<@U123>` becomes a clickable reference to the bot.
-
-The file has two matching halves. The outbound half decides whether a connector call is really sending a Slack message, then adds the bot-mention footer in the same shape used by the generic connector attribution system. It avoids adding a second footer if one is already present, like a mailroom stamp that should appear once, not every time the envelope is handled.
-
-The inbound half protects the bot from confusing its own footer with a user’s request. Slack may report a message as mentioning the bot because the footer contains the bot mention. This file strips known attribution text before checking whether the message still mentions the bot. It also looks through Slack message blocks, not just the plain text field, because Slack messages can store visible text in nested block structures.
+The file also protects important browser boundaries. It strips or rewrites headers that could leak sessions, poison caches, or stop the portal from framing the site. It prevents agent-authored sites from setting cookies in UFO’s reserved namespace. For WebSockets, it checks that the connection really comes from the same site origin, then relays messages both ways with size limits. Without this file, hosted sites would either be unreachable from the browser, or worse, reachable without the careful isolation that keeps workspaces, sessions, cookies, and cached content separate.
 
 #### Function details
 
-##### `is_slack_send`  (lines 36–45)
+##### `IngressServe.app`  (lines 300–332)
 
 ```
-def is_slack_send(provider: str, slug: str) -> bool
+def app(self) -> FastAPI
 ```
 
-**Purpose**: This function answers a narrow question: is this connector call one that publishes a Slack message? It keeps the Slack extension in step with the connector tool’s own rules for deciding which calls should receive an attribution footer.
+**Purpose**: Builds the FastAPI web application that receives all HTTP and WebSocket traffic for hosted sites. It claims the special view-token path before the catch-all proxy route so tokens are not accidentally forwarded to site code.
 
-**Data flow**: It receives a connector provider name and a connector action slug. It lowercases the slug, then checks that the provider is Slack, that the slug looks like it is about messages, and that it includes a send-like verb. It returns true only when all of those clues match.
+**Data flow**: It starts with the configured IngressServe object → creates an application with routes for opening view links, proxying ordinary HTTP paths, refusing token paths over WebSocket, and relaying other WebSockets → returns the ready-to-run web app.
 
-**Call relations**: This is the gatekeeper used before Slack attribution should be applied. By using the same provider and slug pattern as the connector attribution logic, it prevents one part of the system from adding a footer while another part thinks the call is unrelated.
+**Call relations**: The process startup code asks this method for the application before handing it to the web server. After that, the routes it registers send requests into _open, _proxy, _no_view_token, _no_socket_view, or _socket depending on the path and protocol.
 
-
-##### `mention_attributed`  (lines 48–55)
-
-```
-def mention_attributed(arguments: dict[str, JsonValue], bot_user_id: str) -> dict[str, JsonValue]
-```
-
-**Purpose**: This function adds the bot-mention attribution footer to the arguments for a Slack send. Someone would use it right before dispatching a connector-sent Slack message, so readers can click through to the bot from the message footer.
-
-**Data flow**: It receives the message arguments and the Slack bot user ID. It formats the standard attribution subject so it mentions that bot user, then passes the original arguments and that subject to the shared connector attribution helper. The result is a new set of arguments with the footer added, unless a suitable attribution is already there.
-
-**Call relations**: This function is the Slack-specific wrapper around the shared connector attribution machinery. It asks `UFO_ATTRIBUTION_MENTION_SUBJECT.format` to build the right mention text, then hands everything to `attributed_arguments`, which does the actual message-shaping and duplicate-footer avoidance.
-
-*Call graph*: 2 external calls (format, attributed_arguments).
+*Call graph*: 1 external calls (FastAPI).
 
 
-##### `addressing_mention`  (lines 58–68)
+##### `IngressServe._no_view_token`  (lines 334–340)
 
 ```
-def addressing_mention(text: str, bot_user_id: str) -> bool
+async def _no_view_token(self, request: Request) -> Response
 ```
 
-**Purpose**: This function checks whether a piece of Slack text truly mentions the bot, ignoring mentions that only appear inside this system’s own attribution footer. It helps stop the bot from treating its own sent messages as if a person had addressed it.
+**Purpose**: Answers requests to the bare view-token path when no token was provided. It prevents a malformed or empty link from being treated as a real site-opening link.
 
-**Data flow**: It receives some Slack text and the bot user ID. First it removes known attribution footer text from the message. Then it looks for the Slack mention form for that bot user, such as `<@bot_user_id>`. It returns true if the mention remains after the footer is stripped away.
+**Data flow**: It receives an HTTP request → checks whether the method is allowed for view links → returns either a 405 “method not allowed” response or a 403 saying the link is not valid.
 
-**Call relations**: This is used on the inbound side, when Slack text is being judged as addressed to the bot or not. It relies on the shared `attribution_stripped` helper so the same footer shape that was added on send is also recognized and ignored on receive.
+**Call relations**: The app router sends bare view-path requests here instead of to _open. This keeps query-string tricks from being interpreted as a token.
 
-*Call graph*: 1 external calls (attribution_stripped).
-
-
-##### `message_bodies`  (lines 71–77)
-
-```
-def message_bodies(event: Mapping[str, object]) -> tuple[str, ...]
-```
-
-**Purpose**: This function collects every text-bearing part of a Slack message event where a bot mention might be hidden. It matters because Slack messages can keep visible text inside nested blocks, not only in the top-level `text` field.
-
-**Data flow**: It receives a Slack event represented like a dictionary. It reads the top-level text field, then looks at the message blocks field and pulls out every nested string inside it. It returns all of those text snippets as a tuple, starting with the top-level text.
-
-**Call relations**: This function prepares inbound message content for mention checks such as `addressing_mention`. To find text inside Slack’s nested block structure, it delegates the recursive searching work to `_nested_strings`.
-
-*Call graph*: calls 1 internal fn (_nested_strings).
+*Call graph*: 1 external calls (Response).
 
 
-##### `_nested_strings`  (lines 80–89)
+##### `IngressServe._open`  (lines 342–395)
 
 ```
-def _nested_strings(value: object) -> Iterator[str]
+async def _open(self, request: Request, view_path: str) -> Response
 ```
 
-**Purpose**: This helper walks through a nested Slack data structure and yields every string it can find. It is used because Slack block content can be buried inside dictionaries and lists several layers deep.
+**Purpose**: Turns a short-lived signed view link into a host-only session cookie for the specific site origin. This is the doorway from the portal frame into the hosted site.
 
-**Data flow**: It receives any value. If the value is a string, it yields that string. If it is a mapping, it searches through each stored value. If it is a list, it searches through each item. Other kinds of values are ignored.
+**Data flow**: It receives the request and the path after the view prefix → extracts the token and optional entry path → checks the hostname, verifies the token, confirms it matches the addressed site, and optionally confirms the named framing site belongs to the workspace → mints a session token, sets it as a cookie, and redirects the browser to the site path.
 
-**Call relations**: This is the small search tool behind `message_bodies`. `message_bodies` gives it the Slack blocks from an event, and `_nested_strings` returns the scattered text pieces so the rest of the Slack extension can make an accurate mention decision.
+**Call relations**: The route table sends token-opening HTTP requests here. It uses _site to understand the hostname and _framer_belongs when a sibling site is allowed to frame this one; successful requests then continue as normal site requests handled by _proxy.
 
-*Call graph*: called by 1 (message_bodies).
+*Call graph*: calls 2 internal fn (_framer_belongs, _site); 9 external calls (replace, now, RedirectResponse, Response, mint_ingress_token, verify_ingress_token, cookie_secure, set_session_cookie, quote).
 
 
-### `extensions/slack/ufo_ext_slack/mentions.py`
+##### `IngressServe._site`  (lines 397–408)
 
-`domain_logic` · `message ingest and outbound reply sending`
+```
+def _site(self, request: HTTPConnection) -> tuple[UUID, int] | None
+```
 
-Slack does not send every message exactly as a person sees it. A user mention may arrive as something like <@U123>, a channel as <#C456|general>, and a link as <https://example.com|docs>. Those forms are useful for Slack’s computers, but they are hard for people and language models to understand. This file is the translator at the boundary.
+**Purpose**: Figures out which site a request is trying to reach by reading the request hostname. If the host is not one of this ingress server’s signed site names, it returns nothing.
 
-On the way in, render_markup rewrites Slack entities into readable text such as @Alex or #general, using a caller-provided map of Slack IDs to names. If a name cannot be safely found, it leaves the original code alone rather than guessing. Links are shown with both their label and URL when needed, so a reader can see the words and still know where the link points.
+**Data flow**: It receives an HTTP or WebSocket connection → compares its hostname to the configured base host → parses the remaining label into a conversation ID and port → returns that pair, or None if the host is not valid.
 
-On the way out, mention_markup does a narrower job. If the agent writes @Alex, it can turn that back into <@U123> so Slack actually notifies Alex. It only does this for names the caller explicitly allows, skips code blocks and URLs, avoids ambiguous names, and limits how many mentions it will convert. Like a careful receptionist, it will only ring people it can identify with confidence.
+**Call relations**: _open uses this to make sure a view token is being opened at the right origin. _authorized uses it as the first step in the shared gate for both HTTP and WebSocket traffic.
 
-The file also keeps Slack’s HTML-style escapes separate. Turning &lt; back into < is only safe for the original speaker’s own message, not for quoted bystanders.
+*Call graph*: called by 2 (_authorized, _open); 1 external calls (parse_site_label).
+
+
+##### `IngressServe._authorized`  (lines 410–432)
+
+```
+def _authorized(self, connection: HTTPConnection) -> IngressClaims | SiteRefusal
+```
+
+**Purpose**: Checks whether an incoming HTTP request or WebSocket handshake is allowed to reach the addressed site. It is the shared security gate for static files, live proxying, and sockets.
+
+**Data flow**: It receives a connection → reads the site identity from the host → verifies the session cookie as a signed ingress session token → checks that the token names the same conversation and port as the hostname → returns the claims if valid, or a SiteRefusal with the status and message to show if not.
+
+**Call relations**: _proxy calls this before serving any HTTP response. _socket calls it before opening any WebSocket to a sandbox, so both protocols obey the same authorization rule.
+
+*Call graph*: calls 1 internal fn (_site); called by 2 (_proxy, _socket); 3 external calls (__init__, now, verify_ingress_token).
+
+
+##### `IngressServe._stored_manifest`  (lines 434–472)
+
+```
+async def _stored_manifest(self, claims: IngressClaims) -> dict[str, StoredFile] | None
+```
+
+**Purpose**: Finds out whether the authorized site should be served from stored files instead of a live sandbox. If so, it returns a map of request paths to stored file metadata.
+
+**Data flow**: It receives verified ingress claims → if the claims name a shipped app, it delegates to _shipped_manifest → otherwise it reads the hosted-site row for this workspace, conversation, and port → parses the saved manifest JSON → returns StoredFile entries, or None if the site is not stored.
+
+**Call relations**: _proxy uses this to decide between direct blob serving and live sandbox proxying. _socket uses it to reject sockets for static stored sites, because a folder of files has no socket server.
+
+*Call graph*: calls 1 internal fn (_shipped_manifest); called by 2 (_proxy, _socket); 4 external calls (__init__, loads, select, workspace_tx).
+
+
+##### `IngressServe._shipped_manifest`  (lines 474–506)
+
+```
+async def _shipped_manifest(self, shipped: ShippedClaim) -> dict[str, StoredFile] | None
+```
+
+**Purpose**: Builds or reuses a file manifest for a deploy-wide shipped app bundle. These are application files shared across workspaces and addressed by a content digest.
+
+**Data flow**: It receives a shipped-app claim → checks an in-memory cache → lists files under the digest in the fleet blob store if needed → converts each blob entry into a StoredFile keyed by the URL path that should serve it → returns the manifest or None if the bundle is gone.
+
+**Call relations**: _stored_manifest calls this when the session claims refer to shipped app code rather than a workspace-hosted site row. The result later lets _serve_stored stream those files from the fleet store.
+
+*Call graph*: called by 1 (_stored_manifest); 3 external calls (__init__, __init__, guess_type).
+
+
+##### `IngressServe._dial_site`  (lines 508–538)
+
+```
+async def _dial_site(self, claims: IngressClaims) -> DialTarget | SiteRefusal
+```
+
+**Purpose**: Locates the live sandbox endpoint for a site that is not being served from stored files. It turns an authorized site claim into the actual host, port, TLS setting, and extra headers needed to contact the sandbox.
+
+**Data flow**: It receives verified claims → reads any stored sandbox handle for the conversation → chooses the current or resume carrier as needed → builds a sandbox handle → asks the carrier to dial the requested port → returns a DialTarget, or a SiteRefusal if the sandbox is gone or unreachable.
+
+**Call relations**: _proxy calls this before forwarding HTTP traffic to a live site. _socket calls it before opening an upstream WebSocket.
+
+*Call graph*: calls 1 internal fn (_stored_handle); called by 2 (_proxy, _socket); 6 external calls (__init__, __init__, warn, sandbox_handle_backend, sandbox_handle_id, ws).
+
+
+##### `IngressServe._proxy`  (lines 540–606)
+
+```
+async def _proxy(self, request: Request, path: str) -> Response
+```
+
+**Purpose**: Handles ordinary HTTP requests for hosted sites. It either serves a stored file from blob storage or streams the request to a live sandbox and streams the response back.
+
+**Data flow**: It receives the request and requested path → authorizes the session → checks for a stored manifest → serves stored files when present → otherwise dials the sandbox, builds an upstream request with safe headers and streamed body, sends it, and returns a streaming response with cleaned headers and protective cache/frame/cookie rules.
+
+**Call relations**: This is the catch-all HTTP route registered by app. It depends on _authorized, _stored_manifest, _serve_stored, _dial_site, _upstream_url, _upstream_headers, _body, _frame_ancestors, _unframed_policy, and _confined_cookie to keep proxying safe.
+
+*Call graph*: calls 10 internal fn (_authorized, _body, _confined_cookie, _dial_site, _frame_ancestors, _serve_stored, _stored_manifest, _unframed_policy, _upstream_headers, _upstream_url); 7 external calls (stream, Response, StreamingResponse, Request, BackgroundTask, log_error, ws).
+
+
+##### `IngressServe._serve_stored`  (lines 608–674)
+
+```
+async def _serve_stored(self, request: Request, claims: IngressClaims, files: dict[str, StoredFile], path: str) -> Response
+```
+
+**Purpose**: Serves one file from a stored static site or shipped app bundle. It lets a site keep working even if the sandbox that produced it is no longer running.
+
+**Data flow**: It receives the request, verified claims, a manifest of files, and a path → checks that the method is GET or HEAD → chooses the exact file or an index.html under the requested directory → sets cache, ETag, content type, and framing headers → returns 304 for matching browser cache, a HEAD response, a 404 for missing blobs, or a streaming response with file bytes.
+
+**Call relations**: _proxy calls this after _stored_manifest finds stored files. It uses _frame_ancestors for browser framing policy and _stored_body to stream after confirming the blob exists.
+
+*Call graph*: calls 2 internal fn (_frame_ancestors, _stored_body); called by 1 (_proxy); 5 external calls (__init__, __init__, Response, StreamingResponse, ws).
+
+
+##### `IngressServe._stored_body`  (lines 676–682)
+
+```
+async def _stored_body(self, first: bytes, rest: AsyncIterator[bytes]) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams the rest of a stored file after the first chunk has already been safely read. Reading the first chunk early lets the server return a clean 404 if the blob disappeared before sending a 200 response.
+
+**Data flow**: It receives the first bytes and an async iterator for the remaining bytes → yields the first chunk → yields each later chunk unchanged → produces the byte stream consumed by the HTTP response.
+
+**Call relations**: _serve_stored calls this only after it has successfully pulled the first blob chunk. The streaming response then uses it to send the file to the browser.
+
+*Call graph*: called by 1 (_serve_stored).
+
+
+##### `IngressServe._framer_belongs`  (lines 684–719)
+
+```
+async def _framer_belongs(self, workspace_id: UUID, conversation_id: UUID, port: int) -> bool
+```
+
+**Purpose**: Checks whether a site named as an allowed framer really belongs to the same workspace. This prevents a signed link from allowing an unrelated site to wrap another site in an iframe.
+
+**Data flow**: It receives a workspace ID, conversation ID, and port → looks for a matching hosted-site row → if none is found, checks provisioned shipped apps for a matching derived site identity → returns true if the framer is valid for that workspace, otherwise false.
+
+**Call relations**: _open calls this while exchanging a view token for a session. If it returns false, _open refuses the link instead of setting a session cookie.
+
+*Call graph*: called by 1 (_open); 5 external calls (select, workspace_tx, serve_port, shipped_anchor, shipped_app_slug).
+
+
+##### `IngressServe._frame_ancestors`  (lines 721–729)
+
+```
+def _frame_ancestors(self, claims: IngressClaims) -> str
+```
+
+**Purpose**: Builds the browser rule that says which page is allowed to embed this site in a frame. It normally allows the main app origin, and may also allow one verified sibling site.
+
+**Data flow**: It receives verified claims → if framing is disabled or no framer is named, returns the deploy-wide frame ancestor value → otherwise turns the framer’s site identity into a full origin and appends it → returns the value used in the Content-Security-Policy header.
+
+**Call relations**: _proxy and _serve_stored call this before sending site content so every live and stored response carries the same framing boundary.
+
+*Call graph*: called by 2 (_proxy, _serve_stored); 1 external calls (site_label).
+
+
+##### `IngressServe._upstream_url`  (lines 731–734)
+
+```
+def _upstream_url(self, scheme: str, host: str, path: str, query_string: bytes) -> str
+```
+
+**Purpose**: Builds the exact URL used to contact a live sandbox server. It safely quotes the path and preserves the original query string.
+
+**Data flow**: It receives a scheme, upstream host, path, and raw query bytes → encodes the path using the allowed safe characters → appends the query when present → returns the upstream URL string.
+
+**Call relations**: _proxy uses this for HTTP forwarding. _socket uses it for WebSocket forwarding.
+
+*Call graph*: called by 2 (_proxy, _socket); 1 external calls (quote).
+
+
+##### `IngressServe._stored_handle`  (lines 736–746)
+
+```
+async def _stored_handle(self, workspace_id: UUID, conversation_id: UUID) -> str | None
+```
+
+**Purpose**: Reads the saved sandbox handle for a conversation in a workspace. The handle is needed to reconnect to the live sandbox that owns the requested port.
+
+**Data flow**: It receives workspace and conversation IDs → queries the conversation row under that workspace → returns the sandbox handle string, or None if there is no matching conversation.
+
+**Call relations**: _dial_site calls this before asking a carrier to dial the sandbox. A missing handle leads _dial_site to refuse the request as a gone site.
+
+*Call graph*: called by 1 (_dial_site); 2 external calls (select, workspace_tx).
+
+
+##### `IngressServe._upstream_headers`  (lines 748–782)
+
+```
+def _upstream_headers(self, request: HTTPConnection, dial_headers: Mapping[str, str]) -> list[tuple[str, str]]
+```
+
+**Purpose**: Chooses which browser headers are safe to send to the sandbox. It removes proxy-only headers, WebSocket handshake headers, the ingress session cookie, and anything the dial target must override.
+
+**Data flow**: It receives the incoming request or handshake plus headers supplied by the dial target → walks through the viewer’s headers → drops unsafe or internal ones, edits Cookie to remove the UFO session cookie, and preserves repeatable site-owned headers → appends the dial target headers → returns the final header list for the upstream request.
+
+**Call relations**: _proxy uses this for live HTTP requests and _socket uses it for upstream WebSocket connections. This is a key boundary between browser state owned by the site and private ingress state.
+
+*Call graph*: called by 2 (_proxy, _socket).
+
+
+##### `IngressServe._unframed_policy`  (lines 784–796)
+
+```
+def _unframed_policy(self, policy: str) -> str
+```
+
+**Purpose**: Removes only the frame-control part from a site’s Content-Security-Policy header. The rest of the site’s browser safety policy is preserved.
+
+**Data flow**: It receives one Content-Security-Policy header value → splits it into directives → filters out frame-ancestors → joins the remaining directives → returns the rewritten policy, or an empty string if nothing remains.
+
+**Call relations**: _proxy calls this while copying live sandbox response headers. The ingress then supplies its own frame-ancestors rule so framing behavior is controlled consistently.
+
+*Call graph*: called by 1 (_proxy).
+
+
+##### `IngressServe._confined_cookie`  (lines 798–825)
+
+```
+def _confined_cookie(self, header: str) -> str | None
+```
+
+**Purpose**: Rewrites or drops a Set-Cookie header from a sandbox so the site cannot set cookies outside its own hostname or inside UFO’s reserved cookie namespace.
+
+**Data flow**: It receives one Set-Cookie header string → parses the cookie name → drops nameless cookies, malformed cookies, and names starting with the reserved prefix → removes any Domain attribute from allowed cookies → returns the confined header, or None to drop it.
+
+**Call relations**: _proxy calls this for each Set-Cookie response header from a live sandbox before sending it to the browser.
+
+*Call graph*: called by 1 (_proxy).
+
+
+##### `IngressServe._body`  (lines 827–837)
+
+```
+async def _body(self, upstream: httpx.Response) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams raw response bytes from a live sandbox back to the browser and makes sure the upstream response is closed afterward. This avoids leaking pooled network connections when a stream ends early or fails.
+
+**Data flow**: It receives an httpx upstream response → yields each raw byte chunk as it arrives → always closes the upstream response in the end → produces the stream used by the outgoing HTTP response.
+
+**Call relations**: _proxy wraps this in a StreamingResponse after sending a live request upstream. It works with the background close task as a second safety net.
+
+*Call graph*: called by 1 (_proxy); 2 external calls (aclose, aiter_raw).
+
+
+##### `IngressServe._no_socket_view`  (lines 839–845)
+
+```
+async def _no_socket_view(self, websocket: WebSocket) -> None
+```
+
+**Purpose**: Rejects WebSocket attempts to the special view-token path. View tokens are only meant to be exchanged over HTTP, not exposed to site code through a socket path.
+
+**Data flow**: It receives a WebSocket handshake → builds a refusal saying the link is not valid → sends that refusal instead of accepting the socket.
+
+**Call relations**: The app registers this for the view path over WebSocket. It delegates the actual denial response to _refuse.
+
+*Call graph*: calls 1 internal fn (_refuse); 1 external calls (__init__).
+
+
+##### `IngressServe._socket`  (lines 847–903)
+
+```
+async def _socket(self, websocket: WebSocket, path: str) -> None
+```
+
+**Purpose**: Handles WebSocket connections for live sandbox sites. It authorizes the viewer, checks same-origin safety, opens a matching WebSocket to the sandbox, then relays messages both ways.
+
+**Data flow**: It receives the viewer’s WebSocket and requested path → rejects missing or foreign Origin headers → authorizes the session → refuses stored or shipped static sites → dials the sandbox → opens an upstream WebSocket with safe headers and offered subprotocols → accepts the viewer socket only after the upstream accepts → relays messages until one side ends.
+
+**Call relations**: This is the catch-all WebSocket route registered by app. It relies on _same_origin, _authorized, _stored_manifest, _dial_site, _upstream_url, _upstream_headers, _refuse, _relay, and _end to keep socket behavior aligned with HTTP security.
+
+*Call graph*: calls 9 internal fn (_authorized, _dial_site, _end, _refuse, _relay, _same_origin, _stored_manifest, _upstream_headers, _upstream_url); 6 external calls (__init__, accept, log_error, ws, connect, Subprotocol).
+
+
+##### `IngressServe._same_origin`  (lines 905–917)
+
+```
+def _same_origin(self, websocket: WebSocket) -> bool
+```
+
+**Purpose**: Checks that a WebSocket was opened by the same site host it is connecting to. This closes a browser gap where WebSockets are not protected by the usual cross-origin read rules.
+
+**Data flow**: It receives the WebSocket handshake → reads the Origin header → compares the origin hostname with the target request hostname → returns true only when they match and Origin is present.
+
+**Call relations**: _socket calls this before authorization and dialing. A false result is refused immediately so one hosted site cannot open a socket into another site using the victim site’s cookie.
+
+*Call graph*: called by 1 (_socket); 1 external calls (urlsplit).
+
+
+##### `IngressServe._refuse`  (lines 919–926)
+
+```
+async def _refuse(self, websocket: WebSocket, refusal: SiteRefusal) -> None
+```
+
+**Purpose**: Turns a SiteRefusal into a WebSocket handshake denial response. This gives socket clients the same status code and message an HTTP request would have received.
+
+**Data flow**: It receives a WebSocket and a refusal object → creates an HTTP-style response with the refusal’s message, status, and media type → sends that as the denial instead of accepting the socket.
+
+**Call relations**: _no_socket_view uses this for token-path socket attempts. _socket uses it for failed origin checks, failed authorization, static sites, missing sandboxes, and unreachable upstream sockets.
+
+*Call graph*: called by 2 (_no_socket_view, _socket); 2 external calls (send_denial_response, Response).
+
+
+##### `IngressServe._relay`  (lines 928–945)
+
+```
+async def _relay(self, viewer: WebSocket, upstream: ClientConnection) -> None
+```
+
+**Purpose**: Runs the two halves of a WebSocket relay at the same time: viewer to site and site to viewer. When either side finishes, it stops the other side too.
+
+**Data flow**: It receives the accepted viewer socket and upstream site socket → starts one task for each direction → waits until the first direction ends → cancels the other direction → re-raises any real failure from the completed side.
+
+**Call relations**: _socket calls this after both WebSocket connections are open. It hands the actual message movement to _viewer_to_site and _site_to_viewer.
+
+*Call graph*: calls 2 internal fn (_site_to_viewer, _viewer_to_site); called by 1 (_socket); 3 external calls (create_task, gather, wait).
+
+
+##### `IngressServe._viewer_to_site`  (lines 947–956)
+
+```
+async def _viewer_to_site(self, viewer: WebSocket, upstream: ClientConnection) -> None
+```
+
+**Purpose**: Copies WebSocket messages from the browser to the sandbox without changing text frames into binary frames or vice versa. The frame type matters to many site protocols.
+
+**Data flow**: It receives the viewer socket and upstream socket → repeatedly reads messages from the viewer → stops on viewer disconnect → sends text as text and bytes as bytes to the upstream site.
+
+**Call relations**: _relay starts this as one of the two relay directions. It ends naturally when the viewer disconnects.
+
+*Call graph*: called by 1 (_relay); 2 external calls (receive, send).
+
+
+##### `IngressServe._site_to_viewer`  (lines 958–971)
+
+```
+async def _site_to_viewer(self, upstream: ClientConnection, viewer: WebSocket) -> None
+```
+
+**Purpose**: Copies WebSocket messages from the sandbox back to the browser and then closes the browser socket with a suitable close code. It avoids sending close codes that the WebSocket standard reserves for local-only observations.
+
+**Data flow**: It receives the upstream socket and viewer socket → forwards each upstream text or byte message to the viewer → reads the upstream close code and reason → substitutes a safe code when necessary → asks _end to close the viewer side.
+
+**Call relations**: _relay starts this as the site-to-browser direction. It calls _end for the final close so shutdown errors do not hide the original end of the connection.
+
+*Call graph*: calls 1 internal fn (_end); called by 1 (_relay); 3 external calls (suppress, send_bytes, send_text).
+
+
+##### `IngressServe._end`  (lines 973–983)
+
+```
+async def _end(self, viewer: WebSocket, code: int, reason: str) -> None
+```
+
+**Purpose**: Closes the viewer WebSocket quietly. It is deliberately forgiving because the browser may already have gone away.
+
+**Data flow**: It receives the viewer socket, close code, and reason → attempts to close the socket → suppresses any exception raised because the connection is already gone → returns nothing.
+
+**Call relations**: _site_to_viewer calls this after the upstream site ends. _socket also calls it after relay failures to tell the viewer the upstream is gone when possible.
+
+*Call graph*: called by 2 (_site_to_viewer, _socket); 2 external calls (suppress, close).
+
+
+##### `ingress_base_host`  (lines 986–997)
+
+```
+def ingress_base_host(configured: str | None) -> str
+```
+
+**Purpose**: Extracts the base hostname used for all hosted site subdomains from configuration. It refuses to start the server if that value is missing or unusable.
+
+**Data flow**: It receives the configured ingress public URL or None → parses out the hostname → returns the hostname when present → raises a startup error when no hostname can be found.
+
+**Call relations**: run calls this during startup before creating IngressServe. Its result is later used by _site to decide whether a request hostname belongs to this ingress.
+
+*Call graph*: called by 1 (run); 1 external calls (urlsplit).
+
+
+##### `ingress_frame_ancestor`  (lines 1000–1010)
+
+```
+def ingress_frame_ancestor(configured: str | None) -> str
+```
+
+**Purpose**: Builds the deploy-wide browser origin that is allowed to frame hosted sites. If no public app base URL is configured, it returns a rule meaning no one may frame them.
+
+**Data flow**: It receives the configured public app URL or None → parses scheme, hostname, and optional port → returns an origin string like scheme://host:port, or the no-framing value when incomplete.
+
+**Call relations**: run calls this at startup and stores the result on IngressServe. _frame_ancestors later uses it for every stored and proxied site response.
+
+*Call graph*: called by 1 (run); 1 external calls (urlsplit).
+
+
+##### `upstream_client`  (lines 1013–1036)
+
+```
+def upstream_client() -> httpx.AsyncClient
+```
+
+**Purpose**: Creates the shared HTTP client used to talk to live sandbox servers. It is intentionally cookie-blind so cookies from one site are never stored and replayed to another.
+
+**Data flow**: It creates timeout and connection-limit settings → creates a cookie jar whose policy accepts no domains → returns an AsyncClient configured with those limits and that empty, non-storing cookie jar.
+
+**Call relations**: run calls this once during startup and passes the client into IngressServe. _proxy uses that client for all live HTTP forwarding.
+
+*Call graph*: called by 1 (run); 4 external calls (CookieJar, DefaultCookiePolicy, AsyncClient, Limits).
+
+
+##### `run`  (lines 1039–1066)
+
+```
+def run() -> None
+```
+
+**Purpose**: Starts the ingress server process. It loads configuration, prepares logging, database access, carriers, blob storage, and then runs the web server.
+
+**Data flow**: It reads configuration → initializes observability and database connectivity → verifies required ingress secrets and host settings → selects sandbox carriers and blob backend → creates an IngressServe instance → builds its FastAPI app → starts uvicorn on the configured ingress port with WebSocket size and compression settings.
+
+**Call relations**: This is the file’s process entrypoint. It calls the small startup helpers ingress_base_host, ingress_frame_ancestor, and upstream_client, then hands IngressServe.app to uvicorn so incoming traffic can reach the route methods.
+
+*Call graph*: calls 3 internal fn (ingress_base_host, ingress_frame_ancestor, upstream_client); 14 external calls (__init__, run, blob_store_for, load_config, init_db, verify_db_reachable, load_manifests, init_o11y, log, owner_dsn (+4 more)).
+
+
+### `core/src/ufo/sandbox/ingress_token.py`
+
+`domain_logic` · `request handling`
+
+A sandbox may expose a web page on a port, but the system cannot simply leave that port open to everyone. This file acts like a short-lived, tamper-proof visitor pass. The pass says which workspace, conversation, and port the visitor may reach, when the pass expires, and sometimes which enclosing frame or shipped app bundle is involved.
+
+There are two different passes for two different steps. A “view” token is placed in the link that opens the sandbox view. A “session” token is later stored as that origin’s cookie. The token kind is included inside the signed content, so a session cookie cannot be reused as a view link, and a view link cannot be pasted in as a session cookie. This separation limits replay mistakes between the two browser hops.
+
+The file also defines small data shapes for the claims inside a token. “Claims” are the facts the token asserts, such as the workspace ID and port number. Tokens are signed using one deploy-wide secret read from the environment. Verification rebuilds the claims, checks the signature, checks the expected kind, refuses invalid port numbers, and rejects expired tokens. Without this file, sandbox ingress would have no reliable way to know whether a browser request is allowed to reach a particular sandbox port.
 
 #### Function details
 
-##### `mentioned_users`  (lines 67–70)
+##### `mint_ingress_token`  (lines 76–93)
 
 ```
-def mentioned_users(text: str) -> frozenset[str]
+def mint_ingress_token(claims: IngressClaims, kind: IngressTokenKind) -> str
 ```
 
-*Call graph*: calls 1 internal fn (_mentioned).
+**Purpose**: This function turns trusted ingress claims into a signed token string. Someone uses it when they need to create a browser link or session cookie that grants access to exactly one sandbox hop.
 
+**Data flow**: It receives an IngressClaims object and a token kind, such as a view token or a session token. It converts the important fields into a JSON body, including optional shipped-bundle and frame information when present. It reads the shared ingress secret, signs that JSON body, and returns the signed token text that can be sent to the browser.
 
-##### `mentioned_channels`  (lines 73–75)
+**Call relations**: When the system needs to issue an ingress pass, this function gathers the claims and asks ingress_secret for the shared secret. It then hands the prepared JSON bytes to sign_token, which produces the tamper-resistant token that verify_ingress_token will later be able to check.
 
-```
-def mentioned_channels(text: str) -> frozenset[str]
-```
-
-*Call graph*: calls 1 internal fn (_mentioned).
-
-
-##### `_mentioned`  (lines 78–83)
-
-```
-def _mentioned(text: str, kind: str) -> frozenset[str]
-```
-
-*Call graph*: called by 2 (mentioned_channels, mentioned_users).
-
-
-##### `render_markup`  (lines 86–96)
-
-```
-def render_markup(text: str, names: Mapping[str, str]) -> str
-```
-
-
-##### `unescape`  (lines 99–108)
-
-```
-def unescape(text: str) -> str
-```
-
-
-##### `mention_key`  (lines 111–115)
-
-```
-def mention_key(name: str) -> str
-```
-
-*Call graph*: called by 2 (_mention_at, mention_index).
-
-
-##### `mention_index`  (lines 118–132)
-
-```
-def mention_index(names: Mapping[str, str]) -> dict[str, str]
-```
-
-*Call graph*: calls 1 internal fn (mention_key).
-
-
-##### `mention_markup`  (lines 135–166)
-
-```
-def mention_markup(text: str, ids: Mapping[str, str], limit: int=MENTION_MARKUP_MAX) -> str
-```
-
-*Call graph*: calls 1 internal fn (_mention_at); 1 external calls (finditer).
-
-
-##### `_mention_at`  (lines 169–182)
-
-```
-def _mention_at(text: str, start: int, ids: Mapping[str, str]) -> tuple[int, str] | None
-```
-
-*Call graph*: calls 1 internal fn (mention_key); called by 1 (mention_markup); 2 external calls (islice, finditer).
-
-
-##### `_entity`  (lines 185–201)
-
-```
-def _entity(match: re.Match[str], names: Mapping[str, str]) -> str
-```
-
-
-### `extensions/slack/ufo_ext_slack/surface.py`
-
-`io_transport` · `startup, install, request handling, turn execution, delivery`
-
-This file is the bridge between Slack and the core ufo system. Without it, Slack could not safely identify which workspace a request belongs to, decide whether a message is meant for the agent, save attached files, admit a turn, or post the finished answer back into the right Slack thread.
-
-The file does several jobs. First, it verifies Slack requests using Slack's signing secret, which is like checking the wax seal on a letter before trusting it. It supports two install paths: OAuth, where Slack grants a bot token through an Add to Slack flow, and a manual app setup where the workspace owner supplies the token and secret.
-
-For incoming messages, it works out whether the agent was addressed in a direct message or by mention, maps the Slack channel/thread to a ufo conversation, resolves the Slack user to a ufo member when possible, downloads any Slack files into the workspace, and gathers nearby Slack chatter as background context. Unmentioned replies in an existing thread are only admitted when they are part of the agent's conversation or when a separate ambient-reply decision says the agent should answer.
-
-For outgoing work, it posts terminal replies, mid-turn replies, question forms, connection buttons, progress messages, live Slack status text, and uploaded artifacts. It also keeps careful delivery checkpoints so retries do not duplicate messages.
-
-#### Function details
-
-##### `_env_signing_secret`  (lines 228–232)
-
-```
-def _env_signing_secret() -> str | None
-```
-
-**Purpose**: Reads the deploy-wide Slack signing secret from the process environment. This is the fallback secret used when a workspace has not stored its own Slack signing secret.
-
-**Data flow**: It reads the environment variable for Slack's signing secret. If it is present and non-empty, it returns the string; otherwise it returns nothing.
-
-**Call relations**: Workspace-specific secret lookup calls this when no stored secret is available, both during normal request handling and during pre-routing workspace resolution.
-
-*Call graph*: called by 2 (_auth_signing_secret, _ctx_signing_secret).
-
-
-##### `_ctx_signing_secret`  (lines 235–242)
-
-```
-async def _ctx_signing_secret(ctx: SurfaceContext) -> str | None
-```
-
-**Purpose**: Finds the signing secret for a request after the workspace is already known. It prefers the workspace's private credential slot, then falls back to the deploy-wide environment secret.
-
-**Data flow**: It receives a surface context, asks it for the Slack signing-secret credential, and returns that value. If the slot is unset, it returns the environment secret instead.
-
-**Call relations**: The Slack event route and interactive-button route call this before verifying the request body.
-
-*Call graph*: calls 2 internal fn (credential, _env_signing_secret); called by 2 (ingest, interactive).
-
-
-##### `_auth_signing_secret`  (lines 245–253)
-
-```
-async def _auth_signing_secret(auth: SurfaceAuth, workspace_id: UUID) -> str | None
-```
-
-**Purpose**: Finds the signing secret for a workspace before a request has been fully bound to that workspace. This lets the system verify a Slack request before trusting it.
-
-**Data flow**: It receives shared authentication access and a workspace id. It tries to read that workspace's Slack signing-secret credential, falls back to the environment secret, and returns nothing if the workspace is unknown.
-
-**Call relations**: Workspace resolution uses this after extracting a Slack team hint, so it can verify the raw request before binding the request to a tenant.
-
-*Call graph*: calls 2 internal fn (credential, _env_signing_secret); called by 1 (resolve_workspace).
-
-
-##### `slack_client_id`  (lines 256–260)
-
-```
-def slack_client_id() -> str
-```
-
-**Purpose**: Returns the Slack OAuth client id for this deployment. It fails loudly if OAuth is configured incorrectly.
-
-**Data flow**: It reads the client id environment variable. A present value comes out; a missing value raises an error.
-
-**Call relations**: The OAuth token exchange uses this when trading Slack's temporary code for a bot token.
-
-*Call graph*: called by 1 (slack_oauth_exchange).
-
-
-##### `slack_client_secret`  (lines 263–267)
-
-```
-def slack_client_secret() -> str
-```
-
-**Purpose**: Returns the Slack OAuth client secret for this deployment. It protects the install flow from silently continuing with missing configuration.
-
-**Data flow**: It reads the client secret environment variable. A present value comes out; a missing value raises an error.
-
-**Call relations**: The OAuth exchange calls this alongside the client id when proving this app's identity to Slack.
-
-*Call graph*: called by 1 (slack_oauth_exchange).
-
-
-##### `slack_oauth_redirect_uri`  (lines 270–272)
-
-```
-def slack_oauth_redirect_uri(public_base_url: str) -> str
-```
-
-**Purpose**: Builds the callback URL Slack should redirect to after an OAuth install. This keeps the authorize step and callback exchange using the exact same URL.
-
-**Data flow**: It takes the public base URL of the deployment, trims any trailing slash, appends the Slack surface OAuth path, and returns the full URL.
-
-**Call relations**: The OAuth callback uses it before exchanging Slack's authorization code.
-
-*Call graph*: called by 1 (oauth_callback).
-
-
-##### `slack_authorize_url`  (lines 275–287)
-
-```
-def slack_authorize_url(client_id: str, redirect_uri: str, state: str) -> str
-```
-
-**Purpose**: Builds the Add to Slack link shown to an owner. The link asks Slack for the needed bot permissions and carries sealed state tying the install to one workspace.
-
-**Data flow**: It takes a client id, redirect URL, and state token, encodes them with the required Slack scopes, and returns a Slack authorization URL.
-
-**Call relations**: This is used by the install/connect path that sends a workspace owner to Slack to approve the app.
-
-*Call graph*: 1 external calls (urlencode).
-
-
-##### `SlackIdentityError.__init__`  (lines 291–293)
-
-```
-def __init__(self, error: str)
-```
-
-**Purpose**: Creates an error that carries Slack identity-proving failure text. It makes failures from Slack identity checks explicit and readable.
-
-**Data flow**: It receives an error string, stores it on the exception, and initializes the normal runtime error text with the same value.
-
-**Call relations**: Identity proof and OAuth exchange raise this when Slack returns bad, incomplete, or malformed identity information.
-
-*Call graph*: called by 2 (_prove, slack_oauth_exchange).
-
-
-##### `bot_token_fingerprint`  (lines 310–311)
-
-```
-def bot_token_fingerprint(bot_token: str) -> str
-```
-
-**Purpose**: Creates a safe fingerprint of a Slack bot token. The fingerprint lets the code tell whether stored identity data belongs to the current token without storing or comparing the secret token itself.
-
-**Data flow**: It receives a bot token string, hashes it with SHA-256, and returns the hexadecimal hash.
-
-**Call relations**: Identity reads, manual identity proof, and OAuth install all use this to tie a team/bot identity record to the token that proved it.
-
-*Call graph*: called by 3 (_prove, oauth_callback, read_identity); 1 external calls (sha256).
-
-
-##### `read_identity`  (lines 314–326)
-
-```
-async def read_identity(blob: BlobStore, bot_token: str) -> SlackIdentity | None
-```
-
-**Purpose**: Reads the saved Slack workspace identity if it still matches the current bot token. It refuses stale identity data after a token changes.
-
-**Data flow**: It checks the blob store for the identity record, parses it, compares its token fingerprint with the current bot token's fingerprint, and returns the identity or nothing.
-
-**Call relations**: Both install validation and request handling call this before trusting team and bot-user ids.
-
-*Call graph*: calls 3 internal fn (exists, get, bot_token_fingerprint); called by 3 (resolve, _identity, resolve_self_user_id).
-
-
-##### `resolve_self_user_id`  (lines 329–335)
-
-```
-async def resolve_self_user_id(ctx: SurfaceIdentityContext) -> str | None
-```
-
-**Purpose**: Returns the Slack bot user id for this workspace when the bot token and identity record are available. Other extension code can use this to recognize the bot itself.
-
-**Data flow**: It reads the bot token credential, loads the matching identity record, and returns the stored bot user id or nothing.
-
-**Call relations**: This is an identity helper used by code that needs to know which Slack user id represents the app.
-
-*Call graph*: calls 1 internal fn (read_identity); 1 external calls (credential).
-
-
-##### `_bot_token`  (lines 338–345)
-
-```
-async def _bot_token(ctx: SurfaceContext) -> str | None
-```
-
-**Purpose**: Reads the workspace's Slack bot token if it has been installed. Missing tokens are treated as an incomplete install rather than a crash.
-
-**Data flow**: It asks the surface context for the bot-token credential. If the slot is unset, it returns nothing.
-
-**Call relations**: Inbound event and interactive routes call this before making any Slack API calls.
-
-*Call graph*: calls 1 internal fn (credential); called by 2 (ingest, interactive).
-
-
-##### `_identity`  (lines 348–352)
-
-```
-async def _identity(ctx: SurfaceContext, bot_token: str) -> SlackIdentity | None
-```
-
-**Purpose**: Loads the Slack identity for the current token and mirrors the bot user id into the extension store. This keeps hook-time code able to find the bot id even when it cannot read blobs.
-
-**Data flow**: It reads the identity from the blob store. If found, it writes the bot user id to the scoped store and returns the identity.
-
-**Call relations**: Request handlers and mention-mapping code call this before trusting Slack team or bot-user information.
-
-*Call graph*: calls 2 internal fn (_mirror_self_user_id, read_identity); called by 3 (_reply_mention_ids, ingest, interactive).
-
-
-##### `_mirror_self_user_id`  (lines 358–374)
-
-```
-async def _mirror_self_user_id(workspace_id: UUID, bot_user_id: str) -> None
-```
-
-**Purpose**: Copies the verified Slack bot user id into a lightweight scoped store. This is best-effort because a missing footer helper should not break Slack event handling.
-
-**Data flow**: It receives a workspace id and bot user id, skips the write if this process already wrote the same value, otherwise stores it and updates an in-memory cache.
-
-**Call relations**: Identity loading and OAuth install call this after proving which Slack user the bot is.
-
-*Call graph*: called by 2 (_identity, oauth_callback); 1 external calls (__init__).
-
-
-##### `SlackIdentityResolver.resolve`  (lines 387–393)
-
-```
-async def resolve(self) -> SlackIdentity
-```
-
-**Purpose**: Gets or proves the Slack identity for a manually configured Slack app. It avoids repeated network proof when a valid identity is already stored.
-
-**Data flow**: It first tries to read an existing identity. If absent, it calls Slack to prove the token, writes the result to the blob store, and returns it.
-
-**Call relations**: Background identity repair and manual Slack connect use this resolver to establish team and bot-user ids.
-
-*Call graph*: calls 2 internal fn (_prove, read_identity).
-
-
-##### `SlackIdentityResolver._prove`  (lines 395–420)
-
-```
-async def _prove(self) -> SlackIdentity
-```
-
-**Purpose**: Asks Slack's auth.test API what workspace and bot user a bot token belongs to. This proves that a pasted token is real and tells ufo how to route future events.
-
-**Data flow**: It sends the bot token to Slack, checks the JSON response, validates the team and user id shapes, and returns a SlackIdentity with the token fingerprint.
-
-**Call relations**: The resolver calls this only when there is no valid cached identity.
-
-*Call graph*: calls 2 internal fn (__init__, bot_token_fingerprint); called by 1 (resolve); 3 external calls (__init__, AsyncClient, match).
-
-
-##### `_prove_identity_in_background`  (lines 426–440)
-
-```
-def _prove_identity_in_background(ctx: SurfaceContext, bot_token: str) -> None
-```
-
-**Purpose**: Starts a one-per-workspace background task to prove identity after an event arrives for a partially configured manual install. This lets Slack retry later instead of blocking the current request.
-
-**Data flow**: It checks whether a proof task already exists for the workspace. If not, it starts one and registers cleanup when it finishes.
-
-**Call relations**: The identity-unavailable response uses this when there is a bot token but no usable identity record.
-
-*Call graph*: calls 1 internal fn (_run_identity_proof); called by 1 (_identity_unavailable); 1 external calls (create_task).
-
-
-##### `_prove_identity_in_background._untrack`  (lines 436–438)
-
-```
-def _untrack(done: asyncio.Task[None]) -> None
-```
-
-**Purpose**: Removes a finished identity-proof task from the in-memory task table. This prevents old task entries from blocking future retries.
-
-**Data flow**: It receives the completed task, checks that it is still the tracked task for the workspace, and deletes it if so.
-
-**Call relations**: It is attached as the completion callback for the background identity-proof task.
-
-
-##### `_run_identity_proof`  (lines 443–449)
-
-```
-async def _run_identity_proof(ctx: SurfaceContext, bot_token: str) -> None
-```
-
-**Purpose**: Runs the actual background identity proof and logs failures. It keeps failed proof attempts from crashing request handling.
-
-**Data flow**: It receives a context and bot token, creates a resolver, asks it to resolve, and logs any expected or unexpected error.
-
-**Call relations**: Background proof tasks created by _prove_identity_in_background run this.
-
-*Call graph*: called by 1 (_prove_identity_in_background); 1 external calls (__init__).
-
-
-##### `_identity_unavailable`  (lines 457–485)
-
-```
-def _identity_unavailable(ctx: SurfaceContext, bot_token: str | None) -> Response
-```
-
-**Purpose**: Builds the HTTP response for a verified Slack request when the workspace cannot yet identify its Slack app. It either starts repair work or stops wasteful Slack retries when repair is impossible.
-
-**Data flow**: If no bot token exists, it logs the incomplete install once and returns a no-retry service error. If a token exists, it starts background identity proof and returns a retryable service error.
-
-**Call relations**: The event and interactive routes call this after token or identity lookup fails.
-
-*Call graph*: calls 1 internal fn (_prove_identity_in_background); called by 2 (ingest, interactive); 2 external calls (Response, warn).
-
-
-##### `signing_secret_fingerprint`  (lines 491–494)
-
-```
-def signing_secret_fingerprint(signing_secret: str) -> str
-```
-
-**Purpose**: Creates a safe fingerprint of a Slack signing secret. This lets the code remember which secret successfully verified a URL without storing the secret itself.
-
-**Data flow**: It receives a signing secret, hashes it with SHA-256, and returns the hexadecimal hash.
-
-**Call relations**: URL verification marking uses this to tell current verification apart from a stale marker after a secret rotation.
-
-*Call graph*: called by 1 (_mark_url_verified); 1 external calls (sha256).
-
-
-##### `slack_oauth_exchange`  (lines 514–547)
-
-```
-async def slack_oauth_exchange(code: str, redirect_uri: str) -> SlackInstall
-```
-
-**Purpose**: Trades Slack's short-lived OAuth code for the workspace bot token and identity details. This is the point where an approved install becomes usable credentials.
-
-**Data flow**: It sends the code, redirect URL, client id, and client secret to Slack. It validates the returned token, team id, bot user id, and optional app id, then returns a SlackInstall.
-
-**Call relations**: The OAuth callback calls this after validating the sealed install state.
-
-*Call graph*: calls 4 internal fn (__init__, _slack_ok, slack_client_id, slack_client_secret); called by 1 (oauth_callback); 3 external calls (__init__, AsyncClient, match).
-
-
-##### `slack_app_dm_url`  (lines 550–555)
-
-```
-def slack_app_dm_url(app_id: str, team_id: str) -> str
-```
-
-**Purpose**: Builds a browser link that opens the installed app's direct message in Slack. This gives the owner an easy next step after installation.
-
-**Data flow**: It receives the Slack app id and team id, encodes them into Slack's app_redirect URL, and returns the URL.
-
-**Call relations**: The OAuth callback uses it for the success page when Slack supplied an app id.
-
-*Call graph*: called by 1 (oauth_callback); 1 external calls (urlencode).
-
-
-##### `SlackConversationSearch.run`  (lines 642–656)
-
-```
-async def run(self) -> SlackConversationMatches
-```
-
-**Purpose**: Searches Slack conversations by channel details or DM participants. It gives the agent a bounded way to find a Slack destination by a human query.
-
-**Data flow**: It normalizes the query, lists conversations, resolves people for DMs, converts raw Slack records into small conversation objects, filters by text match, and returns matches plus a truncation flag.
-
-**Call relations**: It coordinates the private listing, people-resolution, and conversion helpers inside SlackConversationSearch.
-
-*Call graph*: calls 3 internal fn (_conversation, _list, _people); 2 external calls (__init__, AsyncClient).
-
-
-##### `SlackConversationSearch._list`  (lines 658–677)
-
-```
-async def _list(self, client: httpx.AsyncClient) -> tuple[list[object], bool]
-```
-
-**Purpose**: Fetches a bounded number of Slack conversation-list pages. It avoids scanning forever in huge workspaces.
-
-**Data flow**: It repeatedly calls Slack with page parameters, collects channel records, follows cursors up to the page limit, and returns the records plus whether more pages remained.
-
-**Call relations**: The search runner calls this before converting or filtering conversations.
-
-*Call graph*: calls 3 internal fn (_next_cursor, _params, _slack_ok); called by 1 (run); 1 external calls (get).
-
-
-##### `SlackConversationSearch._params`  (lines 679–687)
-
-```
-def _params(self, cursor: str) -> dict[str, str]
-```
-
-**Purpose**: Builds the query parameters for one Slack conversations.list call. It centralizes the search's page size, conversation types, and cursor handling.
-
-**Data flow**: It receives a cursor string and returns a parameter dictionary, including the cursor only when non-empty.
-
-**Call relations**: The conversation-list loop calls this for every Slack page request.
-
-*Call graph*: called by 1 (_list).
-
-
-##### `SlackConversationSearch._next_cursor`  (lines 689–692)
-
-```
-def _next_cursor(self, payload: dict[str, object]) -> str
-```
-
-**Purpose**: Extracts Slack's next-page cursor from a response. A missing or malformed cursor means the listing is finished.
-
-**Data flow**: It reads response_metadata.next_cursor from the payload and returns it if it is a string, otherwise an empty string.
-
-**Call relations**: The list loop uses this after each Slack page to decide whether to keep paging.
-
-*Call graph*: called by 1 (_list).
-
-
-##### `SlackConversationSearch._people`  (lines 694–722)
-
-```
-async def _people(self, client: httpx.AsyncClient, listed: list[object]) -> tuple[dict[str, tuple[str, ...]], bool]
-```
-
-**Purpose**: Resolves who is in DMs and group DMs so they can be searched by person. It caps the number of DMs it expands.
-
-**Data flow**: It scans listed conversations, collects member ids for DMs, looks up user labels once per user, drops the bot itself, and returns labels by conversation plus whether the cap was hit.
-
-**Call relations**: The search runner calls this after listing conversations and before building searchable SlackConversation objects.
-
-*Call graph*: calls 4 internal fn (_kind, _label, _members, _slack_user); called by 1 (run).
-
-
-##### `SlackConversationSearch._kind`  (lines 724–731)
-
-```
-def _kind(self, raw: dict[str, object]) -> SlackConversationKind
-```
-
-**Purpose**: Classifies a raw Slack conversation as a public channel, private channel, group DM, or one-to-one DM.
-
-**Data flow**: It reads Slack boolean flags from the raw record and returns a small kind string.
-
-**Call relations**: Member lookup and conversation conversion use this to choose the right behavior.
-
-*Call graph*: called by 3 (_conversation, _members, _people).
-
-
-##### `SlackConversationSearch._members`  (lines 733–747)
-
-```
-async def _members(self, client: httpx.AsyncClient, raw: dict[str, object], convo_id: str) -> tuple[str, ...]
-```
-
-**Purpose**: Gets member ids for a DM or group DM. A one-to-one DM can read the user directly, while group DMs need a Slack API call.
-
-**Data flow**: It receives the raw conversation and id. It returns the direct user for an IM or asks Slack for members of a group DM.
-
-**Call relations**: People resolution calls this for each DM-like conversation it decides to expand.
-
-*Call graph*: calls 2 internal fn (_kind, _slack_ok); called by 1 (_people); 1 external calls (get).
-
-
-##### `SlackConversationSearch._label`  (lines 749–754)
-
-```
-def _label(self, user: SlackUser | None, user_id: str) -> str
-```
-
-**Purpose**: Creates a readable search label for a Slack user. It prefers name plus email when both are known.
-
-**Data flow**: It receives a SlackUser or nothing and the raw user id, then returns name/email/id text.
-
-**Call relations**: People resolution uses this when building the searchable participant list for DMs.
-
-*Call graph*: called by 1 (_people).
-
-
-##### `SlackConversationSearch._conversation`  (lines 756–773)
-
-```
-def _conversation(self, raw: object, people: dict[str, tuple[str, ...]]) -> SlackConversation | None
-```
-
-**Purpose**: Turns one raw Slack conversation record into the smaller model used by search results. Bad or incomplete records are ignored.
-
-**Data flow**: It checks that the raw item is a dict with an id, reads name, people, purpose, topic, membership, and kind, then returns a SlackConversation.
-
-**Call relations**: The search runner calls this for every listed record before applying the query filter.
-
-*Call graph*: calls 2 internal fn (_kind, _nested_value); called by 1 (run); 1 external calls (__init__).
-
-
-##### `SlackConversationSearch._nested_value`  (lines 775–777)
-
-```
-def _nested_value(self, field: object) -> str
-```
-
-**Purpose**: Reads Slack's nested purpose or topic text field safely. Missing or malformed values become an empty string.
-
-**Data flow**: It receives a field object, checks for a dict with a string value, and returns that value or an empty string.
-
-**Call relations**: Conversation conversion uses this for the purpose and topic fields.
-
-*Call graph*: called by 1 (_conversation); 1 external calls (get).
-
-
-##### `verify_slack_signature`  (lines 952–967)
-
-```
-def verify_slack_signature(headers: Mapping[str, str], body: bytes, signing_secret: str, now: float | None=None) -> None
-```
-
-**Purpose**: Checks that a Slack request is recent and genuinely signed by Slack. This is the main guard against forged requests.
-
-**Data flow**: It reads timestamp and signature headers, rejects missing, invalid, or stale timestamps, computes the expected HMAC signature from the body and secret, and raises on mismatch.
-
-**Call relations**: Workspace resolution, event ingest, and interactive ingest call this before trusting request contents.
-
-*Call graph*: called by 3 (ingest, interactive, resolve_workspace); 4 external calls (__init__, compare_digest, new, time).
-
-
-##### `_slack_request_body`  (lines 974–993)
-
-```
-async def _slack_request_body(request: Request) -> bytes
-```
-
-**Purpose**: Reads and caches the raw request body while enforcing a size limit. The raw bytes are needed exactly as Slack signed them.
-
-**Data flow**: It checks request state for a cached body or overflow marker. If missing, it streams chunks, totals their size, rejects oversized bodies, stores the bytes, and returns them.
-
-**Call relations**: All Slack routes and workspace resolution use this before parsing or verifying Slack payloads.
-
-*Call graph*: called by 3 (ingest, interactive, resolve_workspace); 1 external calls (stream).
-
-
-##### `url_verification_challenge`  (lines 996–1005)
-
-```
-def url_verification_challenge(body: bytes) -> str | None
-```
-
-**Purpose**: Extracts Slack's URL-verification challenge from a setup request. This lets Slack confirm the endpoint is reachable.
-
-**Data flow**: It parses the body as JSON, checks for a url_verification type, and returns the challenge string or nothing.
-
-**Call relations**: Workspace resolution and event ingest use this to answer Slack setup probes without treating them as real events.
-
-*Call graph*: called by 2 (ingest, resolve_workspace); 1 external calls (loads).
-
-
-##### `slack_team_hint`  (lines 1008–1025)
-
-```
-def slack_team_hint(body: bytes) -> str | None
-```
-
-**Purpose**: Finds the Slack team id inside an untrusted event or interactive payload. It is only a hint until the signature is verified.
-
-**Data flow**: It tries to parse JSON, then form-encoded interactive payload JSON, extracts team_id or team.id, validates its shape, and returns it or nothing.
-
-**Call relations**: Workspace resolution uses this hint to choose which workspace's signing secret should verify the request.
-
-*Call graph*: called by 1 (resolve_workspace); 3 external calls (loads, fullmatch, parse_qs).
-
-
-##### `slack_installation_id`  (lines 1028–1029)
-
-```
-def slack_installation_id(team_id: str) -> str
-```
-
-**Purpose**: Turns a Slack team id into the installation key used by ufo. This is how Slack workspaces are bound to ufo workspaces.
-
-**Data flow**: It receives a team id and prefixes it with team:.
-
-**Call relations**: OAuth install writes this binding, and request resolution reads it.
-
-*Call graph*: called by 2 (oauth_callback, resolve_workspace).
-
-
-##### `resolve_workspace`  (lines 1032–1070)
-
-```
-async def resolve_workspace(request: Request, auth: SurfaceAuth) -> UUID | Response | None
-```
-
-**Purpose**: Determines which ufo workspace a Slack request belongs to, before the normal route context exists. It verifies signed Slack POSTs and accepts sealed OAuth callback state for GETs.
-
-**Data flow**: For GET requests it opens sealed install state and returns its workspace. For POST requests it reads the raw body, handles URL verification, extracts a team id, finds the bound workspace, verifies the signature, and returns the workspace or a response.
-
-**Call relations**: The surface routing layer calls this before dispatching to Slack event, interaction, or OAuth handlers.
-
-*Call graph*: calls 9 internal fn (open_credential_authorization, workspace, _auth_signing_secret, _is_install_state, _slack_request_body, slack_installation_id, slack_team_hint, url_verification_challenge, verify_slack_signature); 1 external calls (JSONResponse).
-
-
-##### `_is_install_state`  (lines 1073–1076)
-
-```
-def _is_install_state(claims: CredentialRequestState) -> bool
-```
-
-**Purpose**: Checks whether sealed credential state belongs to the Slack bot-token install flow. It prevents unrelated sealed state from authorizing a Slack install.
-
-**Data flow**: It receives credential-state claims and returns true only when the payload marker and requested slot match Slack install expectations.
-
-**Call relations**: OAuth callback and workspace resolution use this when interpreting browser callback state.
-
-*Call graph*: called by 2 (oauth_callback, resolve_workspace).
-
-
-##### `slack_thread_key`  (lines 1079–1084)
-
-```
-def slack_thread_key(channel: str, root_ts: str, is_dm: bool) -> str
-```
-
-**Purpose**: Builds the ufo conversation key for a Slack message. Channel conversations are keyed by channel plus thread root, while DMs are keyed by the DM channel.
-
-**Data flow**: It receives a Slack channel id, root timestamp, and DM flag. It returns just the channel for DMs or channel:root for channel threads.
-
-**Call relations**: Inbound event conversion and interactive form conversion use this to find the right ufo conversation.
-
-*Call graph*: called by 2 (_to_inbound, _to_interaction).
-
-
-##### `slack_message_addressed`  (lines 1087–1105)
-
-```
-def slack_message_addressed(event: Mapping[str, object], bot_user_id: str, is_dm: bool) -> bool
-```
-
-**Purpose**: Decides whether a Slack message is directly asking the agent to act. DMs always count; channels count when they mention the bot, except for attribution footer noise.
-
-**Data flow**: It reads all message bodies, checks for real bot mentions, treats certain app_mention events as addressed, and returns a boolean.
-
-**Call relations**: Inbound conversion uses this to choose between immediate admission, ambient decision, or ignoring the message.
-
-*Call graph*: called by 1 (_to_inbound); 2 external calls (addressing_mention, message_bodies).
-
-
-##### `_link_count`  (lines 1108–1111)
-
-```
-def _link_count(text: str) -> int
-```
-
-**Purpose**: Counts Markdown and bare links in reply text. This helps decide whether Slack link previews should be disabled.
-
-**Data flow**: It finds Markdown-style links, removes them, counts remaining bare URLs, and returns the total.
-
-**Call relations**: Slack reply body construction uses this before posting messages.
-
-*Call graph*: called by 1 (slack_reply_body); 2 external calls (findall, sub).
-
-
-##### `slack_reply_parts`  (lines 1114–1191)
-
-```
-def slack_reply_parts(text: str, limit: int=SLACK_MARKDOWN_TEXT_LIMIT) -> list[str]
-```
-
-**Purpose**: Splits long Slack replies into chunks that fit Slack limits while trying not to break code blocks or tables. This keeps large answers readable.
-
-**Data flow**: It receives text and a size limit, identifies protected spans, cuts at paragraph, line, sentence, or word boundaries where possible, and returns ordered text parts.
-
-**Call relations**: Terminal replies, mid-turn replies, and block-body construction use this before sending text to Slack.
-
-*Call graph*: called by 3 (post, slack_reply_body, speak); 2 external calls (finditer, match).
-
-
-##### `slack_reply_body`  (lines 1194–1261)
-
-```
-def slack_reply_body(channel: str, thread_ts: str | None, text: str, metadata: str | None, delivery_id: str | None=None, blocks: bool=True, actions: list[dict[str, object]] | None=None, sections: bool
-```
-
-**Purpose**: Builds the JSON body for a Slack chat.postMessage call. It can include text blocks, question or connect actions, metadata for deduplication, and a footer.
-
-**Data flow**: It receives channel, thread, text, optional metadata, delivery id, block options, and actions. It builds a bounded Slack message body, disables excessive link previews, falls back to plain text if blocks are too large, and returns bytes.
-
-**Call relations**: Reply posting, mid-turn speaking, and progress messages call this before sending to Slack.
-
-*Call graph*: calls 2 internal fn (_link_count, slack_reply_parts); called by 3 (_say, post, speak); 2 external calls (dumps, sub).
-
-
-##### `_mrkdwn_section`  (lines 1264–1265)
-
-```
-def _mrkdwn_section(text: str) -> dict[str, object]
-```
-
-**Purpose**: Creates a simple Slack Block Kit section containing Markdown text. It trims text to Slack's section limit.
-
-**Data flow**: It receives text and returns a section block dictionary with mrkdwn text.
-
-**Call relations**: Question rendering uses this for titles and prose fallback.
-
-*Call graph*: called by 2 (_ask_prose, slack_ask_blocks).
-
-
-##### `slack_ask_blocks`  (lines 1268–1312)
-
-```
-def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] | None
-```
-
-**Purpose**: Renders an agent question as Slack form blocks when possible. If Slack cannot represent the question safely, it renders readable prose instead.
-
-**Data flow**: It receives an optional ask object. It builds a title, one control per question, and a submit button, or prose sections plus a reply-in-thread hint.
-
-**Call relations**: Terminal reply posting appends these blocks when a turn ends by asking the user for input.
-
-*Call graph*: calls 3 internal fn (_ask_control, _ask_prose, _mrkdwn_section); called by 1 (post).
-
-
-##### `_ask_control`  (lines 1315–1367)
-
-```
-def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None
-```
-
-**Purpose**: Builds one Slack input control for one question. It chooses text input, radio buttons, or checkboxes based on the question shape.
-
-**Data flow**: It receives the question index and question data, rejects unsupported attachments or too-wide options, builds the matching Slack input block, and returns it or nothing.
-
-**Call relations**: Ask block rendering calls this for each question.
-
-*Call graph*: calls 1 internal fn (_ask_option); called by 1 (slack_ask_blocks).
-
-
-##### `_ask_option`  (lines 1370–1380)
-
-```
-def _ask_option(option: QuestionOption) -> dict[str, object]
-```
-
-**Purpose**: Turns one answer option into Slack's option format. It includes the label and optional description.
-
-**Data flow**: It receives a QuestionOption and returns a Slack option dictionary, trimming the description to Slack's limit.
-
-**Call relations**: Question controls use this when building radio button and checkbox choices.
-
-*Call graph*: called by 1 (_ask_control).
-
-
-##### `_ask_prose`  (lines 1383–1391)
-
-```
-def _ask_prose(ask: AskQuestion) -> dict[str, object]
-```
-
-**Purpose**: Renders a question as plain readable Slack Markdown. This is used when Slack controls cannot express the question.
-
-**Data flow**: It receives a question, writes the header, prompt, options, and multi-select note into lines, and wraps them in a Markdown section block.
-
-**Call relations**: Ask block rendering uses this fallback when any question cannot become a form control.
-
-*Call graph*: calls 1 internal fn (_mrkdwn_section); called by 1 (slack_ask_blocks).
-
-
-##### `slack_connect_blocks`  (lines 1394–1420)
-
-```
-def slack_connect_blocks(request: ConnectRequest | None, turn_id: UUID) -> list[dict[str, object]] | None
-```
-
-**Purpose**: Builds a Slack button for a connection request, such as connecting another provider account. It lets the user continue sensitive authorization outside chat.
-
-**Data flow**: It receives an optional connect request and turn id. If no request exists, it returns nothing; otherwise it returns an action block with a button carrying the turn id.
-
-**Call relations**: Terminal reply posting adds these blocks beside the reply when the turn asks for a provider connection.
-
-*Call graph*: called by 1 (post).
-
-
-##### `_string_field`  (lines 1423–1427)
-
-```
-def _string_field(event: Mapping[str, object], field: str) -> str
-```
-
-**Purpose**: Reads a required string field from a Slack payload. It gives a clear error when expected Slack data is missing.
-
-**Data flow**: It receives a mapping and field name, checks that the value is a non-empty string, and returns it or raises.
-
-**Call relations**: Inbound and interaction conversion use it for required Slack ids and timestamps.
-
-*Call graph*: called by 2 (_to_inbound, _to_interaction).
-
-
-##### `_inbound_files`  (lines 1430–1442)
-
-```
-def _inbound_files(event: Mapping[str, object]) -> tuple[InboundFile, ...]
-```
-
-**Purpose**: Extracts usable file attachments from a Slack message event. It skips hidden or tombstoned files and limits how many files one message can bring in.
-
-**Data flow**: It reads the event's files array, keeps up to the configured maximum with a name and private download URL, and returns InboundFile records.
-
-**Call relations**: Inbound conversion and attachment backfill use this before downloading files into the workspace.
-
-*Call graph*: called by 2 (_declared_files, _to_inbound); 1 external calls (__init__).
-
-
-##### `_declared_files`  (lines 1445–1476)
-
-```
-async def _declared_files(bot_token: str, channel: str, ts: str, root_ts: str | None) -> tuple[InboundFile, ...]
-```
-
-**Purpose**: Looks up file attachments that Slack did not include directly in an app_mention event. It fetches the exact message from Slack and extracts its files.
-
-**Data flow**: It receives token, channel, message timestamp, and optional thread root, fetches the bounded message range, finds the matching timestamp, and returns inbound files or none.
-
-**Call relations**: Inbound conversion calls this for app_mention events that may have omitted file details.
-
-*Call graph*: calls 2 internal fn (_inbound_files, _slack_ok); called by 1 (_to_inbound); 1 external calls (AsyncClient).
-
-
-##### `oauth_callback`  (lines 1484–1559)
-
-```
-async def oauth_callback(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Completes the Add to Slack installation flow. It validates the sealed install state, exchanges Slack's code for a bot token, binds the Slack team, stores credentials, and shows a result page.
-
-**Data flow**: It reads query parameters, handles user cancellation and bad state, builds the redirect URI, exchanges the code, binds the team to the workspace, stores the bot token and identity, mirrors the bot user id, and returns a callback page.
-
-**Call relations**: Slack redirects the owner's browser here after OAuth authorization.
-
-*Call graph*: calls 10 internal fn (bind_installation, fulfill_credential_request, open_credential_authorization, _is_install_state, _mirror_self_user_id, bot_token_fingerprint, slack_app_dm_url, slack_installation_id, slack_oauth_exchange, slack_oauth_redirect_uri); 3 external calls (__init__, __init__, callback_page).
-
-
-##### `_mark_url_verified`  (lines 1565–1579)
-
-```
-async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None
-```
-
-**Purpose**: Records that Slack successfully reached and signed a request to this deployment. Manual app setup can use this as proof that the Events URL works.
-
-**Data flow**: It fingerprints the signing secret, skips duplicate writes in this process, stores a marker with the fingerprint and time, and remembers it in memory.
-
-**Call relations**: Event and interactive routes call this after a request verifies successfully.
-
-*Call graph*: calls 1 internal fn (signing_secret_fingerprint); called by 2 (ingest, interactive); 2 external calls (dumps, time).
-
-
-##### `ingest`  (lines 1582–1626)
-
-```
-async def ingest(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Handles Slack Events API requests. It verifies the request, filters irrelevant messages, and starts or admits ufo turns from Slack messages.
-
-**Data flow**: It reads the raw body, checks size and signature, answers setup challenges, loads bot token and identity, converts the payload to an inbound message, then either admits it, checks if it folds into a live turn, or starts an ambient decision task.
-
-**Call relations**: This is the main event route Slack calls for messages and app mentions.
-
-*Call graph*: calls 12 internal fn (_admit_inbound, _bot_token, _ctx_signing_secret, _decide_ambient_in_background, _folds_into_live_turn, _identity, _identity_unavailable, _mark_url_verified, _slack_request_body, _to_inbound (+2 more)); 3 external calls (loads, JSONResponse, Response).
-
-
-##### `_folds_into_live_turn`  (lines 1629–1668)
-
-```
-async def _folds_into_live_turn(ctx: SurfaceContext, bot_token: str, inbound: Inbound) -> bool
-```
-
-**Purpose**: Checks whether an unmentioned thread reply should be absorbed by an already running turn. This prevents a useful correction or stop message from being discarded by the ambient classifier.
-
-**Data flow**: It receives inbound message data, checks for an existing conversation and absorbing turn, resolves the sender, checks seat permission, logs the skip, and returns true only when admission would actually fold the reply into the live turn.
-
-**Call relations**: The event route calls this before sending an unaddressed reply to the ambient-reply decision.
-
-*Call graph*: calls 4 internal fn (absorbing_turn, transaction, _resolve_member, _slack_user); called by 1 (ingest); 2 external calls (__init__, log).
-
-
-##### `_admit_inbound`  (lines 1671–1721)
-
-```
-async def _admit_inbound(ctx: SurfaceContext, bot_token: str, inbound: Inbound, identity: SlackIdentity) -> None
-```
-
-**Purpose**: Turns a verified Slack message into a ufo conversation turn. It also saves files, adds context, links the thread, and starts live feedback when a run opens.
-
-**Data flow**: It gathers sender info, ambient context, permalink, and mention names; resolves the member and audience; gets or creates the conversation; mirrors the Slack thread; downloads files; wraps the member text safely; admits the turn; anchors DM replies; and arms followers if a run started.
-
-**Call relations**: The event route and ambient-decision task call this when a Slack message should become agent work.
-
-*Call graph*: calls 13 internal fn (admit, conversation_for, retitle_conversation, _ambient_context, _anchor_dm_thread, _arm_followers, _download_files, _mirror_thread, _resolve_member, _slack_permalink (+3 more)); called by 2 (_run_ambient_decision, ingest); 9 external calls (__init__, __init__, __init__, gather, conversation_audience, fence_member_message, mint_marker, render_markup, unescape).
-
-
-##### `_decide_ambient_in_background`  (lines 1727–1752)
-
-```
-def _decide_ambient_in_background(ctx: SurfaceContext, bot_token: str, inbound: Inbound, identity: SlackIdentity) -> None
-```
-
-**Purpose**: Starts a background decision for an unmentioned thread reply. This keeps Slack's required quick acknowledgement from waiting on model judgment.
-
-**Data flow**: It uses the inbound message id as a task key, skips if a task already exists, creates a task, stores it strongly, and removes it when done.
-
-**Call relations**: The event route calls this after acknowledging Slack when a message might or might not deserve an agent reply.
-
-*Call graph*: calls 1 internal fn (_run_ambient_decision); called by 1 (ingest); 1 external calls (create_task).
-
-
-##### `_decide_ambient_in_background._untrack`  (lines 1748–1750)
-
-```
-def _untrack(done: asyncio.Task[None]) -> None
-```
-
-**Purpose**: Forgets a finished ambient-decision task. This keeps the in-memory task table from growing forever.
-
-**Data flow**: It receives the completed task, checks it is still the tracked task for that message id, and deletes the entry.
-
-**Call relations**: It is attached as a completion callback when an ambient decision task is created.
-
-
-##### `_run_ambient_decision`  (lines 1755–1770)
-
-```
-async def _run_ambient_decision(ctx: SurfaceContext, bot_token: str, inbound: Inbound, identity: SlackIdentity) -> None
-```
-
-**Purpose**: Runs the ambient-reply decision and admits the message if the agent should answer. It logs failures because Slack has already been acknowledged.
-
-**Data flow**: It asks whether a reply is wanted. If yes, it admits the inbound message; if anything fails, it logs the dropped message details.
-
-**Call relations**: Background ambient tasks execute this after the event route has returned success to Slack.
-
-*Call graph*: calls 2 internal fn (_admit_inbound, _ambient_reply_wanted); called by 1 (_decide_ambient_in_background); 1 external calls (log).
-
-
-##### `_author_is_foreign`  (lines 1773–1780)
-
-```
-def _author_is_foreign(event: Mapping[str, object], team_id: str) -> bool
-```
-
-**Purpose**: Detects messages from users outside the installed Slack workspace in shared channels. Those users are not served by this workspace's app.
-
-**Data flow**: It compares source/user team fields with the installed team id and returns true when they differ.
-
-**Call relations**: Inbound conversion uses this early to ignore external Slack Connect bystanders.
-
-*Call graph*: called by 1 (_to_inbound).
-
-
-##### `_channel_origin`  (lines 1796–1832)
-
-```
-async def _channel_origin(ctx: SurfaceContext, payload: Mapping[str, object], event: Mapping[str, object], channel: str, audience_known: bool) -> ChannelOrigin
-```
-
-**Purpose**: Determines who should be allowed to see a Slack conversation in ufo based on the channel kind. Public channels, private rooms, shared channels, and DMs get different audiences.
-
-**Data flow**: It reads channel type and payload flags, sometimes fetches Slack channel info, builds an audience and optional label, and raises when it cannot decide safely.
-
-**Call relations**: Inbound conversion calls this before admitting a channel message.
-
-*Call graph*: calls 2 internal fn (credential, _channel_info); called by 1 (_to_inbound); 4 external calls (__init__, conversation_audience, foreign_room_audience, room_audience).
-
-
-##### `_to_inbound`  (lines 1835–1885)
-
-```
-async def _to_inbound(ctx: SurfaceContext, payload: Mapping[str, object], identity: SlackIdentity) -> Inbound | None
-```
-
-**Purpose**: Converts a raw Slack event payload into the smaller Inbound object ufo admission needs. It filters bots, unsupported subtypes, foreign authors, and messages not meant for the agent.
-
-**Data flow**: It validates the event, checks sender and addressing, computes the thread key, finds existing participation, gathers audience and files, and returns an Inbound record or nothing.
-
-**Call relations**: The event route calls this after verification and identity loading.
-
-*Call graph*: calls 9 internal fn (credential, _author_is_foreign, _channel_origin, _declared_files, _inbound_files, _participating_conversation, _string_field, slack_message_addressed, slack_thread_key); called by 1 (ingest); 2 external calls (__init__, gather).
-
-
-##### `_participating_conversation`  (lines 1888–1899)
-
-```
-async def _participating_conversation(ctx: SurfaceContext, queue_key: str) -> UUID | None
-```
-
-**Purpose**: Checks whether a Slack thread already has a real ufo turn. A bare conversation row is not enough to count as participation.
-
-**Data flow**: It finds the conversation by queue key, then checks whether it has a latest turn. It returns the conversation id only when both exist.
-
-**Call relations**: Inbound conversion uses this to decide whether unaddressed thread replies may belong to an existing agent conversation.
-
-*Call graph*: calls 2 internal fn (find_conversation, latest_turn); called by 1 (_to_inbound).
-
-
-##### `_slack_user`  (lines 1902–1934)
-
-```
-async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None
-```
-
-**Purpose**: Fetches readable Slack user information such as name, confirmed email, timezone, and team id. It is best-effort so a slow Slack lookup does not break normal ingest.
-
-**Data flow**: It calls users.info with a short timeout, validates the response, keeps email only if Slack says it is confirmed, and returns a SlackUser or nothing.
-
-**Call relations**: Admission, member resolution, ambient folding, interaction handling, and name caching use this.
-
-*Call graph*: calls 1 internal fn (_slack_ok); called by 5 (_people, _name, _admit_inbound, _folds_into_live_turn, interactive); 2 external calls (__init__, AsyncClient).
-
-
-##### `_conversation_members`  (lines 1948–1968)
-
-```
-async def _conversation_members(bot_token: str, channel: str) -> tuple[str, ...]
-```
-
-**Purpose**: Reads a bounded roster of Slack conversation members. It is used to safely map outbound @names only to people already in the conversation.
-
-**Data flow**: It calls Slack's conversations.members endpoint with a limit, returns member ids on success, and returns an empty tuple on failure.
-
-**Call relations**: SlackNames.mention_ids calls this before resolving mentionable names.
-
-*Call graph*: calls 1 internal fn (_slack_ok); called by 1 (mention_ids); 1 external calls (AsyncClient).
-
-
-##### `SlackNames.of`  (lines 1989–1997)
-
-```
-async def of(self, texts: Sequence[str], users: Sequence[str]=()) -> dict[str, str]
-```
-
-**Purpose**: Resolves Slack ids found in message text into readable names. This makes inbound and ambient context understandable instead of showing raw ids.
-
-**Data flow**: It scans texts for mentioned users and channels, adds explicitly supplied user ids, resolves them through cache and Slack, and returns id-to-name mappings.
-
-**Call relations**: Admission and ambient digest preparation use this before rendering Slack markup.
-
-*Call graph*: calls 1 internal fn (_resolved); 2 external calls (mentioned_channels, mentioned_users).
-
-
-##### `SlackNames.mention_ids`  (lines 1999–2013)
-
-```
-async def mention_ids(self, channel: str, identity: SlackIdentity) -> dict[str, str]
-```
-
-**Purpose**: Builds a safe map from human @names in an agent reply to Slack user mention ids. It only considers people in the current Slack conversation and same team.
-
-**Data flow**: It reads the conversation roster, resolves member names, drops the bot and foreign-team users, and returns a mention index.
-
-**Call relations**: Reply mention mapping calls this before posting agent-authored text.
-
-*Call graph*: calls 2 internal fn (_resolved, _conversation_members); 1 external calls (mention_index).
-
-
-##### `SlackNames._resolved`  (lines 2015–2023)
-
-```
-async def _resolved(self, wanted: Mapping[str, str]) -> dict[str, _NamedId]
-```
-
-**Purpose**: Combines cached name lookups with bounded fresh Slack lookups. This keeps name resolution fast and prevents one message from causing too many Slack calls.
-
-**Data flow**: It reads remembered names, selects missing ids up to a limit, fetches names concurrently, remembers them, and returns the combined result.
-
-**Call relations**: Both inbound name rendering and outbound mention mapping use this shared resolver.
-
-*Call graph*: calls 3 internal fn (_name, _remember, _remembered); called by 2 (mention_ids, of); 1 external calls (gather).
-
-
-##### `SlackNames._remembered`  (lines 2025–2046)
-
-```
-async def _remembered(self, ids: Sequence[str]) -> dict[str, _NamedId]
-```
-
-**Purpose**: Reads fresh-enough cached Slack names from the extension store. Stale or malformed cache rows are ignored.
-
-**Data flow**: It receives ids, reads matching store keys in bulk, checks name, timestamp, and team fields, and returns valid cached _NamedId entries.
-
-**Call relations**: The resolver calls this before deciding which ids need Slack API lookups.
-
-*Call graph*: called by 1 (_resolved); 3 external calls (__init__, __init__, now).
-
-
-##### `SlackNames._name`  (lines 2048–2065)
-
-```
-async def _name(self, id_: str, url: str) -> _NamedId | None
-```
-
-**Purpose**: Fetches and cleans the display name for one Slack user or channel id. It removes characters that would conflict with Slack mention markup.
-
-**Data flow**: It calls users.info for users or conversations.info for channels, extracts the name and team, normalizes whitespace, strips forbidden brackets, trims length, and returns a _NamedId or nothing.
-
-**Call relations**: The resolver calls this for cache misses.
-
-*Call graph*: calls 2 internal fn (_channel_info, _slack_user); called by 1 (_resolved); 1 external calls (__init__).
-
-
-##### `SlackNames._remember`  (lines 2067–2077)
-
-```
-async def _remember(self, names: Mapping[str, _NamedId]) -> None
-```
-
-**Purpose**: Writes resolved Slack names into the extension cache. Failures are logged but do not stop message handling.
-
-**Data flow**: It receives id-to-name entries, stamps them with the current time, and stores each under its cache key.
-
-**Call relations**: The resolver calls this after successful fresh name lookups.
-
-*Call graph*: called by 1 (_resolved); 2 external calls (__init__, now).
-
-
-##### `_slack_permalink`  (lines 2080–2100)
-
-```
-async def _slack_permalink(bot_token: str, channel: str, ts: str) -> str | None
-```
-
-**Purpose**: Fetches Slack's own permanent link to a message. This gives the agent and logs a reliable source link rather than trying to invent one.
-
-**Data flow**: It calls chat.getPermalink with channel and timestamp, returns the permalink string on success, and returns nothing on failure.
-
-**Call relations**: Inbound admission and form-answer admission use this for turn context.
-
-*Call graph*: calls 1 internal fn (_slack_ok); called by 2 (_admit_inbound, interactive); 1 external calls (AsyncClient).
-
-
-##### `_turn_context`  (lines 2103–2120)
-
-```
-def _turn_context(sender: SlackUser | None, source: str | None, question: str | None=None) -> TurnContext
-```
-
-**Purpose**: Builds the context object attached to a ufo turn. It includes sender label, timezone when valid, source link, and optionally the question being answered.
-
-**Data flow**: It receives Slack user info, source link, and optional question. It formats a sender line, creates a TurnContext, and drops invalid timezone data if needed.
-
-**Call relations**: Admission paths call this before handing a Slack-originated turn to core.
-
-*Call graph*: called by 2 (_admit_inbound, interactive); 1 external calls (__init__).
-
-
-##### `_resolve_member`  (lines 2123–2141)
-
-```
-async def _resolve_member(ctx: SurfaceContext, slack_user_id: str, is_dm: bool, sender: SlackUser | None) -> UUID | None
-```
-
-**Purpose**: Maps a Slack user to a ufo member. It uses an existing link first, then a Slack-confirmed email to join or link a member.
-
-**Data flow**: It receives user id, DM flag, and Slack user details. It returns a linked member, joins by confirmed email when possible, returns nothing when unresolved, and raises for unresolved DMs when user info is unavailable.
-
-**Call relations**: Inbound admission, ambient folding checks, and interactive answer admission use this.
-
-*Call graph*: calls 2 internal fn (join_member, linked_member); called by 3 (_admit_inbound, _folds_into_live_turn, interactive); 1 external calls (__init__).
-
-
-##### `_ambient_reply_wanted`  (lines 2144–2169)
-
-```
-async def _ambient_reply_wanted(ctx: SurfaceContext, bot_token: str, inbound: Inbound, identity: SlackIdentity) -> bool
-```
-
-**Purpose**: Asks whether an unmentioned reply in an existing Slack thread should become a new agent turn. This avoids interrupting human side conversations.
-
-**Data flow**: It fetches recent thread history, admits by default when history is unavailable, otherwise asks core's ambient decision with the incoming message and logs when the answer is no.
-
-**Call relations**: The background ambient-decision runner calls this before admitting an unaddressed message.
-
-*Call graph*: calls 2 internal fn (ambient_reply_wanted, _ambient_history); called by 1 (_run_ambient_decision); 2 external calls (__init__, log).
-
-
-##### `_ambient_history`  (lines 2172–2194)
-
-```
-async def _ambient_history(bot_token: str, inbound: Inbound, identity: SlackIdentity) -> tuple[AmbientMessage, ...]
-```
-
-**Purpose**: Builds the recent Slack thread history used by the ambient-reply decision. It includes member messages and the agent's own messages so the decision has context.
-
-**Data flow**: It fetches the thread tail, converts usable messages into AmbientMessage entries, sorts them by timestamp, and returns the newest bounded slice.
-
-**Call relations**: Ambient reply gating calls this before asking core whether to answer.
-
-*Call graph*: calls 2 internal fn (_ambient_entry, _thread_tail); called by 1 (_ambient_reply_wanted).
-
-
-##### `_thread_tail`  (lines 2197–2243)
-
-```
-async def _thread_tail(bot_token: str, channel: str, root_ts: str, latest: str) -> tuple[object, ...] | None
-```
-
-**Purpose**: Fetches messages in a Slack thread before a given message. It walks pages so long threads do not accidentally return only the beginning.
-
-**Data flow**: It calls Slack conversations.replies with a latest bound, follows cursors up to a page limit, collects messages, and returns nothing if the fetch is untrusted or too large.
-
-**Call relations**: Ambient history and unseen-tail context use this to inspect Slack thread contents.
-
-*Call graph*: calls 1 internal fn (_slack_ok); called by 2 (_ambient_history, _unseen_tail); 1 external calls (AsyncClient).
-
-
-##### `_ambient_entry`  (lines 2246–2266)
-
-```
-def _ambient_entry(item: object, inbound: Inbound, identity: SlackIdentity) -> tuple[float, AmbientMessage] | None
-```
-
-**Purpose**: Converts one fetched Slack message into an ambient-history entry when it is relevant. It drops malformed, empty, future, and other-bot messages.
-
-**Data flow**: It reads user, timestamp, text, and bot flags, marks whether the speaker is the agent, converts the timestamp, and returns an ordered AmbientMessage pair or nothing.
-
-**Call relations**: Ambient history calls this for each Slack message fetched from the thread tail.
-
-*Call graph*: called by 1 (_ambient_history); 1 external calls (__init__).
-
-
-##### `_ambient_context`  (lines 2269–2324)
-
-```
-async def _ambient_context(ctx: SurfaceContext, bot_token: str, inbound: Inbound, identity: SlackIdentity, marker: str) -> str
-```
-
-**Purpose**: Builds background context for an admitted channel turn that the ufo transcript would not otherwise contain. This helps the agent understand nearby Slack discussion without treating it as instructions.
-
-**Data flow**: It chooses no context for DMs, unseen-tail context for existing conversations, channel history for new top-level mentions, or thread history for mid-thread mentions; then fetches Slack messages, resolves names, and renders a digest.
-
-**Call relations**: Inbound admission gathers this alongside sender and permalink data.
-
-*Call graph*: calls 4 internal fn (_digest_names, _slack_ok, _unseen_tail, ambient_digest); called by 1 (_admit_inbound); 1 external calls (AsyncClient).
-
-
-##### `_digest_names`  (lines 2327–2336)
-
-```
-async def _digest_names(bot_token: str, messages: Sequence[object]) -> dict[str, str]
-```
-
-**Purpose**: Resolves names for authors and mentions inside a group of Slack messages. This makes ambient digests readable.
-
-**Data flow**: It extracts message text and author ids from Slack message objects, asks SlackNames to resolve them, and returns the mapping.
-
-**Call relations**: Ambient context and unseen-tail context call this before rendering a digest.
-
-*Call graph*: called by 2 (_ambient_context, _unseen_tail); 1 external calls (__init__).
-
-
-##### `_unseen_tail`  (lines 2339–2385)
-
-```
-async def _unseen_tail(ctx: SurfaceContext, bot_token: str, inbound: Inbound, identity: SlackIdentity, marker: str) -> str
-```
-
-**Purpose**: Builds context for thread messages that were intentionally not admitted as turns since the agent's last turn. This keeps Slack-visible conversation and model-visible conversation from drifting apart.
-
-**Data flow**: It fetches the thread tail, sorts recent messages, walks backward until it finds an admitted message, keeps the unseen ones, resolves names, and renders a digest.
-
-**Call relations**: Ambient context uses this for messages in already-participating Slack conversations.
-
-*Call graph*: calls 4 internal fn (admitted_body, _digest_names, _thread_tail, ambient_digest); called by 1 (_ambient_context).
-
-
-##### `ambient_digest`  (lines 2388–2456)
-
-```
-def ambient_digest(messages: list[object], bot_user_id: str, note: str, marker: str, names: Mapping[str, str]) -> str
-```
-
-**Purpose**: Renders fetched Slack messages as safe, bounded background text. It keeps human context while preventing one person's words from masquerading as system tags or another speaker.
-
-**Data flow**: It filters unsupported messages, bots, the bot's own messages, and direct bot mentions; formats timestamp, speaker, and rendered text; trims long digests while preserving the first and newest lines; and wraps the result in a marked context element.
-
-**Call relations**: Ambient context and unseen-tail context call this after fetching messages and resolving names.
-
-*Call graph*: called by 2 (_ambient_context, _unseen_tail); 3 external calls (fromtimestamp, addressing_mention, render_markup).
-
-
-##### `_slack_download_host_ok`  (lines 2459–2461)
-
-```
-def _slack_download_host_ok(url: str) -> bool
-```
-
-**Purpose**: Checks whether a file download URL belongs to Slack. This prevents sending the bot token to an attacker-controlled host.
-
-**Data flow**: It parses the URL host and returns true only for slack.com or a slack.com subdomain.
-
-**Call relations**: The Slack file download stream calls this before making an authenticated request.
-
-*Call graph*: called by 1 (_stream_download); 1 external calls (urlparse).
-
-
-##### `_stream_download`  (lines 2464–2482)
-
-```
-async def _stream_download(bot_token: str, url: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Streams a Slack private file download into chunks with safety limits. It never loads the whole file into memory.
-
-**Data flow**: It verifies the host, downloads with the bot token, yields chunks, tracks total bytes, and raises if the file exceeds the workspace write limit.
-
-**Call relations**: File downloading passes this stream directly into workspace file writing.
-
-*Call graph*: calls 1 internal fn (_slack_download_host_ok); called by 1 (_download_files); 2 external calls (__init__, AsyncClient).
-
-
-##### `_download_files`  (lines 2494–2510)
-
-```
-async def _download_files(ctx: SurfaceContext, conversation_id: UUID, bot_token: str, files: tuple[InboundFile, ...]) -> DownloadedFiles
-```
-
-**Purpose**: Downloads inbound Slack files into the ufo workspace. Oversized files are skipped and reported rather than partially written.
-
-**Data flow**: It chooses safe inbox filenames, streams each Slack file into the workspace, records delivered names and skipped Slack names, and returns a DownloadedFiles summary.
-
-**Call relations**: Inbound admission calls this before building the member message body.
-
-*Call graph*: calls 2 internal fn (write_workspace_file, _stream_download); called by 1 (_admit_inbound); 2 external calls (__init__, inbox_name).
-
-
-##### `files_note`  (lines 2513–2522)
-
-```
-def files_note(downloaded: DownloadedFiles) -> str
-```
-
-**Purpose**: Creates a short note telling the agent which Slack files were saved or skipped. This makes attachments visible in the turn text.
-
-**Data flow**: It receives delivered and skipped file lists, formats workspace paths and size-limit notes, and returns a newline-separated string.
-
-**Call relations**: Inbound admission appends this note when it fences the member message.
-
-*Call graph*: called by 1 (_admit_inbound).
-
-
-##### `MirroredThread.read`  (lines 2534–2539)
-
-```
-def read(cls, row: JsonValue) -> 'MirroredThread'
-```
-
-**Purpose**: Reads a stored Slack thread mirror into a MirroredThread object. It accepts both old string rows and newer structured rows.
-
-**Data flow**: It receives a stored JSON-like row and returns a MirroredThread built from the queue key alone or from validated structured data.
-
-**Call relations**: Follower hooks and mid-turn comments use this when they need to recover the Slack thread for a ufo conversation.
-
-
-##### `MirroredThread.anchor`  (lines 2541–2545)
-
-```
-def anchor(self) -> str | None
-```
-
-**Purpose**: Finds the Slack timestamp that status and progress should attach to. Channel threads use the root timestamp in the queue key; DMs use the separately stored message timestamp.
-
-**Data flow**: It checks the queue key for a root timestamp, then the message_ts field, and returns the first usable value or nothing.
-
-**Call relations**: Status tracking, progress posting, and comment handling use this to choose the Slack thread parent.
-
-*Call graph*: called by 1 (_track_status).
-
-
-##### `_thread_mirror_key`  (lines 2548–2549)
-
-```
-def _thread_mirror_key(conversation_id: UUID) -> str
-```
-
-**Purpose**: Builds the store key for a conversation's Slack thread mirror. One conversation has one durable Slack-thread record.
-
-**Data flow**: It receives a conversation id and returns the prefixed store key string.
-
-**Call relations**: Thread mirroring, follower hooks, and DM comment handling use this key.
-
-*Call graph*: called by 3 (_mirror_thread, follow_turn, speak).
-
-
-##### `_mirror_thread`  (lines 2552–2560)
-
-```
-async def _mirror_thread(conversation_id: UUID, thread: MirroredThread) -> None
-```
-
-**Purpose**: Stores which Slack thread belongs to a ufo conversation. This lets turn-execution hooks post status and progress even though they do not have the original Slack request.
-
-**Data flow**: It receives a conversation id and MirroredThread, builds the store key, serializes the thread, and writes it to the scoped store.
-
-**Call relations**: Inbound admission and interactive answer admission write this before turns execute.
-
-*Call graph*: calls 1 internal fn (_thread_mirror_key); called by 2 (_admit_inbound, interactive); 2 external calls (__init__, model_dump).
-
-
-##### `_dm_anchor_key`  (lines 2563–2569)
-
-```
-def _dm_anchor_key(turn_id: UUID, message_ref: UUID | None=None) -> str
-```
-
-**Purpose**: Builds the store key that links a DM turn or absorbed message to the Slack message it answers. DMs need this because their conversation key does not include a thread root.
-
-**Data flow**: It receives a turn id and optional message reference, adds the reference only when it is distinct from the turn id, and returns a prefixed key.
-
-**Call relations**: DM anchoring, reply-thread lookup, and cleanup during attachment use this.
-
-*Call graph*: called by 3 (_anchor_dm_thread, _reply_thread, attach).
-
-
-##### `_anchor_dm_thread`  (lines 2572–2579)
-
-```
-async def _anchor_dm_thread(admitted: Admitted, message_ts: str) -> None
-```
-
-**Purpose**: Records which Slack DM message a ufo turn or absorbed arrival should answer under. This keeps replies threaded beneath the member's DM message.
-
-**Data flow**: It receives admission result data and a Slack timestamp, builds the anchor key from the turn and arrival id, and stores the timestamp.
-
-**Call relations**: Inbound admission and interactive answer admission call this for DM conversations.
-
-*Call graph*: calls 1 internal fn (_dm_anchor_key); called by 2 (_admit_inbound, interactive); 1 external calls (__init__).
-
-
-##### `_reply_thread`  (lines 2582–2597)
-
-```
-async def _reply_thread(queue_key: str, turn_id: UUID, message_ref: UUID | None=None) -> str | None
-```
-
-**Purpose**: Finds the Slack thread timestamp for a reply. It uses the channel thread root when available or a stored DM anchor otherwise.
-
-**Data flow**: It receives queue key, turn id, and optional message reference, returns the root timestamp for channel threads, or reads the best DM anchor from the store.
-
-**Call relations**: Terminal posting, mid-turn speaking, and file attachment sharing call this to post in the right Slack thread.
-
-*Call graph*: calls 1 internal fn (_dm_anchor_key); called by 3 (attach, post, speak); 1 external calls (__init__).
-
-
-##### `FollowerContext.workspace_id`  (lines 2608–2608)
-
-```
-def workspace_id(self) -> UUID
-```
-
-**Purpose**: Defines that a follower context must expose the current workspace id. Followers need this to distinguish identical Slack channel/thread ids across workspaces.
-
-**Data flow**: A concrete context returns a UUID workspace id.
-
-**Call relations**: Thread status and progress helpers rely on this protocol property.
-
-
-##### `FollowerContext.public_base_url`  (lines 2611–2611)
-
-```
-def public_base_url(self) -> str | None
-```
-
-**Purpose**: Defines that a follower context may expose the deployment's public URL. Followers use it when building web links in footers.
-
-**Data flow**: A concrete context returns a URL string or nothing.
-
-**Call relations**: Footer rendering reads this through the follower context.
-
-
-##### `FollowerContext.credential`  (lines 2613–2613)
-
-```
-async def credential(self, slot: str) -> str
-```
-
-**Purpose**: Defines how followers read credentials such as the Slack bot token. This lets both surface requests and hooks supply the same need.
-
-**Data flow**: A concrete context receives a credential slot name and returns its secret string.
-
-**Call relations**: Status, progress, and footer code call this through the protocol.
-
-
-##### `FollowerContext.tail`  (lines 2615–2617)
-
-```
-def tail(self, turn_id: UUID, since: str='') -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]
-```
-
-**Purpose**: Defines how followers watch live turn frames. These frames are the stream of activity, text, cost, resume, and terminal signals.
-
-**Data flow**: A concrete context receives a turn id and optional cursor, and returns an async stream context yielding live frames.
-
-**Call relations**: ThreadStatus and ThreadProgress follow this stream during turn execution.
-
-
-##### `FollowerContext.turn_is_terminal`  (lines 2619–2619)
-
-```
-async def turn_is_terminal(self, turn_id: UUID) -> bool
-```
-
-**Purpose**: Defines how a progress follower checks whether a turn has already finished durably. This avoids posting progress after the answer has landed.
-
-**Data flow**: A concrete context receives a turn id and returns true or false.
-
-**Call relations**: ThreadProgress uses this during timed checkpoints.
-
-
-##### `FollowerContext.conversation_agent`  (lines 2621–2621)
-
-```
-async def conversation_agent(self, conversation_id: UUID) -> UUID | None
-```
-
-**Purpose**: Defines how footer code finds the agent assigned to a conversation. The agent id is needed for configuration links.
-
-**Data flow**: A concrete context receives a conversation id and returns an agent id or nothing.
-
-**Call relations**: Progress footer generation uses this before calling the shared Slack footer renderer.
-
-
-##### `FollowerContext.is_operator_workspace`  (lines 2623–2623)
-
-```
-async def is_operator_workspace(self) -> bool
-```
-
-**Purpose**: Defines how footer code decides whether operator-only debug and accounting details may be shown. This protects ordinary or shared Slack rooms from internal details.
-
-**Data flow**: A concrete context returns a boolean.
-
-**Call relations**: Slack footer rendering calls this before adding accounting and debug links.
-
-*Call graph*: called by 1 (_slack_footer).
-
-
-##### `ThreadStatus.thread`  (lines 2680–2681)
-
-```
-def thread(self) -> tuple[UUID, str, str]
-```
-
-**Purpose**: Returns the unique identity of the Slack thread whose status this task writes. It includes workspace, channel, and thread timestamp.
-
-**Data flow**: It combines the context workspace id with the stored Slack channel and thread timestamp and returns a tuple.
-
-**Call relations**: Status writer tracking and restamping use this to coordinate one visible status per thread.
-
-
-##### `ThreadStatus.run`  (lines 2683–2702)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Runs the live Slack status follower for one turn. It writes an initial Thinking status, follows live frames, and clears the status when appropriate.
-
-**Data flow**: It reads the bot token, opens a Slack client, sets the initial status, follows the turn stream, handles cancellation or failure, and clears the thread status at the end.
-
-**Call relations**: The status task wrapper calls this after _track_status starts a task.
-
-*Call graph*: calls 3 internal fn (_clear, _follow, _set); called by 1 (_run_status); 2 external calls (AsyncClient, log).
-
-
-##### `ThreadStatus._set`  (lines 2704–2744)
-
-```
-async def _set(self, client: httpx.AsyncClient, bot_token: str, status: str) -> bool
-```
-
-**Purpose**: Writes one status line to Slack's assistant thread status API. It checks that this turn is still the current writer for the thread.
-
-**Data flow**: It receives a Slack client, bot token, and status text, builds the API body, posts it, logs success or failure, and returns whether Slack accepted it.
-
-**Call relations**: The run, follow, and clear steps use this for every visible status update.
-
-*Call graph*: calls 1 internal fn (_slack_ok); called by 3 (_clear, _follow, run); 3 external calls (post, dumps, log).
-
-
-##### `ThreadStatus._clear`  (lines 2746–2755)
-
-```
-async def _clear(self, client: httpx.AsyncClient, bot_token: str) -> None
-```
-
-**Purpose**: Clears Slack's thread status when this turn ends, but only if no sibling turn is still active in the same thread.
-
-**Data flow**: It checks other live status objects for the same thread. If none remain, it writes an empty status.
-
-**Call relations**: ThreadStatus.run calls this after follow ends or after certain failures.
-
-*Call graph*: calls 1 internal fn (_set); called by 1 (run).
-
-
-##### `ThreadStatus._follow`  (lines 2757–2811)
-
-```
-async def _follow(self, client: httpx.AsyncClient, bot_token: str, shown: str) -> None
-```
-
-**Purpose**: Watches live turn frames and converts them into short Slack status text. It also refreshes quiet statuses before Slack expires them.
-
-**Data flow**: It opens the live frame stream, waits for frames, restamp events, or refresh timeouts, maps activity/text/resume/absorbed frames to status strings, rate-limits updates, and stops on terminal or parked frames.
-
-**Call relations**: ThreadStatus.run calls this between initial set and final clear.
-
-*Call graph*: calls 1 internal fn (_set); called by 1 (run); 4 external calls (ensure_future, gather, wait, monotonic).
-
-
-##### `_restamp_thread_status`  (lines 2821–2828)
-
-```
-def _restamp_thread_status(workspace_id: UUID, channel: str, thread_ts: str) -> None
-```
-
-**Purpose**: Wakes status followers after the app posts in the same thread. Slack clears status when a reply lands, so this asks followers to write it again immediately.
-
-**Data flow**: It receives workspace, channel, and thread timestamp, finds matching live ThreadStatus objects, and sets their wake event.
-
-**Call relations**: Progress posting calls this after a progress message lands in Slack.
-
-*Call graph*: called by 1 (_say).
-
-
-##### `_track_status`  (lines 2831–2852)
-
-```
-def _track_status(ctx: FollowerContext, turn_id: UUID, thread: MirroredThread) -> None
-```
-
-**Purpose**: Starts one Slack status task for a turn in this process. It also makes the newest turn the writer for that Slack thread.
-
-**Data flow**: It skips existing tasks, finds the channel and anchor timestamp, logs unanchored threads, creates a ThreadStatus, records writer state, and starts the async task.
-
-**Call relations**: The shared follower arming function calls this for admitted and executing turns.
-
-*Call graph*: calls 2 internal fn (anchor, _run_status); called by 1 (_arm_followers); 3 external calls (__init__, create_task, log).
-
-
-##### `_run_status`  (lines 2855–2883)
-
-```
-async def _run_status(status: ThreadStatus) -> None
-```
-
-**Purpose**: Wraps a ThreadStatus task with logging and cleanup. It also passes the thread writer claim back to an older still-running turn when needed.
-
-**Data flow**: It awaits the status run, logs task-level failure, removes task/status records, and updates or deletes the thread writer entry.
-
-**Call relations**: _track_status starts tasks that execute this wrapper.
-
-*Call graph*: calls 1 internal fn (run); called by 1 (_track_status); 1 external calls (log).
-
-
-##### `ProgressCadence.__post_init__`  (lines 2895–2899)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: Validates a progress-reporting schedule. It prevents nonsensical timing such as zero wait or a cap below the first interval.
-
-**Data flow**: It checks base_seconds and cap_seconds after construction and raises if they are invalid.
-
-**Call relations**: Progress tracking creates a cadence before starting a ThreadProgress task.
-
-
-##### `ProgressCadence.intervals`  (lines 2901–2912)
-
-```
-def intervals(self) -> Iterator[float]
-```
-
-**Purpose**: Generates the wait intervals for long-turn progress posts. The waits double by elapsed time until they reach a cap.
-
-**Data flow**: It starts at the base interval, yields waits forever, tracks elapsed time, and caps later waits.
-
-**Call relations**: checkpoints_after uses this to find future progress checkpoints.
-
-*Call graph*: called by 1 (checkpoints_after).
-
-
-##### `ProgressCadence.checkpoints_after`  (lines 2914–2923)
-
-```
-def checkpoints_after(self, elapsed_seconds: float) -> Iterator[float]
-```
-
-**Purpose**: Generates future elapsed-time checkpoints after a turn has already been running for some time. This lets resumed reporters continue the same schedule.
-
-**Data flow**: It walks interval checkpoints from zero and yields only checkpoint times greater than the supplied elapsed seconds.
-
-**Call relations**: ThreadProgress uses this when it begins following a turn.
-
-*Call graph*: calls 1 internal fn (intervals).
-
-
-##### `TurnActivity.update`  (lines 2936–2938)
-
-```
-def update(self, summary: str) -> None
-```
-
-**Purpose**: Records a completed activity summary as the current step for progress messages. It clears any streaming text state.
-
-**Data flow**: It receives a summary string, normalizes whitespace, trims it, stores it as activity, and clears streaming chunks.
-
-**Call relations**: ThreadProgress updates this when activity frames arrive.
-
-
-##### `TurnActivity.stream`  (lines 2940–2941)
-
-```
-def stream(self, text: str) -> None
-```
-
-**Purpose**: Records that response text is currently streaming. Progress messages should say the response is being prepared rather than exposing partial text.
-
-**Data flow**: It receives a text chunk and appends it to the streaming list.
-
-**Call relations**: ThreadProgress calls this on text-delta frames.
-
-
-##### `TurnActivity.current_step`  (lines 2943–2947)
-
-```
-def current_step(self) -> str
-```
-
-**Purpose**: Returns the member-facing current step. Streaming response preparation takes priority over the last completed tool activity.
-
-**Data flow**: It checks whether any text is streaming. If yes, it returns the response-preparation label; otherwise it returns the stored activity.
-
-**Call relations**: TurnActivity.report calls this when composing a progress post.
-
-*Call graph*: called by 1 (report).
-
-
-##### `TurnActivity.report`  (lines 2949–2959)
-
-```
-def report(self, elapsed_seconds: float) -> str | None
-```
-
-**Purpose**: Builds one progress-message line for a checkpoint. It returns nothing if the turn has produced no meaningful signal yet.
-
-**Data flow**: It gets the current step, formats elapsed minutes or hours, and returns a short progress line or nothing.
-
-**Call relations**: ThreadProgress._post calls this before posting to Slack.
-
-*Call graph*: calls 1 internal fn (current_step); called by 1 (_post).
-
-
-##### `ThreadProgress.run`  (lines 3000–3003)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Runs the long-turn progress reporter. It opens a Slack client and follows the turn until terminal or parked.
-
-**Data flow**: It reads the bot token, creates a Slack client, and delegates to the follow loop.
-
-**Call relations**: The progress task wrapper calls this after _track_progress starts a task.
-
-*Call graph*: calls 1 internal fn (_follow); called by 1 (_run_progress); 1 external calls (AsyncClient).
-
-
-##### `ThreadProgress._elapsed`  (lines 3005–3008)
-
-```
-def _elapsed(self) -> float
-```
-
-**Purpose**: Calculates how long the member has been waiting on the turn. It uses wall-clock time so restarts do not reset the wait.
-
-**Data flow**: It subtracts the durable turn start time from the current UTC time and returns seconds.
-
-**Call relations**: The progress follow loop and resumed notice code use this for scheduling and message text.
-
-*Call graph*: called by 2 (_follow, _post_resumed); 1 external calls (now).
-
-
-##### `ThreadProgress._follow`  (lines 3010–3063)
-
-```
-async def _follow(self, client: httpx.AsyncClient, bot_token: str) -> None
-```
-
-**Purpose**: Watches live turn frames and posts timed progress updates. It also posts a delayed restart/resume notice when useful.
-
-**Data flow**: It sets up checkpoint timing, tracks activity and cost frames, waits for either frames or due times, posts progress or resume messages when due, and stops on terminal or parked frames.
-
-**Call relations**: ThreadProgress.run delegates the reporter's main loop to this.
-
-*Call graph*: calls 3 internal fn (_elapsed, _post, _post_resumed); called by 1 (run); 4 external calls (__init__, ensure_future, gather, wait).
-
-
-##### `ThreadProgress._post`  (lines 3065–3092)
-
-```
-async def _post(self, client: httpx.AsyncClient, bot_token: str, activity: TurnActivity, elapsed_seconds: float, spend: CostTick | None, first: bool) -> bool
-```
-
-**Purpose**: Posts one scheduled progress checkpoint if there is useful activity to say. A silent checkpoint is skipped instead of filled with fluff.
-
-**Data flow**: It asks TurnActivity for report text. If none, it logs a skip; otherwise it sends the text through _say and returns whether Slack accepted it.
-
-**Call relations**: The follow loop calls this whenever the cadence reaches a checkpoint.
-
-*Call graph*: calls 2 internal fn (_say, report); called by 1 (_follow); 1 external calls (log).
-
-
-##### `ThreadProgress._post_resumed`  (lines 3094–3105)
-
-```
-async def _post_resumed(self, client: httpx.AsyncClient, bot_token: str, spend: CostTick | None, first: bool) -> bool
-```
-
-**Purpose**: Posts the one-line notice that work resumed after a restart. It is delayed briefly so fast-finishing resumed turns do not get a stale warning.
-
-**Data flow**: It builds the fixed resume notice and sends it through _say with the current elapsed time and cost state.
-
-**Call relations**: The follow loop calls this after seeing a resume frame and waiting through the grace period.
-
-*Call graph*: calls 2 internal fn (_elapsed, _say); called by 1 (_follow).
-
-
-##### `ThreadProgress._say`  (lines 3107–3147)
-
-```
-async def _say(self, client: httpx.AsyncClient, bot_token: str, text: str, elapsed_seconds: float, spend: CostTick | None, first: bool) -> bool
-```
-
-**Purpose**: Sends one progress message to the Slack thread. The first successful progress message can include the standard footer.
-
-**Data flow**: It finds channel and thread anchor, optionally builds footer metadata, creates a Slack reply body, posts it, logs success or failure, and restamps thread status when posting into a thread.
-
-**Call relations**: Scheduled progress and resumed notices both send through this shared method.
-
-*Call graph*: calls 4 internal fn (_footer, _restamp_thread_status, _slack_ok, slack_reply_body); called by 2 (_post, _post_resumed); 2 external calls (post, log).
-
-
-##### `ThreadProgress._footer`  (lines 3149–3170)
-
-```
-async def _footer(self, bot_token: str, channel: str, spend: CostTick | None) -> str | None
-```
-
-**Purpose**: Builds the footer for the first progress message when enough conversation information exists. It may include web links and partial cost information.
-
-**Data flow**: It asks for the conversation's agent id, formats current cost if known, and delegates to the shared Slack footer builder.
-
-**Call relations**: ThreadProgress._say calls this only for a first progress post.
-
-*Call graph*: calls 1 internal fn (_slack_footer); called by 1 (_say).
-
-
-##### `_track_progress`  (lines 3176–3203)
-
-```
-def _track_progress(ctx: FollowerContext, turn_id: UUID, conversation_id: UUID, thread: MirroredThread, started_at: datetime) -> None
-```
-
-**Purpose**: Starts one progress reporter task for a turn execution in this process. It uses the durable turn start time so the schedule survives restarts.
-
-**Data flow**: It skips if already tracking the turn, creates a ThreadProgress with cadence and timestamps, starts its async task, and stores it.
-
-**Call relations**: The shared follower arming function calls this only when the caller knows the turn's durable start time.
-
-*Call graph*: calls 1 internal fn (_run_progress); called by 1 (_arm_followers); 4 external calls (__init__, __init__, create_task, now).
-
-
-##### `_run_progress`  (lines 3206–3221)
-
-```
-async def _run_progress(progress: ThreadProgress) -> None
-```
-
-**Purpose**: Wraps a ThreadProgress task with logging and cleanup. Per-message Slack failures are handled inside the reporter; this catches task-level abandonment.
-
-**Data flow**: It awaits the progress run, logs any exception, and removes the task from the in-memory table.
-
-**Call relations**: _track_progress starts tasks that execute this wrapper.
-
-*Call graph*: calls 1 internal fn (run); called by 1 (_track_progress); 1 external calls (log).
-
-
-##### `_arm_followers`  (lines 3235–3249)
-
-```
-def _arm_followers(ctx: FollowerContext, turn: FollowedTurn, thread: MirroredThread) -> None
-```
-
-**Purpose**: Starts all live Slack side-channel followers that a turn should have. Status can start at admission; progress starts only when the turn execution has begun.
-
-**Data flow**: It receives follower context, turn info, and mirrored Slack thread, starts status tracking, and starts progress tracking if a durable started_at is available.
-
-**Call relations**: Inbound admission, interactive answer admission, and the turn-execution hook all converge here.
-
-*Call graph*: calls 2 internal fn (_track_progress, _track_status); called by 3 (_admit_inbound, follow_turn, interactive).
-
-
-##### `_HookFollowerContext.workspace_id`  (lines 3261–3262)
-
-```
-def workspace_id(self) -> UUID
-```
-
-**Purpose**: Adapts a hook context to expose the workspace id required by follower code.
-
-**Data flow**: It returns the workspace id from the wrapped extension context.
-
-**Call relations**: Follower tasks use this adapter when armed from the turn-execution hook.
-
-
-##### `_HookFollowerContext.public_base_url`  (lines 3265–3266)
-
-```
-def public_base_url(self) -> str | None
-```
-
-**Purpose**: Adapts a hook context to expose the deployment public URL for footer links.
-
-**Data flow**: It returns the public base URL from the wrapped extension context.
-
-**Call relations**: Footer generation reads this through the follower protocol.
-
-
-##### `_HookFollowerContext.credential`  (lines 3268–3269)
-
-```
-async def credential(self, slot: str) -> str
-```
-
-**Purpose**: Lets follower code read extension credentials from a hook context. This supplies the Slack bot token outside a surface request.
-
-**Data flow**: It receives a credential slot and returns that slot's value from extension credentials.
-
-**Call relations**: Status and progress tasks use this adapter when started by follow_turn.
-
-
-##### `_HookFollowerContext.tail`  (lines 3271–3274)
-
-```
-def tail(self, turn_id: UUID, since: str='') -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]
-```
-
-**Purpose**: Lets follower code tail live turn frames from a hook context.
-
-**Data flow**: It receives a turn id and optional cursor and returns the extension context's live tail stream.
-
-**Call relations**: ThreadStatus and ThreadProgress use this stream after follow_turn arms them.
-
-
-##### `_HookFollowerContext.turn_is_terminal`  (lines 3276–3277)
-
-```
-async def turn_is_terminal(self, turn_id: UUID) -> bool
-```
-
-**Purpose**: Lets progress code check terminal state through a hook context.
-
-**Data flow**: It receives a turn id and returns the extension context's terminal-state answer.
-
-**Call relations**: ThreadProgress uses this to avoid posting late progress after a turn finishes.
-
-
-##### `_HookFollowerContext.conversation_agent`  (lines 3279–3280)
-
-```
-async def conversation_agent(self, conversation_id: UUID) -> UUID | None
-```
-
-**Purpose**: Lets footer code find the agent for a conversation from a hook context.
-
-**Data flow**: It receives a conversation id and returns the agent id or nothing from the extension context.
-
-**Call relations**: Progress footer generation uses this adapter.
-
-
-##### `_HookFollowerContext.is_operator_workspace`  (lines 3282–3283)
-
-```
-async def is_operator_workspace(self) -> bool
-```
-
-**Purpose**: Lets footer code ask whether the current workspace is an operator workspace through a hook context.
-
-**Data flow**: It returns the extension context's operator-workspace boolean.
-
-**Call relations**: Shared Slack footer rendering uses this when followers were armed from a hook.
-
-
-##### `follow_turn`  (lines 3286–3328)
-
-```
-async def follow_turn(ctx: HookContext) -> HookOutcome
-```
-
-**Purpose**: Hook handler that arms Slack status and progress followers from the turn's own execution. This restores live feedback after restarts and avoids making feedback failure block the turn.
-
-**Data flow**: It ignores missing or subagent turns, reads the mirrored Slack thread with a short timeout, wraps the hook context as a follower context, arms followers with the turn start time, and returns no blocking outcome.
-
-**Call relations**: The manifest hook calls this when a user prompt starts executing.
-
-*Call graph*: calls 2 internal fn (_arm_followers, _thread_mirror_key); 4 external calls (__init__, __init__, timeout, log).
-
-
-##### `interactive`  (lines 3375–3479)
-
-```
-async def interactive(ctx: SurfaceContext, request: Request) -> Response
-```
-
-**Purpose**: Handles Slack interactive payloads such as question-form submits and connect-button clicks. It verifies the request, admits submitted answers, rewrites forms, or sends private authorization links.
-
-**Data flow**: It reads and verifies the body, loads token and identity, parses the interaction, handles connect clicks with an ephemeral message, handles answer submits by finding the conversation, resolving the member, admitting an answer turn, anchoring DMs, arming followers, and scheduling a form rewrite.
-
-**Call relations**: Slack calls this route when a user presses a Block Kit button.
-
-*Call graph*: calls 23 internal fn (admit, admitted_body, connect_url, conversation_for, find_conversation, linked_member, _anchor_dm_thread, _arm_followers, _bot_token, _ctx_signing_secret (+13 more)); 8 external calls (__init__, __init__, gather, conversation_audience, JSONResponse, Response, fence_member_message, mint_marker).
-
-
-##### `_rewrite_in_background`  (lines 3485–3488)
-
-```
-def _rewrite_in_background(bot_token: str, submit: AnswerSubmit) -> None
-```
-
-**Purpose**: Schedules a Slack message rewrite after a form answer is accepted. It keeps the interactive acknowledgement fast.
-
-**Data flow**: It creates a rewrite task, stores it in a set so it stays alive, and removes it when done.
-
-**Call relations**: The interactive route calls this after confirming the submitted answer was the admitted one.
-
-*Call graph*: calls 1 internal fn (_run_rewrite); called by 1 (interactive); 1 external calls (create_task).
-
-
-##### `_run_rewrite`  (lines 3491–3495)
-
-```
-async def _run_rewrite(bot_token: str, submit: AnswerSubmit) -> None
-```
-
-**Purpose**: Runs the form-control rewrite and logs failures. A failed rewrite should not undo the admitted answer.
-
-**Data flow**: It calls the replacement helper with the bot token and submit data, catching and logging any exception.
-
-**Call relations**: Background rewrite tasks execute this.
-
-*Call graph*: calls 1 internal fn (_replace_controls_with_answers); called by 1 (_rewrite_in_background).
-
-
-##### `_ephemeral_in_background`  (lines 3498–3503)
-
-```
-def _ephemeral_in_background(ctx: SurfaceContext, channel: str, slack_user_id: str, thread_ts: str | None, text: str) -> None
-```
-
-**Purpose**: Schedules a private Slack response visible only to one user. This is used for empty submits and connect-button instructions.
-
-**Data flow**: It creates an ephemeral-post task, stores it strongly, and removes it when complete.
-
-**Call relations**: The interactive route calls this when it needs to answer a click without posting to the whole thread.
-
-*Call graph*: calls 1 internal fn (_post_ephemeral); called by 1 (interactive); 1 external calls (create_task).
-
-
-##### `_post_ephemeral`  (lines 3506–3533)
-
-```
-async def _post_ephemeral(ctx: SurfaceContext, channel: str, slack_user_id: str, thread_ts: str | None, text: str) -> None
-```
-
-**Purpose**: Posts a Slack ephemeral message to one user, optionally inside a thread. Ephemeral means only that Slack user can see it.
-
-**Data flow**: It reads the bot token, posts chat.postEphemeral with channel, user, text, and optional thread timestamp, and logs failures.
-
-**Call relations**: Background ephemeral tasks execute this for interaction feedback.
-
-*Call graph*: calls 2 internal fn (credential, _slack_ok); called by 1 (_ephemeral_in_background); 2 external calls (AsyncClient, dumps).
-
-
-##### `_to_interaction`  (lines 3536–3598)
-
-```
-def _to_interaction(raw: bytes, identity: SlackIdentity) -> AnswerSubmit | ConnectClick | None
-```
-
-**Purpose**: Parses a verified Slack interactive request into either an answer submit or a connect click. Other actions are ignored.
-
-**Data flow**: It decodes the form payload JSON, validates team and action fields, extracts user/channel/message/thread data, converts connect values to UUIDs, or collects submitted answers and returns the matching interaction object.
-
-**Call relations**: The interactive route calls this after signature verification and identity loading.
-
-*Call graph*: calls 4 internal fn (_dict_field, _string_field, _submitted_answers, slack_thread_key); called by 1 (interactive); 5 external calls (__init__, __init__, loads, parse_qs, UUID).
-
-
-##### `_submitted_answers`  (lines 3601–3627)
-
-```
-def _submitted_answers(blocks: tuple[Mapping[str, object], ...], state: object) -> tuple[SubmittedAnswer, ...]
-```
-
-**Purpose**: Reads every question and held answer from a submitted Slack ask form. It uses the message's own blocks as the source of question order.
-
-**Data flow**: It walks input blocks with the ask prefix, reads the matching held state value, converts it to text, and returns SubmittedAnswer records.
-
-**Call relations**: _to_interaction calls this while parsing an ask submit.
-
-*Call graph*: calls 1 internal fn (_held_answer); called by 1 (_to_interaction); 1 external calls (__init__).
-
-
-##### `_held_answer`  (lines 3630–3648)
-
-```
-def _held_answer(field: object) -> str
-```
-
-**Purpose**: Converts one Slack control's state into plain answer text. It supports radio buttons, checkboxes, and text boxes.
-
-**Data flow**: It inspects the control type, returns the selected option value, joins multiple selected values, trims typed text, or returns an empty string.
-
-**Call relations**: Submitted-answer extraction calls this for each input block.
-
-*Call graph*: calls 1 internal fn (_option_value); called by 1 (_submitted_answers); 1 external calls (get).
-
-
-##### `_option_value`  (lines 3651–3655)
-
-```
-def _option_value(option: object) -> str
-```
-
-**Purpose**: Extracts the stored value from one Slack option. Missing or malformed options become an empty answer fragment.
-
-**Data flow**: It receives an option object, checks for a string value field, and returns it or an empty string.
-
-**Call relations**: _held_answer uses this for radio button and checkbox selections.
-
-*Call graph*: called by 1 (_held_answer).
-
-
-##### `_dict_field`  (lines 3658–3662)
-
-```
-def _dict_field(payload: Mapping[str, object], field: str) -> Mapping[str, object]
-```
-
-**Purpose**: Reads a required dictionary field from a Slack payload. It provides clear errors for malformed interactive payloads.
-
-**Data flow**: It receives a mapping and field name, returns the dict value, or raises when the field is missing or not a dict.
-
-**Call relations**: Interaction parsing uses this for user, channel, and message sections.
-
-*Call graph*: called by 1 (_to_interaction).
-
-
-##### `_replace_controls_with_answers`  (lines 3665–3698)
-
-```
-async def _replace_controls_with_answers(bot_token: str, submit: AnswerSubmit) -> None
-```
-
-**Purpose**: Rewrites a Slack question message after an answer is accepted. The form controls become fixed answer lines plus who submitted them.
-
-**Data flow**: It maps submitted answers by block id, walks the original delivered blocks, replaces input controls with context lines, replaces the submit row with submitter text, preserves other blocks, and updates the Slack message.
-
-**Call relations**: The background rewrite runner calls this after interactive answer admission succeeds.
-
-*Call graph*: calls 2 internal fn (_context_line, _rewrite_slack_message); called by 1 (_run_rewrite).
-
-
-##### `connect_message_key`  (lines 3720–3723)
-
-```
-def connect_message_key(member_id: UUID, provider: str) -> str
-```
-
-**Purpose**: Builds the store key for remembering where a connect button was posted. It is keyed by requester and provider.
-
-**Data flow**: It receives a member id and provider name and returns a prefixed key string.
-
-**Call relations**: Connect-message holding uses this so later connection-settled hooks can find the Slack message.
-
-*Call graph*: called by 1 (_hold_connect_message).
-
-
-##### `_hold_connect_message`  (lines 3726–3756)
-
-```
-async def _hold_connect_message(store: ScopedStore, request: ConnectRequest | None, posted: dict[str, object], channel: str, ts: str | None) -> None
-```
-
-**Purpose**: Stores the Slack location of a reply's connect button, but only if the posted message actually contains the button. This avoids rewriting messages that fell back to plain text.
-
-**Data flow**: It checks the connect request, timestamp, and posted blocks, finds a connect action, then stores channel, message timestamp, and optional thread timestamp.
-
-**Call relations**: Terminal reply posting calls this after Slack accepts a message with connect blocks.
-
-*Call graph*: calls 3 internal fn (put, _is_connect_action, connect_message_key); called by 1 (post); 1 external calls (__init__).
-
-
-##### `_is_connect_action`  (lines 3759–3766)
-
-```
-def _is_connect_action(block: Mapping[str, object]) -> bool
-```
-
-**Purpose**: Checks whether a Slack block contains the connect button action. It recognizes the button by action id.
-
-**Data flow**: It receives a block, verifies it is an actions block, scans its elements, and returns true if any element has the connect action id.
-
-**Call relations**: Connect-message storage and connect-message settling use this to find or remove buttons.
-
-*Call graph*: called by 2 (_hold_connect_message, settle_connect_message).
-
-
-##### `_rewrite_slack_message`  (lines 3769–3786)
-
-```
-async def _rewrite_slack_message(bot_token: str, channel: str, ts: str, text: str, blocks: list[dict[str, object]]) -> None
-```
-
-**Purpose**: Updates a bot-authored Slack message with new text and blocks. It is the shared helper for rewriting answered forms and settled connect buttons.
-
-**Data flow**: It receives token, channel, timestamp, fallback text, and blocks, posts chat.update to Slack, and raises if Slack rejects it.
-
-**Call relations**: Question rewrite and connect-settle rewrite both use this.
-
-*Call graph*: calls 1 internal fn (_slack_ok); called by 2 (_replace_controls_with_answers, settle_connect_message); 2 external calls (AsyncClient, dumps).
-
-
-##### `_held_connect_message`  (lines 3789–3825)
-
-```
-async def _held_connect_message(bot_token: str, held: ConnectMessage) -> Mapping[str, object] | None
-```
-
-**Purpose**: Reads the current Slack message that contains a stored connect button. It reads live Slack state so it does not overwrite newer form-answer rewrites.
-
-**Data flow**: It builds a one-message history or replies query, fetches from Slack, searches for the exact timestamp, and returns the message object or nothing.
-
-**Call relations**: Connect settling calls this before rewriting the button into an account line.
-
-*Call graph*: calls 1 internal fn (_slack_ok); called by 1 (settle_connect_message); 1 external calls (AsyncClient).
-
-
-##### `settle_connect_message`  (lines 3828–3854)
-
-```
-async def settle_connect_message(bot_token: str, held: ConnectMessage, provider: str, account: str) -> None
-```
-
-**Purpose**: Rewrites a connect button into a line showing the connected account. This makes the Slack thread reflect that authorization is complete.
-
-**Data flow**: It reads the live Slack message, checks that a connect button is still present, removes connect action blocks, appends a connected-account context line, and updates the message.
-
-**Call relations**: Connection-completion logic calls this after an external provider authorization lands.
-
-*Call graph*: calls 4 internal fn (_context_line, _held_connect_message, _is_connect_action, _rewrite_slack_message).
-
-
-##### `_context_line`  (lines 3857–3861)
-
-```
-def _context_line(text: str) -> dict[str, object]
-```
-
-**Purpose**: Builds a small Slack context block containing Markdown text. Context blocks are used for submitted-answer and connected-account notes.
-
-**Data flow**: It receives text, trims it to Slack's context limit, and returns a Block Kit context block.
-
-**Call relations**: Question rewriting and connect settling use this when replacing controls with status text.
-
-*Call graph*: called by 2 (_replace_controls_with_answers, settle_connect_message).
-
-
-##### `_reply_text`  (lines 3864–3874)
-
-```
-def _reply_text(writeback: Writeback) -> str
-```
-
-**Purpose**: Chooses the main text for a terminal turn reply. It turns failures, cancellations, empty replies, and normal answers into member-facing text.
-
-**Data flow**: It reads the terminal status and text from the writeback and returns an error line, cancellation reason, actual answer, or empty-reply placeholder.
-
-**Call relations**: Reply text preparation calls this before adding credential hints or oversize attachment links.
-
-*Call graph*: called by 1 (_reply_with_oversize_links).
-
-
-##### `_reply_with_oversize_links`  (lines 3877–3906)
-
-```
-def _reply_with_oversize_links(ctx: SurfaceContext, writeback: Writeback) -> str
-```
-
-**Purpose**: Adds extra lines to a terminal reply for credential requests and artifacts too large for Slack upload. This prevents important follow-up instructions or files from disappearing.
-
-**Data flow**: It starts with terminal reply text, adds a credentials-page instruction when needed, finds oversized artifacts, adds download-link lines for them, and returns the combined text.
-
-**Call relations**: Terminal Slack posting calls this before splitting and sending reply parts.
-
-*Call graph*: calls 3 internal fn (home_url, _oversize_link_line, _reply_text); called by 1 (post).
-
-
-##### `_oversize_link_line`  (lines 3909–3912)
-
-```
-def _oversize_link_line(ctx: SurfaceContext, artifact: SharedArtifact) -> str
-```
-
-**Purpose**: Formats one too-large artifact as a Markdown link line when a portal download link is available. It falls back to the filename when no link exists.
-
-**Data flow**: It receives an artifact, asks the context for a temporary artifact link, and returns a bullet with name/link and byte size.
-
-**Call relations**: Oversize reply preparation calls this for each over-limit shared artifact.
-
-*Call graph*: calls 1 internal fn (artifact_link); called by 1 (_reply_with_oversize_links).
-
-
-##### `_reply_mention_ids`  (lines 3915–3926)
-
-```
-async def _reply_mention_ids(ctx: SurfaceContext, bot_token: str, channel: str, text: str) -> dict[str, str]
-```
-
-**Purpose**: Builds the Slack mention map for an outgoing reply only when the text contains an at-sign. This avoids unnecessary roster reads.
-
-**Data flow**: It checks the text, loads identity, resolves same-team conversation members through SlackNames, and returns a name-to-id map or empty map.
-
-**Call relations**: Reply mention mapping calls this before replacing readable @names with Slack mention markup.
-
-*Call graph*: calls 1 internal fn (_identity); called by 1 (_reply_mentions_mapped); 1 external calls (__init__).
-
-
-##### `_channel_info`  (lines 3929–3943)
-
-```
-async def _channel_info(bot_token: str, channel: str) -> Mapping[str, object] | None
-```
-
-**Purpose**: Fetches Slack metadata for a channel or conversation. It is best-effort and returns nothing on failure.
-
-**Data flow**: It calls conversations.info with the bot token and channel id, checks the response, and returns the channel dict if present.
-
-**Call relations**: Audience selection, name resolution, and shared-channel footer gating use this.
-
-*Call graph*: calls 1 internal fn (_slack_ok); called by 3 (_name, _channel_is_externally_shared, _channel_origin); 1 external calls (AsyncClient).
-
-
-##### `_channel_is_externally_shared`  (lines 3946–3959)
-
-```
-async def _channel_is_externally_shared(bot_token: str, channel: str) -> bool
-```
-
-**Purpose**: Checks whether a Slack channel crosses workspace boundaries. If channel info cannot be read, it assumes shared for safety.
-
-**Data flow**: It fetches channel info, returns true on missing info, otherwise checks Slack's shared-channel flags.
-
-**Call relations**: Footer rendering uses this to decide whether to hide operator-only accounting and debug links.
-
-*Call graph*: calls 1 internal fn (_channel_info); called by 1 (_slack_footer).
-
-
-##### `_slack_footer`  (lines 3962–3997)
-
-```
-async def _slack_footer(ctx: FollowerContext, bot_token: str, channel: str, conversation_id: UUID, agent_id: UUID, turn_id: UUID, accounting: str | None) -> str | None
-```
-
-**Purpose**: Builds the small footer under Slack replies and first progress posts. It can include web links, configuration links, accounting, and debug links when safe.
-
-**Data flow**: It receives context, token, channel, conversation, agent, turn, and accounting text. It builds portal links, checks operator workspace and shared-channel safety, and returns a trimmed footer or nothing.
-
-**Call relations**: Terminal reply posting and progress footer generation use this shared footer builder.
-
-*Call graph*: calls 2 internal fn (is_operator_workspace, _channel_is_externally_shared); called by 2 (_footer, post).
-
-
-##### `_slack_reply_progress_key`  (lines 4019–4024)
-
-```
-def _slack_reply_progress_key(turn_id: UUID, reply_id: UUID | None=None) -> str
-```
-
-**Purpose**: Builds the store key for a reply delivery checkpoint. Terminal replies use the turn id alone; mid-turn replies add the reply id.
-
-**Data flow**: It receives a turn id and optional reply id and returns the prefixed progress key.
-
-**Call relations**: Terminal posting, mid-turn speaking, and cleanup use this to track exactly-once delivery records.
-
-*Call graph*: called by 3 (attach, post, speak).
-
-
-##### `_slack_reply_progress`  (lines 4027–4040)
-
-```
-async def _slack_reply_progress(store: ScopedStore, key: str) -> tuple[_SlackReplyProgress, JsonValue]
-```
-
-**Purpose**: Reads or creates the durable delivery-progress record for a Slack reply. This record prevents duplicate posts across retries.
-
-**Data flow**: It reads the store key, validates an existing record, or atomically creates an empty record and returns both the model and stored raw value.
-
-**Call relations**: Terminal and mid-turn posting call this before sending any Slack message parts.
-
-*Call graph*: calls 2 internal fn (get, put_if); called by 2 (post, speak); 2 external calls (__init__, __init__).
-
-
-##### `_checkpoint_slack_reply`  (lines 4043–4052)
-
-```
-async def _checkpoint_slack_reply(store: ScopedStore, key: str, expected: JsonValue, progress: _SlackReplyProgress) -> tuple[_SlackReplyProgress, JsonValue]
-```
-
-**Purpose**: Atomically writes a new reply-delivery checkpoint. It detects when another worker changed the record.
-
-**Data flow**: It serializes the progress object and writes it only if the stored value still equals the expected value, returning the updated pair or raising on conflict.
-
-**Call relations**: Delivery, mention mapping, terminal posting, and mid-turn posting call this between send steps.
-
-*Call graph*: calls 1 internal fn (put_if); called by 4 (_deliver_slack_reply, _reply_mentions_mapped, post, speak); 2 external calls (__init__, model_dump).
-
-
-##### `_slack_reply_delivery`  (lines 4055–4070)
-
-```
-def _slack_reply_delivery(message: object, delivery_id: str) -> str | None
-```
-
-**Purpose**: Checks whether a Slack message carries the metadata for a specific delivery id. This helps reconcile uncertain sends.
-
-**Data flow**: It receives a message object and delivery id, validates metadata event type and payload id, and returns the message timestamp when matched.
-
-**Call relations**: Reply reconciliation calls this while scanning Slack history.
-
-*Call graph*: called by 1 (_reconcile_slack_reply).
-
-
-##### `_reconcile_slack_reply`  (lines 4073–4113)
-
-```
-async def _reconcile_slack_reply(client: httpx.AsyncClient, bot_token: str, channel: str, thread_ts: str | None, delivery_id: str) -> str | None
-```
-
-**Purpose**: Looks for a message Slack may have accepted when the previous HTTP response was lost. This closes an important duplicate-post window.
-
-**Data flow**: It scans recent channel or thread messages with metadata included, follows pages up to a limit, returns the matching timestamp if found, or raises if the scan exceeds its page limit.
-
-**Call relations**: Terminal and mid-turn posting call this when a progress record shows a pending delivery id.
-
-*Call graph*: calls 2 internal fn (_slack_ok, _slack_reply_delivery); called by 2 (post, speak); 3 external calls (__init__, get, time).
-
-
-##### `_deliver_slack_reply`  (lines 4116–4156)
-
-```
-async def _deliver_slack_reply(client: httpx.AsyncClient, bot_token: str, store: ScopedStore, key: str, progress: _SlackReplyProgress, expected: JsonValue, delivery_id: str, body: bytes) -> tuple[_Sla
-```
-
-**Purpose**: Sends one Slack reply body with delivery checkpointing. It records pending state before posting and delivery state after Slack returns a timestamp.
-
-**Data flow**: It skips if the delivery id is already recorded, writes pending id, posts to Slack, treats invalid_blocks as recoverable without recording delivery, otherwise records the accepted timestamp and returns the payload.
-
-**Call relations**: Terminal and mid-turn posting call this for each reply part and fallback attempt.
-
-*Call graph*: calls 3 internal fn (_chat_post, _checkpoint_slack_reply, _posted_message_ts); called by 2 (post, speak); 2 external calls (__init__, model_copy).
-
-
-##### `_reply_mentions_mapped`  (lines 4159–4189)
-
-```
-async def _reply_mentions_mapped(ctx: SurfaceContext, bot_token: str, channel: str, text: str, store: ScopedStore, key: str, progress: _SlackReplyProgress, expected: JsonValue) -> tuple[_SlackReplyPro
-```
-
-**Purpose**: Replaces readable @names in reply text with Slack mention markup using a pinned map. Pinning keeps retries and text splitting deterministic.
-
-**Data flow**: It uses an existing mention map from the delivery record if present; otherwise it resolves one, checkpoints it, applies mention markup, and returns updated progress plus mapped text.
-
-**Call relations**: Terminal and mid-turn posting call this before splitting reply text into parts.
-
-*Call graph*: calls 2 internal fn (_checkpoint_slack_reply, _reply_mention_ids); called by 2 (post, speak); 2 external calls (model_copy, mention_markup).
-
-
-##### `post`  (lines 4192–4365)
-
-```
-async def post(ctx: SurfaceContext, writeback: Writeback) -> str
-```
-
-**Purpose**: Posts the terminal Slack reply for a completed turn. It handles splitting, footers, questions, connect buttons, retries, block fallbacks, mention mapping, and exact-once delivery.
-
-**Data flow**: It finds channel and thread, reads token and progress record, maps mentions, prepares text and actions, builds footer, reconciles pending sends, posts each part with checkpoints and fallbacks, stores connect-button locations, marks the reply complete, and returns the first Slack message reference.
-
-**Call relations**: The core surface delivery poller calls this when a turn has a terminal writeback for Slack.
-
-*Call graph*: calls 16 internal fn (credential, _checkpoint_slack_reply, _deliver_slack_reply, _hold_connect_message, _posted_message_ts, _reconcile_slack_reply, _reply_mentions_mapped, _reply_thread, _reply_with_oversize_links, _slack_footer (+6 more)); 5 external calls (__init__, __init__, __init__, AsyncClient, loads).
-
-
-##### `speak`  (lines 4368–4464)
-
-```
-async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str
-```
-
-**Purpose**: Posts a mid-turn Slack reply before the final answer. It is exact-once like terminal posting but has no footer, forms, connect buttons, or files.
-
-**Data flow**: It finds the channel and thread for the reply or comment, reads token and progress record, maps mentions, reconciles pending sends, posts split parts with checkpoints and fallback on invalid blocks, marks complete, and returns the first Slack message reference.
-
-**Call relations**: Core calls this when a running turn emits a mid-turn reply for Slack.
-
-*Call graph*: calls 12 internal fn (credential, _checkpoint_slack_reply, _deliver_slack_reply, _posted_message_ts, _reconcile_slack_reply, _reply_mentions_mapped, _reply_thread, _slack_reply_progress, _slack_reply_progress_key, _thread_mirror_key (+2 more)); 4 external calls (__init__, __init__, __init__, AsyncClient).
-
-
-##### `_chat_post`  (lines 4467–4507)
-
-```
-async def _chat_post(client: httpx.AsyncClient, bot_token: str, body: bytes) -> Mapping[str, object]
-```
-
-**Purpose**: Posts one chat.postMessage request and returns the parsed Slack payload without immediately rejecting Slack-level ok:false. This lets callers handle recoverable invalid_blocks responses.
-
-**Data flow**: It sends the JSON body to Slack, turns HTTP errors into delivery errors with retry-after when available, and returns the response JSON.
-
-**Call relations**: The delivery helper uses this for each Slack message send attempt.
-
-*Call graph*: calls 1 internal fn (__init__); called by 1 (_deliver_slack_reply); 1 external calls (post).
-
-
-##### `_posted_message_ts`  (lines 4510–4516)
-
-```
-def _posted_message_ts(payload: Mapping[str, object]) -> str
-```
-
-**Purpose**: Extracts the timestamp of a successfully posted Slack message. It raises a Slack API error when Slack did not accept the message.
-
-**Data flow**: It checks ok:true, reads the ts field, returns it when non-empty, and raises otherwise.
-
-**Call relations**: Delivery, terminal posting, and mid-turn posting use this after Slack responds.
-
-*Call graph*: called by 3 (_deliver_slack_reply, post, speak); 1 external calls (__init__).
-
-
-##### `attach`  (lines 4519–4564)
-
-```
-async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> None
-```
-
-**Purpose**: Uploads and shares files produced by a completed turn. It also cleans up temporary delivery and DM-anchor records now that core has recorded the terminal reply reference.
-
-**Data flow**: It finds the reply thread, deletes reply progress and DM anchor records for the turn, filters artifacts that fit Slack's upload cap, uploads them concurrently, groups accepted file ids into Slack-sized batches, and shares each batch in the thread.
-
-**Call relations**: Core calls this after the terminal Slack reply has been durably attached.
-
-*Call graph*: calls 7 internal fn (credential, _attachment_batches, _dm_anchor_key, _reply_thread, _share_uploaded_files, _slack_reply_progress_key, _upload_artifact); 4 external calls (__init__, gather, AsyncClient, Timeout).
-
-
-##### `_attachment_batches`  (lines 4567–4571)
-
-```
-def _attachment_batches(files: Sequence[dict[str, str]]) -> Iterator[Sequence[dict[str, str]]]
-```
-
-**Purpose**: Splits uploaded file records into groups Slack will accept in one share message. This keeps large artifact sets deliverable.
-
-**Data flow**: It receives a sequence of file dicts and yields slices no larger than Slack's attachment limit.
-
-**Call relations**: File attachment sharing calls this after uploads finish.
-
-*Call graph*: called by 1 (attach).
-
-
-##### `_upload_artifact`  (lines 4574–4601)
-
-```
-async def _upload_artifact(ctx: SurfaceContext, client: httpx.AsyncClient, bot_token: str, artifact: SharedArtifact) -> str
-```
-
-**Purpose**: Performs the reserve-and-upload steps of Slack's external file upload flow. It streams artifact bytes from ufo's blob store rather than buffering them.
-
-**Data flow**: It asks Slack for an upload URL and file id, validates both, posts the artifact byte stream to the upload URL, and returns the file id.
-
-**Call relations**: attach runs this concurrently for every shareable artifact.
-
-*Call graph*: calls 1 internal fn (_slack_ok); called by 1 (attach); 2 external calls (__init__, post).
+*Call graph*: calls 1 internal fn (ingress_secret); 2 external calls (dumps, sign_token).
 
 
-##### `_share_uploaded_files`  (lines 4604–4628)
+##### `verify_ingress_token`  (lines 96–135)
 
 ```
-async def _share_uploaded_files(client: httpx.AsyncClient, bot_token: str, channel: str, thread_ts: str | None, files: Sequence[dict[str, str]]) -> None
+def verify_ingress_token(token: str, now: datetime, kind: IngressTokenKind) -> IngressClaims
 ```
 
-**Purpose**: Completes Slack's external upload flow by sharing already uploaded files into a channel or thread. One call can share several files together.
+**Purpose**: This function checks whether a token is real, still fresh, meant for the expected hop, and safe to use. If everything is valid, it returns the claims that say what sandbox access is allowed.
 
-**Data flow**: It receives file ids and titles, channel, optional thread timestamp, and bot token, then posts files.completeUploadExternal to Slack.
+**Data flow**: It receives a token string, the current time, and the kind of token the caller expects. It reads the shared secret, verifies the signature, parses the JSON, checks that the token kind matches, rebuilds the workspace, conversation, port, shipped, and framer claims, and rejects malformed data. It also refuses ports outside the normal TCP port range and rejects tokens whose expiry time has passed. The output is an IngressClaims object, or it raises IngressTokenError if the token should not be trusted.
 
-**Call relations**: attach calls this for each batch of successfully uploaded artifacts.
+**Call relations**: During an ingress request, the caller uses this function before allowing access. It calls ingress_secret to get the same secret used at minting time, then uses verify_token to prove the token was not changed. After parsing, it builds ShippedClaim, FramerClaim, and IngressClaims objects so later code can make routing and security decisions from clean, typed data.
 
-*Call graph*: calls 1 internal fn (_slack_ok); called by 1 (attach); 2 external calls (post, dumps).
+*Call graph*: calls 1 internal fn (ingress_secret); 8 external calls (__init__, __init__, __init__, __init__, timestamp, loads, verify_token, UUID).
 
 
-##### `_slack_ok`  (lines 4631–4640)
+##### `ingress_secret`  (lines 138–145)
 
 ```
-async def _slack_ok(request: Awaitable[httpx.Response]) -> dict[str, object]
+def ingress_secret() -> str
 ```
 
-**Purpose**: Normalizes Slack Web API responses by requiring HTTP success and Slack ok:true. It raises a readable SlackApiError otherwise.
+**Purpose**: This function reads the deploy-wide secret used to sign and verify ingress tokens. It makes missing configuration fail loudly instead of allowing the service to appear healthy but reject every real viewer later.
 
-**Data flow**: It awaits an HTTP request, raises for HTTP errors, parses JSON, checks ok, includes Slack response messages when present, and returns the payload.
+**Data flow**: It reads the environment variable named by UFO_TOKEN_SECRET_ENV. If the value exists, it returns that secret string. If it is missing or empty, it raises a RuntimeError explaining that the secret must be configured.
 
-**Call relations**: Most Slack API helpers call this so they can work with trusted successful payloads.
+**Call relations**: Both mint_ingress_token and verify_ingress_token call this function so they use the same secret source. It is the small shared doorway between token logic and deployment configuration: minting needs it to sign new passes, and verification needs it to check existing passes.
 
-*Call graph*: called by 18 (_list, _members, _say, _set, _ambient_context, _channel_info, _conversation_members, _declared_files, _held_connect_message, _post_ephemeral (+8 more)); 1 external calls (__init__).
+*Call graph*: called by 2 (mint_ingress_token, verify_ingress_token).
 
 
-### Terminal Surface
-The UFO command-line surface exposes conversations, files, prompts, progress, and local operations as tab-separated terminal commands.
+### Operator memory surface
+Exposes a restricted browser page for operators to inspect stored workspace memory records.
 
-### `extensions/ufo/ufo_ext_ufo/surface.py`
+### `extensions/memory/ufo_ext_memory/surface.py`
 
 `io_transport` · `request handling`
 
-This file is the bridge between the ufo backend and a user’s terminal. The shell client does not receive rich web objects. Instead, the server sends plain text “directives” such as “say this”, “show a prompt”, “run this local operation”, “poll again”, or “listen while idle”. Without this file, the command-line client would not know what to print, when to reconnect, how to send messages, how to provide secrets, or how to let the agent safely use the member’s local terminal workspace.
+This file is the web “front door” for the memory explorer. The memory system stores durable records for a workspace, including shared memories and member-specific ones. Operators need a safe way to look at those records, mainly for understanding, debugging, and auditing what the system may later recall. Without this surface, the memory store would still exist, but there would be no built-in browser page or JSON endpoint for an operator to inspect it.
 
-The main request handler is `channel`. A POST to a channel can mean several things: send a new message, reconnect to continue reading an existing turn, stop a running turn, answer a local terminal operation, provide a secret, retract a queued message, or do a fast one-shot send. The file checks the bearer token, finds or creates the member’s conversation, admits messages into the durable conversation queue, and streams back directives while the agent works.
+The file does two simple jobs. First, it loads a static HTML page from `static/memory.html` and serves it to the browser. That page is the visual shell of the explorer. Second, it provides an API endpoint that returns every memory item for the currently selected workspace as JSON, ordered by the store helper it calls.
 
-The streaming logic is careful because terminal clients reconnect often. A stream is held open for a limited time; if the answer is not finished, the server sends a cursor with `poll`, so the client can resume without repeating old output. When a turn ends and the user is back at the prompt, the server sends `listen`, so background activity can wake the terminal later. Think of it like a walkie-talkie conversation with bookmarks: each reconnect says “continue after this last thing I heard.”
+A key detail is access control. This surface relies on the shared operator session, meaning the caller must already be verified as an operator and bound to a workspace. Think of that binding like being given a visitor badge for one building: every read should stay inside that building. To read the extension’s own `memory_item` table, the file creates an `ExtensionContext`, which gives it a workspace-scoped database transaction for the memory extension rather than using some unrelated core storage path.
 
 #### Function details
 
-##### `terminal_runtime_id`  (lines 109–111)
+##### `app_page`  (lines 27–30)
 
 ```
-def terminal_runtime_id(channel: str) -> str
+async def app_page(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Creates a stable short identifier for the local terminal runtime tied to one channel. This lets the backend recognize the same terminal conversation across reconnects without exposing the raw channel name.
+**Purpose**: This function returns the memory explorer web page to the browser. It is used when an operator opens the surface itself, before the page asks for memory data.
 
-**Data flow**: It receives a channel string, hashes it, cuts the hash down to a fixed length, and returns that shortened hexadecimal text. Nothing else is changed.
+**Data flow**: It receives the surface context and the web request, but it does not need to inspect either one. It checks the HTML that was loaded when the file started; if the file was missing, it raises an error so the problem is obvious. If the HTML is available, it wraps that text in an HTML web response and sends it back.
 
-**Call relations**: When `channel.bound` connects a terminal workspace, it asks this function for the runtime id to report to the backend. The id is then used as the local namespace for terminal operations in that conversation.
+**Call relations**: This is the page-serving half of the surface. The route table points the empty GET path to it, so the operator first receives the static explorer page. After that page loads in the browser, it can call the separate memory API provided by `memories`.
 
-*Call graph*: called by 1 (bound); 1 external calls (sha256).
-
-
-##### `directive`  (lines 114–122)
-
-```
-def directive(verb: str, *fields: str) -> bytes
-```
-
-**Purpose**: Builds one line of the simple wire language that the shell client reads. It protects the line format by escaping tabs, newlines, and backslashes inside fields.
-
-**Data flow**: It receives a command word and any number of text fields. It escapes characters that would confuse line splitting, joins everything with tabs, adds a newline, and returns bytes ready to send over HTTP.
-
-**Call relations**: Almost every part of this file uses `directive` when it needs to tell the shell client something. Higher-level functions decide what should happen; this function turns that decision into the exact bytes sent to the client.
-
-*Call graph*: called by 10 (_answer, _client_update, _fulfill_secret, _say_lines, _send, _subagent_note, channel, directives_for, history_directives, stream_directives).
+*Call graph*: 1 external calls (HTMLResponse).
 
 
-##### `shared_files`  (lines 136–147)
+##### `memories`  (lines 33–42)
 
 ```
-async def shared_files(ctx: SurfaceContext, turn_id: UUID) -> tuple[SharedFile, ...]
+async def memories(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Collects the files shared by a finished turn and prepares them for terminal display. It adds usable download links when the deployment has artifact links configured.
+**Purpose**: This function returns the workspace’s memory records as JSON for the explorer page. It is the read-only data feed behind the operator view.
 
-**Data flow**: It receives the surface context and a turn id. It asks the backend for artifacts shared by that turn, turns each artifact into a `SharedFile` with name, size, and link, and returns them as an ordered tuple.
+**Data flow**: It receives the current surface context, including the workspace id that authorization has already selected. It builds an extension context for the memory extension so it can open the correct workspace-scoped transaction. It asks the store inventory helper for memory items in that workspace, turns each item into JSON-friendly data, and returns the list as a JSON web response.
 
-**Call relations**: `stream_directives` receives this as a callback from `channel` and calls it only when a terminal frame is being rendered. The resulting file records are handed to `_answer`, which emits `file` directives.
+**Call relations**: This is called when the explorer page requests `api/memories`. It relies on the earlier operator session binding to make sure the request is scoped to one workspace, then hands the actual database lookup to `ufo_ext_memory.store.inventory`. Once the store returns memory item models, this function converts them into the response format the browser can display.
 
-*Call graph*: calls 2 internal fn (artifact_link, shared_artifacts); 1 external calls (__init__).
-
-
-##### `resolve_workspace`  (lines 150–157)
-
-```
-async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | None
-```
-
-**Purpose**: Reads the workspace id claimed by an authorization bearer token. The routing layer can use this before running the actual handler to decide which workspace the request belongs to.
-
-**Data flow**: It receives an HTTP request and authentication object. It looks for an `Authorization: Bearer ...` header, extracts the token, asks the bearer codec for the workspace claim, and returns that workspace id or `None` if the header is missing or invalid-looking.
-
-**Call relations**: This is the surface’s workspace identifier hook. The route handler later verifies the same bearer token again for the member email, so workspace scoping and member identity come from the same signed token.
-
-*Call graph*: 1 external calls (workspace_claim).
+*Call graph*: 5 external calls (__init__, __init__, __init__, JSONResponse, inventory).
 
 
-##### `history_directives`  (lines 163–222)
+### Hosted site doorway
+Handles public and protected hosted-site visits, iframe redirects, share images, and privacy-preserving 404 responses.
 
-```
-def history_directives(conversation: Conversation) -> tuple[bytes, ...]
-```
+### `extensions/sites/ufo_ext_sites/surface.py`
 
-**Purpose**: Turns an existing conversation transcript into terminal lines for a fresh resume. It shows recent user messages and completed agent replies, while avoiding repeating the latest live turn.
+`orchestration` · `request handling`
 
-**Data flow**: It receives a `Conversation`. It walks through its messages, extracts readable text, counts completed work steps, keeps only the newest content within a character budget, and returns `you`, `note`, and `say` directive bytes.
+A hosted site has a permanent link, but the link is only an address, not proof that the visitor is allowed in. This file is the gatekeeper for those links. When someone opens a site URL, it first checks the signed token in the URL to find the workspace and site name. Then it reads the site record, checks the visitor’s session cookie if needed, applies the site’s visibility rules, and finally creates a temporary ingress URL for the actual site bytes. The real site is shown inside an iframe, like putting the site behind a glass window: the frame can display it, but the site cannot easily steer the whole browser tab somewhere unsafe.
 
-**Call relations**: `channel` uses this when an empty reconnect has no cursor, meaning the terminal is rejoining and needs recent context. It relies on `_history_text`, `_dispatched`, and `directive` to shape the transcript into the same kind of lines the live stream uses.
+The file also supports special cases. If a site is an agent homepage, its visibility follows the agent instead of the site row. If a deploy-wide shipped app is opened, the visitor is sent through the portal when needed. Creators can change visibility through a form protected by a CSRF token, which is a signed value that proves the form came from this viewer’s own session.
 
-*Call graph*: calls 3 internal fn (_dispatched, _history_text, directive); called by 1 (channel).
+Share previews are handled carefully. Public sites may expose their name and preview image to chat unfurlers. Non-public sites get generic metadata, so merely pasting a link does not leak private names or pictures.
 
+#### Function details
 
-##### `_dispatched`  (lines 225–232)
+##### `site_token`  (lines 174–183)
 
 ```
-def _dispatched(message: Message, active: set[str]) -> int
+def site_token(workspace_id: UUID, conversation_id: UUID, name: str) -> str
 ```
 
-**Purpose**: Counts how many tool calls in an assistant message actually became live work. Calls that were written but never dispatched are not counted as visible progress.
+**Purpose**: Creates the permanent signed token that names one hosted site. The token identifies the workspace, conversation, and site name, but it does not by itself grant permission to view the site.
 
-**Data flow**: It receives one message and a set of active tool-use ids. If the message has structured blocks, it counts tool-use blocks whose ids are in the active set and returns that count; plain text messages return zero.
+**Data flow**: It receives a workspace ID, conversation ID, and site name. It puts those values into a signed surface token for the sites surface. It returns the token string that can be placed in a hosted site URL.
 
-**Call relations**: `history_directives` uses this count to decide how many completed work steps to summarize as a `note`. It helps replay old history in a way that matches what the user would have seen live.
+**Call relations**: This is the helper used by site_url when the system needs to publish or report a site’s permanent link. It hands off the actual signing work to the shared surface-token code.
 
-*Call graph*: called by 1 (history_directives).
-
-
-##### `_history_text`  (lines 235–240)
-
-```
-def _history_text(message: Message) -> str
-```
-
-**Purpose**: Extracts the readable text from one stored message. It also cleans user messages into the form the member actually meant to send.
-
-**Data flow**: It receives a message. If the content is plain text, it uses it directly; if the content is block-based, it joins the text blocks. For user messages it passes the result through `member_message_text`; for assistant messages it returns the raw assistant text.
-
-**Call relations**: `history_directives` calls this for every message while rebuilding a readable terminal transcript.
-
-*Call graph*: called by 1 (history_directives); 1 external calls (member_message_text).
+*Call graph*: called by 1 (site_url); 1 external calls (mint_surface_token).
 
 
-##### `directives_for`  (lines 243–284)
+##### `site_url`  (lines 186–196)
 
 ```
-def directives_for(frame: LiveFrame, streamed: bool, collect: tuple[CredentialPrompt, ...]=(), connect_message: str | None=None, files: tuple[SharedFile, ...]=(), exits: bool=True) -> tuple[bytes, ...
+def site_url(public_base_url: str | None, workspace_id: UUID, conversation_id: UUID, name: str) -> str
 ```
 
-**Purpose**: Converts one live backend frame into the terminal directives the shell understands. A frame is a single event from the running turn, such as text, progress, cost, completion, cancellation, or a request for input.
+**Purpose**: Builds the full public URL for a hosted site. It refuses to invent a link if the deployment has no public base URL configured, because such a link would not actually be openable.
 
-**Data flow**: It receives a live frame plus context such as whether text has already streamed, pending credential prompts, connection text, shared files, and whether cancellation should exit. It pattern-matches the frame type and returns zero or more directive lines.
+**Data flow**: It receives the deployment’s public base URL plus the site’s workspace, conversation, and name. If the base URL is missing, it raises an explicit configuration error. Otherwise it creates a site token and appends it under the sites frame path, returning the full link.
 
-**Call relations**: `stream_directives` calls this for each frame read from the turn tail. It delegates terminal endings to `_answer`, subagent progress to `_subagent_note`, and uses `directive` for simple one-line events.
+**Call relations**: Callers use this when they need to hand a user the real hosted-site link. It relies on site_token to make the signed address part of that link.
 
-*Call graph*: calls 3 internal fn (_answer, _subagent_note, directive); called by 1 (stream_directives).
-
-
-##### `_subagent_note`  (lines 287–293)
-
-```
-def _subagent_note(frame: SubagentActivity) -> tuple[bytes, ...]
-```
-
-**Purpose**: Formats progress from a subagent as a terminal note. A subagent is a helper agent working under the main agent.
-
-**Data flow**: It receives a subagent activity frame. If the frame has activity text, it chooses a label from the subagent name or profile, builds a note directive, and returns it; if there is no activity text, it returns no lines.
-
-**Call relations**: `directives_for` calls this only for `SubagentActivity` frames. It keeps subagent progress visible without showing start and end events that are already described elsewhere.
-
-*Call graph*: calls 1 internal fn (directive); called by 1 (directives_for).
+*Call graph*: calls 1 internal fn (site_token); 1 external calls (__init__).
 
 
-##### `_answer`  (lines 296–349)
+##### `shipped_homepage_url`  (lines 208–223)
 
 ```
-def _answer(terminal: Terminal, streamed: bool, collect: tuple[CredentialPrompt, ...]=(), connect_message: str | None=None, files: tuple[SharedFile, ...]=(), exits: bool=True) -> tuple[bytes, ...]
+def shipped_homepage_url(public_base_url: str | None, workspace_id: UUID, slug: str, digest: str) -> str | None
 ```
 
-**Purpose**: Builds the final terminal output for a completed, failed, or cancelled turn. It decides whether to show answer text, file links, secret prompts, connection links, a new prompt, or an exit command.
+**Purpose**: Builds a stable portal-embed URL for a deploy-wide shipped app bundle. This is for app code that belongs to the deployment, not for a user-created hosted site row.
 
-**Data flow**: It receives a terminal frame and extra information collected at the end of a turn. Depending on the terminal status, it emits `say`, `file`, `secret`, `ask`, or `exit` directives. It returns the complete tuple of lines that close that turn for the terminal.
+**Data flow**: It receives a public base URL, workspace ID, app slug, and bundle digest. If there is no public base URL, it returns nothing. Otherwise it signs those values into a token marked as a portal embed and returns the frame URL that carries it.
 
-**Call relations**: `directives_for` hands terminal frames to `_answer`. `_answer` uses `_say_lines` and `directive` to turn human-readable outcomes into the wire format sent by `stream_directives`.
+**Call relations**: This is used by code that publishes a shipped app homepage address. Later, when that URL is opened, shipped_address and frame recognize the token shape and route it through the shipped-app path.
 
-*Call graph*: calls 2 internal fn (_say_lines, directive); called by 1 (directives_for).
-
-
-##### `_say_lines`  (lines 352–353)
-
-```
-def _say_lines(text: str) -> tuple[bytes, ...]
-```
-
-**Purpose**: Splits a block of text into separate terminal `say` lines. This keeps multi-line answers from breaking the directive format.
-
-**Data flow**: It receives text, splits it into lines, turns each line into a `say` directive, and returns the directives as a tuple. If the text is empty, it still produces one `say` line for that empty value.
-
-**Call relations**: `_answer` uses this whenever final text needs to be displayed as normal speech from the agent.
-
-*Call graph*: calls 1 internal fn (directive); called by 1 (_answer).
+*Call graph*: 1 external calls (mint_surface_token).
 
 
-##### `stream_directives`  (lines 356–513)
+##### `shipped_address`  (lines 226–240)
 
 ```
-async def stream_directives(tail: AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]], hold_seconds: float, pending: Callable[[str, str], Awaitable[bool]] | None=None, connect: Callable[
+def shipped_address(token: str) -> ShippedAddress | None
 ```
 
-**Purpose**: Runs the live streaming loop for one turn. It reads backend frames and terminal operation requests, converts them into directives, and stops at the right moment so the shell can reconnect safely.
+**Purpose**: Checks whether a token is a valid shipped-app address and, if so, extracts the workspace, app slug, and bundle digest. It deliberately rejects normal site tokens so the two kinds of links cannot be confused.
 
-**Data flow**: It receives an async frame tail, a hold timeout, callbacks for credentials, connection links, files, terminal operations, and cursor state. It waits for either the next frame or a terminal operation, emits directives as events arrive, remembers the last rendered cursor, and finally emits `poll` or `listen` when the stream should be resumed later.
+**Data flow**: It receives a token string. It verifies the token signature and required claims, converts the workspace claim into a UUID, and returns a ShippedAddress object. If anything is missing, malformed, or not marked as a portal embed, it returns None.
 
-**Call relations**: `channel` creates this stream after it has authenticated the request and found the turn. Inside the loop, it uses `_next` to read frames and `directives_for` to render them. It hands cursors back to the client so later requests can continue without duplicating or losing output.
+**Call relations**: resolve_workspace uses this when deciding which workspace a request belongs to. frame uses it at the start of a request to decide whether to call _shipped_frame instead of the normal hosted-site flow.
 
-*Call graph*: calls 3 internal fn (_next, directive, directives_for); called by 1 (channel); 4 external calls (ensure_future, get_running_loop, wait, suppress).
-
-
-##### `_next`  (lines 516–522)
-
-```
-async def _next(frames: AsyncIterator[tuple[str, LiveFrame]]) -> tuple[str, LiveFrame] | None
-```
-
-**Purpose**: Safely reads the next item from an async iterator. It turns the normal end of the iterator into `None` instead of letting an exception escape through a task.
-
-**Data flow**: It receives an async iterator of live frames. It awaits the next item and returns it, or returns `None` if the iterator has ended.
-
-**Call relations**: `stream_directives` wraps frame reads in tasks so it can race them against timeouts and terminal operations. `_next` makes that task result simple to handle.
-
-*Call graph*: called by 1 (stream_directives).
+*Call graph*: called by 2 (frame, resolve_workspace); 3 external calls (__init__, verify_surface_token, UUID).
 
 
-##### `_authenticated_email`  (lines 525–529)
+##### `site_card_url`  (lines 243–252)
 
 ```
-def _authenticated_email(request: Request, workspace_id: UUID) -> str | None
+def site_card_url(public_base_url: str | None, token: str, digest: str) -> str | None
 ```
 
-**Purpose**: Checks the request bearer token and extracts the member email if it is valid for the workspace. This is the main identity check for terminal requests.
+**Purpose**: Builds the public URL for a site’s share-card image, the picture shown when a public site link is pasted into chat or social tools. It only returns a URL when the deployment has a public base address.
 
-**Data flow**: It receives the request and workspace id. It reads the authorization header, verifies the bearer token, and returns the email from the token or `None` if authentication fails.
+**Data flow**: It receives the public base URL, the site token, and the image digest. With no base URL it returns None. Otherwise it combines the base path, token, digest, and image extension into the anonymous share-card route.
 
-**Call relations**: `channel`, `op_body`, and `system_skills` call this before serving protected terminal resources. If it returns `None`, those handlers reject the request as unauthorized.
+**Call relations**: frame calls this while preparing page metadata. It is only used for sites that the caller has already decided are public and safe to name.
 
-*Call graph*: called by 3 (channel, op_body, system_skills); 1 external calls (verify_token).
-
-
-##### `_utf8_header`  (lines 532–539)
-
-```
-def _utf8_header(request: Request, name: str) -> str
-```
-
-**Purpose**: Reads a header value that the shell sent as raw UTF-8 bytes, such as the current working directory. This avoids corrupting non-ASCII paths.
-
-**Data flow**: It receives a request and header name. It retrieves the header text, reverses the HTTP server’s byte-to-text decoding, decodes it as UTF-8, and returns the recovered string.
-
-**Call relations**: `channel` uses this for headers like the working directory and operation error text. It lets terminal paths and messages survive HTTP header encoding.
-
-*Call graph*: called by 1 (channel).
+*Call graph*: called by 1 (frame).
 
 
-##### `_stale_client`  (lines 542–546)
+##### `site_address`  (lines 255–274)
 
 ```
-def _stale_client(request: Request) -> bool
+def site_address(token: str) -> SiteAddress | None
 ```
 
-**Purpose**: Detects whether the shell script version making the request differs from the version the server expects. This lets the server ask old clients to update.
+**Purpose**: Checks whether a token is a valid hosted-site address and extracts the site identity from it. It accepts both normal permanent site links and portal-embed versions of those links.
 
-**Data flow**: It receives a request. It reads the server’s expected client version from the environment and compares it with the request’s `x-ufo-script` header. It returns `True` only when the server has a version set and the client does not match.
+**Data flow**: It receives a token string. It verifies the signed token, checks the optional portal-embed marker, converts the workspace and conversation IDs into UUIDs, and returns a SiteAddress object. If the token is invalid or missing required claims, it returns None.
 
-**Call relations**: `channel` checks this before admitting messages or deciding how to respond to reconnects. If a client is stale, `channel` may return an update directive or an error instead of continuing normally.
+**Call relations**: This is a central parser for site links. resolve_workspace uses it before reading any site row, frame uses it to open a site, homepage_embed_url uses it to convert normal links into portal-embed links, and _resolve uses it for helper routes.
 
-*Call graph*: called by 1 (channel).
-
-
-##### `_client_update`  (lines 549–550)
-
-```
-def _client_update() -> bytes
-```
-
-**Purpose**: Creates the small response that tells the shell to install an updated client and explains why. It is used when the server refuses to continue with an outdated script.
-
-**Data flow**: It takes no input. It returns bytes containing an `install` directive followed by a `say` directive with the stale-client message.
-
-**Call relations**: `channel` calls this in several stale-client branches when it can safely tell the terminal to update immediately.
-
-*Call graph*: calls 1 internal fn (directive); called by 1 (channel).
+*Call graph*: called by 4 (_resolve, frame, homepage_embed_url, resolve_workspace); 3 external calls (__init__, verify_surface_token, UUID).
 
 
-##### `_resumed_from`  (lines 553–560)
+##### `homepage_embed_url`  (lines 277–292)
 
 ```
-def _resumed_from(request: Request, turn_id: UUID) -> str
+def homepage_embed_url(url: str) -> str
 ```
 
-**Purpose**: Extracts the safe resume cursor from the client’s `since` header. It only trusts the cursor if it belongs to the same turn being streamed.
+**Purpose**: Turns a normal hosted-site URL into a signed portal-iframe version of the same URL. This lets the portal open the site in its own embedded context while preserving the same site identity.
 
-**Data flow**: It receives the request and the current turn id. It splits the `since` header into a named turn and cursor, returns the cursor if the named turn matches, and otherwise returns an empty cursor.
+**Data flow**: It receives a URL, splits off the last path segment as the token, and verifies that the URL points at the hosted-site frame path. It reads the site address from the original token, then signs a new token with the portal-embed marker. It returns the same URL prefix with the new token.
 
-**Call relations**: `channel` calls this before opening the turn tail. This prevents a cursor from an older turn from accidentally skipping the beginning of a newer turn.
+**Call relations**: This function depends on site_address to prove the input is really a hosted-site URL. It then uses the shared token signer to mint the portal-specific form.
 
-*Call graph*: called by 1 (channel).
-
-
-##### `_turn_context`  (lines 563–575)
-
-```
-def _turn_context(email: str, request: Request) -> TurnContext
-```
-
-**Purpose**: Builds the extra context attached to a member’s admitted message, including who sent it, where it came from, and the member’s timezone if valid.
-
-**Data flow**: It receives the member email and request. It reads the timezone header, tries to build a `TurnContext`, logs and drops the timezone if validation fails, and returns the resulting context.
-
-**Call relations**: `channel` and `_send` call this before admitting a message. The backend then has sender and timezone information for the turn.
-
-*Call graph*: called by 2 (_send, channel); 2 external calls (__init__, log).
+*Call graph*: calls 1 internal fn (site_address); 1 external calls (mint_surface_token).
 
 
-##### `channel`  (lines 578–725)
+##### `resolve_workspace`  (lines 295–305)
 
 ```
-async def channel(ctx: SurfaceContext, request: Request) -> Response
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
 ```
 
-**Purpose**: Serves the main ufo terminal channel endpoint. It authenticates the member, interprets the request type, admits or resumes work, and returns either a short response or a live stream of directives.
+**Purpose**: Finds which workspace a surface request belongs to before the app reads any database row. This matters because public visitors may not have a session cookie that would otherwise identify a workspace.
 
-**Data flow**: It receives the surface context and HTTP request. It verifies identity, finds the conversation for the email and channel, handles special cases like secrets, sends, unsends, stops, operation replies, stale clients, and normal messages, then creates a streaming response that yields acknowledgements, history, workspace notes, and live turn directives.
+**Data flow**: It reads the token from the request path. It first tries to parse it as a normal site address, then as a shipped-app address. If either works, it returns the workspace ID. If neither works, it returns the same not-found response used for unknown sites.
 
-**Call relations**: This is the center of the file. It calls many helper functions to decode headers, check authentication, build turn context, render history, and stream frames. It hands most backend work to `SurfaceContext`, and it hands live rendering to `stream_directives` through the nested `bound` generator.
+**Call relations**: The surface routing layer calls this as the workspace-identification step. It delegates token understanding to site_address and shipped_address, and uses _not_found so invalid links do not reveal extra information.
 
-*Call graph*: calls 23 internal fn (admit, claim_terminal, conversation_for, latest_turn, link_member, linked_member, read_transcript, stop_turn, tail, terminal_resolve (+13 more)); 5 external calls (partial, conversation_audience, PlainTextResponse, body, StreamingResponse).
-
-
-##### `channel.moved_on`  (lines 691–693)
-
-```
-async def moved_on() -> bool
-```
-
-**Purpose**: Checks whether the conversation has advanced to a newer running turn while the current streamed turn was ending. This tells the stream whether to poll immediately instead of idling.
-
-**Data flow**: It reads the latest turn id from the conversation. It returns `True` when there is a different latest turn and that newer turn is not terminal; otherwise it returns `False`.
-
-**Call relations**: `channel` passes this callback into `stream_directives`. After a terminal frame, `stream_directives` calls it to decide whether to send `poll 0` so the client continues straight into the newer turn.
+*Call graph*: calls 3 internal fn (_not_found, shipped_address, site_address).
 
 
-##### `channel.bound`  (lines 708–723)
+##### `frame`  (lines 308–384)
 
 ```
-async def bound() -> AsyncIterator[bytes]
+async def frame(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Wraps the outgoing directive stream with terminal connection setup and cleanup. It also sends any initial acknowledgement, replayed history, or workspace note before live output begins.
+**Purpose**: Opens a hosted site link. It verifies the URL token, checks the site’s visibility rules, authenticates the viewer when needed, and then either renders a frame page, redirects a portal iframe to ingress, or returns a safe not-found response.
 
-**Data flow**: It starts by connecting the terminal workspace if a current directory was supplied. Then it yields the sent acknowledgement, history lines, workspace note, and all lines from `stream_directives`. When the stream ends or is cancelled, it disconnects the terminal workspace.
+**Data flow**: It reads the site token and optional deep path from the request. If the token is for a shipped app, it hands off to _shipped_frame. Otherwise it parses the site address, reads the site row, prepares safe share-preview tags, checks the viewer from the session cookie, applies homepage or site visibility rules, asks the context for a temporary ingress URL, and returns HTML or a redirect. It may also create a CSRF token for the creator’s visibility form.
 
-**Call relations**: `channel` returns a `StreamingResponse` built from this generator. It calls `terminal_runtime_id` when connecting the terminal and ensures `SurfaceContext.terminal_disconnect` runs in the end.
+**Call relations**: This is the main GET handler declared in SITES_SURFACE. It calls many small helpers: _sites for storage, _viewer and _viewer_is_admin for access checks, _share_tags for metadata, _into_the_portal for portal-only pages, _framed_from for iframe context, _frame_page for final HTML, and _not_found whenever the request should reveal nothing.
 
-*Call graph*: calls 1 internal fn (terminal_runtime_id).
-
-
-##### `_send`  (lines 728–778)
-
-```
-async def _send(ctx: SurfaceContext, request: Request, conversation_id: UUID, member_id: UUID | None, email: str, cwd: str) -> Response
-```
-
-**Purpose**: Admits one message quickly and returns only an acknowledgement, without holding a streaming connection open. This is used when the user sends another message while an existing stream is already listening.
-
-**Data flow**: It receives context, request, conversation id, member id, email, and working directory. It validates the send id and message body, optionally claims the terminal workspace, admits the message with an idempotency key, and returns a `sent` directive plus any workspace note.
-
-**Call relations**: `channel` calls `_send` when the request has the send header. The existing held stream, not this request, will later deliver the resulting agent output.
-
-*Call graph*: calls 4 internal fn (admit, claim_terminal, _turn_context, directive); called by 1 (channel); 3 external calls (PlainTextResponse, body, UUID).
+*Call graph*: calls 18 internal fn (ingress_url, list_agents, _frame_page, _framed_from, _into_the_portal, _is_portal_iframe_request, _not_found, _page, _session_digest, _share_tags (+8 more)); 3 external calls (HTMLResponse, RedirectResponse, mint_surface_token).
 
 
-##### `_unsend`  (lines 781–803)
+##### `_shipped_frame`  (lines 387–426)
 
 ```
-async def _unsend(ctx: SurfaceContext, request: Request, conversation_id: UUID, member_id: UUID | None, unsend: str) -> Response
+async def _shipped_frame(ctx: SurfaceContext, request: Request, shipped: ShippedAddress) -> Response
 ```
 
-**Purpose**: Attempts to retract a queued message before the agent has taken it up. This supports taking back a pending line from the terminal.
+**Purpose**: Opens a deploy-wide shipped app bundle through the same frame route. It treats the bundle as public code and uses the ingress view token, not a hosted-site row, as the authority for the embedded request.
 
-**Data flow**: It receives context, request, conversation id, member id, and the arrival id text. It rejects requests with a body, requires a real member, parses the arrival id, asks the backend to retract it, and returns empty success or a conflict message.
+**Data flow**: It receives the already-parsed shipped address. If the request is not coming from the portal iframe, it looks up the matching agent and redirects the viewer to that agent’s portal page. If the request is inside the portal iframe, it builds the shipped app anchor and port, asks for an ingress URL that includes the shipped slug and digest, and redirects there. If ingress is unavailable, it returns an explanatory HTML page.
 
-**Call relations**: `channel` calls `_unsend` when the unsend header is present. It does not admit a new turn; it only asks `SurfaceContext` to remove a still-pending arrival.
+**Call relations**: frame calls this when shipped_address recognizes the token. It uses _is_portal_iframe_request to choose between portal redirect and iframe ingress, _into_the_portal to send users to the portal, and _unconfigured_page when the deployment cannot host the embedded app.
 
-*Call graph*: calls 1 internal fn (retract_arrival); called by 1 (channel); 3 external calls (PlainTextResponse, body, UUID).
-
-
-##### `_fulfill_secret`  (lines 806–825)
-
-```
-async def _fulfill_secret(ctx: SurfaceContext, request: Request, member_id: UUID | None, sealed: str) -> Response
-```
-
-**Purpose**: Stores a credential value that the user typed privately in response to a secret prompt. The value is not treated as a chat message and is not added to the transcript.
-
-**Data flow**: It receives context, request, member id, and a sealed credential request token. It reads the slot and body value, checks size and emptiness, asks the backend to fulfill the credential request, and returns a `say` directive explaining whether it was stored.
-
-**Call relations**: `channel` calls this early when the secret header is present. It hands the actual validation and secure storage to `SurfaceContext.fulfill_credential_request`.
-
-*Call graph*: calls 2 internal fn (fulfill_credential_request, directive); called by 1 (channel); 2 external calls (PlainTextResponse, body).
+*Call graph*: calls 8 internal fn (ingress_url, list_agents, _framed_from, _into_the_portal, _is_portal_iframe_request, _not_found, _share_tags, _unconfigured_page); called by 1 (frame); 5 external calls (HTMLResponse, RedirectResponse, serve_port, shipped_anchor, shipped_app_slug).
 
 
-##### `op_body`  (lines 828–840)
+##### `_is_portal_iframe_request`  (lines 429–430)
 
 ```
-async def op_body(ctx: SurfaceContext, request: Request) -> Response
+def _is_portal_iframe_request(request: Request) -> bool
 ```
 
-**Purpose**: Serves the raw bytes for an in-flight terminal operation. For example, a local write operation may fetch its staged content through this endpoint.
+**Purpose**: Detects whether the browser request is for an iframe. In this file, that is used as a signal that the portal is embedding the page rather than a person opening the link directly.
 
-**Data flow**: It receives context and request. It authenticates the email, finds the linked member and channel queue key, asks the backend for the operation body, and returns the bytes as binary content or a 404-style text response if missing.
+**Data flow**: It reads the Sec-Fetch-Dest request header. If the value says iframe, it returns true; otherwise it returns false.
 
-**Call relations**: This is the GET route for `{channel}/op/{op_id}`. It protects operation bodies with the same bearer authentication used by `channel` and delegates lookup to the terminal operation store in `SurfaceContext`.
+**Call relations**: frame and _shipped_frame use this to decide whether to redirect into the portal or to proceed with iframe ingress. _framed_from uses it before trusting the referrer as the frame’s parent page.
 
-*Call graph*: calls 3 internal fn (linked_member, terminal_op_body, _authenticated_email); 2 external calls (PlainTextResponse, Response).
+*Call graph*: called by 3 (_framed_from, _shipped_frame, frame).
 
 
-##### `system_skills`  (lines 843–855)
+##### `_framed_from`  (lines 433–436)
 
 ```
-async def system_skills(ctx: SurfaceContext, request: Request) -> Response
+def _framed_from(request: Request) -> str | None
 ```
 
-**Purpose**: Serves the zipped bundle of system skills to an authenticated shell client. It supports normal HTTP caching with an ETag so unchanged bundles do not need to be downloaded again.
+**Purpose**: Returns the page that framed this request, but only when the request really appears to be for an iframe. This helps ingress know where the embedded content is being shown.
 
-**Data flow**: It receives context and request. It authenticates the email, reads the current skill bundle and digest, compares the request’s `if-none-match` header, and returns either `304 Not Modified` or the zip archive with cache headers.
+**Data flow**: It receives the request. If _is_portal_iframe_request says this is not an iframe request, it returns None. Otherwise it reads and returns the Referer header.
 
-**Call relations**: This is the GET route for `{channel}/skills`. It uses `_authenticated_email` for access control and then serves `ctx.system_skill_bundle` directly to the client.
+**Call relations**: frame and _shipped_frame pass this value into the context’s ingress_url call. It depends on _is_portal_iframe_request to avoid treating ordinary navigation referrers as frame parents.
 
-*Call graph*: calls 1 internal fn (_authenticated_email); 2 external calls (PlainTextResponse, Response).
+*Call graph*: calls 1 internal fn (_is_portal_iframe_request); called by 2 (_shipped_frame, frame).
+
+
+##### `_into_the_portal`  (lines 439–452)
+
+```
+def _into_the_portal(ctx: SurfaceContext, agent_id: UUID, share: str) -> Response
+```
+
+**Purpose**: Sends a visitor to the agent’s page inside the member portal when the app needs the portal bridge to work. If there is no portal installed, it returns a plain page explaining that.
+
+**Data flow**: It receives the surface context, an agent ID, and share metadata. It asks the context for the portal home URL pointing at that agent. If a portal URL exists, it returns a redirect. If not, it builds an HTML page saying there is no portal.
+
+**Call relations**: frame uses this for agent-homepage sites opened outside the proper portal iframe. _shipped_frame uses it for shipped app links opened cold. It relies on _page for the fallback HTML.
+
+*Call graph*: calls 2 internal fn (home_url, _page); called by 2 (_shipped_frame, frame); 2 external calls (HTMLResponse, RedirectResponse).
+
+
+##### `_unconfigured_page`  (lines 455–463)
+
+```
+def _unconfigured_page(title: str, share: str) -> str
+```
+
+**Purpose**: Builds the HTML shown when the deployment has no ingress origin configured for hosted content. Instead of showing an empty or broken iframe, it tells the viewer that site hosting is not configured.
+
+**Data flow**: It receives a title and share metadata. It escapes the title for safe HTML, combines the base styles with frame styles, and returns a complete page containing the unconfigured-hosting message.
+
+**Call relations**: frame uses this when a normal or homepage site cannot get an ingress URL. _shipped_frame uses it for shipped apps in the same situation. It delegates the common document wrapper to _page.
+
+*Call graph*: calls 1 internal fn (_page); called by 2 (_shipped_frame, frame); 1 external calls (escape).
+
+
+##### `share_card`  (lines 466–505)
+
+```
+async def share_card(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Serves the preview image for a public site link. This route is intentionally anonymous because chat and social link preview crawlers do not carry a user session.
+
+**Data flow**: It resolves the site from the token in the URL. It refuses the request unless the site exists, is not bound as an agent homepage, is currently public, has a stored card image, and the URL digest matches the site’s current card hash. If all checks pass, it reads the image bytes from blob storage and returns them with image headers and a short public cache time.
+
+**Call relations**: SITES_SURFACE exposes this as a GET route before the deep-link route so it is not swallowed as a site path. It uses _resolve to find the row and _not_found for every refusal, making invalid, private, and unknown cards look the same.
+
+*Call graph*: calls 2 internal fn (_not_found, _resolve); 1 external calls (Response).
+
+
+##### `set_visibility`  (lines 508–529)
+
+```
+async def set_visibility(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lets a site creator change a site between private, workspace-visible, and public. It blocks everyone else with the same not-found response used for unknown sites, and it rejects forged form submissions with a CSRF check.
+
+**Data flow**: It resolves the site, identifies the viewer from the session cookie, and confirms the viewer is the creator. It rejects homepage-bound sites because their visibility follows the agent. It reads the submitted form, checks the CSRF token against this session, validates the requested visibility level, writes the new level to storage, and redirects back to the site frame.
+
+**Call relations**: SITES_SURFACE exposes this as the POST route under a site token. It works with _resolve, _viewer, _csrf_holds, and _sites, and it returns plain text errors for bad CSRF, invalid levels, or homepage-bound sites.
+
+*Call graph*: calls 5 internal fn (_csrf_holds, _not_found, _resolve, _sites, _viewer); 4 external calls (PlainTextResponse, RedirectResponse, form, visibility_level).
+
+
+##### `_resolve`  (lines 532–536)
+
+```
+async def _resolve(ctx: SurfaceContext, request: Request) -> HostedSite | None
+```
+
+**Purpose**: Looks up a hosted site row from the token in a request. It is a small shared helper for routes that need the site but do not need the full frame-opening flow.
+
+**Data flow**: It reads the token path parameter, parses it with site_address, and returns None if the token is invalid. If the token is valid, it uses the hosted-sites store to read the row by conversation ID and site name, returning the site or None.
+
+**Call relations**: share_card and set_visibility call this at the start of their work. It uses _sites to create the storage access object for the current workspace.
+
+*Call graph*: calls 2 internal fn (_sites, site_address); called by 2 (set_visibility, share_card).
+
+
+##### `_sites`  (lines 539–540)
+
+```
+def _sites(ctx: SurfaceContext) -> HostedSites
+```
+
+**Purpose**: Creates the storage helper for hosted sites in the current workspace. It is the file’s shortcut for reading or updating hosted-site rows.
+
+**Data flow**: It receives the surface context, takes the workspace ID and transaction provider from it, and returns a HostedSites store object.
+
+**Call relations**: frame uses this to read a site row. _resolve uses it for shared lookup. set_visibility uses it to write a new visibility level.
+
+*Call graph*: called by 3 (_resolve, frame, set_visibility); 1 external calls (__init__).
+
+
+##### `_viewer_is_admin`  (lines 543–548)
+
+```
+async def _viewer_is_admin(ctx: SurfaceContext, viewer: UUID | None) -> bool
+```
+
+**Purpose**: Checks whether the current viewer is a workspace admin. Admins are allowed to view private sites or private agent homepages even when they are not the creator or owner.
+
+**Data flow**: It receives the context and a possible viewer ID. If there is no viewer, it returns false. Otherwise it opens a transaction, reads the workspace seat snapshot, and returns true only if the viewer appears as an admin member.
+
+**Call relations**: frame calls this during access checks for private sites and private agent homepages. It uses the Seats subsystem to answer the workspace-membership question.
+
+*Call graph*: calls 1 internal fn (transaction); called by 1 (frame); 1 external calls (__init__).
+
+
+##### `_viewer`  (lines 551–561)
+
+```
+async def _viewer(ctx: SurfaceContext, request: Request) -> UUID | None
+```
+
+**Purpose**: Identifies the workspace member represented by the request’s session cookie. If the cookie is missing, invalid, or for another workspace, it returns no viewer.
+
+**Data flow**: It reads the ufo_session cookie from the request. It verifies the bearer token against the current workspace and gets an email address if valid. It then finds an already linked member for that email, or creates the link on first use, and returns the member ID.
+
+**Call relations**: frame uses this to decide whether a visitor can pass the visibility gate. set_visibility uses it to prove the poster is the site creator. It relies on shared bearer-token verification and context member-linking methods.
+
+*Call graph*: calls 2 internal fn (link_member, linked_member); called by 2 (frame, set_visibility); 1 external calls (verify_token).
+
+
+##### `_csrf_holds`  (lines 564–566)
+
+```
+def _csrf_holds(request: Request, submitted: str) -> bool
+```
+
+**Purpose**: Checks whether a submitted visibility form token matches the viewer’s current session. This prevents another website from silently submitting a visibility change on the creator’s behalf.
+
+**Data flow**: It receives the request and the submitted CSRF token. It verifies the token signature, computes the digest of the current session cookie, and returns true only when the token’s stored digest matches this request’s session digest.
+
+**Call relations**: set_visibility calls this before accepting a form submission. It uses _session_digest for the value that ties the CSRF token to this browser session.
+
+*Call graph*: calls 1 internal fn (_session_digest); called by 1 (set_visibility); 1 external calls (verify_surface_token).
+
+
+##### `_session_digest`  (lines 569–573)
+
+```
+def _session_digest(request: Request) -> str
+```
+
+**Purpose**: Creates a safe fingerprint of the current session cookie for CSRF protection. It uses a hash so the actual cookie value does not need to be placed in the form token.
+
+**Data flow**: It reads the ufo_session cookie from the request, or an empty string if missing. It hashes that text with SHA-256 and returns the hexadecimal digest.
+
+**Call relations**: frame uses this when minting a CSRF token for the creator’s visibility selector. _csrf_holds uses it later to check that a submitted token belongs to the same session.
+
+*Call graph*: called by 2 (_csrf_holds, frame); 1 external calls (sha256).
+
+
+##### `_not_found`  (lines 576–577)
+
+```
+def _not_found() -> Response
+```
+
+**Purpose**: Returns the standard not-found response for this surface. The same response is used for unknown sites, invalid tokens, and unauthorized private resources so the page does not reveal which case happened.
+
+**Data flow**: It takes no input. It returns a plain-text HTTP response with the body 'no such site' and status code 404.
+
+**Call relations**: resolve_workspace, frame, _shipped_frame, share_card, and set_visibility all use this as the safe refusal response.
+
+*Call graph*: called by 5 (_shipped_frame, frame, resolve_workspace, set_visibility, share_card); 1 external calls (PlainTextResponse).
+
+
+##### `_page`  (lines 580–585)
+
+```
+def _page(title: str, style: str, body: str, share: str) -> str
+```
+
+**Purpose**: Builds a complete minimal HTML page from a title, CSS, body markup, and share-preview tags. It is the common wrapper for all small pages served by this surface.
+
+**Data flow**: It receives the page title, style text, body HTML, and metadata tags. It combines them with a doctype, charset, viewport tag, title tag, and style block, then returns the HTML string.
+
+**Call relations**: _frame_page uses this for normal framed site pages. _into_the_portal and _unconfigured_page use it for fallback pages. frame uses it directly for the not-signed-in page.
+
+*Call graph*: called by 4 (_frame_page, _into_the_portal, _unconfigured_page, frame).
+
+
+##### `_share_tags`  (lines 588–622)
+
+```
+def _share_tags(name: str | None, canonical: str | None, card: str | None) -> str
+```
+
+**Purpose**: Builds the metadata that link preview tools read, such as title, description, image, and image size. It only names the actual site when the caller has already decided the site is public.
+
+**Data flow**: It receives an optional site name, optional canonical URL, and optional site-specific card URL. It escapes all values for safe HTML, chooses either the site title and card or the generic UFO title and card, and returns Open Graph and Twitter meta tags.
+
+**Call relations**: frame calls this while rendering hosted-site pages, choosing site-specific values only for public non-homepage sites. _shipped_frame calls it with generic values for shipped apps.
+
+*Call graph*: called by 2 (_shipped_frame, frame); 1 external calls (escape).
+
+
+##### `_frame_page`  (lines 625–664)
+
+```
+def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: str, share: str) -> str
+```
+
+**Purpose**: Builds the visible hosted-site frame page. It shows the site name, either a creator visibility selector or a read-only badge, and the iframe that loads the actual hosted site from its temporary ingress URL.
+
+**Data flow**: It receives the site row, optional embedded ingress URL, the stable frame path, an optional CSRF token, and share metadata. If a CSRF token is present, it builds the editable visibility selector; otherwise it shows a badge. If an ingress URL exists, it creates a sandboxed iframe; otherwise it shows the unconfigured-hosting message. It wraps everything with _page and returns the HTML.
+
+**Call relations**: frame calls this after the visitor has passed the site visibility gate. _frame_page calls _selector when the viewer is the creator and uses _page for the final document.
+
+*Call graph*: calls 2 internal fn (_page, _selector); called by 1 (frame); 1 external calls (escape).
+
+
+##### `_selector`  (lines 667–677)
+
+```
+def _selector(current: Visibility, frame_path: str, csrf: str) -> str
+```
+
+**Purpose**: Builds the creator’s visibility form for a site. The form lets the creator choose who can open the permanent site link.
+
+**Data flow**: It receives the current visibility level, the frame path to post back to, and the CSRF token. It creates one option for each visibility label, marks the current one selected, includes the CSRF hidden field, and returns the form HTML.
+
+**Call relations**: _frame_page calls this only when frame has minted a CSRF token, which only happens for the site creator. The form posts to the set_visibility route.
+
+*Call graph*: called by 1 (_frame_page); 1 external calls (escape).
+
+
+### Web portal surfaces
+Provides the user-facing UFO web portal along with community skill directory browsing and retrieval endpoints.
+
+### `extensions/web/ufo_ext_web/community.py`
+
+`io_transport` · `request handling`
+
+The Community tab needs two things from the outside skills directory: a short list of skills to show, and the full SKILL.md document for one selected skill. This file is the bridge to that outside website. If the user has not typed a search, it reads the skills.sh homepage payload and extracts the public leaderboard. If the user has typed a search, it calls the public search API. Each result is reduced to the few facts the list can honestly show: skill name, source repository, and install count. Descriptions are not fetched for every row because the directory only publishes them on each skill page, and those reads are rate limited. To avoid hammering the directory, listings are cached for 15 minutes, and fetched documents are remembered in memory. Think of it like a librarian keeping a short stack of recently requested catalog cards on the desk. The file also validates shapes carefully: if the directory returns bad JSON, an oversized response, a rate limit, or a format this app does not understand, it raises CommunityUnavailable with a sentence suitable for the user-facing toast.
+
+#### Function details
+
+##### `_refusal`  (lines 43–49)
+
+```
+def _refusal(code: int) -> CommunityUnavailable
+```
+
+**Purpose**: Turns an HTTP failure code from the skills directory into a clear CommunityUnavailable error. It gives a special message for rate limiting so the user understands why the directory cannot be read right now.
+
+**Data flow**: It receives a numeric status code from an HTTP response. If the code means “too many requests,” it builds a friendly explanation about the 60-reads-an-hour limit; otherwise it reports the exact code. The result is an exception object that callers raise instead of returning an empty or misleading answer.
+
+**Call relations**: CommunitySkills._search and CommunitySkills._body call this when skills.sh answers with something other than success. It hands back the error object they raise, so the higher-level route can show a refusal message rather than pretending there are no community skills.
+
+*Call graph*: called by 2 (_body, _search); 1 external calls (__init__).
+
+
+##### `CommunitySkills.listing`  (lines 79–89)
+
+```
+async def listing(self, query: str) -> list[CommunitySkill]
+```
+
+**Purpose**: Returns the community skill list for the Skills tab, either as a popular leaderboard or as search results. It uses a short-lived cache so reopening the same view does not keep rereading the outside directory.
+
+**Data flow**: It receives a search query string. First it checks whether that exact query already has a fresh cached list; if so, it returns it. If not, it opens an HTTP client, asks _popular for the leaderboard when the query is empty or _search when it is not, cuts the answer down to the display limit, stores it with the current time, and returns the list of CommunitySkill objects.
+
+**Call relations**: This is the main public listing method other web code calls when the Community narrowing needs rows. Inside, it delegates network setup to _client and chooses between _popular and _search depending on whether the user typed a query.
+
+*Call graph*: calls 3 internal fn (_client, _popular, _search); 1 external calls (monotonic).
+
+
+##### `CommunitySkills.fetch`  (lines 91–116)
+
+```
+async def fetch(self, source: str, name: str) -> CommunityDocument | None
+```
+
+**Purpose**: Fetches the full document for one community skill so the install screen can show its description and instructions. It remembers both found and not-found results to avoid repeating the same directory read.
+
+**Data flow**: It receives a source repository like owner/repo and a skill name. It combines them into a cache key and returns the cached CommunityDocument, or cached None, if already known. Otherwise it opens an HTTP client, downloads the directory’s package data, reads the JSON list of files, looks for SKILL.md, parses that file’s front matter and body, stores the result in the document cache, and returns either the parsed document or None.
+
+**Call relations**: This is the public one-skill read used after a user chooses a listed skill. It relies on _client to create the HTTP session, _body to safely download the response, and _parse to turn SKILL.md text into the structured CommunityDocument shown by the install flow.
+
+*Call graph*: calls 3 internal fn (_body, _client, _parse); 2 external calls (__init__, loads).
+
+
+##### `CommunitySkills._client`  (lines 118–119)
+
+```
+def _client(self, timeout: float) -> httpx.AsyncClient
+```
+
+**Purpose**: Creates the asynchronous HTTP client used for talking to skills.sh. The client follows redirects and can use an injected transport in tests, which lets tests fake network replies without reaching the real internet.
+
+**Data flow**: It receives a timeout value. It combines that timeout with the CommunitySkills transport setting and returns a ready-to-use httpx AsyncClient. It does not itself send any requests.
+
+**Call relations**: CommunitySkills.listing and CommunitySkills.fetch call this right before they need network access. The returned client is then passed to _popular, _search, or _body so those helpers can perform the actual reads.
+
+*Call graph*: called by 2 (fetch, listing); 1 external calls (AsyncClient).
+
+
+##### `CommunitySkills._popular`  (lines 121–136)
+
+```
+async def _popular(self, client: httpx.AsyncClient) -> list[CommunitySkill]
+```
+
+**Purpose**: Reads the public leaderboard from the skills.sh homepage payload when the user has not searched for anything. It extracts valid skill entries and sorts them by install count.
+
+**Data flow**: It receives an HTTP client. It downloads the homepage payload through _body, scans the text for small JSON-like entries that contain a skillId, decodes each entry, converts valid ones with _entry, removes duplicates by source and name, and returns the resulting skills sorted from most installed to least installed. If nothing usable is found, it raises CommunityUnavailable.
+
+**Call relations**: CommunitySkills.listing calls this for the default, no-query Community view. This helper depends on _body for the guarded download and _entry for the shared cleanup and validation of each skill record.
+
+*Call graph*: calls 2 internal fn (_body, _entry); called by 1 (listing); 2 external calls (__init__, loads).
+
+
+##### `CommunitySkills._search`  (lines 138–147)
+
+```
+async def _search(self, client: httpx.AsyncClient, query: str) -> list[CommunitySkill]
+```
+
+**Purpose**: Calls the skills.sh search API for a user’s query and returns matching skills in install-count order. It is the search-path counterpart to the leaderboard reader.
+
+**Data flow**: It receives an HTTP client and the query text. It sends the query and result limit to the search endpoint, checks for a successful response, turns each returned skill-like object into a CommunitySkill with _entry, drops invalid entries, sorts the rest by installs, and returns the list.
+
+**Call relations**: CommunitySkills.listing calls this when the user has typed a search term. If the API refuses the request, it asks _refusal to create the right user-facing error; otherwise it uses _entry so search results and leaderboard results are normalized the same way.
+
+*Call graph*: calls 2 internal fn (_entry, _refusal); called by 1 (listing); 1 external calls (get).
+
+
+##### `CommunitySkills._entry`  (lines 149–156)
+
+```
+def _entry(self, entry: object) -> CommunitySkill | None
+```
+
+**Purpose**: Turns one raw directory entry into the small CommunitySkill object the UI list can use. It filters out entries that do not have a usable name or a safe-looking source repository.
+
+**Data flow**: It receives an unknown object from parsed JSON. If the object is not a dictionary, or if the name/source fields are missing or malformed, it returns None. Otherwise it reads the skill name, source, and install count, fills in zero installs when absent, and returns a CommunitySkill.
+
+**Call relations**: Both _popular and _search use this as their common gatekeeper. That means the two directory sources can have slightly different field names, but the rest of the app still receives one consistent shape.
+
+*Call graph*: called by 2 (_popular, _search); 1 external calls (__init__).
+
+
+##### `CommunitySkills._body`  (lines 158–178)
+
+```
+async def _body(self, client: httpx.AsyncClient, url: str, cap: int, headers: dict[str, str] | None=None) -> bytes
+```
+
+**Purpose**: Downloads a response body safely, with status-code checks and a maximum size limit. This prevents the app from treating failures as data and protects it from unexpectedly huge replies.
+
+**Data flow**: It receives an HTTP client, a URL, a byte-size cap, and optional request headers. It streams the response in chunks, rejects non-success status codes through _refusal, counts bytes as they arrive, raises CommunityUnavailable if the response grows beyond the allowed cap, and finally returns the collected bytes.
+
+**Call relations**: CommunitySkills._popular uses this to read the leaderboard payload, and CommunitySkills.fetch uses it to read the downloadable skill package. When the remote server refuses or sends too much data, this helper turns that problem into a clear CommunityUnavailable error before parsing begins.
+
+*Call graph*: calls 1 internal fn (_refusal); called by 2 (_popular, fetch); 2 external calls (__init__, stream).
+
+
+##### `CommunitySkills._parse`  (lines 180–199)
+
+```
+def _parse(self, document: str) -> CommunityDocument | None
+```
+
+**Purpose**: Reads a SKILL.md document and extracts the parts the install review needs: name, description, instructions, and the original document text. It only accepts documents with valid front matter, which is the metadata block at the top of the Markdown file.
+
+**Data flow**: It receives the raw SKILL.md text. It checks for a front matter block surrounded by --- lines, parses that block as YAML, requires a name and description, trims the remaining Markdown body into instructions, and returns a CommunityDocument. If any required part is missing or unreadable, it returns None.
+
+**Call relations**: CommunitySkills.fetch calls this after it finds SKILL.md in the downloaded package. _parse is the final step that turns a raw text file from the directory into the structured document the install screen can display.
+
+*Call graph*: called by 1 (fetch); 2 external calls (__init__, safe_load).
+
+
+### `extensions/web/ufo_ext_web/surface.py`
+
+`io_transport` · `request handling, live streaming, and scheduled background jobs`
+
+This is the web doorway into the system. It turns normal browser requests into safe, workspace-scoped actions against UFO agents and workspace data. Without it, the browser portal would have no trusted way to sign a member in, show their agents, send messages, upload files, stream a running answer, or read panels like memory, credentials, usage, conversations, and settings.
+
+The file works like a reception desk with many counters. First, it verifies the session cookie and connects the email in that cookie to a workspace member. Then each route checks what that member is allowed to see or do. Chat routes open or continue conversations, save attachments into the conversation workspace, admit the message into the shared turn queue, and return the turn to follow. Streaming routes use server-sent events, a browser-friendly live feed, to deliver text, activity, files, prompts, and final results as an agent works.
+
+It also serves the built web app and its static assets, including support for rolling deployments where different server pods may serve different frontend builds. Read routes project core data into shapes the portal can draw: agent lists, transcripts, subagent work trees, object indexes, setup states, shared artifacts, connection prompts, and spend reports. The important pattern is that the web layer does not invent authority. It asks the privileged SurfaceContext for every real read or write, and adds browser-specific packaging around it.
+
+#### Function details
+
+##### `load_assets`  (lines 251–261)
+
+```
+def load_assets(directory: Path) -> dict[str, tuple[bytes, str]]
+```
+
+**Purpose**: Reads the built portal asset files, such as JavaScript and CSS, into memory so the web server can serve them quickly. It only includes file types the server explicitly knows how to label.
+
+**Data flow**: It receives a directory path, scans its files, keeps files with approved suffixes, reads their bytes, and returns a lookup from request name to bytes and media type.
+
+**Call relations**: It runs during module setup and feeds the static asset tables that later requests use through _static_response and static_asset.
+
+*Call graph*: 1 external calls (glob).
+
+
+##### `rum_config`  (lines 274–287)
+
+```
+def rum_config(environ: Mapping[str, str]) -> dict[str, str] | None
+```
+
+**Purpose**: Builds the browser monitoring configuration for Datadog RUM, which records frontend sessions when enabled. It prevents half-configured monitoring from silently sending data nowhere or to the wrong place.
+
+**Data flow**: It reads environment variables, trims them, returns None if none are set, returns a complete config if all are set, or raises an error if only some are set.
+
+**Call relations**: portal_page calls it just before serving the portal shell so each deployment can inject its own monitoring settings.
+
+*Call graph*: called by 1 (portal_page).
+
+
+##### `portal_shell`  (lines 290–299)
+
+```
+def portal_shell(html: str, config: Mapping[str, str] | None) -> str
+```
+
+**Purpose**: Inserts the monitoring configuration into the built HTML shell that the browser loads first. It also checks that the expected placeholder exists, so a broken frontend build is caught loudly.
+
+**Data flow**: It takes HTML and an optional config, converts the config to safe JSON, replaces one special script block, and returns the final HTML string.
+
+**Call relations**: portal_page calls it after reading rum_config, then sends the result as the main portal page.
+
+*Call graph*: called by 1 (portal_page); 1 external calls (dumps).
+
+
+##### `resolve_workspace`  (lines 312–351)
+
+```
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
+```
+
+**Purpose**: Figures out which workspace a web request belongs to before the route handler runs. It reads the signed bearer token from the session cookie, or from the one login POST that creates the cookie.
+
+**Data flow**: It reads cookies, method, headers, form body when allowed, and query parameters; it returns a workspace ID, a redirect/response, or None for rejection.
+
+**Call relations**: The shared surface router calls this as the first gate; it uses _framed_length, _form, and _chat_target to safely inspect only the login form when needed.
+
+*Call graph*: calls 3 internal fn (_chat_target, _form, _framed_length); 2 external calls (workspace_claim, RedirectResponse).
+
+
+##### `_chat_target`  (lines 354–358)
+
+```
+def _chat_target(request: Request) -> UUID | None
+```
+
+**Purpose**: Safely extracts a conversation ID from the login redirect query string. It exists so only a real UUID can be carried through sign-in.
+
+**Data flow**: It reads the c query parameter, tries to parse it as a UUID, and returns the UUID or None.
+
+**Call relations**: resolve_workspace uses it when redirecting an unauthenticated portal visit to the login page.
+
+*Call graph*: called by 1 (resolve_workspace); 1 external calls (UUID).
+
+
+##### `_static_response`  (lines 361–371)
+
+```
+def _static_response(request: Request) -> Response | None
+```
+
+**Purpose**: Looks up one built frontend asset requested by the browser and prepares a response if this server build has it. It avoids touching the filesystem per request.
+
+**Data flow**: It strips the static URL prefix, searches the in-memory asset table, and either returns None or passes the bytes to _asset_response.
+
+**Call relations**: static_asset tries this first, then falls back to _stored_asset for assets from another build.
+
+*Call graph*: calls 1 internal fn (_asset_response); called by 1 (static_asset).
+
+
+##### `_asset_response`  (lines 374–378)
+
+```
+def _asset_response(request: Request, body: bytes, media_type: str, etag: str) -> Response
+```
+
+**Purpose**: Returns a static file with caching headers. It can answer “not modified” when the browser already has the current content.
+
+**Data flow**: It receives request headers, bytes, media type, and an ETag hash; it returns either a 304 response or the full file response.
+
+**Call relations**: _static_response and _stored_asset both use it so local and stored assets behave the same way.
+
+*Call graph*: called by 2 (_static_response, _stored_asset); 1 external calls (Response).
+
+
+##### `load_apps`  (lines 404–437)
+
+```
+def load_apps(directory: Path) -> AppsBundle | None
+```
+
+**Purpose**: Reads the shipped app pages that are bundled with the web extension. These are deploy-wide app homepages served to workspaces that have not forked their own page.
+
+**Data flow**: It receives a directory, recursively reads non-hidden files, computes a content digest, discovers top-level app slugs, and returns an AppsBundle or None.
+
+**Call relations**: It runs at import time to populate APPS, and later apps, _publish_assets, and homepage-related functions depend on that bundle.
+
+*Call graph*: 4 external calls (__init__, sha256, is_dir, rglob).
+
+
+##### `apps`  (lines 443–449)
+
+```
+def apps() -> AppsBundle
+```
+
+**Purpose**: Returns the loaded shipped app bundle or raises a clear build error. It prevents routes from pretending an app page exists when the frontend build was skipped.
+
+**Data flow**: It reads the module-level APPS value and either returns it or raises RuntimeError with the build command to run.
+
+**Call relations**: agents_index, homepage, and _homepage_state call it when they need shipped app page data.
+
+*Call graph*: called by 3 (_homepage_state, agents_index, homepage).
+
+
+##### `_publish_assets`  (lines 452–462)
+
+```
+async def _publish_assets(blob: BlobStore, apps: AppsBundle) -> None
+```
+
+**Purpose**: Copies this server’s built portal and app assets into the shared blob store. This lets another server pod serve files referenced by a page created on this pod.
+
+**Data flow**: It receives a blob store and app bundle, checks which keys already exist, writes missing static files and app files, and returns nothing.
+
+**Call relations**: _assets_published wraps it in a single reusable task so portal_page, agents_index, and homepage can wait for publishing before handing out links.
+
+*Call graph*: calls 3 internal fn (exists, list, put); called by 1 (_assets_published).
+
+
+##### `_assets_published`  (lines 465–492)
+
+```
+def _assets_published(blob: BlobStore, apps: AppsBundle) -> 'asyncio.Task[None]'
+```
+
+**Purpose**: Starts or reuses the one asset-publishing task for this process. It retries after failure instead of letting future pages reference missing files.
+
+**Data flow**: It reads the global publishing task, creates a new asyncio task when none exists or the old one failed, stores it globally, and returns the task.
+
+**Call relations**: portal_page, agents_index, and homepage call it before serving shells or homepage links that may name those assets.
+
+*Call graph*: calls 1 internal fn (_publish_assets); called by 3 (agents_index, homepage, portal_page); 1 external calls (create_task).
+
+
+##### `_stored_asset`  (lines 495–517)
+
+```
+async def _stored_asset(blob: BlobStore, request: Request) -> Response
+```
+
+**Purpose**: Serves an asset from the shared blob store when the current server build does not have it locally. This is important during rolling deploys.
+
+**Data flow**: It validates the requested asset name and suffix, checks a small in-memory cache, reads bytes from the blob store if needed, caches them, and returns a static response or 404.
+
+**Call relations**: static_asset calls it after _static_response misses, and it uses _asset_response to match local asset behavior.
+
+*Call graph*: calls 3 internal fn (exists, get, _asset_response); called by 1 (static_asset); 3 external calls (sha256, Path, Response).
+
+
+##### `portal_page`  (lines 520–537)
+
+```
+async def portal_page(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Serves the main browser portal page to an authenticated request. It refuses to serve if the frontend build is missing.
+
+**Data flow**: It checks built HTML and apps exist, waits for assets to publish, injects RUM config into the shell, and returns no-store HTML.
+
+**Call relations**: This is the GET route for the web surface root; resolve_workspace has already scoped the request before it runs.
+
+*Call graph*: calls 3 internal fn (_assets_published, portal_shell, rum_config); 1 external calls (HTMLResponse).
+
+
+##### `_authenticate`  (lines 540–558)
+
+```
+async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | Response
+```
+
+**Purpose**: Verifies the session cookie and resolves it to a workspace member. If the email has never spoken before, it links or creates the member record.
+
+**Data flow**: It reads the session cookie, verifies the token for the workspace, links the email to a member if possible, and returns either member ID plus email or a 401 response.
+
+**Call relations**: _audience_for uses it for most web API routes, and fulfill_credential uses it directly for a credential handoff.
+
+*Call graph*: calls 2 internal fn (link_member, linked_member); called by 2 (_audience_for, fulfill_credential); 2 external calls (verify_token, Response).
+
+
+##### `static_asset`  (lines 561–567)
+
+```
+async def static_asset(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Serves frontend assets to authenticated portal users. It first tries this build’s files and then shared storage for files from another build.
+
+**Data flow**: It receives context and request, calls _static_response, and if that misses calls _stored_asset using the fleet blob store.
+
+**Call relations**: It is the route behind /static requests from the portal shell.
+
+*Call graph*: calls 2 internal fn (_static_response, _stored_asset).
+
+
+##### `open_session`  (lines 570–601)
+
+```
+async def open_session(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Accepts the signed login token from a form POST, stores it as the session cookie, and redirects into the portal. This keeps the bearer token out of URLs.
+
+**Data flow**: It bounds and parses the form, validates that the token field exists and has a safe shape, writes the session cookie, and returns a redirect.
+
+**Call relations**: resolve_workspace may have already used the same form token to scope the request; later routes re-check the cookie through _authenticate.
+
+*Call graph*: calls 2 internal fn (_form, _framed_length); 3 external calls (JSONResponse, RedirectResponse, set_session_cookie).
+
+
+##### `_agent_param`  (lines 604–608)
+
+```
+def _agent_param(request: Request) -> UUID | None
+```
+
+**Purpose**: Reads an agent ID from the URL path and validates that it is a UUID. It avoids repeating path parsing in every agent route.
+
+**Data flow**: It takes a request, parses request.path_params['agent_id'], and returns the UUID or None.
+
+**Call relations**: chat, transcript, _panel_gate, and _member_chat_page use it before checking audience permissions.
+
+*Call graph*: called by 4 (_member_chat_page, _panel_gate, chat, transcript); 1 external calls (UUID).
+
+
+##### `_chat_row_key`  (lines 611–612)
+
+```
+def _chat_row_key(conversation_id: UUID) -> str
+```
+
+**Purpose**: Builds the storage key for the web-specific record attached to a conversation. That record says which agent and email own the web chat.
+
+**Data flow**: It receives a conversation UUID and returns a string key under the chat storage prefix.
+
+**Call relations**: _open_conversation writes this key, and _own_web_chat reads it to prove a conversation is this member’s web chat.
+
+*Call graph*: called by 2 (_open_conversation, _own_web_chat).
+
+
+##### `_chat_title`  (lines 621–639)
+
+```
+def _chat_title(text: str, paths: tuple[str, ...]) -> str
+```
+
+**Purpose**: Creates a short title for a new conversation from the first message or attached filenames. The title is trimmed to look good in the chat rail.
+
+**Data flow**: It receives message text and attachment paths, collapses whitespace, falls back to filenames if needed, cuts at a sensible word boundary, and returns a title string.
+
+**Call relations**: _open_conversation uses it for newly opened chats, and summarize_chat_titles also uses it to clean model-generated titles.
+
+*Call graph*: called by 2 (_open_conversation, summarize_chat_titles).
+
+
+##### `_title_excerpt`  (lines 651–669)
+
+```
+def _title_excerpt(messages: tuple[Message, ...]) -> str
+```
+
+**Purpose**: Builds the small opening excerpt used to ask the model for a better conversation title. It uses the first user and assistant texts only.
+
+**Data flow**: It receives transcript messages, extracts rendered text from the first user and assistant messages, removes web context from the user side, and returns joined text or an empty string.
+
+**Call relations**: summarize_chat_titles calls it for each conversation waiting for a summary title.
+
+*Call graph*: calls 1 internal fn (_rendered_text); called by 1 (summarize_chat_titles); 1 external calls (member_message_text).
+
+
+##### `summarize_chat_titles`  (lines 672–718)
+
+```
+async def summarize_chat_titles(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Background job that asks the model to write short titles for conversations that do not yet have one. This improves the chat rail without blocking live conversation.
+
+**Data flow**: It reads candidate conversation IDs, loads their transcripts, makes an excerpt, asks the model for a title when possible, and records the summary result.
+
+**Call relations**: It is a scheduled maintenance flow; it relies on _title_excerpt and _chat_title, then writes back through the extension context.
+
+*Call graph*: calls 4 internal fn (conversations_awaiting_title, summarized_conversation_title, _chat_title, _title_excerpt); 2 external calls (__init__, __init__).
+
+
+##### `seed_homepages`  (lines 721–793)
+
+```
+async def seed_homepages(ctx: ExtensionContext, bucket: str | None=None) -> None
+```
+
+**Purpose**: Background job that starts one homepage-building turn for each eligible agent that has never been seeded. This gives agents an initial Home page without requiring a member to ask manually.
+
+**Data flow**: It reads workspace agents and existing seed markers, skips archived or shipped apps, chooses an acting owner/admin, opens a conversation, invokes the homepage prompt, and records a marker when accepted.
+
+**Call relations**: It runs as scheduled work and uses core conversation and invocation APIs rather than web request handlers.
+
+*Call graph*: calls 5 internal fn (earliest_seated_admin, invoke, open_conversation, turn_outcomes, workspace_agents); 2 external calls (now, shipped_app_slug).
+
+
+##### `_open_conversation`  (lines 796–829)
+
+```
+async def _open_conversation(ctx: SurfaceContext, store: ScopedStore, agent_id: UUID, member_id: UUID, email: str, queue_key: str, text: str, paths: tuple[str, ...]) -> tuple[UUID, str]
+```
+
+**Purpose**: Creates a new web chat conversation and stores the web ownership row that later gates access. It is careful about races so duplicate first sends join the same conversation safely.
+
+**Data flow**: It receives agent, member, email, queue key, message text, and file paths; it writes a provisional chat row, opens or finds the durable conversation, fixes race leftovers, titles the conversation, and returns ID plus title.
+
+**Call relations**: chat calls it when the browser posts to the special new conversation target.
+
+*Call graph*: calls 8 internal fn (delete, put, conversation_for, retitle_conversation, _chat_row_key, _chat_title, _named, _own_web_chat); called by 1 (chat); 3 external calls (__init__, conversation_audience, uuid4).
+
+
+##### `_named`  (lines 832–839)
+
+```
+async def _named(ctx: SurfaceContext, agent_id: UUID, member_id: UUID, conversation_id: UUID) -> str
+```
+
+**Purpose**: Reads the official title of one conversation from the same listing used elsewhere. This keeps all screens naming the conversation the same way.
+
+**Data flow**: It receives context, agent, member, and conversation IDs, asks for that one listed conversation, and returns its title or an empty string.
+
+**Call relations**: _open_conversation uses it after losing an open race to the existing conversation.
+
+*Call graph*: calls 1 internal fn (list_agent_conversations); called by 1 (_open_conversation).
+
+
+##### `_own_web_chat`  (lines 842–854)
+
+```
+async def _own_web_chat(store: ScopedStore, agent_id: UUID, email: str, conversation_id: UUID) -> ChatRecord | None
+```
+
+**Purpose**: Checks whether a conversation is the current member’s own web chat with the selected agent. Anything else is treated as not found.
+
+**Data flow**: It reads the chat row from scoped storage, validates it as ChatRecord, compares agent ID and email, and returns the record or None.
+
+**Call relations**: _member_chat uses it as the first proof of web-chat ownership, and _open_conversation uses it after a race.
+
+*Call graph*: calls 2 internal fn (get, _chat_row_key); called by 2 (_member_chat, _open_conversation).
+
+
+##### `_member_chat`  (lines 857–902)
+
+```
+async def _member_chat(ctx: SurfaceContext, store: ScopedStore, agent_id: UUID, member_id: UUID, email: str, conversation_id: UUID, *, agent_visible: bool) -> ListedConversation | None
+```
+
+**Purpose**: Decides whether this member may continue or read a conversation through the portal chat path. It covers ordinary web chats, private extension rooms, and commentable Slack or terminal conversations.
+
+**Data flow**: It receives identity, agent, conversation, and visibility facts; it reads the conversation listing and chat row, applies the allowed shapes, and returns the listed conversation or None.
+
+**Call relations**: chat, transcript, _resolve_chat, _member_turn, and _member_chat_page all depend on this shared gate.
+
+*Call graph*: calls 3 internal fn (list_agent_conversations, _commentable, _own_web_chat); called by 5 (_member_chat_page, _member_turn, _resolve_chat, chat, transcript); 1 external calls (conversation_audience).
+
+
+##### `_commentable`  (lines 905–909)
+
+```
+def _commentable(conversation: ListedConversation, member_id: UUID) -> bool
+```
+
+**Purpose**: Checks whether a listed conversation can accept a portal comment from this member. Only certain surfaces and audiences are eligible.
+
+**Data flow**: It reads the conversation surface and audience, compares them with shared or member-specific audience values, and returns true or false.
+
+**Call relations**: _member_chat, chat, _resolve_chat, _member_turn, and _conversation_row use it to label or allow comments consistently.
+
+*Call graph*: called by 5 (_conversation_row, _member_chat, _member_turn, _resolve_chat, chat); 1 external calls (conversation_audience).
+
+
+##### `_turn_context`  (lines 912–923)
+
+```
+def _turn_context(email: str, request: Request, source: str) -> TurnContext
+```
+
+**Purpose**: Builds the extra context attached to a submitted turn: who sent it, where it came from, and the browser’s timezone if valid.
+
+**Data flow**: It reads the timezone header, tries to build a TurnContext, logs and drops an invalid timezone, and returns the context.
+
+**Call relations**: chat uses it when admitting a member message into the durable queue.
+
+*Call graph*: called by 1 (chat); 2 external calls (__init__, log).
+
+
+##### `_chat_url`  (lines 926–929)
+
+```
+def _chat_url(public_base_url: str | None, conversation_id: UUID) -> str | None
+```
+
+**Purpose**: Builds a public portal link to a conversation when the deployment has a public base URL. It returns None when no public URL is configured.
+
+**Data flow**: It receives the base URL and conversation ID, joins them into a fragment route, and returns the URL or None.
+
+**Call relations**: _chat_source and _comment_notice use it to include useful links in turn context and comments.
+
+*Call graph*: called by 2 (_chat_source, _comment_notice).
+
+
+##### `_chat_source`  (lines 932–941)
+
+```
+def _chat_source(public_base_url: str | None, conversation_id: UUID, email: str) -> str
+```
+
+**Purpose**: Creates the human-readable source label for a portal message. It tells downstream work where the message came from and who sent it.
+
+**Data flow**: It receives public base URL, conversation ID, and email, builds a chat URL when possible, and returns a source string.
+
+**Call relations**: chat passes this into _turn_context before admitting a message.
+
+*Call graph*: calls 1 internal fn (_chat_url); called by 1 (chat).
+
+
+##### `_comment_notice`  (lines 944–964)
+
+```
+def _comment_notice(public_base_url: str | None, conversation: ListedConversation, member_id: UUID, email: str, text: str, paths: tuple[str, ...]) -> str
+```
+
+**Purpose**: Formats a portal comment so it can be delivered into a Slack or terminal conversation. It names the speaker, link, text, and attachments.
+
+**Data flow**: It receives conversation and sender details, chooses an author label, builds a chat link when available, appends attachment names, and returns markdown-like text.
+
+**Call relations**: chat calls it when the target conversation is commentable rather than a normal web chat.
+
+*Call graph*: calls 1 internal fn (_chat_url); called by 1 (chat); 2 external calls (PurePosixPath, conversation_audience).
+
+
+##### `_audience_for`  (lines 967–974)
+
+```
+async def _audience_for(ctx: SurfaceContext, request: Request) -> tuple[UUID, str, WebAudience] | Response
+```
+
+**Purpose**: Authenticates the request and computes the member’s web audience, meaning the agents and admin powers they can reach. This is the common front door for most API routes.
+
+**Data flow**: It calls _authenticate, then asks the web audience module for permissions tied to the member email, and returns member ID, email, and audience or a response.
+
+**Call relations**: Most route handlers call it directly or through _panel_gate and _object_gate before doing any real work.
+
+*Call graph*: calls 1 internal fn (_authenticate); called by 27 (_member_chat_page, _member_turn, _object_gate, _panel_gate, action_views, admin_index, agents_index, agents_status, chat, chats_index (+15 more)); 2 external calls (web_audience, web_extension).
+
+
+##### `_visibility_flag`  (lines 995–999)
+
+```
+def _visibility_flag(agent: AgentSummary) -> str | None
+```
+
+**Purpose**: Finds the feature flag that controls whether an agent should be hidden in portal lists. Some built-in app agents are gated by product flags.
+
+**Data flow**: It receives an AgentSummary and returns the main-agent flag, an app-specific flag, or None.
+
+**Call relations**: _flag_reads gathers these flags, and agents_index uses the answers to mark hidden agents.
+
+*Call graph*: called by 2 (_flag_reads, agents_index); 1 external calls (shipped_app_slug).
+
+
+##### `_flag_reads`  (lines 1002–1022)
+
+```
+async def _flag_reads(agents: tuple[AgentSummary, ...]) -> dict[str, bool]
+```
+
+**Purpose**: Reads all feature flags needed for the portal boot response in one batch. Defaults are chosen so existing screens stay available during flag outages.
+
+**Data flow**: It receives agents, builds a deduplicated list of portal and agent flags, reads them concurrently, and returns a map of flag key to boolean.
+
+**Call relations**: agents_index calls it before returning surfaces and hidden-agent information.
+
+*Call graph*: calls 1 internal fn (_visibility_flag); called by 1 (agents_index); 2 external calls (gather, flag_enabled).
+
+
+##### `_setup_ready`  (lines 1025–1035)
+
+```
+def _setup_ready(state: SetupState) -> bool
+```
+
+**Purpose**: Answers whether an app’s setup is complete. Setup is complete only when all declared connectors, credentials, and standing orders are settled.
+
+**Data flow**: It receives a SetupState, checks every connector, credential, and standing order, and returns true or false.
+
+**Call relations**: agents_index uses it to mark setup_due, and workspace_starters uses it when deciding starter offers for installed apps.
+
+*Call graph*: called by 2 (agents_index, workspace_starters).
+
+
+##### `agents_index`  (lines 1038–1159)
+
+```
+async def agents_index(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Builds the portal’s initial boot payload: signed-in member, visible agents, homepages, setup state, archived apps, and enabled portal surfaces. This is the first API read the browser needs.
+
+**Data flow**: It authenticates the member, reads web audience, publishes assets, reads homepages and setup states, reads flags and archived agents, and returns a JSON structure for the portal shell.
+
+**Call relations**: The browser calls this after loading the portal; it fans out to helpers like _bound_page, _homepage_state, _flag_reads, and _setup_ready.
+
+*Call graph*: calls 9 internal fn (list_archived_agents, _assets_published, _audience_for, _bound_page, _flag_reads, _homepage_state, _setup_ready, _visibility_flag, apps); 6 external calls (Semaphore, gather, JSONResponse, shipped_app_slug, granted_emails, web_extension).
+
+
+##### `agents_index.setup_of`  (lines 1088–1090)
+
+```
+async def setup_of(agent: AgentSummary) -> SetupState
+```
+
+**Purpose**: Reads setup state for one provisioned agent while respecting a concurrency limit. It keeps the boot request from opening too many backend reads at once.
+
+**Data flow**: It receives an agent from the outer function, waits for the semaphore, calls ctx.agent_setup, and returns the SetupState.
+
+**Call relations**: agents_index creates this inner helper and runs many copies with asyncio.gather.
+
+
+##### `agents_status`  (lines 1162–1203)
+
+```
+async def agents_status(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the live status of each agent the member can see, such as whether a turn is running and recent activity text. The portal polls it to keep the sidebar fresh.
+
+**Data flow**: It authenticates, asks core for per-agent turn status, peeks latest activity for running turns, and returns JSON rows with timestamps and failure flags.
+
+**Call relations**: It is a lightweight polling route beside agents_index and uses _iso for timestamp formatting.
+
+*Call graph*: calls 4 internal fn (agent_turn_statuses, latest_activity, _audience_for, _iso); 1 external calls (JSONResponse).
+
+
+##### `_framed_length`  (lines 1206–1219)
+
+```
+def _framed_length(request: Request, limit: int) -> Response | None
+```
+
+**Purpose**: Checks that routes which parse a whole request body have a trustworthy Content-Length under a limit. It refuses chunked or missing-length bodies.
+
+**Data flow**: It reads transfer and content length headers, compares the declared size with a limit, and returns None or a 411/413 response.
+
+**Call relations**: resolve_workspace, open_session, _parse_inbound, preview, and fulfill_credential use it before parsing forms.
+
+*Call graph*: called by 5 (_parse_inbound, fulfill_credential, open_session, preview, resolve_workspace); 1 external calls (Response).
+
+
+##### `_form`  (lines 1222–1229)
+
+```
+async def _form(request: Request) -> FormData | Response
+```
+
+**Purpose**: Parses a request form and converts malformed form parser errors into a normal 400 response. This keeps bad client input from becoming an internal server error.
+
+**Data flow**: It calls request.form, returns the parsed form on success, or returns a malformed-body response on parser failure.
+
+**Call relations**: All form-reading routes share this helper, including login, chat uploads, previews, and credential fulfillment.
+
+*Call graph*: called by 5 (_parse_inbound, fulfill_credential, open_session, preview, resolve_workspace); 2 external calls (form, Response).
+
+
+##### `_bounded_body`  (lines 1232–1240)
+
+```
+async def _bounded_body(request: Request, limit: int) -> bytes | Response
+```
+
+**Purpose**: Reads a request body while enforcing a hard byte limit based on actual bytes consumed. It protects routes that accept raw bodies.
+
+**Data flow**: It streams chunks from the request into memory, stops with a 413 if the limit is exceeded, and returns the full bytes otherwise.
+
+**Call relations**: _parse_inbound uses it for plain chat text, and upload_start uses it for its small JSON request.
+
+*Call graph*: called by 2 (_parse_inbound, upload_start); 2 external calls (stream, Response).
+
+
+##### `_parse_inbound`  (lines 1243–1296)
+
+```
+async def _parse_inbound(request: Request) -> tuple[str, tuple[UploadFile, ...], tuple[str, ...]] | Response
+```
+
+**Purpose**: Parses a chat send from the browser, including plain text, multipart files, and references to already uploaded blobs. It enforces type and size limits before any turn is admitted.
+
+**Data flow**: It reads content type, decodes raw text or parses multipart form data, validates message and upload parts, limits file count, and returns text, inline files, and uploaded blob keys or a response.
+
+**Call relations**: chat calls it near the start of message handling before saving files or opening conversations.
+
+*Call graph*: calls 4 internal fn (_bounded_body, _form, _framed_length, _uploaded_key); called by 1 (chat); 1 external calls (Response).
+
+
+##### `_uploaded_key`  (lines 1299–1308)
+
+```
+def _uploaded_key(raw: str) -> str | None
+```
+
+**Purpose**: Validates that an uploaded_key form value names a blob under this web surface’s upload prefix. It prevents a browser from referencing arbitrary workspace storage.
+
+**Data flow**: It receives a raw string, checks it stays contained under the upload root, and returns the key or None.
+
+**Call relations**: _parse_inbound calls it for each presigned upload reference.
+
+*Call graph*: called by 1 (_parse_inbound); 1 external calls (contained_relative).
+
+
+##### `_inbox_paths`  (lines 1311–1322)
+
+```
+def _inbox_paths(uploads: tuple[UploadFile, ...], uploaded_keys: tuple[str, ...]) -> tuple[str, ...]
+```
+
+**Purpose**: Chooses safe destination paths for files attached to one message. It keeps duplicate filenames from overwriting each other.
+
+**Data flow**: It receives inline UploadFiles and uploaded blob keys, extracts filenames, runs them through inbox_name with a used-name set, and returns web-inbox paths.
+
+**Call relations**: chat calls it before _deliver_uploads and before adding the file note to the admitted text.
+
+*Call graph*: called by 1 (chat); 2 external calls (PurePosixPath, inbox_name).
+
+
+##### `_deliver_uploads`  (lines 1325–1340)
+
+```
+async def _deliver_uploads(ctx: SurfaceContext, conversation_id: UUID, uploads: tuple[UploadFile, ...], uploaded_keys: tuple[str, ...], paths: tuple[str, ...]) -> None
+```
+
+**Purpose**: Copies attached file bytes into the conversation workspace before the agent turn runs. This makes the files available to the agent under the paths named in the message.
+
+**Data flow**: It receives context, conversation ID, inline files, blob keys, and destination paths; it streams inline uploads or blob streams into workspace files.
+
+**Call relations**: chat calls it after the conversation is chosen and before ctx.admit.
+
+*Call graph*: calls 2 internal fn (write_workspace_file, _upload_chunks); called by 1 (chat).
+
+
+##### `_files_note`  (lines 1343–1346)
+
+```
+def _files_note(text: str, paths: tuple[str, ...]) -> str
+```
+
+**Purpose**: Adds a machine-readable note to the member’s message listing saved attachment paths. The transcript renderer later turns that note back into file cards.
+
+**Data flow**: It receives text and paths, formats the attachment note, and appends it to the text or returns only the note.
+
+**Call relations**: chat uses it when a send includes attachments, and _member_attachments later reads the same shape.
+
+*Call graph*: called by 1 (chat).
+
+
+##### `_member_attachments`  (lines 1354–1362)
+
+```
+def _member_attachments(said: str) -> tuple[str, tuple[str, ...]]
+```
+
+**Purpose**: Splits a stored user message into the member’s real words and the attached file paths hidden in the trailing note. This keeps the UI from showing the bookkeeping sentence.
+
+**Data flow**: It receives stored text, searches for the file note, and returns cleaned words plus a tuple of paths.
+
+**Call relations**: _member_bubble calls it while rendering transcripts.
+
+*Call graph*: called by 1 (_member_bubble).
+
+
+##### `_attachment_preview`  (lines 1365–1377)
+
+```
+def _attachment_preview(public_base_url: str | None, agent_id: UUID, conversation_id: UUID, path: str) -> str | None
+```
+
+**Purpose**: Builds the URL for drawing an attached image inline in chat. It returns nothing for non-image files or deployments without a public base URL.
+
+**Data flow**: It checks the path’s image media type, combines base URL, agent ID, conversation ID, and quoted path, and returns a preview URL or None.
+
+**Call relations**: _conversation_messages and _transcript_aids pass it as the attachment lookup used by _member_bubble.
+
+*Call graph*: 2 external calls (raster_image_media_type, quote).
+
+
+##### `_attachment_payload`  (lines 1380–1393)
+
+```
+def _attachment_payload(path: str, preview_url: str | None) -> dict[str, object]
+```
+
+**Purpose**: Creates the file-card data for one member attachment. It includes filename, media type, and optional preview URL but no download link.
+
+**Data flow**: It receives a workspace path and preview URL, infers media type from image/PDF/fallback rules, and returns a JSON-ready dictionary.
+
+**Call relations**: _member_bubble calls it for each path extracted by _member_attachments.
+
+*Call graph*: called by 1 (_member_bubble); 2 external calls (PurePosixPath, raster_image_media_type).
+
+
+##### `_member_bubble`  (lines 1396–1404)
+
+```
+def _member_bubble(said: str, attach: Attach | None) -> dict[str, object]
+```
+
+**Purpose**: Builds the JSON representation of one user chat bubble. It separates text from attachments and attaches file cards when present.
+
+**Data flow**: It receives stored user text and an optional preview function, extracts words and paths, builds a user bubble, and adds files if needed.
+
+**Call relations**: _rendered_messages and _conversation_messages use it for settled and still-queued member messages.
+
+*Call graph*: calls 2 internal fn (_attachment_payload, _member_attachments); called by 2 (_conversation_messages, _rendered_messages).
+
+
+##### `_upload_chunks`  (lines 1407–1409)
+
+```
+async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams an uploaded file in fixed-size chunks. This avoids reading large uploads all at once during workspace file delivery.
+
+**Data flow**: It receives an UploadFile, repeatedly reads chunks until empty, and yields each bytes chunk.
+
+**Call relations**: _deliver_uploads passes it to the workspace file writer for inline file attachments.
+
+*Call graph*: called by 1 (_deliver_uploads); 1 external calls (read).
+
+
+##### `_answer_key`  (lines 1412–1417)
+
+```
+def _answer_key(conversation_id: UUID, turn_id: UUID, index: int) -> str
+```
+
+**Purpose**: Creates the idempotency key for an answer to a specific question asked by a turn. This lets duplicate answer clicks land on the same admitted message.
+
+**Data flow**: It receives conversation ID, asking turn ID, and question index, and returns a stable key string.
+
+**Call relations**: chat uses it when admitting answers, and _asks uses it to match admitted answers back to question cards.
+
+*Call graph*: called by 2 (_asks, chat).
+
+
+##### `_answer_headers`  (lines 1420–1432)
+
+```
+def _answer_headers(request: Request) -> tuple[UUID, int] | None | Response
+```
+
+**Purpose**: Reads headers that identify a message as an answer to an agent’s question. It validates them before any conversation work happens.
+
+**Data flow**: It reads answer turn and question headers, returns None for normal messages, returns parsed UUID and index, or returns a malformed-header response.
+
+**Call relations**: chat calls it before choosing the idempotency key for admission.
+
+*Call graph*: called by 1 (chat); 2 external calls (Response, UUID).
+
+
+##### `_stop_header`  (lines 1435–1444)
+
+```
+def _stop_header(request: Request) -> UUID | None | Response
+```
+
+**Purpose**: Reads the header that asks to stop a running turn. It validates the turn ID without reading message content first.
+
+**Data flow**: It reads the stop-turn header, returns None when absent, a UUID when valid, or a 400 response when malformed.
+
+**Call relations**: chat calls it before deciding whether the POST is a stop request or a message.
+
+*Call graph*: called by 1 (chat); 2 external calls (Response, UUID).
+
+
+##### `chat`  (lines 1447–1566)
+
+```
+async def chat(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Handles one browser chat POST: new message, answer to a question, comment into another surface, or stop request. It is the main write path for portal conversation activity.
+
+**Data flow**: It authenticates, checks agent and conversation access, parses body and headers, saves uploads, opens or resolves the conversation, optionally stops a turn, admits the message, and returns turn/conversation details.
+
+**Call relations**: It combines many helpers, including _parse_inbound, _open_conversation, _member_chat, _deliver_uploads, _turn_context, and _member_turn.
+
+*Call graph*: calls 19 internal fn (admit, admitted_body, stop_turn, _agent_param, _answer_headers, _answer_key, _audience_for, _chat_source, _comment_notice, _commentable (+9 more)); 5 external calls (JSONResponse, Response, web_extension, UUID, uuid4).
+
+
+##### `_rendered_text`  (lines 1569–1580)
+
+```
+def _rendered_text(message: Message) -> str
+```
+
+**Purpose**: Extracts readable text from a stored model message. For user messages, it strips internal context wrappers so the UI shows what the member actually said.
+
+**Data flow**: It receives a Message, reads string content or text blocks, removes context/injected context from user text, trims it, and returns a string.
+
+**Call relations**: _title_excerpt and _rendered_messages use it when projecting transcripts.
+
+*Call graph*: called by 2 (_rendered_messages, _title_excerpt).
+
+
+##### `_append_activity`  (lines 1583–1584)
+
+```
+def _append_activity(events: list[dict[str, str]], text: str) -> None
+```
+
+**Purpose**: Adds one activity event to a transcript event list. Activity is the short visible description of work a tool or skill did.
+
+**Data flow**: It receives a list and text, appends a dictionary with kind activity, and mutates the list.
+
+**Call relations**: _subagent_activity and _rendered_messages call it after _stored_activity finds display text.
+
+*Call graph*: called by 2 (_rendered_messages, _subagent_activity).
+
+
+##### `_stored_activity`  (lines 1587–1599)
+
+```
+def _stored_activity(block: ToolUseBlock, result: ToolResultBlock) -> str | None
+```
+
+**Purpose**: Chooses the best human-readable activity text for a tool call result. It prefers explicit activity text, then user descriptions, then useful fallbacks.
+
+**Data flow**: It receives the tool-use block and matching result block, inspects their fields, and returns text or None when nothing should be shown.
+
+**Call relations**: _subagent_activity and _rendered_messages use it while turning tool blocks into visible work events.
+
+*Call graph*: called by 2 (_rendered_messages, _subagent_activity).
+
+
+##### `_subagent_activity`  (lines 1621–1645)
+
+```
+def _subagent_activity(messages: tuple[Message, ...]) -> list[dict[str, str]]
+```
+
+**Purpose**: Builds the visible work log for a subagent run from its transcript. It shows notes and tool activity but not the final answer.
+
+**Data flow**: It receives messages, matches tool uses to activity results, collects note and activity events in order, bounds the list, and returns it.
+
+**Call relations**: _subagent_nodes calls it after reading each spawned run’s transcript.
+
+*Call graph*: calls 2 internal fn (_append_activity, _stored_activity); called by 1 (_subagent_nodes).
+
+
+##### `_finish_payload`  (lines 1648–1658)
+
+```
+def _finish_payload(answer: str) -> dict[str, JsonValue] | None
+```
+
+**Purpose**: Tries to decode a subagent finish answer as a JSON object. Structured answers can then be shown as readable prose instead of raw JSON.
+
+**Data flow**: It receives answer text, returns None for empty or non-object JSON, or returns the decoded dictionary.
+
+**Call relations**: _run_answer calls it before deciding how to display a run’s output.
+
+*Call graph*: called by 1 (_run_answer); 1 external calls (loads).
+
+
+##### `_payload_prose`  (lines 1661–1684)
+
+```
+def _payload_prose(value: JsonValue) -> str
+```
+
+**Purpose**: Turns a JSON-like value into readable text. It makes strings, numbers, booleans, lists, and objects suitable for a chat bubble.
+
+**Data flow**: It receives a JSON value, recursively formats it, and returns a prose string such as field labels or joined list entries.
+
+**Call relations**: _run_answer calls it when a structured finish payload has more than one meaningful field.
+
+*Call graph*: called by 1 (_run_answer); 2 external calls (items, strip).
+
+
+##### `_run_answer`  (lines 1687–1703)
+
+```
+def _run_answer(answer: str) -> str
+```
+
+**Purpose**: Normalizes a subagent run’s final answer for display. It hides raw JSON wrappers when the payload clearly contains prose.
+
+**Data flow**: It receives answer text, tries _finish_payload, returns a single prose field directly, formats larger payloads through _payload_prose, or returns the original text.
+
+**Call relations**: _subagent_nodes uses it for subagent cards, and _TranscriptAids.render uses it for whole run conversations.
+
+*Call graph*: calls 2 internal fn (_finish_payload, _payload_prose); called by 2 (render, _subagent_nodes).
+
+
+##### `_subagent_nodes`  (lines 1706–1745)
+
+```
+async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> SubagentRuns
+```
+
+**Purpose**: Builds a tree of subagent runs spawned by a conversation. Each node carries the child run’s target, work events, answer, and its own children.
+
+**Data flow**: It receives spawned turns, resolves missing agent names, reads bounded transcripts for recent spawned runs, fills activity events, nests children under parents, and returns a map keyed by parent turn.
+
+**Call relations**: _transcript_aids uses it for transcript projection, and _events uses it when a live terminal frame needs to announce subagent results.
+
+*Call graph*: calls 4 internal fn (list_agents, read_transcript, _run_answer, _subagent_activity); called by 2 (_events, _transcript_aids); 2 external calls (__init__, gather).
+
+
+##### `_rendered_messages`  (lines 1748–1911)
+
+```
+def _rendered_messages(messages: tuple[Message, ...], subagents: SubagentRuns | None=None, turn_ids: frozenset[str]=frozenset(), agent_origin: frozenset[str]=frozenset(), speakers: Mapping[str, str] |
+```
+
+**Purpose**: Projects raw transcript messages into the chat UI’s message list. It removes hidden engine context, turns tool calls into events, attaches files/questions/apps/connect controls, and groups assistant work into replies.
+
+**Data flow**: It receives messages plus helper maps, walks them in order, builds user bubbles and assistant replies, folds notes/activity/subagents/cards into the right reply, and returns JSON-ready messages.
+
+**Call relations**: _TranscriptAids.render is the public wrapper that supplies this function with all side data.
+
+*Call graph*: calls 4 internal fn (_append_activity, _member_bubble, _rendered_text, _stored_activity); called by 1 (render); 1 external calls (member_message_text).
+
+
+##### `_rendered_messages.note_answer`  (lines 1823–1828)
+
+```
+def note_answer() -> None
+```
+
+**Purpose**: Moves a pending assistant answer into the event list when later tool activity shows it was really a work note. This preserves the order of narration and actions.
+
+**Data flow**: It reads the outer pending answer variables, inserts the text as a note event when allowed, increments the note count, and clears the answer.
+
+**Call relations**: The outer _rendered_messages loop calls it while grouping assistant messages.
+
+
+##### `_rendered_messages.flush_reply`  (lines 1830–1865)
+
+```
+def flush_reply(include_subagents: bool) -> None
+```
+
+**Purpose**: Emits the current assistant reply when a turn boundary is reached. It attaches any subagents, questions, files, apps, or connection controls belonging to that turn.
+
+**Data flow**: It reads the outer accumulated answer and pending events, combines them with side maps for the closing turn, appends a reply if there is anything to show, and resets accumulators.
+
+**Call relations**: The outer _rendered_messages loop calls it between user messages and once at the end.
+
+
+##### `_asks`  (lines 1930–1962)
+
+```
+def _asks(conversation_id: UUID, turns: tuple[Turn, ...], admitted: tuple[KeyedAdmission, ...]) -> _Asks
+```
+
+**Purpose**: Builds question cards for turns that asked the member something and records which answer messages those cards already show. This prevents duplicate answer bubbles.
+
+**Data flow**: It receives conversation turns and keyed admissions, matches answers by _answer_key, marks older answered questions closed, and returns cards plus stated message refs.
+
+**Call relations**: _transcript_aids calls it, and _rendered_messages uses the result through _TranscriptAids.render.
+
+*Call graph*: calls 1 internal fn (_answer_key); called by 1 (_transcript_aids); 2 external calls (__init__, member_message_text).
+
+
+##### `_TranscriptAids.render`  (lines 1985–2004)
+
+```
+def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]
+```
+
+**Purpose**: Renders transcript messages using the side data collected for a conversation. It also rewrites assistant replies as run answers when the conversation is a subagent run.
+
+**Data flow**: It receives raw messages, calls _rendered_messages with stored maps and sets, optionally normalizes assistant text through _run_answer, and returns rendered messages.
+
+**Call relations**: _conversation_messages and _history_messages get a _TranscriptAids object from _transcript_aids and call this method.
+
+*Call graph*: calls 2 internal fn (_rendered_messages, _run_answer).
+
+
+##### `_transcript_aids`  (lines 2007–2059)
+
+```
+async def _transcript_aids(ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID, agent_origin: frozenset[str], speakers: dict[str, str], asked: dict[str, str], opens: frozenset[UUI
+```
+
+**Purpose**: Collects everything needed to render a conversation consistently: turns, subagents, shared files, question answers, created apps, speakers, and connection controls.
+
+**Data flow**: It reads several core views concurrently, builds maps for files, apps, speakers, questions, and controls, creates an attachment preview function, and returns a _TranscriptAids object.
+
+**Call relations**: _conversation_messages uses it for the live transcript tail, and _history_messages uses it for older compacted pages.
+
+*Call graph*: calls 9 internal fn (conversation_subagent_turns, keyed_admissions, list_conversation_artifacts, list_turns, _asks, _connect_controls, _created_apps, _file_payload, _subagent_nodes); called by 2 (_conversation_messages, _history_messages); 3 external calls (__init__, gather, partial).
+
+
+##### `_connect_controls`  (lines 2062–2102)
+
+```
+async def _connect_controls(ctx: SurfaceContext, conversation_id: UUID, turns: tuple[Turn, ...], viewer: UUID) -> dict[str, dict[str, object]]
+```
+
+**Purpose**: Finds connection handoff controls that should be shown in a transcript for the current viewer. It shows only the requesting member’s own connect requests.
+
+**Data flow**: It receives turns and viewer ID, skips unavailable connect machinery or other members’ requests, returns fresh connect controls for open requests or landed account labels for completed ones.
+
+**Call relations**: _transcript_aids calls it so rendered replies can include connect buttons or completed account labels.
+
+*Call graph*: calls 4 internal fn (connect_available, held_accounts, _connect_control, _provider_label); called by 1 (_transcript_aids).
+
+
+##### `_conversation_messages`  (lines 2105–2227)
+
+```
+async def _conversation_messages(ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID, opens: frozenset[UUID]) -> tuple[list[dict[str, object]], Turn | None, int]
+```
+
+**Purpose**: Builds the complete message projection for a conversation as the portal displays it. It combines committed transcript, live running turn prompt, queued arrivals, and earlier-page cursor information.
+
+**Data flow**: It reads transcript, origin refs, speakers, compactions, latest turn, and queue rows; renders stored messages through _transcript_aids; appends still-running or waiting messages; and returns rendered messages, latest turn, and earlier cursor index.
+
+**Call relations**: transcript and conversation_transcript call it as the shared conversation renderer.
+
+*Call graph*: calls 10 internal fn (agent_origin_refs, arrival_speakers, latest_turn, list_compactions, queued_arrivals, read_transcript, turn_detail, _member_bubble, _transcript_aids, _verified_earlier); called by 2 (conversation_transcript, transcript); 3 external calls (gather, partial, member_message_text).
+
+
+##### `_verified_earlier`  (lines 2230–2246)
+
+```
+async def _verified_earlier(ctx: SurfaceContext, conversation_id: UUID, indices: tuple[int, ...], messages: tuple[Message, ...]) -> int
+```
+
+**Purpose**: Finds the newest compaction record that truly sits directly above the current transcript window. This avoids offering history pages that would repeat messages.
+
+**Data flow**: It receives compaction indices and current messages, reads each candidate’s after-window, compares it with the transcript prefix, and returns the matching index or 0.
+
+**Call relations**: _conversation_messages and _history_messages call it when constructing earlier-history cursors.
+
+*Call graph*: calls 1 internal fn (read_compaction_after); called by 2 (_conversation_messages, _history_messages).
+
+
+##### `_history_cursor`  (lines 2249–2251)
+
+```
+def _history_cursor(index: int, end: int | None=None) -> str
+```
+
+**Purpose**: Encodes a history paging position into an opaque cursor string for the browser. The cursor hides the internal index and optional end position.
+
+**Data flow**: It receives an index and optional end, formats them, base64-url encodes the result, strips padding, and returns the cursor.
+
+**Call relations**: transcript, conversation_transcript, _history_messages, and _bounded_history_page use it to advertise older pages.
+
+*Call graph*: called by 4 (fits, _history_messages, conversation_transcript, transcript); 1 external calls (urlsafe_b64encode).
+
+
+##### `_history_position`  (lines 2254–2269)
+
+```
+def _history_position(cursor: str) -> tuple[int, int | None]
+```
+
+**Purpose**: Decodes and validates a history cursor from the browser. It rejects malformed or overly long cursors.
+
+**Data flow**: It receives a cursor string, restores base64 padding, decodes index and optional end, validates numeric bounds, and returns them or raises ValueError.
+
+**Call relations**: _history_messages calls it before reading a compacted history record.
+
+*Call graph*: called by 1 (_history_messages); 1 external calls (b64decode).
+
+
+##### `_bounded_history_page`  (lines 2272–2294)
+
+```
+def _bounded_history_page(messages: list[dict[str, object]], index: int, end: int) -> tuple[list[dict[str, object]], int]
+```
+
+**Purpose**: Cuts a rendered history window into a page that fits both message-count and byte-size limits. This prevents very large history responses.
+
+**Data flow**: It receives rendered messages, compaction index, and end position, tests candidate slices, binary-searches if needed, and returns the page plus its start index.
+
+**Call relations**: _history_messages calls it after rendering an older compaction window.
+
+*Call graph*: called by 1 (_history_messages).
+
+
+##### `_bounded_history_page.fits`  (lines 2277–2282)
+
+```
+def fits(start: int) -> bool
+```
+
+**Purpose**: Checks whether one candidate history slice fits the response byte limit. It includes the cursor that would be returned with that slice.
+
+**Data flow**: It receives a start index from the outer function, builds a JSON payload with messages and earlier cursor, measures its encoded body, and returns true or false.
+
+**Call relations**: _bounded_history_page uses it first for the maximum slice and then during binary search.
+
+*Call graph*: calls 1 internal fn (_history_cursor); 1 external calls (JSONResponse).
+
+
+##### `_history_messages`  (lines 2297–2348)
+
+```
+async def _history_messages(ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID, cursor: str, opens: frozenset[UUID]) -> tuple[list[dict[str, object]], str | None] | None
+```
+
+**Purpose**: Returns one older page of a compacted conversation transcript. It ensures pages join cleanly with the live transcript and with each other.
+
+**Data flow**: It decodes the cursor, reads the compaction record, trims the kept tail, gathers render aids, renders the window, bounds the page, finds any page above it, and returns messages plus next cursor.
+
+**Call relations**: _conversation_history calls it after authorizing that the viewer may read the conversation.
+
+*Call graph*: calls 8 internal fn (agent_origin_refs, arrival_speakers, read_compaction, _bounded_history_page, _history_cursor, _history_position, _transcript_aids, _verified_earlier); called by 1 (_conversation_history); 1 external calls (gather).
+
+
+##### `transcript`  (lines 2351–2395)
+
+```
+async def transcript(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the current member’s chat transcript for one agent conversation. It includes live turn information or any still-open handoff from the latest committed turn.
+
+**Data flow**: It authenticates, validates agent and conversation access through _member_chat, renders messages through _conversation_messages, adds earlier cursor and live/handoff fields, and returns JSON.
+
+**Call relations**: The browser calls it when opening a chat; it shares rendering with conversation_transcript.
+
+*Call graph*: calls 7 internal fn (_agent_param, _audience_for, _conversation_messages, _history_cursor, _member_chat, _open_handoffs, _opens); 4 external calls (JSONResponse, Response, web_extension, UUID).
+
+
+##### `_open_handoffs`  (lines 2398–2409)
+
+```
+async def _open_handoffs(ctx: SurfaceContext, terminal: TerminalFrame) -> dict[str, object]
+```
+
+**Purpose**: Reports handoffs from the newest finished turn that still need the member’s attention. Currently this covers pending credential prompts.
+
+**Data flow**: It receives a terminal frame, checks for a credential request, filters still-pending prompts with _pending_prompts, and returns a small payload.
+
+**Call relations**: transcript calls it when the latest turn has ended but left a credential request open.
+
+*Call graph*: calls 1 internal fn (_pending_prompts); called by 1 (transcript).
+
+
+##### `_connect_control`  (lines 2412–2416)
+
+```
+def _connect_control(ctx: SurfaceContext, provider: str, turn_id: UUID) -> dict[str, object]
+```
+
+**Purpose**: Builds the JSON data for a connect button tied to a turn. The button names the provider and the turn to open, not a stale consent URL.
+
+**Data flow**: It receives context, provider, and turn ID, resolves a provider label, and returns provider, label, and turn fields.
+
+**Call relations**: _connect_controls and _events use it when drawing connection requests in transcripts or live streams.
+
+*Call graph*: calls 1 internal fn (_provider_label); called by 2 (_connect_controls, _events).
+
+
+##### `_provider_label`  (lines 2419–2430)
+
+```
+def _provider_label(ctx: SurfaceContext, provider: str) -> str
+```
+
+**Purpose**: Finds the friendly display name for a connection provider. It prefers the web first-run catalog and falls back to the connect system or raw provider slug.
+
+**Data flow**: It receives context and provider name, searches FIRST_RUN_PROVIDERS, then optionally asks ctx.connect_label, and returns a string.
+
+**Call relations**: _connect_control, _connect_controls, and agent_setup use it so provider names stay consistent.
+
+*Call graph*: calls 2 internal fn (connect_available, connect_label); called by 3 (_connect_control, _connect_controls, agent_setup).
+
+
+##### `_provider_summary`  (lines 2433–2440)
+
+```
+def _provider_summary(provider: str) -> str
+```
+
+**Purpose**: Returns the short explanatory text for a known provider from the first-run catalog. Unknown providers get no summary.
+
+**Data flow**: It receives a provider name, searches FIRST_RUN_PROVIDERS, and returns the matching summary or an empty string.
+
+**Call relations**: agent_setup uses it to enrich connector setup rows.
+
+*Call graph*: called by 1 (agent_setup).
+
+
+##### `chats_index`  (lines 2443–2455)
+
+```
+async def chats_index(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Resolves a permalink conversation ID into the chat or conversation data the portal should open. It is used for routes like #/c/<id>.
+
+**Data flow**: It authenticates, requires a conversation query parameter, then delegates to _resolve_chat with the web store and audience.
+
+**Call relations**: The portal calls this when landing on a conversation permalink rather than a selected agent page.
+
+*Call graph*: calls 2 internal fn (_audience_for, _resolve_chat); 2 external calls (Response, web_extension).
+
+
+##### `_resolve_chat`  (lines 2458–2546)
+
+```
+async def _resolve_chat(ctx: SurfaceContext, store: ScopedStore, audience: WebAudience, member_id: UUID, email: str, requested: str) -> Response
+```
+
+**Purpose**: Figures out what a permalinked conversation is for this member: a web chat, a commentable external conversation, an admin-readable conversation, or nothing. It returns the right row shape for the portal.
+
+**Data flow**: It parses the requested UUID, checks chat agents through _member_chat, reads latest turn details for web chats, or falls back to conversation-agent lookup and listed conversation access, then returns JSON.
+
+**Call relations**: chats_index delegates all permalink resolution to this helper.
+
+*Call graph*: calls 9 internal fn (conversation_agent, latest_turn, list_agent_conversations, turn_detail, allows, _commentable, _conversation_row, _iso, _member_chat); called by 1 (chats_index); 2 external calls (JSONResponse, UUID).
+
+
+##### `_panel_gate`  (lines 2549–2562)
+
+```
+async def _panel_gate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str, WebAudience, UUID] | Response
+```
+
+**Purpose**: Authenticates a per-agent panel request and verifies that the URL’s agent is in the member’s web audience. It is the common gate for settings, skills, setup, conversations, actions, and more.
+
+**Data flow**: It calls _audience_for, parses the agent path parameter, checks audience.allows, and returns member ID, email, audience, and agent ID or a response.
+
+**Call relations**: Many per-agent route handlers call it before performing their specific read or write.
+
+*Call graph*: calls 2 internal fn (_agent_param, _audience_for); called by 11 (_readable_conversation, actions, agent_setup, community_skill, community_skills, connections, conversations, homepage, intents, settings (+1 more)); 1 external calls (Response).
+
+
+##### `_iso`  (lines 2565–2566)
+
+```
+def _iso(moment: datetime | None) -> str | None
+```
+
+**Purpose**: Formats optional datetimes for JSON responses. It returns null-style None when there is no timestamp.
+
+**Data flow**: It receives a datetime or None and returns ISO text or None.
+
+**Call relations**: Status, usage, memory, object, conversation, and permalink responses use it for consistent timestamp formatting.
+
+*Call graph*: called by 6 (_conversation_row, _memory_rows, _resolve_chat, _usage_payload, agents_status, object_detail); 1 external calls (isoformat).
+
+
+##### `_window_param`  (lines 2569–2585)
+
+```
+def _window_param(request: Request) -> int | None | Response
+```
+
+**Purpose**: Parses the usage time range requested by the browser. It accepts named ranges or a custom number of seconds.
+
+**Data flow**: It reads query parameters, validates allowed names or numeric bounds, and returns seconds, None for all time, or a 400 response.
+
+**Call relations**: workspace_usage calls it before reading spend data.
+
+*Call graph*: called by 1 (workspace_usage); 1 external calls (Response).
+
+
+##### `_usage_payload`  (lines 2588–2628)
+
+```
+def _usage_payload(report: MemberSpendReport | SpendReport) -> dict[str, object]
+```
+
+**Purpose**: Turns a member or workspace spend report into the JSON shape the usage page draws. It includes totals, daily lines, and breakdowns.
+
+**Data flow**: It receives a spend report, reads nested usage fields, formats timestamps, and returns a dictionary.
+
+**Call relations**: workspace_usage uses it for both the reader’s own usage and the admin workspace rollup.
+
+*Call graph*: calls 1 internal fn (_iso); called by 1 (workspace_usage).
+
+
+##### `skills`  (lines 2631–2655)
+
+```
+async def skills(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists skills available to a selected agent. These are the deploy and workspace skills the member can manage from the portal.
+
+**Data flow**: It gates the agent with _panel_gate, asks ctx.agent_skills, and returns skill metadata as JSON.
+
+**Call relations**: It is the per-agent skills panel read.
+
+*Call graph*: calls 2 internal fn (agent_skills, _panel_gate); 1 external calls (JSONResponse).
+
+
+##### `_community_refusal`  (lines 2661–2665)
+
+```
+def _community_refusal(fault: Exception) -> Response
+```
+
+**Purpose**: Formats a community directory failure as member-readable text. A special header tells the frontend to show the body directly.
+
+**Data flow**: It receives an exception, converts it to text, and returns a 502 response with the refusal header.
+
+**Call relations**: community_skills and community_skill call it when the community service is unavailable or HTTP access fails.
+
+*Call graph*: called by 2 (community_skill, community_skills); 1 external calls (Response).
+
+
+##### `community_skills`  (lines 2672–2688)
+
+```
+async def community_skills(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists or searches community skills that a member may review for an agent. It enforces a minimum search length.
+
+**Data flow**: It gates the agent, reads the q parameter, rejects too-short queries, calls the community listing service, and returns skill summaries or a readable failure.
+
+**Call relations**: The community skills panel calls this before an apply intent is submitted elsewhere.
+
+*Call graph*: calls 2 internal fn (_community_refusal, _panel_gate); 3 external calls (JSONResponse, Response, listing).
+
+
+##### `community_skill`  (lines 2691–2712)
+
+```
+async def community_skill(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Fetches one community skill document for review. It validates owner, repo, and skill name before contacting the directory.
+
+**Data flow**: It gates the agent, validates path parts against safe patterns, fetches the skill, and returns JSON, 404, or a readable directory failure.
+
+**Call relations**: The community skill detail view uses this; installation still goes through the intent/action lane.
+
+*Call graph*: calls 2 internal fn (_community_refusal, _panel_gate); 3 external calls (JSONResponse, Response, fetch).
+
+
+##### `workspace_memory`  (lines 2715–2790)
+
+```
+async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Shows the member’s memory across agents they can reach, either as recent items or search results. It never exposes another member’s private memory subject.
+
+**Data flow**: It authenticates, checks memory availability, parses kind/cursor or query, reads recent memory or searches per reachable agent, deduplicates results, and returns rows plus available actions.
+
+**Call relations**: The workspace memory tab calls this, and it uses _memory_rows and _action_payloads for response shaping.
+
+*Call graph*: calls 7 internal fn (object_actions, recent_memory, search_memory, decode, _action_payloads, _audience_for, _memory_rows); 6 external calls (__init__, gather, audience_subjects, conversation_audience, JSONResponse, Response).
+
+
+##### `_memory_rows`  (lines 2793–2803)
+
+```
+def _memory_rows(found: tuple[MemoryMatch, ...]) -> list[dict[str, object]]
+```
+
+**Purpose**: Converts memory match objects into simple JSON rows for the portal. It includes kind, text, optional object ref, time, and subject.
+
+**Data flow**: It receives memory matches, formats refs and timestamps, and returns a list of dictionaries.
+
+**Call relations**: workspace_memory uses it for both recent memory and search results.
+
+*Call graph*: calls 1 internal fn (_iso); called by 1 (workspace_memory).
+
+
+##### `connections`  (lines 2806–2815)
+
+```
+async def connections(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists connection accounts visible for one selected agent. It includes the member’s private grants and shared edges they may see.
+
+**Data flow**: It gates the agent, asks ctx.list_agent_connections with member and admin status, and returns model-dumped rows.
+
+**Call relations**: The per-agent connections panel calls this.
+
+*Call graph*: calls 2 internal fn (list_agent_connections, _panel_gate); 1 external calls (JSONResponse).
+
+
+##### `connection_pool`  (lines 2818–2828)
+
+```
+async def connection_pool(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists the member-visible pool of connection accounts across the workspace. Agents outside the member’s audience are filtered out of each row.
+
+**Data flow**: It authenticates, reads connections with admin scope when allowed, filters each connection’s agent list by audience, and returns JSON.
+
+**Call relations**: The workspace connections page calls this separate from an individual agent panel.
+
+*Call graph*: calls 2 internal fn (list_connections, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `github_coverage`  (lines 2831–2837)
+
+```
+async def github_coverage(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Reports GitHub connection coverage for the member or admin. It tells the portal whether GitHub capabilities are installed or available.
+
+**Data flow**: It authenticates, calls ctx.github_coverage with member and admin status, and returns the coverage model as JSON.
+
+**Call relations**: workspace_first_run and _held_providers also use the same core coverage read.
+
+*Call graph*: calls 2 internal fn (github_coverage, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `conversations`  (lines 2840–2871)
+
+```
+async def conversations(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists conversations for one selected agent that the member can see. Admins may also see unreadable or disclosable rows according to core rules.
+
+**Data flow**: It gates the agent, parses a bounded search string, asks for one extra row beyond the list limit, converts rows with _conversation_row, and returns rows plus a more flag.
+
+**Call relations**: The conversations panel calls this before opening a conversation transcript route.
+
+*Call graph*: calls 4 internal fn (list_agent_conversations, _conversation_row, _panel_gate, _searched); 1 external calls (JSONResponse).
+
+
+##### `_searched`  (lines 2874–2878)
+
+```
+def _searched(request: Request) -> str | None
+```
+
+**Purpose**: Reads and bounds the conversation search query from the URL. Empty searches become None.
+
+**Data flow**: It takes a request, trims the q parameter to the maximum length, and returns the text or None.
+
+**Call relations**: conversations uses it when calling the core conversation listing.
+
+*Call graph*: called by 1 (conversations).
+
+
+##### `_conversation_row`  (lines 2881–2915)
+
+```
+def _conversation_row(entry: ListedConversation, member_id: UUID, agent: dict[str, str] | None=None) -> dict[str, object]
+```
+
+**Purpose**: Converts a ListedConversation into the JSON row shown in conversation lists and permalink resolution. It includes readability and commentability flags.
+
+**Data flow**: It receives a listed conversation, viewer member ID, and optional agent summary, then formats IDs, labels, timestamps, speakers, and permission booleans.
+
+**Call relations**: conversations and _resolve_chat use it for consistent conversation row output.
+
+*Call graph*: calls 2 internal fn (_commentable, _iso); called by 2 (_resolve_chat, conversations).
+
+
+##### `_readable_conversation`  (lines 2918–2938)
+
+```
+async def _readable_conversation(ctx: SurfaceContext, request: Request, conversation_id: UUID | None=None) -> tuple[UUID, UUID, 'SlotViewer'] | Response
+```
+
+**Purpose**: Authorizes a read-only conversation content request. It verifies agent reach, conversation ID, and core readability, then creates a SlotViewer for later projections.
+
+**Data flow**: It gates the panel, parses or receives a conversation ID, asks ctx.readable_conversation, and returns agent ID, conversation ID, and viewer or a 404 response.
+
+**Call relations**: conversation_transcript, _conversation_history, conversation_attachment, and _slot_target use it as the shared content-read gate.
+
+*Call graph*: calls 3 internal fn (readable_conversation, _opens, _panel_gate); called by 4 (_conversation_history, _slot_target, conversation_attachment, conversation_transcript); 3 external calls (__init__, Response, UUID).
+
+
+##### `conversation_transcript`  (lines 2941–2959)
+
+```
+async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns a read-only transcript for an authorized conversation. This covers conversations the member can read but may not continue as their own chat.
+
+**Data flow**: It routes cursor requests to _conversation_history, otherwise authorizes with _readable_conversation, renders messages through _conversation_messages, adds earlier cursor if present, and returns JSON.
+
+**Call relations**: The conversations panel calls this after selecting a row.
+
+*Call graph*: calls 4 internal fn (_conversation_history, _conversation_messages, _history_cursor, _readable_conversation); 1 external calls (JSONResponse).
+
+
+##### `_member_chat_page`  (lines 2962–2990)
+
+```
+async def _member_chat_page(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID, 'SlotViewer'] | Response
+```
+
+**Purpose**: Authorizes a transcript or attachment read for the member’s own chat route. It covers private extension conversations that normal panel gates may not cover.
+
+**Data flow**: It authenticates, parses agent and conversation IDs, checks _member_chat, and returns agent ID, conversation ID, and SlotViewer or a 404 response.
+
+**Call relations**: _conversation_history and conversation_attachment fall back to it when _readable_conversation is not enough.
+
+*Call graph*: calls 4 internal fn (_agent_param, _audience_for, _member_chat, _opens); called by 2 (_conversation_history, conversation_attachment); 4 external calls (__init__, Response, web_extension, UUID).
+
+
+##### `_conversation_history`  (lines 2993–3014)
+
+```
+async def _conversation_history(ctx: SurfaceContext, request: Request, cursor: str) -> Response
+```
+
+**Purpose**: Returns one earlier page for a compacted transcript after authorizing the same ways that can advertise such a cursor. It supports infinite scroll upward.
+
+**Data flow**: It first tries read-only conversation authorization, then member-chat authorization, calls _history_messages, and returns messages plus another cursor or 404.
+
+**Call relations**: conversation_transcript calls it when the request includes a cursor.
+
+*Call graph*: calls 3 internal fn (_history_messages, _member_chat_page, _readable_conversation); called by 1 (conversation_transcript); 2 external calls (JSONResponse, Response).
+
+
+##### `_inbox_attachment`  (lines 3017–3028)
+
+```
+def _inbox_attachment(path: str) -> bool
+```
+
+**Purpose**: Checks whether a path names a direct file saved by the web composer under web-inbox. It refuses nested paths and special directory names.
+
+**Data flow**: It receives a path string, splits directory and filename, and returns true only for one safe leaf under the inbox directory.
+
+**Call relations**: conversation_attachment uses it before serving any workspace file bytes.
+
+*Call graph*: called by 1 (conversation_attachment).
+
+
+##### `conversation_attachment`  (lines 3031–3071)
+
+```
+async def conversation_attachment(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Serves an inline image preview for a file the member attached to a message. It deliberately refuses non-image and unsafe files so the browser cannot execute uploaded content.
+
+**Data flow**: It authorizes the conversation, validates the requested path and media type, checks workspace file size, reads the file stream, validates it as the claimed image, and returns bytes or an error.
+
+**Call relations**: Attachment preview URLs created by _attachment_preview point to this route.
+
+*Call graph*: calls 5 internal fn (list_workspace_files, read_workspace_file, _inbox_attachment, _member_chat_page, _readable_conversation); 5 external calls (__init__, Response, raster_image_media_type, validated_image_preview, log).
+
+
+##### `_slot_target`  (lines 3091–3115)
+
+```
+async def _slot_target(ctx: SurfaceContext, request: Request) -> SlotTarget | Response
+```
+
+**Purpose**: Finds the conversation target for a typed slot read, including subagent conversation reads rooted in a parent conversation. It ensures the subagent belongs to the authorized root.
+
+**Data flow**: It parses optional root and conversation IDs, authorizes the root or conversation, checks spawned turns when needed, and returns a SlotTarget or response.
+
+**Call relations**: conversation_slots and conversation_slot call it before asking providers for slot summaries or payloads.
+
+*Call graph*: calls 2 internal fn (conversation_subagent_turns, _readable_conversation); called by 2 (conversation_slot, conversation_slots); 3 external calls (__init__, Response, UUID).
+
+
+##### `_slot_context`  (lines 3118–3134)
+
+```
+async def _slot_context(ctx: SurfaceContext, target: SlotTarget, ext: ExtensionContext) -> ConversationSlotContext | None
+```
+
+**Purpose**: Builds the context object passed to a conversation slot provider. It includes audience, conversation ID, agent ID, transcript messages, and public base URL.
+
+**Data flow**: It reads the conversation audience and transcript, merges the audience into the extension context, and returns a ConversationSlotContext or None.
+
+**Call relations**: conversation_slots and conversation_slot use it as the base provider context.
+
+*Call graph*: calls 2 internal fn (conversation_audience, read_transcript); called by 2 (conversation_slot, conversation_slots); 2 external calls (__init__, replace).
+
+
+##### `_project_slot_context`  (lines 3137–3221)
+
+```
+async def _project_slot_context(ctx: SurfaceContext, slot_context: ConversationSlotContext, extension: str, content: type[BaseModel], root_conversation_id: UUID | None, viewer: SlotViewer) -> Conversa
+```
+
+**Purpose**: Adds host-side projections needed by built-in slot providers, such as workspace changes, artifacts, sites, or automations. It also precomputes which member objects are visible.
+
+**Data flow**: It receives a slot context and provider identity, reads the needed core data for certain extension/content combinations, replaces projection or visible_items, and returns the updated context.
+
+**Call relations**: conversation_slots calls it before summarizing each slot, and conversation_slot calls it before reading one slot payload.
+
+*Call graph*: calls 5 internal fn (artifact_link, artifact_preview_link, conversation_changes, list_conversation_artifacts, list_conversation_member_objects); called by 2 (conversation_slot, conversation_slots); 7 external calls (__init__, __init__, __init__, __init__, replace, raster_image_media_type, urlsplit).
+
+
+##### `_authorized_slot_payload`  (lines 3224–3268)
+
+```
+def _authorized_slot_payload(payload: ConversationSlotPayload, context: ConversationSlotContext) -> ConversationSlotPayload
+```
+
+**Purpose**: Filters a slot payload so it only includes sites or automations the viewer may actually open or read. It can redact sensitive automation details while still showing the row exists.
+
+**Data flow**: It receives a payload and slot context, compares payload items with visible_items, removes unauthorized items, redacts hidden fields when needed, and returns the payload.
+
+**Call relations**: conversation_slot applies it after the provider returns a typed payload.
+
+*Call graph*: called by 1 (conversation_slot); 1 external calls (model_copy).
+
+
+##### `conversation_slots`  (lines 3271–3315)
+
+```
+async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists which typed side panels are available for an authorized conversation, with counts. Examples include changes and artifacts.
+
+**Data flow**: It authorizes the slot target, builds shared context, loops through registered slot providers, projects context, asks each provider for a summary count, logs failures, and returns slot tiles.
+
+**Call relations**: The transcript UI calls this to decide which conversation side panels to show.
+
+*Call graph*: calls 4 internal fn (summarize_conversation_slot, _project_slot_context, _slot_context, _slot_target); 4 external calls (replace, JSONResponse, Response, log).
+
+
+##### `conversation_slot`  (lines 3318–3345)
+
+```
+async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the full payload for one typed conversation slot. It verifies the provider and checks the provider returned the expected model type.
+
+**Data flow**: It authorizes the target, finds the slot provider by ID, builds and projects context, reads the provider payload, filters it through _authorized_slot_payload, and returns JSON.
+
+**Call relations**: The portal calls this after the user opens a slot listed by conversation_slots.
+
+*Call graph*: calls 5 internal fn (read_conversation_slot, _authorized_slot_payload, _project_slot_context, _slot_context, _slot_target); 2 external calls (JSONResponse, Response).
+
+
+##### `_changes_projection`  (lines 3348–3351)
+
+```
+def _changes_projection(ctx: ConversationSlotContext) -> WorkspaceChanges
+```
+
+**Purpose**: Retrieves the workspace-changes projection from a slot context and fails if the wrong projection was supplied. It is a type guard for the built-in changes slot.
+
+**Data flow**: It receives a ConversationSlotContext, checks projection type, and returns WorkspaceChanges or raises an error.
+
+**Call relations**: _read_changes and _summarize_changes call it for the CHANGES_SLOT provider.
+
+*Call graph*: called by 2 (_read_changes, _summarize_changes).
+
+
+##### `_read_changes`  (lines 3354–3355)
+
+```
+async def _read_changes(ctx: ConversationSlotContext) -> WorkspaceChanges
+```
+
+**Purpose**: Returns the full changes-slot payload from the context. It is the read callback for the built-in changes slot.
+
+**Data flow**: It receives slot context and returns the WorkspaceChanges projection from _changes_projection.
+
+**Call relations**: CHANGES_SLOT registers it as the provider read function.
+
+*Call graph*: calls 1 internal fn (_changes_projection).
+
+
+##### `_summarize_changes`  (lines 3358–3359)
+
+```
+async def _summarize_changes(ctx: ConversationSlotContext) -> int | None
+```
+
+**Purpose**: Counts workspace changes for the slot list. It hides the slot when there are no changes.
+
+**Data flow**: It receives slot context, counts changes in the projection, and returns the count or None.
+
+**Call relations**: CHANGES_SLOT registers it as the summary function used by conversation_slots.
+
+*Call graph*: calls 1 internal fn (_changes_projection).
+
+
+##### `_artifacts_projection`  (lines 3372–3375)
+
+```
+def _artifacts_projection(ctx: ConversationSlotContext) -> ArtifactsSlotPayload
+```
+
+**Purpose**: Retrieves the artifacts projection from a slot context and fails if it is missing or wrong. It is a type guard for the built-in artifacts slot.
+
+**Data flow**: It receives a ConversationSlotContext, checks projection type, and returns ArtifactsSlotPayload or raises.
+
+**Call relations**: _read_artifacts and _summarize_artifacts call it for ARTIFACTS_SLOT.
+
+*Call graph*: called by 2 (_read_artifacts, _summarize_artifacts).
+
+
+##### `_read_artifacts`  (lines 3378–3379)
+
+```
+async def _read_artifacts(ctx: ConversationSlotContext) -> ArtifactsSlotPayload
+```
+
+**Purpose**: Returns the full artifacts-slot payload from the context. It is the read callback for the artifacts slot.
+
+**Data flow**: It receives slot context and returns the ArtifactsSlotPayload projection from _artifacts_projection.
+
+**Call relations**: ARTIFACTS_SLOT registers it as the provider read function.
+
+*Call graph*: calls 1 internal fn (_artifacts_projection).
+
+
+##### `_summarize_artifacts`  (lines 3382–3384)
+
+```
+async def _summarize_artifacts(ctx: ConversationSlotContext) -> int | None
+```
+
+**Purpose**: Counts shared artifacts for the slot list. It hides the artifacts slot when there are none.
+
+**Data flow**: It receives slot context, counts artifacts in the projection, and returns the count or None.
+
+**Call relations**: ARTIFACTS_SLOT registers it as the summary function used by conversation_slots.
+
+*Call graph*: calls 1 internal fn (_artifacts_projection).
+
+
+##### `workspace_credentials`  (lines 3397–3410)
+
+```
+async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists workspace credential slots that members can fill, without exposing any secret values. It also includes actions available on the credential collection.
+
+**Data flow**: It authenticates, reads credential slot state, reads collection actions, formats both, and returns JSON.
+
+**Call relations**: The workspace credentials page calls this.
+
+*Call graph*: calls 4 internal fn (list_credential_slots, object_actions, _action_payloads, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `workspace_team`  (lines 3413–3432)
+
+```
+async def workspace_team(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the workspace member roster and whether the current member can add people. It includes member collection actions.
+
+**Data flow**: It authenticates, reads members, uses audience.admin for can_add, reads member collection actions, and returns JSON.
+
+**Call relations**: The team page calls this, and admin_index offers deeper admin-only roster details.
+
+*Call graph*: calls 4 internal fn (list_members, object_actions, _action_payloads, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `workspace_sources`  (lines 3435–3446)
+
+```
+async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists source bindings visible to the member, such as registered data sources. Admins see all; ordinary members see allowed private and shared sources.
+
+**Data flow**: It authenticates, calls ctx.list_sources with member and admin scope, and returns source rows.
+
+**Call relations**: The workspace sources page calls this.
+
+*Call graph*: calls 2 internal fn (list_sources, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `workspace_surfaces`  (lines 3449–3460)
+
+```
+async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists installed surfaces, such as Slack, that are attached to agents visible to this member. It filters out installations for agents outside the web audience.
+
+**Data flow**: It authenticates, reads all installations, filters by audience.allows(agent_id), and returns JSON.
+
+**Call relations**: The workspace surfaces/topology page calls this; admin_index has the admin-wide view.
+
+*Call graph*: calls 2 internal fn (list_installations, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `workspace_imessage_claim`  (lines 3500–3521)
+
+```
+async def workspace_imessage_claim(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Reports the current member’s iMessage claim state for first-run setup. It says pending, connected, or expired without exposing other members’ claims.
+
+**Data flow**: It authenticates, reads the member’s imessage surface claim, compares proof and expiry timestamps, and returns an ImessageClaim JSON model.
+
+**Call relations**: The first-run iMessage step polls this while waiting for a phone verification.
+
+*Call graph*: calls 2 internal fn (member_surface_claim, _audience_for); 3 external calls (__init__, now, JSONResponse).
+
+
+##### `workspace_first_run`  (lines 3524–3564)
+
+```
+async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the first-run connector catalog and which key setup steps are already installed. It helps new teams connect Slack, GitHub, iMessage, and other providers.
+
+**Data flow**: It authenticates, reads installations and GitHub coverage, checks the iMessage feature flag and extension presence, formats provider tiles, connector steps, and actions, and returns JSON.
+
+**Call relations**: The first-run flow and Connect page call this; it shares provider catalog naming with setup and starter helpers.
+
+*Call graph*: calls 5 internal fn (github_coverage, list_installations, object_actions, _action_payloads, _audience_for); 3 external calls (__init__, flag_enabled, JSONResponse).
+
+
+##### `connector_catalog`  (lines 3567–3595)
+
+```
+async def connector_catalog(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Searches the installed brokers’ catalog of connectable providers for the Connect page. It bounds query and cursor strings so the request stays controlled.
+
+**Data flow**: It authenticates, validates q and after parameters, asks ctx.connector_catalog for a page, converts entries to tiles, and returns the next cursor.
+
+**Call relations**: The Connect page calls this when browsing provider options.
+
+*Call graph*: calls 2 internal fn (connector_catalog, _audience_for); 3 external calls (__init__, JSONResponse, Response).
+
+
+##### `_held_providers`  (lines 3646–3657)
+
+```
+async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) -> frozenset[str]
+```
+
+**Purpose**: Computes which provider accounts or surfaces the workspace already has in the vocabulary used by starter rows. It includes broker connections, Slack, and GitHub.
+
+**Data flow**: It reads connections, surface installations, and GitHub coverage, combines provider names into a set, and returns it frozen.
+
+**Call relations**: workspace_starters calls it before deciding which ranked starter ideas are ready or blocked.
+
+*Call graph*: calls 3 internal fn (github_coverage, list_connections, list_installations); called by 1 (workspace_starters).
+
+
+##### `fill_starters`  (lines 3660–3749)
+
+```
+def fill_starters(slate: Slate, held: frozenset[str], taken: frozenset[str], installed: tuple[StarterApp, ...]=()) -> tuple[tuple[StarterRow, ...], UnlockRow | None]
+```
+
+**Purpose**: Chooses which starter suggestions to show based on the ranked slate, installed apps, already-taken app names, and connected providers. It separates ready apps from unlocks that need accounts.
+
+**Data flow**: It receives a slate and current workspace state, walks ranked entries, skips unavailable or duplicate items, fills up to two app rows, picks one unlock, adds a check-in row, and returns both lists.
+
+**Call relations**: workspace_starters calls it after loading cached/generated starter data and live provider state.
+
+*Call graph*: called by 1 (workspace_starters); 4 external calls (__init__, __init__, __init__, get).
+
+
+##### `_solvent`  (lines 3752–3761)
+
+```
+async def _solvent() -> bool
+```
+
+**Purpose**: Checks whether the workspace balance still has room to spend money on generating starter suggestions. It avoids model work when the workspace is over its spending boundary.
+
+**Data flow**: It opens an extension transaction, reads balance headroom, and returns true if no headroom is set or balance exceeds the reserve threshold.
+
+**Call relations**: workspace_starters passes this result into StarterCache.
+
+*Call graph*: called by 1 (workspace_starters); 2 external calls (read_headroom, web_extension).
+
+
+##### `_recalled`  (lines 3764–3771)
+
+```
+async def _recalled(ctx: SurfaceContext, member_id: UUID) -> tuple[str, ...]
+```
+
+**Purpose**: Reads recent memory for the current member’s own audience to help generate personalized starter suggestions. It excludes other members’ private memory.
+
+**Data flow**: It checks memory availability, builds audience subjects for the member, reads a bounded recent page, truncates each memory text, and returns a tuple.
+
+**Call relations**: workspace_starters calls it before asking StarterCache for a slate.
+
+*Call graph*: calls 1 internal fn (recent_memory); called by 1 (workspace_starters); 2 external calls (audience_subjects, conversation_audience).
+
+
+##### `workspace_starters`  (lines 3774–3832)
+
+```
+async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns personalized starter rows for a member before they ask anything. It combines generated ranking with live connector and app setup state.
+
+**Data flow**: It authenticates, reads installed app setup states, builds or reads a StarterCache slate using memory and solvency, reads held providers and taken names, calls fill_starters, and returns JSON.
+
+**Call relations**: The portal start screen calls this after first-run and agent boot data are available.
+
+*Call graph*: calls 7 internal fn (agent_setup, _audience_for, _held_providers, _recalled, _setup_ready, _solvent, fill_starters); 5 external calls (__init__, __init__, gather, JSONResponse, web_extension).
+
+
+##### `workspace_usage`  (lines 3835–3910)
+
+```
+async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns spend and usage data for the current member, and for the whole workspace when the member is an admin. This powers the usage page.
+
+**Data flow**: It authenticates, parses the requested window, reads member spend, formats usage and caps, optionally reads admin rollup, and returns JSON.
+
+**Call relations**: It uses _window_param and _usage_payload to keep time-range parsing and spend formatting shared.
+
+*Call graph*: calls 5 internal fn (member_spend, spend_rollup, _audience_for, _usage_payload, _window_param); 1 external calls (JSONResponse).
+
+
+##### `connect_handoff`  (lines 3916–3940)
+
+```
+async def connect_handoff(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Starts the outbound OAuth-style connection flow for a connect request left by a turn. It mints the provider consent URL only when the member clicks.
+
+**Data flow**: It authorizes the member’s access to the turn, asks ctx.connect_url for a fresh URL, redirects there, or returns a callback page if the request is no longer valid.
+
+**Call relations**: Connect buttons produced by _connect_control point to this route.
+
+*Call graph*: calls 2 internal fn (connect_url, _member_turn); 2 external calls (callback_page, RedirectResponse).
+
+
+##### `_member_turn`  (lines 3943–3996)
+
+```
+async def _member_turn(ctx: SurfaceContext, request: Request, *, named_turn: UUID | None=None, allow_commentable: bool=False) -> tuple[UUID, UUID, str] | Response
+```
+
+**Purpose**: Authorizes access to a specific turn for mutation or streaming. It ensures the requester owns the turn or may read/comment on its conversation.
+
+**Data flow**: It authenticates, parses or receives a turn ID, reads turn detail and owner, checks agent visibility and _member_chat when needed, and returns member ID, turn ID, and email or a refusal.
+
+**Call relations**: chat uses it for stopping turns, connect_handoff uses it for connect presses, and stream uses it for live event access.
+
+*Call graph*: calls 5 internal fn (turn_detail, turn_owner, _audience_for, _commentable, _member_chat); called by 3 (chat, connect_handoff, stream); 3 external calls (Response, web_extension, UUID).
+
+
+##### `stream`  (lines 3999–4007)
+
+```
+async def stream(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Opens a server-sent event stream for one turn’s live frames. This is how the browser watches an agent answer in real time.
+
+**Data flow**: It authorizes the turn through _member_turn, reads Last-Event-ID for resume, and returns a StreamingResponse over _events.
+
+**Call relations**: The chat UI calls it after chat returns a turn ID to tail.
+
+*Call graph*: calls 2 internal fn (_events, _member_turn); 1 external calls (StreamingResponse).
+
+
+##### `_event`  (lines 4010–4011)
+
+```
+def _event(name: str, payload: dict[str, object]) -> bytes
+```
+
+**Purpose**: Formats a named server-sent event with a JSON payload. Server-sent events are simple text records the browser can consume as a live stream.
+
+**Data flow**: It receives an event name and payload dictionary, JSON-encodes the payload, and returns event bytes.
+
+**Call relations**: _events uses it for extra web-specific events such as subagent, connect, credentials, files, and apps.
+
+*Call graph*: called by 1 (_events); 1 external calls (dumps).
+
+
+##### `_pending_prompts`  (lines 4014–4027)
+
+```
+async def _pending_prompts(ctx: SurfaceContext, request_: CredentialRequest) -> dict[str, object] | None
+```
+
+**Purpose**: Filters a credential request down to prompts that are still unanswered. This prevents fulfilled or expired prompts from being shown again.
+
+**Data flow**: It receives a credential request, checks each slot with ctx.credential_prompt_pending, and returns reason, seal, and pending prompts or None.
+
+**Call relations**: _events uses it during live streaming, and _open_handoffs uses it during transcript reload.
+
+*Call graph*: calls 1 internal fn (credential_prompt_pending); called by 2 (_events, _open_handoffs).
+
+
+##### `_file_payload`  (lines 4030–4043)
+
+```
+def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, object]
+```
+
+**Purpose**: Formats a shared artifact as a chat file card. It includes download and preview links where the core context can mint them.
+
+**Data flow**: It receives a SharedArtifact, asks context for artifact and preview links, copies metadata, and returns a dictionary.
+
+**Call relations**: _events uses it for newly shared files, and _transcript_aids uses it for settled transcript files.
+
+*Call graph*: calls 2 internal fn (artifact_link, artifact_preview_link); called by 2 (_events, _transcript_aids).
+
+
+##### `_opens`  (lines 4046–4047)
+
+```
+def _opens(audience: WebAudience) -> frozenset[UUID]
+```
+
+**Purpose**: Returns the set of agent IDs this web audience can open. This is used to decide whether app cards should be visible.
+
+**Data flow**: It receives a WebAudience and returns a frozen set of its agent IDs.
+
+**Call relations**: transcript, _readable_conversation, _member_chat_page, and _events pass this set into app-card rendering.
+
+*Call graph*: called by 4 (_events, _member_chat_page, _readable_conversation, transcript).
+
+
+##### `_created_apps`  (lines 4050–4081)
+
+```
+async def _created_apps(ctx: SurfaceContext, created: Mapping[str, tuple[ObjectRef, ...]], opens: frozenset[UUID]) -> dict[str, list[dict[str, object]]]
+```
+
+**Purpose**: Builds app cards for agents created by one or more turns, but only for apps the viewer may open. It resolves object references back to live agent summaries.
+
+**Data flow**: It receives created object refs and openable agent IDs, lists agents, matches created agent names, filters by opens, and returns cards keyed by turn ID.
+
+**Call relations**: _transcript_aids uses it for settled turns, and _events uses it when a live terminal frame reports created apps.
+
+*Call graph*: calls 1 internal fn (list_agents); called by 2 (_events, _transcript_aids).
+
+
+##### `_events`  (lines 4084–4132)
+
+```
+async def _events(ctx: SurfaceContext, turn_id: UUID, member_id: UUID, since: str, email: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams live turn frames and adds web-specific events around terminal frames. It can announce subagent results, connection controls, credential prompts, files, created apps, and then the raw live frame.
+
+**Data flow**: It tails the turn from an optional cursor, inspects each frame, performs extra reads on terminal frames, yields named events, and finally yields the frame converted by _sse.
+
+**Call relations**: stream returns this async iterator to the browser as text/event-stream.
+
+*Call graph*: calls 13 internal fn (connect_available, conversation_subagent_turns, shared_artifacts, tail, turn_detail, _connect_control, _created_apps, _event, _file_payload, _opens (+3 more)); called by 1 (stream); 2 external calls (web_audience, web_extension).
+
+
+##### `fulfill_credential`  (lines 4135–4163)
+
+```
+async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Stores one credential value entered privately in the web UI. The secret is not admitted as a chat message and does not appear in transcripts.
+
+**Data flow**: It authenticates, bounds and parses the form, validates sealed, slot, and value fields, enforces secret size, calls privileged credential fulfillment, and returns stored slot or an error.
+
+**Call relations**: Credential prompt forms created by live streams or transcript handoffs post to this route.
+
+*Call graph*: calls 4 internal fn (fulfill_credential_request, _authenticate, _form, _framed_length); 2 external calls (JSONResponse, Response).
+
+
+##### `admin_index`  (lines 4166–4221)
+
+```
+async def admin_index(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the administration dashboard for workspace admins. It includes agents, installations, web grants, members, seats, spend caps, and deployment shape.
+
+**Data flow**: It authenticates, rejects non-admins as not found, reads installations, grants, seat snapshot, spend caps, and deployment metadata, and returns JSON.
+
+**Call relations**: The admin screen calls this; ordinary workspace reads use narrower routes like workspace_team and workspace_surfaces.
+
+*Call graph*: calls 5 internal fn (list_installations, object_actions, spend_caps, _action_payloads, _audience_for); 5 external calls (__init__, JSONResponse, Response, granted_emails, web_extension).
+
+
+##### `_object_gate`  (lines 4224–4238)
+
+```
+async def _object_gate(ctx: SurfaceContext, request: Request) -> tuple[UUID, WebAudience, PortalKind] | Response
+```
+
+**Purpose**: Common gate for generic object index and detail pages. It authenticates, computes audience, and verifies that the requested object kind exists.
+
+**Data flow**: It reads the kind path parameter, calls ctx.object_kind, and returns member ID, audience, and PortalKind or a response.
+
+**Call relations**: object_index and object_detail both start here so unknown kinds and audience rules are consistent.
+
+*Call graph*: calls 2 internal fn (object_kind, _audience_for); called by 2 (object_detail, object_index); 1 external calls (Response).
+
+
+##### `_object_agent`  (lines 4241–4251)
+
+```
+def _object_agent(request: Request, audience: WebAudience) -> AgentSummary | Response
+```
+
+**Purpose**: Finds the agent namespace named by the object request’s agent query parameter. Object reads always happen inside one reachable agent namespace.
+
+**Data flow**: It parses the agent query value as UUID, searches the audience’s agents, and returns the AgentSummary or a 404 response.
+
+**Call relations**: object_index uses it for single-agent indexes, and object_detail uses it for detail reads.
+
+*Call graph*: called by 2 (object_detail, object_index); 2 external calls (Response, UUID).
+
+
+##### `_action_payloads`  (lines 4254–4255)
+
+```
+def _action_payloads(views: tuple[ActionView, ...]) -> list[dict[str, object]]
+```
+
+**Purpose**: Converts action view models into JSON dictionaries, omitting empty optional fields. These describe actions the UI may offer.
+
+**Data flow**: It receives action views and returns model_dump dictionaries with None fields excluded.
+
+**Call relations**: action_views, admin_index, workspace_credentials, workspace_first_run, workspace_memory, and workspace_team use it.
+
+*Call graph*: called by 6 (action_views, admin_index, workspace_credentials, workspace_first_run, workspace_memory, workspace_team).
+
+
+##### `_kind_payload`  (lines 4258–4265)
+
+```
+def _kind_payload(kind: PortalKind) -> dict[str, object]
+```
+
+**Purpose**: Builds common metadata for an object kind page, including list fields, schema, and whether apply/delete intents exist. This keeps object index and detail responses aligned.
+
+**Data flow**: It receives a PortalKind, checks ApplyIntent support sets, and returns a dictionary of kind metadata.
+
+**Call relations**: object_index and object_detail include it in their responses.
+
+*Call graph*: calls 2 internal fn (applying_kinds, deleting_kinds); called by 2 (object_detail, object_index).
+
+
+##### `_filter_value`  (lines 4268–4275)
+
+```
+def _filter_value(raw: str) -> JsonValue
+```
+
+**Purpose**: Parses query-string filter values into simple JSON scalars when possible. This lets filters like true or 3 behave as booleans or numbers instead of only strings.
+
+**Data flow**: It receives a raw string, tries json.loads, and returns the parsed value or the original string.
+
+**Call relations**: object_index calls it for all non-reserved query parameters.
+
+*Call graph*: called by 1 (object_index); 1 external calls (loads).
+
+
+##### `_fanout_token`  (lines 4278–4283)
+
+```
+def _fanout_token(walking: dict[str, str]) -> str | None
+```
+
+**Purpose**: Encodes per-agent cursors into one continuation token for object indexes that fan out across multiple agents. The browser treats it as opaque.
+
+**Data flow**: It receives a map of agent ID strings to cursors, returns None if empty, or JSON-encodes and hex-encodes the map.
+
+**Call relations**: object_index uses it after merging multi-agent pages.
+
+*Call graph*: called by 1 (object_index); 1 external calls (dumps).
+
+
+##### `_fanout_walks`  (lines 4286–4303)
+
+```
+def _fanout_walks(token: str) -> dict[UUID, str] | None
+```
+
+**Purpose**: Decodes a fan-out object index cursor back into per-agent cursors. It rejects tokens this route did not mint.
+
+**Data flow**: It receives a token string, hex-decodes and JSON-parses it, validates non-empty string cursors and UUID agent keys, and returns a UUID map or None.
+
+**Call relations**: object_index calls it when continuing a cross-agent object listing.
+
+*Call graph*: called by 1 (object_index); 2 external calls (loads, UUID).
+
+
+##### `_merged_rank`  (lines 4306–4319)
+
+```
+def _merged_rank(row: dict[str, object], order_by: str) -> tuple[int, float | str, str]
+```
+
+**Purpose**: Computes the sort key for one row in a merged multi-agent object listing. It gives consistent ordering across pages returned by different agents.
+
+**Data flow**: It receives a row and order field, classifies the field as missing, boolean, number, or text, and returns a tuple with name as tie-breaker.
+
+**Call relations**: object_index uses it when no single agent is named and rows must be merged together.
+
+
+##### `object_index`  (lines 4322–4412)
+
+```
+async def object_index(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists objects of one kind for the signed-in member, either within one agent or across all reachable agents. It supports search, filters, ordering, and cursors.
+
+**Data flow**: It gates kind and audience, parses sorting and cursor options, builds ObjectListQuery, reads pages from one or many agents, merges and sorts when fanned out, and returns rows plus next cursor.
+
+**Call relations**: The generic object index pages call this; it relies on _object_gate, _object_agent, _filter_value, _fanout_walks, _merged_rank, and _fanout_token.
+
+*Call graph*: calls 7 internal fn (list_member_objects, _fanout_token, _fanout_walks, _filter_value, _kind_payload, _object_agent, _object_gate); 4 external calls (__init__, replace, JSONResponse, Response).
+
+
+##### `object_detail`  (lines 4415–4462)
+
+```
+async def object_detail(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns one object’s detail as the member may read it. It includes spec when visible, fields, links, generation, and timestamps.
+
+**Data flow**: It gates kind and agent, reads the member object, checks each outgoing link for openability, and returns a detail JSON response or 404.
+
+**Call relations**: The generic object detail page calls this; it shares kind metadata with object_index through _kind_payload.
+
+*Call graph*: calls 5 internal fn (member_object, _iso, _kind_payload, _object_agent, _object_gate); 2 external calls (JSONResponse, Response).
+
+
+##### `_sse`  (lines 4465–4497)
+
+```
+def _sse(cursor: str, frame: LiveFrame) -> bytes
+```
+
+**Purpose**: Converts one live hub frame into server-sent event bytes. It maps each frame type to the event name the browser expects.
+
+**Data flow**: It receives a cursor and LiveFrame, optionally writes the SSE id line, serializes the frame payload, and returns event bytes.
+
+**Call relations**: _events calls it for every raw live frame after adding any web-specific extra events.
+
+*Call graph*: called by 1 (_events); 1 external calls (model_dump_json).
+
+
+##### `intents`  (lines 4500–4505)
+
+```
+async def intents(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Submits a prepared intent for a selected agent. Prepared intents are panel-driven actions that are still admitted through the surface’s normal authority path.
+
+**Data flow**: It gates the agent, then passes context, request, agent ID, member ID, and email to submit_intent.
+
+**Call relations**: The route is a thin web gate around the intent logic in ufo_ext_web.panels.
+
+*Call graph*: calls 1 internal fn (_panel_gate); 1 external calls (submit_intent).
+
+
+##### `actions`  (lines 4508–4526)
+
+```
+async def actions(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Submits an action offered by an object kind or object instance for a selected agent. The browser names the route; the server binds the real target.
+
+**Data flow**: It gates the agent, reads kind/name/action path parameters, and delegates to submit_action with member and agent identity.
+
+**Call relations**: Panels that show action buttons post here; submit_action performs the deeper dispatch.
+
+*Call graph*: calls 1 internal fn (_panel_gate); 1 external calls (submit_action).
+
+
+##### `action_views`  (lines 4529–4543)
+
+```
+async def action_views(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lists actions declared for an object collection or instance. It lets the UI draw available controls even when the actual dispatch will re-check authority later.
+
+**Data flow**: It authenticates, validates object kind, chooses collection or instance binding from the path, reads ctx.object_actions, and returns action payloads.
+
+**Call relations**: Object panels call this to discover controls; actions is the POST route that executes them.
+
+*Call graph*: calls 4 internal fn (object_actions, object_kind, _action_payloads, _audience_for); 2 external calls (JSONResponse, Response).
+
+
+##### `_write_agent`  (lines 4550–4568)
+
+```
+def _write_agent(request: Request, audience: WebAudience, stated: object=None) -> AgentSummary | Response
+```
+
+**Purpose**: Chooses the agent namespace for a direct object write. It uses an explicit body or query agent when present, otherwise falls back to the workspace main agent.
+
+**Data flow**: It receives request, audience, and optional stated agent, parses a UUID when given, searches allowed agents, or returns the main agent or an error response.
+
+**Call relations**: object_write uses it before admitting apply or delete intents.
+
+*Call graph*: called by 1 (object_write); 2 external calls (Response, UUID).
+
+
+##### `_direct_result`  (lines 4571–4575)
+
+```
+def _direct_result(frame: TerminalFrame, name: str) -> Response
+```
+
+**Purpose**: Turns the terminal result of a direct object-write turn into the synchronous response expected by an app frame. It reports success or refusal in a small JSON shape.
+
+**Data flow**: It receives a terminal frame and object name, checks terminal status, and returns ok true with detail or ok false with an error reason.
+
+**Call relations**: object_write calls it when the admitted write turn reaches a terminal frame.
+
+*Call graph*: called by 1 (object_write); 1 external calls (JSONResponse).
+
+
+##### `object_write`  (lines 4578–4652)
+
+```
+async def object_write(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Lets an app frame create, update, or delete an object under the member’s web session by admitting a prepared-intent turn. It waits briefly for the turn result and returns it synchronously.
+
+**Data flow**: It authenticates, validates kind and body/path, chooses agent, builds an object_apply or object_delete ToolIntent, opens the intent conversation, admits the turn, tails it until terminal/parked/timeout, and returns JSON.
+
+**Call relations**: Bridge clients post here; it uses _write_agent and _direct_result around the same turn machinery used by chat.
+
+*Call graph*: calls 7 internal fn (admit, conversation_for, object_kind, tail, _audience_for, _direct_result, _write_agent); 7 external calls (__init__, timeout, dumps, conversation_audience, JSONResponse, json, Response).
+
+
+##### `object_changes`  (lines 4658–4686)
+
+```
+async def object_changes(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns a recent audit log of object create, update, and delete events for admins. It does not expose stored object specs.
+
+**Data flow**: It authenticates, rejects non-admins, reads recent object changes, formats kind/name/verb/caller/agent/time, and returns JSON.
+
+**Call relations**: The admin audit page calls this separately from object_index and object_detail.
+
+*Call graph*: calls 2 internal fn (recent_object_changes, _audience_for); 2 external calls (JSONResponse, Response).
+
+
+##### `settings`  (lines 4689–4701)
+
+```
+async def settings(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the selected agent’s settings page data. It also decides whether the current member may archive the agent.
+
+**Data flow**: It gates the agent, finds the agent summary, computes archivable from main/admin/owner status, and delegates to agent_settings.
+
+**Call relations**: The settings panel calls this; most formatting lives in ufo_ext_web.panels.agent_settings.
+
+*Call graph*: calls 1 internal fn (_panel_gate); 1 external calls (agent_settings).
+
+
+##### `agent_setup`  (lines 4704–4734)
+
+```
+async def agent_setup(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns what a selected app still needs before it works: connectors, credentials, standing orders, and whether it already has its own page. Provider labels are made friendly here.
+
+**Data flow**: It gates the agent, reads ctx.agent_setup, enriches connector rows with label and summary, checks _bound_page, and returns JSON.
+
+**Call relations**: The app setup screen calls this, and agents_index uses related setup reads for boot badges.
+
+*Call graph*: calls 5 internal fn (agent_setup, _bound_page, _panel_gate, _provider_label, _provider_summary); 1 external calls (JSONResponse).
+
+
+##### `_bound_page`  (lines 4737–4764)
+
+```
+async def _bound_page(ctx: SurfaceContext, summary: AgentSummary, member_id: UUID) -> ObjectRow | None
+```
+
+**Purpose**: Finds the hosted site row that this workspace has built and bound as an agent’s homepage. It asks past normal row visibility because homepage state has its own agent-based gate.
+
+**Data flow**: It queries site objects for homepage_agent equal to the agent ID, then returns the first row carrying site_url or None.
+
+**Call relations**: agents_index, homepage, and agent_setup use it so homepage state and setup stand-on-page decisions agree.
+
+*Call graph*: calls 1 internal fn (list_member_objects); called by 3 (agent_setup, agents_index, homepage); 1 external calls (__init__).
+
+
+##### `homepage`  (lines 4767–4786)
+
+```
+async def homepage(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Returns the selected agent’s homepage state and URL if one is available. It covers both workspace-built pages and shipped app bundles.
+
+**Data flow**: It gates the agent, publishes assets, reads the bound page, computes state with _homepage_state, and returns JSON.
+
+**Call relations**: The portal polls or reads this route after boot; agents_index includes the same homepage state initially.
+
+*Call graph*: calls 5 internal fn (_assets_published, _bound_page, _homepage_state, _panel_gate, apps); 1 external calls (JSONResponse).
+
+
+##### `_homepage_state`  (lines 4789–4836)
+
+```
+def _homepage_state(ctx: SurfaceContext, summary: AgentSummary, bound: ObjectRow | None, admin: bool, member_id: UUID) -> dict[str, JsonValue]
+```
+
+**Purpose**: Computes the public homepage state for one agent. It returns set with a URL and generation for bound or shipped pages, or none when no page is available to this viewer.
+
+**Data flow**: It receives context, agent summary, bound page, admin flag, and member ID; applies private-agent visibility rules, builds hosted-site or shipped-bundle URLs, and returns a small state dictionary.
+
+**Call relations**: agents_index and homepage call it after obtaining the bound page and shipped apps bundle.
+
+*Call graph*: calls 1 internal fn (apps); called by 2 (agents_index, homepage); 3 external calls (shipped_app_slug, homepage_embed_url, shipped_homepage_url).
+
+
+##### `preview`  (lines 4854–4885)
+
+```
+async def preview(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Renders an uploaded document file into a PNG preview for the composer before it is sent. It stores nothing and admits no turn.
+
+**Data flow**: It authenticates, requires multipart form data, bounds and parses the form, chooses the first file, maps its suffix to a preview kind, calls ctx.render_preview, and returns PNG or an error.
+
+**Call relations**: The attachment composer calls this for local preview display before chat submission.
+
+*Call graph*: calls 4 internal fn (render_preview, _audience_for, _form, _framed_length); 2 external calls (PurePosixPath, Response).
+
+
+##### `upload_start`  (lines 4888–4924)
+
+```
+async def upload_start(ctx: SurfaceContext, request: Request) -> Response
+```
+
+**Purpose**: Creates a presigned upload URL so large attachments can go straight from the browser to blob storage. The later chat send only references the uploaded key.
+
+**Data flow**: It authenticates, reads a bounded JSON body with size, checksum, and name, validates size, creates a safe upload key, asks the blob store for a presigned PUT URL, and returns key plus URL.
+
+**Call relations**: The browser calls this before uploading attachment bytes; _parse_inbound later accepts the returned key in a chat send.
+
+*Call graph*: calls 2 internal fn (_audience_for, _bounded_body); 5 external calls (loads, JSONResponse, Response, inbox_name, uuid4).

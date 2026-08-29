@@ -1,1573 +1,2015 @@
-# Persistence, Schema Contracts, and Pagination  `stage-21` (cross-cutting infrastructure)
+# Cross-cutting billing, metering, feature flags, and operator observability  `stage-21` (cross-cutting infrastructure)
 
-This stage is the system’s shared storage foundation. It works behind the scenes during startup, normal work, background jobs, and migrations, so every part of the product agrees on how data is shaped, saved, and read. The central blueprint is schema/tables.py, which defines the database tables and rules, while db.py is the guarded doorway that opens database connections, runs migrations, wraps changes in transactions, and keeps each workspace’s data separate. schema/records.py defines common record formats for turns, agents, requests, billing, icons, and terminal results; schema/__init__.py simply makes those schema modules importable.
+This stage is shared behind-the-scenes support for money, feature access, and operator visibility. It is used throughout the system whenever a model is called, a tool runs, usage is reported, or staff need to inspect what is happening.
 
-Conversation history has two layers. turns/transcript.py defines the agreed file format for saved conversations and compaction records, and loop/transcript.py reads and writes those transcripts safely in shared blob storage without letting older state overwrite newer state. blob.py stores raw files either locally or in cloud storage while keeping workspace files isolated. listings.py provides cursor-based paging, like bookmarks in a long list, so portals can move older or newer without missing items. durability.py helps saved workflow objects survive software changes across versions.
+The billing pieces work like a cash register and receipt book. accounting.py records workspace usage, checks spend limits, charges prepaid balances, exports usage to billing partners, and builds spend reports. balance.py tracks prepaid credit in micro-USD, very small fractions of a dollar, and decides what happens when credit is low or gone. pricing.py stores model price tables and turns token counts into charges, keeping a version stamp so old bills can be traced to the exact prices used.
+
+The external billing bridge is metronome.py, which reports usage to Metronome and connects prepaid payment flows to Stripe, including refill and billing portal support. flags.py is the system’s feature switchboard, letting code ask whether a feature is enabled for a workspace. o11y.py provides traces, metrics, logs, and safety filters. The debugger surface gives trusted operators read-only fleet inspection tools without changing customer data.
 
 ## Files in this stage
 
-### Conversation storage and blobs
-Defines the saved conversation formats and the shared binary storage layer used to persist transcript-related data safely across local and cloud backends.
+### Billing ledger and credit
+Core billing code records usage, manages prepaid balance, applies model pricing, and produces spend information.
 
-### `core/src/ufo/turns/transcript.py`
+### `core/src/ufo/billing/accounting.py`
 
-`data_model` · `cross-cutting transcript persistence and readback`
+`domain_logic` · `request handling, billing writes, reporting, and background usage export`
 
-This file is the common rulebook for durable conversation history. A conversation is saved as a compressed JSON blob: JSON is a plain text data format, and LZ4 is a fast compression format that makes the stored bytes smaller. Without this shared rulebook, one part of the system could write a transcript in one shape while another part tried to read it in a different shape, causing old conversations, debug views, or evaluation runs to break.
+This file is the place where usage becomes money. When a turn uses model tokens, makes sandbox network requests, or generates images or videos, this code writes rows into a ledger, which is like an accounting notebook: each row says what was used, by whom, when, and what it cost. Some usage only counts activity, such as egress requests, while tokens and media can also debit the workspace balance.
 
-The main record is `Conversation`, which stores the current message window, its sequence number, and optional extra context such as the system prompt and injected text that the model saw. The file also defines the records used when a long conversation is compacted. Compaction is like replacing a pile of notes with a careful summary plus the most recent pages, so the model can keep working without carrying the full past conversation.
+A key idea is that model usage may be reported more than once during retries or recovery. The file avoids double-charging by treating a turn attempt as cumulative: if a later report is just a bigger version of the same attempt, only the increase is charged. If the reports contradict each other, it raises an error rather than quietly corrupting billing.
 
-The compaction models describe what was summarized, what messages existed before and after, what files or facts mattered, and whether important facts survived the summary. The helper functions build predictable blob-store paths, compress records before saving, decompress and validate records after loading, and return `None` when a requested compaction record does not exist. If bytes are corrupt or no longer match the expected shape, the file raises `TranscriptDecodeError` so callers get one clear kind of failure.
+The file also decides whether work may start or continue. Balance checks stop work when prepaid credit is too low, with special rules for work paid by the workspace's own provider key. Spend caps check rolling time windows for workspace, member, or agent limits.
+
+Finally, it turns ledger rows into reports and export batches. Reports answer questions like “who spent what?” and “which model cost the most?” Exports freeze usage deltas so an outside billing system can receive retries safely without being billed twice.
 
 #### Function details
 
-##### `transcript_key`  (lines 37–38)
+##### `applicable_caps_absent`  (lines 60–66)
 
 ```
-def transcript_key(conversation_id: UUID) -> str
+def applicable_caps_absent(workspace_id: UUID, member_id: UUID | None, agent_id: UUID) -> bool
 ```
 
-**Purpose**: Builds the exact storage path for a conversation transcript. Someone uses it when they need every part of the system to look for the same saved conversation blob in the blob store.
+**Purpose**: Quickly answers whether this exact workspace, member, and agent combination was recently found to have no spend caps. It is a shortcut that avoids unnecessary database reads in deployments that do not use caps.
 
-**Data flow**: It takes a conversation ID, which is a unique identifier, and inserts it into a fixed path pattern. The result is a string such as a folder-and-file name where the compressed transcript belongs.
+**Data flow**: It receives a workspace id, optional member id, and agent id. It looks in a small in-memory cache for that exact trio and compares the stored expiry time with the current clock. It returns true only if the cached “no caps here” note is still fresh; it changes nothing.
 
-**Call relations**: This is the shared naming rule for transcript blobs. Writers and readers can independently call it and still meet at the same storage location.
+**Call relations**: This is a fast path for cap enforcement code outside this file. It pairs with _note_absent_caps, which records the cache entry after SpendEvaluator.decide has actually checked the database and found no relevant caps.
 
-
-##### `encode`  (lines 41–43)
-
-```
-def encode(conversation: Conversation) -> bytes
-```
-
-**Purpose**: Turns a validated `Conversation` object into compressed bytes that can be saved. It is used before storing a transcript so the durable copy is compact and consistently formatted.
-
-**Data flow**: It receives a `Conversation`, converts it into ordinary JSON-ready data, writes that as compact JSON text, changes the text into bytes, and compresses those bytes with LZ4. The output is the compressed byte string that can be put into storage.
-
-**Call relations**: This is the write-side codec for transcripts. It relies on the `Conversation` model’s dump method to get a clean data shape, then uses JSON encoding before compression.
-
-*Call graph*: 2 external calls (model_dump, dumps).
+*Call graph*: 1 external calls (monotonic).
 
 
-##### `decode`  (lines 46–50)
+##### `_note_absent_caps`  (lines 69–78)
 
 ```
-def decode(body: bytes) -> Conversation
+def _note_absent_caps(key: tuple[UUID, UUID | None, UUID]) -> None
 ```
 
-**Purpose**: Turns compressed stored transcript bytes back into a validated `Conversation`. It protects callers from bad or outdated stored data by wrapping decode failures in a clear transcript-specific error.
+**Purpose**: Remembers for a few seconds that no spend cap applies to one workspace/member/agent trio. This makes repeated checks cheap without making cap changes invisible for long.
 
-**Data flow**: It receives compressed bytes from storage, decompresses them, and asks the `Conversation` schema to validate the JSON inside. If everything matches, it returns a `Conversation`; if decompression or validation fails, it raises `TranscriptDecodeError`.
+**Data flow**: It receives the cache key. It reads the current time, clears expired entries if the cache is already large, and stores a new expiry time for that key. It returns nothing, but updates the in-memory cache.
 
-**Call relations**: This is the read-side partner to `encode`. Any reader of transcript blobs can use it to get a safe, typed conversation instead of manually unpacking bytes.
+**Call relations**: SpendEvaluator.decide calls this only after a real database check finds no caps. Later, applicable_caps_absent can use that note to let callers skip a database round trip briefly.
+
+*Call graph*: called by 1 (decide); 1 external calls (monotonic).
+
+
+##### `_total_tokens`  (lines 81–89)
+
+```
+def _total_tokens(usage: Usage) -> int
+```
+
+**Purpose**: Adds all token categories in a Usage object into one total token count. Billing writers use this to decide whether there is anything to record and what total amount belongs in the ledger.
+
+**Data flow**: It receives a Usage record with input, output, cache-read, and cache-write token counts. It adds those fields together. It returns the integer total and changes nothing.
+
+**Call relations**: record_turn_usage, record_workspace_usage, and record_sandbox_tokens call this before pricing or writing token ledger rows.
+
+*Call graph*: called by 3 (record_sandbox_tokens, record_turn_usage, record_workspace_usage).
+
+
+##### `_prompt_tokens`  (lines 92–101)
+
+```
+def _prompt_tokens(usage: Usage) -> int
+```
+
+**Purpose**: Counts the tokens that made up the prompt the provider read, including cached prompt parts. This is used later to show what share of the prompt came from cache.
+
+**Data flow**: It receives a Usage record. It adds input tokens and all cache read/write token classes, but not output tokens. It returns that prompt-side token count and changes nothing.
+
+**Call relations**: The token billing writers call this when storing ledger rows. read_turn_cost later uses the stored prompt and cache-read counts to calculate a cache percentage.
+
+*Call graph*: called by 3 (record_sandbox_tokens, record_turn_usage, record_workspace_usage).
+
+
+##### `workspace_owns_the_key`  (lines 104–118)
+
+```
+async def workspace_owns_the_key(connection: AsyncConnection, workspace_id: UUID, key_slot: str | None) -> bool
+```
+
+**Purpose**: Checks whether a provider key slot belongs to the workspace. This matters because work paid directly with the workspace's own key should not also be charged against the platform balance.
+
+**Data flow**: It receives a database connection, workspace id, and optional key slot name. If no slot is supplied, it returns false. Otherwise it queries the credential table for that workspace and slot, then returns true if such a credential exists.
+
+**Call relations**: BalanceGate._workspace_serves_itself calls this after it has figured out which key slot a model would use. The result feeds admission decisions for low-balance work.
+
+*Call graph*: called by 1 (_workspace_serves_itself); 2 external calls (execute, select).
+
+
+##### `record_turn_usage`  (lines 121–256)
+
+```
+async def record_turn_usage(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, model: str, usage: Usage, attempt: str='', pricing: Pricing=CORE_PRICING, byok: bool=False) -> None
+```
+
+**Purpose**: Records and bills model token usage for one turn attempt. It is built to survive retries by charging only new cumulative usage, not the same usage twice.
+
+**Data flow**: It receives a connection, workspace, turn, model name, usage counters, attempt id, pricing table, and whether the workspace brought its own key. It totals and prices the usage, locks any existing ledger row for the same attempt, compares old and new counters, debits only the price increase unless byok is true, then inserts or updates the ledger row. If the incoming report conflicts with earlier billing identity or counters, it raises TurnUsageConflict.
+
+**Call relations**: Turn-running code calls this as usage is completed or replayed. It uses _total_tokens and _prompt_tokens for amounts, Pricing.micro_usd for cost, debit to move balance, and ledger_id_for indirectly through the generated ledger id.
+
+*Call graph*: calls 3 internal fn (_prompt_tokens, _total_tokens, micro_usd); 7 external calls (__init__, execute, insert, select, update, debit, ledger_id_for).
+
+
+##### `read_turn_cost`  (lines 270–300)
+
+```
+async def read_turn_cost(connection: AsyncConnection, turn_id: UUID, dimension: str) -> TurnCost | None
+```
+
+**Purpose**: Reads the total cost of one turn for a chosen ledger dimension, such as host-side tokens or sandbox tokens. It combines multiple attempts so the user sees the full cost of the turn.
+
+**Data flow**: It receives a connection, turn id, and dimension name. It sums ledger rows for that turn and dimension, reads the model and prompt/cache counts, and returns a TurnCost with tokens, micro-dollars, model, and cache percentage. If nothing was billed, it returns null.
+
+**Call relations**: Terminal turn display or reporting code can call this after usage has been recorded. It depends on billing writers having stored prompt and cache token splits in the ledger.
+
+*Call graph*: 3 external calls (__init__, execute, select).
+
+
+##### `record_workspace_usage`  (lines 303–352)
+
+```
+async def record_workspace_usage(connection: AsyncConnection, workspace_id: UUID, model: str, usage: Usage, pricing: Pricing=CORE_PRICING, byok: bool=False) -> None
+```
+
+**Purpose**: Bills model token usage that belongs to a workspace but not to a specific turn, such as a background job. It makes that spend count for workspace totals and workspace-level caps.
+
+**Data flow**: It receives workspace, model, usage, pricing, and byok information. It totals and prices the tokens, debits the workspace unless byok is true, and inserts a fresh ledger row with no turn id. If the usage is zero, it does nothing.
+
+**Call relations**: Background job code calls this instead of record_turn_usage. It uses the same token helpers and pricing logic as turn billing, but creates a new row each time because there is no turn attempt replay key.
+
+*Call graph*: calls 3 internal fn (_prompt_tokens, _total_tokens, micro_usd); 4 external calls (execute, insert, debit, uuid4).
+
+
+##### `record_egress_request`  (lines 355–384)
+
+```
+async def record_egress_request(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, amount: int=1) -> None
+```
+
+**Purpose**: Counts sandbox network egress requests made during a turn. These requests are measured for reporting but priced at zero, so they do not debit balance or spend caps.
+
+**Data flow**: It receives a connection, workspace id, turn id, and request count. It builds a stable ledger id for that turn and egress dimension, then inserts the row or atomically adds to the existing amount. It returns nothing.
+
+**Call relations**: The sandbox egress proxy calls this when it flushes request counts for a turn. It uses ledger_id_for so all egress for the same turn lands in one ledger row.
+
+*Call graph*: 2 external calls (execute, ledger_id_for).
+
+
+##### `record_probe_egress_request`  (lines 387–413)
+
+```
+async def record_probe_egress_request(connection: AsyncConnection, workspace_id: UUID, amount: int=1) -> None
+```
+
+**Purpose**: Counts sandbox egress requests made by an off-turn probe. A probe is not tied to a user turn, so the row belongs only to the workspace.
+
+**Data flow**: It receives a connection, workspace id, and request count. It inserts a fresh zero-priced egress ledger row with no turn id. It returns nothing and does not debit balance.
+
+**Call relations**: Probe or proxy code calls this for network activity outside a turn. Unlike record_egress_request, it uses a fresh id so separate probe batches do not merge accidentally.
+
+*Call graph*: 3 external calls (execute, insert, uuid4).
+
+
+##### `record_sandbox_tokens`  (lines 416–492)
+
+```
+async def record_sandbox_tokens(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, model: str, usage: Usage, pricing: Pricing=CORE_PRICING) -> None
+```
+
+**Purpose**: Records and bills model token usage from calls made inside the sandbox through the egress proxy. This is separate from the normal host-side turn loop so both sources can be counted without overlap.
+
+**Data flow**: It receives workspace, turn, model, usage, and pricing. It totals and prices the tokens, debits the workspace, and inserts or atomically adds to a per-turn sandbox token ledger row. It stores the same token class details as normal turn billing.
+
+**Call relations**: The egress proxy or sandbox model-call path calls this. It uses _total_tokens, _prompt_tokens, Pricing.micro_usd, debit, and ledger_id_for, and read_turn_cost can later read this dimension.
+
+*Call graph*: calls 3 internal fn (_prompt_tokens, _total_tokens, micro_usd); 3 external calls (execute, debit, ledger_id_for).
+
+
+##### `record_image_usage`  (lines 495–514)
+
+```
+async def record_image_usage(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, model: str, images: int, micro_usd: int) -> None
+```
+
+**Purpose**: Records and bills generated image usage for a turn. The caller supplies the price because image providers may charge by units that are not standard text tokens.
+
+**Data flow**: It receives workspace, turn, model, image count, and cost in micro-dollars. It passes those values to the shared media writer with the images dimension. It returns nothing itself.
+
+**Call relations**: Image generation provider code calls this after it knows the provider charge. It delegates the actual ledger write and balance debit to _record_media_usage.
+
+*Call graph*: calls 1 internal fn (_record_media_usage).
+
+
+##### `record_video_usage`  (lines 517–531)
+
+```
+async def record_video_usage(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, model: str, videos: int, micro_usd: int) -> None
+```
+
+**Purpose**: Records and bills generated video usage for a turn. Like image billing, the caller provides the price because video charging can use provider-specific units.
+
+**Data flow**: It receives workspace, turn, model, video count, and cost in micro-dollars. It passes those values to the shared media writer with the videos dimension. It returns nothing itself.
+
+**Call relations**: Video generation provider code calls this after a chargeable generation. It shares the same underlying write path as record_image_usage through _record_media_usage.
+
+*Call graph*: calls 1 internal fn (_record_media_usage).
+
+
+##### `_record_media_usage`  (lines 534–575)
+
+```
+async def _record_media_usage(connection: AsyncConnection, workspace_id: UUID, turn_id: UUID, dimension: str, model: str, amount: int, micro_usd: int) -> None
+```
+
+**Purpose**: Writes the common ledger row for image and video usage and debits the workspace for the new cost. It keeps repeated generations on the same turn accumulated safely.
+
+**Data flow**: It receives the dimension, model, amount, and price. It creates a per-turn ledger id, debits the workspace by the given price, then inserts the ledger row or atomically adds amount and price to the existing row. It returns nothing.
+
+**Call relations**: record_image_usage and record_video_usage both call this. It uses debit for the balance movement and ledger_id_for to keep each media dimension separate from token and egress rows.
+
+*Call graph*: called by 2 (record_image_usage, record_video_usage); 3 external calls (execute, debit, ledger_id_for).
+
+
+##### `mint_usage_exports`  (lines 600–715)
+
+```
+async def mint_usage_exports(connection: AsyncConnection, workspace_id: UUID, consumer: str, floor: datetime, key_slot_for: Callable[[str], str | None]) -> None
+```
+
+**Purpose**: Creates frozen export-intent rows for usage that has not yet been sent to an outside billing consumer. Freezing the delta makes retries safe: the same usage slice can be resent without recalculating a different answer.
+
+**Data flow**: It receives a workspace, consumer name, backfill floor time, and a function that maps model names to key slots. It finds ledger rows that have grown beyond what this consumer has already exported, applies settlement rules for turn-based accumulated rows, decides the byok flag, and inserts one export intent per new delta. Existing identical intents are ignored.
+
+**Call relations**: A background export job calls this before reading pending exports. It reads ledger, turn, credential, and ledger_export tables, then read_pending_usage_exports can deliver the frozen rows it creates.
+
+*Call graph*: 5 external calls (now, timedelta, execute, or_, select).
+
+
+##### `read_pending_usage_exports`  (lines 718–763)
+
+```
+async def read_pending_usage_exports(connection: AsyncConnection, workspace_id: UUID, consumer: str, limit: int) -> tuple[UsageExport, ...]
+```
+
+**Purpose**: Reads usage export intents that have been minted but not acknowledged by the outside consumer. It returns the frozen deltas in a stable order for delivery.
+
+**Data flow**: It receives workspace id, consumer name, and a maximum count. It joins pending export rows to their ledger rows, calculates amount and price deltas, and returns UsageExport objects. It does not change the database.
+
+**Call relations**: The export delivery loop calls this after mint_usage_exports. Once the external consumer accepts a batch, ack_usage_exports marks these same entries as done.
+
+*Call graph*: 3 external calls (__init__, execute, select).
+
+
+##### `ack_usage_exports`  (lines 766–790)
+
+```
+async def ack_usage_exports(connection: AsyncConnection, workspace_id: UUID, consumer: str, exports: tuple[UsageExport, ...]) -> None
+```
+
+**Purpose**: Marks exported usage intents as acknowledged after the external billing consumer accepted them. This removes them from future pending reads.
+
+**Data flow**: It receives workspace, consumer, and the UsageExport objects that were successfully delivered. It builds a condition matching each ledger id and starting amount, then updates those rows with an acknowledgement time. It returns nothing.
+
+**Call relations**: The export delivery loop calls this only after read_pending_usage_exports results have been sent successfully. If a crash happens before this call, the same frozen exports stay pending and can be retried.
+
+*Call graph*: 3 external calls (execute, or_, update).
+
+
+##### `metered_workspaces`  (lines 793–796)
+
+```
+def metered_workspaces() -> WorkspaceCandidates
+```
+
+**Purpose**: Finds workspaces that have ever written ledger usage, so a background exporter knows which workspaces are worth checking. It is intentionally broad and cheap to refine later.
+
+**Data flow**: It builds a candidate source from distinct workspace ids in the ledger table and wraps it in the system's WorkspaceCandidates helper. It returns that candidate object and does not query immediately here.
+
+**Call relations**: Usage export scheduling code can call this to decide which workspace owners to visit. The actual candidate machinery is provided by owner_candidates.
+
+*Call graph*: 1 external calls (owner_candidates).
+
+
+##### `SpendEvaluator.decide`  (lines 832–847)
+
+```
+async def decide(self, connection: AsyncConnection, pending_micro_usd: int) -> SpendDecision
+```
+
+**Purpose**: Decides whether a turn is allowed, parked, or rejected under spend caps. A spend cap is a rolling limit, such as “this agent may spend $10 per day.”
+
+**Data flow**: It receives a connection and pending cost. It loads applicable caps, caches the no-cap case, sums recent spend for each cap, adds the pending cost, and compares against each limit. It returns a SpendDecision with an outcome and user-facing message.
+
+**Call relations**: Turn admission or mid-turn enforcement code calls this when caps may apply. It orchestrates _applicable_caps, _used_micro_usd, _message, and _note_absent_caps.
+
+*Call graph*: calls 4 internal fn (_applicable_caps, _message, _used_micro_usd, _note_absent_caps); 1 external calls (__init__).
+
+
+##### `SpendEvaluator._applicable_caps`  (lines 849–877)
+
+```
+async def _applicable_caps(self, connection: AsyncConnection) -> tuple[SpendCap, ...]
+```
+
+**Purpose**: Loads the spend caps that apply to this specific workspace/member/agent combination. It checks workspace-wide caps plus caps for the current member or agent.
+
+**Data flow**: It reads the spend_cap table for matching workspace, scope, and subject id. It turns each database row into a SpendCap object. It returns a tuple of caps without deciding whether they are breached.
+
+**Call relations**: SpendEvaluator.decide calls this first. Its result determines whether the evaluator can allow immediately or must check recent spend.
+
+*Call graph*: called by 1 (decide); 4 external calls (__init__, execute, or_, select).
+
+
+##### `SpendEvaluator._used_micro_usd`  (lines 879–905)
+
+```
+async def _used_micro_usd(self, connection: AsyncConnection, cap: SpendCap) -> int
+```
+
+**Purpose**: Calculates how much money has already been spent inside one cap's rolling time window. The query changes depending on whether the cap is for a workspace, member, or agent.
+
+**Data flow**: It receives a SpendCap, computes the cutoff time from the cap's window length, then sums priced ledger amounts since that cutoff. Workspace caps read by workspace id; member and agent caps join through turns and conversations. It returns the summed micro-dollar amount.
+
+**Call relations**: SpendEvaluator.decide calls this once for each applicable cap. The returned spend is combined with the pending cost to determine breaches.
+
+*Call graph*: called by 1 (decide); 4 external calls (now, timedelta, execute, select).
+
+
+##### `SpendEvaluator._message`  (lines 907–918)
+
+```
+def _message(self, outcome: SpendOutcome, breaches: list[SpendCap]) -> str
+```
+
+**Purpose**: Builds the plain message shown when a spend cap parks or rejects a turn. It names the tightest breached cap and formats its limit as dollars.
+
+**Data flow**: It receives the chosen outcome and the breached caps. It picks the lowest limit among them, converts micro-dollars to dollars, and returns a sentence explaining the park or rejection. It changes nothing.
+
+**Call relations**: SpendEvaluator.decide calls this only after it has found cap breaches. The returned text becomes the message inside SpendDecision.
+
+*Call graph*: called by 1 (decide).
+
+
+##### `_token_sum`  (lines 1035–1043)
+
+```
+def _token_sum() -> sa.ColumnElement[int]
+```
+
+**Purpose**: Builds a database expression that sums only token-like dimensions. It keeps token totals from being polluted by images, videos, or egress counts.
+
+**Data flow**: It creates a SQL expression: if a ledger row's dimension is normal tokens or sandbox tokens, include its amount; otherwise include zero; then sum and default null to zero. It returns the expression, not a computed number.
+
+**Call relations**: SpendRollup.read, SpendRollup._by_origin, and _usage_details use this expression inside larger reporting queries.
+
+*Call graph*: called by 3 (_by_origin, read, _usage_details); 1 external calls (case).
+
+
+##### `_token_cost_sum`  (lines 1046–1058)
+
+```
+def _token_cost_sum() -> sa.ColumnElement[int]
+```
+
+**Purpose**: Builds a database expression that sums the cost of only token-like dimensions. This lets reports separate token cost from total cost that may include media.
+
+**Data flow**: It creates a SQL expression that includes priced_micro_usd only for normal tokens and sandbox tokens, otherwise zero, then sums it. It returns the expression for use in a query.
+
+**Call relations**: SpendRollup.read, SpendRollup._by_origin, and _usage_details use this alongside _token_sum in report queries.
+
+*Call graph*: called by 3 (_by_origin, read, _usage_details); 1 external calls (case).
+
+
+##### `_usage_details`  (lines 1061–1185)
+
+```
+async def _usage_details(connection: AsyncConnection, source: sa.FromClause, scope: sa.ColumnElement[bool], cutoff: datetime | None, now: datetime) -> UsageDetails
+```
+
+**Purpose**: Builds the common usage section shared by workspace, member, and agent spend reports. It gives selected-window totals, all-time totals, daily history, model breakdowns, and previous-period token comparison.
+
+**Data flow**: It receives a connection, a table/join source, a scope condition, an optional cutoff, and the current time. It runs several aggregate queries for selected and all-time totals, daily rows, execution labels, model labels, and previous-period tokens. It returns one UsageDetails object with all those pieces.
+
+**Call relations**: SpendRollup.read, SpendRollup.read_agent, and SpendRollup.read_member call this after setting up the right source and scope. It relies on _token_sum and _token_cost_sum to keep token reporting consistent.
+
+*Call graph*: calls 2 internal fn (_token_cost_sum, _token_sum); called by 3 (read, read_agent, read_member); 9 external calls (__init__, __init__, __init__, __init__, fromisoformat, date, timedelta, execute, select).
+
+
+##### `SpendRollup.read`  (lines 1196–1300)
+
+```
+async def read(self, connection: AsyncConnection, window_seconds: int | None) -> SpendReport
+```
+
+**Purpose**: Builds a full workspace spend report for a selected time window or all time. It answers high-level billing questions like total spend, spend by dimension, member, agent, origin, and price table.
+
+**Data flow**: It receives a database connection and optional window length. It computes a cutoff, queries ledger totals and grouped breakdowns, asks _by_origin for origin grouping, asks _usage_details for shared usage charts, and returns a SpendReport object.
+
+**Call relations**: Workspace billing or admin reporting endpoints call this. It coordinates helper expressions, _by_origin, and _usage_details into one report object.
+
+*Call graph*: calls 4 internal fn (_by_origin, _token_cost_sum, _token_sum, _usage_details); 8 external calls (__init__, __init__, __init__, __init__, now, timedelta, execute, select).
+
+
+##### `SpendRollup._by_origin`  (lines 1302–1367)
+
+```
+async def _by_origin(self, connection: AsyncConnection, window: sa.ColumnElement[bool]) -> tuple[OriginTotal, ...]
+```
+
+**Purpose**: Groups token spend by the place where the user-facing conversation began, even when subagents later spent tokens in private child turns. This makes the report match how people think about where work started.
+
+**Data flow**: It receives a connection and window condition. It builds a recursive database query that walks parent_turn_id links from spending turns back to root turns, joins to the root conversation, groups token spend by surface label, and returns OriginTotal rows.
+
+**Call relations**: SpendRollup.read calls this for the workspace report. It uses _token_sum and _token_cost_sum so origin totals count only token dimensions.
+
+*Call graph*: calls 2 internal fn (_token_cost_sum, _token_sum); called by 1 (read); 4 external calls (__init__, desc, execute, select).
+
+
+##### `SpendRollup.read_agent`  (lines 1369–1425)
+
+```
+async def read_agent(self, connection: AsyncConnection, agent_id: UUID, window_seconds: int | None) -> AgentSpendReport
+```
+
+**Purpose**: Builds a spend report for one agent, including that agent's own caps. Workspace-only jobs are excluded because they do not belong to an agent turn.
+
+**Data flow**: It receives a connection, agent id, and optional window length. It joins ledger rows to turns for that agent, groups spend by dimension, reads agent-scoped caps, builds shared usage details, and returns an AgentSpendReport.
+
+**Call relations**: Agent billing or admin views call this. It delegates detailed token history to _usage_details after preparing the agent-specific scope.
+
+*Call graph*: calls 1 internal fn (_usage_details); 7 external calls (__init__, __init__, __init__, now, timedelta, execute, select).
+
+
+##### `SpendRollup.read_member`  (lines 1427–1485)
+
+```
+async def read_member(self, connection: AsyncConnection, member_id: UUID, window_seconds: int | None) -> MemberSpendReport
+```
+
+**Purpose**: Builds a spend report for one workspace member, including that member's caps. It follows ledger rows through turns and conversations to find which member started the work.
+
+**Data flow**: It receives a connection, member id, and optional window length. It joins ledger, turn, and conversation tables, filters to the member, groups by dimension, reads member-scoped caps, builds shared usage details, and returns a MemberSpendReport.
+
+**Call relations**: Member billing or admin views call this. It mirrors SpendRollup.read_agent but uses conversation membership instead of turn agent id.
+
+*Call graph*: calls 1 internal fn (_usage_details); 7 external calls (__init__, __init__, __init__, now, timedelta, execute, select).
+
+
+##### `BalanceGate.admits`  (lines 1517–1555)
+
+```
+async def admits(self, connection: AsyncConnection, agent_id: UUID | None=None, key_slot_for: Callable[[str], str | None] | None=None, turn_id: UUID | None=None, model: str | None=None) -> SpendDecisi
+```
+
+**Purpose**: Decides whether a workspace has enough balance to start, resume, or fold in a turn. Starting requires a reserve, but there is an exception for turns paid by the workspace's own provider key while the balance is still above zero.
+
+**Data flow**: It receives a connection plus optional agent, key-slot resolver, turn id, and model. It reads balance headroom. If there is no balance row, it allows. If balance is above the reserve adjusted by grace, it allows. Otherwise it checks whether this turn already debited anything and whether the workspace will serve the model with its own key. It returns allow or reject with a billing message.
+
+**Call relations**: Turn admission and resume paths call this before work begins. It uses read_headroom, _workspace_serves_itself, _turn_has_debited, and balance_refusal_message.
+
+*Call graph*: calls 2 internal fn (_turn_has_debited, _workspace_serves_itself); 4 external calls (__init__, _forget_absent_balance, balance_refusal_message, read_headroom).
+
+
+##### `BalanceGate._workspace_serves_itself`  (lines 1557–1579)
+
+```
+async def _workspace_serves_itself(self, connection: AsyncConnection, agent_id: UUID | None, key_slot_for: Callable[[str], str | None] | None, model: str | None=None) -> bool
+```
+
+**Purpose**: Figures out whether the workspace's own provider key will serve the model call. This supports the rule that own-key token calls do not need the usual starting reserve.
+
+**Data flow**: It receives optional agent id, key-slot resolver, and model. If no model was supplied, it reads the agent's model from the database. It asks the resolver which credential slot that model uses, then calls workspace_owns_the_key. It returns true only when the workspace owns that slot.
+
+**Call relations**: BalanceGate.admits calls this when balance is below the normal entry reserve but still positive. It hands the final key-ownership question to workspace_owns_the_key.
+
+*Call graph*: calls 1 internal fn (workspace_owns_the_key); called by 1 (admits); 2 external calls (execute, select).
+
+
+##### `BalanceGate.sustains`  (lines 1581–1602)
+
+```
+async def sustains(self, connection: AsyncConnection, pending_micro_usd: int, turn_id: UUID | None=None) -> SpendDecision
+```
+
+**Purpose**: Decides whether a running turn may continue into another round. Unlike admission, continuation stops at zero balance, not at the starting reserve.
+
+**Data flow**: It receives a connection, pending unbilled cost, and optional turn id. It reads balance headroom. If no balance row exists, it allows. If balance minus pending cost stays above the grace-adjusted floor, it allows. If the pending cost is positive or the turn has already debited balance, it rejects; otherwise it allows because non-debiting work cannot improve by being parked.
+
+**Call relations**: The running turn loop calls this before taking more billable work. It uses read_headroom, _turn_has_debited, and balance_refusal_message.
+
+*Call graph*: calls 1 internal fn (_turn_has_debited); 4 external calls (__init__, _forget_absent_balance, balance_refusal_message, read_headroom).
+
+
+##### `BalanceGate._turn_has_debited`  (lines 1604–1627)
+
+```
+async def _turn_has_debited(self, connection: AsyncConnection, turn_id: UUID | None) -> bool
+```
+
+**Purpose**: Checks whether a turn has already taken any money from the workspace balance. This is different from asking whether the turn has a priced ledger row, because own-key token usage may be priced but not debited.
+
+**Data flow**: It receives a connection and optional turn id. If there is no turn id, it returns false. Otherwise it searches ledger rows for that turn with debited_micro_usd greater than zero and returns true if any exist.
+
+**Call relations**: BalanceGate.admits and BalanceGate.sustains call this to avoid letting already-charging turns cycle forever around low-balance rules.
+
+*Call graph*: called by 2 (admits, sustains); 2 external calls (execute, select).
+
+
+### `core/src/ufo/billing/balance.py`
+
+`domain_logic` · `cross-cutting: used during billing setup, admin reads, payment fulfillment, and before paid model work starts`
+
+This file is the billing “wallet” for a workspace. Instead of recalculating the balance from every purchase each time, it keeps a current balance row in the database, like the number shown on a prepaid card. The detailed purchase rows are still kept as the receipt trail, so the current number can be checked against what was ever granted and what was ever debited.
+
+The file supports two kinds of reads. Fast reads, such as read_headroom, are used before model work starts and only fetch the few numbers needed to decide whether work may begin. Fuller reads, such as read_balance and recent_purchases, are for admin screens and audits, where showing totals and history matters more than speed.
+
+It also records credits and debits. credit adds a purchase only once for a given reference, so a retried payment webhook cannot double-credit the workspace. debit subtracts actual usage, even if that makes the balance negative, because keeping an honest record of spent money is safer than rejecting the ledger entry.
+
+There are also auto-top-up helpers. They store and read the amount to refill and the threshold that triggers it. A workspace that has successfully paid before earns a small grace amount, so normal work is not blocked during the short delay between crossing the threshold and Stripe or another payment system completing the refill.
+
+#### Function details
+
+##### `balance_absent`  (lines 39–45)
+
+```
+def balance_absent(workspace_id: UUID) -> bool
+```
+
+**Purpose**: This is a quick memory check for workspaces that recently had no balance row. It helps self-hosted or unpaid deployments avoid a database read before every round when there is known to be no prepaid balance.
+
+**Data flow**: It takes a workspace ID, looks in a small in-memory map, and compares the saved expiry time with the current monotonic clock, which is a clock used for measuring elapsed time safely. It returns true only if the workspace was recently seen to have no balance row and that note has not expired.
+
+**Call relations**: This is a connectionless fast path. Other code can call it before paying the cost of a database lookup, while _note_absent_balance creates the remembered absence and _forget_absent_balance removes it when credit appears.
+
+*Call graph*: 1 external calls (monotonic).
+
+
+##### `_note_absent_balance`  (lines 48–55)
+
+```
+def _note_absent_balance(workspace_id: UUID) -> None
+```
+
+**Purpose**: This remembers, for a few seconds, that a workspace had no balance row. The point is to avoid repeatedly asking the database the same question for workspaces that are not using prepaid billing.
+
+**Data flow**: It takes a workspace ID, reads the current monotonic time, optionally clears expired entries if the cache is full, and stores a short-lived expiry time for that workspace. It changes only the in-memory absence cache and returns nothing.
+
+**Call relations**: read_balance and read_headroom call this after a database lookup finds no balance row. That makes later checks cheaper until either the note expires or credit calls _forget_absent_balance because the workspace now has a balance.
+
+*Call graph*: called by 2 (read_balance, read_headroom); 1 external calls (monotonic).
+
+
+##### `_forget_absent_balance`  (lines 58–61)
+
+```
+def _forget_absent_balance(workspace_id: UUID) -> None
+```
+
+**Purpose**: This removes the temporary note saying a workspace has no balance. It is used when a balance row is seen or created, so the fast path does not accidentally hide a newly credited workspace.
+
+**Data flow**: It takes a workspace ID and removes that ID from the in-memory absence cache if it is present. It returns nothing and does not touch the database.
+
+**Call relations**: credit calls this after successfully adding money to a workspace balance. It is the counterpart to _note_absent_balance, keeping the shortcut safe after a workspace moves from unpaid or self-hosted behavior into having credit.
+
+*Call graph*: called by 1 (credit).
+
+
+##### `billing_screen_url`  (lines 78–87)
+
+```
+def billing_screen_url(public_base_url: str | None, home_surface: str | None) -> str | None
+```
+
+**Purpose**: This builds the web address for the billing screen, if this deployment has one. It lets later billing checks show a useful link instead of forcing each caller to know how browser surfaces are mounted.
+
+**Data flow**: It receives the public base URL of the deployment and the name of the home browser surface. If either is missing, it returns None; otherwise it trims any trailing slash from the base URL and joins it with the surface path and billing fragment.
+
+**Call relations**: This is usually prepared during setup and passed down to code that may need to refuse paid work. balance_refusal_message can then use the resulting URL to tell a user where an admin can add credit.
+
+
+##### `balance_refusal_message`  (lines 90–99)
+
+```
+def balance_refusal_message(billing_url: str | None) -> str
+```
+
+**Purpose**: This writes the human-facing message shown when a workspace is out of credit. It makes sure the message is still clear even when there is no billing web page to link to.
+
+**Data flow**: It takes an optional billing URL. If there is no URL, it returns a plain sentence saying an admin can set up automatic refills; if there is a URL, it includes that address in the sentence.
+
+**Call relations**: This sits at the edge between billing decisions and user-facing text. Code that blocks work because of insufficient credit can call it after billing_screen_url has decided whether a billing link exists.
+
+
+##### `read_auto_topup`  (lines 111–133)
+
+```
+async def read_auto_topup(connection: AsyncConnection, workspace_id: UUID) -> AutoTopup | None
+```
+
+**Purpose**: This answers the refill job’s practical question: should this workspace be topped up now, and by how much? It only returns settings when auto top-up exists and the current balance is at or below the configured threshold.
+
+**Data flow**: It receives a database connection and workspace ID, reads the workspace’s balance and auto top-up columns, and checks whether a refill amount is configured. If there is no row, no refill setting, or the balance is still above the threshold, it returns None; otherwise it returns an AutoTopup object with the amount and threshold.
+
+**Call relations**: This function is used by code that decides when to ask a payment extension to charge a card. It keeps the “is the workspace short?” decision in core billing, while the payment extension can focus on how to collect the money.
+
+*Call graph*: 3 external calls (__init__, execute, select).
+
+
+##### `set_auto_topup`  (lines 136–156)
+
+```
+async def set_auto_topup(connection: AsyncConnection, workspace_id: UUID, amount_micro_usd: int | None, threshold_micro_usd: int | None) -> bool
+```
+
+**Purpose**: This turns automatic refills on or off for a workspace that already has a balance. It prevents half-configured refill rules by requiring both the refill amount and threshold together, or neither.
+
+**Data flow**: It receives a database connection, workspace ID, and optional amount and threshold. If only one of amount or threshold is provided, it raises a ValueError; otherwise it updates the existing balance row with the new settings and timestamp, then returns true if exactly one row was changed.
+
+**Call relations**: Admin or billing settings code calls this when a workspace changes its refill preferences. Later, read_auto_topup and configured_auto_topup read the values it stored for charging decisions or display.
+
+*Call graph*: 2 external calls (execute, update).
+
+
+##### `mark_topup_verified`  (lines 159–173)
+
+```
+async def mark_topup_verified(connection: AsyncConnection, workspace_id: UUID) -> None
+```
+
+**Purpose**: This records that the workspace has successfully completed a top-up payment at least once. That proof of payment earns the workspace a fixed grace amount when deciding whether work can continue.
+
+**Data flow**: It receives a database connection and workspace ID, then updates the balance row only if the verification timestamp is still empty. It stamps the verification time and update time, and returns nothing.
+
+**Call relations**: Payment fulfillment code calls this after a charge has settled. Later, read_headroom notices the verification timestamp and includes the grace allowance used by admission checks before model work.
+
+*Call graph*: 2 external calls (execute, update).
+
+
+##### `configured_auto_topup`  (lines 185–206)
+
+```
+async def configured_auto_topup(connection: AsyncConnection, workspace_id: UUID) -> AutoTopup | None
+```
+
+**Purpose**: This reads the auto top-up rule exactly as configured, even if the workspace has not reached the refill threshold yet. It is useful for showing an admin what rule is currently set.
+
+**Data flow**: It receives a database connection and workspace ID, reads the refill amount and threshold from the balance row, and returns None if there is no row or no configured amount. Otherwise it returns an AutoTopup object with the stored settings.
+
+**Call relations**: Unlike read_auto_topup, this does not decide whether a refill should happen now. Settings and admin display code can use it to report the saved rule, while the refill job uses read_auto_topup for the action decision.
+
+*Call graph*: 3 external calls (__init__, execute, select).
+
+
+##### `read_headroom`  (lines 209–228)
+
+```
+async def read_headroom(connection: AsyncConnection, workspace_id: UUID) -> Headroom | None
+```
+
+**Purpose**: This reads only the numbers needed to decide whether a workspace has enough room to start paid work. It avoids the heavier lifetime totals that an admin page might need.
+
+**Data flow**: It receives a database connection and workspace ID, reads the current balance, required reserve, and top-up verification timestamp. If no balance row exists, it notes that absence in the short-lived cache and returns None; otherwise it returns a Headroom object with balance, reserve, and either zero grace or the fixed grace amount.
+
+**Call relations**: This is called in the fast path before model rounds or other paid work. If it finds no balance, it calls _note_absent_balance; if it finds a verified top-up, it gives admission checks the extra grace that mark_topup_verified made available.
+
+*Call graph*: calls 1 internal fn (_note_absent_balance); 3 external calls (__init__, execute, select).
+
+
+##### `recent_purchases`  (lines 242–275)
+
+```
+async def recent_purchases(connection: AsyncConnection, workspace_id: UUID, limit: int) -> tuple[Purchase, ...]
+```
+
+**Purpose**: This returns the newest balance credits for a workspace, capped at a requested limit. It supports billing screens that need to show where the current balance came from without loading an unlimited history.
+
+**Data flow**: It receives a database connection, workspace ID, and maximum number of purchases. It queries purchase rows for that workspace, orders newest first with a stable tie-breaker, converts each row into a Purchase object, and returns them as a tuple.
+
+**Call relations**: Admin or operator views use this alongside read_balance. read_balance gives the totals; recent_purchases gives the visible receipt list behind those totals.
+
+*Call graph*: 3 external calls (__init__, execute, select).
+
+
+##### `read_balance`  (lines 278–308)
+
+```
+async def read_balance(connection: AsyncConnection, workspace_id: UUID) -> Balance | None
+```
+
+**Purpose**: This gives the full billing picture for a workspace: what is left now, what reserve is required, and the lifetime credit and charge totals. It is meant for people or admin tools, not the tight pre-work gate.
+
+**Data flow**: It receives a database connection and workspace ID, first reads the current balance row, and if none exists records the absence in the short-lived cache and returns None. If a row exists, it sums all purchase rows for total granted credit, total charged money, and last purchase time, then returns a Balance object.
+
+**Call relations**: This is the fuller companion to read_headroom. Both call _note_absent_balance when there is no row, but read_balance also performs the aggregate purchase query needed for audit and display.
+
+*Call graph*: calls 1 internal fn (_note_absent_balance); 3 external calls (__init__, execute, select).
+
+
+##### `credit`  (lines 311–369)
+
+```
+async def credit(connection: AsyncConnection, workspace_id: UUID, granted_micro_usd: int, charged_micro_usd: int, reference: str) -> bool
+```
+
+**Purpose**: This adds credit to a workspace exactly once for a given reference, such as a payment ID. It protects against duplicate deliveries or retries accidentally adding the same purchase twice.
+
+**Data flow**: It receives a database connection, workspace ID, granted amount, charged amount, and reference string. It inserts a purchase row using a database conflict rule that does nothing if the same workspace and reference already exist; if the insert did not happen, it returns false. If the purchase is new, it creates or updates the workspace balance by adding the granted amount, clears any cached “no balance” note, and returns true.
+
+**Call relations**: Payment fulfillment or operator crediting code calls this inside its own database transaction so the payment source and balance update succeed or fail together. After that transaction commits, the caller can use count_charge when credit returned true.
+
+*Call graph*: calls 1 internal fn (_forget_absent_balance); 2 external calls (execute, uuid4).
+
+
+##### `count_charge`  (lines 372–389)
+
+```
+def count_charge(charged_micro_usd: int) -> None
+```
+
+**Purpose**: This reports positive charged money to the metrics system, so operators can see how much balance has been sold. It deliberately ignores grants, refunds, and corrections because a metric counter can go up but cannot safely be taken back down.
+
+**Data flow**: It receives a charged amount in micro-USD. If the amount is zero or negative, it does nothing; if it is positive, it emits a metric named balance_charged_micro_usd_total with that amount.
+
+**Call relations**: Callers use this after credit has returned true and after their database transaction has committed. That order matters because credit may be retried, while emitted metrics cannot be rolled back like a database transaction.
+
+*Call graph*: 1 external calls (emit_metric).
+
+
+##### `debit`  (lines 392–412)
+
+```
+async def debit(connection: AsyncConnection, workspace_id: UUID, micro_usd: int) -> int
+```
+
+**Purpose**: This subtracts spent money from a workspace balance. It records what was actually taken, and it allows the balance to go negative so the ledger still reflects real usage that already happened.
+
+**Data flow**: It receives a database connection, workspace ID, and amount to subtract. If the amount is zero, it returns zero; otherwise it updates the balance row by subtracting the amount and updating the timestamp. It returns the requested amount if a balance row existed, or zero if there was no row to debit.
+
+**Call relations**: Usage-recording code calls this in the same transaction as the ledger entry for spent work. Its return value tells that caller whether any prepaid balance was actually reduced, which matters for self-hosted or uncredited workspaces.
+
+*Call graph*: 2 external calls (execute, update).
+
+
+##### `set_reserve`  (lines 415–426)
+
+```
+async def set_reserve(connection: AsyncConnection, workspace_id: UUID, reserve_micro_usd: int) -> bool
+```
+
+**Purpose**: This sets the minimum balance cushion a workspace must keep before starting new work. The reserve helps avoid admitting work that can begin but almost immediately run out of credit.
+
+**Data flow**: It receives a database connection, workspace ID, and reserve amount. It updates the existing workspace balance row with the new reserve and timestamp, then returns true if exactly one row was changed and false if the workspace has no balance row.
+
+**Call relations**: Billing settings or operator code calls this to change the admission cushion. Later, read_headroom reads the reserve and gives it to the gate that decides whether paid work may start.
+
+*Call graph*: 2 external calls (execute, update).
+
+
+### `core/src/ufo/models/pricing.py`
+
+`domain_logic` · `billing/accounting`
+
+This file is the billing price sheet for model usage. Different kinds of tokens can cost different amounts: input tokens, output tokens, cached tokens that are read, and cached tokens that are written for different lifetimes. The file stores those rates in tiny units called micro-USD, meaning millionths of a US dollar, per million tokens.
+
+The main idea is simple: take a model name, look up its price row, multiply each kind of token by the matching rate, add the results, and divide by one million to get the final micro-dollar charge. If the model is unknown, the code logs a warning and returns zero instead of crashing. That matters for old historical records: billing can continue even if a model name is no longer in the current price table.
+
+The file also creates a digest, which is like a fingerprint for the whole price table. It sorts the model prices, turns them into a compact JSON string, and hashes that text with SHA-256. This gives each price table a repeatable label. If any rate changes, the fingerprint changes too. The Pricing object bundles the table and its fingerprint together, so accounting code can both calculate charges and record which price version was used.
+
+#### Function details
+
+##### `price_digest`  (lines 26–43)
+
+```
+def price_digest(prices: Mapping[str, ModelPrice]) -> str
+```
+
+**Purpose**: Creates a stable fingerprint for a model price table. This lets billed usage records later prove which exact set of prices was used.
+
+**Data flow**: It receives a mapping from model names to their price rows. It sorts the models, converts each rate into a compact JSON form, hashes that text with SHA-256, and returns a string beginning with "sha256:" followed by the hash.
+
+**Call relations**: When a Pricing object is built, pricing_from calls this function first to label the table. Inside, it relies on JSON formatting and SHA-256 hashing from the standard library to make the label deterministic.
+
+*Call graph*: called by 1 (pricing_from); 2 external calls (sha256, dumps).
+
+
+##### `usage_priced_micro_usd`  (lines 46–60)
+
+```
+def usage_priced_micro_usd(model: str, usage: Usage, prices: Mapping[str, ModelPrice]) -> int
+```
+
+**Purpose**: Calculates the cost of one piece of model usage in micro-USD. It is the core arithmetic that turns token counts into a billable amount.
+
+**Data flow**: It receives a model name, a Usage record containing token counts, and a table of model prices. It looks up the model's rates, multiplies each token category by its matching rate, adds the pieces together, divides by one million tokens, and returns the final integer charge in micro-USD. If the model is not found, it writes a log message and returns 0.
+
+**Call relations**: Pricing.micro_usd calls this function whenever accounting code asks a Pricing object to price usage. If the model name is missing from the table, this function hands the problem to the logging system so the event is visible without stopping billing.
+
+*Call graph*: called by 1 (micro_usd); 1 external calls (log).
+
+
+##### `Pricing.micro_usd`  (lines 70–71)
+
+```
+def micro_usd(self, model: str, usage: Usage) -> int
+```
+
+**Purpose**: Provides the simple public method for pricing a Usage record with this Pricing object's table. Callers do not need to pass the price table separately.
+
+**Data flow**: It receives a model name and a Usage record. It uses the prices stored inside the Pricing object, passes everything to usage_priced_micro_usd, and returns the calculated micro-USD charge.
+
+**Call relations**: Accounting code calls this method when recording sandbox token use, turn-level usage, or workspace usage. This method is the small bridge between those accounting flows and the lower-level pricing arithmetic.
+
+*Call graph*: calls 1 internal fn (usage_priced_micro_usd); called by 3 (record_sandbox_tokens, record_turn_usage, record_workspace_usage).
+
+
+##### `pricing_from`  (lines 74–77)
+
+```
+def pricing_from(prices: Mapping[str, ModelPrice]) -> Pricing
+```
+
+**Purpose**: Builds a complete Pricing object from a plain model-to-price mapping. It freezes together the price table and the digest that identifies that table.
+
+**Data flow**: It receives a mapping of model prices, copies it into a normal dictionary, computes the table's digest with price_digest, and returns a new Pricing object containing both the copied table and the digest.
+
+**Call relations**: This is the construction helper for the file. It calls price_digest to create the version stamp, then creates the Pricing object that later accounting code can use through Pricing.micro_usd.
+
+*Call graph*: calls 1 internal fn (price_digest); 1 external calls (__init__).
+
+
+### Feature flag controls
+Feature flag access centralizes startup wiring and workspace-scoped feature checks.
+
+### `core/src/ufo/flags.py`
+
+`util` · `startup and cross-cutting runtime feature checks`
+
+Feature flags are switches that let a deploy turn features on for some users or workspaces without changing the code. This file is the project’s single doorway to those switches. That matters because the rest of the system should not need to know which flag service is being used, or whether there is one at all.
+
+At startup, `init_flags` can attach a real OpenFeature provider. OpenFeature is a common interface for feature-flag systems, like a universal power adapter for different flag backends. If no provider is given, the built-in no-op provider stays in place, so every flag simply returns the default value written in the code.
+
+Later, code calls `flag_enabled` to ask, “Is this feature on?” The question is asked for the current workspace, so a backend can enable a feature for one workspace but not another. The function is deliberately cautious: it waits at most two seconds, and if the provider errors, is missing, or is too slow, it returns the caller’s default. In other words, a broken flag service should not crash a user flow or leave it hanging. Like a locked door that stays locked when the badge reader fails, features are withheld unless the flag check gives a clear answer.
+
+#### Function details
+
+##### `init_flags`  (lines 28–33)
+
+```
+def init_flags(provider: FeatureProvider | None) -> None
+```
+
+**Purpose**: This function installs the feature-flag provider chosen by the deploy. If no provider is supplied, it intentionally does nothing, leaving OpenFeature’s default no-op behavior in place.
+
+**Data flow**: It receives either a provider object or `None`. If it gets `None`, nothing changes and future flag checks fall back to their code defaults. If it gets a provider, it gives that provider to the process-wide OpenFeature API, so later flag lookups use that backend.
+
+**Call relations**: This is meant to be called during application startup, after configuration or extensions have selected a flag backend. Its only handoff is to `openfeature.api.set_provider`, which stores the provider globally for later calls to `flag_enabled`.
+
+*Call graph*: 1 external calls (set_provider).
+
+
+##### `flag_enabled`  (lines 36–50)
+
+```
+async def flag_enabled(flag: str, *, default: bool) -> bool
+```
+
+**Purpose**: This function answers whether a named feature flag is on for the current workspace. It protects the rest of the system from slow or broken flag lookups by returning the caller’s default when the flag cannot be resolved quickly and safely.
+
+**Data flow**: It takes a flag name and a required default boolean value. It reads the current workspace ID, builds an evaluation context from it, asks the OpenFeature client for the flag’s boolean value, and gives that answer back. If the lookup times out or raises any error, it logs a warning with the flag name, default, and error details, then returns the default instead.
+
+**Call relations**: Runtime code calls this whenever it needs to decide whether to offer a feature. The function gathers the current workspace through `ufo.workspace.ws_current`, creates an OpenFeature `EvaluationContext` so the backend knows who the question is about, asks `openfeature.api.get_client` for the flag value, limits the wait with `asyncio.timeout`, and reports failures through `ufo.o11y.warn` before falling back safely.
+
+*Call graph*: 5 external calls (timeout, get_client, EvaluationContext, warn, ws_current).
+
+
+### Observability and operator inspection
+Operational tooling provides tracing, metrics, safe logging, service checks, and trusted read-only debugging views.
+
+### `core/src/ufo/o11y.py`
+
+`io_transport` · `startup and cross-cutting runtime observability`
+
+This file makes the system visible while it runs. In production, operators need to know what happened, how long it took, what failed, and whether a background service is healthy. Without this file, failures would be harder to connect across queues and background work, metrics could grow out of control, and logs might accidentally publish private prompt or credential data.
+
+It uses OpenTelemetry, a standard way to collect traces, metrics, and logs. A trace is like a timeline for one piece of work; spans are the named steps on that timeline. Metrics are counters and timings that dashboards can graph. Logs are event records with searchable fields.
+
+At startup, `init_o11y` installs exporters that send traces, metrics, and logs to an OTLP collector, if one is configured. The file also installs a log-message guard even when exporting is disabled, because third-party libraries can write huge messages directly to stderr.
+
+During normal work, callers use helpers such as `span`, `turn_span`, `log`, `warn`, `log_error`, and the metric emitters. These helpers add the current workspace automatically, redact sensitive fields, and keep metric dimensions bounded so dashboards do not explode into thousands of accidental time series. Service checks are sent directly to Datadog because OpenTelemetry does not provide that type of health signal.
+
+#### Function details
+
+##### `init_service_checks`  (lines 284–300)
+
+```
+def init_service_checks(url: str | None, env: str | None, api_key: str | None) -> None
+```
+
+**Purpose**: Configures where Datadog service checks should be sent. It deliberately fails early if a service-check URL is configured without the environment tag or API key, because that would make health alerts unreliable.
+
+**Data flow**: It receives an optional intake URL, environment name, and API key. If there is no URL, it clears the service-check destination so later submissions do nothing. If there is a URL, it validates the required pieces and stores a small intake configuration for later use.
+
+**Call relations**: This is the setup step for `emit_service_check`. Later, when a service check is emitted, that function reads the stored intake information created here.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `compaction_key`  (lines 136–137)
+##### `init_o11y`  (lines 303–329)
 
 ```
-def compaction_key(conversation_id: UUID, index: int, half: CompactionHalf) -> str
+def init_o11y(otlp_endpoint: str | None) -> None
 ```
 
-**Purpose**: Builds the exact storage path for one piece of a compaction record. A compaction has separate saved parts: the window before compaction, the window after compaction, and the summary.
+**Purpose**: Sets up the OpenTelemetry pipeline for traces, metrics, and logs. If no collector endpoint is provided, it still installs the log-size guard so unsafe library messages are blocked locally.
 
-**Data flow**: It takes a conversation ID, a compaction index, and which half or section is wanted. It returns the fixed blob-store path for that specific compressed JSON file.
+**Data flow**: It receives an optional OTLP collector endpoint. It first installs the log guard. If an endpoint exists, it builds separate trace, metric, and log URLs, creates OpenTelemetry providers and exporters, registers them globally, and connects warning-level standard Python logs into the OpenTelemetry log stream.
 
-**Call relations**: The compaction read helpers call this before fetching from the blob store. It keeps all compaction readers and writers using the same folder layout.
+**Call relations**: This is the main startup entry for this file’s observability plumbing. It calls `_guard_log_messages` first, uses `_otlp_signal_urls` to build export destinations, and finishes by calling `_bridge_warning_logs` so warnings from other modules can reach the collector.
 
-*Call graph*: called by 2 (read_compaction_after, read_compaction_record).
-
-
-##### `decode_compaction`  (lines 140–149)
-
-```
-def decode_compaction(index: int, before: bytes, after: bytes, summary: bytes) -> CompactionRecord
-```
-
-**Purpose**: Rebuilds a full `CompactionRecord` from its three compressed stored pieces. It is used when a caller wants the before window, after window, and summary together.
-
-**Data flow**: It receives an index plus three compressed byte strings: before, after, and summary. It decompresses and validates each one, pulls out the message windows and typed summary, and returns one `CompactionRecord`. If any piece is unreadable or has the wrong shape, it raises `TranscriptDecodeError`.
-
-**Call relations**: `read_compaction_record` fetches the three stored blobs and then hands them to this function. This function is the place where raw compaction bytes become a trustworthy in-memory record.
-
-*Call graph*: called by 1 (read_compaction_record); 2 external calls (__init__, __init__).
+*Call graph*: calls 3 internal fn (_bridge_warning_logs, _guard_log_messages, _otlp_signal_urls); 13 external calls (set_logger_provider, OTLPLogExporter, OTLPMetricExporter, OTLPSpanExporter, set_meter_provider, LoggerProvider, BatchLogRecordProcessor, MeterProvider, PeriodicExportingMetricReader, create (+3 more)).
 
 
-##### `read_compaction_after`  (lines 152–165)
+##### `_bridge_warning_logs`  (lines 332–344)
 
 ```
-async def read_compaction_after(blob: BlobStore, conversation_id: UUID, index: int) -> tuple[Message, ...] | None
+def _bridge_warning_logs(logger_provider: LoggerProvider) -> None
 ```
 
-**Purpose**: Fetches only the “after” window for one compaction, if it exists. This is useful when a reader needs the compacted replacement window without paying to load the larger full record.
+**Purpose**: Forwards warning and error messages from ordinary Python logging into the OpenTelemetry log pipeline. This helps operator-visible warnings from libraries or other modules avoid disappearing into local-only logging.
 
-**Data flow**: It receives a blob store, a conversation ID, and a compaction index. It builds the path for the `after` blob, asks the blob store for the bytes, returns `None` if the blob is missing, or decompresses and validates the window and returns its messages. Bad bytes become `TranscriptDecodeError`.
+**Data flow**: It receives an OpenTelemetry log provider. It creates a standard logging handler that exports warning-or-higher records, filters out this project’s own structured logs and OpenTelemetry’s own internal logs, and attaches the handler to the root logger.
 
-**Call relations**: It calls `compaction_key` to find the right blob and `BlobStore.get` to retrieve it. It stands as a lightweight read path alongside the fuller `read_compaction_record` flow.
+**Call relations**: `init_o11y` calls this after creating the log provider. From then on, warning-level standard library log records can be exported alongside structured application logs.
 
-*Call graph*: calls 2 internal fn (get, compaction_key); 1 external calls (__init__).
-
-
-##### `read_compaction_record`  (lines 168–179)
-
-```
-async def read_compaction_record(blob: BlobStore, conversation_id: UUID, index: int) -> CompactionRecord | None
-```
-
-**Purpose**: Fetches one complete compaction record from storage, or reports that it is absent. Debugging tools, evaluation code, and other readers use this when they need the full story of a compaction boundary.
-
-**Data flow**: It receives a blob store, a conversation ID, and an index. It builds and fetches the `before`, `after`, and `summary` blobs; if any expected blob is missing, it returns `None`. If all are present, it passes the bytes to `decode_compaction` and returns the resulting `CompactionRecord`.
-
-**Call relations**: It calls `compaction_key` for each stored piece and `BlobStore.get` to fetch them. `read_compaction_records` repeatedly calls this function while walking through a conversation’s compaction history.
-
-*Call graph*: calls 3 internal fn (get, compaction_key, decode_compaction); called by 1 (read_compaction_records).
+*Call graph*: called by 1 (init_o11y); 2 external calls (getLogger, LoggingHandler).
 
 
-##### `read_compaction_records`  (lines 182–192)
+##### `_GuardedRecordFactory.__call__`  (lines 374–386)
 
 ```
-async def read_compaction_records(blob: BlobStore, conversation_id: UUID) -> tuple[CompactionRecord, ...]
+def __call__(self, *args: object, **kwargs: object) -> logging.LogRecord
 ```
 
-**Purpose**: Loads all compaction records for a conversation in order from oldest to newest. It is the convenient “give me the whole compaction history” helper.
+**Purpose**: Inspects every standard Python log record before any handler writes it. If the final message is too large, it replaces the text with a short notice that says which logger produced it and how many characters were dropped.
 
-**Data flow**: It starts at compaction index 1 and repeatedly asks for the next record. Each record found is added to a list; the first missing index means there are no more records. It returns the collected records as an immutable tuple.
+**Data flow**: It receives the raw arguments used to create a log record. It asks the wrapped original factory to make the record, renders the message safely, and either returns it unchanged or overwrites the message and arguments with a safe summary.
 
-**Call relations**: It builds on `read_compaction_record` instead of fetching blobs itself. This keeps the loop simple: ask for record 1, then 2, then 3, and stop when the lower-level reader says the next record is not there.
+**Call relations**: _guard_log_messages installs this object as the process-wide log record factory. It relies on `_rendered_message` to decide whether a record is safe to keep.
 
-*Call graph*: calls 1 internal fn (read_compaction_record).
+*Call graph*: calls 1 internal fn (_rendered_message).
 
 
-### `core/src/ufo/blob.py`
+##### `_guard_log_messages`  (lines 389–393)
 
-`io_transport` · `cross-cutting storage during request handling, background work, asset publishing, and teardown`
+```
+def _guard_log_messages() -> None
+```
 
-A “blob” here means a named pile of bytes: an uploaded file, a generated artifact, a cached web asset, or a saved compaction record. This file hides where those bytes actually live. In development they can be ordinary files under a directory. In deployment they can be objects in an S3 bucket, which is cloud storage addressed by string keys.
+**Purpose**: Installs the process-wide guard that prevents oversized standard Python log messages from being written. It is careful not to wrap the logging system more than once.
 
-The central idea is the BlobStore protocol: callers ask to put, get, stream, delete, check, or list bytes by key. Concrete stores then do the real work. FilesystemBlobStore turns keys into safe paths under one root directory and writes through temporary files so half-written data is not left behind. S3BlobStore talks to S3 asynchronously, streams large files in chunks, and can create temporary signed URLs so another process can upload or download one object without receiving broad storage credentials.
+**Data flow**: It reads the current log record factory. If that factory is already guarded, it leaves it alone. Otherwise, it wraps the existing factory in `_GuardedRecordFactory` and installs the wrapper globally.
 
-Two wrapper stores add safety rails. WorkspaceBlobStore automatically prefixes every key with the current workspace, like putting each tenant’s files in its own labeled drawer. FleetBlobStore allows only a few shared prefixes for deployment-owned data, such as static assets and terminal payloads. Without these wrappers, a mistaken key could read or overwrite data in the wrong namespace.
+**Call relations**: `init_o11y` calls this during startup before any exporter setup. Once installed, `_GuardedRecordFactory.__call__` runs for future standard logging records.
+
+*Call graph*: called by 1 (init_o11y); 3 external calls (__init__, getLogRecordFactory, setLogRecordFactory).
+
+
+##### `_rendered_message`  (lines 396–406)
+
+```
+def _rendered_message(record: logging.LogRecord) -> str | None
+```
+
+**Purpose**: Safely computes what a log record would actually print. It avoids crashing the caller if a malformed logging template cannot be interpolated.
+
+**Data flow**: It receives a Python log record. If the message is already a plain string with no arguments, it returns it directly. Otherwise, it asks the logging record to render itself, returning `None` if that rendering raises an error.
+
+**Call relations**: _GuardedRecordFactory.__call__ uses this helper before deciding whether a log message is too large to allow through.
+
+*Call graph*: called by 1 (__call__); 1 external calls (getMessage).
+
+
+##### `_otlp_signal_urls`  (lines 409–415)
+
+```
+def _otlp_signal_urls(otlp_endpoint: str) -> tuple[str, str, str]
+```
+
+**Purpose**: Builds the exact HTTP endpoints used to export traces, metrics, and logs to an OTLP collector. This matters because the exporter expects a complete URL, not just a base address.
+
+**Data flow**: It receives a base collector endpoint, removes any trailing slash, and returns three URLs with the standard trace, metric, and log paths appended.
+
+**Call relations**: `init_o11y` calls this during startup so each OpenTelemetry exporter is pointed at the correct signal-specific endpoint.
+
+*Call graph*: called by 1 (init_o11y).
+
+
+##### `_ambient_scope`  (lines 418–423)
+
+```
+def _ambient_scope() -> dict[str, str]
+```
+
+**Purpose**: Finds the current workspace and turns it into metadata for logs and traces. This lets code inside a workspace automatically carry that workspace ID without every caller passing it by hand.
+
+**Data flow**: It reads the current workspace from a context variable. If there is no workspace, it returns an empty dictionary. If there is one, it returns a dictionary containing the workspace ID as text.
+
+**Call relations**: `turn_span`, `span`, and `_emit_log` call this when adding shared context to traces and logs.
+
+*Call graph*: called by 3 (_emit_log, span, turn_span); 1 external calls (get).
+
+
+##### `current_traceparent`  (lines 426–432)
+
+```
+def current_traceparent() -> str | None
+```
+
+**Purpose**: Captures the currently active trace as a W3C `traceparent` header, which is a standard text form for trace identity. This can be stored and later used to reconnect work that crosses a queue or process boundary.
+
+**Data flow**: It creates an empty carrier dictionary and asks the trace context propagator to inject the current trace into it. It returns the `traceparent` value if one was produced, otherwise `None`.
+
+**Call relations**: This is used by code that needs to preserve trace continuity outside this file. The matching reconnection happens in `turn_span`, which can extract a parent trace from such a header.
+
+
+##### `turn_profile`  (lines 435–443)
+
+```
+def turn_profile(subagent_profile: str | None, spawned: bool=False) -> str
+```
+
+**Purpose**: Chooses the small, stable profile label used for a turn. This separates main user-facing work, spawned agent work, and named subagent profiles without creating unbounded metric labels.
+
+**Data flow**: It receives an optional subagent profile and a flag saying whether the turn was spawned. It returns the subagent profile if present, otherwise `agent` for spawned work or `main` for normal member-facing work.
+
+**Call relations**: `turn_span` calls this when tagging a turn trace. Other code can also use it to keep metric labels aligned with trace labels.
+
+*Call graph*: called by 1 (turn_span).
+
+
+##### `turn_span`  (lines 447–483)
+
+```
+def turn_span(turn_id: UUID, conversation_id: UUID, traceparent: str | None, subagent_profile: str | None, parent_turn_id: UUID | None) -> Iterator[Span]
+```
+
+**Purpose**: Opens the main trace span for one durable turn. A span is a timed section on a trace, and this one represents the whole turn from the worker’s point of view.
+
+**Data flow**: It receives turn and conversation IDs, an optional saved traceparent, an optional subagent profile, and an optional parent turn ID. It builds redacted trace attributes, adds workspace context, extracts the parent trace if available, starts a server-style span named `turn`, yields it to the caller, and closes it when the caller’s block ends.
+
+**Call relations**: This is used around turn execution. It calls `_ambient_scope`, `turn_profile`, and `redact_payload` before handing control to OpenTelemetry’s tracer.
+
+*Call graph*: calls 3 internal fn (_ambient_scope, redact_payload, turn_profile); 2 external calls (get_tracer, cast).
+
+
+##### `span`  (lines 487–499)
+
+```
+def span(name: str, kind: SpanKind=SpanKind.INTERNAL, **attributes: object) -> Iterator[Span]
+```
+
+**Purpose**: Opens a smaller trace span inside whatever trace is already active. Callers use it to time and label stages such as model calls, tool calls, or sandbox operations.
+
+**Data flow**: It receives a span name, a span kind, and arbitrary attributes. It adds workspace context, redacts sensitive values, converts attributes into OpenTelemetry-friendly values, starts the span, yields it to the caller, and closes it when the block exits.
+
+**Call relations**: This is a general tracing helper used by runtime code. It shares the same redaction and workspace behavior as `turn_span` through `_ambient_scope` and `redact_payload`.
+
+*Call graph*: calls 2 internal fn (_ambient_scope, redact_payload); 1 external calls (get_tracer).
+
+
+##### `redact_payload`  (lines 502–508)
+
+```
+def redact_payload(fields: Mapping[str, object]) -> dict[str, JsonValue]
+```
+
+**Purpose**: Removes fields whose names look sensitive and redacts nested values. This is the main safety gate before data becomes log or trace metadata.
+
+**Data flow**: It receives a mapping of field names to values. For each field, it normalizes the key by removing underscores and hyphens and lowercasing it; sensitive keys are dropped. The remaining values are passed through `redact_value`, and a JSON-like dictionary comes out.
+
+**Call relations**: `turn_span`, `span`, and `_emit_log` call this before exporting data. `redact_value` also calls it recursively for nested dictionaries.
+
+*Call graph*: calls 1 internal fn (redact_value); called by 4 (_emit_log, redact_value, span, turn_span).
+
+
+##### `redact_value`  (lines 511–521)
+
+```
+def redact_value(value: object) -> JsonValue
+```
+
+**Purpose**: Converts one value into a safe JSON-like form. It preserves ordinary simple values, walks through lists and dictionaries, and turns unfamiliar objects into strings.
+
+**Data flow**: It receives any Python object. Plain values such as strings, numbers, booleans, and `None` pass through. Dictionaries are cleaned with `redact_payload`, sequences are cleaned item by item, and everything else is stringified.
+
+**Call relations**: `redact_payload` calls this for every non-sensitive field. For nested dictionaries, this function calls `redact_payload` again, making the two helpers work together recursively.
+
+*Call graph*: calls 1 internal fn (redact_payload); called by 1 (redact_payload).
+
+
+##### `log`  (lines 524–530)
+
+```
+def log(event: str, **fields: object) -> None
+```
+
+**Purpose**: Writes a structured information-level event. Callers use it for normal noteworthy events that should be searchable and tied to the current trace.
+
+**Data flow**: It receives an event name and keyword fields. It passes them to `_emit_log` with information severity so the fields can be redacted, scoped to the workspace, and sent through both standard logging and OpenTelemetry logs.
+
+**Call relations**: This is the public convenience function for ordinary structured logs. `_emit_log` does the shared work.
+
+*Call graph*: calls 1 internal fn (_emit_log).
+
+
+##### `log_error`  (lines 533–535)
+
+```
+def log_error(event: str, **fields: object) -> None
+```
+
+**Purpose**: Writes a structured error-level event. Callers use it when something failed and operators should be able to search for the failure with safe metadata.
+
+**Data flow**: It receives an event name and keyword fields. It passes them to `_emit_log` with error severity, which adds workspace context, removes sensitive data, and emits the record.
+
+**Call relations**: This is the public convenience function for error logs. It follows the same path as `log` and `warn`, with a different severity.
+
+*Call graph*: calls 1 internal fn (_emit_log).
+
+
+##### `warn`  (lines 538–540)
+
+```
+def warn(event: str, **fields: object) -> None
+```
+
+**Purpose**: Writes a structured warning-level event. It is for expected but important conditions that are not full errors but may deserve operator attention.
+
+**Data flow**: It receives an event name and keyword fields. It passes them to `_emit_log` with warning severity so the event is exported consistently with other structured logs.
+
+**Call relations**: This is the public convenience function for warning logs. `_emit_log` supplies the common redaction, workspace tagging, and export behavior.
+
+*Call graph*: calls 1 internal fn (_emit_log).
+
+
+##### `formatted_stack`  (lines 543–572)
+
+```
+def formatted_stack(error: BaseException) -> str
+```
+
+**Purpose**: Formats an exception’s stack trace for logging without including exception messages. This avoids leaking text that may have come from an untrusted command, provider, or environment.
+
+**Data flow**: It receives an exception. It walks through the exception, its cause, and its context while avoiding loops, records each exception class and traceback frames, and trims the middle if the result is too long. It returns a bounded string.
+
+**Call relations**: Other code can use this when adding stack information to a structured log field. It relies on Python’s traceback formatter but deliberately avoids message text.
+
+*Call graph*: 1 external calls (format_tb).
+
+
+##### `_emit_log`  (lines 575–593)
+
+```
+def _emit_log(event: str, severity_number: SeverityNumber, severity_text: str, level: int, fields: Mapping[str, object]) -> None
+```
+
+**Purpose**: Performs the shared work behind `log`, `warn`, and `log_error`. It creates one safe structured log record and sends it through both standard Python logging and OpenTelemetry logging.
+
+**Data flow**: It receives the event name, severity values, Python logging level, and fields. It adds ambient workspace context, redacts sensitive fields, removes fields whose value is `None`, writes to the project logger, and emits an OpenTelemetry log record with the same attributes.
+
+**Call relations**: `log`, `warn`, and `log_error` all call this helper. It calls `_ambient_scope` and `redact_payload` before handing the event to the logging systems.
+
+*Call graph*: calls 2 internal fn (_ambient_scope, redact_payload); called by 3 (log, log_error, warn); 2 external calls (getLogger, get_logger).
+
+
+##### `_bounded_error_class`  (lines 596–609)
+
+```
+def _bounded_error_class(dimensions: dict[str, str]) -> dict[str, str]
+```
+
+**Purpose**: Keeps the `error_class` metric label within a known list. This prevents one unusual exception class from permanently creating a new dashboard time series.
+
+**Data flow**: It receives a dictionary of metric dimensions. If the `error_class` value is known, it returns the dimensions unchanged. If it is unknown, it returns a copy where that value is replaced with `other`.
+
+**Call relations**: `emit_metric` and `emit_histogram` call this right before recording data, so both counter and timing metrics get the same protection.
+
+*Call graph*: called by 2 (emit_histogram, emit_metric).
+
+
+##### `emit_metric`  (lines 612–622)
+
+```
+def emit_metric(name: str, amount: int=1, /, **dimensions: str) -> None
+```
+
+**Purpose**: Increments a named counter metric, such as a total number of turns, retries, failures, or tool calls. It fails loudly for unknown metric names so typos do not silently create bad telemetry.
+
+**Data flow**: It receives a metric name, an optional amount, and string dimensions. It checks the name against the registered counter list, creates and caches the OpenTelemetry counter if needed, bounds the error class dimension, and adds the amount.
+
+**Call relations**: Runtime code calls this whenever a counted event happens. It uses `_bounded_error_class` before sending the count through OpenTelemetry’s metric meter.
+
+*Call graph*: calls 1 internal fn (_bounded_error_class); 1 external calls (get_meter).
+
+
+##### `emit_histogram`  (lines 625–647)
+
+```
+def emit_histogram(name: str, value: int, /, **dimensions: str) -> None
+```
+
+**Purpose**: Records one timing or size observation for a registered histogram metric. Histograms let dashboards calculate distributions such as percentiles, not just totals.
+
+**Data flow**: It receives a histogram name, a numeric value, and string dimensions. It verifies the histogram exists and that all dimensions were declared for that histogram, creates and caches the OpenTelemetry histogram if needed, bounds the error class dimension, and records the value in milliseconds.
+
+**Call relations**: Runtime code calls this for measured durations such as model rounds, tool calls, database waits, and turn time. It uses `_bounded_error_class` before recording through OpenTelemetry.
+
+*Call graph*: calls 1 internal fn (_bounded_error_class); 1 external calls (get_meter).
+
+
+##### `emit_up_down_metric`  (lines 650–662)
+
+```
+def emit_up_down_metric(name: str, amount: int, /, **dimensions: str) -> None
+```
+
+**Purpose**: Adds or subtracts from a current-state metric. This is useful for values that go up and down, such as the number of active model rounds.
+
+**Data flow**: It receives a metric name, signed amount, and string dimensions. It checks that the name and dimensions are allowed, creates and caches the OpenTelemetry up-down counter if needed, and applies the amount.
+
+**Call relations**: Runtime code calls this when entering or leaving work that should be counted as currently active. Unlike `emit_metric` and `emit_histogram`, it does not route through `_bounded_error_class` because its declared dimensions do not include that field.
+
+*Call graph*: 1 external calls (get_meter).
+
+
+##### `emit_service_check`  (lines 665–697)
+
+```
+async def emit_service_check(name: str, status: int, message: str='', /, **tags: str) -> None
+```
+
+**Purpose**: Sends a Datadog service check, which represents the latest health state of a named service-like thing. This is used when an alert needs to clear after a later OK status, something a simple counter cannot express.
+
+**Data flow**: It receives a registered check name, status, optional message, and tags. It validates the check name, returns immediately if service checks were not configured, builds a Datadog report with a stable host name and environment tag, posts it to Datadog using an async HTTP client, and raises if Datadog rejects the request.
+
+**Call relations**: This depends on `init_service_checks` having stored an intake URL, API key, and environment. It sends directly with `httpx.AsyncClient` because the OpenTelemetry collector path used elsewhere in this file does not support service checks.
+
+*Call graph*: 1 external calls (AsyncClient).
+
+
+### `extensions/debugger/ufo_ext_debugger/surface.py`
+
+`io_transport` · `request handling`
+
+This file is the bridge between the debugger web app in the browser and the system’s stored session data. Think of it as a read-only control room: it serves the built React page, then answers the page’s requests for lists of workspaces, conversations, transcripts, turn details, files, and live event streams.
+
+The important safety idea is that the request already arrives with an operator-scoped SurfaceContext. That context is the “badge” that decides which workspace the request may read from. Most functions here do not make their own authorization decisions; they ask the context for data, so reads stay tied to the chosen workspace. The fleet endpoint is the exception in scope, but it still sits behind the same operator gate.
+
+For normal data, the file returns JSON. For workspace file contents, it streams bytes back. For a running turn, it uses SSE, or Server-Sent Events: a simple browser-friendly stream where the server keeps sending named events over one HTTP response. The helper functions turn internal live frames into these SSE messages, including an event id so a browser can reconnect and continue from where it left off.
+
+Without this file, the debugger front end would have no usable backend: the page could load only if prebuilt elsewhere, and operators could not inspect conversations or follow live turns through this surface.
 
 #### Function details
 
-##### `BlobStore.put`  (lines 54–54)
+##### `app_page`  (lines 56–61)
 
 ```
-async def put(self, key: str, data: bytes) -> None
+async def app_page(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Defines the standard promise that a blob store can save a complete byte string under a key. Code that publishes assets can rely on this without caring whether the final storage is disk or S3.
+**Purpose**: Serves the debugger’s main web page to the browser. If the front-end app has not been built yet, it fails clearly instead of returning a broken empty page.
 
-**Data flow**: A caller provides a key and bytes → the concrete store writes those bytes to its backing storage → nothing is returned, but the key should now name the saved data.
+**Data flow**: It receives the request and the already-prepared surface context, checks whether the compiled HTML was loaded from disk when the module started, and returns that HTML as the response. If the HTML is missing, it raises an error telling the developer to build the debugger frontend.
 
-**Call relations**: This is part of the shared blob-store contract. Asset publishing code calls it through that contract, and the actual behavior is supplied by stores such as FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore, or FleetBlobStore.
+**Call relations**: The surface router calls this when someone opens the debugger root page with a GET request. It hands the browser the shell of the app; after that, the browser calls the JSON and stream endpoints in this same file to fill the page with data.
 
-*Call graph*: called by 1 (_publish_assets).
+*Call graph*: 1 external calls (HTMLResponse).
 
 
-##### `BlobStore.get`  (lines 56–56)
+##### `fleet`  (lines 64–68)
 
 ```
-async def get(self, key: str) -> bytes
+async def fleet(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Defines the standard promise that a blob store can read a whole object into memory. It is used when callers need the complete stored value, such as a transcript record, Slack identity, or web asset.
+**Purpose**: Returns the fleet-wide landing data: available workspaces and recent threads. This powers the debugger’s top-level index view for operators.
 
-**Data flow**: A caller provides a key → the concrete store looks up the bytes behind that key → the full byte content comes back, or a missing-key error is raised by implementations.
+**Data flow**: It ignores the single-workspace view for this particular read, asks FleetDirectory for the deploy’s fleet directory, converts that structured result into JSON-friendly data, and sends it back as a JSON response.
 
-**Call relations**: Transcript reading, Slack identity reading, and web asset serving call this abstract operation. The call is then carried by whichever concrete store has been configured.
+**Call relations**: The surface router calls this for the fleet API endpoint. It relies on the broader operator access check that happened before the handler runs, then hands the browser a fleet overview for navigation.
 
-*Call graph*: called by 4 (read_compaction_after, read_compaction_record, read_identity, _stored_asset).
+*Call graph*: 2 external calls (__init__, JSONResponse).
 
 
-##### `BlobStore.exists`  (lines 58–58)
+##### `workspace_meta`  (lines 71–84)
 
 ```
-async def exists(self, key: str) -> bool
+async def workspace_meta(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Defines the standard promise that callers can ask whether a key currently has stored bytes. This lets code avoid unnecessary uploads or decide whether cached data can be reused.
+**Purpose**: Returns small pieces of information about the currently selected workspace. The debugger uses this to show which workspace is being inspected and, when available, which Slack team and Datadog site relate to it.
 
-**Data flow**: A caller provides a key → the concrete store checks its backing storage → it returns true if an object exists there and false if not.
+**Data flow**: It reads the Slack installation value from the context, strips the internal Slack team prefix if present, reads the Datadog site from the environment, and returns those values plus the workspace id as JSON.
 
-**Call relations**: Slack and web surface code call this through the common blob-store shape before reading or publishing stored data. Concrete stores perform the actual disk or S3 check.
+**Call relations**: The browser calls this after selecting or entering a workspace. It asks SurfaceContext for installation metadata and combines it with an environment setting so the page can display useful workspace labels and external-tool hints.
 
-*Call graph*: called by 3 (read_identity, _publish_assets, _stored_asset).
+*Call graph*: calls 1 internal fn (installation); 1 external calls (JSONResponse).
 
 
-##### `BlobStore.delete`  (lines 60–62)
+##### `conversations`  (lines 87–89)
 
 ```
-async def delete(self, key: str) -> None
+async def conversations(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Defines the standard promise that a blob can be removed. Deleting something that is already absent is intentionally harmless, which makes retries safe.
+**Purpose**: Lists the conversations visible inside the current workspace. This gives the debugger its conversation browser.
 
-**Data flow**: A caller provides a key → the concrete store asks its backing storage to remove that object → no value is returned, and absence is treated as success.
+**Data flow**: It asks the surface context for conversation summaries, converts each summary into JSON-ready form, and returns the list to the browser.
 
-**Call relations**: This is a contract method for all blob stores. Higher-level code can call delete on any configured store and get the same no-surprises behavior.
+**Call relations**: The surface router invokes this for the conversations API endpoint. It depends on SurfaceContext to apply the workspace scope, then gives the frontend the list it needs before a user drills into one conversation.
 
+*Call graph*: calls 1 internal fn (list_conversations); 1 external calls (JSONResponse).
 
-##### `BlobStore.get_stream`  (lines 64–64)
 
-```
-def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Defines the standard promise that a blob can be read piece by piece instead of all at once. This matters for large files, where loading everything into memory would be wasteful or unsafe.
-
-**Data flow**: A caller provides a key → the concrete store opens the stored object → chunks of bytes are yielded over time until the object is fully read.
-
-**Call relations**: This belongs to the common storage interface. Concrete stores implement it using file reads or S3 response streaming, and wrapper stores add namespace checks before delegating.
-
-
-##### `BlobStore.put_stream`  (lines 66–66)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: Defines the standard promise that callers can write a blob from a stream of chunks. This lets the system accept large uploads without first collecting the entire file in memory.
-
-**Data flow**: A caller provides a key and an asynchronous stream of byte chunks → the concrete store writes each chunk to storage → nothing is returned after the full stream is saved.
-
-**Call relations**: This is used through the blob-store interface when data arrives gradually. Filesystem and S3 implementations handle the storage details, including temporary files or multipart upload.
-
-
-##### `BlobStore.list`  (lines 68–72)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Defines the standard promise that callers can list stored objects below a required key prefix. The prefix requirement prevents accidental scans of the entire storage area.
-
-**Data flow**: A caller provides a prefix → the concrete store finds matching objects up to a fixed limit → it returns small records describing each object’s key, size, and last modified time.
-
-**Call relations**: Web asset publishing calls this through the common interface. Concrete stores translate the request into a filesystem walk or an S3 listing.
-
-*Call graph*: called by 1 (_publish_assets).
-
-
-##### `FilesystemBlobStore.put`  (lines 81–86)
-
-```
-async def put(self, key: str, data: bytes) -> None
-```
-
-**Purpose**: Saves a complete byte string as a file under the configured blob root. It writes to a temporary file first and then swaps it into place, so readers do not see half-written data.
-
-**Data flow**: A key and bytes come in → the key is resolved to a safe path, parent folders are created, bytes are written to a uniquely named temporary file, and that file replaces the final path → the stored file now contains the new bytes.
-
-**Call relations**: This is the filesystem implementation of the BlobStore put operation. It relies on _resolve to keep the path inside the storage root and uses background threads for blocking file work so the async event loop stays responsive.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (to_thread, uuid4).
-
-
-##### `FilesystemBlobStore.get`  (lines 88–93)
-
-```
-async def get(self, key: str) -> bytes
-```
-
-**Purpose**: Reads a complete stored file from the filesystem. It turns a normal missing-file condition into BlobNotFound so callers see the same kind of error across backends.
-
-**Data flow**: A key comes in → the key is resolved to a safe path and the file is read as bytes → the bytes are returned, or BlobNotFound is raised if the file is absent.
-
-**Call relations**: This is the filesystem version of the BlobStore get operation. It depends on _resolve for safety and is used anywhere the configured backend is local disk.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (__init__, to_thread).
-
-
-##### `FilesystemBlobStore.exists`  (lines 95–97)
-
-```
-async def exists(self, key: str) -> bool
-```
-
-**Purpose**: Checks whether a key points to an existing file inside the filesystem blob root. It gives callers a quick yes-or-no answer without reading the file.
-
-**Data flow**: A key comes in → it is converted to a safe path → the filesystem is asked whether that path is a file → true or false is returned.
-
-**Call relations**: This implements the BlobStore exists operation for local storage. Like other file operations, it goes through _resolve and runs the blocking filesystem check outside the main async path.
-
-*Call graph*: calls 1 internal fn (_resolve); 1 external calls (to_thread).
-
-
-##### `FilesystemBlobStore.delete`  (lines 99–101)
-
-```
-async def delete(self, key: str) -> None
-```
-
-**Purpose**: Removes a stored file from the filesystem if it exists. If it is already gone, the function still succeeds.
-
-**Data flow**: A key comes in → it is resolved to a safe path → the file is unlinked with missing files ignored → nothing is returned.
-
-**Call relations**: This is the local-disk version of BlobStore.delete. It uses _resolve before touching the filesystem so a key cannot delete outside the blob root.
-
-*Call graph*: calls 1 internal fn (_resolve); 1 external calls (to_thread).
-
-
-##### `FilesystemBlobStore.get_stream`  (lines 103–116)
-
-```
-async def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Reads a stored file in bounded chunks. This lets callers send or process large blobs without holding the whole file in memory.
-
-**Data flow**: A key comes in → the safe file path is opened for reading → chunks are read and yielded until the file ends → the file handle is closed afterward, even if reading stops early.
-
-**Call relations**: This implements the streaming read part of the BlobStore contract for local files. It uses _resolve for containment and raises BlobNotFound when opening the file fails because it is missing.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (__init__, to_thread).
-
-
-##### `FilesystemBlobStore.put_stream`  (lines 118–131)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: Writes streamed byte chunks to a local file safely. Like the whole-file writer, it writes to a temporary file first so a failed stream does not leave a broken final object.
-
-**Data flow**: A key and a stream of chunks come in → the safe path and parent folders are prepared → chunks are written into a temporary file → on success the temporary file replaces the target, and on failure it is removed.
-
-**Call relations**: This is the filesystem implementation of BlobStore.put_stream. It uses _resolve and temporary filenames, while the actual blocking file writes happen in worker threads.
-
-*Call graph*: calls 1 internal fn (_resolve); 2 external calls (to_thread, uuid4).
-
-
-##### `FilesystemBlobStore.list`  (lines 133–136)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Lists local files whose keys begin with a required prefix. Requiring a prefix keeps callers from accidentally walking the whole blob store.
-
-**Data flow**: A prefix comes in → empty prefixes are rejected → the slower directory walk is run away from the event loop → a tuple of matching BlobEntry records comes back.
-
-**Call relations**: This is the filesystem version of BlobStore.list. It hands the real walking work to _walk so the async method stays small and non-blocking.
-
-*Call graph*: 1 external calls (to_thread).
-
-
-##### `FilesystemBlobStore._walk`  (lines 138–159)
-
-```
-def _walk(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Performs the actual filesystem scan for list. It turns matching files into BlobEntry records and ignores temporary write files.
-
-**Data flow**: A prefix comes in → the store root and starting directory are found → files under that area are walked, filtered by prefix, measured, timestamped, sorted, and capped → a tuple of entries is returned.
-
-**Call relations**: FilesystemBlobStore.list runs this in a background thread. It depends on _contained_root and _resolve to know the safe root and starting path, then produces the entries that list returns.
-
-*Call graph*: calls 2 internal fn (_contained_root, _resolve); 4 external calls (__init__, fromtimestamp, walk, Path).
-
-
-##### `FilesystemBlobStore._resolve`  (lines 161–166)
-
-```
-def _resolve(self, key: str) -> Path
-```
-
-**Purpose**: Turns a blob key into a real filesystem path while preventing path escape. This is the guardrail that stops keys like '../secret' from reaching outside the blob directory.
-
-**Data flow**: A key comes in → it is joined to the canonical blob root and resolved → if the result is not inside the root, an error is raised → otherwise the safe path is returned.
-
-**Call relations**: Every filesystem read, write, delete, stream, and walk uses this before touching disk. It calls _contained_root to get the trusted root for the current operation.
-
-*Call graph*: calls 1 internal fn (_contained_root); called by 7 (_walk, delete, exists, get, get_stream, put, put_stream).
-
-
-##### `FilesystemBlobStore._contained_root`  (lines 168–181)
-
-```
-def _contained_root(self) -> Path
-```
-
-**Purpose**: Finds the real storage root directory in a way that matches the project’s containment checks. It allows a not-yet-created root, but rejects configured paths that point somewhere invalid.
-
-**Data flow**: The configured root path is read from the store → containment validation is attempted → a canonical directory path is returned, or a not-yet-existing root is resolved for first use.
-
-**Call relations**: _resolve and _walk call this whenever they need the safe filesystem root. It delegates the main validation to the sandbox containment helper configured_root.
-
-*Call graph*: called by 2 (_resolve, _walk); 1 external calls (configured_root).
-
-
-##### `_is_missing_key`  (lines 184–185)
-
-```
-def _is_missing_key(error: ClientError) -> bool
-```
-
-**Purpose**: Recognizes the different error codes S3-like services use for a missing object. This lets the rest of the code treat those variants as one simple “not found” case.
-
-**Data flow**: An S3 client error comes in → the error code is read from its response data → true is returned if it matches a known missing-object code, otherwise false.
-
-**Call relations**: S3BlobStore.get, exists, and get_stream call this when the S3 client raises an error. It decides whether the store should return false, raise BlobNotFound, or pass the original error upward.
-
-*Call graph*: called by 3 (exists, get, get_stream).
-
-
-##### `S3BlobStore.put`  (lines 207–209)
-
-```
-async def put(self, key: str, data: bytes) -> None
-```
-
-**Purpose**: Saves a complete byte string as one object in an S3 bucket. It is the cloud-storage equivalent of writing a whole local file.
-
-**Data flow**: A key and bytes come in → an S3 client for the current event loop is obtained → the bytes are sent to S3 under the bucket and key → nothing is returned after S3 accepts the write.
-
-**Call relations**: This implements BlobStore.put for S3. It relies on _client so callers do not pay the cost of building a new S3 client for every operation.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.get`  (lines 211–221)
-
-```
-async def get(self, key: str) -> bytes
-```
-
-**Purpose**: Reads a complete object from S3 into memory. Missing objects are reported as BlobNotFound so callers do not need to understand S3’s error formats.
-
-**Data flow**: A key comes in → an S3 client requests the object → if S3 says it is missing, BlobNotFound is raised → otherwise the response body is read fully and returned as bytes.
-
-**Call relations**: This is the S3 implementation of BlobStore.get. It uses _client for the shared client and _is_missing_key to translate S3 missing-object errors.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key); 1 external calls (__init__).
-
-
-##### `S3BlobStore.exists`  (lines 223–231)
-
-```
-async def exists(self, key: str) -> bool
-```
-
-**Purpose**: Checks whether an object exists in S3 without downloading it. It uses S3’s metadata lookup as a lightweight presence test.
-
-**Data flow**: A key comes in → an S3 client sends a head-object request → missing-object errors become false, other errors are re-raised, and success becomes true.
-
-**Call relations**: This implements BlobStore.exists for S3. It uses _client to talk to S3 and _is_missing_key to recognize the normal absent-key case.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key).
-
-
-##### `S3BlobStore.delete`  (lines 233–235)
-
-```
-async def delete(self, key: str) -> None
-```
-
-**Purpose**: Asks S3 to remove an object from the bucket. Like the blob-store contract expects, deleting an absent object is not treated as a special problem here.
-
-**Data flow**: A key comes in → an S3 client is obtained → a delete request is sent for that bucket and key → nothing is returned.
-
-**Call relations**: This is the S3 version of BlobStore.delete. It shares the event-loop-specific client supplied by _client.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.get_stream`  (lines 237–248)
-
-```
-async def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Reads an S3 object in chunks instead of all at once. This is important for large files because it keeps memory use bounded.
-
-**Data flow**: A key comes in → S3 is asked for the object → missing-object errors become BlobNotFound → the response body yields chunks until complete, then the body is closed.
-
-**Call relations**: This implements BlobStore.get_stream for S3. It uses _client for access and _is_missing_key for error translation.
-
-*Call graph*: calls 2 internal fn (_client, _is_missing_key); 1 external calls (__init__).
-
-
-##### `S3BlobStore.put_stream`  (lines 250–294)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: Writes streamed data to S3, using multipart upload for larger content. Multipart upload means S3 receives the object in numbered pieces and then assembles them at the end.
-
-**Data flow**: A key and chunk stream come in → chunks are gathered into part-sized buffers → small data is uploaded as one object, while larger data starts a multipart upload, sends each part, and completes it → on failure any started multipart upload is aborted.
-
-**Call relations**: This is the S3 implementation of BlobStore.put_stream. It gets the shared S3 client through _client and then chooses between simple upload and multipart upload based on how much data arrives.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.presigned_put`  (lines 296–320)
-
-```
-async def presigned_put(self, key: str, size_bytes: int, checksum_sha256: str, ttl_seconds: int) -> str
-```
-
-**Purpose**: Creates a temporary URL that lets another process upload exactly one measured object to S3. The URL is tied to the key, expected byte length, checksum, and expiry time.
-
-**Data flow**: A key, size, checksum, and time-to-live come in → the S3 client signs a put-object request with those constraints → a URL string is returned for the uploader to use.
-
-**Call relations**: WorkspaceBlobStore.presigned_put delegates here when its backend is S3. This function uses _client so the signing settings match the S3 client that will accept the upload.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.presigned_put_unmeasured`  (lines 322–332)
-
-```
-async def presigned_put_unmeasured(self, key: str, ttl_seconds: int) -> str
-```
-
-**Purpose**: Creates a temporary upload URL for a fixed key when the final size and checksum are not known yet. It is less strict than presigned_put, but still only grants access to one key for a limited time.
-
-**Data flow**: A key and expiry time come in → the S3 client signs a put-object request for that key only → a URL string is returned.
-
-**Call relations**: WorkspaceBlobStore.presigned_put_unmeasured delegates here for S3-backed work. It uses _client for the signing operation.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.presigned_get`  (lines 334–341)
-
-```
-async def presigned_get(self, key: str, ttl_seconds: int) -> str
-```
-
-**Purpose**: Creates a temporary URL that lets a holder download one S3 object. This is useful when another component needs direct access without receiving storage credentials.
-
-**Data flow**: A key and expiry time come in → the S3 client signs a get-object request → a URL string is returned.
-
-**Call relations**: WorkspaceBlobStore.presigned_get delegates here when the backend is S3. The function uses _client so the generated URL follows the same endpoint and signing rules as other S3 operations.
-
-*Call graph*: calls 1 internal fn (_client).
-
-
-##### `S3BlobStore.put_host`  (lines 343–354)
-
-```
-async def put_host(self) -> str
-```
-
-**Purpose**: Reports the hostname that presigned upload URLs will contact. The system can use this to allow a sandbox to reach exactly the storage host it needs.
-
-**Data flow**: The store’s S3 client is obtained → its endpoint URL is parsed → the correct hostname is returned, including the bucket name for normal AWS virtual-hosted addressing when needed.
-
-**Call relations**: Code that prepares network egress rules can call this after S3 signing is configured. It depends on _client and parses the client’s actual endpoint rather than rebuilding it by hand.
-
-*Call graph*: calls 1 internal fn (_client); 1 external calls (urlsplit).
-
-
-##### `S3BlobStore.list`  (lines 356–373)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Lists objects in S3 under a required prefix and returns their keys, sizes, and modification times. The fixed cap prevents very large listings from overwhelming callers.
-
-**Data flow**: A prefix comes in → empty prefixes are rejected → S3 list pages are fetched for that prefix → each returned object becomes a BlobEntry → entries are capped and returned.
-
-**Call relations**: This implements BlobStore.list for S3. It gets the shared client through _client and uses S3 pagination to walk matching objects page by page.
-
-*Call graph*: calls 1 internal fn (_client); 1 external calls (__init__).
-
-
-##### `S3BlobStore.close`  (lines 375–381)
-
-```
-async def close(self) -> None
-```
-
-**Purpose**: Closes the S3 client associated with the currently running async event loop. This releases network resources when that loop is done using the store.
-
-**Data flow**: The current event loop is identified → any cached client and lock for that loop are removed from the store → if a client existed, it is closed.
-
-**Call relations**: This is teardown support for S3BlobStore. It mirrors _client, which creates and caches one client per event loop.
-
-*Call graph*: 1 external calls (get_running_loop).
-
-
-##### `S3BlobStore._client`  (lines 383–409)
-
-```
-async def _client(self) -> AioBaseClient
-```
-
-**Purpose**: Returns the shared S3 client for the current async event loop, creating it if needed. Reusing clients avoids expensive setup on every blob operation and keeps network objects tied to the loop they belong to.
-
-**Data flow**: The running event loop is checked → an existing client is returned if present → otherwise a per-loop lock prevents duplicate creation, a configured S3 client is built, cached, and returned.
-
-**Call relations**: All S3 operations call this before talking to S3 or generating signed URLs. It is the central connection point between S3BlobStore’s public methods and aiobotocore, the asynchronous S3 library.
-
-*Call graph*: called by 11 (delete, exists, get, get_stream, list, presigned_get, presigned_put, presigned_put_unmeasured, put, put_host (+1 more)); 3 external calls (get_session, Lock, get_running_loop).
-
-
-##### `WorkspaceBlobStore.put`  (lines 422–423)
-
-```
-async def put(self, key: str, data: bytes) -> None
-```
-
-**Purpose**: Saves bytes under the currently bound workspace’s storage prefix. Callers use workspace-relative keys, so they do not have to manually include the workspace ID.
-
-**Data flow**: A workspace-relative key and bytes come in → _full adds the current workspace prefix → the backend store writes the bytes under that full key → nothing is returned.
-
-**Call relations**: This wraps a filesystem or S3 backend. It calls _full first, then hands the actual write to the backend’s put method.
-
-*Call graph*: calls 1 internal fn (_full).
-
-
-##### `WorkspaceBlobStore.get`  (lines 425–426)
-
-```
-async def get(self, key: str) -> bytes
-```
-
-**Purpose**: Reads a complete blob from the current workspace’s namespace. It prevents callers from accidentally reading another workspace by constructing the full key itself.
-
-**Data flow**: A workspace-relative key comes in → _full adds the current workspace prefix → the backend reads that full key → the bytes are returned.
-
-**Call relations**: This is the workspace-safe wrapper around backend get. It depends on _full for isolation and then delegates storage access to the configured backend.
-
-*Call graph*: calls 1 internal fn (_full).
-
-
-##### `WorkspaceBlobStore.exists`  (lines 428–429)
-
-```
-async def exists(self, key: str) -> bool
-```
-
-**Purpose**: Checks whether a blob exists inside the current workspace. The caller asks with a local key, not a global storage path.
-
-**Data flow**: A workspace-relative key comes in → _full turns it into a full workspace key → the backend checks whether that object exists → true or false is returned.
-
-**Call relations**: This wraps backend exists with workspace prefixing. It calls _full before delegating so the check cannot wander into another namespace.
-
-*Call graph*: calls 1 internal fn (_full).
-
-
-##### `WorkspaceBlobStore.delete`  (lines 431–432)
-
-```
-async def delete(self, key: str) -> None
-```
-
-**Purpose**: Deletes a blob from the current workspace’s namespace. It keeps deletion scoped to the active workspace.
-
-**Data flow**: A workspace-relative key comes in → _full adds the workspace prefix → the backend deletes the full key → nothing is returned.
-
-**Call relations**: This is the workspace-safe wrapper for backend delete. It relies on _full for the namespace boundary.
-
-*Call graph*: calls 1 internal fn (_full).
-
-
-##### `WorkspaceBlobStore.get_stream`  (lines 434–438)
-
-```
-def get_stream(self, key: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Opens a streaming read for a blob in the current workspace. It resolves the workspace prefix immediately so the stream can keep working even after the workspace scope exits.
-
-**Data flow**: A workspace-relative key comes in → _full immediately builds the full key → the backend stream for that full key is returned → later iteration yields byte chunks from storage.
-
-**Call relations**: Context-building code calls this when it needs member blob text. This method fixes the workspace key first, then hands off to the backend’s get_stream method.
-
-*Call graph*: calls 1 internal fn (_full); called by 1 (_member_blob_text).
-
-
-##### `WorkspaceBlobStore.put_stream`  (lines 440–441)
-
-```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
-```
-
-**Purpose**: Writes streamed bytes into the current workspace’s namespace. It gives large uploads the same workspace isolation as whole-byte writes.
-
-**Data flow**: A workspace-relative key and chunk stream come in → _full adds the current workspace prefix → the backend writes the stream under that full key → nothing is returned after completion.
-
-**Call relations**: This wraps backend put_stream. It calls _full before delegating so the backend only sees the already-scoped key.
-
-*Call graph*: calls 1 internal fn (_full).
-
-
-##### `WorkspaceBlobStore.list`  (lines 443–448)
-
-```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
-```
-
-**Purpose**: Lists blobs under a prefix inside the current workspace, while returning keys back in workspace-relative form. This keeps callers from depending on the internal global prefix.
-
-**Data flow**: A workspace-relative prefix comes in → empty prefixes are rejected → the current workspace root prefix is built → the backend lists full keys below it → each returned entry has the workspace root removed from its key.
-
-**Call relations**: This wraps backend list. It uses _full to find the workspace root, delegates the real listing to the backend, then rewrites entries so callers see local keys.
-
-*Call graph*: calls 1 internal fn (_full); 1 external calls (replace).
-
-
-##### `WorkspaceBlobStore.presigned_put`  (lines 450–461)
-
-```
-async def presigned_put(self, key: str, size_bytes: int, checksum_sha256: str, ttl_seconds: int) -> str
-```
-
-**Purpose**: Creates a measured temporary upload URL for a blob inside the current workspace, but only when the backend is S3. This lets an uploader write directly to cloud storage without escaping the workspace prefix.
-
-**Data flow**: A workspace-relative key, size, checksum, and expiry come in → the key is expanded with _full → if the backend is S3, S3BlobStore.presigned_put creates the URL → otherwise a type error is raised.
-
-**Call relations**: This is a workspace-safe wrapper over S3BlobStore.presigned_put. It first scopes the key, then hands signing to the S3 backend.
-
-*Call graph*: calls 1 internal fn (_full).
-
-
-##### `WorkspaceBlobStore.presigned_put_unmeasured`  (lines 463–469)
+##### `conversation_turns`  (lines 92–97)
 
 ```
-async def presigned_put_unmeasured(self, key: str, ttl_seconds: int) -> str
+async def conversation_turns(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Creates a temporary upload URL for a current-workspace object when the final body size is unknown. It works only with the S3 backend.
+**Purpose**: Lists the turns inside one conversation. A turn is one unit of back-and-forth work in a conversation, and this endpoint lets the debugger show that sequence.
 
-**Data flow**: A workspace-relative key and expiry come in → _full builds the full workspace key → the S3 backend signs an unmeasured PUT URL → the URL is returned, or a type error is raised for non-S3 storage.
+**Data flow**: It reads the conversation id from the URL and checks that it is a valid UUID. If the id is bad, it returns a 404-style JSON error; otherwise it asks the context for that conversation’s turns and returns them as JSON.
 
-**Call relations**: This wraps S3BlobStore.presigned_put_unmeasured with workspace prefixing. It keeps the direct upload limited to one key under the active workspace.
+**Call relations**: The router calls this when the frontend opens the turns list for a conversation. It uses _uuid_param to safely interpret the URL value before handing the id to SurfaceContext.
 
-*Call graph*: calls 1 internal fn (_full).
+*Call graph*: calls 2 internal fn (list_turns, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `WorkspaceBlobStore.presigned_get`  (lines 471–478)
+##### `conversation_transcript`  (lines 100–107)
 
 ```
-async def presigned_get(self, key: str, ttl_seconds: int) -> str
+async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Creates a temporary download URL for an object in the current workspace, when storage is S3. The generated URL points only at the prefixed workspace key.
+**Purpose**: Fetches the transcript for one conversation. This lets an operator read the recorded messages in a conversation without changing anything.
 
-**Data flow**: A workspace-relative key and expiry come in → _full adds the workspace prefix → the S3 backend signs a GET URL → the URL is returned, or a type error is raised if the backend is not S3.
+**Data flow**: It pulls the conversation id from the URL, rejects it if it is not a valid UUID, then asks the context for the transcript. If no transcript exists, it returns a JSON error; if it exists, it returns the transcript as JSON.
 
-**Call relations**: This is the workspace wrapper around S3BlobStore.presigned_get. It scopes the key first, then delegates URL signing.
+**Call relations**: The frontend calls this when it needs the readable transcript view. The function uses _uuid_param for input safety and SurfaceContext for the actual workspace-scoped read.
 
-*Call graph*: calls 1 internal fn (_full).
+*Call graph*: calls 2 internal fn (read_transcript, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `WorkspaceBlobStore._full`  (lines 480–483)
+##### `conversation_compactions`  (lines 110–114)
 
 ```
-def _full(self, key: str) -> str
+async def conversation_compactions(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Builds the real storage key for the currently active workspace. It also rejects keys that already include the workspace prefix, which prevents double-prefix mistakes.
+**Purpose**: Lists compaction records for a conversation. A compaction is where older conversation history has been summarized to keep context smaller, so this helps operators see where summarization happened.
 
-**Data flow**: A caller’s workspace-relative key comes in → keys already starting with the global workspace prefix are rejected → the current workspace ID is read → the full key workspaces/<id>/<key> is returned.
+**Data flow**: It validates the conversation id from the URL, returns a not-found JSON error if the id is invalid, otherwise asks the context for the compaction indexes or records and returns them as a JSON list.
 
-**Call relations**: Every WorkspaceBlobStore operation calls this before touching the backend. It depends on ws_current, so calls must happen inside a bound workspace scope.
+**Call relations**: The router calls this for the compactions list endpoint. It is usually followed by compaction_record when the debugger page wants the details for a particular compaction.
 
-*Call graph*: called by 10 (delete, exists, get, get_stream, list, presigned_get, presigned_put, presigned_put_unmeasured, put, put_stream); 1 external calls (ws_current).
+*Call graph*: calls 2 internal fn (list_compactions, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `FleetBlobStore.put`  (lines 494–495)
+##### `compaction_record`  (lines 117–132)
 
 ```
-async def put(self, key: str, data: bytes) -> None
+async def compaction_record(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Saves deployment-owned bytes under one of the allowed fleet prefixes. This is for shared data, not workspace-private data.
+**Purpose**: Returns one detailed compaction record, including what messages existed before, what remained after, and the generated summary. This helps an operator understand exactly how history was shortened.
 
-**Data flow**: A key and bytes come in → _checked verifies the key starts with an allowed fleet prefix → the backend writes the bytes → nothing is returned.
+**Data flow**: It reads a conversation id and a compaction index from the URL. If either is invalid, it returns a not-found JSON error. Otherwise it asks the context for that record, and if found, returns the index, before messages, after messages, and summary as JSON.
 
-**Call relations**: This wraps a filesystem or S3 backend for fleet-wide storage. It calls _checked before delegating so writes stay inside the approved shared namespaces.
+**Call relations**: The frontend calls this after it knows a compaction exists and wants to inspect it. It uses _uuid_param for the conversation id, then delegates the read to SurfaceContext.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 2 internal fn (read_compaction, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `FleetBlobStore.get`  (lines 497–498)
+##### `workspace_files`  (lines 135–140)
 
 ```
-async def get(self, key: str) -> bytes
+async def workspace_files(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Reads a complete deployment-owned blob from an allowed fleet namespace. It refuses keys outside those shared areas.
+**Purpose**: Lists files associated with a conversation’s workspace area. This lets the debugger show attachments or generated files that belong to that conversation.
 
-**Data flow**: A key comes in → _checked validates its prefix → the backend reads the object → bytes are returned.
+**Data flow**: It validates the conversation id from the URL, returns a not-found JSON error if invalid, then asks the context for the file list and returns each file entry as JSON.
 
-**Call relations**: This is the fleet-safe wrapper around backend get. It uses _checked as the namespace gate before storage access.
+**Call relations**: The router invokes this when the frontend opens the files panel for a conversation. It prepares the list that workspace_file can later use when the user chooses a specific file.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 2 internal fn (list_workspace_files, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `FleetBlobStore.exists`  (lines 500–501)
+##### `workspace_file`  (lines 143–153)
 
 ```
-async def exists(self, key: str) -> bool
+async def workspace_file(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Checks whether a deployment-owned blob exists under an allowed fleet prefix. It blocks checks against workspace or unknown key areas.
+**Purpose**: Streams the contents of one workspace file back to the operator. It is used when the debugger user clicks or downloads a specific file.
 
-**Data flow**: A key comes in → _checked confirms it is in an allowed fleet namespace → the backend checks existence → true or false is returned.
+**Data flow**: It validates the conversation id, reads the requested file path from the URL, and asks the context for a byte stream. If the id is invalid, the path is rejected, or the file is missing, it returns a JSON not-found error. If the file exists, it sends the bytes as an octet-stream response, which means generic binary data.
 
-**Call relations**: This wraps backend exists. The prefix check happens first, so the backend is only asked about approved shared keys.
+**Call relations**: The frontend calls this after listing files with workspace_files. The function relies on SurfaceContext to find and open the file safely, then uses StreamingResponse so large files do not need to be loaded into memory all at once.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 2 internal fn (read_workspace_file, _uuid_param); 2 external calls (JSONResponse, StreamingResponse).
 
 
-##### `FleetBlobStore.delete`  (lines 503–504)
+##### `turn`  (lines 156–163)
 
 ```
-async def delete(self, key: str) -> None
+async def turn(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Deletes a deployment-owned blob from an allowed fleet namespace. It protects other storage areas from accidental shared-store deletion.
+**Purpose**: Returns detailed information about a single turn. This gives the debugger the main record for one unit of agent work.
 
-**Data flow**: A key comes in → _checked validates the prefix → the backend deletes the object → nothing is returned.
+**Data flow**: It reads and validates the turn id from the URL. If the id is invalid or no turn exists, it returns a not-found JSON error; otherwise it converts the turn detail to JSON and returns it.
 
-**Call relations**: This wraps backend delete. It depends on _checked to enforce the fleet namespace boundary.
+**Call relations**: The router calls this when the frontend opens a specific turn. It uses _uuid_param before asking SurfaceContext for the turn detail.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 2 internal fn (turn_detail, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `FleetBlobStore.get_stream`  (lines 506–507)
+##### `turn_steps`  (lines 166–173)
 
 ```
-def get_stream(self, key: str) -> AsyncIterator[bytes]
+async def turn_steps(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Streams a deployment-owned blob from an allowed shared prefix. This supports large shared payloads without loading them all at once.
+**Purpose**: Returns the individual steps within a turn. This lets an operator inspect the sequence of actions that made up the turn.
 
-**Data flow**: A key comes in → _checked validates it → the backend streaming reader is returned → iterating that stream yields byte chunks.
+**Data flow**: It validates the turn id from the URL, asks the context for that turn’s steps, and returns a not-found JSON error if the id is invalid or the steps cannot be found. When found, it returns the steps as a JSON list.
 
-**Call relations**: This wraps backend get_stream. It performs the fleet prefix check before handing the key to the underlying store.
+**Call relations**: The frontend calls this after selecting a turn and wanting the step-by-step breakdown. It pairs with turn: one gives the overall detail, the other gives the internal sequence.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 2 internal fn (turn_steps, _uuid_param); 1 external calls (JSONResponse).
 
 
-##### `FleetBlobStore.put_stream`  (lines 509–510)
+##### `stream`  (lines 176–181)
 
 ```
-async def put_stream(self, key: str, chunks: AsyncIterator[bytes]) -> None
+async def stream(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Writes streamed bytes into an allowed deployment-owned namespace. It is the large-file version of fleet put.
+**Purpose**: Opens a live event stream for one turn. This lets the debugger watch new activity arrive as the turn runs, instead of repeatedly refreshing.
 
-**Data flow**: A key and chunk stream come in → _checked validates the key prefix → the backend writes the stream → nothing is returned after the stream is saved.
+**Data flow**: It validates the turn id and checks that the turn exists. If not, it returns a not-found JSON error. If it exists, it reads the Last-Event-ID header, which tells where a dropped stream should resume, and returns a streaming Server-Sent Events response produced by _events.
 
-**Call relations**: This wraps backend put_stream. It uses _checked first so streamed writes cannot target workspace-private or unknown areas.
+**Call relations**: The browser calls this for the live turn view. After checking the turn through SurfaceContext, it hands off to _events to continually read live frames and format them for the browser.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 3 internal fn (turn_detail, _events, _uuid_param); 2 external calls (JSONResponse, StreamingResponse).
 
 
-##### `FleetBlobStore.list`  (lines 512–513)
+##### `_events`  (lines 184–187)
 
 ```
-async def list(self, prefix: str) -> tuple[BlobEntry, ...]
+async def _events(ctx: SurfaceContext, turn_id: UUID, since: str) -> AsyncIterator[bytes]
 ```
 
-**Purpose**: Lists deployment-owned blobs below an allowed fleet prefix. It refuses listing requests outside the shared namespaces.
+**Purpose**: Turns the context’s live tail of a turn into a stream of browser-ready event messages. It is the small adapter between internal live frames and the HTTP streaming response.
 
-**Data flow**: A prefix comes in → _checked validates that the prefix is allowed → the backend lists matching objects → BlobEntry records are returned.
+**Data flow**: It receives a context, a turn id, and an optional cursor saying where to resume. It opens the context’s tail stream, then for each incoming cursor-and-frame pair, converts the frame with _sse and yields the resulting bytes.
 
-**Call relations**: This wraps backend list. The prefix check ensures callers cannot use the fleet store to enumerate workspace data.
+**Call relations**: stream calls this when it needs the body of a Server-Sent Events response. _events listens to SurfaceContext.tail and passes every live frame to _sse for formatting.
 
-*Call graph*: calls 1 internal fn (_checked).
+*Call graph*: calls 2 internal fn (tail, _sse); called by 1 (stream).
 
 
-##### `FleetBlobStore._checked`  (lines 515–518)
+##### `_sse`  (lines 190–216)
 
 ```
-def _checked(self, key: str) -> str
+def _sse(cursor: str, frame: LiveFrame) -> bytes
 ```
 
-**Purpose**: Verifies that a fleet-store key starts with one of the approved shared prefixes. This is the main safety rule separating deployment-owned data from workspace data.
+**Purpose**: Formats one live frame as one Server-Sent Events message. It gives each kind of frame a clear event name, such as text, reply, activity, or cost.
 
-**Data flow**: A key comes in → its start is compared with the allowed prefixes → the key is returned unchanged if allowed, or a ValueError is raised if not.
+**Data flow**: It receives a cursor and a LiveFrame object. If there is a cursor, it writes it as the event id. It then checks what kind of frame it is, serializes the frame to JSON, and returns the exact bytes the browser expects for one SSE event. If it sees a frame kind this debugger does not know about, it raises an error instead of silently mislabeling it.
 
-**Call relations**: Every FleetBlobStore operation calls this before delegating to the backend. It is the guardrail that makes the unprefixed fleet handle safe to expose.
+**Call relations**: _events calls this for every live frame coming from SurfaceContext.tail. Its output is yielded directly into the StreamingResponse opened by stream, so the browser receives these messages as the live debugger feed.
 
-*Call graph*: called by 7 (delete, exists, get, get_stream, list, put, put_stream).
+*Call graph*: called by 1 (_events); 1 external calls (model_dump_json).
 
 
-##### `blob_store_for`  (lines 521–533)
+##### `_uuid_param`  (lines 219–223)
 
 ```
-def blob_store_for(config: BlobConfig) -> FilesystemBlobStore | S3BlobStore
+def _uuid_param(request: Request, name: str) -> UUID | None
 ```
 
-**Purpose**: Builds the actual blob storage backend described by configuration. It chooses local filesystem storage or S3 storage and checks that the needed settings are present.
+**Purpose**: Safely reads a UUID value from a route parameter. UUIDs are standard unique identifiers; this helper keeps bad URL values from causing confusing downstream reads.
 
-**Data flow**: A BlobConfig comes in → its backend name is inspected → required fields such as root or bucket are checked → a FilesystemBlobStore or S3BlobStore instance is returned.
+**Data flow**: It takes a request and the name of a path parameter, tries to convert that parameter into a UUID object, and returns the UUID if conversion works. If the value is not a valid UUID string, it returns None.
 
-**Call relations**: Startup or configuration wiring code uses this to turn settings into a usable backend. WorkspaceBlobStore and FleetBlobStore can then wrap the returned store to add namespace rules.
+**Call relations**: Many endpoint handlers call this before asking SurfaceContext for a conversation or turn. By centralizing the parsing rule, those handlers can all respond consistently with not-found errors when the URL id is malformed.
 
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: called by 9 (compaction_record, conversation_compactions, conversation_transcript, conversation_turns, stream, turn, turn_steps, workspace_file, workspace_files); 1 external calls (UUID).
 
 
-### Database access and durability
-Provides workspace-scoped database entry points and version-tolerant object persistence for durable workflow replay.
+### External billing integrations
+Metronome and Stripe integration exports usage, exposes billing status, creates portal links, and supports automatic prepaid refills.
 
-### `core/src/ufo/db.py`
+### `extensions/metronome/ufo_ext_metronome.py`
 
-`io_transport` · `startup, request handling, background jobs, migrations, teardown`
+`domain_logic` · `scheduled jobs, chat tool calls, and billing page requests`
 
-This file protects the boundary between workspaces, which are separate customer or project areas sharing one running service. Its main job is to make database access safe by requiring normal code to use `workspace_tx`, a transaction helper that pins the current workspace onto that database transaction. In PostgreSQL, this supports row-level security, meaning the database itself refuses rows from the wrong workspace. If no workspace was set, access fails closed instead of accidentally showing shared data.
+This extension is the bridge between UFO’s internal accounting and outside billing tools. Metronome receives usage records so people can see and price what a workspace used. Stripe stores payment methods and charges cards when a workspace has automatic refills turned on. Without this file, settled usage would not be shipped to Metronome, admins would have no built-in way to open the billing portal, and prepaid balances could not be topped up from a saved card.
 
-The file also keeps database connection pools. A pool is like a small taxi stand for database connections: callers borrow a connection, use it, and return it, instead of creating a new one every time. Because Python event loops cannot safely share async database connections, this file keeps one engine per event loop and database URL.
+The file has three main jobs. First, the usage shipper wakes up on a schedule, reads settled usage exports from core, turns them into Metronome ingest events, confirms the workspace exists as a Metronome customer alias, sends the batch, and only then marks the exports as acknowledged. This order is important: if the process crashes, the same event can be resent without double-counting.
 
-There is one deliberate exception to workspace-scoped access: `owner_tx`. Background sweeps use it to list work across all workspaces, then switch back into each workspace before reading its real contents.
+Second, the billing tool lets a workspace admin ask through chat for status, a Stripe portal link, or automatic refill settings. It checks that the speaker is an admin before doing anything.
 
-The file also covers practical operations: checking at startup that the database is reachable, disposing connections during shutdown or tests, running Alembic migrations that update the database schema, and tuning SQLite so local/test databases behave predictably under concurrent writes.
+Third, the top-up job checks workspaces that have refill rules. If the balance is low and a saved card exists, it creates a Stripe payment and credits the balance only after the payment succeeds. It slows down retries after missing cards or declined cards to avoid noisy and costly repeated attempts.
 
 #### Function details
 
-##### `_build_engine`  (lines 101–111)
+##### `StripeError.__init__`  (lines 186–188)
 
 ```
-def _build_engine(url: str, pool: _Pool) -> AsyncEngine
+def __init__(self, message: str, status: int=0) -> None
 ```
 
-*Call graph*: calls 1 internal fn (_pool_kwargs); called by 2 (_engine_for, verify_db_reachable); 1 external calls (create_async_engine).
+**Purpose**: Creates an error object for a failed Stripe call and keeps the HTTP status code with it. The status is useful later because a declined card, an in-progress request, and a server problem need different reactions.
+
+**Data flow**: It receives an error message and an optional status code. It stores the message in the normal exception machinery and saves the status on the object. The result is an exception that callers can inspect after catching it.
+
+**Call relations**: The shared Stripe request helper raises this error when Stripe answers with a non-success response. Balance top-up code later uses the saved status to decide whether to wait, treat the card as declined, or raise the failure.
+
+*Call graph*: called by 1 (_stripe).
 
 
-##### `_pool_kwargs`  (lines 114–134)
-
-```
-def _pool_kwargs(url: str, pool: _Pool) -> dict[str, Any]
-```
-
-*Call graph*: calls 1 internal fn (_driver_kwargs); called by 1 (_build_engine); 1 external calls (make_url).
-
-
-##### `_driver_kwargs`  (lines 137–164)
+##### `UsageShipper.run`  (lines 218–244)
 
 ```
-def _driver_kwargs(driver: str, pool: _Pool) -> dict[str, Any]
+async def run(self) -> None
 ```
 
-*Call graph*: called by 1 (_pool_kwargs).
+**Purpose**: Sends one workspace’s settled usage records to Metronome in safe batches. It is designed so that a crash or retry does not lose usage or bill it twice.
+
+**Data flow**: It first reads the Metronome token from the environment, then finds the workspace’s fixed backfill floor. It repeatedly asks core for pending usage exports, warns if they are getting too old, ensures Metronome has a customer alias for the workspace, converts exports into ingest events, sends them, logs success, and acknowledges the exports only after Metronome accepts them. It stops when there is no more work or the last batch is smaller than the batch limit.
+
+**Call relations**: The scheduled shipping entry point creates a UsageShipper and calls this method. During its loop it relies on _floor for the cutoff date, _note_usage_aging_out for warnings, _ensure_metronome_customer before sending, _events to build the payload, and _ingest to make the actual Metronome call.
+
+*Call graph*: calls 6 internal fn (_events, _floor, _note_usage_aging_out, _ensure_metronome_customer, _ingest, _require_env); 1 external calls (log).
 
 
-##### `_engine_for`  (lines 167–183)
-
-```
-def _engine_for(url: str, pool: _Pool) -> AsyncEngine
-```
-
-*Call graph*: calls 1 internal fn (_build_engine); called by 2 (owner_tx, workspace_tx); 1 external calls (get_running_loop).
-
-
-##### `init_db`  (lines 186–190)
+##### `UsageShipper._floor`  (lines 246–256)
 
 ```
-def init_db(url: str) -> None
+async def _floor(self) -> datetime
 ```
 
+**Purpose**: Finds or creates the earliest date from which this workspace’s usage should be shipped. This prevents the first run from trying to backfill too far into the past.
 
-##### `init_owner_db`  (lines 193–207)
+**Data flow**: It reads a stored floor value from the extension store. If none exists, it writes a new timestamp equal to now minus the configured backfill window. It returns a datetime that the shipper uses when asking core for pending exports.
 
-```
-def init_owner_db(url: str) -> None
-```
+**Call relations**: UsageShipper.run calls this before touching the usage export queue. The returned floor becomes the boundary for what core is allowed to mint and return as pending usage.
 
-
-##### `verify_db_reachable`  (lines 210–230)
-
-```
-async def verify_db_reachable() -> None
-```
-
-*Call graph*: calls 1 internal fn (_build_engine).
+*Call graph*: called by 1 (run); 3 external calls (fromisoformat, now, timedelta).
 
 
-##### `dispose_db`  (lines 233–256)
+##### `UsageShipper._note_usage_aging_out`  (lines 258–279)
 
 ```
-async def dispose_db() -> None
+def _note_usage_aging_out(self, exports: tuple[UsageExport, ...]) -> None
 ```
 
-*Call graph*: calls 1 internal fn (_hand_off); 1 external calls (get_running_loop).
+**Purpose**: Warns operators when pending usage is older than Metronome’s backdating window. This does not fix the backlog, but it makes silent revenue loss visible.
+
+**Data flow**: It receives a batch of usage exports, finds the oldest event time, compares it with the allowed backfill window, and either does nothing or writes a warning log with the workspace, oldest time, and batch size.
+
+**Call relations**: UsageShipper.run calls this after reading each batch and before sending it. It uses _rfc3339 to format the timestamp for the warning.
+
+*Call graph*: calls 1 internal fn (_rfc3339); called by 1 (run); 3 external calls (now, timedelta, warn).
 
 
-##### `_hand_off`  (lines 259–266)
-
-```
-def _hand_off(loop: asyncio.AbstractEventLoop, engine: AsyncEngine) -> None
-```
-
-*Call graph*: called by 1 (dispose_db); 1 external calls (call_soon_threadsafe).
-
-
-##### `_dispose_on_this_loop`  (lines 269–276)
+##### `UsageShipper._events`  (lines 281–300)
 
 ```
-def _dispose_on_this_loop(engine: AsyncEngine) -> None
+def _events(self, exports: tuple[UsageExport, ...]) -> list[dict[str, object]]
 ```
 
-*Call graph*: 2 external calls (ensure_future, dispose).
+**Purpose**: Turns UFO usage export records into the exact event objects Metronome expects. Each event includes a stable transaction ID so resending the same export is safe.
+
+**Data flow**: It receives settled usage exports and reads the current workspace ID. For each export it builds a dictionary with the transaction ID, customer alias, timestamp, model, dimension, amount, price details, turn ID, and whether the usage was bring-your-own-key. It returns a list of event dictionaries ready for Metronome ingest.
+
+**Call relations**: UsageShipper.run calls this immediately before _ingest. It uses _rfc3339 so event timestamps are formatted consistently.
+
+*Call graph*: calls 1 internal fn (_rfc3339); called by 1 (run).
 
 
-##### `dispose_loop_engines`  (lines 279–289)
-
-```
-async def dispose_loop_engines() -> None
-```
-
-*Call graph*: 1 external calls (get_running_loop).
-
-
-##### `_stopping`  (lines 292–299)
+##### `_ship`  (lines 303–304)
 
 ```
-def _stopping() -> bool
+async def _ship(ctx: ExtensionContext) -> None
 ```
 
-*Call graph*: called by 1 (_opened); 1 external calls (current_task).
+**Purpose**: Acts as the scheduled job wrapper for usage shipping. It exists so the extension manifest can register a simple job handler.
 
+**Data flow**: It receives an extension context for one workspace. It creates a UsageShipper using that context and the configured ingest transport, then awaits the shipper’s run. It returns nothing after the workspace’s pending usage has been drained or skipped by errors.
 
-##### `_opened`  (lines 303–381)
-
-```
-async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]
-```
-
-*Call graph*: calls 1 internal fn (_stopping); called by 2 (owner_tx, workspace_tx); 8 external calls (Lock, ensure_future, shield, AsyncExitStack, begin, monotonic, emit_histogram, emit_metric).
-
-
-##### `workspace_tx`  (lines 385–395)
-
-```
-async def workspace_tx() -> AsyncIterator[AsyncConnection]
-```
-
-*Call graph*: calls 2 internal fn (_engine_for, _opened); 1 external calls (text).
-
-
-##### `failed_statement`  (lines 398–418)
-
-```
-def failed_statement(error: BaseException) -> dict[str, str]
-```
-
-
-##### `owner_tx`  (lines 422–435)
-
-```
-async def owner_tx() -> AsyncIterator[AsyncConnection]
-```
-
-*Call graph*: calls 2 internal fn (_engine_for, _opened).
-
-
-##### `apply_migrations`  (lines 438–476)
-
-```
-def apply_migrations(url: str, pack: str | None=None) -> None
-```
-
-*Call graph*: calls 1 internal fn (_seal_sqlite_journal); 7 external calls (__init__, upgrade, from_config, Path, migration_locations, catch_warnings, simplefilter).
-
-
-##### `_seal_sqlite_journal`  (lines 479–495)
-
-```
-def _seal_sqlite_journal(url: str) -> None
-```
-
-*Call graph*: called by 1 (apply_migrations); 2 external calls (make_url, connect).
-
-
-##### `core_migration_head`  (lines 498–506)
-
-```
-def core_migration_head() -> str
-```
-
-*Call graph*: 2 external calls (__init__, from_config).
-
-
-##### `_sqlite_on_connect`  (lines 509–515)
-
-```
-def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None
-```
-
-
-##### `_sqlite_begin_immediate`  (lines 518–520)
-
-```
-def _sqlite_begin_immediate(connection: sa.Connection) -> None
-```
-
-*Call graph*: 1 external calls (exec_driver_sql).
-
-
-### `core/src/ufo/durability.py`
-
-`io_transport` · `cross-cutting: database persistence, replay, and recovery`
-
-DBOS stores workflow inputs, step results, and errors in a system database so work can be replayed after a crash or deployment. The tricky part is that the code reading the saved data may not be exactly the same code that wrote it. A normal Python pickle, which is Python’s built-in object-freezing format, can restore a Pydantic model as raw internal data without running the model’s normal validation and default-filling logic. That means a field added later might simply be missing, causing a confusing failure much later during replay.
-
-This file fixes that by creating a custom serializer called `ReplaySafeSerializer`. When it sees a Pydantic `BaseModel`, it saves two things: the model’s class and its current field values. When the object is loaded again, `_rebuild` reconstructs it through Pydantic’s `model_validate`, which is like sending the saved fields back through the model’s front door. New fields can get their current defaults, removed fields can be ignored, and truly required missing fields fail in a clearer place.
-
-The file also provides `replay_safe_client`, the project’s intended way to create a `DBOSClient`. This matters because DBOS records the serializer name with stored rows. If a client is not built with this serializer, it may not decode the stored data correctly.
-
-#### Function details
-
-##### `replay_safe_client`  (lines 27–31)
-
-```
-def replay_safe_client(system_database_url: str) -> DBOSClient
-```
-
-**Purpose**: Creates a DBOS client that knows how to read and write this project’s replay-safe saved data. Someone uses this instead of constructing `DBOSClient` directly so database rows are recorded and decoded with the right serializer name.
-
-**Data flow**: It takes a system database URL as input. It creates a new `ReplaySafeSerializer`, passes both the URL and serializer into `DBOSClient`, and returns the ready-to-use client. The database connection information stays the same, but the client is now equipped to encode and decode this project’s saved workflow data.
-
-**Call relations**: This is the front door for DBOS client creation in this file. It calls `ReplaySafeSerializer.__init__` to make the serializer and then hands that serializer to the external `dbos.DBOSClient`, so later database reads and writes use the custom replay-safe format.
-
-*Call graph*: 2 external calls (__init__, DBOSClient).
-
-
-##### `_rebuild`  (lines 34–35)
-
-```
-def _rebuild(model_class: type[BaseModel], fields: dict[str, object]) -> BaseModel
-```
-
-**Purpose**: Recreates a saved Pydantic model from its class and saved field values. It exists so old stored model data is rebuilt using today’s model rules, including defaults and validation.
-
-**Data flow**: It receives a Pydantic model class and a dictionary of field names to saved values. It asks the model class to validate those fields through `model_validate`, and returns the newly constructed model object. The saved raw field data becomes a normal current-version model instance.
-
-**Call relations**: This function is used indirectly by pickle recordings made by `_ModelPickler.reducer_override`. The pickle stores a reference to `_rebuild` by module and function name, so during deserialization Python calls it to reconstruct Pydantic models safely.
-
-
-##### `_ModelPickler.reducer_override`  (lines 39–42)
-
-```
-def reducer_override(self, obj: object) -> tuple[Callable[..., object], tuple[object, ...]]
-```
-
-**Purpose**: Changes how Pydantic models are written into pickle data. Instead of letting pickle freeze the model’s private internal state, it tells pickle to save enough information to rebuild the model cleanly later.
-
-**Data flow**: It receives each object the pickler is about to serialize. If the object is a Pydantic `BaseModel`, it returns instructions saying: save the model’s class and a plain dictionary of its fields, then rebuild it later with `_rebuild`. If the object is not a Pydantic model, it returns `NotImplemented`, which tells pickle to use its normal behavior.
-
-**Call relations**: This method is called by Python’s pickle machinery while `ReplaySafeSerializer.serialize` is dumping data. It hands Pydantic models off to `_rebuild` for future loading, while leaving non-model objects to ordinary pickle behavior.
-
-
-##### `ReplaySafeSerializer.name`  (lines 48–49)
-
-```
-def name(self) -> str
-```
-
-**Purpose**: Returns the stable name DBOS uses to label data written with this serializer. This name is important because stored database rows need to be matched with the same decoding method later.
-
-**Data flow**: It takes no outside data beyond the serializer object itself. It returns the constant string `ufo_pickle`. Nothing else is changed.
-
-**Call relations**: DBOS calls this as part of its serializer interface when recording or reading serialized rows. The name connects database records to `ReplaySafeSerializer.serialize` and `ReplaySafeSerializer.deserialize` across future replays.
-
-
-##### `ReplaySafeSerializer.serialize`  (lines 51–54)
-
-```
-def serialize(self, data: object) -> str
-```
-
-**Purpose**: Turns a Python object into a text string that can be stored in the database. It uses the custom pickler so Pydantic models are saved in a replay-safe way.
-
-**Data flow**: It receives any Python object. It creates an in-memory byte buffer, uses `_ModelPickler` to pickle the object into that buffer, then base64-encodes the bytes into ordinary UTF-8 text. The result is a database-friendly string containing the saved object.
-
-**Call relations**: DBOS uses this method when it needs to persist workflow data. Inside, it creates `_ModelPickler`, whose `reducer_override` supplies the special Pydantic-model behavior, and it uses `io.BytesIO` and `base64.b64encode` to turn binary pickle data into safe text.
-
-*Call graph*: 3 external calls (__init__, b64encode, BytesIO).
-
-
-##### `ReplaySafeSerializer.deserialize`  (lines 56–57)
-
-```
-def deserialize(self, serialized_data: str) -> object
-```
-
-**Purpose**: Turns a stored text string back into the original Python object. For Pydantic models saved by this serializer, loading triggers the safer rebuild path rather than restoring stale internal model state.
-
-**Data flow**: It receives a base64 text string from storage. It decodes that text back into pickle bytes, then asks Python’s pickle loader to reconstruct the object. The output is the restored Python value, with Pydantic models rebuilt through `_rebuild` when the pickle data calls for it.
-
-**Call relations**: DBOS uses this method when reading persisted workflow data during normal operation or replay. It relies on `base64.b64decode` to recover the stored bytes and `pickle.loads` to rebuild objects, which may call `_rebuild` for Pydantic models recorded by `ReplaySafeSerializer.serialize`.
-
-*Call graph*: 2 external calls (b64decode, loads).
-
-
-### Cursor pagination
-Implements stable cursor-based paging for portal lists so rows can be browsed without skips or duplicates.
-
-### `core/src/ufo/listings.py`
-
-`domain_logic` · `request handling`
-
-This file solves a common listing problem: how to show page after page of items while the underlying data may be changing. Instead of using offset paging, which says 'skip the first 20 rows' and can go wrong if a new row appears, it uses keyset paging. That means each page starts from a real item position, like placing a bookmark in a stack of papers.
-
-Every listing is ordered the same way: newest first, using `created_at` and then the row id to break ties. The tie-breaker matters because two rows can have the same timestamp. A cursor stores both pieces, so the next page can start exactly before or after that row.
-
-`ListingCursor` is the bookmark. It can be encoded into a string safe for a query parameter and decoded back. Bad cursor strings raise `MalformedCursor` instead of silently showing the wrong page.
-
-`page_query` prepares a SQLAlchemy database query for one page. SQLAlchemy is the library used to build database queries in Python. It asks for one extra row beyond the requested limit so the code can tell whether another page exists.
-
-`page_of` then turns those raw rows into a `ListingPage`: the visible rows plus optional cursors for moving older or newer. When walking toward newer rows, it temporarily queries in the opposite order for efficiency, then reverses the page back so users still see newest-first results.
-
-#### Function details
-
-##### `ListingCursor.encode`  (lines 42–45)
-
-```
-def encode(self) -> str
-```
-
-**Purpose**: This turns a cursor into a single text token that can be placed in a URL or request parameter. It records whether the cursor points toward newer or older items, plus the timestamp and item id that mark the page boundary.
-
-**Data flow**: It starts with a `ListingCursor` object containing a creation time, an item id, and a newer-or-older direction. It chooses the word `newer` or `older`, joins that with the timestamp and id using `|`, and returns the resulting string. It does not change anything else.
-
-**Call relations**: This is used when a listing response needs to give the client a navigation token. The matching `ListingCursor.decode` function later reads that token back when the client asks for another page.
-
-
-##### `ListingCursor.decode`  (lines 48–60)
-
-```
-def decode(cls, token: str) -> 'ListingCursor'
-```
-
-**Purpose**: This reads a cursor token from a request and turns it back into a `ListingCursor`. It protects the listing from bad or invented tokens by raising `MalformedCursor` when the text does not describe a valid position.
-
-**Data flow**: It receives a text token. It splits the token into direction, timestamp, and item id, checks that the direction is either `newer` or `older`, parses the timestamp, and verifies that the id is a valid UUID, which is a standard unique identifier format. If all parts are valid, it returns a cursor object; if not, it raises `MalformedCursor`.
-
-**Call relations**: A web surface for workspace memory calls this when a user follows a listing link with a cursor. After decoding succeeds, that cursor can be passed into the paging flow; if decoding fails, the caller can report a client error instead of guessing what page was intended.
-
-*Call graph*: called by 1 (workspace_memory); 3 external calls (__init__, fromisoformat, UUID).
-
-
-##### `page_query`  (lines 74–96)
-
-```
-def page_query(query: sa.Select[Any], cursor: ListingCursor | None, limit: int, *, created_at: sa.ColumnElement[datetime], ident: sa.ColumnElement[Any]) -> sa.Select[Any]
-```
-
-**Purpose**: This prepares a database query so it returns exactly the slice of rows needed for one page of a listing. It applies the shared newest-first ordering and uses the cursor as a boundary when the user is moving through pages.
-
-**Data flow**: It receives a SQLAlchemy query, an optional cursor, a page size limit, and the two database columns that define the listing position: creation time and id. It orders the query newest-first for normal paging, or oldest-first temporarily when walking toward newer rows. If there is a cursor, it adds a comparison so only rows beyond that cursor are returned. It asks for `limit + 1` rows, so later code can tell whether another page exists.
-
-**Call relations**: Listing code calls this before talking to the database. Its output is still a query, not the final page; after the database returns rows, `page_of` uses the rows and the same cursor direction to build the user-facing page envelope.
-
-*Call graph*: 2 external calls (tuple_, UUID).
-
-
-##### `page_of`  (lines 99–128)
-
-```
-def page_of(rows: Sequence[SourceT], cursor: ListingCursor | None, limit: int, *, render: Callable[[SourceT], RowT], position: Callable[[SourceT], tuple[datetime, str]]) -> ListingPage[RowT]
-```
-
-**Purpose**: This turns database rows from `page_query` into a finished listing page. It renders each raw row into the caller's public row shape and adds optional cursors for moving to older or newer pages.
-
-**Data flow**: It receives the rows returned from the database, the cursor that led here, the requested limit, a `render` function for converting raw rows into output rows, and a `position` function for reading each row's timestamp and id. It checks whether an extra row was returned, trims the page to the requested limit, reverses rows if the query had walked toward newer items, and creates boundary cursors from the first and last visible rows. It returns a `ListingPage` containing the rendered rows and whichever navigation cursors truly exist.
-
-**Call relations**: This is the second half of the paging flow after `page_query`. It uses its helper `page_of.at` to create cursors for page boundaries, then returns a `ListingPage` for the calling listing endpoint or service to send onward.
+**Call relations**: The manifest registers this as the usage shipping job. Its only job is to hand control to UsageShipper.run.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `page_of.at`  (lines 118–120)
+##### `BillingConfig.from_env`  (lines 322–339)
 
 ```
-def at(source: SourceT, *, newer: bool) -> ListingCursor
+def from_env(cls) -> 'BillingConfig'
 ```
 
-**Purpose**: This small helper creates a `ListingCursor` for one row in the page. It is used to mark the first or last visible row as the place where the next navigation step should begin.
+**Purpose**: Reads the required Stripe and Metronome settings from environment variables. It fails early if billing is only partly configured.
 
-**Data flow**: It receives one source row and a direction flag saying whether the cursor should point toward newer items. It calls the provided `position` function to extract the row's creation time and id, then returns a new `ListingCursor` with those values.
+**Data flow**: It checks the environment for the Stripe secret key, Stripe portal configuration ID, and Metronome bearer token. If any are missing, it raises an error naming all missing variables. Otherwise it returns a frozen BillingConfig object containing the three values.
 
-**Call relations**: This helper lives inside `page_of` because it depends on the caller-provided way to read a row's position. `page_of` calls it when building the `older` and `newer` cursors for the final `ListingPage`.
+**Call relations**: Billing tool calls, billing status reads, portal creation, and balance top-up use this before talking to Stripe or Metronome billing-related APIs. Usage shipping reads its Metronome token separately so usage reporting can be configured independently.
+
+
+##### `_billing_record`  (lines 352–354)
+
+```
+async def _billing_record(ctx: ExtensionContext) -> BillingRecord | None
+```
+
+**Purpose**: Reads the saved Stripe customer ID for a workspace, if one has been created. This is the local pointer that connects a UFO workspace to its Stripe customer.
+
+**Data flow**: It asks the extension store for the billing record. If nothing is stored, it returns None. If data is present, it validates it as a BillingRecord and returns the record with the Stripe customer ID.
+
+**Call relations**: Billing status, portal creation, autopay setup, top-up, and the billing page all call this when they need to know whether the workspace already has a Stripe customer.
+
+*Call graph*: called by 5 (run, _billing_autopay, _billing_portal, _billing_projection, _billing_status).
+
+
+##### `manage_billing`  (lines 377–386)
+
+```
+async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResult
+```
+
+**Purpose**: Implements the chat-facing billing action for workspace admins. It routes an admin’s request to status, portal, or autopay behavior.
+
+**Data flow**: It receives a tool context and parsed billing arguments. It verifies admin access, loads billing configuration from the environment, chooses the requested operation, and returns a ToolResult from the matching helper.
+
+**Call relations**: The tool definition registered in the manifest points to this function. It first calls _admin_billing, then hands off to _billing_status, _billing_portal, or _billing_autopay depending on the requested operation.
+
+*Call graph*: calls 4 internal fn (_admin_billing, _billing_autopay, _billing_portal, _billing_status).
+
+
+##### `_billing_autopay`  (lines 389–420)
+
+```
+async def _billing_autopay(ext: ExtensionContext, config: BillingConfig, args: ManageBillingInput) -> ToolResult
+```
+
+**Purpose**: Sets or stops automatic prepaid balance refills for a workspace. It makes sure a card is already saved before promising future unattended charges.
+
+**Data flow**: It receives the workspace context, billing config, and requested refill numbers. If only one of the two required numbers is provided, it raises an error. If both are omitted, it clears the refill rule. If both are present, it checks for a billing record and a default Stripe payment method, converts dollars into micro-dollars, stores the refill rule in core, clears prior refusal state, bumps an attempt marker, logs the change, and returns the new settings as JSON text.
+
+**Call relations**: manage_billing calls this for the autopay operation. It uses _billing_record and _default_payment_method to confirm the card, set_auto_topup inside a transaction to write the rule, and _text_result to return a tool-friendly answer.
+
+*Call graph*: calls 4 internal fn (transaction, _billing_record, _default_payment_method, _text_result); called by 1 (manage_billing); 2 external calls (set_auto_topup, log).
+
+
+##### `_admin_billing`  (lines 423–429)
+
+```
+async def _admin_billing(ctx: ToolContext) -> ExtensionContext
+```
+
+**Purpose**: Checks that the billing tool is being used by a real workspace admin. This prevents ordinary members or anonymous requests from changing billing.
+
+**Data flow**: It receives a tool context. It rejects the call if there is no speaking member or if the speaker is not an admin. If checks pass, it returns the extension context attached to the tool call.
+
+**Call relations**: manage_billing calls this before loading billing configuration or performing any billing operation. It relies on the ToolContext admin check supplied by core.
+
+*Call graph*: calls 1 internal fn (speaker_is_admin); called by 1 (manage_billing).
+
+
+##### `_billing_status`  (lines 432–456)
+
+```
+async def _billing_status(ext: ExtensionContext, config: BillingConfig) -> ToolResult
+```
+
+**Purpose**: Reports the workspace’s balance and whether Stripe currently has a default payment method. It answers what is true now rather than trusting a cached local card flag.
+
+**Data flow**: It reads the workspace balance from core inside a transaction. It then reads the local billing record and, if present, asks Stripe whether the customer has a default payment method. It returns JSON text containing card presence and balance figures, using null values if the workspace has no balance record.
+
+**Call relations**: manage_billing calls this for the status operation. It uses _billing_record and _default_payment_method for the Stripe side, read_balance for the core balance, and _text_result for the tool response.
+
+*Call graph*: calls 4 internal fn (transaction, _billing_record, _default_payment_method, _text_result); called by 1 (manage_billing); 1 external calls (read_balance).
+
+
+##### `_billing_portal`  (lines 459–481)
+
+```
+async def _billing_portal(ext: ExtensionContext, config: BillingConfig) -> ToolResult
+```
+
+**Purpose**: Creates a short-lived Stripe Customer Portal link for a workspace admin. The portal is where admins save payment methods and view billing details.
+
+**Data flow**: It reads the workspace ID and any saved billing record. If no Stripe customer is recorded, it creates one through Stripe and stores the resulting customer ID. It then asks Stripe for a portal session URL with a return link back to UFO’s billing screen, logs the event, and returns the URL plus customer ID as JSON text.
+
+**Call relations**: manage_billing calls this for the portal operation. It may call _stripe_customer to create the Stripe customer, then _portal_session to make the link, and _text_result to format the tool result.
+
+*Call graph*: calls 5 internal fn (home_url, _billing_record, _portal_session, _stripe_customer, _text_result); called by 1 (manage_billing); 2 external calls (__init__, log).
+
+
+##### `_text_result`  (lines 484–485)
+
+```
+def _text_result(payload: dict[str, object]) -> ToolResult
+```
+
+**Purpose**: Wraps a small JSON payload as a tool result that the chat/tool system can return. It is a formatting helper for billing actions.
+
+**Data flow**: It receives a dictionary, converts it to a JSON string, places that string into a TextContent object, and returns a ToolResult containing that text.
+
+**Call relations**: _billing_status, _billing_portal, and _billing_autopay all use this so their structured answers are returned in the same simple text form.
+
+*Call graph*: called by 3 (_billing_autopay, _billing_portal, _billing_status); 3 external calls (__init__, __init__, dumps).
+
+
+##### `_require_env`  (lines 499–503)
+
+```
+def _require_env(name: str) -> str
+```
+
+**Purpose**: Reads one required environment variable and raises a clear error if it is missing. It is used for settings that must exist before work can safely begin.
+
+**Data flow**: It receives an environment variable name, looks up its value, and returns the non-empty string. If the variable is absent or empty, it raises a RuntimeError naming the missing setting.
+
+**Call relations**: UsageShipper.run calls this before reading pending usage exports, so an unconfigured Metronome token does not cause the system to mint export intents that cannot be shipped.
+
+*Call graph*: called by 1 (run).
+
+
+##### `_stripe_customer`  (lines 506–523)
+
+```
+async def _stripe_customer(config: BillingConfig, workspace_id: UUID, transport: httpx.AsyncBaseTransport | None) -> str
+```
+
+**Purpose**: Creates or reuses the Stripe Customer for a workspace. It uses a stable idempotency key, meaning a repeated create request settles on the same customer instead of making duplicates.
+
+**Data flow**: It receives billing config, a workspace UUID, and an optional HTTP transport. It sends Stripe a customer creation request with a description and workspace metadata. It extracts and returns the customer ID from Stripe’s response, or raises if the response does not contain one.
+
+**Call relations**: _billing_portal calls this when a workspace asks for the billing portal before any Stripe customer has been recorded. It uses _stripe for the HTTP call and _as_str to validate the returned ID.
+
+*Call graph*: calls 2 internal fn (_as_str, _stripe); called by 1 (_billing_portal).
+
+
+##### `_portal_session`  (lines 526–551)
+
+```
+async def _portal_session(config: BillingConfig, customer_id: str, flow: str | None, transport: httpx.AsyncBaseTransport | None, return_url: str | None=None) -> str
+```
+
+**Purpose**: Creates a Stripe Customer Portal session URL. This is the temporary link an admin opens to manage payment methods, invoices, and billing details.
+
+**Data flow**: It receives billing config, a Stripe customer ID, an optional portal flow type, an optional transport, and an optional return URL. It builds the Stripe request data, sends it, extracts the session URL, and returns that URL as a string.
+
+**Call relations**: _billing_portal calls this after it has a Stripe customer. It uses _stripe for the provider request and _as_str to make sure Stripe returned a usable URL.
+
+*Call graph*: calls 2 internal fn (_as_str, _stripe); called by 1 (_billing_portal).
+
+
+##### `_default_payment_method`  (lines 554–566)
+
+```
+async def _default_payment_method(config: BillingConfig, customer_id: str, transport: httpx.AsyncBaseTransport | None) -> str | None
+```
+
+**Purpose**: Asks Stripe whether a customer has a default payment method. This is the source of truth for whether an unattended top-up charge can name a card.
+
+**Data flow**: It receives billing config, a Stripe customer ID, and an optional transport. It fetches the customer from Stripe and looks inside invoice settings for a default payment method string. It returns that method ID or None.
+
+**Call relations**: BalanceTopup.run uses it before charging, _billing_autopay uses it before enabling refills, _billing_status uses it to report card presence, and _card_on_file uses it before fetching card details.
+
+*Call graph*: calls 1 internal fn (_stripe); called by 4 (run, _billing_autopay, _billing_status, _card_on_file).
+
+
+##### `_card_on_file`  (lines 581–596)
+
+```
+async def _card_on_file(config: BillingConfig, customer_id: str, transport: httpx.AsyncBaseTransport | None) -> CardOnFile | None
+```
+
+**Purpose**: Returns the human-recognizable card details for the customer’s default card: brand and last four digits. This is for display, not for charging.
+
+**Data flow**: It receives billing config, a Stripe customer ID, and an optional transport. It first finds the default payment method. If none exists, it returns None. If one exists, it fetches that payment method from Stripe and returns a CardOnFile object when the method contains card brand and last-four data; otherwise it returns None.
+
+**Call relations**: _billing_projection calls this when building the billing page response. It uses _default_payment_method for the method ID and _stripe for the extra Stripe read.
+
+*Call graph*: calls 2 internal fn (_default_payment_method, _stripe); called by 1 (_billing_projection); 1 external calls (__init__).
+
+
+##### `_stripe`  (lines 599–620)
+
+```
+async def _stripe(config: BillingConfig, method: str, path: str, transport: httpx.AsyncBaseTransport | None, data: dict[str, str] | None=None, idempotency_key: str | None=None) -> dict[str, object]
+```
+
+**Purpose**: Performs the low-level HTTP request to Stripe with the right authentication, API version, timeout, and optional idempotency key. It is the shared Stripe transport helper for this file.
+
+**Data flow**: It receives billing config, HTTP method, Stripe path, optional transport, optional form data, and optional idempotency key. It sends the request to Stripe, raises StripeError with status and body if Stripe does not return success, and otherwise returns the JSON response as a dictionary.
+
+**Call relations**: Stripe-specific helpers and BalanceTopup._charge all call this instead of creating their own HTTP requests. It creates StripeError objects when the provider rejects a request.
+
+*Call graph*: calls 1 internal fn (__init__); called by 5 (_charge, _card_on_file, _default_payment_method, _portal_session, _stripe_customer); 1 external calls (AsyncClient).
+
+
+##### `_as_str`  (lines 623–627)
+
+```
+def _as_str(value: object, field: str) -> str
+```
+
+**Purpose**: Checks that a provider response field is a non-empty string. It protects later code from quietly using missing IDs or URLs.
+
+**Data flow**: It receives a value and the field’s plain name for error messages. If the value is a non-empty string, it returns it. Otherwise it raises a ValueError saying the provider response did not carry that field.
+
+**Call relations**: _stripe_customer uses this for Stripe customer IDs, and _portal_session uses it for Stripe portal URLs.
+
+*Call graph*: called by 2 (_portal_session, _stripe_customer).
+
+
+##### `_ensure_metronome_customer`  (lines 630–681)
+
+```
+async def _ensure_metronome_customer(ctx: ExtensionContext, token: str, transport: httpx.AsyncBaseTransport | None) -> None
+```
+
+**Purpose**: Makes sure Metronome has a live customer whose ingest alias is this workspace’s UUID. Without that alias, usage events can be accepted but not attributed to the right customer.
+
+**Data flow**: It receives the extension context, Metronome token, and optional transport. It looks up a customer by the workspace alias. If one exists, it returns. If not, it tries to create one with the alias. It treats permission failures and unresolved conflicts as hard errors, logs successful creation or harmless races, and returns only when the alias is confirmed.
+
+**Call relations**: UsageShipper.run calls this once before sending the first batch in a pass. It calls _customer_by_alias before and sometimes after creation to avoid shipping usage into nowhere.
+
+*Call graph*: calls 1 internal fn (_customer_by_alias); called by 1 (run); 4 external calls (__init__, __init__, AsyncClient, log).
+
+
+##### `_customer_by_alias`  (lines 691–708)
+
+```
+async def _customer_by_alias(http: httpx.AsyncClient, headers: dict[str, str], alias: str) -> str | None
+```
+
+**Purpose**: Looks up the live Metronome customer that owns a given ingest alias. It returns None when no readable live customer is found.
+
+**Data flow**: It receives an HTTP client, headers, and an alias string. It asks Metronome’s customer API for that alias. Permission failures become a special customer-scope error, other failed responses become MetronomeError, and a successful response returns the first customer ID or None.
+
+**Call relations**: _ensure_metronome_customer uses this as its safety check before creating a customer and again after a conflict to distinguish a normal race from an invisible or archived alias holder.
+
+*Call graph*: called by 1 (_ensure_metronome_customer); 3 external calls (__init__, __init__, get).
+
+
+##### `BalanceTopup.run`  (lines 727–810)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Checks whether a workspace needs an automatic balance refill and, if so, charges its saved Stripe card and credits the workspace. It carefully avoids repeated charges or repeated declined-card attempts.
+
+**Data flow**: It reads the workspace’s configured auto-top-up rule. If none exists, it stops. It respects short waits after finding no card and longer waits after a decline. It loads billing config, finds the Stripe customer and default payment method, reads current charged totals, builds an attempt key, and calls _charge. If the charge is in flight or declined, it records the right waiting state. If it succeeds, it credits the workspace balance, marks the top-up verified, records the charge metric, and logs success.
+
+**Call relations**: The scheduled top-up entry point creates BalanceTopup and calls this method. It uses _billing_record and _default_payment_method for Stripe identity, _charge for the payment, and core balance functions to read rules, credit funds, and verify the refill.
+
+*Call graph*: calls 3 internal fn (_charge, _billing_record, _default_payment_method); 9 external calls (fromisoformat, now, count_charge, credit, mark_topup_verified, read_auto_topup, read_balance, log, warn).
+
+
+##### `BalanceTopup._charge`  (lines 812–869)
+
+```
+async def _charge(self, config: BillingConfig, customer_id: str, payment_method: str, wanted: AutoTopup, workspace_id: UUID, attempt: str) -> str | None
+```
+
+**Purpose**: Creates and confirms a Stripe PaymentIntent for one automatic refill. It returns the payment ID only when money actually moved.
+
+**Data flow**: It receives billing config, Stripe customer and payment method IDs, the desired top-up rule, workspace ID, and an attempt string. It converts micro-dollars to cents, sends a Stripe payment request with an idempotency key, and interprets the response. A conflict becomes an in-flight signal, a payment-required status becomes a declined-card result, a succeeded intent returns its ID, and other non-success statuses are raised.
+
+**Call relations**: BalanceTopup.run calls this when it has confirmed that a refill rule and saved card exist. It uses _stripe for the provider call and warns when Stripe declines or returns a non-succeeded payment state.
+
+*Call graph*: calls 1 internal fn (_stripe); called by 1 (run); 2 external calls (__init__, warn).
+
+
+##### `_top_up`  (lines 872–873)
+
+```
+async def _top_up(ctx: ExtensionContext) -> None
+```
+
+**Purpose**: Acts as the scheduled job wrapper for automatic balance refills. It gives the manifest a simple handler for each candidate workspace.
+
+**Data flow**: It receives an extension context, creates a BalanceTopup with that context and billing transport, and waits for its run method. It returns nothing after the top-up check completes.
+
+**Call relations**: The manifest registers this as the balance top-up job. It delegates all real work to BalanceTopup.run.
 
 *Call graph*: 1 external calls (__init__).
 
 
-### Durable transcript I/O
-Reads and writes shared blob-backed conversation transcripts while preventing stale states from overwriting newer ones.
-
-### `core/src/ufo/loop/transcript.py`
-
-`io_transport` · `turn completion and repair republishing`
-
-A conversation transcript is the long-lived record of what has happened in a conversation. This file wraps the low-level blob store, which is a place to save and load chunks of data by key, and gives the rest of the system a simple `Transcript` object for one conversation.
-
-The important safety rule here is that each saved conversation has a `seq`, a sequence number that should move forward over time. Think of it like page numbers in a notebook: page 5 should not be replaced by page 4 after page 5 has already been written. Before saving a new transcript, this file reads the current one. If the current saved transcript is at the same or a later sequence number, the write is ignored. That means the first valid write for a sequence stays authoritative, and late or stale work cannot roll the transcript backward.
-
-The file does not decide what a conversation means. It relies on `ufo.turns.transcript` to turn conversation objects into bytes for storage and back again. Its job is to connect that format to the shared storage system and enforce the monotonic sequence guard.
-
-#### Function details
-
-##### `Transcript.read`  (lines 17–22)
+##### `_ingest`  (lines 876–884)
 
 ```
-async def read(self) -> Conversation | None
+async def _ingest(token: str, events: list[dict[str, object]], transport: httpx.AsyncBaseTransport | None) -> None
 ```
 
-**Purpose**: Reads the saved transcript for this conversation, if one exists. Someone uses this when they need the latest durable conversation record rather than an in-memory copy.
+**Purpose**: Sends a batch of usage events to Metronome’s ingest endpoint. It is the actual network write for usage shipping.
 
-**Data flow**: It starts with the `Transcript` object's blob store and conversation ID. It turns the conversation ID into the storage key, asks the blob store for the saved bytes, and if nothing is found, returns `None`. If bytes are found, it decodes them into a `Conversation` object and returns that.
+**Data flow**: It receives a Metronome bearer token, a list of event dictionaries, and an optional transport. It posts the events with authorization. If Metronome does not return success, it raises MetronomeError; otherwise it returns nothing.
 
-**Call relations**: This is the lookup step used by `Transcript.write` before saving, so the writer can compare sequence numbers and avoid overwriting newer data. It relies on `transcript_key` to find the right blob and `decode` to translate stored bytes back into a conversation.
+**Call relations**: UsageShipper.run calls this after confirming the Metronome customer alias and building events. A successful return lets the shipper acknowledge the exports.
 
-*Call graph*: called by 1 (write); 2 external calls (decode, transcript_key).
-
-
-##### `Transcript.write`  (lines 24–28)
-
-```
-async def write(self, conversation: Conversation) -> None
-```
-
-**Purpose**: Saves a conversation transcript only if it is newer than what is already stored. This protects the durable conversation history from being replaced by stale results.
-
-**Data flow**: It receives a `Conversation` object to save. First it reads the currently stored transcript. If there is already a transcript with a sequence number greater than or equal to the incoming one, it stops without changing storage. Otherwise, it encodes the incoming conversation into bytes and writes those bytes to the blob store under this conversation's transcript key.
-
-**Call relations**: This is called when the system is ready to publish a completed or repaired conversation state. It calls `Transcript.read` to check what is already durable, then uses `encode` and `transcript_key` to store the newer transcript in the shared blob store.
-
-*Call graph*: calls 1 internal fn (read); 2 external calls (encode, transcript_key).
+*Call graph*: called by 1 (run); 2 external calls (__init__, AsyncClient).
 
 
-### Schema contracts
-Declares the schema package, shared runtime record shapes, and the central database table blueprint used across storage, tools, jobs, and migrations.
-
-### `core/src/ufo/schema/__init__.py`
-
-`other` · `import time`
-
-This is an empty package marker file. In Python, a folder can contain an `__init__.py` file to say, “treat this folder as an importable package.” That lets the rest of the project refer to modules inside this directory using names like `ufo.schema.something` instead of relying on raw file paths.
-
-Because this file has no code, it does not create classes, run setup steps, or change data. Its value is structural: it helps organize the project’s schema code under one clear namespace. A schema usually means a description of the shape of data, such as what fields an object should have and what types those fields should be. This file is the front door to that area of the codebase, even though the door itself has no extra instructions written on it.
-
-If it were removed, imports may still work in some modern Python setups, but behavior can vary depending on packaging tools and project layout. Keeping it makes the package boundary explicit and predictable.
-
-
-### `core/src/ufo/schema/records.py`
-
-`data_model` · `cross-cutting`
-
-This file is like the project’s shared paperwork. When a member sends a message, the system turns it into a “turn”: one durable unit of work with an ID, a status, an incoming message, optional context, and eventually a final result. Different parts of the product need to read and write that same record, so this file defines the common shapes and rules.
-
-Most classes are Pydantic models, meaning they are data records that also check their own values when they are created. For example, TurnContext cleans unsafe text from surface-provided fields before they are later rendered into an engine prompt, and it rejects unknown timezone names early. Turn checks that a finished turn always has a matching terminal frame, while a queued or running turn does not.
-
-The file also defines stable ID helpers. These create repeatable UUIDs from workspace, conversation, turn, billing, and reply information. That matters because the system may replay work after a crash or resume a parked turn. Repeatable IDs stop duplicate rows and duplicate user-visible replies.
-
-There is also small product logic for agent icons. New agents get an icon based on their name when possible, while avoiding icons already used in the workspace. Without these shared definitions, surfaces and workers could disagree about statuses, IDs, prompts, terminal results, or validation rules, causing duplicate work, broken rendering, or unsafe context text.
-
-#### Function details
-
-##### `auto_agent_icon`  (lines 176–195)
+##### `_rfc3339`  (lines 887–889)
 
 ```
-def auto_agent_icon(name: str, taken: Collection[str]) -> TablerIcon
+def _rfc3339(moment: datetime) -> str
 ```
 
-**Purpose**: Chooses the starting icon for a new agent. It tries to pick an icon that matches a word in the agent’s name, and otherwise picks a stable-looking random choice from unused icons.
+**Purpose**: Formats a datetime for provider-facing JSON timestamps. If the time has no timezone, it treats it as UTC.
 
-**Data flow**: It receives an agent name and a collection of icons already taken in the workspace. It hashes the name to get a repeatable number, scans the name for known keywords such as “support” or “billing,” and prefers that keyword icon if it is still free. If not, it chooses from the remaining unused icons using the hash; if every icon is taken, it allows a repeat. The output is one valid icon name.
+**Data flow**: It receives a datetime. It leaves timezone-aware values alone, adds UTC to timezone-less values, and returns the ISO-formatted timestamp string.
 
-**Call relations**: This function is used when creating or displaying a new agent that needs a default visual mark. It relies on the standard SHA-256 hash function so the same name tends to get the same icon, while the surrounding agent-creation flow supplies the list of icons already in use.
+**Call relations**: UsageShipper._events uses this for Metronome event timestamps, and UsageShipper._note_usage_aging_out uses it for warning logs.
 
-*Call graph*: 1 external calls (sha256).
-
-
-##### `turn_id_for`  (lines 249–251)
-
-```
-def turn_id_for(workspace_id: UUID, conversation_id: UUID, seq: int) -> UUID
-```
-
-**Purpose**: Builds the stable ID for a turn. A turn is one unit of conversation work, and this ID is also used as the workflow ID so retries can recognize the same work instead of making a duplicate.
-
-**Data flow**: It receives a workspace ID, conversation ID, and sequence number. It combines them into one namespace string and turns that string into a UUID using UUID version 5, which is deterministic: the same inputs always produce the same output. The result is the turn’s UUID.
-
-**Call relations**: This helper is called when a new turn is admitted into the queue or workflow system. It hands back the identity that later storage, workers, and replay logic can all use to refer to exactly the same turn.
-
-*Call graph*: 1 external calls (uuid5).
+*Call graph*: called by 2 (_events, _note_usage_aging_out); 1 external calls (replace).
 
 
-##### `ledger_id_for`  (lines 254–259)
+##### `_billing_request_workspace`  (lines 898–903)
 
 ```
-def ledger_id_for(workspace_id: UUID, turn_id: UUID, dimension: str, attempt: str='') -> UUID
+def _billing_request_workspace(request: Request) -> UUID | None
 ```
 
-**Purpose**: Builds a stable billing ledger ID for one kind of cost within one turn attempt. This prevents billing replay from creating duplicate charges for the same recorded attempt.
+**Purpose**: Identifies which workspace a billing page request belongs to by reading the session cookie. This is the first gate in keeping the billing page private.
 
-**Data flow**: It receives the workspace ID, turn ID, billing dimension, and optionally a run attempt ID. It combines those values into a deterministic UUID string and returns the UUID version 5 result. The output names one billing write for that workspace, turn, dimension, and attempt.
+**Data flow**: It receives an HTTP request, pulls the session cookie, asks the bearer-token helper for the workspace claim, and returns the workspace UUID or None.
 
-**Call relations**: This helper fits into the billing flow after a model run spends tokens or money. The worker can write billing data with this ID, and if the same attempt is replayed, the same ID is produced; if a parked turn later resumes under a new attempt, the new attempt value produces a separate ledger entry.
+**Call relations**: The manifest registers this as the identify function for the billing route. Core uses its answer to bind the request to a workspace before _billing_projection runs.
 
-*Call graph*: 1 external calls (uuid5).
-
-
-##### `mid_turn_reply_id_for`  (lines 262–273)
-
-```
-def mid_turn_reply_id_for(turn_id: UUID, round_index: int, span_index: int, attempt: str='') -> UUID
-```
-
-**Purpose**: Builds a stable ID for a reply spoken before a turn fully ends. This keeps recovered workflows from delivering the same partial reply to the member twice.
-
-**Data flow**: It receives a turn ID, round number, span number, and optionally a run attempt ID. It folds those values into a deterministic UUID version 5. The output identifies one mid-turn reply at one position in one attempt.
-
-**Call relations**: This helper is used by the turn-running flow when it emits user-visible text before the terminal result. Replay of the same attempt creates the same reply ID and can collapse onto the already-delivered record, while a resumed attempt gets different IDs for its new words.
-
-*Call graph*: 1 external calls (uuid5).
+*Call graph*: 1 external calls (workspace_claim).
 
 
-##### `TurnContext._tag_safe_line`  (lines 439–443)
+##### `_billing_projection`  (lines 906–973)
 
 ```
-def _tag_safe_line(cls, value: str | None) -> str | None
+async def _billing_projection(ext: ExtensionContext, request: Request) -> Response
 ```
 
-**Purpose**: Cleans member- or surface-provided context text so it can be safely inserted into prompt context. It removes angle brackets and flattens whitespace so the text cannot pretend to be markup tags.
+**Purpose**: Builds the JSON data shown on the billing screen: balance, stopping threshold, saved card details, autopay settings, and recent purchases. It is read-only and available outside the normal chat turn path.
 
-**Data flow**: It receives an optional string from fields such as sender, question, or source. If the value is missing, it stays missing. Otherwise the function removes “<” and “>”, splits and rejoins whitespace into a single line, and returns the cleaned text; if nothing meaningful remains, it returns nothing.
+**Data flow**: It receives the extension context and request. It verifies the session cookie for this workspace, checks that the email belongs to an admin member, then reads headroom, balance, auto-top-up configuration, and recent purchases from core. If the workspace is not balance-limited, it returns limited false. Otherwise it loads billing config, optionally reads card details from Stripe, tolerates Stripe read failures by marking the card unread, and returns a JSON response with all display fields.
 
-**Call relations**: Pydantic calls this validator automatically when a TurnContext is created. It runs before the engine later renders that context into a prompt, so unsafe surface text is cleaned at the boundary rather than trusted deeper in the system.
+**Call relations**: The billing route registered in the manifest calls this for GET requests. It uses core seat checks and balance reads, _billing_record for the Stripe customer pointer, and _card_on_file for displayable card information.
 
-
-##### `TurnContext._known_zone`  (lines 447–454)
-
-```
-def _known_zone(cls, value: str | None) -> str | None
-```
-
-**Purpose**: Checks that a timezone string is a real IANA timezone name, such as “America/New_York.” This catches bad surface input before a turn starts running.
-
-**Data flow**: It receives an optional timezone string. If it is missing, it returns it unchanged. If present, it asks the system timezone database to load it; success means the original string is returned, while failure becomes a validation error that says the timezone is unknown.
-
-**Call relations**: Pydantic calls this validator when building TurnContext. The surface that admits the turn gets the error early, instead of letting a bad timezone break prompt construction or date handling during the worker’s run.
-
-*Call graph*: 1 external calls (ZoneInfo).
+*Call graph*: calls 3 internal fn (transaction, _billing_record, _card_on_file); 9 external calls (configured_auto_topup, read_balance, read_headroom, recent_purchases, verify_token, JSONResponse, warn, member_by_email, member_is_admin).
 
 
-##### `Turn.spawned`  (lines 488–491)
+##### `manifest`  (lines 976–1014)
 
 ```
-def spawned(self) -> bool
+def manifest() -> Manifest
 ```
 
-**Purpose**: Tells whether this turn was created by another turn rather than directly by a member or scheduler. In plain terms, it answers: “Is this a child task?”
+**Purpose**: Declares this extension to the UFO host: its tools, scheduled jobs, HTTP route, prompt guidance, and credential slot. This is how the rest of the system discovers what the file provides.
 
-**Data flow**: It reads the turn’s parent_turn_id field. If that parent ID is present, it returns true; otherwise it returns false. It does not change the turn.
+**Data flow**: It creates and returns a Manifest object. The manifest includes the manage_billing tool, the usage shipping and balance top-up jobs with their candidate workspace sets, the billing page route, the billing prompt section, and an Anthropic API key credential slot used for bring-your-own-key behavior.
 
-**Call relations**: Other code can read this property when it needs to treat spawned subagent work differently from ordinary turns. It depends on the convention that only the spawn path fills in parent_turn_id.
+**Call relations**: The extension loader calls this to register the extension. The returned manifest points later runtime activity to _ship, _top_up, _billing_projection, and manage_billing.
 
-
-##### `Turn._nothing_created`  (lines 495–498)
-
-```
-def _nothing_created(cls, value: object) -> object
-```
-
-**Purpose**: Normalizes a missing created-objects value into an empty tuple. This lets the rest of the code treat “nothing was created” as an empty list-like value instead of a database null.
-
-**Data flow**: It receives the raw value for created_refs before normal validation. If the database or caller supplied null, it changes that to an empty tuple. Any other value passes through unchanged.
-
-**Call relations**: Pydantic calls this validator while creating a Turn. It protects later turn-resume and cancellation logic from having to special-case a nullable database column whenever no objects were created.
-
-
-##### `Turn._aware_utc`  (lines 502–507)
-
-```
-def _aware_utc(cls, value: datetime | None) -> datetime | None
-```
-
-**Purpose**: Ensures turn timestamps know they are in UTC time. This avoids accidentally treating a database-returned timestamp as local time.
-
-**Data flow**: It receives an optional datetime for created_at or updated_at. If the value is missing, it stays missing. If it already has timezone information, it is returned unchanged. If it lacks timezone information, the function marks it as UTC and returns the corrected datetime.
-
-**Call relations**: Pydantic calls this validator when a Turn is loaded or built. It especially protects paths using database drivers that drop timezone markers, so later code can safely compare and display timestamps.
-
-*Call graph*: 1 external calls (replace).
-
-
-##### `Turn._terminal_matches_status`  (lines 510–515)
-
-```
-def _terminal_matches_status(self) -> 'Turn'
-```
-
-**Purpose**: Checks that a turn’s status and final result agree with each other. A running, queued, or parked turn must not have a terminal frame, and a done, failed, or cancelled turn must have one with the same status.
-
-**Data flow**: It looks at the Turn after all fields have been parsed. If the status is not finished but terminal data exists, or if the status is finished but terminal data is missing, it raises a validation error. If a terminal frame exists but says a different status than the turn itself, it also raises an error. Otherwise it returns the valid Turn unchanged.
-
-**Call relations**: Pydantic calls this model-level validator after constructing a Turn. It enforces the queue contract shared by surfaces, workers, and storage, preventing inconsistent records from entering the rest of the system.
-
-
-### `core/src/ufo/schema/tables.py`
-
-`data_model` · `database setup and all database access`
-
-This file is like the floor plan for the system’s database. It does not store data itself. Instead, it tells SQLAlchemy, a Python library for describing and talking to databases, what rooms exist and what each room is allowed to contain. The shared `metadata` object is the binder that holds all these table definitions together.
-
-The tables cover the main things the product needs to remember: workspaces, members, agents, conversations, turns in a conversation, incoming messages, billing ledger entries, spending caps, connected accounts, credentials, shared files, synced sources, pages, runtime workers, and delivery queues. The file also defines links between tables with foreign keys, which are rules like “this conversation must belong to a real workspace.”
-
-Many columns include constraints, which are guardrails enforced by the database. For example, a turn status must be one of a known set, a ledger amount must be positive, and a main agent cannot be archived. Indexes are added where the system will often search, such as pending work, active conversations, or billing records.
-
-Without this file, different parts of the system could disagree about what data exists or what shape it has. The result would be broken migrations, invalid records, slower queries, and bugs that only appear after bad data has already been saved.
-
-#### Function details
-
-##### `_conversation_audience`  (lines 12–13)
-
-```
-def _conversation_audience(context: DefaultExecutionContext) -> str
-```
-
-**Purpose**: This function chooses the default audience label for a new conversation when one is not supplied directly. In plain terms, it decides whether the conversation should be shared or tied to a specific member based on the `member_id` being inserted.
-
-**Data flow**: It receives a database execution context, which is SQLAlchemy’s snapshot of the row currently being inserted. It reads the row’s current `member_id`, passes that value to `conversation_audience`, turns the result into text, and gives that text back as the value for the conversation’s `audience` column.
-
-**Call relations**: This function is attached to the `conversation.audience` column as a Python-side default. When code inserts a conversation without explicitly setting `audience`, SQLAlchemy calls this function, which asks `ufo.turns.audience.conversation_audience` to produce the correct audience value from the row’s `member_id`.
-
-*Call graph*: 2 external calls (get_current_parameters, conversation_audience).
+*Call graph*: 7 external calls (__init__, __init__, __init__, __init__, __init__, metered_workspaces, member_workspaces).
 
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The current trusted settings for how the service should run, including database, provider, deployment, and safety options.
-- `reg-database-schema-version` — The record of which database upgrades have already been applied and what storage shape the system expects.
-- `reg-database-session-workspace-scope` — The shared database access layer that keeps reads and writes inside the right workspace and transaction.
-- `reg-workspace-directory` — The durable list of workspaces and their core ownership, admin, billing, and setup state.
-- `reg-agent-profiles` — The saved assistant definitions, including each agent's model, tools, visibility, setup needs, internet access, and identity.
-- `reg-surface-routing` — The mapping from outside places like web, Slack, terminal, and iMessage to the right workspace, conversation, member, and agent.
-- `reg-conversation-records` — The durable conversation list, including titles, audience, surface labels, sandbox links, and visibility rules.
-- `reg-inbound-admission-queue` — The saved queue of incoming messages or intents waiting to become safe conversation turns.
-- `reg-turn-state` — The shared status record for each unit of agent work, including claiming, running, completion, failure, parent-child links, and billing markers.
-- `reg-transcript-store` — The saved conversation history and compacted summaries that later turns, portals, and auditors read back.
-- `reg-cancellation-flags` — The shared stop signals and cleanup markers used to cancel turns, child work, sandboxes, and stuck jobs safely.
-- `reg-runtime-instance-fleet` — The record of which server processes are alive and which shared listeners or jobs they currently own.
-- `reg-background-job-queue` — The shared pool of delayed or recurring work that workers claim, run, retry, and clean up.
-- `reg-schedule-monitor-store` — The saved recurring prompts, pauses, and outside-world watches that can wake conversations later.
-- `reg-skill-store` — The shared library of built-in and user-created skills that can be selected, checked, and loaded into a turn.
-- `reg-billing-ledger` — The shared money and usage record for tokens, images, videos, sandbox use, egress, balances, caps, and exports.
-- `reg-object-registry` — The shared object front desk that gives stable names, views, permissions, and change history for workspace records.
-- `reg-artifact-blob-store` — The shared file storage for generated artifacts, downloads, document previews, screenshots, and other saved output bytes.
-- `reg-source-sync-state` — The saved state of connected content sources, including pages, checkpoints, errors, ownership, and read grants.
-- `reg-memory-store` — The long-term saved facts, profiles, notes, and summaries that can be recalled in later conversations.
-- `reg-subagent-objectives` — The shared plan and delegation state for child agents, objectives, steps, evidence, attempts, and result delivery.
-- `reg-observability-context` — The shared tracing, logging, metrics, health, and redaction context used to understand what happened safely.
-- `reg-extension-data-store` — Durable extension-scoped key/value or JSON state used by installed extensions beyond their manifest capabilities and lockfile selection.
-- `reg-reply-delivery-outbox` — Durable reply records for messages that must be delivered exactly once or retried safely, including mid-turn replies before final turn completion.
-- `reg-workspace-change-store` — Saved per-conversation file-change summaries produced from workspace git state at turn teardown and later shown in portal slots or audits.
-- `reg-research-reference-store` — Conversation-scoped research findings, cited links, fetched-page metadata, and source-panel references created by browser or research workflows.
-- `reg-conversation-todo-store` — Durable conversation checklist/todo state exposed as workspace objects and updated by tools or agents across turns.
-- `reg-report-digest-store` — Saved generated report digest results and related background-report state separate from the schedule that triggered them.
-- `reg-runtime-connection-pools` — Live pooled connections and reusable clients for shared services such as the database, Redis/live hub, blob storage, model providers, connector APIs, and sandbox/browser providers.
-- `reg-turn-created-reference-store` — Saved references created by a turn, linking its work to newly produced artifacts, objects, sources, sites, or other records for later display, replay, and cleanup.
+- `reg-deployment-config` — The merged deployment settings that tell the system what product, services, addresses, databases, sandboxes, and safety defaults to use.
+- `reg-workspace-records` — The saved workspace records that identify each customer space and hold its limits, setup state, balance settings, and routing boundaries.
+- `reg-conversation-turn-state` — The conversation and turn queue state that tracks each unit of agent work from admission through running, completion, cancellation, or recovery.
+- `reg-runtime-fleet-liveness` — The heartbeat and listener-claim records that show which long-running service instances are alive and what work they currently own.
+- `reg-model-catalog` — The shared AI model catalog that records available providers, model names, prices, limits, API routes, key sources, and reasoning support.
+- `reg-billing-ledger` — The usage ledger, spend caps, price versions, exports, and prepaid balance records used to meter and charge workspace activity.
+- `reg-feature-flags` — The workspace feature switches that let the system turn capabilities on or off without changing the code.
+- `reg-observability-traces` — The shared logs, metrics, traces, traceparent links, and safety-filtered operator views used to understand what the system is doing.
+- `reg-object-store` — The workspace object records and change journal for agents, members, files, credentials, sites, connectors, memory records, reports, and extension objects.
+- `reg-subagent-tasks` — The parent-child delegation state that tracks spawned helper agents, their inputs, outputs, names, costs, and undelivered results.
+- `reg-prompt-and-delivery-policy` — The prompt, delivery-rule, compaction, and prompt-change proposal state that controls what instructions are rendered and how replies should be shaped.
+- `reg-service-connection-pools` — Process-local shared connection/client pools for database, Redis/pubsub, HTTP/provider calls, and other long-lived service clients reused by requests, workers, tools, and jobs.
+- `reg-turn-resource-budget` — In-flight per-turn resource budget and usage accumulator for spend, model tokens, cache reads, sandbox tokens, egress, retries, and stop conditions before final ledger reconciliation.
+- `reg-evaluation-feedback-store` — Saved evaluation and self-improvement state, including test cases from failures, replay outputs, judge results, prompt-candidate gates, and promotion decisions.
+- `reg-security-audit-log` — Durable audit records for sensitive reads and administrative/object changes, such as transcript access and object-change journaling.
+- `reg-backend-provider-registry` — Process-local registry mapping provider names to active backend implementations for models, search, embeddings, memory, connectors, browser access, auth, billing, and feature services.

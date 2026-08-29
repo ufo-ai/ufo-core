@@ -1,152 +1,502 @@
-# Core Runtime, Surface Routing, Listener, and Turn Delivery Migrations  `stage-2.2`
+# Core early runtime, source, ledger, and scheduling migrations  `stage-2.2`
 
-This stage is upgrade work for the database, the system’s long-term memory. It runs behind the scenes when the codebase moves to newer rules. The first changes widen where conversations can live: Slack and web records become valid, and Slack can write messages back. Runtime migrations add records for running worker processes, then loosen them so shared fleet workers do not need one workspace, and later remove old fleet columns. Routing changes make delivery depend on both surface and workspace, add listener claims so only one runtime owns a surface listener, and move iMessage routing away from old shared extension records toward surface installation data and sender addresses like phone numbers. Several cleanup migrations remove stale iMessage project links, claim codes, confirmation replies, and phone opt-in keys. Other changes support day-to-day reliability: job-candidate indexes speed up background searches, artifact media types are corrected for better display, mid-turn replies get their own durable table, BYOK fields record whether a turn used a customer-provided key, and an object-change journal records edits for later tracking.
+This stage is behind-the-scenes setup for the database. It is made of migrations, which are small ordered changes that update stored data structures before the system does its normal work. Together they make the runtime safer, more trackable, and easier to scale.
+
+Several changes expand the ledger, the system’s accounting book: it can now record egress, sandbox token use, price audit text, and entries tied to a whole workspace instead of only one turn. Turn records gain guards against duplicate resume work, trace links for following related work, and extra context such as sender or timezone. Scheduled task storage is added, including due times, claiming, clearer pause records, and the last turn a schedule fired on. Source records become more flexible by allowing extension-defined backends, and more reliable by counting repeated errors for backoff. Conversation records learn how to remember their sandbox handles and sandbox conversations, so isolated work areas can be resumed. Job-selection indexes act like a database shortcut, helping background workers find candidates quickly. Runtime instances can also belong to a shared fleet instead of one workspace.
 
 ## Files in this stage
 
-### Surface admission
-These migrations add Slack and web as accepted conversation and identity surfaces.
+### Initial runtime guardrails
+These migrations add early accounting and turn-resume safeguards needed by the runtime before later scheduling and tracing work.
 
-### `core/src/ufo/schema/migrations/versions/0009_slack.py`
+### `core/src/ufo/schema/migrations/versions/0012_egress_dimension.py`
 
 `data_model` · `database migration`
 
-This migration is like a renovation plan for the database. Before it runs, the database only knows certain conversation “surfaces” such as the command line and subagents. After it runs, Slack is also allowed, and the app gains a way to track whether a generated reply has been sent back to Slack.
+This migration exists because the application’s ledger used to accept only one dimension value: `tokens`. A ledger is like an accounting book, and the `dimension` column says what kind of thing is being counted. This change adds `egress`, which likely represents outgoing data or traffic, as another valid thing the ledger can track. Without this migration, newer application code could try to write `egress` ledger rows, but the database would reject them because its safety rule still says only `tokens` is allowed.
 
-The upgrade adds an optional idempotency key to each turn. An idempotency key is a repeat-detection label: if the same request arrives twice, the system can recognize it instead of creating duplicate work. It also creates a unique index so the same workspace cannot reuse the same key.
+The file uses Alembic, a database migration tool that applies small, ordered changes to a database schema. The `revision` and `down_revision` values place this migration after version `0011` and identify it as version `0012`.
 
-The migration then relaxes conversation membership so a conversation can exist without a member_id, which is useful for Slack flows where identity may not match the older model exactly. It updates database check constraints, which are rules enforced by the database, so Slack becomes an allowed surface for conversations and surface identities.
+The `upgrade` function changes the existing check constraint named `ledger_dimension`. A check constraint is a database rule that refuses rows with invalid values. It first removes the old rule, then creates a new rule allowing `dimension` to be either `tokens` or `egress`.
 
-Finally, it creates a writeback table. This table records the delivery state of a response: waiting, claimed by a worker, delivered, or failed. Without this table, the system would not have a durable checklist for sending replies back to Slack and avoiding lost or duplicated delivery attempts. The downgrade reverses these changes.
+The `downgrade` function does the reverse. If the system rolls back this migration, it removes the expanded rule and restores the older one that allows only `tokens`.
 
 #### Function details
 
-##### `upgrade`  (lines 12–43)
+##### `upgrade`  (lines 11–14)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: Applies the new database shape needed for Slack support. It adds fields, rules, and a new table so turns can be deduplicated and outgoing Slack replies can be tracked safely.
+**Purpose**: Applies this migration by allowing the ledger table to store entries whose `dimension` is either `tokens` or `egress`. This is used when moving the database forward to match newer application behavior.
 
-**Data flow**: It starts with the existing database schema. It adds an optional idempotency_key column to the turn table, creates a uniqueness rule for that key inside each workspace, changes allowed surface values to include Slack, allows conversation.member_id to be empty, and creates the writeback table with its status rules and links back to turns and workspaces. The result is a database that can store Slack conversations and track reply delivery progress.
+**Data flow**: It starts with the current `ledger` table, whose `dimension` rule only permits `tokens`. It opens a safe table-alteration block through Alembic, removes the old `ledger_dimension` check rule, and replaces it with a new rule that permits both `tokens` and `egress`. The result is a database that can accept the new ledger dimension.
 
-**Call relations**: This function is run by Alembic, the database migration tool, when the project moves from the previous schema version to this one. It delegates the actual database edits to Alembic operations such as adding columns, creating indexes, altering tables in batches, and creating a new table, while SQLAlchemy objects describe the columns, data types, foreign keys, and check rules.
-
-*Call graph*: 11 external calls (add_column, batch_alter_table, create_index, create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text (+1 more)).
-
-
-##### `downgrade`  (lines 46–56)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses the Slack migration and restores the database shape from the previous version. Someone would use it when rolling the database back to the earlier schema.
-
-**Data flow**: It starts with a database that has Slack support from this migration. It removes the writeback table, changes surface rules so Slack is no longer allowed, makes conversation.member_id required again, drops the idempotency-key index, and removes the idempotency_key column from turn. The result is the older database schema from before this migration was applied.
-
-**Call relations**: This function is run by Alembic when rolling back from this schema version to the prior one. It calls Alembic’s drop and table-alter operations to undo the same kinds of changes made by upgrade, using SQLAlchemy type information where needed so the database can safely adjust existing columns.
-
-*Call graph*: 5 external calls (batch_alter_table, drop_column, drop_index, drop_table, Uuid).
-
-
-### `core/src/ufo/schema/migrations/versions/0010_web.py`
-
-`data_model` · `database migration or rollback`
-
-This file is a small database schema change, written for Alembic, the tool used to move the database structure forward or backward over time. The project stores a field called `surface`, which means the user-facing place where something happened, such as the command line, Slack, or a subagent. Before this migration, the database only allowed certain surface names. If the application tried to save a web conversation or a web identity, the database would reject it because its built-in rule did not include `web`.
-
-The migration fixes that by replacing two existing database check rules. A check rule is like a guard at a door: it only lets rows in if a value is on an approved list. For the `conversation` table, the approved list becomes `cli`, `subagent`, `slack`, and `web`. For the `surface_identity` table, it becomes `cli`, `slack`, and `web`.
-
-The file also includes the reverse path. If someone rolls the database back to the previous version, it removes `web` from those approved lists again. That rollback matters because migrations must be reversible when possible, especially during deployments or testing.
-
-#### Function details
-
-##### `upgrade`  (lines 11–21)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Moves the database schema forward so `web` is accepted as a valid surface. Someone would use this when upgrading the application to a version that can store web conversations and web identities.
-
-**Data flow**: It starts with the existing database tables, where the `surface` rules do not allow `web`. It opens each table for a safe schema edit, removes the old check rule, and creates a new one with `web` added to the allowed values. After it runs, new rows using the web surface can be saved in the affected tables.
-
-**Call relations**: Alembic calls this function during an upgrade to revision `0010`. Inside, it asks `alembic.op.batch_alter_table` to make controlled changes to the `conversation` and `surface_identity` tables, then uses those table-editing blocks to replace the old constraints with broader ones.
+**Call relations**: Alembic calls this function when applying revision `0012`. Inside the function, it hands the table change work to `alembic.op.batch_alter_table`, which provides the `batch` object used to drop and recreate the constraint safely.
 
 *Call graph*: 1 external calls (batch_alter_table).
 
 
-##### `downgrade`  (lines 24–32)
+##### `downgrade`  (lines 17–20)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Moves the database schema backward by removing `web` from the allowed surface values. Someone would use this if rolling back to an older application version that does not know about the web surface.
+**Purpose**: Reverses this migration by removing support for the `egress` ledger dimension. This is used if the database must be rolled back to the previous schema version.
 
-**Data flow**: It starts with database rules that allow `web`. It opens each affected table, drops the newer check rule, and recreates the older rule without `web`. After it runs, the database will again reject new rows whose surface is `web` in these tables.
+**Data flow**: It starts with a `ledger` table whose `dimension` rule allows both `tokens` and `egress`. It opens an Alembic table-alteration block, removes that expanded rule, and creates the older rule again so only `tokens` is allowed. Afterward, the database matches the earlier schema expectation.
 
-**Call relations**: Alembic calls this function during a rollback from revision `0010` to the previous revision. It uses `alembic.op.batch_alter_table` for each table so the constraint changes happen through Alembic's standard database-editing mechanism.
+**Call relations**: Alembic calls this function when rolling revision `0012` back to revision `0011`. Like `upgrade`, it relies on `alembic.op.batch_alter_table` to perform the constraint changes on the `ledger` table.
 
 *Call graph*: 1 external calls (batch_alter_table).
 
 
-### Runtime fleet foundations
-These migrations create and evolve runtime-instance records while adding indexes needed for efficient operational sweeps.
+### `core/src/ufo/schema/migrations/versions/0013_turn_run_guard.py`
 
-### `core/src/ufo/schema/migrations/versions/0015_runtime_instance.py`
+`data_model` · `database migration during upgrade or rollback`
 
-`data_model` · `database migration`
+This file describes one small change to the database shape. A database migration is like a recorded renovation plan: it tells the system exactly how to update an existing database when the code starts expecting new columns to exist.
 
-This migration changes the shape of the database. It creates a new table named `runtime_instance`, which is like adding a new ledger page where the system can write down each active runtime process. A runtime instance gets its own unique ID, is linked to a workspace, records when it started, records its latest heartbeat, and stores a fingerprint that identifies what kind of runtime it is. The heartbeat is important because it is a simple “I am still alive” timestamp; without it, the system would have a harder time telling whether a runtime is still running or has gone stale.
+Here, the `turn` table gains two optional columns. `running_attempt` stores text that can identify the attempt currently claiming or running a turn. This supports a single-owner guard, meaning the system can tell when one worker has already taken responsibility for that turn instead of letting multiple workers race over the same work. `resume_enqueued_at` stores a timestamp with timezone information for when resume work was queued. That gives the system a way to notice that resume work has already been requested, helping avoid duplicate enqueueing.
 
-The migration also adds an index named `runtime_instance_live` on the workspace ID and heartbeat time. An index is like a book index: it helps the database quickly find runtime instances for a workspace, especially when checking recent heartbeats.
-
-The file also includes the reverse operation. If this migration is rolled back, it removes the index first and then removes the table. That order matters because the index belongs to the table. Overall, this file exists so database upgrades and downgrades can happen in a controlled, repeatable way.
+The file also includes the reverse operation. If this migration must be rolled back, it removes the two columns it added. Without this migration, newer code that reads or writes these fields would fail against an older database, because the expected columns would not exist.
 
 #### Function details
 
-##### `upgrade`  (lines 12–25)
+##### `upgrade`  (lines 12–16)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: This function applies the migration by adding the `runtime_instance` table and a lookup index for live runtime checks. It is used when moving the database forward from the previous schema version.
+**Purpose**: Applies the schema change by adding two nullable columns to the `turn` table. It is used when moving the database forward to support the newer turn-claiming and resume-deduplication behavior.
 
-**Data flow**: Before it runs, the database does not have a `runtime_instance` table. The function tells Alembic, the database migration tool, to create columns for IDs, workspace links, timestamps, and a fingerprint, then to enforce a primary key and a workspace foreign key. After that, it creates an index so the database can quickly search runtime instances by workspace and heartbeat time.
+**Data flow**: The function takes no direct input from callers. It tells Alembic, the database migration tool, to add `running_attempt` as a text column and `resume_enqueued_at` as a timezone-aware datetime column. After it runs, the database table has two extra places to store this information, and existing rows are still valid because both columns may be empty.
 
-**Call relations**: Alembic calls this function when applying this migration. Inside it, the function hands the table and index definitions to Alembic operations, using SQLAlchemy building blocks to describe column types and constraints in a database-independent way.
+**Call relations**: During a database upgrade, Alembic calls this function for revision `0013`. The function hands the actual table-changing work to Alembic operations and SQLAlchemy column definitions, which translate the requested columns into database-specific commands.
 
-*Call graph*: 8 external calls (create_index, create_table, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Uuid).
+*Call graph*: 4 external calls (add_column, Column, DateTime, Text).
 
 
-##### `downgrade`  (lines 28–30)
+##### `downgrade`  (lines 19–21)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: This function reverses the migration by removing the runtime instance index and table. It is used when rolling the database back to the previous schema version.
+**Purpose**: Reverses this migration by removing the two columns added by `upgrade`. It is used if the database needs to be moved back to the previous revision.
 
-**Data flow**: Before it runs, the database has the `runtime_instance` table and its supporting index. The function first removes the index, then removes the table itself. After it finishes, the database no longer stores runtime instance records from this migration.
+**Data flow**: The function takes no direct input from callers. It asks Alembic to drop `resume_enqueued_at` and then `running_attempt` from the `turn` table. After it runs, the database shape matches the older version, but any data stored in those two columns is lost.
 
-**Call relations**: Alembic calls this function when undoing this migration. It hands off the removal steps to Alembic operations, reversing the work done by `upgrade` in the safe order.
+**Call relations**: During a rollback from revision `0013` to `0012`, Alembic calls this function. It delegates the column removal to Alembic's drop-column operation so the migration system can apply the reverse change consistently.
+
+*Call graph*: 1 external calls (drop_column).
+
+
+### Scheduled task foundation
+This migration creates the base storage model for tasks that are due later, recurring, or claimed for execution.
+
+### `core/src/ufo/schema/migrations/versions/0017_scheduled_task.py`
+
+`data_model` · `database migration during deploy or schema setup`
+
+This migration creates a new database table called `scheduled_task`. A database migration is like a written instruction sheet for changing the shape of the database in a safe, repeatable way. Without this file, the application would have no official place to store tasks that are meant to run on a schedule.
+
+The new table records which workspace, conversation, and agent a scheduled task belongs to. It also stores human-facing details such as the task name, description, schedule, and prompt. The timing fields say when the task should next run and when it last ran. The `claimed_by` and `claim_expires_at` fields support coordination between workers, so two background workers do not accidentally run the same task at the same time.
+
+The migration also adds an index on `next_run_at`. An index is like a book index: it helps the database quickly find tasks that are due soon instead of scanning every row. The file includes both directions: `upgrade` applies the change, and `downgrade` removes it if the migration is rolled back.
+
+#### Function details
+
+##### `upgrade`  (lines 12–35)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Creates the `scheduled_task` table and adds a fast lookup index for due tasks. This is used when moving the database forward to a version that supports scheduled task storage.
+
+**Data flow**: Alembic, the database migration tool, calls this function with access to the current database connection through `op`. The function defines the new table columns, links some columns to existing `workspace`, `conversation`, and `agent` records, adds a rule that task names must be unique within a workspace, and creates an index on `next_run_at`. After it runs, the database can store and efficiently find scheduled tasks.
+
+**Call relations**: This function is called by Alembic when this migration is applied. It hands the actual database-changing work to Alembic operations such as creating a table and creating an index, while SQLAlchemy objects describe the columns and constraints in a database-neutral way.
+
+*Call graph*: 9 external calls (create_index, create_table, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, UniqueConstraint, Uuid).
+
+
+##### `downgrade`  (lines 38–40)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Removes the scheduled task database changes made by `upgrade`. This is used if the database must be rolled back to an older version that did not have scheduled tasks.
+
+**Data flow**: Alembic calls this function during a rollback. It first removes the index for finding due scheduled tasks, then removes the entire `scheduled_task` table. After it runs, the database no longer has the storage added by this migration.
+
+**Call relations**: This is the reverse path for the migration. Alembic calls it only when rolling back, and it delegates the physical database changes to Alembic operations for dropping the index and table.
 
 *Call graph*: 2 external calls (drop_index, drop_table).
 
 
-### `core/src/ufo/schema/migrations/versions/0027_job_candidate_indexes.py`
+### Backend and audit metadata
+These migrations loosen source backend constraints while adding operational metadata for price auditing and source failure backoff.
+
+### `core/src/ufo/schema/migrations/versions/0019_source_backend_open.py`
 
 `data_model` · `database migration`
 
-This file is an Alembic migration. Alembic is the tool that changes the database structure in controlled steps, a bit like a renovation checklist for a building. This particular step adds several indexes, which are database shortcuts that help find matching rows without reading an entire table.
+This file is one step in the project’s database history. It changes the `source` table, which stores where data sources come from. Before this migration, the database itself enforced a strict rule: the `backend` column could only contain the value `folder`. That was safe when there was only one kind of source, but it would block extension-based backends because the database would reject any new backend name before the application could use it.
 
-The migration focuses on tables used to find work that needs attention: turns, conversations, and extension storage records. It adds an index for looking up turns by conversation and recent activity, a filtered index for parked turns in a workspace, an index for conversations by workspace, a filtered index for conversations that have a sandbox handle, and an index for extension-store records by extension and key.
+The migration solves that by removing the check constraint named `source_backend`. A check constraint is a database rule that refuses rows whose values do not match a condition. In everyday terms, it is like a form field that only accepts one approved answer. This migration opens that field up so extensions can add new valid answers.
 
-Two of these are filtered indexes, meaning they only include rows that match a condition, such as `status = 'parked'`. That keeps the shortcut smaller and more focused. The file provides both directions: `upgrade` adds the shortcuts, and `downgrade` removes them if the migration is rolled back. The important goal is predictable performance: repeated sweep-style reads should use indexes instead of becoming expensive full-table searches.
+The file also includes the reverse operation. If someone downgrades the database back to the previous version, it recreates the old rule that only allows `backend in ('folder')`. Both changes are done through Alembic, the tool used here to apply database migrations in order.
+
+#### Function details
+
+##### `upgrade`  (lines 11–13)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Applies the forward migration by removing the old database rule that limited `source.backend` to only `folder`. This lets the application store source backends provided by extensions.
+
+**Data flow**: It reads no application data directly. When the migration runs, it opens a safe table-alteration block for the `source` table, then tells the database to drop the `source_backend` check constraint. After it finishes, rows in `source` are no longer blocked just because their `backend` value is something other than `folder`.
+
+**Call relations**: Alembic calls this function when upgrading the database from revision `0018` to `0019`. Inside it, the function uses Alembic’s `batch_alter_table` helper so the table change is carried out in the database-appropriate way.
+
+*Call graph*: 1 external calls (batch_alter_table).
+
+
+##### `downgrade`  (lines 16–18)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Reverses the migration by restoring the old rule that only allows `folder` as a source backend. This is used if the database is rolled back to the earlier schema version.
+
+**Data flow**: It reads no application data directly. When run, it opens a table-alteration block for the `source` table and creates a check constraint named `source_backend` with the condition `backend in ('folder')`. Afterward, the database will reject any `source` row whose `backend` is not `folder`.
+
+**Call relations**: Alembic calls this function when downgrading the database from revision `0019` back to `0018`. It uses the same `batch_alter_table` helper as the upgrade path, but hands off the opposite instruction: create the constraint instead of dropping it.
+
+*Call graph*: 1 external calls (batch_alter_table).
+
+
+### `core/src/ufo/schema/migrations/versions/0020_ledger_price_digest.py`
+
+`data_model` · `database migration`
+
+This migration teaches the database about one new piece of information: a `price_digest` column on the `ledger` table. A database table is like a spreadsheet, and a column is one kind of value every row may carry. Here, the new value is optional text, meaning old ledger rows do not need to be rewritten immediately and can leave this field empty.
+
+The reason this file exists is to keep the application's idea of the data in step with the actual database. If newer code expects ledger records to have a place for a price digest, but the database was never changed, writes or reads could fail. This migration is the controlled step that makes the database ready.
+
+The file also includes the reverse operation. If the project needs to roll back from revision `0020` to the previous revision `0019`, the `downgrade` function removes the column again. This is like adding a new labeled slot to every ledger card, while keeping instructions for how to remove that slot if the change is undone.
+
+#### Function details
+
+##### `upgrade`  (lines 12–13)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Applies this migration by adding the `price_digest` column to the `ledger` table. This prepares the database for code that wants to store or inspect a text digest related to ledger pricing.
+
+**Data flow**: It takes no direct input from the application. When the migration tool runs it, it creates a new column definition named `price_digest`, marks it as text, allows it to be empty, and sends that change to the database. After it finishes, the `ledger` table has one extra optional field.
+
+**Call relations**: This function is called by Alembic, the database migration tool, when moving the schema forward to revision `0020`. It hands the actual table change to Alembic's `add_column` operation, using SQLAlchemy to describe the new text column in a database-independent way.
+
+*Call graph*: 3 external calls (add_column, Column, Text).
+
+
+##### `downgrade`  (lines 16–17)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Reverses this migration by removing the `price_digest` column from the `ledger` table. It is used when rolling the database schema back to the previous version.
+
+**Data flow**: It takes no direct input from the application. When the migration tool runs it, it tells the database to drop the `price_digest` column from `ledger`. After it finishes, ledger rows no longer have that field, and any data stored there is gone.
+
+**Call relations**: This function is called by Alembic when moving backward from revision `0020` to `0019`. It delegates the real database alteration to Alembic's `drop_column` operation so the migration system can undo the schema change cleanly.
+
+*Call graph*: 1 external calls (drop_column).
+
+
+### `core/src/ufo/schema/migrations/versions/0021_source_error_backoff.py`
+
+`data_model` · `database migration during deployment or rollback`
+
+This migration changes the shape of the database table named `source`. A database migration is a small, ordered step that updates stored data structures as the application evolves. Here, the application needs to track repeated source failures, so it adds a new `consecutive_errors` number to every source row.
+
+The new column is an integer and cannot be empty. Existing rows get a default value of `0`, meaning “this source has not currently failed repeatedly.” Without this migration, newer application code that tries to read or update `consecutive_errors` would fail because the database would not have that field.
+
+The file also includes the reverse step. If the system needs to roll back from this version to the previous database version, it removes the `consecutive_errors` column again. In everyday terms, the upgrade adds a new box to every source’s record card, and the downgrade takes that box away.
+
+#### Function details
+
+##### `upgrade`  (lines 12–16)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Adds the `consecutive_errors` column to the `source` table. This prepares the database so the application can count repeated source failures and decide when to slow down retry attempts.
+
+**Data flow**: It receives no application data directly. When the migration tool runs it, it tells the database to add a new integer field to every `source` row, with existing and future rows getting `0` when no value is provided. After it finishes, the database schema includes the new counter.
+
+**Call relations**: This is called by Alembic, the database migration tool, when moving the database forward from revision 0020 to 0021. It hands the actual database change to Alembic and SQLAlchemy, which build and execute the column-add operation.
+
+*Call graph*: 3 external calls (add_column, Column, Integer).
+
+
+##### `downgrade`  (lines 19–20)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Removes the `consecutive_errors` column from the `source` table. This is used only when rolling the database schema back to the previous version.
+
+**Data flow**: It receives no application data directly. When run, it tells the database to delete the `consecutive_errors` field from the `source` table. After it finishes, source rows no longer store that repeated-error count.
+
+**Call relations**: This is called by Alembic when reversing this migration. It hands the removal request to Alembic, which performs the database schema change.
+
+*Call graph*: 1 external calls (drop_column).
+
+
+### Ledger sandbox accounting
+These migrations expand ledger dimensions for sandbox token usage and allow ledger entries to anchor directly to workspaces.
+
+### `core/src/ufo/schema/migrations/versions/0022_sandbox_tokens_dimension.py`
+
+`data_model` · `database migration during deployment or upgrade`
+
+This migration changes a safety rule on the database table named ledger. The ledger has a column called dimension, which labels what kind of usage or cost a row represents. Before this migration, the database only allowed two labels there: 'tokens' and 'egress'. This file adds a third allowed label, 'sandbox_tokens'.
+
+The important idea is that the database itself enforces this rule through a check constraint, which is like a guard at the door: if an application tries to insert a ledger row with a dimension not on the approved list, the database rejects it. Without this migration, any code that tries to record sandbox token usage would fail when saving to the ledger.
+
+The upgrade path removes the old guard rule and replaces it with a new one that includes 'sandbox_tokens'. The downgrade path does the reverse, restoring the older rule that only permits 'tokens' and 'egress'. The file uses Alembic, a tool for applying database schema changes step by step, so deployments can move the database forward or backward in a controlled way.
+
+#### Function details
+
+##### `upgrade`  (lines 11–16)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Moves the database schema forward by allowing ledger rows to use 'sandbox_tokens' as a valid dimension. This is needed before the application can safely record sandbox token usage in the ledger.
+
+**Data flow**: It starts with the current ledger table rule, where dimension may only be 'tokens' or 'egress'. It opens a controlled table-alteration block, removes the old check constraint named ledger_dimension, and creates a new constraint with the same name that also allows 'sandbox_tokens'. After it runs, new ledger rows can use all three approved dimension values.
+
+**Call relations**: Alembic calls this function when applying revision 0022. Inside, it asks Alembic's op.batch_alter_table helper to make the ledger table change safely, then uses that table-editing object to replace the old database rule with the new one.
+
+*Call graph*: 1 external calls (batch_alter_table).
+
+
+##### `downgrade`  (lines 19–22)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Moves the database schema backward by removing 'sandbox_tokens' from the allowed ledger dimensions. This is used if the migration needs to be rolled back to the previous database version.
+
+**Data flow**: It starts with a ledger table rule that allows 'tokens', 'egress', and 'sandbox_tokens'. It opens a controlled table-alteration block, drops the current ledger_dimension check constraint, and recreates it so only 'tokens' and 'egress' are accepted. After it runs, the database will reject new ledger rows whose dimension is 'sandbox_tokens'.
+
+**Call relations**: Alembic calls this function when rolling revision 0022 back to revision 0021. Like the upgrade path, it relies on Alembic's op.batch_alter_table helper to safely edit the ledger table and restore the earlier constraint.
+
+*Call graph*: 1 external calls (batch_alter_table).
+
+
+### `core/src/ufo/schema/migrations/versions/0023_ledger_workspace_anchor.py`
+
+`config` · `database migration`
+
+This file is one step in the project’s database history. It updates the shape of the `ledger` table, which records accounting or spending information. Before this migration, every ledger row was required to have a `turn_id`, meaning each entry had to point to a specific turn. This migration makes `turn_id` optional, so the system can record spend that belongs to a workspace even when there is no single turn to attach it to.
+
+It uses Alembic, a database migration tool that applies changes in order, like pages in a logbook of schema changes. The `revision` and `down_revision` values tell Alembic where this change sits in that sequence.
+
+The `upgrade` function applies the new rule by changing `ledger.turn_id` to allow empty values. The `downgrade` function reverses that rule and makes `turn_id` required again. Both functions use Alembic’s batch table alteration helper, which is a safer way to change an existing table across different database engines.
+
+Without this file, newer code that needs workspace-anchored ledger entries could fail when trying to save a ledger row without a turn.
+
+#### Function details
+
+##### `upgrade`  (lines 12–14)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Applies the migration by making the `turn_id` column in the `ledger` table optional. This lets ledger records exist without being attached to a specific turn.
+
+**Data flow**: It reads no application data. It opens a controlled table-change operation for `ledger`, identifies `turn_id` as a UUID column, and changes the column rule from required to nullable. The result is a database schema where future ledger rows may leave `turn_id` empty.
+
+**Call relations**: Alembic calls this when moving the database forward from revision `0022` to `0023`. Inside that migration step, it asks Alembic to alter the `ledger` table and uses SQLAlchemy’s UUID type description so the database column is changed without losing its existing type.
+
+*Call graph*: 2 external calls (batch_alter_table, Uuid).
+
+
+##### `downgrade`  (lines 17–19)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Reverses the migration by making the `turn_id` column in the `ledger` table required again. This is used if the database schema needs to be rolled back to the previous version.
+
+**Data flow**: It reads no application data. It opens a controlled table-change operation for `ledger`, identifies `turn_id` as a UUID column, and changes the column rule from nullable back to not nullable. The result is a database schema where every ledger row must again have a `turn_id`.
+
+**Call relations**: Alembic calls this when rolling the database back from revision `0023` to `0022`. It hands the table alteration to Alembic’s batch operation helper and uses SQLAlchemy’s UUID type description so the rollback changes only the required-versus-optional rule.
+
+*Call graph*: 2 external calls (batch_alter_table, Uuid).
+
+
+### Conversation and turn context
+These migrations preserve sandbox handles, trace linkage, and surface-provided context across conversations and turns.
+
+### `core/src/ufo/schema/migrations/versions/0024_conversation_sandbox_handle.py`
+
+`data_model` · `database migration`
+
+This migration changes the shape of the database table that stores conversations. It adds a new optional text field called `sandbox_handle` to the `conversation` table. In plain terms, this is like adding a new blank line to each conversation record where the system can write down the name or identifier of the sandbox tied to that conversation.
+
+A sandbox is an isolated work area where code or tools can run without affecting the rest of the system. A handle is a saved reference to something, like a claim ticket. Together, `sandbox_handle` gives the system a durable way to find the same sandbox again after time passes, a process restarts, or a conversation continues later.
+
+The file follows the standard migration pattern: `upgrade` applies the change when moving the database forward, and `downgrade` removes the change if the migration is rolled back. The column is nullable, meaning old conversations do not need an immediate sandbox handle. Without this migration, newer code that expects to store or read a conversation’s sandbox reference would have nowhere in the database to put that information.
+
+#### Function details
+
+##### `upgrade`  (lines 12–13)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Adds the new `sandbox_handle` field to the `conversation` table. This is used when updating the database to support durable sandbox resume for conversations.
+
+**Data flow**: Before this runs, conversation records have no dedicated place to store a sandbox reference. The function tells the migration tool to add a nullable text column named `sandbox_handle`. After it runs, each conversation row can optionally store that sandbox identifier.
+
+**Call relations**: This function is called by the database migration system when applying revision `0024`. It uses Alembic, the database migration tool, together with SQLAlchemy, the database schema library, to describe and perform the table change.
+
+*Call graph*: 3 external calls (add_column, Column, Text).
+
+
+##### `downgrade`  (lines 16–17)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Removes the `sandbox_handle` field from the `conversation` table. This is used if the database needs to be rolled back to the previous schema version.
+
+**Data flow**: Before this runs, conversation records may include a `sandbox_handle` column. The function tells the migration tool to drop that column. After it runs, the database returns to the older shape where conversations cannot store this sandbox reference.
+
+**Call relations**: This function is called by the migration system when rolling back from revision `0024` to `0023`. It hands the rollback work to Alembic, which performs the actual database column removal.
+
+*Call graph*: 1 external calls (drop_column).
+
+
+### `core/src/ufo/schema/migrations/versions/0025_turn_traceparent.py`
+
+`data_model` · `database migration during deploy or schema setup`
+
+This migration changes the shape of the database. The project stores agent activity in a table called `turn`, and this file adds a new optional text column named `traceparent`. In plain terms, a trace is like a tracking number for a chain of work. If one turn starts another turn, especially through a subagent, `traceparent` can record the parent trace information so tools can connect those events later.
+
+Without this migration, the application would have no place in the `turn` table to save that parent trace link. That would make it harder to follow cause and effect across nested agent work, especially when debugging or observing how a task moved through the system.
+
+The file follows the standard Alembic migration pattern. Alembic is the tool that applies database changes in order. The `upgrade` function describes what to do when moving forward to this version: add the column. The `downgrade` function describes how to undo it: remove the column. The column is nullable, meaning existing rows do not need an immediate value, so the migration can be applied safely to databases that already contain turns.
+
+#### Function details
+
+##### `upgrade`  (lines 12–13)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Adds the new `traceparent` text field to the `turn` table. This is used when the database is being moved forward to support tracing relationships between spawned turns.
+
+**Data flow**: It takes no direct input from application code. When Alembic runs this migration, the function asks the database to add a nullable text column named `traceparent` to the existing `turn` table. After it finishes, future rows can store parent trace information, and old rows remain valid because the new field may be empty.
+
+**Call relations**: Alembic calls this function when applying revision `0025`. Inside, it uses SQLAlchemy to describe the new column and Alembic’s operation helper to add that column to the database table.
+
+*Call graph*: 3 external calls (add_column, Column, Text).
+
+
+##### `downgrade`  (lines 16–17)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Removes the `traceparent` field from the `turn` table. This is used only when rolling the database schema back to the previous version.
+
+**Data flow**: It takes no direct input from application code. When Alembic runs a rollback, the function tells the database to drop the `traceparent` column from `turn`. After it finishes, the database no longer has a place to store that trace-parent link in this table.
+
+**Call relations**: Alembic calls this function when reversing revision `0025`. It hands the actual table change to Alembic’s drop-column operation, which performs the database-specific work.
+
+*Call graph*: 1 external calls (drop_column).
+
+
+### `core/src/ufo/schema/migrations/versions/0026_turn_context.py`
+
+`data_model` · `database migration during upgrade or rollback`
+
+This file is one step in the project’s database change history. It tells the migration tool, Alembic, how to move the database schema forward to version `0026`, and how to undo that change if needed. The real-world problem it solves is that a stored `turn` needs a place to keep extra context supplied by the outside surface, such as who sent the turn or what timezone should be used when rendering it. Without this migration, the application code could try to save or read that context, but the database table would have no column for it. The forward migration adds a nullable JSON column named `context` to the `turn` table. JSON means the database can store structured data like a small dictionary or object, rather than only a single plain string. Nullable means older rows, or turns with no extra context, can leave it empty. The rollback path removes the same column, returning the schema to the previous version. Like a careful renovation plan, this file says both how to add the new room and how to take it back out cleanly.
+
+#### Function details
+
+##### `upgrade`  (lines 12–13)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Moves the database schema forward by adding a new `context` column to the `turn` table. This gives each turn a place to store optional structured context data.
+
+**Data flow**: It takes no direct input from application code. When Alembic runs this migration, it creates a new column definition using SQLAlchemy, with JSON storage and permission for empty values, then tells the database to add that column to the `turn` table. After it finishes, existing and future `turn` rows can include a `context` value.
+
+**Call relations**: Alembic calls this function when applying revision `0026`. Inside it, the function relies on SQLAlchemy to describe the new column and Alembic’s `add_column` operation to make the actual schema change in the database.
+
+*Call graph*: 3 external calls (add_column, Column, JSON).
+
+
+##### `downgrade`  (lines 16–17)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Reverses this migration by removing the `context` column from the `turn` table. This is used if the database needs to be rolled back to the previous schema version.
+
+**Data flow**: It takes no direct input from application code. When Alembic runs a rollback, it tells the database to drop the `context` column from `turn`. After it finishes, the table no longer has a place for that context data, and any values stored there are gone.
+
+**Call relations**: Alembic calls this function when rolling back from revision `0026` to `0025`. It hands the work to Alembic’s `drop_column` operation, which performs the database change.
+
+*Call graph*: 1 external calls (drop_column).
+
+
+### Selection and fleet runtime
+These migrations speed up background job selection and permit shared runtime fleet instances that are not tied to a single workspace.
+
+### `core/src/ufo/schema/migrations/versions/0027_job_candidate_indexes.py`
+
+`data_model` · `database migration during deploy or schema setup`
+
+This file is an Alembic migration, which is a small script used to move the database structure from one version to the next. Its job is not to store application behavior, but to teach the database better shortcuts for finding rows.
+
+Think of an index like the index at the back of a book. Without it, you may need to read every page to find a topic. With it, you can jump straight to the likely pages. This migration adds those shortcuts for places where the system repeatedly looks up turns, conversations, and extension-store records.
+
+The new indexes support queries such as finding turns for a conversation by recent activity, finding parked turns in a workspace, finding conversations in a workspace, finding sandbox-backed conversations, and looking up extension data by extension name and key. Two of the indexes are partial indexes, meaning they only include rows that match a condition, such as turns whose status is parked. That keeps the shortcut smaller and more focused.
+
+The file also includes the reverse operation. If this migration must be rolled back, the downgrade function removes exactly the indexes that were added.
 
 #### Function details
 
@@ -156,11 +506,11 @@ Two of these are filtered indexes, meaning they only include rows that match a c
 def upgrade() -> None
 ```
 
-**Purpose**: Applies this migration by adding database indexes for the queries that regularly search for candidate work. Someone would use it when moving the database schema forward to version 0027.
+**Purpose**: Applies the schema change by creating five database indexes. These indexes are meant to make recurring candidate-search queries use fast lookups instead of reading entire tables.
 
-**Data flow**: It starts with the existing database tables. It asks Alembic to create five indexes, using SQLAlchemy text snippets for the two filter conditions. After it finishes, the database has new lookup shortcuts on the `turn`, `conversation`, and `ext_store` tables; the table data itself is not changed.
+**Data flow**: It takes no direct input from the caller, but it uses Alembic's migration operation object and SQLAlchemy text expressions for the index conditions. It tells the database to add indexes on selected columns in the turn, conversation, and ext_store tables. After it runs, the database has extra lookup structures that speed up specific reads, while the table data itself stays unchanged.
 
-**Call relations**: When Alembic applies this migration, it calls `upgrade`. This function then hands each index request to `alembic.op.create_index`, and uses `sqlalchemy.text` to express the filtered-index conditions in SQL that the database can understand.
+**Call relations**: Alembic calls this function when moving the database forward to revision 0027. Inside, it hands each requested index definition to alembic.op.create_index, and uses sqlalchemy.text to express the partial-index filters in database-readable SQL.
 
 *Call graph*: 2 external calls (create_index, text).
 
@@ -171,24 +521,26 @@ def upgrade() -> None
 def downgrade() -> None
 ```
 
-**Purpose**: Reverses this migration by removing the indexes that `upgrade` added. Someone would use it if the database schema needs to roll back from version 0027 to the previous version.
+**Purpose**: Reverses this migration by removing the indexes created by upgrade. Someone would use this when rolling the database schema back from revision 0027 to the previous version.
 
-**Data flow**: It starts with a database that already has the five indexes from this migration. It asks Alembic to drop each one. After it finishes, those lookup shortcuts are gone, while the underlying table rows remain in place.
+**Data flow**: It takes no direct input. It asks Alembic to drop each named index from the affected tables. After it runs, those database shortcuts are gone, so queries may still work but may become slower on large tables.
 
-**Call relations**: When Alembic rolls this migration back, it calls `downgrade`. This function delegates each removal to `alembic.op.drop_index`, undoing the same schema changes that `upgrade` introduced.
+**Call relations**: Alembic calls this function during a rollback. It uses alembic.op.drop_index for each index, undoing the work performed by upgrade in the opposite direction.
 
 *Call graph*: 1 external calls (drop_index).
 
 
 ### `core/src/ufo/schema/migrations/versions/0028_runtime_instance_fleet.py`
 
-`data_model` · `database migration during deploy or schema setup`
+`data_model` · `database migration`
 
-This file is a small database change script. It updates the `runtime_instance` table so the `workspace_id` column is allowed to be empty, or `NULL` in database terms. A `NULL` value means “there is no workspace here,” not “the workspace is unknown.”
+This file is a small database schema change. It changes the `runtime_instance` table so the `workspace_id` column is allowed to be empty, or `NULL` in database terms. A `NULL` value means “there is no value here,” not an unknown workspace.
 
-The reason is explained in the file’s opening comment: a shared fleet process can hold a runtime seat without owning a workspace. Before this migration, every `runtime_instance` row had to point to a workspace. That rule worked for workspace-specific runtimes, but it was too strict for fleet-wide runtime processes. Without this change, the system could not accurately record those shared fleet seats in the same table.
+The reason is explained in the file comment: some runtime instances represent seats in a shared fleet. A fleet process is not owned by one workspace, so forcing every row to have a workspace ID would make it impossible to record that kind of process honestly. Without this migration, saving a shared fleet runtime instance could fail because the database would reject the missing `workspace_id`.
 
-The migration has two directions. `upgrade` applies the new rule by making `workspace_id` optional. `downgrade` reverses the rule and makes `workspace_id` required again. The changes are made through Alembic, the tool used here to safely evolve database tables over time. The `batch_alter_table` call is like temporarily opening the table for renovation, changing one column, and then closing it back up.
+The file follows the usual Alembic migration pattern. Alembic is the tool that applies database changes step by step. `upgrade` moves the database forward to this version by making `workspace_id` optional. `downgrade` reverses that change by making `workspace_id` required again. The code uses a batch table alteration, which is Alembic’s safe way to edit an existing table across different database engines.
+
+An important caution: downgrading would only be safe if there are no rows with a missing `workspace_id`, because making the column required again would conflict with those rows.
 
 #### Function details
 
@@ -198,11 +550,11 @@ The migration has two directions. `upgrade` applies the new rule by making `work
 def upgrade() -> None
 ```
 
-**Purpose**: Applies the forward database change. It makes `runtime_instance.workspace_id` optional so shared fleet runtime rows can exist without pointing to a workspace.
+**Purpose**: Moves the database schema forward so `runtime_instance.workspace_id` may be empty. This allows shared fleet runtime instances to be recorded even when they do not belong to a workspace.
 
-**Data flow**: It reads no application data. It opens the `runtime_instance` table for alteration, identifies `workspace_id` as a UUID column, and changes the column rule from “must have a value” to “may be empty.” The output is an updated database schema.
+**Data flow**: It takes no direct input from the caller. It opens an Alembic table-editing block for the `runtime_instance` table, tells the database that `workspace_id` is a UUID column, and changes that column so it accepts `NULL` values. The result is a changed database schema; no application data is returned.
 
-**Call relations**: Alembic calls this function when moving the database from revision `0027` to revision `0028`. Inside that migration step, it asks Alembic to alter the `runtime_instance` table and uses SQLAlchemy’s UUID type so the migration describes the existing column accurately.
+**Call relations**: Alembic calls this function when applying migration revision `0028`. Inside that migration step, it asks Alembic to alter the `runtime_instance` table and uses SQLAlchemy’s UUID type description so the existing column type is preserved while only the required-versus-optional rule changes.
 
 *Call graph*: 2 external calls (batch_alter_table, Uuid).
 
@@ -213,484 +565,141 @@ def upgrade() -> None
 def downgrade() -> None
 ```
 
-**Purpose**: Reverses the migration. It makes `runtime_instance.workspace_id` required again, restoring the older schema rule.
+**Purpose**: Reverses this migration by making `runtime_instance.workspace_id` required again. This is used if the database schema must be rolled back to the previous version.
 
-**Data flow**: It reads no application data. It opens the `runtime_instance` table for alteration, identifies `workspace_id` as a UUID column, and changes the column rule from “may be empty” back to “must have a value.” The output is a database schema matching the previous revision.
+**Data flow**: It takes no direct input from the caller. It opens an Alembic table-editing block for the `runtime_instance` table, identifies `workspace_id` as an existing UUID column, and changes that column so it no longer accepts `NULL` values. The result is a database schema matching the earlier expectation that every runtime instance has a workspace ID.
 
-**Call relations**: Alembic calls this function when rolling the database back from revision `0028` to revision `0027`. It uses the same table-alteration path as `upgrade`, but applies the opposite nullability rule.
+**Call relations**: Alembic calls this function when rolling back from revision `0028` to `0027`. Like `upgrade`, it hands the table change to Alembic and uses SQLAlchemy’s UUID type information so the database knows which existing column is being changed.
 
 *Call graph*: 2 external calls (batch_alter_table, Uuid).
 
 
-### Workspace-scoped surface delivery
-These migrations tie surface delivery state to workspaces and remove obsolete shared-fleet columns.
+### Scheduled continuation refinements
+These migrations refine scheduled pauses, remember the last turn fired by a scheduled task, and link conversations to their sandbox conversation records.
 
-### `core/src/ufo/schema/migrations/versions/0030_surface_workspace_keys.py`
-
-`data_model` · `schema migration during deployment or rollback`
-
-This migration updates the database for a world where the same kind of external surface, such as a messaging or delivery channel, can exist in more than one workspace. Without this change, two workspaces could accidentally collide if they used the same surface names or queue keys, because the database rules would not always include the workspace as part of the identity.
-
-The upgrade creates a new table called surface_installation. This table records which installation belongs to which workspace and surface. It also requires installation IDs to be non-empty, links each row back to an existing workspace, and prevents duplicate surface-plus-installation pairs.
-
-Then it tightens existing database rules. surface_identity gets a new primary key, meaning its main “this row is unique” identity now includes workspace_id as well as surface and external_id. conversation gets a new uniqueness rule so queue keys are only required to be unique within the same workspace and surface, not across the whole system. Finally, it adds an index on writeback records that are still pending or claimed, like adding a shortcut in a filing cabinet so the system can quickly find work that is due.
-
-The downgrade reverses these steps, restoring the older database layout if the migration must be rolled back.
-
-#### Function details
-
-##### `upgrade`  (lines 17–51)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the new database layout for workspace-qualified surface delivery. Someone runs this when moving the database forward to version 0030 so workspace_id becomes part of the key database identities where needed.
-
-**Data flow**: It starts with the existing database schema. It creates the new surface_installation table, changes uniqueness and primary-key rules on surface_identity and conversation, and adds a filtered writeback index for pending or claimed work. The result is a database that can distinguish the same surface-related values across different workspaces and can find due writebacks more quickly.
-
-**Call relations**: Alembic, the database migration tool, calls this function when upgrading to this revision. Inside it, the function hands each concrete change to Alembic operations such as creating a table, altering tables in batches, and creating an index; SQLAlchemy objects describe the columns and constraints that Alembic should create.
-
-*Call graph*: 12 external calls (batch_alter_table, create_index, create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, UniqueConstraint (+2 more)).
-
-
-##### `downgrade`  (lines 54–64)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses the migration and restores the previous database rules. Someone would use this only when rolling the database back from version 0030 to version 0029.
-
-**Data flow**: It starts with the version 0030 schema. It removes the writeback shortcut index, changes conversation uniqueness back to surface plus queue key, changes surface_identity back to using only surface and external_id as its primary key, and drops the surface_installation table. The result is the older schema shape.
-
-**Call relations**: Alembic calls this function during a rollback. It uses Alembic operations to drop the index and table and to batch-alter existing tables, undoing the same kinds of schema changes that upgrade created.
-
-*Call graph*: 3 external calls (batch_alter_table, drop_index, drop_table).
-
-
-### `core/src/ufo/schema/migrations/versions/0046_shared_fleet_columns.py`
-
-`data_model` · `database migration`
-
-This migration updates the database shape after the project stopped using some older dedicated-mode behavior. A database migration is like a carefully written renovation plan: it says exactly which walls to remove when moving forward, and how to rebuild them if you need to go back.
-
-The file removes `approved_by` from the `proposal` table because proposal approval no longer uses a separate approver field; the `status` field now carries the important promotion signal. It also removes `fingerprint` and `started_at` from `runtime_instance` because the shared fleet only needs the remaining liveness information, and nothing reads those two fields anymore.
-
-The `upgrade` function is the forward path. It drops the unused columns from the two tables. The `downgrade` function is the reverse path. It recreates the same columns with suitable types and defaults, and restores the foreign key from `proposal.approved_by` to the `member` table. That foreign key is a database rule saying the stored member ID must point to a real member.
-
-Without this file, deployments moving from schema version `0045` to `0046` would not know how to cleanly remove these obsolete database fields, and rollbacks would not know how to recreate them.
-
-#### Function details
-
-##### `upgrade`  (lines 18–23)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Moves the database schema forward to version `0046` by removing columns that the current shared-fleet system no longer reads. This keeps the stored data model simpler and avoids preserving fields that no longer have a purpose.
-
-**Data flow**: It takes no direct input from the caller, but it works against the database connection controlled by Alembic, the migration tool. It opens safe table-alteration blocks for `proposal` and `runtime_instance`, removes `approved_by` from `proposal`, and removes `fingerprint` and `started_at` from `runtime_instance`. The result is a database schema with those old columns gone.
-
-**Call relations**: Alembic calls this function when applying this migration during an upgrade. Inside the function, it asks Alembic's `batch_alter_table` helper to perform table changes in a way that works across supported databases.
-
-*Call graph*: 1 external calls (batch_alter_table).
-
-
-##### `downgrade`  (lines 26–39)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses the migration by adding back the columns that `upgrade` removed. This is used if the database must be rolled back from version `0046` to the previous schema version.
-
-**Data flow**: It takes no direct input, but reads the migration context supplied by Alembic. It first adds `started_at` and `fingerprint` back to `runtime_instance`, giving them defaults so existing rows can be filled safely. Then it adds `approved_by` back to `proposal` and recreates the rule tying that value to a valid row in the `member` table. The result is a database schema shaped like it was before this migration.
-
-**Call relations**: Alembic calls this function when rolling the migration back. The function uses Alembic's table-alteration helper to change tables, and SQLAlchemy column/type builders to describe the columns that need to be recreated.
-
-*Call graph*: 5 external calls (batch_alter_table, Column, DateTime, Text, Uuid).
-
-
-### Delivery metadata
-These migrations refine artifact media labels, add durable mid-turn reply tracking, and record BYOK usage on turns.
-
-### `core/src/ufo/schema/migrations/versions/0089_artifact_media_types.py`
+### `core/src/ufo/schema/migrations/versions/0029_scheduled_pause.py`
 
 `data_model` · `database migration during upgrade or rollback`
 
-This file is an Alembic migration, which means it is a small, ordered database change that can be applied when the application is upgraded, or reversed if it is rolled back. The problem it fixes is simple: some uploaded shared artifacts were stored with the generic media type `application/octet-stream`, which basically means “unknown binary file.” That happened because the hosted registry could not recognize certain filename endings, such as `.docx`, `.xlsx`, `.pptx`, `.patch`, and `.diff`. As a result, office documents and patch files could end up filed under “Other” and might not get the right inline preview behavior.
+This migration updates the database shape for a feature called “scheduled pause causal state.” In plain terms, the system needs better bookkeeping for why a turn was admitted, when it was queued for dispatch, and how one-time scheduled tasks relate back to a paused conversation turn.
 
-The migration keeps a small built-in map from file suffixes to the correct media type names. On upgrade, it looks only at rows in the `shared_artifact` table that still have the fallback “unknown” media type. If the filename ends with one of the known suffixes, it replaces the generic value with the more specific one. This is careful: rows that already have a more precise media type are left alone.
+It changes the `turn` table first. An older column named `resume_enqueued_at` is renamed to `dispatch_enqueued_at`, which is a broader name: it describes when work was queued for dispatch, not only when something resumed. The migration also adds `admission_source`, a required text field that says whether a turn came from a real member action or from internal system work. A database check rule keeps that value limited to `member` or `internal`, like a form that only accepts two approved answers.
 
-On downgrade, it does the reverse in a broader way: any row using one of the media types introduced by this migration is set back to the fallback value. This makes rollback possible, though it may also turn matching media types back into the generic type even if they were correct for other reasons.
+Then it extends the `scheduled_task` table with two optional fields: `origin_seq`, likely used to remember where in a sequence the task came from, and `resume_turn_id`, likely used to point back to the turn being resumed. Finally, it creates a special unique index for one-time schedules, so there can only be one matching scheduled pause per workspace and conversation when the schedule is `@once`. Without this migration, newer code expecting these columns and safety rules could fail or allow duplicate pause tasks.
 
 #### Function details
 
-##### `upgrade`  (lines 28–38)
+##### `upgrade`  (lines 12–30)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: Applies the forward database fix. It finds shared artifact rows that were saved as an unknown file type and, based on the filename ending, replaces that generic label with the correct media type.
+**Purpose**: Applies the new database layout needed for scheduled pause tracking. It renames an existing queue-time column, adds a source label for turns, adds pause-related fields to scheduled tasks, and creates a rule that prevents duplicate one-time pause tasks for the same workspace and conversation.
 
-**Data flow**: It starts with the `shared_artifact` table, specifically the `filename` and `media_type` fields. For each known suffix such as `.docx` or `.patch`, it updates rows whose media type is still `application/octet-stream` and whose lowercase filename ends with that suffix. The result is that affected database rows now carry a more accurate media type, while already-correct rows are not changed.
+**Data flow**: It starts with the existing database schema. It changes the `turn` table by renaming `resume_enqueued_at` to `dispatch_enqueued_at`, adding `admission_source` with a default of `internal`, and adding a check so only `member` or `internal` are allowed. It then adds `origin_seq` and `resume_turn_id` to `scheduled_task`, and creates a filtered unique index for rows whose schedule is `@once`. The output is the same database, but with new columns and constraints that newer application code can rely on.
 
-**Call relations**: Alembic calls this function when this migration is applied. Inside the function, SQLAlchemy is used to describe the table and columns, then Alembic sends each generated update statement to the database.
+**Call relations**: This function is called by Alembic, the migration tool, when the project is upgraded to revision `0029`. It delegates the actual table edits to Alembic operations and uses SQLAlchemy column/type helpers to describe the new fields in a database-independent way.
 
-*Call graph*: 4 external calls (execute, Text, column, table).
-
-
-##### `downgrade`  (lines 41–50)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses the migration if the database version is rolled back. It changes the media types introduced by this migration back to the old generic fallback value.
-
-**Data flow**: It reads the same `shared_artifact` table definition and loops over the set of media types from the migration’s lookup table. For every row whose media type matches one of those values, it writes `application/octet-stream` back into `media_type`. The output is a database state closer to what existed before this migration.
-
-**Call relations**: Alembic calls this function during rollback. Like `upgrade`, it builds simple SQL update statements with SQLAlchemy and hands them to Alembic to execute against the database.
-
-*Call graph*: 4 external calls (execute, Text, column, table).
+*Call graph*: 8 external calls (add_column, batch_alter_table, create_index, Column, Integer, Text, Uuid, text).
 
 
-### `core/src/ufo/schema/migrations/versions/0095_mid_turn_reply.py`
-
-`data_model` · `schema migration`
-
-This file changes the database shape for a specific need: sometimes a running turn wants to answer a person before the whole turn is over. Before this migration, durable delivery was centered around a final write at the end of a turn. That is not enough when there can be several replies during the turn itself.
-
-The migration creates a `mid_turn_reply` table. Each row is a delivery job for one spoken reply. It records which workspace and turn it belongs to, where it occurred inside the turn using round and span positions, the reply text, and delivery state such as `pending`, `claimed`, `delivered`, or `failed`. In plain terms, this table is like a mailroom clipboard: each outgoing message gets its own line, someone can claim responsibility for delivering it, and failures can be written down for retry or diagnosis.
-
-The table also includes fields for claim ownership and claim expiry. That matters when multiple workers might be polling for messages to deliver. The database row acts as the shared agreement about who is currently trying to deliver the reply. An index is added so the system can quickly find replies that are still waiting or actively claimed. Without this migration, mid-turn replies would be much harder to make reliable: repeated events, replayed turns, or competing workers could cause duplicate delivery or lost replies.
-
-#### Function details
-
-##### `upgrade`  (lines 19–46)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: This function applies the migration by creating the new `mid_turn_reply` table and an index for quickly finding replies that still need delivery work. It is used when moving the database forward to version 0095.
-
-**Data flow**: It takes no direct input from application code; Alembic, the database migration tool, calls it during an upgrade. It defines the new table columns, required links to existing `workspace` and `turn` rows, allowed status values, and a filtered lookup index. After it runs, the database can store and search durable mid-turn reply delivery records.
-
-**Call relations**: During a database upgrade, Alembic calls `upgrade`. This function hands the actual database changes to Alembic operations such as creating the table and index, while SQLAlchemy objects describe the columns, foreign keys, time fields, and status rule.
-
-*Call graph*: 7 external calls (create_index, create_table, CheckConstraint, Column, DateTime, ForeignKey, text).
-
-
-##### `downgrade`  (lines 49–51)
+##### `downgrade`  (lines 33–40)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: This function reverses the migration by removing the index and then deleting the `mid_turn_reply` table. It is used if the database must be rolled back from version 0095 to the previous version.
+**Purpose**: Reverses the migration so the database can return to the previous schema version. This is useful if the application must be rolled back to older code that does not know about the new scheduled pause fields.
 
-**Data flow**: It takes no direct input from application code; Alembic calls it during a downgrade. It first removes the lookup index, then removes the table itself. After it runs, the database no longer has storage for mid-turn reply delivery records.
+**Data flow**: It starts with a database that has the revision `0029` schema. It removes the special pause index, drops `resume_turn_id` and `origin_seq` from `scheduled_task`, removes the `admission_source` rule and column from `turn`, and renames `dispatch_enqueued_at` back to `resume_enqueued_at`. The result is a database shaped like it was before this migration ran.
 
-**Call relations**: During a rollback, Alembic calls `downgrade`. It uses Alembic's drop operations to undo the structures that `upgrade` created, in the safe order: remove the index before removing the table it belongs to.
+**Call relations**: This function is called by Alembic when rolling back from revision `0029` to the previous revision. It performs the inverse of `upgrade`, again handing the table-level work to Alembic operations so the rollback is applied consistently.
 
-*Call graph*: 2 external calls (drop_index, drop_table).
+*Call graph*: 3 external calls (batch_alter_table, drop_column, drop_index).
 
 
-### `core/src/ufo/schema/migrations/versions/0098_turn_byok.py`
+### `core/src/ufo/schema/migrations/versions/0037_scheduled_last_turn.py`
 
 `data_model` · `database migration`
 
-This migration changes the shape of the database. The `turn` table records individual units of work or interaction, and this file adds space to remember key-related billing information for each turn. In plain terms, it lets the system write down, “Was this turn served using a user-provided key?” and “Which attempt was that tied to?” That matters because if a recovery or retry happens later, the system needs to bill or account for the re-run under the same key context as the original attempt. Without these columns, that information could be lost or guessed incorrectly.
+This migration changes the shape of the database table named `scheduled_task`. A database migration is like a dated instruction card for remodeling a shared filing cabinet: it says exactly what drawer or label to add, and also how to undo that change if the project rolls back.
 
-The file uses Alembic, a database migration tool that applies schema changes in a controlled order. The `revision` and `down_revision` values place this change after migration `0097`. The `upgrade` function is the forward step: it adds a nullable boolean column called `byok` and a nullable text column called `byok_attempt`. Nullable means old rows do not need an immediate value, so existing data can survive the change. The `downgrade` function is the reverse step: it removes those two columns if the database must be moved back to the previous version.
+Here, the new piece of information is `last_turn_id`. It is added as a nullable UUID column. A UUID is a long unique identifier, often used instead of a simple number when records need globally unique IDs. Nullable means old scheduled tasks are allowed to have no value there yet, which is important because existing databases may already contain rows before this migration runs.
+
+The practical purpose is to let scheduled tasks remember the most recent “turn” they acted in. Without this column, later scheduling logic would not have a standard place in the database to store that fact. The file also includes the reverse operation: if the migration is undone, the column is removed again. The revision metadata tells Alembic, the migration tool, where this step sits in the ordered chain of database changes.
 
 #### Function details
 
-##### `upgrade`  (lines 12–14)
+##### `upgrade`  (lines 12–13)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: This function applies the migration by adding two new columns to the `turn` database table. It is used when moving the database forward to version `0098`.
+**Purpose**: Applies this migration by adding a `last_turn_id` field to the `scheduled_task` table. This is used when moving the database forward to the newer schema.
 
-**Data flow**: Before it runs, the `turn` table has no place to store BYOK status or the attempt identifier tied to BYOK use. The function tells Alembic to add a `byok` true-or-false field and a `byok_attempt` text field. After it runs, new and existing `turn` rows can store that information, although the fields may be empty for older data.
+**Data flow**: It takes no direct input from application code. When Alembic runs it, it builds a new database column definition named `last_turn_id` with UUID values allowed to be empty, then asks the database migration layer to add that column to `scheduled_task`. The result is a database table with one extra place to store the last turn linked to each scheduled task.
 
-**Call relations**: Alembic calls this function when upgrading the database to this revision. Inside it, the migration asks SQLAlchemy to describe each new column, then hands those column definitions to Alembic so Alembic can make the actual database change.
+**Call relations**: Alembic calls this function when upgrading from the previous database revision to this one. Inside, it uses SQLAlchemy to describe the new column and Alembic’s `add_column` operation to make the actual database change.
 
-*Call graph*: 2 external calls (add_column, Column).
+*Call graph*: 3 external calls (add_column, Column, Uuid).
 
 
-##### `downgrade`  (lines 17–19)
+##### `downgrade`  (lines 16–17)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: This function reverses the migration by removing the BYOK-related columns from the `turn` table. It is used only when rolling the database schema back from version `0098` to the previous version.
+**Purpose**: Reverses this migration by removing the `last_turn_id` field from the `scheduled_task` table. This is used if the database schema needs to be rolled back to the earlier version.
 
-**Data flow**: Before it runs, the `turn` table may contain the `byok` and `byok_attempt` columns. The function tells Alembic to drop `byok_attempt` first and then `byok`. After it runs, the table is back to its earlier shape, and any data stored in those two columns is removed with them.
+**Data flow**: It takes no direct input from application code. When Alembic runs it during a rollback, it tells the migration layer to drop the `last_turn_id` column from `scheduled_task`. Afterward, the database no longer has that storage slot, and any values that were in it are gone.
 
-**Call relations**: Alembic calls this function during a downgrade. It does not calculate anything itself; it simply gives Alembic the instructions needed to remove the columns that `upgrade` added.
+**Call relations**: Alembic calls this function when downgrading from this revision back to the previous one. It hands the work to Alembic’s `drop_column` operation, which performs the matching undo step for the column added by `upgrade`.
 
 *Call graph*: 1 external calls (drop_column).
 
 
-### Listener and iMessage routing
-These migrations add listener ownership claims and clean up iMessage routing state before moving routing to sender addresses.
-
-### `core/src/ufo/schema/migrations/versions/0104_surface_listener_claim.py`
+### `core/src/ufo/schema/migrations/versions/0067_sandbox_conversation.py`
 
 `data_model` · `database migration`
 
-This file is one step in the project’s database history. A database migration is like a dated instruction card for changing the shape of the database safely over time. Here, the new shape is a table called `surface_listener_claim`.
+This migration changes the shape of the database table named `conversation`. The problem it solves is bookkeeping: a normal conversation may need to point to another conversation-like record that acts as its sandbox, meaning the isolated context where its turns are executed. Without this column, the system would have no direct database field for storing that relationship.
 
-The table stores claims on a `surface`, which appears to be a named place or channel where something can listen for work or events. Each surface can have only one row, because `surface` is the primary key. In plain terms, that means one surface can only have one active claim record at a time. The row also records the workspace it belongs to, the runtime instance that owns the claim, a token identifying that ownership, when the claim expires, and when it was created or last updated.
+The file follows Alembic’s migration pattern. Alembic is a tool that applies database changes in a controlled order, like a recipe book where each step has a number. This migration is revision `0067`, and it comes after revision `0066`.
 
-The constraints protect the data from becoming meaningless. The surface name cannot be an empty string. The owner must point to an existing `runtime_instance`, and if that runtime instance is deleted, its claims are deleted too. The optional workspace reference points to the `workspace` table.
+When moving the database forward, `upgrade` adds a nullable UUID column called `sandbox_conversation_id` to the `conversation` table. A UUID is a long unique identifier, commonly used as an ID. “Nullable” means older or unrelated conversations do not have to fill it in.
 
-Without this migration, later code that expects to coordinate surface listener ownership through this table would fail because the table would not exist.
+When rolling the database backward, `downgrade` removes that column. This lets developers or deployments undo the schema change if they need to return to the previous database version.
 
 #### Function details
 
-##### `upgrade`  (lines 10–24)
+##### `upgrade`  (lines 12–13)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: Creates the `surface_listener_claim` table during a forward database migration. This gives the application a place to store which runtime instance owns a listener claim for each surface.
+**Purpose**: This function applies the migration. It adds the new `sandbox_conversation_id` field so conversation rows can optionally point to the sandbox conversation used for their turns.
 
-**Data flow**: It takes no direct input from application code. When the migration tool runs it, it sends a table definition to Alembic, the database migration tool: column names, data types, required fields, keys, and safety rules. The result is a new database table with those rules enforced by the database.
+**Data flow**: Before it runs, the `conversation` table has no `sandbox_conversation_id` column. The function asks Alembic to add a new nullable UUID column with that name. After it runs, each conversation row has an extra optional slot where that sandbox conversation ID can be stored.
 
-**Call relations**: During an upgrade from revision `0103` to `0104`, the migration runner calls this function. It hands the table blueprint to `alembic.op.create_table`, using SQLAlchemy objects to describe columns and constraints in a database-independent way.
+**Call relations**: Alembic calls this function when the database is being advanced from revision `0066` to `0067`. Inside, it uses SQLAlchemy to describe the new column and Alembic to actually add that column to the database table.
 
-*Call graph*: 8 external calls (create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Uuid).
-
-
-##### `downgrade`  (lines 27–28)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Removes the `surface_listener_claim` table when rolling this migration back. This restores the database to the shape it had before this migration was applied.
-
-**Data flow**: It takes no direct input. When called by the migration tool, it asks Alembic to drop the `surface_listener_claim` table from the database. Afterward, the table and the claim records inside it are gone.
-
-**Call relations**: During a rollback from revision `0104` to `0103`, the migration runner calls this function. It delegates the actual removal to `alembic.op.drop_table`.
-
-*Call graph*: 1 external calls (drop_table).
+*Call graph*: 3 external calls (add_column, Column, Uuid).
 
 
-### `core/src/ufo/schema/migrations/versions/0109_imessage_project_binding.py`
-
-`data_model` · `database migration`
-
-This file is one step in the project’s database migration history. A database migration is a small script that moves stored data from an older shape or meaning to a newer one, so the application and the database keep agreeing with each other.
-
-Here, the important rule is: the iMessage extension should no longer keep its project binding in the shared `ext_store` table. That table appears to store key-value settings for extensions. The migration looks for rows where the extension is `imessage` and the key is `project`, then deletes them. In plain terms, it clears out a duplicated or outdated note from the wrong filing cabinet, because the note is now supposed to be kept somewhere more specific: `surface_installation`.
-
-The file uses Alembic, a database migration tool, and SQLAlchemy, a Python library for building database queries. It defines enough of the `ext_store` table to build a delete query, without needing the full table model.
-
-The downgrade path does nothing. That means if someone rolls the database back from this migration, the deleted project binding is not recreated. This is important: the migration is destructive for that specific stored value, so rollback cannot fully restore the old data automatically.
-
-#### Function details
-
-##### `upgrade`  (lines 15–26)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies this migration by deleting the old iMessage project binding from `ext_store`. Someone would use it when moving the database forward to the version where that binding belongs only in surface installation data.
-
-**Data flow**: It starts with two fixed pieces of information: the extension name `imessage` and the key `project`. It builds a lightweight description of the `ext_store` table, creates a delete command for rows matching those two values, gets the current database connection from Alembic, and runs the command. The result is that matching rows are removed from the database; nothing is returned.
-
-**Call relations**: Alembic calls this function when applying revision `0109`. Inside, it asks SQLAlchemy to describe table columns and build the delete statement, then asks Alembic for the active database connection so the statement can be executed.
-
-*Call graph*: 5 external calls (get_bind, Text, column, delete, table).
-
-
-##### `downgrade`  (lines 29–30)
+##### `downgrade`  (lines 16–17)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Defines what should happen if this migration is rolled back, but in this file it deliberately does nothing. The old deleted value is not restored.
+**Purpose**: This function reverses the migration. It removes the `sandbox_conversation_id` field if the database needs to go back to the previous schema version.
 
-**Data flow**: It receives no input, reads no stored data, makes no database changes, and returns nothing. The database is left exactly as it was before the function was called.
+**Data flow**: Before it runs, the `conversation` table includes the `sandbox_conversation_id` column. The function asks Alembic to drop that column. After it runs, the table no longer has a place to store that sandbox conversation link.
 
-**Call relations**: Alembic would call this function during a rollback from revision `0109` to `0108`. Unlike `upgrade`, it does not hand work off to SQLAlchemy or the database connection, because there is no safe automatic way here to recreate the deleted binding.
+**Call relations**: Alembic calls this function when rolling the database back from revision `0067` to `0066`. It hands the change off to Alembic’s `drop_column` operation, which performs the database alteration.
 
-
-### `core/src/ufo/schema/migrations/versions/0113_imessage_claim_code.py`
-
-`io_transport` · `database upgrade migration`
-
-This migration exists to remove a specific kind of stored extension data from the database. The project keeps extension-related key-value data in a table called `ext_store`. For the iMessage extension, some keys begin with `claim:` and others begin with `confirmation-reply:`. During the upgrade to this revision, those records are deleted.
-
-In plain terms, this is a one-time cleanup step. Imagine a shared filing cabinet where one drawer is labeled “iMessage.” This migration goes into that drawer and throws away only the folders whose names start with two old prefixes. It does not touch other extensions, and it does not remove unrelated iMessage data.
-
-The file uses Alembic, a tool that runs database changes in order, and SQLAlchemy, a library for describing database tables and queries in Python. Instead of defining the full `ext_store` table model, it creates a small temporary description containing only the columns it needs: `extension` and `key`. It then builds and runs a delete query.
-
-The downgrade is intentionally empty. That means if the migration is rolled back, the deleted rows are not recreated. This is important: the upgrade is destructive for matching records, so once run, that specific stored data is gone unless restored from backup.
-
-#### Function details
-
-##### `upgrade`  (lines 14–28)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Runs the forward migration. It deletes stored iMessage extension entries whose keys start with the old claim-code or confirmation-reply prefixes.
-
-**Data flow**: The function starts with no direct input from the caller. It describes just enough of the `ext_store` database table to build a delete command, then asks the current database connection to run that command. Before it runs, matching rows exist in `ext_store`; after it runs, rows for the `imessage` extension with keys beginning `claim:` or `confirmation-reply:` have been removed.
-
-**Call relations**: Alembic calls this function when applying revision 0113. Inside the function, SQLAlchemy is used to describe the table, columns, and delete condition, and Alembic supplies the active database connection so the cleanup query can actually be executed.
-
-*Call graph*: 6 external calls (get_bind, Text, column, delete, or_, table).
-
-
-##### `downgrade`  (lines 31–32)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Defines what happens if this migration is reversed. In this file, it deliberately does nothing, because the deleted records cannot be safely reconstructed.
-
-**Data flow**: The function receives no input and produces no database change. Before and after it runs, the database is left as-is; it does not restore the iMessage claim-code or confirmation-reply records that the upgrade removed.
-
-**Call relations**: Alembic would call this function during a rollback from revision 0113. Unlike `upgrade`, it does not hand work to SQLAlchemy or the database connection, because there is no reverse cleanup action to perform.
-
-
-### `core/src/ufo/schema/migrations/versions/20260819175749_imessage_phone_claim.py`
-
-`data_model` · `database migration`
-
-This file is part of the project’s database migration history. A migration is a small script that Alembic, the database upgrade tool, runs when the database needs to move from one version to the next. Here, the change is not adding a new table or column. Instead, it deletes old stored records from the `ext_store` table.
-
-The `ext_store` table appears to be a general-purpose place where extensions can save key-value style data. This migration focuses only on the `imessage` extension. Within that extension’s saved data, it deletes records whose keys start with `opt-in-claim:` or `opt-in-receipt:`. In plain terms, those are likely temporary records about a user claiming or confirming an iMessage phone opt-in. If they are left behind after the rules or format changed, the system could make decisions from stale information.
-
-The file defines the migration’s revision identifiers so Alembic knows where it belongs in the upgrade chain. The upgrade step builds a lightweight description of the table and issues one delete command. The downgrade step intentionally does nothing, because deleted old records cannot be safely recreated later.
-
-#### Function details
-
-##### `upgrade`  (lines 14–28)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Runs the forward database change for this migration. It deletes old iMessage extension records whose keys look like opt-in claims or opt-in receipts, preventing stale phone opt-in data from surviving into the new database version.
-
-**Data flow**: It starts with no direct input from the caller. It builds a small SQLAlchemy description of the `ext_store` table, including only the `extension` and `key` columns it needs. It then creates a delete statement that targets rows where `extension` is `imessage` and the key begins with either `opt-in-claim:` or `opt-in-receipt:`. Finally, it gets the active database connection from Alembic and executes that delete statement. The output is not a returned value; the important result is that matching rows are removed from the database.
-
-**Call relations**: Alembic calls this function when upgrading the database to this revision. Inside, it relies on SQLAlchemy helpers to describe the table, build the delete condition, and combine the two key-prefix checks with an OR. It then asks Alembic for the current database connection and sends the completed delete command to the database.
-
-*Call graph*: 6 external calls (get_bind, Text, column, delete, or_, table).
-
-
-##### `downgrade`  (lines 31–32)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Represents the reverse migration, but it deliberately does nothing. This is because the upgrade deletes stored records, and the migration cannot know how to restore those exact old records later.
-
-**Data flow**: It receives no meaningful input and reads no data. It performs no database work and returns nothing. After it runs, the database is unchanged.
-
-**Call relations**: Alembic would call this function if someone tried to roll the database back past this revision. Unlike `upgrade`, it does not call any SQL or Alembic helpers, because there is no safe reverse action for the deleted data.
-
-
-### `core/src/ufo/schema/migrations/versions/20260820052830_surface_address_routing.py`
-
-`data_model` · `database migration during upgrade`
-
-This file is a database migration: a one-time set of instructions that changes stored data and table shapes when the system is upgraded. The problem it solves is tenant routing for shared providers. Some services belong to the whole deployment rather than to one customer workspace. For those, the installation itself cannot identify the right workspace, because many workspaces share it. Instead, the sender's address, such as an iMessage phone number, becomes the thing that points to the right workspace and member.
-
-The migration first changes the `surface_installation` table by adding `routes_ingress`, a true-or-false field meaning “incoming traffic can be routed through this installation.” Existing non-iMessage installations are marked as routing ingress. iMessage installations are marked as not routing ingress, because they are shared across workspaces. The old uniqueness rule on installation IDs is replaced with a partial unique index, meaning the uniqueness rule only applies when `routes_ingress` is true.
-
-It then creates `surface_address`, a table that maps each surface/address pair to a workspace and member. Think of it like a mailroom directory: the phone number tells the system which office and person should receive the message. It also creates `surface_stream_cursor`, which stores the current position in a shared message stream.
-
-Finally, it moves existing iMessage linked phone identities into `surface_address`, moves saved iMessage stream positions into the new cursor table, and deletes short-lived claim and receipt records from the old extension store. The reverse migration is intentionally empty, so this change is not automatically undone.
-
-#### Function details
-
-##### `upgrade`  (lines 114–213)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the schema and data changes needed for address-based routing. It updates installation routing rules, creates new tables for addresses and stream cursors, and moves existing iMessage data into the new layout.
-
-**Data flow**: It starts with the current database connection. It changes `surface_installation` by adding `routes_ingress`, fills that field based on whether the surface is iMessage, and replaces the old always-on uniqueness rule with one that only applies to installations that route incoming traffic. It then creates `surface_address` and `surface_stream_cursor`. After the new tables exist, it copies existing iMessage member identities from `surface_identity` into `surface_address`, deletes those old identity rows, copies valid stream cursor values from `ext_store` into `surface_stream_cursor`, and removes obsolete iMessage cursor, claim, and receipt entries from `ext_store`.
-
-**Call relations**: This function is called by Alembic, the database migration tool, when upgrading to this revision. It uses Alembic operations to alter and create tables, and SQLAlchemy expressions to read old rows, transform them, insert them into the new tables, and delete old storage records once they have been moved or intentionally discarded.
-
-*Call graph*: 14 external calls (batch_alter_table, create_index, create_table, get_bind, Boolean, CheckConstraint, Column, DateTime, ForeignKey, delete (+4 more)).
-
-
-##### `downgrade`  (lines 216–217)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: This is the placeholder for reversing the migration, but it does nothing. In practice, the migration is one-way unless a future developer writes a manual rollback.
-
-**Data flow**: It receives no useful input and makes no database changes. The database stays exactly as it is.
-
-**Call relations**: Alembic may call this function if someone asks to downgrade past this revision. Because it contains only `pass`, it does not hand work off to any schema or data operations and does not restore the old table layout.
-
-
-### Object-change journaling
-This migration adds a durable journal for recording object changes.
-
-### `core/src/ufo/schema/migrations/versions/20260822054846_object_change_journal.py`
-
-`data_model` · `database migration / deployment`
-
-This migration creates an `object_change` journal: a database table that acts like a logbook for important object edits. Each row records what workspace the change happened in, what kind of object was touched, its name, whether it was created, updated, or deleted, who or what caused it, which agent was involved, and what the object looked like before and after the change. Without this table, the system would have no structured place to store this history, making it harder to audit changes, debug behavior, or reconstruct what happened over time.
-
-The file uses Alembic, a tool that applies database changes step by step, and SQLAlchemy, a Python library for describing database tables and columns. The `upgrade` function is the forward step: it creates the table, sets required fields, adds a link back to the `workspace` table, and adds a rule that the action word must be one of `create`, `update`, or `delete`. It also adds an index, which is like a book index, so the database can quickly find changes for a workspace in time order. The `downgrade` function is the reverse step: it removes the index and then removes the table.
-
-#### Function details
-
-##### `upgrade`  (lines 12–29)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Creates the `object_change` table and its lookup index. This is used when moving the database schema forward so the application can start storing a journal of object changes.
-
-**Data flow**: It does not take application data as input. Instead, it reads the table definition written in this file, asks Alembic to create the `object_change` table with its columns and constraints, then asks Alembic to create an index on `workspace_id` and `created_at`. After it runs, the database has a new place to store object change records and a faster way to search them by workspace and time.
-
-**Call relations**: Alembic calls this function when this migration is applied. Inside it, the function hands the table shape to SQLAlchemy building blocks such as columns, foreign keys, primary keys, and check constraints, then passes the finished instructions to Alembic’s `create_table` and `create_index` operations.
-
-*Call graph*: 9 external calls (create_index, create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Uuid).
-
-
-##### `downgrade`  (lines 32–34)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Removes the `object_change` table and its index. This is used if the migration needs to be rolled back to the previous database shape.
-
-**Data flow**: It takes no application data as input. It tells Alembic to drop the `object_change_workspace` index first, then drop the `object_change` table itself. After it runs, the database no longer has this journal table or its supporting index.
-
-**Call relations**: Alembic calls this function when rolling this migration backward. It uses Alembic’s `drop_index` before `drop_table` so the database cleanup happens in the safe order: remove the helper lookup structure, then remove the table it belonged to.
-
-*Call graph*: 2 external calls (drop_index, drop_table).
+*Call graph*: 1 external calls (drop_column).

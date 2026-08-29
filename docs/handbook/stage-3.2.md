@@ -1,67 +1,27 @@
-# Provider Backend Registration  `stage-3.2`
+# Backend provider and external service registration  `stage-3.2`
 
-This stage is the system’s plug-in counter. During startup, it registers the outside services and interchangeable backends that the rest of UFO may use later. Instead of every feature knowing every provider’s details, these files put names, settings, and factory functions in central places.
+This stage is shared startup plumbing. It teaches the system what outside services and plug-in providers are available before the main work begins. The model registry is the central catalog: given a model name, it knows the provider, required key, client setup, and price. The Bedrock extension adds Amazon Bedrock-hosted models to that catalog. The OpenAI embedding extension adds the default service for turning text into number vectors used for search, but waits to contact OpenAI until work is needed.
 
-The feature flag doorway in flags.py lets code ask “is this on?” while a deployment can plug in Cloudflare Flagship through the Flagship extension. The model registry keeps the master catalog of AI models, including prices and the code needed to create a provider client; the Bedrock extension adds Amazon Bedrock-backed models to that catalog. The OpenAI embedding extension adds a service that turns text into number lists, called vectors, for search and memory.
+Several files register connector options. Composio and Pipedream manifests announce which services they can connect to and which OAuth sign-in routes they use. The Composio resolver is a flexible front desk that can recognize many Composio toolkits by name and send them through one shared broker. Keyed connectors cover simpler services that use API keys, with rules for storing and sending those keys safely.
 
-For running workspaces, sandbox/select.py chooses the sandbox carrier, such as local or remote. Redis Hub registers Redis as shared live transport so multiple servers can share terminal and frame updates. The sources registry maps connector names to connector classes. The Pipedream manifest adds Pipedream connectors, sign-in routes, and a broker for running actions safely without leaking user secrets.
+Flagship connects feature flags to Cloudflare so behavior can be switched on or off. Redis Hub registers Redis as shared live communication support for frames and terminal traffic.
 
 ## Files in this stage
 
-### Core backend gateways
-Core registries and selectors define the common entry points used to resolve feature flags, AI models, and sandbox carriers.
-
-### `core/src/ufo/flags.py`
-
-`util` · `startup and feature checks`
-
-Feature flags are like light switches for software features. They let a team turn something on for one workspace, leave it off for another, or disable it safely if the flag service is unavailable. This file keeps that logic in one place so the rest of the project does not need to know which outside flag provider is being used.
-
-At startup, `init_flags` can connect a chosen OpenFeature provider. OpenFeature is a standard library interface for feature flags, so the project can swap one backend service for another without changing every call site. If no provider is given, the built-in no-op provider stays in place, meaning flags simply fall back to the defaults written in code.
-
-When code wants to know whether a feature is available, it calls `flag_enabled`. That function asks the flag system for a true-or-false answer, using the current workspace ID as the “targeting key” so a backend can enable a feature for one workspace at a time. It also protects the running system: if the flag provider errors, or takes longer than two seconds, the function logs a warning and returns the caller’s default value. In other words, a broken flag service should not crash a user request or leave it waiting forever.
-
-#### Function details
-
-##### `init_flags`  (lines 28–33)
-
-```
-def init_flags(provider: FeatureProvider | None) -> None
-```
-
-**Purpose**: Connects the deployment’s chosen feature-flag provider to the process-wide OpenFeature API. If no provider is supplied, it deliberately does nothing, leaving the safe default provider in place.
-
-**Data flow**: It receives either a provider object or `None`. If it gets `None`, nothing changes and future flag checks will use OpenFeature’s default no-op behavior. If it gets a provider, it gives that provider to OpenFeature so later flag lookups go through the selected backend.
-
-**Call relations**: This is meant to be called during boot, after deployment configuration has decided whether there is a real flag backend. Its only handoff is to `openfeature.api.set_provider`, which installs the provider used later by `flag_enabled`.
-
-*Call graph*: 1 external calls (set_provider).
-
-
-##### `flag_enabled`  (lines 36–50)
-
-```
-async def flag_enabled(flag: str, *, default: bool) -> bool
-```
-
-**Purpose**: Answers whether a named feature flag is on for the current workspace. It is designed to be safe: if the flag system cannot answer quickly or cleanly, it returns the default chosen by the caller.
-
-**Data flow**: It takes a flag name and a default true-or-false value. It reads the current workspace, builds an evaluation context from that workspace ID, and asks the OpenFeature client for the flag’s boolean value. If the answer arrives within the timeout, that answer is returned. If anything fails, it writes a warning with the flag name, default, and error details, then returns the default.
-
-**Call relations**: Application code calls this when deciding whether to offer a feature. Inside, it gets the current workspace from `ufo.workspace.ws_current`, creates an OpenFeature `EvaluationContext`, uses `openfeature.api.get_client` to ask the configured provider, and wraps the call in `asyncio.timeout` so it cannot hang. On failure, it reports the problem through `ufo.o11y.warn` and hands the caller a safe fallback.
-
-*Call graph*: 5 external calls (timeout, get_client, EvaluationContext, warn, ws_current).
-
+### Model and embedding providers
+Registers the central model catalog, Bedrock-hosted model clients, and OpenAI-backed embedding generation.
 
 ### `core/src/ufo/models/registry.py`
 
-`domain_logic` · `startup and model-call request handling`
+`domain_logic` · `startup for building and validation; request handling whenever model facts or clients are needed`
 
-This file is the project’s model switchboard. Other parts of the system may ask for a model by name, or use the special name `auto`, meaning “use the deployment’s default model.” The registry turns those names into concrete model facts: which provider serves it, what key it needs, how to create a client for it, and how to price its usage.
+This file solves a coordination problem. Many parts of the system need to know about models: routing needs to choose the right provider, billing needs prices, and runtime calls need credentials. If each part guessed on its own, a typo or missing model could show up later as a failed API call, a wrong bill, or a confusing crash. The registry makes model lookup a single front door.
 
-At startup, `model_registry` combines the built-in model definitions with any model definitions contributed by extensions. It refuses to start if two models claim the same id, or if important configured models point to ids that do not exist. That is important because a typo in a model name should fail immediately, not halfway through a user request.
+The main class, `ModelRegistry`, is a frozen data holder, meaning its fields are not meant to change after creation. It contains a table of model specifications keyed by exact model id, a combined pricing table, and the configured default model used when something asks for `auto` instead of naming a real model.
 
-`ModelRegistry` is the object created from that startup work. Think of it like a well-labeled cabinet: each drawer is keyed by exact model id, and inside is the model’s instruction card. When a model call happens, `client_for` looks up the card, finds the right API key either from the current workspace’s bring-your-own-key storage or from environment configuration, checks that the key can be sent safely over the provider’s wire protocol, and then builds the provider client. Pricing and provider lookup also go through this same registry, so the rest of the system has one trusted place to ask model questions.
+The file also knows how to create a model client at the moment it is needed. That matters because credentials may come from the current workspace's bring-your-own-key storage, or from platform environment variables. In everyday terms, it checks the right key ring only when someone actually opens that model's door.
+
+The top-level `model_registry` function builds the table from built-in model definitions plus extension manifests. It refuses duplicate ids, and it checks that important configured model names are real during startup. That turns configuration mistakes into early, clear failures instead of surprises halfway through a user request.
 
 #### Function details
 
@@ -71,11 +31,11 @@ At startup, `model_registry` combines the built-in model definitions with any mo
 def resolve(self, model: str) -> str
 ```
 
-**Purpose**: This turns the special model name `auto` into the real default model configured for this deployment. If the caller already gave a specific model id, it leaves it unchanged.
+**Purpose**: This turns the special model value `auto` into the concrete default model configured for this deployment. If the caller already supplied a specific model id, it leaves it alone.
 
-**Data flow**: It receives a model name. If that name is the `auto` placeholder, it replaces it with `self.auto_model`; otherwise it returns the original name. It does not change the registry.
+**Data flow**: It receives a model name. If that name is the shared `auto` marker, it replaces it with `self.auto_model`; otherwise it returns the original name unchanged. It does not change the registry.
 
-**Call relations**: Other methods use this before asking questions where `auto` would be too vague. `key_slot_for` uses it to find the real key slot, and `model_key_env` uses it to check the key needed by the model that will actually run.
+**Call relations**: Other methods use this before asking questions where `auto` would be too vague. `key_slot_for` uses it to find the real model whose key slot matters, and `model_key_env` uses it to check which provider key onboarding should ask for.
 
 *Call graph*: called by 2 (key_slot_for, model_key_env).
 
@@ -86,11 +46,11 @@ def resolve(self, model: str) -> str
 def spec(self, model: str) -> ModelSpec
 ```
 
-**Purpose**: This fetches the full registered description for a model id. It deliberately raises a clear error if the id is unknown, so mistakes are caught at the registry instead of failing later in unrelated code.
+**Purpose**: This looks up the full stored description for a model id. It exists so every part of the system fails in the same clear way when someone names a model that is not registered.
 
-**Data flow**: It receives a model id, looks in the registry’s `specs` table, and returns the matching `ModelSpec`. If there is no entry, it turns the missing lookup into a `ValueError` that names the unknown model.
+**Data flow**: It receives a model id and checks the registry's `specs` table. If the id exists, it returns the matching `ModelSpec`, which contains facts such as provider, key requirements, price, and client factory. If the id is missing, it raises a `ValueError` explaining that no model is registered for that id.
 
-**Call relations**: This is the main doorway to model facts. `client_for` uses it before building a provider client, `provider_for` uses it to report the backend provider, and `model_key_env` uses it after resolving `auto` to decide which environment variable should contain the key.
+**Call relations**: `client_for`, `provider_for`, and `model_key_env` all go through this lookup rather than reading the table directly. That makes this method the common checkpoint before model-specific work continues.
 
 *Call graph*: called by 3 (client_for, model_key_env, provider_for).
 
@@ -101,11 +61,11 @@ def spec(self, model: str) -> ModelSpec
 async def client_for(self, model: str) -> ModelClient
 ```
 
-**Purpose**: This creates the actual client object used to talk to the provider for a chosen model. It also finds the API key at the last responsible moment, so workspace-specific keys and rotated platform keys are respected.
+**Purpose**: This creates the actual client object used to call a model provider, such as OpenAI or Anthropic. It also finds and validates the credential the provider needs, so a missing or unusable key becomes a clear error before the provider call is attempted.
 
-**Data flow**: It receives a model id, looks up that model’s spec, then decides whether a key is needed. If no key is needed, it builds the client with an empty key. If a key is needed, it asks the current workspace for the right credential, reports a clear runtime error if none is set, checks that the key only contains ASCII characters, and then returns the provider client built from the spec and key.
+**Data flow**: It receives a model id, looks up that model's specification, and checks whether the model needs a key. If no key is required, it builds the client with an empty key. If a key is required, it asks the current workspace for the credential, allowing either a workspace-specific bring-your-own-key value or a platform environment value. If no key is found, it raises a helpful runtime error. If the key contains non-ASCII characters, which provider network protocols may not carry safely, it raises `CredentialValueInvalid`. On success, it returns a new model client built from the spec and key.
 
-**Call relations**: When code is ready to make a model call, it comes here to get the usable client. This method first relies on `ModelRegistry.spec` for the model’s facts, then asks `ws_current` for the active workspace so it can load the correct credential. If the key contains characters the provider connection cannot carry, it raises `CredentialValueInvalid` instead of letting the provider fail later.
+**Call relations**: When some later part of the system is ready to make a model call, it asks this method for the correct client. This method first relies on `spec` to confirm the model is known, then calls `ws_current` to reach the active workspace's credential lookup, and finally hands the finished spec-plus-key pair to the model's client factory.
 
 *Call graph*: calls 1 internal fn (spec); 2 external calls (__init__, ws_current).
 
@@ -116,11 +76,11 @@ async def client_for(self, model: str) -> ModelClient
 def provider_for(self, model: str) -> str
 ```
 
-**Purpose**: This answers which provider, such as OpenAI or Anthropic, serves a given model. That lets usage, metering, and reporting group model calls under the correct backend.
+**Purpose**: This returns the provider name for a model, such as the backend company or service that serves it. That is useful for routing, metrics, and billing labels.
 
-**Data flow**: It receives a model id, fetches the registered spec for that id, and returns the spec’s provider name. If the model id is not registered, the lookup fails clearly through `spec`.
+**Data flow**: It receives a model id, looks up the model specification through `spec`, and returns the provider field from that specification. If the model id is unknown, the lookup raises the shared clear error.
 
-**Call relations**: Code that needs to label a model call by provider uses this small lookup. It delegates to `ModelRegistry.spec`, keeping unknown-model errors consistent with the rest of the registry.
+**Call relations**: Code that needs to record or split work by provider calls this method instead of duplicating model lookup rules. It delegates the hard part, checking that the model exists, to `spec`.
 
 *Call graph*: calls 1 internal fn (spec).
 
@@ -131,11 +91,11 @@ def provider_for(self, model: str) -> str
 def key_slot_for(self, model: str) -> str | None
 ```
 
-**Purpose**: This tells which workspace bring-your-own-key slot would pay for a model’s calls, if any. It is intentionally forgiving: old or unknown model ids return `None` instead of crashing, which is useful for billing exports and historical records.
+**Purpose**: This tells the caller which workspace bring-your-own-key slot would pay for a model, if any. It is intentionally forgiving: for unknown historical models or keyless models, it returns `None` rather than crashing.
 
-**Data flow**: It receives a model name, first turns `auto` into the configured real model, then looks for that spec directly in the registry table. If the spec is missing or has no key slot, it returns `None`; otherwise it returns the key slot name.
+**Data flow**: It receives a model name, first resolving `auto` to the concrete configured model. It then does a soft lookup in the registry table. If there is no spec, or the spec has no key slot, it returns `None`. Otherwise it returns the key slot name stored on the spec.
 
-**Call relations**: This method is used when the system needs to label whether usage was paid by a workspace key or by the platform. It calls `ModelRegistry.resolve` first because stored agent settings may still say `auto`, and billing needs the key slot for the concrete model that actually ran.
+**Call relations**: This method uses `resolve` because stored agent settings may say `auto`, but billing and key labeling need the real model behind it. Unlike `spec`, it avoids loud failure so exports or old ledger rows can still be described even if a model has since been removed.
 
 *Call graph*: calls 1 internal fn (resolve).
 
@@ -146,11 +106,11 @@ def key_slot_for(self, model: str) -> str | None
 def model_key_env(self, model: str, config: Config) -> str | None
 ```
 
-**Purpose**: This tells onboarding which environment variable should be set before a model’s first use. It only does this eager check for core providers whose key environment variables are known by configuration.
+**Purpose**: This tells onboarding which environment variable should be set before a first run for a given model. It only answers for built-in providers whose key environment names are known in core configuration.
 
-**Data flow**: It receives a model name and the system configuration. It resolves `auto` to the real model, looks up that model’s provider, and returns the configured Anthropic or OpenAI key environment variable when appropriate. For contributed or unknown-to-core providers, it returns `None` because their key lookup is handled later by their own model spec.
+**Data flow**: It receives a model name and the application configuration. It resolves `auto` to the configured real model, looks up that model's spec, and reads its provider. For Anthropic it returns the configured Anthropic key environment variable name; for OpenAI it returns the configured OpenAI key environment variable name; for other contributed providers it returns `None` because core may not know how that provider obtains credentials.
 
-**Call relations**: Startup or onboarding code can call this to warn users about missing keys before the first model turn. It uses `ModelRegistry.resolve` to avoid checking the placeholder `auto`, and `ModelRegistry.spec` to read the provider from the actual registered model.
+**Call relations**: Onboarding or setup checks call this when they want to warn early about missing keys. It uses `resolve` so `auto` points to the actual first model, and `spec` so a bad model id still fails clearly.
 
 *Call graph*: calls 2 internal fn (resolve, spec).
 
@@ -161,88 +121,26 @@ def model_key_env(self, model: str, config: Config) -> str | None
 def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegistry
 ```
 
-**Purpose**: This builds the active `ModelRegistry` for the running deployment. It combines built-in models and extension-provided models, rejects duplicate ids, validates important configured model choices, and prepares pricing information.
+**Purpose**: This builds the complete model registry for the running system. It combines built-in model definitions with model definitions contributed by extension manifests, checks for conflicts and bad configuration, and produces the ready-to-use `ModelRegistry`.
 
-**Data flow**: It receives the loaded configuration and a group of extension manifests. It asks for the built-in model specs, adds those and all manifest-provided specs into one dictionary keyed by model id, and raises clear errors for duplicate ids or configured model ids that do not exist. Finally, it builds a combined pricing table from the specs and returns a frozen `ModelRegistry` containing the specs, pricing, and configured automatic model.
+**Data flow**: It receives the loaded configuration and a tuple of extension manifests. It asks `core_model_specs` for the built-in models, then adds those plus every manifest-provided model into one dictionary keyed by model id. If two specs claim the same id, it raises a `ValueError`. It then checks that the configured default, ambient reply, and background job models all exist. Finally it builds a combined pricing table from every spec's price and returns a new `ModelRegistry` containing the specs, pricing, and configured auto model.
 
-**Call relations**: This is called during setup to create the single model registry used later by model calls, onboarding checks, pricing, and provider lookups. It hands off to `core_model_specs` for built-in definitions, to `pricing_from` to assemble pricing, and finally constructs the `ModelRegistry` object the rest of the system depends on.
+**Call relations**: This is the startup assembly point for model knowledge. It gathers built-in specs through `core_model_specs`, folds in manifest contributions, uses `pricing_from` to prepare billing data, and constructs the `ModelRegistry` that the rest of the system consults during later model selection and calls.
 
 *Call graph*: 3 external calls (__init__, core_model_specs, pricing_from).
 
 
-### `core/src/ufo/sandbox/select.py`
-
-`orchestration` · `startup/config load`
-
-A sandbox can run on different backends, much like a package can be delivered by different couriers. This file is the place where the system reads the configured backend names, checks that they are valid, and builds the carrier objects that will be kept alive for the process.
-
-It always starts with one built-in option: `local`, which runs sandboxes locally. Then it adds any carrier backends advertised by loaded extensions through their manifests. If two backends try to use the same name, the file stops immediately, because otherwise a name like `docker` could mean two different things.
-
-The file also supports `resume_backends`: older backends that are no longer the default, but must stay available so existing saved sandbox handles can still be reopened. This lets a deployment move from one provider to another without abandoning old workspaces. The default backend and resume backends must be distinct, and resume names cannot repeat.
-
-A key safety rule is enforced for remote carriers. If a carrier runs outside the local process or cluster, it must have a public HTTPS proxy URL configured. Without that, sandbox network traffic could bypass the system’s controlled egress path, where credentials, denial rules, and metering are applied.
-
-#### Function details
-
-##### `select_carriers`  (lines 26–50)
-
-```
-def select_carriers(config: Config, manifests: tuple[Manifest, ...]) -> DeployCarriers
-```
-
-**Purpose**: Builds the full set of sandbox carriers for this running deployment: the default carrier for new sandboxes, plus any extra carriers needed to resume older sandboxes. It also catches unsafe or ambiguous configuration early, before sandbox work begins.
-
-**Data flow**: It receives the main configuration and the loaded extension manifests. It starts with the built-in `local` carrier, adds extension-provided carrier definitions, checks for duplicate names and invalid resume settings, then asks `_built` to create the actual carrier objects. It returns a `DeployCarriers` object containing the default carrier, its specification, and a name-to-carrier map for resume backends.
-
-**Call relations**: This is the main selection routine in the file. `select_carrier` calls it when only the default backend is needed. During its work, it calls `_built` once for the default backend and once for each resume backend, so all configured carrier names are validated and constructed in one place.
-
-*Call graph*: calls 1 internal fn (_built); called by 1 (select_carrier); 2 external calls (__init__, __init__).
-
-
-##### `select_carrier`  (lines 53–56)
-
-```
-def select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> tuple[Carrier, CarrierSpec]
-```
-
-**Purpose**: Returns only the default sandbox carrier, for callers that do not care about resume backends. It is a convenience wrapper around the fuller carrier selection process.
-
-**Data flow**: It receives the same configuration and manifests as `select_carriers`. It calls `select_carriers`, then takes just the default carrier and its specification from the returned bundle. The result is a two-item pair: the carrier object and the `CarrierSpec` that describes where it came from.
-
-**Call relations**: This function sits on top of `select_carriers`. It does not make separate decisions; it relies on the full selection path so the same validation rules are used even when a caller only asks for the default backend.
-
-*Call graph*: calls 1 internal fn (select_carriers).
-
-
-##### `_built`  (lines 59–79)
-
-```
-def _built(specs: dict[str, CarrierSpec], config: Config, name: str) -> tuple[Carrier, CarrierSpec]
-```
-
-**Purpose**: Turns one configured backend name into a live carrier object, while enforcing the safety checks needed for remote sandbox backends. It is the gatekeeper that makes sure a name refers to a real registered backend and that remote backends have a secure public proxy URL.
-
-**Data flow**: It receives the known carrier specifications, the configuration, and one backend name. It looks up that name; if no carrier registered it, it raises an error. If the carrier is remote, it reads `proxy_public_url` from the sandbox configuration, checks that it exists, parses it as a URL, and requires it to be HTTPS with a hostname. If all checks pass, it calls the carrier factory and returns the new carrier together with its specification.
-
-**Call relations**: `select_carriers` calls this helper whenever it needs to construct a default or resume backend. `_built` delegates URL parsing to `urllib.parse.urlparse` and raises `NotRegisteredError` when a configured backend name cannot be found, so bad configuration fails during startup instead of later during sandbox creation.
-
-*Call graph*: called by 1 (select_carriers); 2 external calls (__init__, urlparse).
-
-
-### Model and embedding providers
-Provider extensions add concrete Bedrock model offerings and OpenAI-backed embeddings to the central backend system.
-
 ### `extensions/bedrock/ufo_ext_bedrock.py`
 
-`config` · `startup and provider discovery; client creation when a Bedrock model is selected`
+`config` · `startup / provider discovery`
 
-This file is like a menu and connection guide for using large language models through Amazon Bedrock Mantle. Without it, the rest of the system would not know that these Bedrock model IDs exist, what API style they use, where to send requests, or which environment variables must be set before a request can work.
+This file is a provider plug-in for Amazon Bedrock Mantle. A provider plug-in is like a catalog page plus connection instructions: it lists the models the system can use, says how large their context windows are, records pricing and knowledge cutoff dates, and tells the rest of the system how to build the right client when someone actually calls a model.
 
-The file defines provider-wide names, the needed API key slot, and the AWS region environment variables. It then defines helper functions that build model descriptions called ModelSpec objects. A ModelSpec is a compact record saying: this is the model ID, this is the provider, this is the price, this is the context window size, this is the knowledge cutoff, and this is the function to call when it is time to make a real network client.
+Bedrock Mantle exposes two kinds of model APIs here. Anthropic model IDs, such as Claude models, are connected through the Anthropic Bedrock Mantle client. OpenAI-style model IDs, such as GPT models, are connected through an OpenAI-compatible client. The file does not translate prompts or responses itself. Instead, each `ModelSpec` points to the core client code that already knows how to speak the right API shape.
 
-There are two paths because Bedrock Mantle exposes two API shapes. Anthropic models use an Anthropic Bedrock Mantle client. OpenAI-compatible models use an OpenAI-style client, with a different base web address depending on whether the model uses the older chat-style API or the newer responses-style API.
+The file also defines the credential and region rules. It expects an API key in `AWS_BEARER_TOKEN_BEDROCK`, and it expects an AWS region from `AWS_REGION` or `AWS_DEFAULT_REGION`. If no region is set, it stops with a clear error, because Bedrock endpoints are regional.
 
-At the end, manifest() packages the provider name, version, credential requirement, and all model specs into a Manifest. That manifest is what the larger system can load to discover this extension.
+At the bottom, `manifest()` packages everything into a `Manifest`, which is the object the larger UFO system reads to discover this extension’s name, required credential, and supported models.
 
 #### Function details
 
@@ -252,11 +150,11 @@ At the end, manifest() packages the provider name, version, credential requireme
 def bedrock_region() -> str
 ```
 
-**Purpose**: This function finds the AWS region that Bedrock Mantle requests should use. A region is the Amazon data-center area, such as where the service endpoint lives, and requests cannot be formed correctly without it.
+**Purpose**: Finds the AWS region that Bedrock Mantle should use. Bedrock URLs depend on region, so the system cannot safely create a client without this value.
 
-**Data flow**: It reads the process environment, first looking for AWS_REGION and then AWS_DEFAULT_REGION. If it finds one, it returns that text. If neither is set, it stops with an error that tells the user which environment variables to set.
+**Data flow**: It reads the process environment, first looking for `AWS_REGION` and then `AWS_DEFAULT_REGION`. If it finds one, it returns that region string. If both are missing, it raises an error telling the user which environment variable to set.
 
-**Call relations**: The Anthropic and OpenAI client builders call this before creating a network client. It acts as the shared checkpoint that makes sure both API styles are aimed at the correct Amazon region.
+**Call relations**: When either Bedrock client builder needs to create a real network client, it calls `bedrock_region` first. `_anthropic_client` uses the result for the Anthropic Bedrock Mantle client, and `_openai_client` uses it to build the correct OpenAI-compatible Bedrock Mantle base URL.
 
 *Call graph*: called by 2 (_anthropic_client, _openai_client).
 
@@ -267,11 +165,11 @@ def bedrock_region() -> str
 def _anthropic_client(spec: ModelSpec, key: str) -> AnthropicClient
 ```
 
-**Purpose**: This function builds a ready-to-use client for Anthropic-style models served through Bedrock Mantle. The rest of the system uses it when a ModelSpec says a chosen Bedrock model should speak the Anthropic API.
+**Purpose**: Builds the client used to call Anthropic models through Amazon Bedrock Mantle. Someone would use this indirectly when a `ModelSpec` for an Anthropic model needs a working API connection.
 
-**Data flow**: It receives a model description and an API key. It asks bedrock_region for the AWS region, creates an Anthropic Bedrock Mantle client with the key, region, timeout, and retry settings, wraps that client in UFO's AnthropicClient wrapper, and returns the wrapper. The wrapper carries both the network client and the model specification.
+**Data flow**: It receives a model specification and an API key. It looks up the AWS region, creates an Anthropic Bedrock Mantle async client with that key, region, no automatic retries, and a provider timeout, then wraps it in UFO’s `AnthropicClient` together with the model specification. The result is a ready-to-use Anthropic model client.
 
-**Call relations**: Model specs created by _anthropic store this function as their client factory. When the wider UFO system needs to call one of those Anthropic Bedrock models, it comes back to this function to build the concrete client.
+**Call relations**: Anthropic model specs created by `_anthropic` store this function as their client builder. Later, when the core system wants to use one of those models, it calls this builder. The builder asks `bedrock_region` for the region, hands the key and region to Anthropic’s Bedrock Mantle client, and then hands that lower-level client to UFO’s `AnthropicClient` wrapper.
 
 *Call graph*: calls 1 internal fn (bedrock_region); 3 external calls (__init__, AsyncAnthropicBedrockMantle, cast).
 
@@ -282,11 +180,11 @@ def _anthropic_client(spec: ModelSpec, key: str) -> AnthropicClient
 def _openai_client(spec: ModelSpec, key: str) -> OpenAIClient
 ```
 
-**Purpose**: This function builds a ready-to-use client for OpenAI-compatible models served through Bedrock Mantle. It hides the details of Bedrock Mantle's OpenAI-style web address from the rest of the system.
+**Purpose**: Builds the client used to call OpenAI-compatible models through Amazon Bedrock Mantle. It chooses the correct Bedrock Mantle URL depending on whether the model uses the chat completions style API or the newer responses style API.
 
-**Data flow**: It receives a model description and an API key. It gets the AWS region, chooses the correct base URL depending on whether the model uses the responses API or the chat API, creates an OpenAI SDK client for that URL, wraps it in UFO's OpenAIClient wrapper, and returns it.
+**Data flow**: It receives a model specification and an API key. It gets the AWS region, builds a base URL for Bedrock Mantle, creates an OpenAI SDK-style client pointed at that URL, and wraps it in UFO’s `OpenAIClient` with the model specification. The output is a ready-to-use OpenAI-compatible model client.
 
-**Call relations**: Model specs created by _openai store this function as their client factory. When the selected model is one of the OpenAI-compatible Bedrock models, the wider system uses this function to point the OpenAI client at Bedrock Mantle rather than at OpenAI directly.
+**Call relations**: OpenAI-compatible model specs created by `_openai` store this function as their client builder. When the larger system needs to call one of those models, this function is invoked. It relies on `bedrock_region` for the regional endpoint and delegates actual SDK client creation to `openai_sdk_client` before returning UFO’s `OpenAIClient` wrapper.
 
 *Call graph*: calls 1 internal fn (bedrock_region); 2 external calls (__init__, openai_sdk_client).
 
@@ -297,11 +195,11 @@ def _openai_client(spec: ModelSpec, key: str) -> OpenAIClient
 def _anthropic(id: str, price: ModelPrice, cutoff: str, *, context_window: int=ANTHROPIC_CONTEXT_WINDOW, reasoning: ReasoningSupport=REASONS) -> ModelSpec
 ```
 
-**Purpose**: This helper creates a ModelSpec for an Anthropic model available through Bedrock Mantle. It keeps the repeated setup for Anthropic models in one place, so each model entry only needs to state what is unique about that model.
+**Purpose**: Creates a `ModelSpec` entry for one Anthropic model available through Bedrock. A `ModelSpec` is the catalog record that tells UFO how the model is named, priced, authenticated, and connected.
 
-**Data flow**: It takes a model ID, pricing information, a knowledge cutoff date, and optional context-window and reasoning settings. It combines those with Bedrock's provider name, credential details, the Anthropic client builder, and the chat API surface, then returns a complete ModelSpec.
+**Data flow**: It receives the Bedrock model ID, price information, knowledge cutoff date, and optional context-window and reasoning settings. It combines those with shared Bedrock constants such as provider name, credential slot, API key environment variable, and the `_anthropic_client` builder. It returns a complete `ModelSpec` for that Anthropic model.
 
-**Call relations**: The BEDROCK_MODEL_SPECS list calls this repeatedly while the file is loaded. Those resulting specs later become part of the manifest that the extension exposes to the rest of UFO.
+**Call relations**: This helper is used while building `BEDROCK_MODEL_SPECS`, the file’s model catalog. It does not open a network connection itself. Instead, it records `_anthropic_client` inside each model spec so the real client can be created later, only when that model is used.
 
 *Call graph*: 1 external calls (__init__).
 
@@ -312,11 +210,11 @@ def _anthropic(id: str, price: ModelPrice, cutoff: str, *, context_window: int=A
 def _openai(id: str, price: ModelPrice, cutoff: str, window: int, api_surface: ApiSurface) -> ModelSpec
 ```
 
-**Purpose**: This helper creates a ModelSpec for an OpenAI-compatible model available through Bedrock Mantle. It standardizes the common Bedrock credential, provider, reasoning, and client-factory settings for these models.
+**Purpose**: Creates a `ModelSpec` entry for one OpenAI-compatible model available through Bedrock. It keeps the repeated provider, credential, pricing, context, reasoning, and API-surface details consistent across these model entries.
 
-**Data flow**: It takes a model ID, price, knowledge cutoff, context-window size, and API surface name. It combines those with Bedrock's provider name, the OpenAI client builder, and the required API key location, then returns a complete ModelSpec.
+**Data flow**: It receives the model ID, price, knowledge cutoff, context window size, and API surface name. It combines those with shared Bedrock constants and the `_openai_client` builder. It returns a complete `ModelSpec` that the rest of UFO can list and later use to create a client.
 
-**Call relations**: The BEDROCK_MODEL_SPECS list calls this for each OpenAI-compatible Bedrock model. The finished specs are then included in manifest(), so the larger system can discover and select these models.
+**Call relations**: This helper is used to populate `BEDROCK_MODEL_SPECS` with GPT-style Bedrock Mantle models. Like `_anthropic`, it only creates catalog data at import time. The actual network client is created later through `_openai_client` when the model is selected for use.
 
 *Call graph*: 1 external calls (__init__).
 
@@ -327,26 +225,26 @@ def _openai(id: str, price: ModelPrice, cutoff: str, window: int, api_surface: A
 def manifest() -> Manifest
 ```
 
-**Purpose**: This function returns the extension's public description: its name, version, required credential, and available models. It is the main thing the host system calls to learn what this provider offers.
+**Purpose**: Returns the extension manifest that tells UFO what this provider offers. The manifest includes the extension name and version, the credential the user must provide, and the complete list of Bedrock model specs.
 
-**Data flow**: It creates a credential slot describing the Bedrock API key the user must provide. It then creates and returns a Manifest containing the extension name, version, that credential requirement, and the full list of Bedrock model specs.
+**Data flow**: It creates a credential slot named `bedrock_api_key` with a human-readable description, then packages that credential requirement together with the provider name, version, and `BEDROCK_MODEL_SPECS`. The returned `Manifest` is the single object the host system reads to discover this extension.
 
-**Call relations**: The extension loader calls this during provider discovery. The returned Manifest hands the larger UFO system everything it needs to show, validate, and later use the Bedrock Mantle models defined in this file.
+**Call relations**: This is the public discovery point for the file. During provider discovery or startup, the larger system calls `manifest`; `manifest` hands back the model catalog built earlier by `_anthropic` and `_openai`, plus the credential requirement created with `CredentialSlot`.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
 ### `extensions/embed_openai/ufo_ext_embed_openai.py`
 
-`io_transport` · `startup and embedding jobs`
+`io_transport` · `startup registration and background embedding/indexing work`
 
-This file is the bridge between the project and OpenAI’s embedding API. An embedding is a long list of numbers that represents the meaning of a piece of text, a bit like giving each sentence a location on a map of ideas. Without this file, deployments that rely on the default embedding backend would have no built-in way to create those vectors.
+This extension gives the project a ready-made embedding backend: it sends text to OpenAI’s `text-embedding-3-large` model and gets back vectors, which are long lists of numbers that capture meaning for search and indexing. Without this file, a deployment that expects the default embedding backend would not know how to create those vectors.
 
-The file does three main things. First, it defines safe limits for requests sent to OpenAI: each text item is clipped if it is too large, and many texts are packed into batches without going over item-count or character-count limits. This keeps requests from becoming too large and failing unexpectedly.
+The file does three main things. First, it defines safety limits for embedding requests. OpenAI calls can fail or become too large if too much text is sent at once, so `plan_embed_batches` clips very long text items and groups them into batches that stay under size limits. Think of it like packing boxes for shipping: each box can only hold so many items and so much total weight.
 
-Second, it defines `OpenAIEmbedClient`, which reads the deploy API key only when an embedding call actually happens. That means a development server can start without an OpenAI key, but the system will clearly fail if someone tries to embed text without one.
+Second, `OpenAIEmbedClient` performs the actual embedding call. It reads the deploy API key from the environment at the moment embedding is requested, not when the server starts. That means a local development server can boot without an OpenAI key, but if someone tries to embed without a key, it fails clearly.
 
-Third, it exposes a `manifest`, which tells the host system: “I am the default embedding backend, here is how to build me, and I need an OpenAI API key at deploy time.”
+Third, `manifest` advertises this extension to the host system. It says: “I provide the default embedding backend, and I need an OpenAI API key to do real work.”
 
 #### Function details
 
@@ -356,11 +254,11 @@ Third, it exposes a `manifest`, which tells the host system: “I am the default
 def plan_embed_batches(texts: tuple[str, ...]) -> tuple[tuple[str, ...], ...]
 ```
 
-**Purpose**: This function prepares text for OpenAI embedding requests without letting any single request get too large. It clips oversized text items and groups the remaining text into batches that stay under the configured limits.
+**Purpose**: This function prepares text for OpenAI embedding requests without exceeding request size limits. It shortens any single text that is too long, then groups texts into batches that are small enough to send safely.
 
-**Data flow**: It receives a tuple of text strings. For each string, it trims it to the maximum allowed length, then adds it to the current batch unless doing so would exceed the maximum number of items or characters. It returns a tuple of batches, where each batch is a tuple of clipped text strings ready to send to OpenAI.
+**Data flow**: It receives a tuple of text strings. For each string, it keeps only the allowed maximum number of characters, then adds it to the current batch unless that batch would have too many items or too many total characters. It returns a tuple of batches, where each batch is a tuple of clipped text strings ready to send to OpenAI.
 
-**Call relations**: When `OpenAIEmbedClient.embed` is ready to contact OpenAI, it calls this function first. The batches produced here become the actual chunks of text sent in separate embedding API requests.
+**Call relations**: When `OpenAIEmbedClient.embed` is about to call OpenAI, it first asks this function how to split the input. The returned batches control how many separate OpenAI requests are made and help prevent oversized payloads.
 
 *Call graph*: called by 1 (embed).
 
@@ -371,11 +269,11 @@ def plan_embed_batches(texts: tuple[str, ...]) -> tuple[tuple[str, ...], ...]
 async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]
 ```
 
-**Purpose**: This asynchronous function turns text strings into embedding vectors using OpenAI’s `text-embedding-3-large` model. It is the main workhorse that the rest of the system uses when it needs searchable numeric representations of text.
+**Purpose**: This is the main workhorse that turns text into embedding vectors using OpenAI. Someone uses it when the system needs numeric representations of text for indexing or search.
 
-**Data flow**: It receives a tuple of text strings. It first reads the deploy API key from the environment, using the project’s credential helper, and raises a clear error if no key is available. It then creates an OpenAI async client, splits the input text into safe batches, sends each batch to OpenAI, sorts the returned rows back into the original order, converts the embedding values to floats, and returns all vectors as tuples.
+**Data flow**: It receives a tuple of text strings. It reads the OpenAI API key from the deployment environment, and if no key is available it raises a clear error. It creates an async OpenAI client, splits the text with `plan_embed_batches`, sends each batch to OpenAI, sorts the returned rows back into input order, converts the embedding values to plain floats, and returns all vectors as tuples.
 
-**Call relations**: This method relies on `deploy_env` to find the OpenAI key, `openai.AsyncOpenAI` to talk to OpenAI’s service, and `plan_embed_batches` to keep each request within size limits. It is called by the embedding core when the system needs vectors for indexing or serving memory-related features.
+**Call relations**: The wider embedding system calls this method through the `EmbedClient` interface when embeddings are needed. Inside the method, it relies on `deploy_env` to find the API key, `plan_embed_batches` to keep requests within limits, and `openai.AsyncOpenAI` to make the actual network calls to OpenAI.
 
 *Call graph*: calls 1 internal fn (plan_embed_batches); 2 external calls (AsyncOpenAI, deploy_env).
 
@@ -386,11 +284,11 @@ async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]
 def build(ctx: ExtensionContext) -> EmbedClient
 ```
 
-**Purpose**: This function creates the embedding client that the host system will use for this backend. It deliberately does not require an API key at startup, so a local or development server can boot even before embedding is used.
+**Purpose**: This function creates the embedding client object that the host system will use. It deliberately does not require an API key at construction time, so the service can start even before embedding is used.
 
-**Data flow**: It receives an extension context, which represents the workspace or environment the extension is being built for. It does not read data from that context here. It simply creates and returns an `OpenAIEmbedClient` instance.
+**Data flow**: It receives an extension context from the host system, but this backend does not need to read anything from that context. It returns a new `OpenAIEmbedClient` instance with the default model settings.
 
-**Call relations**: The manifest points to this function as the factory for the default embedding backend. During system startup, the core extension machinery calls it to build the client, and later that client’s `embed` method does the actual OpenAI work.
+**Call relations**: The extension manifest points to this function as the factory for the default embedding backend. During startup, the host system calls it to obtain a client, and later that client’s `embed` method performs the real OpenAI work.
 
 *Call graph*: 1 external calls (__init__).
 
@@ -401,69 +299,362 @@ def build(ctx: ExtensionContext) -> EmbedClient
 def manifest() -> Manifest
 ```
 
-**Purpose**: This function describes the extension to the host system. It declares the extension’s name and version, says which deploy key it needs, and registers this file’s OpenAI client as the default embedding backend.
+**Purpose**: This function describes the extension to the host system. It tells the system the extension’s name and version, which deployment key it needs, and which embedding backend it provides.
 
-**Data flow**: It takes no input. It builds an `EmbedBackendSpec` that links the backend name to the `build` function, then wraps that in a `Manifest` object along with metadata and required deploy keys. The returned manifest is what the host system reads to discover and load this extension.
+**Data flow**: It takes no input. It builds and returns a `Manifest` object containing the extension metadata, the required OpenAI API key name, and an `EmbedBackendSpec` that connects the backend name `default` to the `build` function.
 
-**Call relations**: The extension loader calls this during discovery or startup. The manifest it returns tells the core system that the backend named `default` can be constructed by calling `build`.
+**Call relations**: The host system calls this during extension discovery or startup. The manifest is how the rest of the project learns that this file supplies the default embedding backend and should use `build` when that backend is requested.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
-### Feature and live transport backends
-Infrastructure extensions register Cloudflare Flagship for feature decisions and Redis Hub for shared live terminal transport.
+### Brokered connector providers
+Declares broker-managed connector extensions and the dynamic Composio resolver used to route toolkit connections.
 
-### `extensions/flagship/ufo_ext_flagship.py`
+### `extensions/composio/ufo_ext_composio/manifest.py`
 
-`orchestration` · `startup`
+`config` · `startup / extension registration`
 
-Feature flags are switches that let a deployed product turn features on or off without changing code. This file connects those switches to Cloudflare Flagship through OpenFeature, which is a common interface for reading flags from different providers. Think of OpenFeature like a universal power adapter: the core app plugs into one shape, and this extension makes Cloudflare fit that shape.
+This file is the extension’s front desk. When the main system loads the Composio extension, it calls this file to ask: “What do you provide, and how should I reach it?” The answer is a `Manifest`, which is a package of registration information.
 
-At startup, the extension checks whether the deploy has the three required Cloudflare environment values: the Flagship app ID, the Cloudflare account ID, and an API token allowed to evaluate flags. If any are missing, it does not create a provider. That is intentional: the product then falls back to each flag’s built-in default instead of crashing or guessing.
+Composio is a service that can connect to many external tools, such as GitHub, and keep each user’s tokens on Composio’s servers. That matters because this deployment does not need to store those secrets itself. Most Composio tools can be found dynamically through a resolver, using just their Composio slug, which is like looking up a tool by its catalog name. A smaller set of explicitly listed connectors is also declared here, mainly for cases that need command-line credentials or a real provider host.
 
-If all keys are present, it builds a Flagship provider with a short request timeout, no retries, and a configurable cache lifetime. That means a flag lookup should either get an answer quickly, often from cache, or safely fall back through the wider flag system. This file does not create, edit, or delete flags. The actual flag definitions live in infrastructure files, so changing what an environment offers is treated like a normal code review change.
+The file creates one shared `ComposioBroker`, which is the piece that later brokers access to server-side Composio accounts. It also creates a request forwarder for command-line credential use. For each known connector in `CONNECTORS`, it builds a `ConnectorProvider` with its OAuth sign-in description, user-facing label, broker, allowed transfer hosts, and optional CLI credential settings. Finally, it registers a browser route for the OAuth callback/bridge, so the user’s consent flow has a place to return to.
 
 #### Function details
 
-##### `build`  (lines 42–63)
-
-```
-def build(cache_ttl_seconds: float) -> FeatureProvider | None
-```
-
-**Purpose**: This function tries to create the Cloudflare Flagship feature-flag provider that the core system can use through OpenFeature. If the deploy is missing the needed Cloudflare settings, it returns nothing so the system can use each flag’s code default instead.
-
-**Data flow**: It starts with a cache lifetime value from the caller. It then reads three deploy environment values: the Flagship app ID, the Cloudflare account ID, and the Flagship API token. If any value is absent, it records a warning showing which pieces were present and returns None. If all values are present, it passes them into Cloudflare’s FlagshipServerProvider, along with a one-second timeout, zero retries, and the requested cache lifetime, and returns that provider.
-
-**Call relations**: This function is the bridge from this extension into the actual Cloudflare SDK. It calls deploy_env to read deploy-only settings, calls warn when the extension cannot be safely configured, and otherwise hands the gathered settings to FlagshipServerProvider so the rest of the app can read flags through the OpenFeature provider interface.
-
-*Call graph*: 3 external calls (FlagshipServerProvider, deploy_env, warn).
-
-
-##### `manifest`  (lines 66–72)
+##### `manifest`  (lines 24–53)
 
 ```
 def manifest() -> Manifest
 ```
 
-**Purpose**: This function describes the extension to the host system. It tells the host the extension’s name and version, which deploy keys it needs, and how to build its feature-flag provider.
+**Purpose**: Builds and returns the Composio extension manifest, which is the object the host application reads to register this extension. It describes the available connectors, the dynamic connector resolver, and the web route used for OAuth sign-in.
 
-**Data flow**: It takes no input. It packages fixed constants from this file into a Manifest: the extension name, version, required environment keys, and a FlagProviderSpec that says the backend is called flagship and should be built by the build function. The result is a Manifest object the extension system can read.
+**Data flow**: It starts with fixed extension constants, the `CONNECTORS` catalog, and Composio-specific helper classes. It creates a shared broker, creates a request forwarder, turns each connector specification into a `ConnectorProvider`, attaches an optional command-line credential when that connector has an environment variable configured, adds a resolver for dynamically discovered Composio tools, and adds the OAuth route. The result is a complete `Manifest` object returned to the host application.
 
-**Call relations**: This is the registration point for the file. It creates a FlagProviderSpec so the host knows which builder to use for the flagship backend, then wraps that in a Manifest so the extension can be discovered and wired into the larger feature-flag setup.
+**Call relations**: The host system calls this function when it loads the extension. Inside, it constructs the broker, OAuth provider objects, connector provider objects, resolver, route specification, and final manifest. Those constructed pieces are then used later by the wider system: the connector registry can list and resolve Composio connectors, the broker can support grants, the CLI credential can forward authorization when needed, and the registered route can receive the browser-based OAuth consent flow.
+
+*Call graph*: 9 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, items).
+
+
+### `extensions/composio/ufo_ext_composio/resolver.py`
+
+`domain_logic` · `connector discovery and connection setup`
+
+Composio offers access to many outside services, called toolkits. Registering each one separately would be brittle and a lot of work, so this file creates an open resolver for them. A resolver is the part of the system that answers questions like: “Does this provider name belong here?”, “How should a user connect it?”, and “Where should tool calls go after connection?”
+
+The central piece is `ComposioResolver`, a small frozen data class that keeps only one thing: a shared `ConnectorBroker`. The broker is the worker that later runs Composio-backed tools. The resolver itself stays mostly stateless, which matters because it asks for a fresh Composio client each time. That means tests or runtime configuration can swap the client behavior without stale connections hanging around.
+
+When asked about a provider, the resolver first rejects names that are locally banned. For anything else, it asks Composio’s live catalog whether the toolkit is connectable. If it is, the resolver can build an OAuth description, create a connector entry with a readable label, and search Composio’s catalog for discoverable services. It also exposes Composio’s approved file-transfer hosts, so tool files can safely move through the sandbox while the actual service token remains with Composio.
+
+#### Function details
+
+##### `ComposioResolver.transfer_hosts`  (lines 32–33)
+
+```
+def transfer_hosts(self) -> tuple[str, ...]
+```
+
+**Purpose**: This property tells the rest of the system which Composio file-store hosts are allowed for file transfers. It matters because tools may read or write files, and the sandbox needs a clear allow-list of safe hosts.
+
+**Data flow**: It takes no outside input beyond the resolver object. It reads the shared Composio transfer-host list and returns it unchanged as a tuple of host names. It does not change any state.
+
+**Call relations**: When the connector system needs to know which external hosts are permitted for a Composio-backed connection, it asks this property. The answer is handed back directly to the surrounding sandbox or connector flow so file inputs and outputs can pass through approved Composio storage.
+
+
+##### `ComposioResolver.claims`  (lines 35–38)
+
+```
+async def claims(self, provider: str) -> bool
+```
+
+**Purpose**: This function decides whether a given provider name should be treated as a Composio toolkit. It prevents banned names from being accepted and checks Composio’s live catalog before saying yes.
+
+**Data flow**: It receives a provider slug, such as a short service name. First it lowercases the name and compares it with the local banned list; if it is banned, the result is `False`. Otherwise it creates or retrieves a Composio client, asks whether that toolkit is connectable, and returns `True` only if Composio reports a matching connectable toolkit.
+
+**Call relations**: The wider connector registry calls this when no explicitly registered connector has already claimed the provider. If the provider passes this check, later connection steps can ask this same resolver for an OAuth descriptor and connector entry; if it fails, the name is left for other resolvers or rejected.
+
+*Call graph*: 1 external calls (composio_client).
+
+
+##### `ComposioResolver.descriptor`  (lines 40–41)
+
+```
+def descriptor(self, provider: str) -> OAuthProvider
+```
+
+**Purpose**: This function builds the connection description used for OAuth, the standard flow where a user grants access to an outside service. For Composio, it creates a descriptor that points to the toolkit slug but leaves the provider host blank because Composio keeps and uses the account token on its own side.
+
+**Data flow**: It receives a provider slug. It places that slug into a `ComposioOAuthProvider` object and sets the host to an empty string. The result is an OAuth provider description that the rest of the connection flow can use.
+
+**Call relations**: After `claims` has confirmed that a slug belongs to Composio, the connect flow can call this to learn how to start the authorization process. It hands off to `ComposioOAuthProvider`, which packages the provider information in the shape expected by the connector system.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ComposioResolver.entry`  (lines 43–46)
+
+```
+def entry(self, provider: str) -> ConnectorEntry
+```
+
+**Purpose**: This function creates the connector entry that represents a Composio toolkit inside the system. It gives the provider a human-friendly label and attaches it to the shared Composio broker that will later run its tools.
+
+**Data flow**: It receives a provider slug. It keeps the original slug as the provider id, turns underscores into spaces and title-cases the result for display, and combines that with the resolver’s broker in a new `ConnectorEntry`. The returned entry is ready for the connector registry or UI to use.
+
+**Call relations**: Once a provider has been accepted as a Composio toolkit, the registry or connection flow calls this to create the concrete connector record. That record points future tool execution toward the one shared `ConnectorBroker`, rather than creating a separate broker for every possible toolkit.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ComposioResolver.catalog`  (lines 48–51)
+
+```
+async def catalog(self, query: str, limit: int=TOOLKIT_SEARCH_LIMIT, after: str | None=None) -> CatalogPage
+```
+
+**Purpose**: This function searches Composio’s toolkit catalog so users or discovery tools can find services they may connect. It keeps the system from advertising random names by relying on Composio’s own list of connectable toolkits.
+
+**Data flow**: It receives a search query, a maximum number of results, and optionally an `after` marker used to fetch the next page of results. It gets a Composio client, asks that client to list matching toolkits, and returns the resulting catalog page. It does not store the results itself.
+
+**Call relations**: Discovery features call this when they need to show or search available Composio-backed services. The function delegates the actual lookup to the Composio client, then passes the catalog page back to the caller so the caller can display results or continue paging.
+
+*Call graph*: 1 external calls (composio_client).
+
+
+### `extensions/pipedream/ufo_ext_pipedream/manifest.py`
+
+`config` · `startup / extension discovery`
+
+This file is the extension’s “front desk sign.” When the main application loads extensions, it asks each one for a manifest, which is a plain declaration of what the extension provides. Here, the Pipedream extension declares a set of connectors, such as services whose accounts are authorized through Pipedream rather than directly through this app.
+
+The file creates one shared PipedreamBroker. A broker is the server-side helper that knows how to use connected accounts without handing secret tokens to the agent or browser. For every connector listed in CONNECTORS, the manifest builds a ConnectorProvider. Each provider includes three important things: an OAuth provider, which describes how the user grants access; a human-friendly label; and the shared broker that later performs actions and credential-backed work.
+
+It also registers one browser-facing route for the OAuth bridge. OAuth is the common “let this app access my account” consent process. This route is where the consent flow redirects so the app can finish connecting the account to the correct workspace.
+
+In short, this file does not perform Pipedream actions itself. It declares the menu of available Pipedream-backed connections and the route needed to finish login, so the rest of the system can discover and use them safely.
+
+#### Function details
+
+##### `manifest`  (lines 25–47)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Builds and returns the Pipedream extension’s manifest, which is the object the host application reads to discover this extension’s connectors and routes. Someone would use it during extension loading so the app can add Pipedream-backed services to its connection registry.
+
+**Data flow**: It starts with the connector catalog from CONNECTORS and creates one shared PipedreamBroker. For each catalog entry, it turns the provider name and connector details into a ConnectorProvider with an OAuth setup, display label, broker, and allowed transfer hosts. It then adds a route for the OAuth bridge and returns one Manifest object containing the extension name, version, connector list, and route list.
+
+**Call relations**: When the host system loads this extension, it calls manifest to ask, “What do you provide?” The function creates PipedreamOAuthProvider objects for each connector, wraps them in ConnectorProvider entries, creates a RouteSpec for the OAuth redirect path, and hands everything to Manifest so the wider connector and routing systems can register them.
+
+*Call graph*: 6 external calls (__init__, __init__, __init__, __init__, __init__, items).
+
+
+### Direct-key connector providers
+Registers services that authenticate through user-supplied API keys and outbound-proxy-safe credential handling.
+
+### `extensions/keyed_connectors/ufo_ext_keyed_connectors.py`
+
+`config` · `startup / extension manifest load`
+
+Some outside services cannot be connected through a broker-style “click to authorize” flow. Instead, the workspace already owns an API key, like a special password for that service. This file describes those services in a controlled way so the agent can call them without ever seeing the real key.
+
+The main idea is a table of supported providers, such as Datadog, PostHog, Mercury, Apollo, and PandaDoc. Each row says which web host may be contacted, which HTTP header carries the key, what environment variable the sandbox should use, and what text to show when asking a workspace admin for the credential. For providers whose API host depends on region or account, the file lists the allowed hosts and asks the member to choose one. That prevents a key meant for one region from being sent somewhere else.
+
+The safety trick is a “sentinel”: the sandbox receives a harmless placeholder value in an environment variable. When the sandbox makes an outgoing request, the egress proxy replaces that placeholder with the real secret only for the approved host and header. Like handing someone a claim ticket instead of the actual valuables, the agent can use the credential path without being able to read or copy the secret.
+
+At the end, the file builds a manifest: the package of credential slots plus a prompt section explaining how agents should use these keyed providers.
+
+#### Function details
+
+##### `KeyedSecret.__post_init__`  (lines 56–61)
+
+```
+def __post_init__(self) -> None
+```
+
+**Purpose**: This checks that a declared API key uses only an authentication prefix the outbound proxy knows how to safely replace. It protects the provider table from accidentally describing a kind of header value the system cannot swap correctly.
+
+**Data flow**: After a KeyedSecret object is created, it reads its own scheme field. If there is no scheme, it accepts the secret as a plain header value. If there is a scheme, it compares it with the small approved set, and raises an error if the scheme is not supported. Nothing new is returned; the object is either accepted or rejected.
+
+**Call relations**: This runs automatically whenever the provider table creates a KeyedSecret. Later, KeyedProvider.slots relies on these already-checked secrets when it creates credential slots and injection rules, so bad schemes are caught early instead of becoming unsafe proxy behavior.
+
+
+##### `KeyedProvider.__post_init__`  (lines 79–88)
+
+```
+def __post_init__(self) -> None
+```
+
+**Purpose**: This checks that each provider describes its API address in exactly one safe way: either one fixed host, or a closed list of selectable hosts. It also makes sure region-based providers include the extra information needed to ask the user for the right host and pass that choice into the sandbox.
+
+**Data flow**: After a KeyedProvider object is created, it reads its host, sites, host_env, and site_description fields. If both a fixed host and selectable sites are present, or neither is present, it raises an error. If selectable sites are used but the environment variable or user-facing description is missing, it also raises an error. Otherwise the provider declaration is left unchanged and considered valid.
+
+**Call relations**: This runs as the KEYED_PROVIDERS table is built. KeyedProvider.target_host and KeyedProvider.slots depend on the provider having a clear host shape, so this validation keeps the later manifest-building code simple and safe.
+
+
+##### `KeyedProvider.target_host`  (lines 91–100)
+
+```
+def target_host(self) -> str | HostChoice
+```
+
+**Purpose**: This turns a provider’s host declaration into the exact form the rest of the manifest needs. For a simple provider it returns the fixed hostname; for a region-based provider it returns a HostChoice, meaning a user must choose from approved hostnames.
+
+**Data flow**: It reads the provider’s sites, host, provider name, site description, and host environment variable. If there are no selectable sites, it outputs the fixed host string. If there are selectable sites, it creates and returns a HostChoice containing the credential slot name, description, allowed hosts, default host, and environment variable name.
+
+**Call relations**: KeyedProvider.slots calls this when building credential slots, because each secret must be tied to the right approved host. KeyedProvider.usage also calls it when writing human-readable instructions, so the examples show either a fixed host or an environment variable for the selected host.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `KeyedProvider.slots`  (lines 102–120)
+
+```
+def slots(self) -> tuple[CredentialSlot, ...]
+```
+
+**Purpose**: This converts one provider declaration into the credential slots the system exposes to users. Each slot tells the system what secret to ask for and exactly where that secret may be injected into an outgoing request.
+
+**Data flow**: It starts with a KeyedProvider and reads its secrets plus its target host. For every secret, it creates a CredentialSlot with a name, a user-facing description, and an InjectionTarget saying the allowed host, HTTP header, sentinel placeholder, sandbox environment variable, and request-counting dimension. If the host is selectable, it also adds a separate credential slot for the host choice. The output is a tuple of all slots for that provider.
+
+**Call relations**: The top-level manifest function calls this for every provider in KEYED_PROVIDERS and gathers the results into the extension manifest. It hands off to CredentialSlot and InjectionTarget objects from the SDK, which are the shared format the rest of the system understands.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
+##### `KeyedProvider.usage`  (lines 122–135)
+
+```
+def usage(self) -> str
+```
+
+**Purpose**: This writes a short instruction line explaining how to call one provider from the sandbox. It is meant for the prompt text shown to the agent, so the agent knows which slots exist and how to place the environment variables into a REST API call.
+
+**Data flow**: It reads the provider name, label, secrets, schemes, headers, environment variable names, and host information. It builds a curl-style example using the right headers and either the fixed host or the selected host environment variable. It returns one formatted string naming the slots and showing the request pattern.
+
+**Call relations**: The module uses this while building SECTION_BODY, the prompt section included in the manifest. It depends on KeyedProvider.target_host so its instructions match the same host rules used by KeyedProvider.slots.
+
+
+##### `manifest`  (lines 268–274)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: This is the extension’s public assembly point. It packages the keyed-provider credential slots and the explanatory prompt text into a Manifest object that the larger system can load.
+
+**Data flow**: It reads the extension name, version, provider table, and prepared prompt body. It asks each provider for its credential slots, flattens them into one tuple, creates a PromptSection with the keyed-connector guidance, and returns a Manifest containing all of that. It does not mutate the provider table or store secrets.
+
+**Call relations**: The extension loader calls this when it wants to discover what this extension contributes. Inside, it calls KeyedProvider.slots for the credential declarations and constructs SDK Manifest and PromptSection objects so the rest of the platform receives the data in its standard extension format.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+### Feature flag backend
+Connects feature-flag reads and operator writes to the Cloudflare Flagship service.
+
+### `extensions/flagship/ufo_ext_flagship.py`
+
+`io_transport` · `startup for flag reads; CLI flag-write commands for admin changes`
+
+Feature flags let the product change behavior without shipping new code. This file makes Cloudflare Flagship the place where those choices live. At startup, the main system asks this extension for an OpenFeature provider. OpenFeature is a common interface for reading flags, so the rest of the code can ask “is this flag on?” without knowing it is backed by Cloudflare.
+
+The file expects deploy-level environment values: the Flagship app id, the Cloudflare account id, and a token that is allowed to evaluate flags. If any of these are missing, it does not crash the product. Instead, it logs a warning and returns no provider, so flags fall back to their code defaults. That means a missing or unreachable flag service makes features behave as if they are off or at their safe default.
+
+There is a separate `FlagshipAdmin` path for writes, used by `ufoctl flags set`. This uses a different token because changing flags is more powerful than reading them. To change one flag, it first reads the full current flag record from Cloudflare, changes only the default served variation, and sends the whole record back. This is like editing one line on a form while carefully copying the rest unchanged, so Terraform-owned settings are not accidentally erased.
+
+#### Function details
+
+##### `build`  (lines 52–73)
+
+```
+def build(cache_ttl_seconds: float) -> FeatureProvider | None
+```
+
+**Purpose**: Creates the Cloudflare Flagship provider that the rest of the system uses to read feature flags. If the deploy is missing the needed Cloudflare settings, it returns nothing so the system uses each flag’s built-in default instead.
+
+**Data flow**: It reads the Flagship app id, account id, and read token from deploy environment variables. If any are absent, it writes a warning that says which pieces are missing and returns `None`. If all are present, it builds a `FlagshipServerProvider` with the app details, a short timeout, no retries, and the requested cache lifetime, then returns that provider.
+
+**Call relations**: This function is registered in the extension manifest as the builder for the `flagship` flag backend. During startup, core flag setup calls it through that registration; it then hands back either a ready OpenFeature provider or `None` to signal safe fallback behavior.
+
+*Call graph*: 3 external calls (FlagshipServerProvider, deploy_env, warn).
+
+
+##### `FlagshipAdmin.serve`  (lines 95–103)
+
+```
+def serve(self, key: str, *, on: bool) -> None
+```
+
+**Purpose**: Changes which variation of one Flagship flag is served by default, choosing either the configured “on” or “off” variation. It is meant for operator-driven writes, not for normal per-request flag checks.
+
+**Data flow**: It receives a flag key and a desired boolean state. First it asks Cloudflare for the current full flag record. It checks that the record is readable and that the requested variation, either `on` or `off`, really exists. Then it copies the current record while leaving out read-only answer fields, swaps in the new `default_variation`, and sends the updated flag back to Cloudflare. It returns nothing if the write succeeds, and raises an error if the flag cannot be read or changed safely.
+
+**Call relations**: This method is the public action on `FlagshipAdmin`. A command such as `ufoctl flags set` would call it after `build_admin` creates the admin client. It relies on `FlagshipAdmin._call` for both the read request and the write request, so all Cloudflare communication and error parsing stays in one place.
+
+*Call graph*: calls 1 internal fn (_call).
+
+
+##### `FlagshipAdmin._call`  (lines 105–120)
+
+```
+def _call(self, method: str, path: str, body: dict[str, object] | None=None) -> dict[str, object]
+```
+
+**Purpose**: Sends one HTTP request to the Cloudflare Flagship flags API and turns Cloudflare’s response into either a usable dictionary or a clear runtime error. It centralizes the low-level web request details for admin writes.
+
+**Data flow**: It takes an HTTP method such as `GET` or `PUT`, a flag API path, and an optional JSON body. It builds the full Cloudflare URL from the stored account id and app id, adds the bearer token for authorization, and sends the request through the stored `httpx` client. It parses the JSON response when present. If Cloudflare reports failure through the HTTP status or response body, it raises an error containing the method, path, status code, and Cloudflare’s error details. Otherwise it returns the parsed response dictionary.
+
+**Call relations**: It is called by `FlagshipAdmin.serve` whenever that method needs to read or update a flag. Because `serve` calls this helper twice, `_call` is the shared doorway to Cloudflare for the admin path.
+
+*Call graph*: called by 1 (serve).
+
+
+##### `build_admin`  (lines 123–140)
+
+```
+def build_admin() -> FlagshipAdmin
+```
+
+**Purpose**: Creates the write-capable Flagship admin client used by flag-setting commands. Unlike read setup, it fails loudly if required write credentials are missing, because an operator asked for a change and needs to know why it cannot happen.
+
+**Data flow**: It reads the Cloudflare account id, Flagship app id, and write token from deploy environment variables. It collects the names of any missing values. If anything is missing, it raises an error naming the missing settings. If everything is present, it returns a `FlagshipAdmin` instance loaded with those credentials.
+
+**Call relations**: This function is the setup step for the flag-writing command path, such as `ufoctl flags set`. After it returns a `FlagshipAdmin`, that caller can invoke `FlagshipAdmin.serve` to actually change which variation a flag serves.
+
+*Call graph*: 2 external calls (__init__, deploy_env).
+
+
+##### `manifest`  (lines 143–149)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Describes this extension to the host system: its name, version, required deploy environment keys, and the feature-flag provider it offers. This is how the wider project discovers and plugs in the Flagship backend.
+
+**Data flow**: It uses the constants in this file to create a `Manifest`. The manifest lists the deploy keys needed for reading flags and registers a `FlagProviderSpec` that says the backend is named `flagship` and should be built with `build`. The finished manifest is returned to the extension loader.
+
+**Call relations**: The extension system calls this during discovery or startup. The returned manifest points the core feature-flag setup toward `build`, which then creates the actual OpenFeature provider if the deploy has the needed Cloudflare credentials.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+### Shared Redis transports
+Registers Redis as the shared backend for live-frame hub traffic and terminal transport.
+
 ### `extensions/redis_hub/ufo_ext_redis_hub/manifest.py`
 
-`config` · `startup / extension registration`
+`config` · `startup/config load`
 
-This is the extension’s “menu card” for the rest of the system. The core application can ask extensions what backends they provide, and this file answers: it provides a hub backend named `redis` and a terminal transport named `redis`.
+This is the extension’s registration card. The main system does not automatically know that a Redis-backed hub or Redis-backed terminal transport exists, so this file describes them in a standard shape called a manifest. A manifest is like a menu entry: it gives the extension a name and version, then says, “if the user asks for backend redis, build this object.”
 
-A hub is the part that spreads live frames or messages to the right places. Normally that may happen inside one running process. This extension swaps that for Redis Streams, a Redis feature for ordered message streams, so several server pods or processes can all take part. The terminal transport does a related job for connected user terminals: if a user’s connection is held by one pod, but work is admitted on another pod, Redis plus the shared blob store help route the terminal traffic back to the right machine.
+The problem it solves is coordination across more than one running server instance. The normal in-process hub only works inside one process. By selecting the Redis hub backend, live frames can be shared through Redis Streams, so different server instances can participate. The terminal transport does a related job for connected user terminals: if a turn is accepted by a server that does not directly hold the user’s terminal connection, Redis and the blob store help route the terminal data to the right place.
 
-Both pieces use the same setting, `hub.url`, which is the Redis connection address such as `redis://host:6379/0`. A key safety detail is that this file fails early and clearly if Redis was selected but no URL was configured. That is like checking for fuel before starting a trip, instead of discovering the empty tank on the highway.
+Both builders require `hub.url`, the Redis connection address. They deliberately fail immediately if that URL is missing. This is important because a bad deployment should break clearly at startup or configuration time, not later during a user request when the system first tries to send a frame or reach a terminal.
 
 #### Function details
 
@@ -473,11 +664,11 @@ Both pieces use the same setting, `hub.url`, which is the Redis connection addre
 def _build_hub(url: str | None) -> Hub
 ```
 
-**Purpose**: This function creates the Redis-backed hub when the system has been configured to use `hub.backend = "redis"`. It also protects the system from starting with an incomplete Redis setup by requiring a Redis URL.
+**Purpose**: Builds the Redis-backed live-frame hub when the system has been configured to use `hub.backend = "redis"`. It also checks that the Redis URL was actually provided, so the system does not start with a half-configured backend.
 
-**Data flow**: It receives a possible Redis URL. If the URL is missing, it raises a clear error explaining that `hub.url` is required. If the URL is present, it passes that address into `RedisStreamHub` and returns the new hub object that the rest of the system can use.
+**Data flow**: It receives a Redis URL, or `None` if no URL was configured. If the URL is missing, it raises a clear error explaining that `hub.url` is required. If the URL is present, it creates and returns a `RedisStreamHub`, which is the object that will use Redis Streams to share hub messages across server instances.
 
-**Call relations**: The manifest gives this function to `HubSpec` as the builder for the Redis hub option. When the core system chooses that backend, it calls this builder, which then hands off to `RedisStreamHub.__init__` to create the real Redis Streams hub.
+**Call relations**: The manifest points the core system to this builder through a hub specification. When the core sees that the selected hub backend is `redis`, it calls this function, and this function hands off the actual hub work to `RedisStreamHub`.
 
 *Call graph*: 1 external calls (__init__).
 
@@ -488,11 +679,11 @@ def _build_hub(url: str | None) -> Hub
 def _build_terminal(url: str | None, blob: BlobStore) -> TerminalTransport
 ```
 
-**Purpose**: This function creates the Redis-backed terminal transport when the system has been configured to use `terminal.backend = "redis"`. It makes sure the terminal routing layer has both a Redis address and access to the blob store used for larger shared data.
+**Purpose**: Builds the Redis-backed terminal transport when the system has been configured to use `terminal.backend = "redis"`. This lets terminal traffic reach the right connected user even when different server instances are involved.
 
-**Data flow**: It receives a possible Redis URL and a `BlobStore`, which is shared storage for data that should not live only in one process. If the URL is missing, it raises a clear error. If the URL is present, it gives the URL and blob store to `RedisTerminals` and returns the resulting terminal transport.
+**Data flow**: It receives a Redis URL and a blob store, which is shared storage for larger pieces of terminal-related data. If the URL is missing, it raises a clear configuration error. If the URL is present, it creates and returns `RedisTerminals`, giving it both the Redis address and the blob store it needs to coordinate terminal delivery.
 
-**Call relations**: The manifest gives this function to `TerminalTransportSpec` as the builder for the Redis terminal option. When the core system selects that terminal backend, this builder is called and it hands off to `RedisTerminals.__init__` to create the Redis-based terminal routing object.
+**Call relations**: The manifest registers this function as the builder for the Redis terminal transport. When the core selects the `redis` terminal backend, it calls this function, which then delegates the real transport behavior to `RedisTerminals`.
 
 *Call graph*: 1 external calls (__init__).
 
@@ -503,65 +694,10 @@ def _build_terminal(url: str | None, blob: BlobStore) -> TerminalTransport
 def manifest() -> Manifest
 ```
 
-**Purpose**: This function returns the extension description that the core application reads at startup. It says the extension is named `redis_hub`, gives its version, and advertises the Redis hub and terminal transport choices.
+**Purpose**: Creates the extension manifest that the main system reads to discover what this Redis extension provides. It declares the extension name, version, hub backend, and terminal transport backend.
 
-**Data flow**: It takes no input. It builds a `Manifest` object containing one `HubSpec` for the `redis` hub backend and one `TerminalTransportSpec` for the `redis` terminal backend. The finished manifest is returned to the extension-loading system.
+**Data flow**: It takes no input. It packages the constants from this file together with two builder functions: one for the Redis hub and one for the Redis terminal transport. It returns a `Manifest` object that the host application can inspect during extension loading.
 
-**Call relations**: This is the entry point the core extension loader uses to discover what this file provides. Inside, it creates `HubSpec`, `TerminalTransportSpec`, and `Manifest` objects, linking the backend names to the builder functions `_build_hub` and `_build_terminal` so they can be used later if selected.
+**Call relations**: This is the public entry point for the extension metadata. The extension loader calls it to learn that the backend name `redis` is available, and the returned hub and terminal specifications tell the core system which builder functions to call later when those backends are selected.
 
 *Call graph*: 3 external calls (__init__, __init__, __init__).
-
-
-### External connector brokers
-Connector registries and manifests map external source backends and expose Pipedream as a brokered connector runtime.
-
-### `extensions/sources/ufo_ext_sources/registry.py`
-
-`config` · `startup / import time`
-
-This file solves a simple but important problem: when the system sees a source that says it uses a certain backend, it needs to know which connector class should be used to fetch data from that service. Instead of searching the codebase at startup to discover connectors automatically, this file lists them explicitly. That makes startup more predictable and makes adding a new provider a deliberate change: import the connector and add it to the registry list.
-
-The main object created here is `CONNECTORS`, a dictionary. A dictionary is like a lookup table: given a connector name, it returns the connector class for that name. The file imports many provider connector classes, then passes them into `_connector_registry`, which builds the lookup table.
-
-There is also a safety check. If two connectors claim the same `name`, the registry raises an error immediately. That matters because the name is used in several places: it identifies the backend for a source row, points to the right credential slot, and helps name source bindings elsewhere in the system. If two connectors shared a name, the system would not know which one was meant, like two shops using the same street address.
-
-#### Function details
-
-##### `_connector_registry`  (lines 61–69)
-
-```
-def _connector_registry(connector_types: tuple[type[Connector], ...]) -> dict[str, type[Connector]]
-```
-
-**Purpose**: Builds the connector lookup table from a fixed list of connector classes. It also protects the system from ambiguous names by rejecting duplicate connector names.
-
-**Data flow**: It receives a tuple of connector classes. It reads each class’s `name` value, checks whether that name has already been used, and stores the class under that name in a dictionary. It returns the finished dictionary, unless it finds a duplicate name, in which case it raises an error instead of producing an unsafe registry.
-
-**Call relations**: This function is called when the module is loaded to create `CONNECTORS`. The rest of the source-sync system can then use `CONNECTORS` as the shared lookup table for turning a backend name into the connector class that should be run.
-
-
-### `extensions/pipedream/ufo_ext_pipedream/manifest.py`
-
-`config` · `startup / extension load`
-
-This file is the extension’s “front desk sign.” When the application loads extensions, it asks this file for a manifest, which is a structured description of what the extension adds to the system. Here, the extension adds a set of Pipedream connectors, such as services that need OAuth sign-in. OAuth is the common web flow where a user grants access without giving the app their password.
-
-The important idea is that Pipedream keeps each user’s service token on its own servers. This project only receives enough information to ask Pipedream to perform actions, so private tokens do not have to live inside this deployment. That matters especially for providers with stricter access rules, such as Gmail, or for services where another connector provider is not available.
-
-The file creates one shared `PipedreamBroker`, which is the component later used to run actions and server-side connector work. Then it loops through the known connector catalog and creates a `ConnectorProvider` for each entry. Each provider gets a user-facing label, a Pipedream OAuth provider for sign-in, the shared broker, and the allowed transfer hosts. Finally, it registers a browser bridge route. That route is used during the consent flow, when the user is redirected back after approving access.
-
-#### Function details
-
-##### `manifest`  (lines 24–46)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: Builds and returns the extension manifest that the main application uses to discover Pipedream connectors and their OAuth callback route. Someone would use this when loading the extension so the rest of the system knows what connector tools and web routes are available.
-
-**Data flow**: It starts with the connector catalog and creates one shared Pipedream broker. For each catalog entry, it turns the stored connector details into a registered connector provider, including the sign-in provider, display label, broker, and allowed transfer hosts. It also adds a GET route for the OAuth bridge, then returns a completed manifest object containing the extension name, version, connectors, and route.
-
-**Call relations**: During extension loading, the system calls this function to ask, “What do you provide?” The function creates the broker and provider objects, using the Pipedream connector catalog as its source of truth. It hands the finished manifest back to the host application, which can then put these connectors in the connect registry and expose the OAuth bridge route for browser-based sign-in.
-
-*Call graph*: 6 external calls (__init__, __init__, __init__, __init__, __init__, items).

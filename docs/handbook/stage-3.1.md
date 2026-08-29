@@ -1,27 +1,72 @@
-# Application and Skill Bundle Registration  `stage-3.1`
+# Built-in workspace app and skill bundle registration  `stage-3.1`
 
-This stage is the system’s sign-up desk for apps and skill bundles. It runs as shared setup support, before onboarding or a user turn needs to create an agent or load a skill. Each manifest is like a labeled plug that tells the host, “I exist, this is my agent, these are my instructions, and these are the skills or scheduled jobs I bring.”
+This stage is part of startup and behind-the-scenes setup. It is where UFO tells itself which built-in workspace apps, agents, and skills are available before users start working. Most files here are manifests, meaning simple registration cards. They name an app, describe what it does, declare its home-screen skill, and list any setup, permissions, schedules, or helper skills it needs.
 
-The app manifests register workspace apps: Artifacts, Chat, Code, Issues, Meetings, Metrics, Radar, and Wiki. They tell the platform how each app should appear, what workspace agent to create, what setup or accounts it needs, and which homepage skill to load. Code focuses on pull-request review, Issues and Meetings can add scheduled work, Metrics reports delivery information, and the others provide their own workspace-facing agents.
+The app manifests register the main user-facing workspace tools: Artifacts for shared generated files and hosted sites, Chat for the main conversation agent, Code for pull request review, Issues for issue tracking work, Meetings for meeting support, Metrics for reports, Radar for monitoring signals, and Wiki for shared knowledge. The brief_pipeline manifest adds a chain of helper agent stages for producing briefs, while the documents manifest adds document-writing skills and a writing subagent.
 
-The brief-pipeline and documents manifests add reusable writing tools, including specialist subagents and document-making skills. The sample skill probe is a simple load test that prints a success message. The skill-create extension registers user-made workspace skills so later turns can save, find, load, update, or delete them.
+The catalog_skill file is different: it builds a live “model catalog” skill, a table of available AI models, prices, limits, and features. The sample probe is a tiny test button that confirms a sample skill can run.
 
 ## Files in this stage
 
-### Workspace App Manifests
-Core workspace app extensions are declared so the platform can install their agents, schedules, setup needs, and homepage skills.
+### Model catalog skill
+Core built-in skill registration starts with the live model catalog users and agents can consult.
+
+### `core/src/ufo/models/catalog_skill.py`
+
+`domain_logic` · `startup`
+
+This file solves a simple but important problem: the list of usable models should not be written by hand in one place while the real runtime uses a different list somewhere else. If that happened, people could choose a model based on stale information, or documentation could claim a model exists when the system cannot actually run it.
+
+Instead, this file turns the live model registry into a readable skill. The registry is the source of truth: it contains each model’s ID, provider, price, knowledge cutoff, context window, reasoning support, and API surface. At startup, this file reads those records and formats them into a Markdown table. Markdown is plain text with simple formatting, like tables and headings, that can be shown to users or loaded as instructions.
+
+The result is a RuntimeSkill named “model-catalog”. A RuntimeSkill is a packaged block of instructions the runtime can load and use. Here, its instructions are not behavior rules but a catalog: a clear comparison sheet for models. An everyday analogy is a restaurant menu printed directly from the kitchen’s current inventory system, rather than typed separately by hand. Because both the menu and the kitchen use the same records, they stay in sync.
+
+#### Function details
+
+##### `_per_mtok`  (lines 18–19)
+
+```
+def _per_mtok(micro_usd_per_mtok: int) -> str
+```
+
+**Purpose**: This small helper turns a stored price into a human-readable dollar amount per million tokens. A token is a small piece of text used by AI models, and “per million tokens” is a common way to show model pricing.
+
+**Data flow**: It receives an integer price stored in micro-dollars, which are millionths of a dollar. It divides that number by the project’s constant for micro-dollars per dollar, formats the result with two decimal places, and returns a string such as "$1.25".
+
+**Call relations**: When the catalog is being built, model_catalog_skill calls this helper for each model’s input and output prices. The helper keeps the table-building code readable and makes sure prices are displayed consistently.
+
+*Call graph*: called by 1 (model_catalog_skill).
+
+
+##### `model_catalog_skill`  (lines 22–50)
+
+```
+def model_catalog_skill(registry: ModelRegistry) -> RuntimeSkill
+```
+
+**Purpose**: This function creates the complete model catalog skill from the current ModelRegistry. Someone would use it at boot time to produce a trustworthy, readable list of the models this deployment can actually run.
+
+**Data flow**: It receives a ModelRegistry containing model specifications. It sorts the models by ID, turns each one into a row in a Markdown table, formats prices through _per_mtok, wraps the table with a short explanation and skill metadata, and returns a RuntimeSkill object containing the final name, description, instructions, and raw Markdown text.
+
+**Call relations**: This is the main builder in the file. It calls _per_mtok while writing each model row, then hands the finished text to RuntimeSkill so the rest of the system can load the catalog like any other runtime skill.
+
+*Call graph*: calls 1 internal fn (_per_mtok); 1 external calls (__init__).
+
+
+### Workspace app manifests
+These manifests register the main built-in workspace apps, their agents, homepage skills, setup needs, and scheduled work.
 
 ### `extensions/app_artifacts/ufo_ext_app_artifacts/manifest.py`
 
-`config` · `startup`
+`config` · `startup / extension discovery`
 
-This file is like a label and instruction card that comes with the Artifacts app. Without it, the shared apps infrastructure would not know that this extension exists, what it should be called, what version it is, or how to set up its workspace agent.
+This file is the registration card for the Artifacts app. It does not build the homepage itself. Instead, it describes the app to the shared app system: its name, version, agent identity, icon, purpose, and the skill package that contains the homepage behavior.
 
-The app’s job is to provide a homepage for workspace artifacts: shared files and hosted sites, shown newest first with search, filters, paging, and a viewer for opened files. The file defines the agent named “artifacts” and gives it a detailed prompt. That prompt is the agent’s job description: keep the artifacts shelf working, show files and sites clearly, and use the `app-artifacts-home` skill when someone asks to change the page.
+In everyday terms, this is like the label and instruction sheet that comes with an appliance. The system reads it to learn: “There is an app called app_artifacts; create a workspace-visible agent named artifacts; give it this prompt; let it use this homepage skill.”
 
-It also defines basic public details such as the app name, version, icon, purpose, and visibility. “Visibility” here means who can see or use the agent; in this case it is available to the workspace. The skill path points to a folder shipped alongside this file, so the system can load the static homepage-editing skill when needed.
+The long prompt is important because it tells the agent what the Artifacts app is supposed to be: a grid or table of workspace files and hosted sites, newest first, with search, filters, paging, a file viewer, downloads, and links back to conversations. It also tells the agent that if a user asks to change the page, it should load the app-artifacts-home skill and preserve the page’s controls.
 
-In short, this file does not build the artifact shelf itself. It registers the shelf app with the platform and connects together the agent, its instructions, and its homepage skill.
+Without this file, the extension would not announce itself properly. The system would not know to provision the Artifacts agent or where to find the skill that powers its homepage.
 
 #### Function details
 
@@ -31,11 +76,11 @@ In short, this file does not build the artifact shelf itself. It registers the s
 def manifest() -> Manifest
 ```
 
-**Purpose**: This function returns the extension’s manifest, which is the package description the host system reads to install or activate the app. It gathers the app name, version, agent definition, and skill location into one object.
+**Purpose**: Builds and returns the extension manifest, which is the structured description the host system reads to install this app. It names the extension, gives its version, includes the Artifacts agent, and points to the homepage skill.
 
-**Data flow**: It reads the constants defined earlier in the file, such as the app name, version, prepared agent, and skill folder path. It creates a `SkillSpec` for the homepage skill, then creates and returns a `Manifest` containing that skill and the Artifacts agent. The result is a complete description of what this extension contributes to the system.
+**Data flow**: It starts from the constants defined earlier in the file, such as the app name, version, prepared agent definition, and skill folder path. It packages those into a Manifest object, including a SkillSpec that points at the app-artifacts-home skill. The result is a complete manifest object that the rest of the system can read.
 
-**Call relations**: When the extension is loaded, the host system calls `manifest` to ask, “What do you provide?” The function hands off to `SkillSpec.__init__` to describe the homepage skill, then to `Manifest.__init__` to bundle that skill together with the already defined agent provision.
+**Call relations**: When the extension system asks this module what it provides, this function is the answer. Inside, it creates a SkillSpec to describe the homepage skill, then creates a Manifest to bundle that skill together with the Artifacts agent provision.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
@@ -44,11 +89,11 @@ def manifest() -> Manifest
 
 `config` · `startup / extension discovery`
 
-This is the registration card for the workspace's main Chat app. It does not run the chat itself. Instead, it describes the app to the UFO platform: its name, version, main agent, icon, prompt, purpose, and the skill folder that contains the chat home behavior.
+This is the registration card for the Chat app extension. It does not draw the chat screen itself or send messages directly. Instead, it describes the Chat app to the platform so the platform can create it in the right place, with the right name, icon, instructions, and starting skill.
 
-Think of it like a sign-up form for an app store inside the workspace. The file says: "There is an app called app_chat, it has a main agent named chat, it should use this instruction prompt, and its homepage behavior lives in the app-chat-home skill." The prompt explains the agent's job in human terms: show the current conversation, support the message composer, stream replies, and show starter prompts when no chat is open.
+The file defines basic facts such as the extension name, version, and where its skill files live. It then builds an agent description for the workspace’s main chat agent. In plain terms, this says: “Create a visible workspace agent named chat, use the message-circle icon, make it the main agent, allow internet access, and give it these instructions.” Those instructions tell the agent that its home page is the chat conversation screen, including the transcript, message composer, live streamed replies, and starter prompts.
 
-The important object here is the agent provision. It packages the agent's visible identity and operating instructions, including that it is the main workspace-visible chat agent and can use internet access. The `manifest()` function then returns one complete `Manifest`, which is what the host system reads when discovering and loading the extension.
+The important link is the `app-chat-home` skill. A skill is a packaged set of behavior or UI guidance that the agent can load when it needs to show or change the page. The `manifest` function wraps all of this into a `Manifest`, which is the standard object the host system reads when discovering extensions. Think of it like a shop sign plus setup sheet: it tells the building manager what this shop is, where to place it, and what staff instructions come with it.
 
 #### Function details
 
@@ -58,11 +103,11 @@ The important object here is the agent provision. It packages the agent's visibl
 def manifest() -> Manifest
 ```
 
-**Purpose**: Builds and returns the extension's manifest, which is the platform-readable description of the Chat app. The system uses this to know the app's name, version, main agent, and the skill path for the chat home screen.
+**Purpose**: Builds and returns the official description of this Chat app extension. The platform uses this description to know that the extension provides a main workspace chat agent and a home-screen skill.
 
-**Data flow**: It starts with the constants defined in this file, such as the app name, version, prepared chat agent, and skill folder path. It wraps the home skill path in a `SkillSpec`, then places that skill and the chat agent into a `Manifest`. The result is a complete manifest object that the platform can read to load the extension.
+**Data flow**: It starts with the constants defined in this file: the extension name and version, the prebuilt chat agent description, and the path to the `app-chat-home` skill. It packages the skill path into a skill description, combines that with the chat agent, and returns one complete manifest object for the host system to read.
 
-**Call relations**: When the platform discovers this extension, it calls `manifest()` to ask what the extension provides. Inside that call, the function creates a `SkillSpec` for the home skill and a `Manifest` containing both the skill and the already-defined chat agent, then hands that manifest back to the loader.
+**Call relations**: This function is called when the extension system asks the file, “What do you provide?” It creates the skill entry and the overall manifest, then hands that manifest back so the platform can register the Chat app and make its home skill available.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
@@ -71,25 +116,27 @@ def manifest() -> Manifest
 
 `config` · `startup / extension discovery`
 
-This file is the app’s registration card. It tells the larger system, “there is an app called app_code, it provides a workspace agent named code, and that agent reviews GitHub pull requests.” The agent’s main instructions are loaded from a prompt file, while extra procedures are shipped as skills, which are reusable instruction files kept with the extension.
+This file is the app’s shipping label and setup sheet. Without it, the system would not know that this extension provides a workspace agent named “code”, what prompt that agent should use, what GitHub connections it needs, or which skill documents should be bundled with it.
 
-A key idea here is that prompts are written into an agent record when the agent is first created, and then users may edit them. Because of that, adding new prompt text later would not reliably reach existing workspaces. Skills solve that problem: they are files delivered by the extension itself, so updated or newly added procedures can arrive on deploy. That is why the pull-request “babysitting” behavior, which keeps watching reviewed pull requests until they merge or close, is packaged as a skill rather than only prompt text.
+The file defines the app’s name, version, agent name, purpose, setup instructions, and the location of its prompt and skills. The prompt is read from a Markdown file and placed into an AgentSpec, which is the recipe for the agent: what it is for, which model settings it uses, whether it can access the internet, how large its sandbox should be, and who can see it.
 
-The file also describes what setup is needed. The agent needs GitHub-related connectors and credentials, plus a source trigger so pull-request changes can wake the conversation. It deliberately uses a scheduled task for babysitting because some important events, like check results or commit statuses, may not move the pull-request source record. In short, this file connects the human-facing app idea to the platform’s installable pieces.
+It also explains an important design choice: the pull-request “babysitting” behavior lives in a skill file, not directly in the prompt. A prompt is copied into an agent record when the agent is first created and may later be edited by a workspace member. A skill, by contrast, is shipped with the extension and can reach existing workspaces on the next deploy. In everyday terms, the prompt is like a personalized notebook page, while a skill is like an updated instruction manual that ships with the product.
+
+Finally, the setup section says the agent needs GitHub connector access, the UFO GitHub App credential, and a source trigger so pull-request changes can wake the agent.
 
 #### Function details
 
-##### `manifest`  (lines 101–110)
+##### `manifest`  (lines 102–111)
 
 ```
 def manifest() -> Manifest
 ```
 
-**Purpose**: Builds and returns the complete manifest object for this extension. The platform uses this to learn the app’s name, version, agent definition, and bundled skills.
+**Purpose**: This function builds and returns the extension manifest, which is the object the platform reads to learn what this app provides. It packages together the app name, version, agent definition, and skill files.
 
-**Data flow**: It starts from constants already defined in the file, such as the app name, version, prepared agent description, and skill folder paths. It packages those into a Manifest object, creating SkillSpec entries for the home skill and babysitting skill. The result is a single manifest value that the platform can read during extension loading.
+**Data flow**: It reads the module-level constants and prebuilt agent definition already created in the file. It then creates a Manifest object containing one agent and two SkillSpec entries that point to the home skill and babysitting skill folders. The result is a complete description of the extension that the UFO platform can load.
 
-**Call relations**: When the extension system asks this module what it provides, this function is the answer. It hands the platform a Manifest, and inside that it creates SkillSpec records so the platform knows which skill files belong to the app.
+**Call relations**: When the extension system asks this package what it contributes, this function is the handoff point. Inside, it creates SkillSpec objects for the shipped skill paths and passes them, along with the Code app agent, into Manifest.__init__ so the platform receives one structured manifest.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
@@ -98,13 +145,13 @@ def manifest() -> Manifest
 
 `config` · `startup / app registration`
 
-This file is the app’s registration form. It does not triage issues or write code itself. Instead, it tells the larger UFO platform how to create an agent that will do those jobs.
+This file tells the larger system how to install and run an Issues app for a workspace. The app is meant to watch one issue tracker, such as GitHub Issues, and help with two jobs: triaging new issues and, when explicitly approved, implementing selected issues.
 
-The app is built around one workspace agent named “issues.” That agent works over a GitHub issue tracker. Its first feature is triage: on a schedule, it looks for open issues that do not already have a comment from this app, then posts a useful summary, owner suggestion, and plan. The important safeguard is that the agent treats its own comment as the record that an issue has already been triaged. This avoids a loop where commenting on an issue wakes the app again and causes it to comment repeatedly.
+The file defines the app’s name, version, skill folder, agent name, task names, and the special approval label `ufo:implement`. It then writes the agent’s instructions in human language. Those instructions are important because they set boundaries: triage is always active, but implementation only happens after a member asks for it and marks an issue with the approval label. This prevents the agent from writing code for work nobody approved.
 
-The second feature is implementation. It only acts when a member approves an issue by adding the label “ufo:implement.” That label is treated as visible, lasting approval on the issue itself, rather than something hidden in a chat history.
+It also defines a schedule for triage. Instead of reacting to every issue change, the app sweeps on a clock. That matters because the app comments on issues, and a comment itself changes the issue. If the app reacted directly to issue changes, it could wake itself up again and again. The schedule avoids that loop.
 
-The file also says what setup is required: the member must connect the relevant GitHub account and identify the repositories. Finally, it points to a homepage skill, which is extra behavior used when the agent needs to show or update its app page.
+Finally, the file declares that the agent needs GitHub access, a GitHub app credential, scheduled-task support, and one homepage skill. Without this manifest, the system would not know this app exists or how to set it up.
 
 #### Function details
 
@@ -114,24 +161,26 @@ The file also says what setup is required: the member must connect the relevant 
 def manifest() -> Manifest
 ```
 
-**Purpose**: This function gives the UFO platform the complete description of the Issues app. The platform calls it when loading the extension so it can learn the app’s name, version, agent, and included skill.
+**Purpose**: This function returns the complete description of the Issues app for the host system to load. It packages the app name, version, agent definition, and homepage skill into one manifest object.
 
-**Data flow**: It starts with the constants and objects already defined in this file, such as the app name, version, prepared agent definition, and skills folder path. It wraps the homepage skill path in a SkillSpec, then returns a Manifest object containing the app’s identity, agent to create, and skill to install. Nothing is changed outside the function; the result is a packaged description for the platform to consume.
+**Data flow**: It takes no input. It reads the constants already defined in this file, creates a `SkillSpec` pointing to the homepage skill folder, then creates and returns a `Manifest` containing the app’s name, version, agent, and skill list. Nothing external is changed; the output is the manifest object the system can register.
 
-**Call relations**: When the extension is loaded, this function is the handoff point from this file to the wider manifest system. It creates a SkillSpec so the platform can find the homepage skill, then creates and returns a Manifest so the platform can register the app and provision the Issues agent.
+**Call relations**: When the extension system asks this file what it provides, this function is the answer. It builds a `SkillSpec` for the homepage skill and hands that, together with the prebuilt `ISSUES_APP_AGENT`, to `Manifest.__init__`, so the wider platform can install the agent and expose its skill.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
 ### `extensions/app_meetings/ufo_ext_app_meetings/manifest.py`
 
-`config` · `startup / app installation`
+`config` · `startup / extension discovery`
 
-This file is the app’s “registration card.” It does not do the meeting work itself. Instead, it tells the UFO platform what the Meetings app is, what it is allowed to do, and how it should be set up for a workspace.
+This file tells the platform how to install and present the Meetings app. The app is built around one workspace agent connected to one calendar. Its main active job is to prepare meeting briefs before meetings happen. Two other abilities, follow-ups and decision notes, are described in the agent’s instructions but are not turned on automatically; the member must ask for them first.
 
-The app is built around one workspace agent named “meetings.” Its main active feature is meeting briefs: before meetings happen, it should look at the calendar and prepare useful context, such as who is attending and what was left open from the last similar meeting. The file also describes two future or optional features: follow-ups and meeting notes. Those are deliberately not turned on at setup. The prompt says the agent must wait until a member asks for them, then connect the needed Google Docs account and create the right scheduled task.
+The file defines simple names and settings first: the app name and version, where its homepage skill lives, the calendar connector to request, and task names for briefs, follow-ups, and notes. It then writes the agent’s purpose and long operating instructions. Those instructions are important because they tell the agent not only what to do, but also what not to do: for example, it must not quietly perform follow-up or note-taking work unless that feature has been explicitly armed.
 
-The setup section asks only for a calendar connection at first, using the Google Calendar connector. This matters because a workspace might only want briefing, so it should not have to connect a notes account too early. The schedule defines when the briefing task can run, including a regular cadence and morning variants. Finally, the manifest points to a home-screen skill, which is the app’s page inside the workspace. In short, this file is the blueprint the platform reads to provision the Meetings app safely and consistently.
+The schedule section sets up the briefing task. The key idea is a time window: each run briefs meetings that start before the next scheduled run and have not started yet. Like assigning mail to delivery routes, this prevents the same meeting from being briefed twice.
+
+Finally, the file bundles all of this into an agent provision and exposes a `manifest()` function. Without this file, the platform would not know the Meetings app exists, what connector to ask for, what scheduled task to create, or which homepage skill belongs to it.
 
 #### Function details
 
@@ -141,11 +190,11 @@ The setup section asks only for a calendar connection at first, using the Google
 def manifest() -> Manifest
 ```
 
-**Purpose**: This function builds and returns the Meetings app manifest, which is the complete package of information the platform needs to recognize and install the app. It names the app, gives its version, lists the agent to create, and points to the app’s home skill.
+**Purpose**: Builds and returns the formal app manifest, which is the object the platform reads to discover this extension. It names the app, gives its version, registers the Meetings agent, and points to the app’s homepage skill.
 
-**Data flow**: It starts with constants already defined in the file, such as the app name, version, agent definition, and skill folder path. It wraps the home skill path in a SkillSpec, then places that skill and the Meetings agent into a Manifest object. The result is a ready-to-read manifest object for the platform; it does not change external state by itself.
+**Data flow**: It reads the constants and prepared objects defined earlier in the file, such as the app name, version, agent setup, and skill folder path. It wraps the homepage skill path in a `SkillSpec`, then places that and the Meetings agent into a `Manifest`. The result is a complete description of the extension that the rest of the system can load.
 
-**Call relations**: When the platform asks this extension what it provides, this function is the handoff point. It creates a SkillSpec for the home page skill, then creates the Manifest that contains both that skill and the prebuilt Meetings agent configuration.
+**Call relations**: When the platform is discovering extensions, it calls `manifest` to ask this file what it provides. The function hands off to the manifest and skill specification constructors to package the already-defined settings into the standard shape the platform expects.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
@@ -154,13 +203,11 @@ def manifest() -> Manifest
 
 `config` · `startup / extension discovery`
 
-This file is like the label and instruction card inside a boxed app. It does not calculate metrics itself. Instead, it describes what the Metrics app is, what agent should be created for it, what that agent should say and do, what outside account it needs, and what schedule it should offer.
+This file tells the platform how to install and present a workspace agent called "metrics." The agent's main job is to report how engineering delivery is going, such as what shipped, how long changes took, whether fixes followed, and what work is still open. Without this file, the system would not know that the Metrics app exists, what account it needs connected, what schedule to offer, or which homepage skill belongs to it.
 
-The main agent is named “metrics.” Its job is to report how the team is doing. Engineering delivery reporting is enabled from the start. Revenue and support reporting are described as possible future report sets, but the prompt is careful: the agent should not pretend to run those reports until a member explicitly asks and connects the needed account.
+Most of the file is configuration written as Python objects. It names the app, points to its skills folder, and defines three possible report areas: engineering, revenue, and support. Engineering is ready from the start. Revenue and support are intentionally dormant until a workspace member asks for them. That distinction matters because the prompt tells the agent not to invent or manually perform work for report sets that have not been formally enabled.
 
-The file also defines the default engineering report schedule. It offers weekday morning-style cadences, especially Monday morning, because these reports are meant to be read as useful team updates rather than constant noise.
-
-Setup is tied to GitHub. The app asks which repositories should be measured and connects the GitHub account that owns them. Finally, the manifest includes one skill, the homepage skill, which is used when the agent needs to show or update its metrics screen. Without this file, the platform would not know that this extension exists, what agent to create, or what setup steps and scheduled task belong to it.
+The file also sets up the scheduled engineering report. It offers sensible cadences, such as Monday morning or weekday mornings, instead of very frequent updates that people are unlikely to read. Finally, it declares that setup requires GitHub access, because the engineering delivery report depends on repository data. In everyday terms, this file is like the instruction sheet included with an appliance: it says what the appliance is, what power source it needs, what buttons it has, and what it should do when switched on.
 
 #### Function details
 
@@ -170,26 +217,26 @@ Setup is tied to GitHub. The app asks which repositories should be measured and 
 def manifest() -> Manifest
 ```
 
-**Purpose**: Builds and returns the extension manifest, which is the platform-readable description of the Metrics app. The host system uses it to discover the app name, version, provided agent, and homepage skill.
+**Purpose**: This function returns the complete manifest, which is the formal package description the platform reads to learn about this extension. It names the app version, registers the Metrics agent, and points the platform to the app's homepage skill.
 
-**Data flow**: It takes no input from the caller. It reads the constants already defined in this file, such as the app name, version, prepared agent definition, and skill path. It packages those into a Manifest object and returns that object to the system.
+**Data flow**: It takes no input from the caller. It reads the constants and prebuilt setup objects defined earlier in the file, wraps the homepage skill path in a SkillSpec, and returns a Manifest object containing the app name, version, agent definition, and skill list.
 
-**Call relations**: When the extension is loaded, the platform calls this function to ask, “What do you provide?” The function creates a SkillSpec for the homepage skill, then hands both that skill and the prebuilt Metrics agent into Manifest so the rest of the system can install and expose the app.
+**Call relations**: When the platform discovers this extension, it calls manifest to ask, "What do you add to the system?" The function builds the final Manifest object and uses SkillSpec to describe the homepage skill path, then hands that complete description back to the extension loader.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
 ### `extensions/app_radar/ufo_ext_app_radar/manifest.py`
 
-`config` · `startup / extension registration`
+`config` · `startup / extension discovery`
 
-This file is the Radar app’s registration form. Without it, the larger system would not know that this extension exists, what agent to create for it, or where to find the skill that powers its homepage.
+This file is the Radar app's registration card. Without it, the shared app infrastructure would not know that the Radar app exists, what to call it, what icon to show, which agent to create, or which bundled skill contains its homepage.
 
-The Radar app is meant to show a digest of recent scheduled runs: what each run found, when it happened, what task caused it, and where to open the fuller story. Think of it like a newsroom front page for automated work: short headlines on the main feed, with links into the full article.
+The file defines a small set of constants: the app name and version, the folder where its skills live, the name of the homepage skill, and the visible agent name, "radar". It also defines the agent's instruction prompt. That prompt explains the app's job in human terms: show a feed of recent scheduled runs, let each run open into a fuller story, and keep the rebuild control working when members ask for page changes.
 
-Most of the file is made of clear constants. These give the app its internal name, version, skill folder, public agent name, and a long prompt. The prompt is important because it tells the Radar agent what its homepage should contain and how to respond when a workspace member asks to change that page. It also restricts the agent from internet access and makes it visible across the workspace.
+The central object is `RADAR_APP_AGENT`, an `AgentProvision`. In plain terms, that is a request to the platform: "please create this workspace-visible agent with this purpose, prompt, model setting, and icon." It also says the agent should not have internet access.
 
-The file then packages these details into an `AgentProvision`, which is the instruction to create an agent, and a `SkillSpec`, which points to the homepage-editing skill. The `manifest()` function returns the final `Manifest`, the bundle the host system reads to wire the extension into the app platform.
+Finally, the `manifest()` function packages everything into a `Manifest`, which is the object the host system reads when it loads the extension. Think of it like a shipping label on a box: it tells the platform what is inside and how to wire it into the workspace.
 
 #### Function details
 
@@ -199,24 +246,24 @@ The file then packages these details into an `AgentProvision`, which is the inst
 def manifest() -> Manifest
 ```
 
-**Purpose**: Builds and returns the Radar app’s manifest, which is the extension’s official description for the host system. It says which agent should be created and which skill folder belongs to this app.
+**Purpose**: Builds and returns the Radar app's extension manifest, which is the platform-readable description of what this extension provides. Someone uses it when the system is discovering extensions and needs to know which agents and skills should be registered.
 
-**Data flow**: It reads the constants defined in this file, including the app name, version, prepared Radar agent, and homepage skill path. It wraps the homepage path in a `SkillSpec`, then places the agent and skill into a `Manifest`. The result is a complete object the app platform can use to register the extension.
+**Data flow**: It starts with the file's predefined app name, version, agent definition, and skills folder path. It creates a `SkillSpec` pointing to the bundled homepage skill, then creates a `Manifest` containing the app identity, the Radar agent, and that skill. The result is a manifest object that the host platform can read to install or expose the app.
 
-**Call relations**: When the extension system needs to learn what this package provides, this function is the handoff point. Inside it, the function creates a `SkillSpec` for the homepage skill and then creates the final `Manifest` that carries both the skill and the already-defined Radar agent to the surrounding app infrastructure.
+**Call relations**: When the extension is loaded, the surrounding app infrastructure calls `manifest` to ask, "what do you provide?" This function answers by constructing a `SkillSpec` for the homepage skill and a `Manifest` that includes the already-defined Radar agent provision. It hands that finished manifest back to the platform so the app can appear in the workspace.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
 ### `extensions/app_wiki/ufo_ext_app_wiki/manifest.py`
 
-`config` · `startup`
+`config` · `startup / extension discovery`
 
-This file is like the label and setup card that ships with the Wiki app. The app’s job is to turn a workspace’s shared knowledge into a readable page: who is in the workspace, how the team works, past decisions, open work, history, and other useful facts. Without this file, the platform would not know that the Wiki app exists, what agent to create for it, or which skill contains its homepage behavior.
+This file is the Wiki app’s shipping label. When the platform discovers this extension, it reads this manifest to learn what the app is called, what version it is, which agent should be created, and which skill file supplies the app’s homepage behavior.
 
-The file defines simple constants such as the extension name, version, skill folder, agent name, and the skill used for the homepage. It then writes the agent’s instructions in plain text. Those instructions tell the agent what the Wiki page should look like and what to do when someone asks to change it. It also defines the agent’s purpose, icon, privacy, model choice, and safety-related settings such as not allowing internet access.
+The Wiki app is meant to turn a workspace’s shared memory into a readable page. In plain terms, it creates a private “wiki” agent whose job is to present what the workspace knows: team practices, decisions, open work, history, facts, and the people roster. The long prompt in this file is the instruction card for that agent. It tells the agent what the homepage should look like and how to respond when someone asks to change or rebuild it.
 
-The key object is `WIKI_APP_AGENT`, an `AgentProvision`. A provision is a request to create an agent as part of installing or enabling the extension. Here, the agent is private, meaning it is meant for the workspace’s allowed users rather than the public. Finally, the `manifest` function packages the agent and its homepage skill into a `Manifest`, which is the platform’s standard “here is what this extension provides” record.
+The file also sets important boundaries. The app is private, does not get internet access, uses automatic model selection, and is represented with a book icon. Without this file, the platform would not know to provision the Wiki agent or where to find the homepage skill that makes the app usable.
 
 #### Function details
 
@@ -226,27 +273,27 @@ The key object is `WIKI_APP_AGENT`, an `AgentProvision`. A provision is a reques
 def manifest() -> Manifest
 ```
 
-**Purpose**: This function returns the extension’s manifest, which is the formal description the platform reads to install or load the Wiki app. It says the extension’s name and version, includes the private wiki agent, and points to the skill folder for the homepage behavior.
+**Purpose**: This function builds and returns the extension’s manifest, which is the object the platform reads to install the Wiki app. It packages together the app name, version, private Wiki agent, and the homepage skill path.
 
-**Data flow**: It starts with the constants already defined in the file: the app name, version, prepared wiki agent, and path to the homepage skill. It wraps the homepage skill path in a `SkillSpec`, then puts that together with the agent inside a `Manifest`. The result is a single manifest object that the larger system can read to know what this extension adds.
+**Data flow**: It reads the constants defined earlier in the file, such as the app name, version, agent definition, and skill folder path. It creates a skill specification pointing to the Wiki homepage skill, then creates a manifest containing that skill and the Wiki agent. The result is a complete manifest object returned to the platform; it does not change files or external state itself.
 
-**Call relations**: When the extension system asks this file what it provides, `manifest` builds the answer. It calls `SkillSpec.__init__` to describe the homepage skill, then calls `Manifest.__init__` to bundle that skill with the wiki agent and extension metadata.
+**Call relations**: During extension loading, the platform calls this function to ask, “What does this extension provide?” The function hands off to `SkillSpec.__init__` to describe the homepage skill and to `Manifest.__init__` to bundle the whole extension description into the standard form the platform expects.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
-### Document Production Bundles
-Specialized writing and briefing extensions register subagents and skills for drafting, critique, and document creation.
+### Workflow extension bundles
+These extension manifests add reusable multi-step brief and document workflows plus their supporting agents and skills.
 
 ### `extensions/brief_pipeline/ufo_ext_brief_pipeline/manifest.py`
 
-`config` · `startup`
+`config` · `startup / extension discovery`
 
-This is the extension’s sign-up sheet. When the larger UFO system looks for extensions, it needs a simple way to ask, “What do you add?” This file answers that question for the brief-pipeline extension.
+This file is the extension’s front desk sign. When the larger system discovers the brief-pipeline extension, it needs a simple answer to: “What is this extension called, what version is it, and what does it add?” This file provides that answer.
 
-The extension declares its name and version, then points to a skills folder on disk. A skill is a packaged instruction set that teaches the parent agent how to use the extension. In this case, the skill teaches the parent agent to chain three stages together: first an outline stage, then a drafting stage, then a critic stage. The critic does not directly rewrite the work; it gives feedback that the parent agent can apply.
+The extension adds a small writing pipeline. One subagent creates an outline, a second turns that outline into a draft, and a third critiques the draft. The parent agent stays in charge and uses the critique itself, rather than handing final control to the critic. Think of it like a writing workshop: one person plans, one writes, one reviews, and the main author decides what to do next.
 
-The three stages are described elsewhere as profiles. A profile is like a job description for a helper agent: what role it plays and how it should behave. This file gathers those profiles and the skill path into a Manifest, which is the standard object the host expects from an extension. Without this file, the extension might exist on disk, but the host would not know what subagents or skills it is supposed to load.
+The file imports three predefined subagent profiles from the pipeline module. A profile is a description of how a helper agent should behave. It also points to a skills directory on disk, where the instructions for the parent agent live. The `manifest` function packages all of this into a `Manifest` object, which is the standard “extension declaration” shape understood by UFO. Without this file, the system would not know that this extension exists, which subagents it provides, or where to find the skill instructions.
 
 #### Function details
 
@@ -256,26 +303,26 @@ The three stages are described elsewhere as profiles. A profile is like a job de
 def manifest() -> Manifest
 ```
 
-**Purpose**: Builds and returns the extension declaration that the host application reads. It says: this extension is called brief_pipeline, this is its version, these are its three helper-agent profiles, and this is where its skill instructions live.
+**Purpose**: Builds and returns the official declaration for the brief-pipeline extension. The system uses it to learn the extension’s name, version, subagents, and skill files.
 
-**Data flow**: It starts with fixed values from this file: the extension name, version, and skill folder path. It also uses the imported outline, draft, and critic profiles. It packages all of that into a Manifest object, including a SkillSpec that points to the skill directory, and returns that Manifest to the caller.
+**Data flow**: It starts with constants in this file, such as the extension name, version, and path to the skill directory, plus the three imported subagent profiles. It wraps the skill directory in a `SkillSpec`, then puts the name, version, subagents, and skill specification into a `Manifest`. The result is a complete description of what this extension contributes; it does not change anything else by itself.
 
-**Call relations**: The host extension loader calls this function when it wants to discover what the extension offers. Inside, it creates the skill description and then the full manifest, handing the host a ready-to-load description of the brief writing pipeline.
+**Call relations**: This function is called when UFO is loading or inspecting extensions. During that moment, it creates a `SkillSpec` for the skill folder and a `Manifest` for the whole extension, handing that finished declaration back to the extension system so the rest of UFO can wire in the outline, draft, and critic stages.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
 ### `extensions/documents/ufo_ext_documents/manifest.py`
 
-`config` · `startup / extension load`
+`config` · `startup / extension discovery`
 
-This file is like the packing list for the documents extension. Without it, the larger UFO system would not know that this extension contains skills for Word documents, PowerPoint files, PDFs, spreadsheets, document review, themes, shared design rules, and prose drafting.
+This file is the documents pack’s signpost. It does not create documents itself. Instead, it describes the tools this extension makes available to the larger UFO system.
 
-The file names the extension, gives it a version, points to the folder where its skills live, and lists the skill folders that should be made available. A skill here means a reusable workflow plus supporting files that teach the agent how to do a specific kind of document work. Some of those skills build on shared design foundations, so the system can keep documents visually consistent even when the user gives little style guidance.
+The pack includes several “skills,” which are folders containing instructions, scripts, and assets for a specific kind of work. For example, there are skills for Word documents, PowerPoint files, spreadsheets, PDFs, visual themes, document review, and drafting prose. Think of this file like the contents label on a toolbox: it names every tool inside and points to where each one lives.
 
-It also registers a `writing` subagent profile. A subagent is a smaller, focused helper agent. In this case, it is meant for drafting and editing text, while the format-specific skills take care of the document container, such as DOCX, PPTX, XLSX, or PDF.
+It also registers a specialized child worker called the `writing` subagent. A subagent is a focused helper that can be given a smaller task, such as drafting or editing text, while already having the right writing workflow loaded.
 
-The main work happens in `manifest()`, which returns a `Manifest` object. That object is the formal description the extension loader reads during setup, so it can wire these skills and the writing helper into the rest of the system.
+The key job here is to build and return a `Manifest`, which is the formal description UFO’s extension loader understands. The manifest includes the extension name, version, available subagents, and a list of `SkillSpec` entries. Each `SkillSpec` points to one skill folder under this extension’s `skills/` directory. This lets the main system load these capabilities on demand instead of hard-coding them elsewhere.
 
 #### Function details
 
@@ -285,334 +332,20 @@ The main work happens in `manifest()`, which returns a `Manifest` object. That o
 def manifest() -> Manifest
 ```
 
-**Purpose**: Builds and returns the formal manifest for the documents extension. The system uses this to discover the extension name, version, available document skills, and the bundled writing subagent.
+**Purpose**: Builds the formal manifest for the documents extension so the UFO system can discover its skills and writing subagent. Someone would use this when loading extensions and asking, “What does this package add?”
 
-**Data flow**: It starts with the constants in this file: the extension name, version, skills folder, skill names, and writing profile. It turns each skill name into a `SkillSpec`, which points at that skill's folder on disk. It then packages all of that into a `Manifest` object and returns it to the caller.
+**Data flow**: It starts with fixed information in this file: the extension name, version, skills folder, skill names, and writing subagent profile. It turns each skill name into a `SkillSpec`, which points at that skill’s folder on disk. It then packages the name, version, subagent, and skill list into a `Manifest` object and returns it to the caller.
 
-**Call relations**: When the extension loader asks this file what it contributes, `manifest` creates the answer. To do that, it calls `SkillSpec.__init__` for each listed skill folder, then calls `Manifest.__init__` to bundle those skill specs together with the extension metadata and the writing subagent profile.
+**Call relations**: During extension loading, the larger system calls `manifest` to learn what this documents pack provides. Inside, it creates several `SkillSpec` objects so each skill can be found later, then creates a `Manifest` object that hands the full extension description back to the loader.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
-### Skill Validation and Creation
-Sample and member-created skill support verifies skill loading and registers persistent workspace skill management.
+### Sample skill probe
+The sample probe provides a minimal executable health check for bundled skill discovery.
 
 ### `extensions/sample/skills/sample_skill/probe.py`
 
-`test` · `startup or health check`
+`entrypoint` · `startup or health check`
 
-This file answers a very simple question: “Can this sample skill’s Python code run at all?” It does not define any classes or functions. It just prints the message `sample-skill-probe-ok` as soon as the file is executed or imported as a script. That makes it useful as a probe, like tapping a microphone and listening for sound. If the surrounding system runs this file and sees the expected text, it knows the sample skill is reachable, Python can execute it, and the basic extension wiring is working. If the message does not appear, the problem is likely outside this file: the file may not have been found, the skill may not have been installed correctly, or the execution environment may be broken. Because the file has no branching, configuration, or dependencies, its behavior is intentionally predictable.
-
-
-### `extensions/skill_create/ufo_ext_skill_create/manifest.py`
-
-`domain_logic` · `startup, object requests, runtime skill loading, scheduled indexing`
-
-A “skill” here is a small bundle of text files, especially a required SKILL.md file, that teaches the agent a reusable behavior. This file is the bridge between those saved skill bundles and the rest of the UFO system. Without it, member-authored skills could not be treated like workspace objects, loaded at runtime, shown in the member portal, or indexed for search.
-
-The file defines the shape of a saved skill: files may be given directly as text, copied from a workspace path, or kept unchanged by referring to their stored SHA-256 digest, which is a fingerprint of the file contents. It enforces safety limits, such as keeping file paths inside the skill folder, requiring text files, limiting the number and total size of files, and refusing stale edits when another writer has changed the skill first.
-
-The SkillObjects class provides the object-style operations: list skills, get details, save changes, delete, and report status. It deliberately avoids returning file contents in object details; instead it returns digests, so large or sensitive file bodies are not echoed into normal context.
-
-The file also supports runtime use. It can produce skill cards, materialize one saved skill or all saved skills, and periodically index skill descriptions so routing or search can find them. Finally, manifest() advertises all of this to the host application.
-
-#### Function details
-
-##### `_require_ext`  (lines 119–122)
-
-```
-def _require_ext(ext: ExtensionContext | None) -> ExtensionContext
-```
-
-**Purpose**: This small guard makes sure an extension context is present before any skill operation continues. The extension context is the object that tells the code which workspace, database transaction tools, sandbox, index, and other services it is allowed to use.
-
-**Data flow**: It receives either an ExtensionContext or nothing. If the context is missing, it stops the operation with an error; otherwise it returns the same context so later code can safely use it.
-
-**Call relations**: Most methods in SkillObjects call this at the start because they cannot read or write workspace skills without knowing the current extension environment. It is the front-door check before listing, reading, saving, deleting, resolving files, or reporting status.
-
-*Call graph*: called by 8 (_resolve, apply, delete, get, list, member_detail, member_page, status).
-
-
-##### `_contained_keys`  (lines 125–132)
-
-```
-def _contained_keys(name: str, spec: UserSkillSpec) -> None
-```
-
-**Purpose**: This checks that every file path named in a skill stays inside that skill’s own folder. It prevents a skill from saving files under sneaky paths like ../other-place, which could overwrite or reference things outside the skill.
-
-**Data flow**: It takes the skill name and the proposed skill specification. It computes the skill’s allowed root folder, checks every file key against that root, and either returns silently when all paths are safe or raises a clear error for the first unsafe path.
-
-**Call relations**: SkillObjects.apply calls this before resolving or saving files. It relies on the shared sandbox path-checking helpers to enforce the same containment rules used elsewhere in the system.
-
-*Call graph*: called by 1 (apply); 2 external calls (contained_relative, skill_root).
-
-
-##### `_text`  (lines 135–141)
-
-```
-def _text(path: str, content: bytes) -> str
-```
-
-**Purpose**: This confirms that a skill file is plain UTF-8 text. Skills in this feature are text bundles, not arbitrary binary attachments.
-
-**Data flow**: It receives a file path and raw bytes. It tries to decode the bytes into text; if decoding works, it returns the text, and if not, it raises an error naming the offending file.
-
-**Call relations**: SkillObjects._resolve calls this after gathering each file’s bytes, no matter whether the bytes came from stored content, inline text, or a workspace file. It is the final text-only gate before saving.
-
-*Call graph*: called by 1 (_resolve).
-
-
-##### `SkillObjects.list`  (lines 148–149)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: This returns a paged list of saved workspace skills for normal object-listing tools. It shows lightweight rows rather than full file contents.
-
-**Data flow**: It receives a tool context and a list query such as paging or filtering options. It checks the extension context, reads skill rows, applies the object paging helper, and returns an ObjectPage.
-
-**Call relations**: Object-listing flows call this when a user or agent asks what skill objects exist. It delegates the database-facing work to SkillObjects._rows and the page-shaping work to object_page.
-
-*Call graph*: calls 2 internal fn (_rows, _require_ext); 1 external calls (object_page).
-
-
-##### `SkillObjects.member_page`  (lines 151–162)
-
-```
-async def member_page(self, ext: ExtensionContext | None, *, member_id: UUID, admin: bool, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: This returns the saved skills as a signed-in member would see them in the portal, outside an agent turn. The important point is that skills belong to the workspace, not to one person or one agent.
-
-**Data flow**: It receives an extension context, member information, an admin flag, and a list query. It uses the workspace context to read the same rows as the normal list operation, then turns them into a paged result.
-
-**Call relations**: Member-facing portal code calls this to show the workspace’s saved skills. It shares the same row-building path as SkillObjects.list, so the portal and tool view stay consistent.
-
-*Call graph*: calls 2 internal fn (_rows, _require_ext); 1 external calls (object_page).
-
-
-##### `SkillObjects.get`  (lines 164–165)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[UserSkillSpec] | None
-```
-
-**Purpose**: This fetches the detailed saved specification for one skill. It returns file fingerprints and sizes, not the file bodies themselves.
-
-**Data flow**: It receives a tool context and a skill name. It checks the extension context, asks SkillObjects._skill for the stored detail, and returns that detail or null if the skill does not exist.
-
-**Call relations**: Object-get flows call this before editing or inspecting a skill. It hands off to SkillObjects._skill, which knows how to translate stored bytes into digest references.
-
-*Call graph*: calls 2 internal fn (_skill, _require_ext).
-
-
-##### `SkillObjects.member_detail`  (lines 167–185)
-
-```
-async def member_detail(self, ext: ExtensionContext | None, name: str, *, member_id: UUID, admin: bool) -> MemberObject[UserSkillSpec] | None
-```
-
-**Purpose**: This returns one skill in the shape needed by the member portal: a display row together with its detailed object information. Like get, it avoids exposing file contents.
-
-**Data flow**: It receives an extension context, a skill name, member information, and an admin flag. It reads all rows to find the matching display row, reads the detailed skill record, and returns both together as a MemberObject; if either piece is missing, it returns null.
-
-**Call relations**: Member portal detail pages call this when someone opens one saved skill. It combines the row data from SkillObjects._rows with the digest-based detail from SkillObjects._skill.
-
-*Call graph*: calls 3 internal fn (_rows, _skill, _require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects._rows`  (lines 187–195)
-
-```
-async def _rows(self, ext: ExtensionContext) -> tuple[ObjectRow, ...]
-```
-
-**Purpose**: This builds the lightweight list entries for saved skills. Each row contains the skill name, a shortened description, and whether it is pinned.
-
-**Data flow**: It receives an extension context, asks UserSkillStore for the workspace’s skill listing, shortens each description to the configured summary length, and returns a tuple of ObjectRow values.
-
-**Call relations**: SkillObjects.list, SkillObjects.member_page, and SkillObjects.member_detail use this whenever they need display-ready rows. It is the common adapter between the skill store and object-list views.
-
-*Call graph*: called by 3 (list, member_detail, member_page); 2 external calls (__init__, __init__).
-
-
-##### `SkillObjects._skill`  (lines 197–212)
-
-```
-async def _skill(self, ext: ExtensionContext, name: str) -> ObjectDetail[UserSkillSpec] | None
-```
-
-**Purpose**: This turns one stored skill record into safe object detail. It replaces each file body with a SHA-256 digest and size so callers can refer to unchanged files without receiving their full contents.
-
-**Data flow**: It receives an extension context and a skill name. It asks UserSkillStore for the record; if none exists, it returns null. If found, it computes a digest and size for every stored file, builds a UserSkillSpec with FileRef values, and returns ObjectDetail with timestamps and generation information.
-
-**Call relations**: SkillObjects.get and SkillObjects.member_detail call this when they need full metadata for one skill. It sits between raw stored files and the safer public object representation.
-
-*Call graph*: called by 2 (get, member_detail); 5 external calls (__init__, __init__, __init__, __init__, sha256).
-
-
-##### `SkillObjects.status`  (lines 214–231)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: This reports a compact status summary for a saved skill, such as its description, file count, total bytes, and pinned state. It also protects readers from accidentally using stale information.
-
-**Data flow**: It receives a tool context, skill name, and expected generation. It reads the stored record; if missing, it returns null. If the generation does not match, it raises an error. Otherwise it returns a small dictionary of status facts.
-
-**Call relations**: Status-checking object flows call this after reading a skill. It uses the same generation check pattern as edit and delete operations, so callers know whether the skill changed while they were looking.
-
-*Call graph*: calls 1 internal fn (_require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects.apply`  (lines 233–256)
-
-```
-async def apply(self, ctx: ToolContext, name: str, spec: UserSkillSpec, old: UserSkillSpec | None, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This saves a new or updated workspace skill. It validates the proposed bundle, resolves file references into actual text bytes, enforces size limits, and writes the result to the store.
-
-**Data flow**: It receives a tool context, skill name, proposed UserSkillSpec, the old spec if any, and an expected generation. It checks the extension context, rejects too many files, checks path containment, resolves all file values into bytes, rejects an oversized bundle, and saves the finished skill with its pinned setting and generation guard.
-
-**Call relations**: Object-apply flows call this when a user or agent creates or edits a skill. It calls _contained_keys for path safety, _resolve for turning references into content, and UserSkillStore.save for the actual persistence.
-
-*Call graph*: calls 3 internal fn (_resolve, _contained_keys, _require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects.delete`  (lines 258–269)
-
-```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
-```
-
-**Purpose**: This removes a saved skill from the workspace, but only if the caller is not working from a stale generation. That prevents deleting someone else’s newer edit by accident.
-
-**Data flow**: It receives a tool context, skill name, and expected generation. It reads the current record; if the skill exists and its generation differs, it raises an error. Otherwise it asks the store to delete the skill.
-
-**Call relations**: Object-delete flows call this when a user or agent removes a skill. It uses _require_ext for workspace context and UserSkillStore for reading and deleting the stored record.
-
-*Call graph*: calls 1 internal fn (_require_ext); 1 external calls (__init__).
-
-
-##### `SkillObjects._resolve`  (lines 271–319)
-
-```
-async def _resolve(self, ctx: ToolContext, name: str, spec: UserSkillSpec) -> dict[str, bytes]
-```
-
-**Purpose**: This converts the flexible file values in a skill specification into the exact bytes that will be saved. It is where inline text, workspace file references, and keep-unchanged digest references all become real stored content.
-
-**Data flow**: It receives a tool context, skill name, and skill spec. It reads already stored files so FileRef entries can keep existing content, verifies their digests, reads any FileFrom paths from the sandboxed workspace using a small Python helper, decodes those results, encodes inline strings, checks every result is text, and returns a path-to-bytes dictionary.
-
-**Call relations**: SkillObjects.apply calls this after basic path checks and before saving. It uses the sandbox to read workspace files safely, _text to reject non-text content, and UserSkillStore to look up existing file bytes for unchanged files.
-
-*Call graph*: calls 2 internal fn (_require_ext, _text); called by 1 (apply); 7 external calls (__init__, b64decode, sha256, dumps, loads, quote, workspace_path).
-
-
-##### `_member_cards`  (lines 353–354)
-
-```
-async def _member_cards(ctx: ExtensionContext) -> tuple[SkillCard, ...]
-```
-
-**Purpose**: This returns the lightweight skill cards shown or considered for member-authored skills. A skill card is the summary information used before loading the full skill.
-
-**Data flow**: It receives an extension context, asks UserSkillStore for the workspace’s cards, and returns them as a tuple.
-
-**Call relations**: The manifest registers this as the member skill card provider. Runtime skill-selection code can call it when it needs to know which saved skills are available.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_materialize_skill`  (lines 357–358)
-
-```
-async def _materialize_skill(ctx: ExtensionContext, name: str) -> RuntimeSkill | None
-```
-
-**Purpose**: This loads one saved skill into the runtime form the agent can actually use. “Materialize” means turning the stored database version back into a usable RuntimeSkill object.
-
-**Data flow**: It receives an extension context and skill name. It asks UserSkillStore to materialize that skill and returns the RuntimeSkill, or null if the skill cannot be found.
-
-**Call relations**: The manifest registers this as the single-skill loader for member skills. Agent runtime code calls it when a particular saved skill should be loaded for a turn.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_materialize_all_skills`  (lines 361–362)
-
-```
-async def _materialize_all_skills(ctx: ExtensionContext) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: This loads all saved workspace skills into runtime skill objects. It is used when an agent turn wants the whole saved skill set.
-
-**Data flow**: It receives an extension context, asks UserSkillStore to materialize every saved skill in the workspace, and returns the resulting tuple.
-
-**Call relations**: The manifest registers this as the all-skills loader. Agent runtime code calls it when workspace skills are enabled and the full set needs to be available.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `index_skills`  (lines 365–414)
-
-```
-async def index_skills(ctx: ExtensionContext) -> None
-```
-
-**Purpose**: This scheduled job updates the search or routing index for saved skills whose descriptions have changed or have never been indexed. Indexing makes skills findable by meaning, not just by exact name.
-
-**Data flow**: It receives an extension context, checks that both the index backend and embedding client are available, queries the database for stale skill cards, and tries to index each one. It counts successful settlements, logs individual failures, and raises the last error only if every attempted row failed.
-
-**Call relations**: The extension job system calls this on a schedule for workspaces with stale skill indexes. It creates a TextChunker and calls _index_card for each stale row, so one bad skill does not normally block the rest.
-
-*Call graph*: calls 2 internal fn (transaction, _index_card); 3 external calls (__init__, or_, select).
-
-
-##### `_index_card`  (lines 417–454)
-
-```
-async def _index_card(ctx: ExtensionContext, index: IndexBackend, embed: EmbedClient, chunker: TextChunker, row: sa.Row) -> None
-```
-
-**Purpose**: This indexes one skill card and then marks it as indexed only if the stored skill has not changed during indexing. That guard avoids claiming that old content is up to date.
-
-**Data flow**: It receives the extension context, index backend, embedding client, text chunker, and one database row. It sends the skill name and shortened description through chunk_embed_upsert, then updates indexed_digest only if the row’s digest still matches. If the skill was deleted meanwhile, it removes that skill’s index scope.
-
-**Call relations**: index_skills calls this for each stale skill. It hands text to the shared indexing helper, then uses a database transaction to settle or clean up based on whether the skill survived unchanged.
-
-*Call graph*: calls 2 internal fn (transaction, delete); called by 1 (index_skills); 4 external calls (__init__, select, update, chunk_embed_upsert).
-
-
-##### `_skills_awaiting_index`  (lines 457–467)
-
-```
-def _skills_awaiting_index() -> sa.Select[tuple[UUID]]
-```
-
-**Purpose**: This builds the database query that finds workspaces with skills needing indexing. It does not run the query itself; it describes the candidate set for the job scheduler.
-
-**Data flow**: It takes no runtime input. It creates a SQL select statement for distinct workspace IDs where a skill has no indexed digest or its indexed digest differs from the current digest, and returns that statement.
-
-**Call relations**: manifest passes this function to owner_candidates when registering the indexing job. The job system uses it to decide which workspace owners should receive a skill_index run.
-
-*Call graph*: 2 external calls (or_, select).
-
-
-##### `manifest`  (lines 470–489)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This is the extension’s registration point. It tells the host application what this extension is called, what object type it adds, what built-in authoring skill it provides, how member skills load, and what scheduled job it needs.
-
-**Data flow**: It takes no input. It constructs and returns a Manifest containing the skill object definition, the create-skill built-in skill path, member-skill callbacks, and the scheduled indexing job with its candidate query.
-
-**Call relations**: The host application calls this during extension startup. The returned Manifest wires together the object operations in SkillObjects, the runtime loading helpers, and the scheduled index_skills job so the rest of the system can discover and use them.
-
-*Call graph*: 5 external calls (__init__, __init__, __init__, __init__, owner_candidates).
+This file is deliberately minimal. When Python runs it, it immediately prints the text `sample-skill-probe-ok` to standard output, which usually means the terminal, log, or calling process that launched it. The point is not to perform real skill work, but to provide a clear signal: the file was found, Python could execute it, and the surrounding extension or skill wiring is basically working. You can think of it like pressing a doorbell to confirm the wiring is connected. If the expected message appears, the probe path is alive. If it does not appear, something outside this file may be wrong, such as the skill not being installed, the path being incorrect, or the execution environment failing before the skill code can run. Because it has no functions or configuration, there is no hidden behavior: running the file produces exactly one printed line.

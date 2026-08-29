@@ -1,453 +1,236 @@
-# Extension Workflow, Integration, Trigger, and Web Migrations  `stage-2.9`
+# Core late app identity, source cleanup, tool allowlist, and audit migrations  `stage-2.9`
 
-This stage is behind-the-scenes upgrade work. Each file is a database migration: a planned change to the stored data layout, with a way to undo it if the upgrade is rolled back. Together they give extensions their own durable storage and move older data into newer shared places.
+This stage is a set of late database upgrades. A database migration is a one-time script that changes stored data or the tables that hold it. These changes run during upgrade, behind the scenes, so newer code sees cleaner and safer records.
 
-The coding migrations build the review inbox and review-run records, link runs to conversations, remove an old direct conversation field, then move review setup into the shared source-trigger system. The evaluation migration creates fake email and calendar tables for test workspaces. Monitor, objectives, report digest, research, sample, and scheduled-task migrations add tables for repeating checks, goal steps and evidence, report summaries and unchanged readings, remembered research sources, sample notes, and paused conversations.
+Several migrations tidy old app and source identities. One retires broken QuickBooks sources with no company address. Others park sources that keep refusing work and add stable page identities so a source cannot save duplicate pages. A new object-change journal records what changed, who changed it, and when.
 
-The sources migrations create the source-trigger table, move old subscription data into it, and add delivery settings. The web migrations tidy chat metadata: one backfills older web chat rows into shared extension storage, and the next moves chat titles into the main conversation table. In short, this stage prepares the database so extension features can keep their history, schedules, and metadata consistently across upgrades.
+Another group updates built-in agents, which are app-like helpers in a workspace. Agents gain workspace skill settings, icons, reusable archived names, and a clear purpose field. Old code review agents are adopted by the newer coding app. The old Tasks app is archived, chat becomes the main agent, and wiki agents are made private to avoid accidental exposure.
+
+The last group keeps operations consistent. Turn records get frozen billing identity data. Tool allowlists are renamed so saved Slack, iMessage, and object actions match the current tool registry, like updating labels on keys so they still open the right doors.
 
 ## Files in this stage
 
-### Coding review workflow
-Builds and evolves the coding review inbox/run schema, then migrates coding review setup into shared source-trigger infrastructure.
+### Source cleanup and audit base
+Initial migrations retire unusable QuickBooks sources and add durable object-change journaling.
 
-### `extensions/coding/ufo_ext_coding/migrations/coding_0001_review_inbox.py`
+### `core/src/ufo/schema/migrations/versions/20260821155315_retire_companyless_quickbooks_sources.py`
+
+`domain_logic` · `database migration during deployment`
+
+QuickBooks Online needs each request to point at a specific company file. In this system, that company information is stored in the source row’s configuration as a base URL. Older rows could exist without that value, but such rows can never successfully sync because the system cannot even form the right address before contacting QuickBooks.
+
+This migration finds those broken QuickBooks sources and retires them instead of deleting them outright. That matters because other records, such as pages, may still point back to the source. The source row stays as a historical reference, but it is marked as removed. Its grants are deleted, so it no longer has active access rights. Its pages that are not already tombstoned are marked with a tombstone, meaning “treat this as deleted.” That lets page-change consumers notice the deletion and clean up any derived search or index data.
+
+An everyday analogy: rather than throwing away a broken filing cabinet and losing the labels that other paperwork refers to, this migration puts a clear “retired” sticker on it, removes its keys, and marks the active folders inside as closed.
+
+The downgrade does nothing, because once sources have been retired and grants removed, the migration does not know how to safely recreate their previous working state.
+
+#### Function details
+
+##### `upgrade`  (lines 25–72)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: This applies the migration. It finds active QuickBooks sources whose configuration does not include the required company address, then retires those sources and marks their active pages as deleted.
+
+**Data flow**: It reads QuickBooks source rows from the database, including each row’s stored configuration. For each row, it interprets the configuration as JSON if needed and checks whether it has a base_url value. Rows without that value become the target set. If there are none, it stops without changing anything. Otherwise, it records the current time, deletes grants for those sources, tombstones their non-tombstoned pages, and updates the source rows so they are marked removed, unclaimed, and freshly updated.
+
+**Call relations**: Alembic, the database migration tool, calls this when upgrading the database to this revision. Inside, it asks Alembic for the current database connection, uses SQLAlchemy to describe just the columns it needs, reads the candidate rows, uses JSON parsing for configurations stored as text, and uses the current UTC time for the retirement timestamps. It does all the cleanup in the database so later application code and page-change consumers see these sources as retired.
+
+*Call graph*: 13 external calls (get_bind, now, loads, Boolean, DateTime, JSON, Text, Uuid, column, delete (+3 more)).
+
+
+##### `downgrade`  (lines 75–76)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: This is the placeholder for reversing the migration, but it intentionally does nothing. The removed grants and the decision to retire unusable sources cannot be safely reconstructed from the remaining data.
+
+**Data flow**: It receives no input, reads no data, changes nothing, and returns nothing. The database is left exactly as it was before this function was called.
+
+**Call relations**: Alembic would call this only if someone tried to roll the database back past this revision. Unlike the upgrade path, it does not hand off to any database operations, because restoring broken QuickBooks sources to an active state would be unsafe and incomplete.
+
+
+### `core/src/ufo/schema/migrations/versions/20260822054846_object_change_journal.py`
 
 `data_model` · `database migration`
 
-This migration adds the first database tables for a coding review inbox. In everyday terms, it creates two new filing cabinets. One cabinet, `coding_review_inbox`, records that a source item in a workspace is waiting for coding review, along with the conversation and agent tied to that review. The other cabinet, `coding_review_run`, records a concrete review attempt for a repository pull request, including the base and head code versions, the run identifier, and links back to the conversation, agent, and optional turn that produced it.
+This file is an Alembic migration, which is a small script used to move the database from one shape to another. Its job is to create an `object_change` journal table. Think of this table like a logbook kept beside a shared workspace: whenever an object is created, updated, or deleted, the system can write down the object’s workspace, type, name, action, caller, agent, before-and-after content, and timestamp.
 
-The file also adds a uniqueness rule to the existing `turn` table so that a turn can be safely referenced together with its workspace. This matters because most tables here are scoped by workspace, and the database needs a reliable way to say, “this turn belongs to this workspace.”
+The migration creates columns for those pieces of information, plus a primary key so each journal entry has its own unique identity. It links each change back to a workspace using a foreign key, which means the database enforces that every change belongs to a real workspace. The `ondelete="CASCADE"` rule means that if a workspace is removed, its change history is removed too. It also adds a check rule so the action, called `verb`, can only be `create`, `update`, or `delete`.
 
-The many foreign key rules are guardrails. A foreign key is a database rule that says one record must point to a real record somewhere else. Some use cascade delete, meaning if a workspace or source is removed, its review inbox or review run records are removed too. Without this migration, the coding review feature would have nowhere durable to remember pending reviews or past review runs.
+Finally, it creates an index on workspace and creation time. An index is like the alphabetized tabs in a filing cabinet: it helps the database quickly find the history for one workspace in time order. The downgrade reverses all of this, removing the index and then the table.
 
 #### Function details
 
-##### `upgrade`  (lines 12–80)
+##### `upgrade`  (lines 12–29)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: This function applies the new database layout needed for coding reviews. It adds a workspace-aware uniqueness rule to turns, then creates the inbox and review-run tables with the columns and safety rules the feature needs.
+**Purpose**: Creates the new `object_change` database table and its lookup index. This is used when moving the database forward to a version that can store an audit journal of object changes.
 
-**Data flow**: Before it runs, the database has no dedicated place for coding review inbox entries or review run records. The function uses Alembic operations, which are migration commands for changing a database, and SQLAlchemy column and constraint descriptions, which describe table fields and rules. After it runs, the database contains the two new tables, their primary keys, links to existing workspace/source/conversation/agent/turn records, and a unique identity for review runs.
+**Data flow**: Before this runs, the database has no `object_change` table from this migration. The function defines the table columns, rules, workspace link, allowed action values, and search index. After it runs, the database can store change records and can efficiently look them up by workspace and time.
 
-**Call relations**: During an upgrade, Alembic calls this function as part of moving the database to the `coding_0001` revision. The function hands the actual database work to Alembic helpers such as table creation and batch table alteration, while SQLAlchemy objects describe the columns and constraints those helpers should create.
+**Call relations**: Alembic calls this function when applying this migration. Inside it, the function hands the table and index definitions to Alembic and SQLAlchemy, which are the tools that translate these Python instructions into actual database changes.
 
-*Call graph*: 11 external calls (batch_alter_table, create_table, BigInteger, Column, DateTime, ForeignKeyConstraint, Integer, PrimaryKeyConstraint, Text, UniqueConstraint (+1 more)).
-
-
-##### `downgrade`  (lines 83–87)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: This function reverses the migration. It removes the coding review tables and removes the uniqueness rule that was added to the existing `turn` table.
-
-**Data flow**: Before it runs, the database includes the coding review inbox table, the coding review run table, and the added unique constraint on `turn`. The function asks Alembic to drop the two tables first, then alters `turn` to drop the constraint. After it runs, the database is back to the shape it had before this migration, and any data stored in those two review tables is gone.
-
-**Call relations**: Alembic calls this function when rolling the database backward from this revision. It delegates the physical changes to Alembic operations: dropping tables directly and using a batch alteration for the existing `turn` table so the constraint can be removed safely.
-
-*Call graph*: 2 external calls (batch_alter_table, drop_table).
+*Call graph*: 9 external calls (create_index, create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Uuid).
 
 
-### `extensions/coding/ufo_ext_coding/migrations/coding_0002_review_conversation.py`
-
-`data_model` · `database migration during deployment or schema upgrade`
-
-This file is a small database change script, also called a migration. Its job is to teach the database one new fact: a row in the `coding_review_run` table may point to the `conversation` row that represents the review conversation.
-
-Before this migration, a coding review run could exist without an explicit database-level connection to the conversation that ran it. After the migration, the table has a new optional field, `review_conversation_id`. Optional means older rows or runs without a conversation can still exist. The file also adds a foreign key, which is a database rule saying “if this review run claims to refer to a conversation, that conversation must really exist.” The rule uses both `workspace_id` and the conversation `id`, so the link stays inside the correct workspace.
-
-The `upgrade` function applies the change. The `downgrade` function reverses it by removing the rule and then removing the column. Without this file, newer application code that expects review runs to remember their review conversation would not have a safe place in the database to store that connection.
-
-#### Function details
-
-##### `upgrade`  (lines 12–20)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the new database shape. It adds an optional `review_conversation_id` column to `coding_review_run` and adds a safety rule tying that value to a real conversation in the same workspace.
-
-**Data flow**: It starts with the existing `coding_review_run` table. It opens a controlled table-alteration block, creates a UUID column named `review_conversation_id`, and then adds a foreign key rule from `workspace_id` plus `review_conversation_id` to the matching `workspace_id` plus `id` in the `conversation` table. The result is an updated database schema that can store and validate the review-conversation link.
-
-**Call relations**: This is called by Alembic, the database migration tool, when the project is moved forward from revision `coding_0001` to `coding_0002`. Inside that migration step, it relies on Alembic’s table-alteration helper and SQLAlchemy’s column/type builders to express the database change.
-
-*Call graph*: 3 external calls (batch_alter_table, Column, Uuid).
-
-
-##### `downgrade`  (lines 23–26)
+##### `downgrade`  (lines 32–34)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Reverses the migration. It removes the database rule first, then removes the `review_conversation_id` column from `coding_review_run`.
+**Purpose**: Removes the `object_change` table and its index. This is used when rolling the database back to the previous schema version.
 
-**Data flow**: It starts with a database schema that already has the conversation link column and foreign key rule. It opens a controlled table-alteration block, drops the foreign key constraint named `coding_review_run_review_conversation_fkey`, and then drops the `review_conversation_id` column. The result is the older schema from before this migration.
+**Data flow**: Before this runs, the database may contain the `object_change` table and its workspace/time index. The function first removes the index, then removes the table itself. After it runs, the database no longer has this journal table or any records stored in it.
 
-**Call relations**: This is called by Alembic when rolling the database backward from revision `coding_0002` to `coding_0001`. It uses Alembic’s table-alteration helper so the rollback happens in the correct order: remove the dependency rule before removing the field it depends on.
-
-*Call graph*: 1 external calls (batch_alter_table).
-
-
-### `extensions/coding/ufo_ext_coding/migrations/coding_0003_review_agent_binding.py`
-
-`data_model` · `database migration`
-
-This file exists so the database can evolve safely as the project changes. The short comment says the design changed so that a source is tied to the agent that reviews it. As part of that change, the `coding_review_inbox` table no longer needs its `conversation_id` column.
-
-It uses Alembic, a tool that applies database changes in order, like numbered renovation instructions for a building. The `revision` and `down_revision` values tell Alembic where this step fits in the migration chain: this migration comes after `coding_0002` and is identified as `coding_0003`.
-
-The `upgrade` function is the forward path. When the system moves to this version, it opens the `coding_review_inbox` table in a safe alteration mode and drops the `conversation_id` column.
-
-The `downgrade` function is the undo path. If someone rolls the database back to the previous version, it adds `conversation_id` back as a required UUID value. A UUID is a long unique identifier, often used when many records need IDs that will not collide.
-
-Without this file, deployments would not have a reliable, repeatable way to bring the database schema into line with the newer review-agent binding design.
-
-#### Function details
-
-##### `upgrade`  (lines 12–14)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Applies the forward database change for this migration. It removes the now-unneeded `conversation_id` field from the `coding_review_inbox` table.
-
-**Data flow**: It takes no direct inputs from application code. Alembic provides access to the database operation context, the function selects the `coding_review_inbox` table for alteration, and the table comes out without its `conversation_id` column.
-
-**Call relations**: Alembic calls this function when upgrading the database to revision `coding_0003`. Inside, it uses Alembic's `batch_alter_table` helper so the column removal is performed through the migration system rather than by ad hoc database code.
-
-*Call graph*: 1 external calls (batch_alter_table).
-
-
-##### `downgrade`  (lines 17–19)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Reverses this migration if the database needs to go back to the previous version. It restores the `conversation_id` column that `upgrade` removed.
-
-**Data flow**: It takes no direct application input. Alembic gives it a database operation context, it opens the `coding_review_inbox` table for alteration, creates a required UUID column named `conversation_id`, and adds that column back to the table.
-
-**Call relations**: Alembic calls this function during a rollback from revision `coding_0003` to `coding_0002`. It uses Alembic's table-alteration helper and SQLAlchemy's column and UUID definitions to describe exactly what should be restored.
-
-*Call graph*: 3 external calls (batch_alter_table, Column, Uuid).
-
-
-### `extensions/coding/ufo_ext_coding/migrations/coding_0004_tools.py`
-
-`orchestration` · `database migration during upgrade or rollback`
-
-This file is an Alembic migration, which means it is a scripted database change that runs when the project is upgraded or rolled back. Its main job is to retire two old tables used for coding review inboxes and review runs, while preserving the important inbox setup by copying it into newer, more general tables: conversations and source triggers.
-
-Before deleting the old inbox table, the migration looks for existing shared pull request sources. For each one, it builds a stable trigger name from the provider, account, and base URL. This is like writing a forwarding address before removing an old mailbox: future code review events still know where to go. If a matching trigger already exists, it leaves it alone. If not, it creates a new conversation record and a new trigger record connected to the same workspace and agent.
-
-After that safety step, the upgrade removes the old `coding_review_run` and `coding_review_inbox` tables and drops an older unique constraint from the `turn` table. The downgrade does the reverse schema work: it recreates the dropped constraint and the two old tables. However, it only recreates the table shapes, not the old review inbox data that was carried forward.
-
-#### Function details
-
-##### `_binding_name`  (lines 20–35)
-
-```
-def _binding_name(provider: str, config: object) -> str
-```
-
-**Purpose**: This helper turns a pull request source configuration into a stable trigger binding name. It makes sure the source really describes a pull request stream, then creates a short, repeatable name that can be used to recognize the same source later.
-
-**Data flow**: It receives a provider name, such as a code hosting service, and a configuration object. It checks that the configuration is a dictionary with an account, the `pull_requests` stream, and optionally a base URL. It then serializes the important parts in a consistent order, hashes them, takes the first eight characters, and returns a readable name such as a provider prefix plus that short hash.
-
-**Call relations**: During the inbox carry-forward step, `_carry_review_inboxes` calls this function for each old review inbox source. The binding name it returns is used to check whether an equivalent source trigger already exists and, if not, to create one.
-
-*Call graph*: called by 1 (_carry_review_inboxes); 2 external calls (sha256, dumps).
-
-
-##### `_carry_review_inboxes`  (lines 38–149)
-
-```
-def _carry_review_inboxes() -> None
-```
-
-**Purpose**: This function preserves existing code review inbox subscriptions before the old inbox table is deleted. It copies each eligible old inbox into the newer conversation-and-trigger model so pull request review events can still reach the right agent.
-
-**Data flow**: It starts by opening the current database connection and inspecting the database shape. If the old `source_trigger` table or its needed `delivery` column is missing, it stops safely. Otherwise, it reads rows from `coding_review_inbox` joined to active shared sources. For each row, it builds a binding name, checks whether a matching trigger already exists, and skips duplicates. When no trigger exists, it creates a new conversation with a code-review queue key and inserts a matching source trigger connected to that conversation.
-
-**Call relations**: The `upgrade` function calls this first, before dropping the old tables. Inside this process, `_carry_review_inboxes` asks `_binding_name` to produce the stable name used for matching and creating triggers.
-
-*Call graph*: calls 1 internal fn (_binding_name); called by 1 (upgrade); 12 external calls (get_bind, DateTime, JSON, Text, Uuid, and_, column, insert, inspect, select (+2 more)).
-
-
-##### `upgrade`  (lines 152–157)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: This is the forward migration that applies the new database design. It first preserves old inbox behavior in the new trigger system, then removes obsolete tables and an old uniqueness rule.
-
-**Data flow**: It takes no direct input beyond the live database state. It calls `_carry_review_inboxes` to copy useful old inbox records into new records, then drops `coding_review_run` and `coding_review_inbox`. Finally, it alters the `turn` table by removing the `coding_turn_workspace_identity` unique constraint. The result is a database using the newer code review trigger structure.
-
-**Call relations**: Alembic calls `upgrade` when this migration is applied. Its most important handoff is to `_carry_review_inboxes`, which does the data-preserving work before the destructive table drops happen.
-
-*Call graph*: calls 1 internal fn (_carry_review_inboxes); 2 external calls (batch_alter_table, drop_table).
-
-
-##### `downgrade`  (lines 160–228)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: This is the rollback path for the migration. It rebuilds the old constraint and recreates the old code review tables so the database schema can return to the previous version.
-
-**Data flow**: It takes no direct input beyond the current database connection. It first restores the old unique constraint on the `turn` table. Then it creates empty versions of `coding_review_inbox` and `coding_review_run`, including their columns, primary keys, unique rule, and links to related tables such as workspace, source, agent, turn, and conversation. The output is a database schema shaped like the older version.
-
-**Call relations**: Alembic calls `downgrade` when rolling this migration back. Unlike `upgrade`, it does not call the carry-forward helper, because it is rebuilding old table definitions rather than translating trigger records back into old inbox rows.
-
-*Call graph*: 11 external calls (batch_alter_table, create_table, BigInteger, Column, DateTime, ForeignKeyConstraint, Integer, PrimaryKeyConstraint, Text, UniqueConstraint (+1 more)).
-
-
-### Environment and goal state
-Creates durable storage for evaluation fixtures, scheduled monitors, and objective progress tracking.
-
-### `extensions/eval_env/ufo_ext_eval_env/migrations/0001_eval_env.py`
-
-`config` · `database migration`
-
-This is a database migration: a small, ordered change to the database shape. It belongs to Alembic, the tool this project uses to move the database forward or backward between versions.
-
-The file adds two new tables. The first table, `eval_env_email`, stores email-like records: which workspace they belong to, which folder they are in, who sent them, who received them, the subject, body, and when they were sent. The second table, `eval_env_event`, stores calendar-like records: title, start and end times, attendees, and status.
-
-Both tables are tied to a `workspace`. That means each mailbox item and calendar event belongs to a specific workspace, like putting each user's papers into their own labeled drawer. The foreign key rule uses cascade delete, so if a workspace is removed, its related emails and events are automatically removed too. This prevents orphaned data from being left behind.
-
-The file also adds indexes on `workspace_id`. An index is like a book index: it helps the database quickly find all emails or events for one workspace instead of scanning everything.
-
-The `downgrade` function reverses the change by dropping the indexes and tables, so the database can be rolled back cleanly if needed.
-
-#### Function details
-
-##### `upgrade`  (lines 12–39)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: This function moves the database forward by adding storage for evaluation-environment emails and calendar events. It is used when installing or upgrading this extension so the rest of the code can save and read those records.
-
-**Data flow**: It receives no direct input from application code; Alembic calls it during a migration run. It declares the columns, primary keys, workspace links, and indexes for two new database tables. After it finishes, the database has `eval_env_email` and `eval_env_event` tables ready to store per-workspace mailbox and calendar data.
-
-**Call relations**: Alembic calls this function when applying this migration revision. Inside it, the function hands table and column definitions to Alembic and SQLAlchemy helpers, which translate the Python declarations into actual database changes.
-
-*Call graph*: 9 external calls (create_index, create_table, Column, DateTime, ForeignKeyConstraint, JSON, PrimaryKeyConstraint, Text, Uuid).
-
-
-##### `downgrade`  (lines 42–46)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: This function undoes the migration by removing the email and calendar storage added by `upgrade`. It is used when rolling the database back to a version before this extension schema existed.
-
-**Data flow**: It receives no direct input from application code; Alembic calls it during a rollback. It first removes the workspace lookup indexes, then removes the event and email tables themselves. After it finishes, the database no longer contains these evaluation-environment tables or their data.
-
-**Call relations**: Alembic calls this function when reversing this migration revision. It delegates the actual removal work to Alembic operations for dropping indexes and tables, in the safe order needed because indexes belong to tables.
+**Call relations**: Alembic calls this function when undoing this migration. It uses Alembic’s drop operations to reverse what `upgrade` created, in the safe order: remove the index first, then the table it belongs to.
 
 *Call graph*: 2 external calls (drop_index, drop_table).
 
 
-### `extensions/monitors/ufo_ext_monitors/migrations/0001_monitor.py`
+### Agent and source metadata
+These migrations add or adjust persisted metadata for agent skills, icons, archived names, source refusal state, and agent purpose.
 
-`data_model` · `database setup and schema migration`
+### `core/src/ufo/schema/migrations/versions/20260822090000_agent_use_workspace_skills.py`
 
-This is a database migration, which means it is a scripted change to the database structure. Its job is to add the first table needed by the monitors extension. Without this file, the system would have no place to save monitors, so it could not remember what to check, when to check it next, who created it, or how many times it has run.
+`data_model` · `database migration during deployment or schema update`
 
-The table it creates is called `monitor`. Each row is one monitor. It stores the monitor’s identity, the workspace and conversation it belongs to, the agent that should act on it, and human-facing details such as its name, audience, command, reason, next steps, and description. It also stores scheduling information, such as how often it should run, when it is due next, and when its deadline is.
+This migration updates the saved database structure for agents. Before this change, the workspace had one shared set of saved skills, and agents implicitly had access to that set. This file makes that behavior explicit by adding a new database column named `use_workspace_skills` to the `agent` table.
 
-Some fields track runtime state. For example, the table counts how many probes have run, how many quiet or failed checks happened in a row, and whether checks were skipped. It also includes claim fields, which let one worker temporarily mark a monitor as being worked on so two workers do not process the same monitor at the same time.
+Think of it like adding a new checkbox to every agent’s record: “Use the workspace skill set?” Because existing agents already effectively had that access before this migration, the new checkbox is filled in as true for all existing rows. The column is also required, so every agent must have a clear yes-or-no value instead of leaving the setting blank.
 
-The migration also adds safety rules: monitors are tied to existing workspaces, conversations, agents, and optionally members; names must be unique within a workspace; and the interval must be at least one minute. An index is added so the system can quickly find monitors that are due to be checked.
+The file is written for Alembic, the tool used to apply database changes over time. Its `upgrade` function moves the database forward by adding the column. Its `downgrade` function reverses the move by removing the column. Without this migration, newer code that expects agents to have this setting would not find it in the database and could fail when reading or saving agent records.
 
 #### Function details
 
-##### `upgrade`  (lines 12–48)
+##### `upgrade`  (lines 17–21)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: This function applies the migration by creating the `monitor` table and adding an index for finding due monitors quickly. It is used when installing or upgrading the monitors extension so the database has the storage shape the code expects.
+**Purpose**: Adds the `use_workspace_skills` column to the `agent` table. This lets each agent record say whether that agent should load the workspace’s shared skill set.
 
-**Data flow**: Before this runs, the database does not have the monitor table from this migration. The function sends table-building instructions to Alembic, the migration tool, describing each column, relationship, uniqueness rule, and validity check. After it finishes, the database can store monitor records and can efficiently search by the next scheduled probe time and deadline.
+**Data flow**: It takes no direct input from application code. When the migration runs, it tells the database migration tool to add a new required Boolean value, meaning true or false, to each agent row. Existing and newly inserted rows get a default value of true unless another value is provided.
 
-**Call relations**: The migration runner calls this function when moving the database forward to this revision. Inside it, the function hands the actual database-changing work to Alembic operations such as creating the table and index, while SQLAlchemy objects describe the columns and constraints in a database-independent way.
+**Call relations**: Alembic calls this function when applying this migration. Inside it, the function builds the new column definition using SQLAlchemy helpers and hands that definition to Alembic’s `add_column` operation so the database schema is changed.
 
-*Call graph*: 13 external calls (create_index, create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, Integer, JSON, PrimaryKeyConstraint, Text (+3 more)).
-
-
-##### `downgrade`  (lines 51–53)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: This function reverses the migration by removing the monitor index and table. It is used if the database needs to roll back to the state before the monitors table existed.
-
-**Data flow**: Before this runs, the monitor table and its due-date index exist. The function tells Alembic to drop the index first, then drop the table itself. After it finishes, the database no longer has the storage created by this migration, and any monitor records in that table are gone.
-
-**Call relations**: The migration runner calls this function when rolling the database backward from this revision. It uses Alembic’s drop operations to undo the objects that `upgrade` created, in the safe order: remove the index, then remove the table.
-
-*Call graph*: 2 external calls (drop_index, drop_table).
+*Call graph*: 4 external calls (add_column, Boolean, Column, true).
 
 
-### `extensions/objectives/migrations/objectives_0001_objective.py`
-
-`data_model` · `database migration during install or upgrade`
-
-This is a database migration, which is a scripted change to the database structure. It acts like a set of building plans: when the objectives extension is installed or upgraded, this file tells the database which new tables, links, and lookup shortcuts to add.
-
-The migration creates four related tables. The main `objective` table stores a named goal inside a workspace and conversation, along with its directive and timestamps. The `objective_step` table breaks an objective into ordered steps, each with a title and JSON acceptance rules. JSON means flexible structured data, useful when the exact shape of the rules may vary. The `objective_event` table records evidence that a step was either done or blocked, and it only allows those two event kinds. The `objective_check` table stores verdicts from later checks of a step.
-
-The tables are tied back to workspaces, conversations, objectives, and steps using foreign keys, which are database rules saying “this record must point to a real parent record.” Many of those links delete automatically when the parent is deleted, so leftover orphan records do not pile up. Indexes are added for common lookups, like finding objectives for a conversation or events/checks for a step over time. Without this file, the objectives feature would have no database shape to save or query its core information.
-
-#### Function details
-
-##### `upgrade`  (lines 12–69)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Creates the database tables and indexes needed by the objectives feature. Someone runs this when moving the database forward to a version that supports objectives.
-
-**Data flow**: It takes no direct input from application code, but it uses Alembic’s database operation tool to change the connected database. Before it runs, the objectives tables do not exist. After it runs, the database contains tables for objectives, steps, events, and checks, with rules that keep their relationships valid and indexes that make common searches faster.
-
-**Call relations**: This is the forward half of the migration. Alembic calls it when applying revision `objectives_0001`, and inside it the function hands each table, column, constraint, and index definition to Alembic and SQLAlchemy so they can turn the Python description into real database changes.
-
-*Call graph*: 12 external calls (create_index, create_table, CheckConstraint, Column, DateTime, ForeignKeyConstraint, Integer, JSON, PrimaryKeyConstraint, Text (+2 more)).
-
-
-##### `downgrade`  (lines 72–79)
+##### `downgrade`  (lines 24–25)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Removes the database objects created by this migration. Someone would use it when rolling the database back to a version before the objectives feature existed.
+**Purpose**: Removes the `use_workspace_skills` column from the `agent` table. This is used if the database needs to be rolled back to the previous schema version.
 
-**Data flow**: It takes no direct input from application code and works on the connected database. Before it runs, the objectives tables and indexes exist. After it runs, the objective check and event indexes are gone, then the check, event, step, and objective tables are removed in an order that respects their dependencies.
+**Data flow**: It takes no direct input from application code. When run, it asks the migration tool to delete the column from the agent table, which also removes the stored true-or-false values for that setting.
 
-**Call relations**: This is the reverse half of the migration. Alembic calls it during rollback, and it uses Alembic’s drop functions to undo what `upgrade` created, starting with dependent tables before removing their parent table.
-
-*Call graph*: 2 external calls (drop_index, drop_table).
-
-
-### `extensions/objectives/migrations/objectives_0002_step_fanout.py`
-
-`data_model` · `database migration`
-
-This file changes the database shape for the objectives feature. An objective is made of steps, and the order of those steps is not always enough to know whether they must happen one after another or whether some can happen at the same time. The new `independent` column stores that answer directly on each `objective_step` row.
-
-The practical reason for this is efficiency and clarity. Instead of asking the model or planning logic to decide over and over whether steps can fan out and run in parallel, the system records that decision once in the data. It is like writing “can be done anytime” on certain tasks in a checklist, so the scheduler does not need to infer it every time it reads the list.
-
-Because old database rows did not have this information, the migration gives them a safe default: `false`. That means existing steps are treated as not independent unless later changed. This avoids accidentally allowing old plans to run steps in parallel when they were not designed for that.
-
-The file uses Alembic, a database migration tool, to apply or undo the change.
-
-#### Function details
-
-##### `upgrade`  (lines 20–24)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: Adds the `independent` column to the `objective_step` database table. The new column is a true-or-false value, cannot be empty, and defaults to `false` for existing and new rows unless set otherwise.
-
-**Data flow**: Before this runs, the `objective_step` table has no stored answer for whether a step may run independently. The function tells Alembic to add a Boolean column named `independent`, with a database-side default of false. After it runs, every objective step row has this new field available.
-
-**Call relations**: This function is called by Alembic when the project is being moved forward to this migration version. It hands the actual database change to Alembic's `add_column` operation, using SQLAlchemy objects to describe the new column and its default value.
-
-*Call graph*: 4 external calls (add_column, Boolean, Column, false).
-
-
-##### `downgrade`  (lines 27–28)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: Removes the `independent` column from the `objective_step` table. This is used if the database needs to be rolled back to the previous migration version.
-
-**Data flow**: Before this runs, the `objective_step` table includes the `independent` flag. The function tells Alembic to drop that column. After it runs, the table returns to the older shape and no longer stores independence information for steps.
-
-**Call relations**: This function is called by Alembic during a rollback from this migration. It delegates the work to Alembic's `drop_column` operation so the database schema matches the earlier objectives migration.
+**Call relations**: Alembic calls this function when reversing this migration. It hands off to Alembic’s `drop_column` operation, which performs the actual database change.
 
 *Call graph*: 1 external calls (drop_column).
 
 
-### Extension content records
-Adds persistence for report digests, unchanged digest readings, research source observations, and sample extension notes.
+### `core/src/ufo/schema/migrations/versions/20260823021954_app_icons.py`
 
-### `extensions/report_digest/ufo_ext_report_digest/migrations/0001_report_digest.py`
+`io_transport` · `database migration`
 
-`data_model` · `database migration`
+This file is an Alembic migration. Alembic is the tool that applies database changes in a controlled order, like a checklist for bringing an older database up to date. Here, the change is not creating a new table or column. Instead, it fills in the `icon` field for a small set of existing agent records.
 
-This file is a database migration, meaning it describes one planned change to the database structure. The feature here is “report digest”: a saved summary of a report, including its title, short summary, key points, the reader it was written for, the model that wrote it, and when it was written. Without this migration, the application would have nowhere official to store those digest entries.
+The file defines a fixed map of app agent identities to icon names. Each identity is made from two pieces: who provisioned the agent and the agent's provisioned name. During upgrade, the migration builds a lightweight description of the `agent` table, then loops through that map. For each known app agent, it runs an update that finds the matching row and sets its `icon` value.
 
-The migration creates a table named `report_digest_entry`. Each row belongs to both a workspace and a turn. A workspace is the larger area where work happens, and a turn is a specific step or exchange in that work. The table uses both IDs together as its primary key, which means there can be only one digest entry for the same workspace-and-turn pair.
+This matters because these app agents declare recognizable icons, and the database needs to reflect that. Without this migration, those agents might appear with missing, blank, or generic icons in places that read from the database.
 
-It also adds foreign keys, which are database rules that say “this value must point to a real row in another table.” If the linked workspace or turn is deleted, the digest row is deleted too. This keeps old digest records from being left behind like loose papers after their folder has been thrown away.
-
-The `upgrade` function applies the change. The `downgrade` function reverses it by dropping the table.
+The downgrade path does nothing. That means rolling this migration back will not remove or restore the old icon values. This is intentional or accepted here, but it is important: the change is one-way from the migration's point of view.
 
 #### Function details
 
-##### `upgrade`  (lines 12–26)
+##### `upgrade`  (lines 20–35)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: Creates the `report_digest_entry` database table so the system can store one digest for a specific workspace and turn. It defines the needed fields, the unique identity of each row, and the links back to existing workspace and turn records.
+**Purpose**: Applies the forward database change by assigning icon names to known built-in app agents. It is used when the database is being upgraded to this migration revision.
 
-**Data flow**: Before this runs, the database has no `report_digest_entry` table. The function gives Alembic, the database migration tool, a full table plan: ID fields, text fields, a JSON field for digest points, a timestamp, foreign-key rules, and a primary-key rule. After it runs, the database can store report digest entries and will automatically delete them if their workspace or turn is deleted.
+**Data flow**: It starts with the hard-coded `APP_ICONS` map, where each app agent identity points to an icon name. It creates a minimal description of the `agent` table, then for each entry builds an update statement: find the row with the matching `provisioned_by` and `provisioned_name`, and set `icon` to the mapped value. The result is changed rows in the database; the function does not return a value.
 
-**Call relations**: This is called by Alembic when applying this migration during an upgrade. It hands the table definition to `alembic.op.create_table`, using SQLAlchemy column and constraint objects to describe exactly what the database should create.
+**Call relations**: Alembic calls this function when moving the database forward to this revision. Inside the function, SQLAlchemy is used to describe the table and build each update, and Alembic's operation object runs those updates against the database.
 
-*Call graph*: 8 external calls (create_table, Column, DateTime, ForeignKeyConstraint, JSON, PrimaryKeyConstraint, Text, Uuid).
+*Call graph*: 4 external calls (execute, Text, column, table).
 
 
-##### `downgrade`  (lines 29–30)
+##### `downgrade`  (lines 38–39)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Removes the `report_digest_entry` table when this migration is rolled back. This is the undo step for the table created by `upgrade`.
+**Purpose**: Defines what should happen if this migration is rolled back, but in this file it deliberately does nothing. It exists because Alembic expects migrations to provide a downgrade function.
 
-**Data flow**: Before this runs, the database may contain the `report_digest_entry` table and any digest rows inside it. The function asks Alembic to drop that table. After it runs, the table and its stored digest data are gone.
+**Data flow**: No input is read, no database statements are run, and no value is returned. Before and after calling it, the icon values remain whatever they already are.
 
-**Call relations**: This is called by Alembic when reversing this migration. It delegates the actual database change to `alembic.op.drop_table`, which removes the table created by `upgrade`.
-
-*Call graph*: 1 external calls (drop_table).
+**Call relations**: Alembic calls this function only when rolling the database backward past this revision. Unlike `upgrade`, it does not hand off any work to SQLAlchemy or Alembic operations, so the rollback leaves the icon updates in place.
 
 
-### `extensions/report_digest/ufo_ext_report_digest/migrations/0002_report_digest_unchanged.py`
+### `core/src/ufo/schema/migrations/versions/20260823202415_free_archived_app_names.py`
 
-`data_model` · `database migration`
+`data_model` · `database migration during upgrade`
 
-This file is part of the project’s database change history. A database migration is like a dated instruction sheet for changing the shape of the database safely and repeatably. Here, the new shape is a table named `report_digest_unchanged`.
+This file is an Alembic migration, which means it is a small, ordered database change that runs when the system upgrades its stored data. The problem it solves is name blocking: if an agent has been archived, its old name may still sit in the normal `name` field, preventing a new or active agent from using that name. This migration adds a new optional column called `archived_name` to the `agent` table. Then it finds every agent whose `archived_at` field is set, meaning it has been archived. For each one, it saves the old visible name into `archived_name` and changes `name` to a generated internal value like `~archived-123`, based on that row’s id. In everyday terms, it is like taking a retired employee’s name off the active office door and putting it into the archive records instead. Finally, it adds a database rule, called a check constraint, that keeps the two archive fields in step: active agents must have neither `archived_at` nor `archived_name`, while archived agents must have both. The downgrade is intentionally empty, so this migration does not describe how to undo the change.
 
-The table stores pairs of IDs: a `workspace_id` and a `turn_id`. In plain terms, it says: “for this workspace, during this turn, the report digest read something and found no change.” The two IDs together form the table’s primary key, meaning the same workspace-and-turn pair can only be recorded once.
+#### Function details
 
-The table also points back to the existing `workspace` and `turn` tables using foreign keys. A foreign key is a database rule that says “this value must refer to a real row over there.” Both links use `ondelete="CASCADE"`, which means if a workspace or turn is deleted, its matching unchanged-report records are automatically cleaned up too. Without this migration, the system would have no dedicated database place to remember these “read but unchanged” report-digest events.
+##### `upgrade`  (lines 15–35)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: Applies the forward database change. It adds a place to store an archived agent’s former name, moves existing archived names there, replaces their active `name` values with internal placeholders, and adds a rule that keeps archived-name data consistent.
+
+**Data flow**: It starts with the current `agent` table. It adds the nullable `archived_name` column, reads all rows where `archived_at` is not null, and for each row uses the row id and current name to update that row: the old name becomes `archived_name`, and `name` becomes `~archived-<id>`. It then adds a database check constraint so future rows cannot have only one of `archived_at` or `archived_name` filled in.
+
+**Call relations**: Alembic calls this function when this migration is applied. Inside it, the migration asks Alembic for a safe table-alteration context, asks for the active database connection, and uses SQLAlchemy text statements to select and update the affected rows before adding the final consistency rule.
+
+*Call graph*: 4 external calls (batch_alter_table, get_bind, Column, text).
+
+
+##### `downgrade`  (lines 38–39)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: Defines what would happen if this migration were rolled back, but here it does nothing. That means the migration is effectively one-way from this file’s point of view.
+
+**Data flow**: It receives no input and makes no database changes. The database remains exactly as it was before this function was called.
+
+**Call relations**: Alembic would call this during a requested rollback to the previous migration. Because the function body is empty, it does not hand off to any database operation or restore the old names into the old shape.
+
+
+### `core/src/ufo/schema/migrations/versions/20260824141446_source_refusal_park.py`
+
+`data_model` · `database migration during deploy or setup`
+
+This migration updates the database table named `source`. A database migration is like a written instruction sheet for changing a filing cabinet: it says which new drawers or labels must be added, and how to remove them if the change needs to be undone.
+
+The new fields support a “source parking” idea. A source can now have a count of how many refusals happened in a row, using `consecutive_refusals`. It starts at zero and is required for every source, so the system always has a clear number to work with. The migration also adds `parked_at`, which can store the date and time when a source was parked, and `parked_reason`, which can store a human-readable explanation for why that happened.
+
+Without this file, the application code that tries to record refusal counts or parking details would have nowhere to put that information in the database. That would likely cause database errors or make the feature impossible to use.
+
+The file also includes a reverse path. If the migration is rolled back, it removes the three added fields from the `source` table, returning the database to its earlier shape.
 
 #### Function details
 
@@ -457,97 +240,57 @@ The table also points back to the existing `workspace` and `turn` tables using f
 def upgrade() -> None
 ```
 
-**Purpose**: This function applies the migration by creating the `report_digest_unchanged` table. It is used when the database is being moved forward to a newer version of the extension schema.
+**Purpose**: This function applies the migration by adding three new columns to the `source` table. It is used when moving the database forward to support source refusal counting and parking.
 
-**Data flow**: It takes no direct input from application code. When run by Alembic, the database migration tool, it defines a new table with two UUID columns, adds rules linking those columns to existing workspace and turn records, and makes the pair of columns unique as the table’s identity. The result is a new database table ready to store unchanged report-digest readings.
+**Data flow**: It starts with the existing `source` table. Inside a safe table-alteration block, it adds `consecutive_refusals` as a required integer with a default value of zero, then adds `parked_at` for an optional timestamp, and `parked_reason` for optional explanatory text. After it runs, every source row can store refusal and parking information.
 
-**Call relations**: Alembic calls this function during an upgrade. Inside it, the function hands the table definition to `alembic.op.create_table`, using SQLAlchemy helpers to describe the columns, foreign-key rules, and primary-key rule that the database should create.
+**Call relations**: Alembic, the database migration tool, calls this function when this revision is applied. The function hands the actual table-changing work to Alembic’s `batch_alter_table`, and uses SQLAlchemy helpers to describe the new database columns in a database-independent way.
 
-*Call graph*: 5 external calls (create_table, Column, ForeignKeyConstraint, PrimaryKeyConstraint, Uuid).
-
-
-##### `downgrade`  (lines 23–24)
-
-```
-def downgrade() -> None
-```
-
-**Purpose**: This function reverses the migration by deleting the `report_digest_unchanged` table. It is used when the database is being rolled back to the previous schema version.
-
-**Data flow**: It takes no direct input from application code. When run by Alembic during a rollback, it tells the database to drop the table. Afterward, the database no longer has a place for these unchanged report-digest records, and any data in that table is removed.
-
-**Call relations**: Alembic calls this function during a downgrade. It delegates the actual table removal to `alembic.op.drop_table`, which issues the database operation needed to remove `report_digest_unchanged`.
-
-*Call graph*: 1 external calls (drop_table).
+*Call graph*: 4 external calls (batch_alter_table, Column, DateTime, text).
 
 
-### `extensions/research/ufo_ext_research/migrations/research_0001_source_observations.py`
-
-`data_model` · `database migration`
-
-This file is a database migration, which is a small script that changes the shape of the database in a controlled way. Its job is to add a new table called `research_source_observation`. That table records source links connected to a workspace, a conversation, and a turn in that conversation. In plain terms, it lets the system say: “During this conversation, for this message turn, we observed this source URL, with this title, snippet, date, and ranking.”
-
-The table is tied to existing workspace, conversation, and turn records using foreign keys. A foreign key is a rule that says one record must point to a real record somewhere else. The `ondelete="CASCADE"` rules mean that if the related workspace, conversation, or turn is deleted, these source observations are automatically deleted too. That prevents orphaned source records from being left behind.
-
-The primary key uses workspace, conversation, and a digest of the URL. A digest is a short fixed-length fingerprint of the URL, useful for identifying the same source without relying only on the full text of the URL. The file also creates an index, which is like a sorted lookup card, so the database can quickly find sources for a conversation ordered or filtered by update time. Without this migration, the research extension would have no database place to store these observed sources.
-
-#### Function details
-
-##### `upgrade`  (lines 12–39)
-
-```
-def upgrade() -> None
-```
-
-**Purpose**: This function applies the migration by creating the new database table and its lookup index. It is used when the system is being upgraded to a version that needs to store observed research sources.
-
-**Data flow**: Before it runs, the database has no `research_source_observation` table. The function defines the table columns, the required links to existing workspace, conversation, and turn records, the primary key, and then adds an index for faster conversation-based lookup. After it runs, the database can store source observations for research conversations.
-
-**Call relations**: The migration tool calls this function when moving the database forward to revision `research_0001`. Inside, it hands the actual database work to Alembic operations such as creating a table and creating an index, while SQLAlchemy objects describe the columns, constraints, and data types.
-
-*Call graph*: 10 external calls (create_index, create_table, Column, DateTime, ForeignKeyConstraint, Integer, PrimaryKeyConstraint, String, Text, Uuid).
-
-
-##### `downgrade`  (lines 42–44)
+##### `downgrade`  (lines 23–27)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: This function reverses the migration by removing the index and then deleting the source observation table. It is used if the database must be rolled back to the state before this research feature was added.
+**Purpose**: This function reverses the migration by removing the three columns added by `upgrade`. It is used if the database must be rolled back to the previous version.
 
-**Data flow**: Before it runs, the database contains the `research_source_observation` table and its index. The function first removes the index, then removes the table itself. After it runs, stored research source observations are gone and the database no longer has this schema piece.
+**Data flow**: It starts with a `source` table that contains parking and refusal fields. Inside a table-alteration block, it drops `parked_reason`, then `parked_at`, then `consecutive_refusals`. After it runs, the table no longer stores this source parking information.
 
-**Call relations**: The migration tool calls this function when rolling the database backward from revision `research_0001`. It uses Alembic’s drop operations to undo the objects created by `upgrade`, in the safe order: index first, table second.
+**Call relations**: Alembic calls this function when this revision is rolled back. It uses the same table-alteration mechanism as `upgrade`, but instead of adding columns, it removes the fields so the database matches the earlier schema.
 
-*Call graph*: 2 external calls (drop_index, drop_table).
+*Call graph*: 1 external calls (batch_alter_table).
 
 
-### `extensions/sample/migrations/0001_sample_ext_note.py`
+### `core/src/ufo/schema/migrations/versions/20260825023542_agent_purpose.py`
 
-`data_model` · `database migration`
+`data_model` · `schema migration`
 
-This file tells Alembic, the database migration tool, how to change the database so the sample extension has a place to store its data. Think of it like a renovation instruction sheet: when moving forward, add this room; when rolling back, remove it.
+This file is a database migration, which is a small, ordered change to the shape of the database. Its job is to teach the existing `agent` table a new piece of information: each agent can now have a `purpose`, written as text.
 
-The migration creates a table named `sample_ext_note`. That table has two pieces of information: a `workspace_id`, which points to an existing workspace, and a `note`, which holds the text of the note. The `workspace_id` is also the table’s primary key, meaning each workspace can have at most one note in this table.
+The field is allowed to be empty. That matters because the database may already contain many agent rows created before this idea existed. If the new column were required immediately, the migration could fail or force the system to invent purposes for old agents. Instead, old rows can keep working with a blank value, while newer provisioning code or user-created agents can fill it in later.
 
-The table is connected to the main `workspace` table with a foreign key. A foreign key is a database rule that says, “this value must refer to a real row over there.” It also uses `ondelete="CASCADE"`, which means if a workspace is deleted, its sample extension note is automatically deleted too. Without this migration, the extension would have no database table to save notes in, and code that expects this table would fail when reading or writing extension notes.
+The migration has two directions. `upgrade` moves the database forward by adding the column. `downgrade` reverses that change by removing it. This is like adding a new blank line to every form in a filing cabinet, then being able to remove that line again if the system is rolled back.
+
+Without this file, the application code could not safely store or read an agent’s own statement of purpose from the database.
 
 #### Function details
 
-##### `upgrade`  (lines 12–19)
+##### `upgrade`  (lines 18–19)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: This function applies the migration by creating the `sample_ext_note` table. It is used when the database is being moved forward to a version that includes the sample extension’s note storage.
+**Purpose**: This function applies the forward database change. It adds a nullable text column named `purpose` to the `agent` table, giving every agent record a place to store its stated reason for existing.
 
-**Data flow**: It starts with an existing database that does not yet have this extension table. It defines the table name, two columns, a link back to the `workspace` table, and a rule that makes `workspace_id` unique as the main identifier. After it runs, the database has a new table ready to store one text note for each workspace.
+**Data flow**: It takes no direct input from callers. When the migration tool runs it, it asks Alembic, the database migration helper, to add a new column to the `agent` table; SQLAlchemy is used to describe that column as text and optional. After it runs, the database schema includes `agent.purpose`, while existing rows can leave it empty.
 
-**Call relations**: Alembic calls this function when applying this migration. Inside it, the function hands the table definition to Alembic’s `create_table` operation, using SQLAlchemy building blocks such as columns, text and UUID types, a foreign key rule, and a primary key rule.
+**Call relations**: Alembic calls this function when upgrading the database to revision `20260825023542`. Inside, it hands the actual database alteration to `alembic.op.add_column`, using SQLAlchemy’s `Column` and `Text` objects to describe exactly what should be added.
 
-*Call graph*: 6 external calls (create_table, Column, ForeignKeyConstraint, PrimaryKeyConstraint, Text, Uuid).
+*Call graph*: 3 external calls (add_column, Column, Text).
 
 
 ##### `downgrade`  (lines 22–23)
@@ -556,271 +299,524 @@ def upgrade() -> None
 def downgrade() -> None
 ```
 
-**Purpose**: This function reverses the migration by removing the `sample_ext_note` table. It is used when rolling the database back to a version before this sample extension table existed.
+**Purpose**: This function reverses the migration. It removes the `purpose` column from the `agent` table if the database is rolled back to the previous schema version.
 
-**Data flow**: It starts with a database that contains the `sample_ext_note` table. It asks Alembic to drop that table. After it runs, the table and any notes stored in it are gone.
+**Data flow**: It takes no direct input from callers. When run, it tells Alembic to drop the `purpose` column from the `agent` table. After it finishes, the database no longer has that field, and any stored purpose text in that column is gone.
 
-**Call relations**: Alembic calls this function during a rollback. It delegates the actual removal to Alembic’s `drop_table` operation, which performs the database change.
+**Call relations**: Alembic calls this function during a downgrade from revision `20260825023542`. It delegates the database work to `alembic.op.drop_column`, which performs the column removal.
 
-*Call graph*: 1 external calls (drop_table).
+*Call graph*: 1 external calls (drop_column).
 
 
-### Background trigger state
-Adds state for paused scheduled tasks and establishes the shared source-trigger table with delivery metadata.
+### Built-in app agent transitions
+These migrations adopt, archive, or redefine built-in app agents as product ownership and app identity change.
 
-### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/migrations/0001_pause.py`
+### `core/src/ufo/schema/migrations/versions/20260825044912_adopt_coding_provision.py`
 
-`data_model` · `database migration / setup`
+`orchestration` · `database migration during deploy or rollback`
 
-This is a database migration, which is a small script used to move the database from one shape to another. Here, the new shape includes a table called `pause`. A `pause` record represents a conversation or agent action that has been put on hold until a specific time, like writing a reminder on a calendar so the system knows when to continue.
+This file is a one-time database change, run by Alembic, the tool this project uses to apply database migrations. Its job is to make old reviewer agents line up with the product’s newer naming and app model without creating duplicates or overwriting user choices.
 
-The table stores the paused item’s identity, which workspace, conversation, and agent it belongs to, when it should resume, what prompt should be used, and a human-readable description. It also records ordering information so the resumed work can fit back into the conversation stream correctly. There are fields for ownership and claiming too, so a worker process can temporarily reserve a pause while it is processing it and avoid another worker doing the same job at the same time.
+Earlier versions provisioned a reviewer agent under the source identity “coding” with the declared name “code-review.” The newer app expects that same thing to be found under “app_code” with the declared name “code.” If the database rows are not moved, the app may fail to find the existing page-backed agent, or old software could create a second reviewer beside the first.
 
-The migration also links pause records to existing workspace, conversation, agent, and member records using foreign keys, which are database rules that keep references valid. If a workspace, conversation, or agent is deleted, its pauses are deleted too. If the member who created the pause is deleted, that creator field is simply cleared. An index on the resume time helps the system quickly find pauses that are due to wake up.
+The upgrade does four things. First, it rewrites the provision identity so the same database row is now recognized as the app’s agent. Second, it renames the row from “code-review” to “code” only when the workspace has not renamed it and the name is not already taken. Third, it applies the app icon, `git-pull-request`, so old and new workspaces look the same. Fourth, it widens visibility from `private` to `workspace`, but only for active rows still at the old default. Archived agents stay hidden, because archiving was a workspace’s way of saying “we do not want this.”
+
+The downgrade reverses the identity and simple name change, but deliberately does not undo visibility or icon changes, because it cannot reliably tell which visibility changes came from this migration versus a user.
 
 #### Function details
 
-##### `upgrade`  (lines 12–36)
+##### `_agent`  (lines 68–78)
+
+```
+def _agent() -> sa.TableClause
+```
+
+**Purpose**: Builds a lightweight description of the `agent` database table so the migration can write update statements without importing the full application model. This is like writing just the columns needed on a notecard before editing a spreadsheet.
+
+**Data flow**: It takes no outside input. It names the table and the columns this migration needs, including workspace, display name, provisioning identity, icon, visibility, and archive time. It returns that table description for other helper functions to use when building database updates.
+
+**Call relations**: The helper functions `_move`, `_rename`, `_mark`, and `_widen` call this first whenever they need to form an update against the `agent` table. It hands them the shared table shape so each step edits the same kind of row consistently.
+
+*Call graph*: called by 4 (_mark, _move, _rename, _widen); 5 external calls (DateTime, Text, Uuid, column, table).
+
+
+##### `_move`  (lines 81–87)
+
+```
+def _move(was: str, was_declared: str, now: str, declared: str) -> None
+```
+
+**Purpose**: Changes which product identity existing agent rows say they were provisioned by. This lets the new app recognize the old reviewer as the same agent instead of creating another one.
+
+**Data flow**: It receives an old source identity and declared name, plus the new source identity and declared name. It finds agent rows whose provisioning fields match the old pair, then updates those fields to the new pair. It does not return data; it changes matching database rows.
+
+**Call relations**: During `upgrade`, this is the first step: the reviewer moves from the old coding extension identity to the app identity. During `downgrade`, it runs in the opposite direction after the name is changed back.
+
+*Call graph*: calls 1 internal fn (_agent); called by 2 (downgrade, upgrade); 1 external calls (execute).
+
+
+##### `_rename`  (lines 90–117)
+
+```
+def _rename(was: str, now: str) -> None
+```
+
+**Purpose**: Renames the agent’s visible row name when it is still the old default name and when the new name is not already used in that workspace. It protects user-made names and avoids two agents sharing the same name.
+
+**Data flow**: It receives the old visible name and the new visible name. It looks for app-owned reviewer rows whose current name still equals the old default, then checks whether another row in the same workspace already has the new name. If the name is free, it updates the row name; otherwise it leaves it alone.
+
+**Call relations**: In `upgrade`, it follows `_move`, because it only renames rows after they have the new app provisioning identity. In `downgrade`, it runs before `_move` so the app-owned row can be renamed back before its provisioning identity is restored to the old one.
+
+*Call graph*: calls 1 internal fn (_agent); called by 2 (downgrade, upgrade); 4 external calls (execute, literal, select, text).
+
+
+##### `_mark`  (lines 120–129)
+
+```
+def _mark(icon: str) -> None
+```
+
+**Purpose**: Gives all moved reviewer agents the app’s declared icon. This keeps old workspaces from showing a different symbol than newly provisioned workspaces.
+
+**Data flow**: It receives an icon name. It finds rows now identified as the app’s reviewer and writes that icon value into their `icon` column. It returns nothing; the visible mark in the database is changed.
+
+**Call relations**: Only `upgrade` calls this. It runs after `_move`, because it targets rows under the new app identity, and it does not take part in rollback.
+
+*Call graph*: calls 1 internal fn (_agent); called by 1 (upgrade); 1 external calls (execute).
+
+
+##### `_widen`  (lines 132–143)
+
+```
+def _widen(was: str, visibility: str) -> None
+```
+
+**Purpose**: Makes active reviewer agents visible to the whole workspace when they are still using the old default private visibility. It avoids changing archived agents or agents whose visibility someone already changed.
+
+**Data flow**: It receives the old visibility value and the new visibility value. It finds app-owned reviewer rows that are not archived and still have the old visibility. It updates only those rows to the new visibility and leaves everything else untouched.
+
+**Call relations**: Only `upgrade` calls this, after the identity move. It is the last upgrade step because it depends on the rows already being recognized as the app’s reviewer.
+
+*Call graph*: calls 1 internal fn (_agent); called by 1 (upgrade); 1 external calls (execute).
+
+
+##### `upgrade`  (lines 146–150)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: Creates the `pause` table and a lookup index for finding pauses by their resume time. This is used when installing or upgrading the scheduled tasks extension so the database can store paused work.
+**Purpose**: Applies the forward migration: old shipped reviewer rows become the new coding app’s reviewer rows, with the app name, icon, and appropriate workspace visibility.
 
-**Data flow**: Before this runs, the database has no dedicated table for scheduled pauses. The function sends table and index definitions to Alembic, the migration tool, which applies them to the database. After it runs, the database can store pause records, enforce their links to other tables, prevent duplicate pauses for the same workspace and conversation, and quickly search for due pauses.
+**Data flow**: It starts with existing database rows provisioned as `coding` / `code-review`. It moves their provisioning identity to `app_code` / `code`, renames eligible rows from `code-review` to `code`, writes the app icon, and widens eligible active rows from private to workspace visibility. It returns nothing; the database is updated in place.
 
-**Call relations**: Alembic calls this function when applying this migration. Inside it, the function hands the table layout to SQLAlchemy and Alembic helpers, which translate the Python description into database changes.
+**Call relations**: Alembic calls this when applying the migration. It coordinates the helper steps in a careful order: `_move` changes identity first, `_rename` updates safe display names, `_mark` sets the icon, and `_widen` adjusts visibility where doing so respects user intent.
 
-*Call graph*: 10 external calls (create_index, create_table, Column, DateTime, ForeignKeyConstraint, Integer, PrimaryKeyConstraint, Text, UniqueConstraint, Uuid).
+*Call graph*: calls 4 internal fn (_mark, _move, _rename, _widen).
 
 
-##### `downgrade`  (lines 39–41)
+##### `downgrade`  (lines 153–155)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: Undo the migration by removing the resume-time index and then deleting the `pause` table. This is used if the database needs to be rolled back to the state before scheduled pauses existed.
+**Purpose**: Partly reverses the migration for rollback by restoring the old provisioning identity and default visible name where safe. It intentionally leaves visibility as-is because it cannot know whether the migration or a user made a row workspace-visible.
 
-**Data flow**: Before this runs, the database contains the `pause` table and its `pause_due` index. The function tells Alembic to remove the index first, then remove the table. After it runs, stored pause records and the table structure for them are gone.
+**Data flow**: It starts with rows identified as the newer app reviewer. It first renames eligible rows from `code` back to `code-review`, then moves their provisioning identity from `app_code` / `code` back to `coding` / `code-review`. It returns nothing; matching database rows are changed.
 
-**Call relations**: Alembic calls this function when rolling this migration backward. It performs the reverse of `upgrade`, handing the removal work to Alembic’s database-operation helpers.
+**Call relations**: Alembic calls this during rollback. It uses `_rename` and `_move` in the reverse-oriented order, but does not call `_mark` or `_widen`, so icon and visibility are not forcibly restored to earlier values.
 
-*Call graph*: 2 external calls (drop_index, drop_table).
+*Call graph*: calls 2 internal fn (_move, _rename).
 
 
-### `extensions/sources/ufo_ext_sources/migrations/0001_source_trigger.py`
+### `core/src/ufo/schema/migrations/versions/20260826235718_archive_the_tasks_app.py`
 
-`data_model` · `database migration during upgrade or downgrade`
+`domain_logic` · `database migration during deployment upgrade`
 
-This file is a one-time database change, written for Alembic, the tool this project uses to move the database from one version to the next. Before this migration, the Sources extension kept subscriptions in a general key-value table called `ext_store`, under keys like `subscribers:<binding>`. That was like keeping important address book entries on sticky notes. This migration gives those subscriptions their own proper table, `source_trigger`, with clear links to the workspace, conversation, agent, and member that created them.
+This file is a one-time database change run during deployment. The project used to ship a Tasks app through an extension called `app_tasks`, which created agents named `tasks`. That app is no longer shipped, because the portal now shows the Tasks screen itself. Rather than delete those agent rows, this migration marks them as archived, like putting an old file in a records box instead of throwing it away.
 
-When upgrading, the file first creates the new table and an index so lookups by workspace and binding can be fast. It then reads the old subscriber maps, turns each still-valid conversation subscription into a row in `source_trigger`, and deletes the old stored maps only after the copy is complete. It deliberately skips broken or stale entries, such as subscriptions pointing to conversations that no longer exist, because the new table enforces real database relationships called foreign keys. A foreign key is a rule that says, for example, “this conversation ID must point to an actual conversation.”
+The migration looks in the `agent` table for rows that were provisioned by the `app_tasks` extension with the declared name `tasks`, and only touches rows that are not already archived. For each matching row, it saves the current visible name into `archived_name`, replaces the public `name` with a generated archived-looking name based on the row id, and stamps both `archived_at` and `updated_at` with the current time.
 
-When downgrading, it removes the index and table. The downgrade does not rebuild the old `ext_store` subscription maps, so moving backward would discard the migrated trigger records.
+A key detail is that it does not erase the provisioning identity. That matters during rolling deployments: older running servers may still look for the Tasks app. Because the archived row still says it came from `app_tasks` as `tasks`, those servers recognize that it already exists instead of creating a duplicate.
+
+The downgrade deliberately does nothing. Once a row is archived, the database does not know whether this migration archived it or a user did, so automatically unarchiving could undo a user’s real choice.
 
 #### Function details
 
-##### `upgrade`  (lines 16–37)
+##### `upgrade`  (lines 32–56)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: This is the forward migration. It creates the new `source_trigger` table, adds a lookup index, and then carries over existing subscription data from the older storage format.
+**Purpose**: Archives existing Tasks app agent rows that came from the old `app_tasks` extension. This preserves their history while removing them from the active agent roster.
 
-**Data flow**: It starts with the current database schema and old subscription records in `ext_store`. It adds a new table with columns for the trigger ID, workspace, conversation, agent, binding text, creator, and timestamps, plus rules that keep those links valid. It then calls `_carry_subscriptions` to copy compatible old records into the new table. After it finishes, the database has the new structure and the old live subscriptions have been represented as trigger rows.
+**Data flow**: It defines a lightweight view of the `agent` database table with only the columns it needs. It then builds an update for agents whose provisioning source is `app_tasks`, whose provisioned name is `tasks`, and whose archive time is still empty. Those matching rows are changed so their old name is saved, their visible name is replaced with an archived placeholder based on their id, and their archive and update timestamps are set to the current time.
 
-**Call relations**: Alembic calls this function when applying this migration. After creating the table and index through Alembic and SQLAlchemy helpers, it hands off to `_carry_subscriptions`, which performs the careful data move from the old storage place to the new table.
+**Call relations**: The migration runner calls this when applying this revision. Inside it, SQLAlchemy is used to describe the table and build the update statement, and Alembic’s `op.execute` sends that statement to the database. This is the active part of the migration: it performs the actual archival.
 
-*Call graph*: calls 1 internal fn (_carry_subscriptions); 9 external calls (create_index, create_table, Column, DateTime, ForeignKeyConstraint, PrimaryKeyConstraint, Text, UniqueConstraint, Uuid).
-
-
-##### `_carry_subscriptions`  (lines 40–125)
-
-```
-def _carry_subscriptions() -> None
-```
-
-**Purpose**: This helper moves old Sources subscription records into the new `source_trigger` table. It protects existing users by preserving valid subscriptions instead of losing them during the schema change.
-
-**Data flow**: It reads rows from `ext_store` where the extension is `sources` and the key begins with `subscribers:`. Each key gives the binding name, and each stored dictionary contains conversation IDs. For each conversation ID, it checks the real `conversation` table in the same workspace. If the conversation still exists, it builds a new trigger row using that conversation’s agent and member. It inserts all collected trigger rows with fresh IDs and current timestamps, then deletes the old subscriber entries from `ext_store`.
-
-**Call relations**: This function is called only by `upgrade`, after the new table already exists. It talks directly to the database connection supplied by Alembic, uses lightweight table descriptions to read old data and existing conversations, inserts the new trigger rows, and finally removes the obsolete key-value records so there is only one source of truth.
-
-*Call graph*: called by 1 (upgrade); 12 external calls (get_bind, DateTime, JSON, Text, Uuid, column, delete, insert, select, table (+2 more)).
+*Call graph*: 7 external calls (execute, DateTime, Text, Uuid, cast, column, table).
 
 
-##### `downgrade`  (lines 128–130)
+##### `downgrade`  (lines 59–60)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: This is the reverse migration for the database structure. It removes the `source_trigger` index and table if the migration is rolled back.
+**Purpose**: Intentionally leaves the archived rows as they are when rolling this migration back. This avoids accidentally unarchiving agents that a workspace member may have archived on purpose.
 
-**Data flow**: It starts with a database that contains the `source_trigger` table and its binding index. It drops the index first, then drops the table. The result is that the schema no longer contains the new trigger storage.
+**Data flow**: It receives no input and makes no database changes. The before and after state are the same: any Tasks app rows archived by the upgrade, or by users, remain archived.
 
-**Call relations**: Alembic calls this function when rolling this migration back. Unlike `upgrade`, it does not call a helper to recreate the old `ext_store` subscriber maps, so it only reverses the table structure, not the copied subscription data.
-
-*Call graph*: 2 external calls (drop_index, drop_table).
+**Call relations**: The migration runner calls this only if this revision is rolled back. Unlike `upgrade`, it does not hand anything to SQLAlchemy or Alembic because the safe rollback behavior is to do nothing.
 
 
-### `extensions/sources/ufo_ext_sources/migrations/0002_trigger_delivery.py`
+### `core/src/ufo/schema/migrations/versions/20260827015500_chat_is_the_main_agent.py`
 
-`data_model` · `database migration`
+`domain_logic` · `database upgrade migration`
 
-This migration changes the shape of the database for source triggers. A database migration is like a carefully labeled renovation step: it says exactly what to add when moving forward, and what to remove if moving backward. Here, the project has decided that every row in the `source_trigger` table should record a `delivery` value. Because the table may already contain existing rows, the migration cannot simply add a required column all at once. Existing rows would have no value, and the database would reject them. Instead, it adds the column as optional, fills every existing row with the default text value `current`, and only then makes the column required. That three-step approach keeps old data valid while introducing the new rule. The file also includes a downgrade path, which removes the `delivery` column if this migration is reversed. Without this file, deployments using this version of the code might expect a `delivery` column that does not exist, causing database errors when reading or writing source trigger records.
+This file is an Alembic migration, which means it is run during a database upgrade to move stored data from an old shape to a new one. The old setup could have a separate agent named “chat” created by the chat extension, while the workspace also had its normal main agent, often named “assistant”. The new rule is simpler: chat is the main agent.
+
+The migration first finds workspaces that still have a non-main agent provisioned by the chat extension as “chat”. If none exist, it stops. For affected workspaces, it archives active old chat agents by saving their old name, renaming them to a safe archived name based on their id, and setting an archive timestamp. This is like moving an old folder out of the way before reusing its label.
+
+It then removes the chat-extension provisioning markers from those old non-main agents. After that, if the main agent is still named “assistant” and no agent in that workspace is currently named “chat”, it renames the main agent to “chat”. Finally, it marks unprovisioned main agents in those workspaces as belonging to the chat extension version 0.2.0.
+
+The downgrade does nothing, so this change is intentionally not reversible by this migration.
 
 #### Function details
 
-##### `upgrade`  (lines 12–18)
+##### `upgrade`  (lines 29–105)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: This function applies the database change. It adds the new `delivery` column to `source_trigger`, fills old rows with `current`, and then makes sure future rows must always have a value.
+**Purpose**: Moves existing database rows to the new rule where the chat extension uses the workspace’s main agent. It archives old separate chat agents, frees up the “chat” name when possible, and labels the main agent as the chat-provisioned agent.
 
-**Data flow**: It starts with the existing `source_trigger` table, which has no `delivery` column. It adds `delivery` as a text field that may temporarily be empty, updates all existing records so their `delivery` value is `current`, and then changes the column so empty values are no longer allowed. The result is a table where every trigger has a non-empty delivery setting.
+**Data flow**: It starts by asking the database for workspace ids that have a non-main agent provisioned as app_chat/chat. If that list is empty, nothing changes. Otherwise, it updates matching agent rows: active old chat agents are archived and renamed, old provisioned markers are cleared, eligible main agents named “assistant” are renamed to “chat” only when that name is not already taken, and unprovisioned main agents are stamped with the chat extension name and version. The output is not a returned value; the result is changed rows in the agent table.
 
-**Call relations**: Alembic, the database migration tool, calls this when moving the database forward to revision `sources_0002`. Inside the function, it asks Alembic to alter the table safely, uses SQLAlchemy to describe the new column and update statement, and hands the update to Alembic to run against the database.
+**Call relations**: Alembic calls this function when applying this migration revision. Inside, it gets the current database connection from Alembic, then uses SQLAlchemy query builders to create and run the needed SELECT and UPDATE statements in order, so each later step sees the database changes made by the earlier steps.
 
-*Call graph*: 7 external calls (batch_alter_table, execute, Column, Text, column, table, update).
+*Call graph*: 7 external calls (get_bind, Text, cast, exists, literal, select, update).
 
 
-##### `downgrade`  (lines 21–23)
+##### `downgrade`  (lines 108–109)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: This function reverses the migration. It removes the `delivery` column from `source_trigger` so the database matches the previous revision.
+**Purpose**: Provides the required Alembic downgrade hook, but deliberately does not undo the migration. This means rolling back this revision will not restore the old separate chat-agent setup.
 
-**Data flow**: It starts with a `source_trigger` table that includes the `delivery` column. It tells the database to drop that column. Afterward, the table no longer stores delivery information for source triggers.
+**Data flow**: It receives no inputs and performs no database reads or writes. Before and after this function runs, the database is unchanged by it.
 
-**Call relations**: Alembic calls this when rolling the database back from revision `sources_0002` to the previous migration. It uses Alembic's table-alteration helper to perform the removal in a way that works across supported database systems.
-
-*Call graph*: 1 external calls (batch_alter_table).
+**Call relations**: Alembic may call this function if someone asks to downgrade past this revision. Unlike upgrade, it does not hand off to any SQL-building or database-update work, so the migration has no automatic reverse path.
 
 
-### Web chat metadata
-Backfills older web chat metadata and moves web chat titles into the shared conversation model.
+### Billing and privacy locks
+These migrations freeze turn billing identity and correct wiki app visibility to preserve privacy expectations.
 
-### `extensions/web/ufo_ext_web/migrations/web_0001_chat_rows.py`
+### `core/src/ufo/schema/migrations/versions/20260827153512_freeze_turn_billing.py`
 
-`orchestration` · `database migration during upgrade or rollback`
+`data_model` · `database migration during deployment or schema update`
 
-This file is an Alembic migration, which means it is a small script run when the database is moved from one version of the application to another. Its job is to help the web extension start using `ext_store` as the place where web chat rows are recorded, without losing track of conversations that already existed before this change.
+This migration changes the database table named "turn". A turn is likely a recorded unit of activity in the system, and this change gives each turn an optional new field called "billing_identity". The field is stored as JSON, which means it can hold structured data such as key-value pairs rather than just one plain text value.
 
-The migration looks at existing conversations whose surface is `web`. For each one, it checks whether the conversation’s `queue_key` uses an older simple shape: the agent id, then a slash, then the member’s email address. That check matters because not every queue key means the same thing. Some keys are for intent lanes, and some are newer generated keys, so copying all of them would create misleading chat records.
+The reason this matters is billing often needs to be tied to the exact identity or account context that existed when work happened. Storing that identity directly on the turn is like stapling the receipt details to the job record: later, the system does not have to guess who should be billed if other account information changes.
 
-When the key really is an old web chat key, the migration inserts a new row into `ext_store` under a `chat/<conversation id>` key. The stored value includes the agent id, the email spelling from the queue key, and the agent name as the chat title. Think of it like moving labels from the outside of old folders into a new index card system.
-
-The rollback path repeats the same careful check, then deletes the matching `ext_store` rows. This keeps downgrade safe: it removes what this migration added, instead of broadly deleting unrelated web extension data.
+The file follows Alembic's migration pattern. Alembic is a tool that applies database changes in a controlled order. The `upgrade` function moves the database forward by adding the new column. The `downgrade` function reverses that change by removing the column. If this file were missing, deployments would not automatically create the storage needed for frozen turn billing identity data, and code expecting that column could fail when reading or writing turns.
 
 #### Function details
 
-##### `_bare_key_email`  (lines 38–51)
-
-```
-def _bare_key_email(queue_key: str, agent_id: object, member_email: str) -> str | None
-```
-
-**Purpose**: This helper decides whether a conversation queue key is the old simple `agent/email` form, and if so returns the email part. It protects the migration from treating newer or differently shaped keys as member email addresses.
-
-**Data flow**: It receives a queue key, an agent id, and the member email from the database. It first checks that the key starts with the agent id plus a slash. Then it compares the remaining part with the member email, ignoring letter case and extra surrounding spaces on the stored member email. If both checks pass, it returns the email text taken from the queue key; otherwise it returns nothing.
-
-**Call relations**: Both migration directions rely on this helper as their gatekeeper. During upgrade, it decides whether a conversation should get a new `ext_store` chat row. During downgrade, it decides whether a conversation matches the kind of row this migration would have created, so rollback can delete only those rows.
-
-*Call graph*: called by 2 (downgrade, upgrade).
-
-
-##### `upgrade`  (lines 54–85)
+##### `upgrade`  (lines 10–11)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: This runs when the database is upgraded to this migration. It finds old web conversations with queue keys that contain the member email, then writes equivalent chat metadata into the extension store.
+**Purpose**: Moves the database schema forward by adding an optional `billing_identity` field to the `turn` table. This gives each turn record a place to store structured billing identity data.
 
-**Data flow**: It gets a database connection from Alembic, reads web conversations joined with their member and agent records, and examines each result. For each row, it asks `_bare_key_email` whether the queue key is an old email-based key. If yes, it inserts a new `ext_store` row for the web extension, keyed by `chat/<conversation id>`, with the agent id, email, title, and timestamps. If no, it leaves that conversation unchanged.
+**Data flow**: Before this runs, the `turn` table has no `billing_identity` column. The function creates a new JSON column that may be left empty. After it runs, new and existing turn rows can carry billing identity information when needed.
 
-**Call relations**: Alembic calls this function during the forward migration. The function uses SQLAlchemy to read existing conversation data and to insert new extension-store records. It hands the important key-shape decision to `_bare_key_email` so the database write only happens for conversations that match the old web chat format.
+**Call relations**: Alembic calls this function when applying this migration. Inside it, the migration asks SQLAlchemy to describe the new column and asks Alembic to add that column to the database table.
 
-*Call graph*: calls 1 internal fn (_bare_key_email); 3 external calls (get_bind, insert, select).
+*Call graph*: 3 external calls (add_column, Column, JSON).
 
 
-##### `downgrade`  (lines 88–110)
+##### `downgrade`  (lines 14–15)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: This runs when the migration is rolled back. It removes the chat metadata rows that the upgrade would have created, without touching unrelated web extension data.
+**Purpose**: Reverses the migration by removing the `billing_identity` field from the `turn` table. This is used if the database needs to be rolled back to the earlier schema.
 
-**Data flow**: It gets a database connection, reads web conversations joined with their member records, and checks each row with `_bare_key_email`. If the queue key matches the old email-based form, it deletes the corresponding `ext_store` row for that workspace, the `web` extension, and the `chat/<conversation id>` key. If the key does not match, it deletes nothing for that conversation.
+**Data flow**: Before this runs, the `turn` table includes the `billing_identity` column. The function tells Alembic to drop that column. After it runs, any data stored in that field is gone and the table matches the older shape.
 
-**Call relations**: Alembic calls this function during rollback. It mirrors the upgrade’s selection logic by calling `_bare_key_email`, then uses SQLAlchemy to delete only the rows tied to conversations that qualified for the original backfill.
+**Call relations**: Alembic calls this function when rolling this migration back. It hands the removal work to Alembic's column-dropping operation, which changes the database schema directly.
 
-*Call graph*: calls 1 internal fn (_bare_key_email); 3 external calls (get_bind, delete, select).
+*Call graph*: 1 external calls (drop_column).
 
 
-### `extensions/web/ufo_ext_web/migrations/web_0002_titles_to_core.py`
+### `core/src/ufo/schema/migrations/versions/20260827161500_the_wiki_app_is_private.py`
 
-`io_transport` · `database migration`
+`domain_logic` · `database migration during upgrade`
 
-This file fixes where portal chat names live. Before this migration, the web extension kept each chat’s title inside its own stored JSON value in the ext_store table. That was a problem because the main query that lists conversations looks at the core conversation table, not inside the web extension’s private storage. In everyday terms, the label was stuck on a note inside a drawer, while the front desk needed it on the folder itself.
+This file fixes a data mistake left by an earlier release of the wiki app. That release created wiki app agent rows as visible to the whole workspace, even though the app is now meant to be private. Think of it like a building directory that accidentally listed a private office as open to everyone; this migration corrects the old directory entries that still have the original mistaken label.
 
-The migration reads every web extension store row whose key starts with chat/. Each key contains the conversation id after that prefix. For each stored chat value, it looks for a title field. If the title is a non-empty string, the migration writes that title onto the matching row in the conversation table. Then it rewrites the extension-store JSON without the title field and updates the row’s timestamp.
+On upgrade, it looks only at rows in the `agent` table that clearly came from the wiki app provisioning path: `provisioned_by` must be `app_wiki`, `provisioned_name` must be `wiki`, and `visibility` must still be `workspace`. Those checks matter. They mean the migration changes only rows that still look exactly like the old shipped default. If a user or later process already made a wiki private, the migration leaves it alone. If some unrelated agent exists, it is not touched.
 
-The helper also accepts JSON values that come back from the database as text, not only as already-parsed objects. That matters because different database drivers may return JSON columns differently.
+Archived rows are included too. The comment explains why: this change only narrows access, so restoring an archived wiki later should bring it back with today’s intended privacy, not the older mistaken workspace-wide visibility.
 
-The downgrade does the reverse for rollback: it reads the title from the conversation table and puts it back into the web extension’s stored JSON value.
+The downgrade does nothing. That is intentional. Once a row says `private`, the database cannot tell whether this migration changed it or a user chose that privacy setting. Widening all private wiki rows during rollback would risk exposing user-private content.
 
 #### Function details
 
-##### `_chat_rows`  (lines 44–61)
-
-```
-def _chat_rows(bind: sa.engine.Connection) -> list[tuple[UUID, str, dict[str, object]]]
-```
-
-**Purpose**: This helper finds all saved web chat records in the extension storage table and returns them in a consistent shape. It makes sure each stored JSON value is a normal dictionary, even if the database driver returned it as a text string.
-
-**Data flow**: It receives an open database connection. It asks the ext_store table for rows belonging to the web extension whose keys look like chat records. For each row, it keeps the workspace id and key, and turns the stored value into a dictionary if needed. It returns a list of chat rows ready for the migration steps to inspect.
-
-**Call relations**: Both the upgrade and downgrade paths call this first so they work from the same view of the old web chat storage. It performs the shared database read and JSON cleanup, then hands the prepared rows back to whichever migration direction is running.
-
-*Call graph*: called by 2 (downgrade, upgrade); 3 external calls (loads, execute, select).
-
-
-##### `upgrade`  (lines 64–89)
+##### `upgrade`  (lines 42–57)
 
 ```
 def upgrade() -> None
 ```
 
-**Purpose**: This is the forward migration. It moves each saved chat title from the web extension’s private JSON storage into the shared conversation row, then removes the old title field from the extension storage.
+**Purpose**: This function performs the one-way data correction. It finds wiki app agent rows that still have the old workspace-wide visibility and changes them to private.
 
-**Data flow**: It gets the current database connection and asks _chat_rows for all stored web chat records. For each row, it looks for a non-empty text title. When it finds one, it extracts the conversation id from the chat key, updates that conversation’s title, then rewrites the extension-store value without the title field and refreshes its updated_at time. Rows without a usable title are left alone.
+**Data flow**: It reads the `agent` table through a lightweight SQLAlchemy table description, focusing on `provisioned_by`, `provisioned_name`, and `visibility`. It builds an update that selects only rows where the wiki app created the `wiki` agent and the visibility is still `workspace`. Those matching rows are changed so their `visibility` becomes `private`; all other rows are left as they were.
 
-**Call relations**: Alembic, the database migration tool, calls this when applying the migration. The function relies on _chat_rows to find old chat records, then uses database update statements to write the title to conversation and clean up ext_store.
+**Call relations**: Alembic, the database migration tool, calls this function when applying this migration. Inside it, SQLAlchemy is used to describe the table and columns, then Alembic’s execution hook sends the update to the database. No later helper takes over; this function is the whole upgrade action for the file.
 
-*Call graph*: calls 1 internal fn (_chat_rows); 3 external calls (get_bind, update, UUID).
+*Call graph*: 4 external calls (execute, Text, column, table).
 
 
-##### `downgrade`  (lines 92–109)
+##### `downgrade`  (lines 60–61)
 
 ```
 def downgrade() -> None
 ```
 
-**Purpose**: This is the rollback path. It puts conversation titles back into the web extension’s stored JSON values if the migration needs to be undone.
+**Purpose**: This function intentionally does nothing when the migration is rolled back. It avoids changing private wiki rows back to workspace-wide visibility, because that could reveal agents that users meant to keep private.
 
-**Data flow**: It gets the current database connection and asks _chat_rows for the web chat records. For each one, it extracts the conversation id from the key, reads the current title from the matching conversation row, and writes a title field back into the extension-store value. If there is no title, it stores an empty string, then updates the row’s updated_at time.
+**Data flow**: Nothing is read, changed, or returned. The database remains exactly as it is at the moment rollback reaches this migration.
 
-**Call relations**: Alembic calls this when reversing the migration. Like upgrade, it starts with _chat_rows so it can find the old web chat storage rows, then it reads from conversation and updates ext_store to recreate the older data layout.
+**Call relations**: Alembic calls this function when moving the database version backward past this migration. Unlike `upgrade`, it does not hand any SQL to the database, because the file’s safety rule is that privacy should not be widened automatically.
 
-*Call graph*: calls 1 internal fn (_chat_rows); 4 external calls (get_bind, select, update, UUID).
+
+### Action allowlist updates
+These migrations normalize stored agent tool allowlists and action names to match the current registry.
+
+### `core/src/ufo/schema/migrations/versions/20260828010853_object_action_allowlists.py`
+
+`orchestration` · `database migration`
+
+This file is an Alembic migration, meaning it is a small step in the database’s version history. Its job is to clean up existing saved data so the rest of the application can use newer action names consistently. Think of it like relabeling items in a storage room: the items are the same, but their labels need to match the new naming system so people can find and use them correctly.
+
+The main change is in the `agent` table. Some agents have a `tools` field, stored as JSON data, that may contain old names such as `slack_connect` or `manage_billing`. The migration rewrites those names into longer names such as `action:surface:slack_connect` or `action:workspace:manage_billing`. These names are more structured, so the system can tell what kind of action each tool represents.
+
+During upgrade, the file also looks in `ext_store`, a table used to store extension-specific data. For the web extension, it finds homepage seed entries whose value is the special marker `withheld-tools` and deletes them. That prevents stale marker data from lingering after the action allowlist format changes.
+
+The downgrade path reverses the tool-name rewrite, so rolling back the migration restores the older short names.
+
+#### Function details
+
+##### `_rewrite`  (lines 53–64)
+
+```
+def _rewrite(mapping: dict[str, str]) -> None
+```
+
+**Purpose**: This helper rewrites tool names saved on agents using a provided old-to-new or new-to-old name map. It exists so both upgrade and downgrade can use the same careful rewriting process.
+
+**Data flow**: It starts with a mapping of tool names. It reads all agents whose `tools` value is not empty, skips any `tools` value that is not a list, replaces each listed tool name when the mapping contains a replacement, and writes the changed list back to that agent row. If an agent’s list does not change, it leaves the row untouched.
+
+**Call relations**: The migration’s `upgrade` function calls this helper with the forward rename map. The `downgrade` function calls it with the reversed map. Inside, it asks Alembic for the current database connection, uses SQLAlchemy to read matching rows, and uses SQLAlchemy again to update only the agents that need a change.
+
+*Call graph*: called by 2 (downgrade, upgrade); 3 external calls (get_bind, select, update).
+
+
+##### `upgrade`  (lines 67–84)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: This is the forward migration step. It moves stored data into the newer action naming format and removes an obsolete web homepage seed marker.
+
+**Data flow**: It first sends the rename table into `_rewrite`, changing old tool names in agent records into the newer structured action names. Then it reads rows from `ext_store` for the web extension whose keys begin with `homepage-seed/`. For any of those rows whose value is exactly `withheld-tools`, it deletes that stored entry.
+
+**Call relations**: Alembic runs this function when applying the migration. It relies on `_rewrite` for the agent tool renaming, then directly uses the database connection and SQLAlchemy queries to find and remove the stale extension-store records.
+
+*Call graph*: calls 1 internal fn (_rewrite); 2 external calls (get_bind, select).
+
+
+##### `downgrade`  (lines 87–88)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: This is the rollback step. It changes agent tool names back from the newer structured action identifiers to the older short names.
+
+**Data flow**: It builds a reversed version of the rename map, where each new action identifier points back to its old name. It passes that reversed map to `_rewrite`, which reads agent tool lists and writes back any names that need to be restored.
+
+**Call relations**: Alembic runs this function if the migration is rolled back. It does not undo the homepage seed marker deletion; its only handoff is to `_rewrite`, which performs the database updates for agent tool names.
+
+*Call graph*: calls 1 internal fn (_rewrite).
+
+
+### `core/src/ufo/schema/migrations/versions/20260828011033_surface_action_allowlists.py`
+
+`data_model` · `database migration during deploy or rollback`
+
+Agents have a `tools` allowlist, which is a saved list of tool names the agent is allowed to ask its model to call. Four setup tools for Slack and iMessage were renamed in the live tool registry: for example, `slack_connect` became `action:surface:slack_connect`. Without this migration, any database row still using the old names would silently stop granting access to those tools, because the saved names would no longer match what the running application recognizes.
+
+This file is an Alembic migration, which means it is a small script run when the database schema or stored data needs to move from one version to another. Here it does not change table shapes. Instead, it rewrites data inside the `agent.tools` JSON column. Think of it like updating labels on keys: the keys still open the same doors, but the keyring must use the labels the new lock system expects.
+
+The helper `_rewrite` reads every agent row whose `tools` value is not SQL `NULL`, then only changes rows where that value is actually a JSON list. That matters because a JSON value of `null` is different from a missing database value and should not be treated as a list. On upgrade it replaces old tool names with canonical action IDs. On downgrade it performs the exact reverse replacement.
+
+#### Function details
+
+##### `_rewrite`  (lines 30–39)
+
+```
+def _rewrite(names: dict[str, str]) -> None
+```
+
+**Purpose**: This function rewrites tool names inside the `agent.tools` JSON column according to a supplied name map. It is used for both moving forward to the new names and moving backward to the old names.
+
+**Data flow**: It receives a dictionary where each key is a tool name to look for and each value is the replacement name. It opens a database connection through Alembic, reads each agent row whose `tools` column is not database `NULL`, skips anything that is not a list, builds a new list with matching names replaced, and writes the row back only if something actually changed.
+
+**Call relations**: The migration entry points `upgrade` and `downgrade` both call this helper. They provide different maps: `upgrade` passes old-name to new-name replacements, while `downgrade` passes the reversed map. `_rewrite` uses SQLAlchemy and Alembic to describe the `agent` table, read rows, and update only the affected records.
+
+*Call graph*: called by 2 (downgrade, upgrade); 5 external calls (get_bind, JSON, column, select, table).
+
+
+##### `upgrade`  (lines 42–43)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: This is the forward migration step. It changes saved allowlists from the old Slack and iMessage setup tool names to the new canonical action IDs used by the current application.
+
+**Data flow**: It starts with the fixed `SURFACE_ACTIONS` mapping, where each old tool name points to its new canonical name. It passes that mapping into `_rewrite`, which performs the actual database reads and updates. The result is that stored agent allowlists match the tool names registered by the newer code.
+
+**Call relations**: Alembic calls `upgrade` when applying this migration. `upgrade` does not touch the database directly; it hands the replacement plan to `_rewrite`, which carries out the row-by-row rewrite.
+
+*Call graph*: calls 1 internal fn (_rewrite).
+
+
+##### `downgrade`  (lines 46–47)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: This is the rollback step. It changes saved allowlists from the new canonical action IDs back to the old tool names so an older version of the application can still understand them.
+
+**Data flow**: It builds a reversed version of `SURFACE_ACTIONS`, turning each canonical action ID back into its former short name. It passes that reversed mapping to `_rewrite`, which updates any matching list entries in the database. The result is data shaped for the older application version.
+
+**Call relations**: Alembic calls `downgrade` when undoing this migration. Like `upgrade`, it relies on `_rewrite` for the database work, but supplies the inverse mapping so the migration is reversible.
+
+*Call graph*: calls 1 internal fn (_rewrite).
+
+
+### `core/src/ufo/schema/migrations/versions/20260828045120_restore_surface_tool_names.py`
+
+`data_model` · `database migration during upgrade or rollback`
+
+This file is an Alembic migration, meaning it is a small database change script that runs when the system moves from one version of the app to another. Its job is not to add a new table or column, but to repair saved data in the existing `agent.tools` JSON column. That column stores each agent’s allowed tools as a list of names.
+
+A previous migration changed several Slack and iMessage tool names from their original “wire names” into canonical action IDs. In this version of the app, those canonical surface action IDs are not registered as tools, but the original wire names are. Without this migration, an agent could have an allowlist that points at names the app cannot find, like having a shopping list with old product codes instead of the labels on the shelves.
+
+The migration looks at every agent row whose `tools` value is not SQL NULL. It only changes values that are real JSON lists; JSON `null` or other shapes are left alone. Inside each list, it replaces only the known surface action IDs with their tool names and leaves everything else untouched. The downgrade does the same work in reverse, so the database can be moved back to the previous version safely.
+
+#### Function details
+
+##### `_rewrite`  (lines 25–34)
+
+```
+def _rewrite(names: dict[str, str]) -> None
+```
+
+**Purpose**: This helper rewrites tool names inside saved agent allowlists using a mapping it is given. It exists so the upgrade and downgrade can share the same careful database-walking logic while using opposite name maps.
+
+**Data flow**: It receives a dictionary that says “replace this name with that name.” It reads agent IDs and their `tools` JSON values from the database, skips rows where `tools` is not a list, builds a new list with only matching names replaced, and writes the row back only if something actually changed.
+
+**Call relations**: Both `upgrade` and `downgrade` call this helper when Alembic runs the migration. `_rewrite` then asks Alembic for the active database connection, uses SQLAlchemy to describe and query the `agent` table, and sends update statements back to the database for rows that need repair.
+
+*Call graph*: called by 2 (downgrade, upgrade); 5 external calls (get_bind, JSON, column, select, table).
+
+
+##### `upgrade`  (lines 37–38)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: This runs when moving the database forward to this migration. It converts the stored Slack and iMessage surface action IDs back into the tool wire names that this app version registers.
+
+**Data flow**: It starts with the fixed mapping from canonical action IDs to registered tool names. It passes that mapping to `_rewrite`, which reads the database, replaces matching entries in agent tool lists, and saves the corrected lists.
+
+**Call relations**: Alembic calls `upgrade` as part of applying this migration. `upgrade` does not touch the database directly; it hands the forward replacement table to `_rewrite`, which performs the actual scan and updates.
+
+*Call graph*: calls 1 internal fn (_rewrite).
+
+
+##### `downgrade`  (lines 41–42)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: This runs if the migration is rolled back. It reverses the upgrade by changing the restored tool wire names back into the canonical surface action IDs used by the previous migration.
+
+**Data flow**: It builds the reverse of the upgrade mapping, turning each tool name back into its earlier canonical action ID. It gives that reversed mapping to `_rewrite`, which applies the same list-by-list database update process.
+
+**Call relations**: Alembic calls `downgrade` when reverting this migration. Like `upgrade`, it delegates the database work to `_rewrite`, but with the mapping flipped so the saved data matches the older database version’s expectations.
+
+*Call graph*: calls 1 internal fn (_rewrite).
+
+
+### Page identity safeguards
+The final migration adds stable page identity storage and prevents duplicate non-empty page identities per source.
+
+### `core/src/ufo/schema/migrations/versions/20260828052547_source_page_identity.py`
+
+`data_model` · `database migration during deploy or schema setup`
+
+This migration changes the shape of the database table named `page`. In plain terms, it gives each page a new place to store a `source_identity`: a text value that can identify the page within the system or service it came from. This matters when pages are imported from outside sources, because a URL or internal page ID from that source may be needed to recognize the same page later.
+
+The migration also creates a unique index. An index is like a sorted lookup card for the database: it helps the database find rows quickly and can enforce rules. Here, the rule says that for the same `source_id`, a non-empty `source_identity` may appear only once. The index is partial, meaning it only applies when `source_identity` is not null. In everyday terms, blank identity values are allowed to repeat, but real identity values must be unique per source.
+
+The file has two directions. `upgrade` applies the change when moving the database forward. `downgrade` reverses it if the project needs to roll back to the previous schema. Without this migration, the application could not reliably store or enforce source-specific page identities.
+
+#### Function details
+
+##### `upgrade`  (lines 10–19)
+
+```
+def upgrade() -> None
+```
+
+**Purpose**: This function moves the database schema forward by adding the `source_identity` column to the `page` table. It also adds a uniqueness rule so each source can only have one page with a given non-empty identity.
+
+**Data flow**: It starts with the existing `page` table. It adds a nullable text column called `source_identity`, then creates a database index over `source_id` and `source_identity` that only applies when `source_identity` has a value. After it runs, pages can store an optional source identity, and duplicate non-empty identities within the same source are rejected by the database.
+
+**Call relations**: Alembic calls this function when applying this migration. Inside it, the function asks SQLAlchemy to describe the new text column and the index condition, then asks Alembic to make those changes in the database.
+
+*Call graph*: 5 external calls (add_column, create_index, Column, Text, text).
+
+
+##### `downgrade`  (lines 22–24)
+
+```
+def downgrade() -> None
+```
+
+**Purpose**: This function reverses the migration. It removes the uniqueness rule and then removes the `source_identity` column from the `page` table.
+
+**Data flow**: It starts with a database that already has the `source_identity` column and its index. It first drops the index named `page_source_identity`, then drops the column itself. After it runs, the database looks like it did before this migration, and any stored source identity values are gone.
+
+**Call relations**: Alembic calls this function when rolling the database schema back to the previous revision. It hands the work to Alembic operations that remove the index and column in the safe order: rule first, stored field second.
+
+*Call graph*: 2 external calls (drop_column, drop_index).

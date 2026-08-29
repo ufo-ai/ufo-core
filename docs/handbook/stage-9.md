@@ -1,2708 +1,1848 @@
-# Turn Claim, Context Assembly, Skills, and Prompt Construction  `stage-9`
+# Turn engine claim, context assembly, and prompt construction  `stage-9`
 
-This stage prepares one unit of agent work before and during a turn. A “turn” is one pass where the agent reads the latest conversation, thinks, may use tools, and writes back. The queue runner claims pending work so two workers do not handle the same turn. The turn engine then gathers the needed context, runs the model and tools, watches for new messages, records costs, and saves either the result or a safe failure.
+This stage is the preparation room for one agent turn, before and during the first model call. A turn is one piece of pending conversation work. The queue safely claims that work, makes sure only one runner owns it, and records success or recovery if something crashes. The engine is the traffic controller: it gathers the conversation, watches for cancellations or spending limits, absorbs new user messages that arrive late, calls tools and the model, saves the transcript, and publishes the result.
 
-Several helpers assemble what the model will see. Conversation compaction shortens old chat history into a checked summary so it fits inside the model’s reading limit, while keeping recent messages intact. Skill loading reads built-in and user-created skills, resolves their dependencies, and puts selected ones into the sandbox. Skill selection keeps the list small and relevant. The skill store preserves user-made skills and prevents unsafe names, overwrites, and conflicts.
-
-Other files add live reference material: spawn catalogs describe which subagents can be started, the model catalog lists available AI models, automations summarize scheduled tasks, and the delivery register supplies reply-format rules. Finally, prompt rendering fills templates and checks the completed system prompt before the model sees it.
+Several helpers build the agent’s “briefing packet.” Compaction shortens old conversation history into a checked summary while keeping recent messages unchanged, so the model has room to think. Skill selection chooses only the most relevant saved skills, instead of flooding the prompt. The delivery register loads the writing rules agents must follow when answering or reporting to a parent agent. The conversation slot code adds visible hosted sites as safe links when the viewer is allowed to see them. Finally, prompt rendering fills the approved template, checks every slot, and creates a digest, like a fingerprint, so the exact prompt can be traced later.
 
 ## Files in this stage
 
-### Turn Orchestration
-These files claim a unit of queued work and drive the agent turn through context setup, execution, failure handling, and result delivery.
-
-### `core/src/ufo/loop/__init__.py`
-
-`other` · `import time`
-
-This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that a folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools, but the label itself does not do the work. Here, the drawer is `ufo.loop`, which likely holds code related to the project’s loop or event-processing behavior elsewhere in the package. Because this file is empty, importing `ufo.loop` does not run setup code, create objects, or expose helper functions directly. Its main value is structural: it gives the surrounding codebase a stable package path to import from. Without it, depending on the Python version and packaging setup, imports involving `ufo.loop` could be less predictable or fail in environments that require explicit package markers.
-
+### Turn work orchestration
+These files claim pending turn work and coordinate the durable execution path for a complete agent turn.
 
 ### `core/src/ufo/loop/queue.py`
 
 `orchestration` · `turn queue processing`
 
-Think of this file as the dispatch desk and staging area for agent work. A turn may need a model, tools, a sandbox, credentials, skills, billing rules, subagents, and live progress updates. This file gathers those pieces in the right order and hands them to the TurnEngine, which does the actual model-and-tool loop.
+This file is the traffic controller for agent work. A turn is put on a DBOS queue, where DBOS is the workflow system that can replay work after a crash. The queue is partitioned by conversation, so turns in the same conversation run in order, like customers waiting in a single checkout lane.
 
-It is designed for reliability. Turns are run through DBOS workflows, which are durable workflows that can replay after a crash. The file first claims a turn so two workers do not run the same work at once. If another turn should run next for the same conversation, it enqueues that handoff. If setup fails before the engine can write a final result, a backstop writes a failed terminal message so clients are not left waiting forever.
+When a turn starts, the file loads the turn, agent, audience, tools, skills, subagents, model choice, billing rules, credentials, sandbox access, and transcript storage. It then builds a TurnEngine, which does the actual model-and-tool loop. This file is mostly the careful setup around that engine: deciding which tools are allowed, which saved skills appear in the prompt, whether the workspace’s own model key is being used, and how a sandbox should be opened or authorized.
 
-The file also decides which tools and skills are visible. Main agents get normal member-facing tools unless configured otherwise. Subagents get tools from their profile and grants. Workspace skills can be placed into prompts, loaded into the sandbox, or silently tested through a “shadow” selector that logs what retrieval would have chosen without slowing the turn.
-
-Without this file, queued turns would not reliably become running agent work, failures could leave conversations stuck, subagent answers might not return to parents, and each process would lack the runtime wiring needed to serve many workspaces safely.
+It also protects the system from half-finished work. If a turn was already claimed elsewhere, it repairs the transcript and exits. If setup fails before the engine can write a result, it writes a failed terminal result itself and publishes it so clients stop waiting. If a child or subagent turn finishes, it delivers the result back to the parent conversation. Without this file, turns could run out of order, lose billing consistency, leak tools they should not have, or leave users waiting forever after failures.
 
 #### Function details
 
-##### `_without_workspace_skills`  (lines 159–162)
+##### `_without_workspace_skills`  (lines 160–163)
 
 ```
 async def _without_workspace_skills(name: str) -> None
 ```
 
-**Purpose**: This is a placeholder skill loader used when an agent has workspace skills turned off. It deliberately loads nothing, so saved workspace skills do not enter the prompt or tool set through this path.
+**Purpose**: This is a harmless placeholder used when an agent has workspace skills turned off. It makes sure no saved workspace skill is loaded by name for that agent.
 
-**Data flow**: It receives a skill name, ignores it, and returns nothing. No database, sandbox, or registry state is changed.
+**Data flow**: It receives a skill name, ignores it, and returns nothing. The before state is “a skill name was requested”; the after state is “no skill was provided.”
 
-**Call relations**: During turn setup, _run_turn may use this as the materializer for member skills when workspace skills are disabled. It acts like a locked door: even if something asks for a workspace skill by name, nothing is opened.
+**Call relations**: It is chosen inside the turn setup path when workspace skills are disabled. That lets the rest of the skill-loading machinery use the same shape of callback without actually exposing workspace skills.
 
 
-##### `_member_skill_turn`  (lines 165–177)
+##### `_member_skill_turn`  (lines 166–178)
 
 ```
 def _member_skill_turn(turn: Turn) -> bool
 ```
 
-**Purpose**: This decides whether a turn is the kind of turn where member workspace skills should be considered. It filters out prepared intents and a special internal root turn that has no real user topic.
+**Purpose**: This decides whether a turn is the kind of turn where member-visible saved skills should be considered. It keeps skills out of special internal or prepared-intent turns where they would not match the normal user prompt flow.
 
-**Data flow**: It reads the turn’s admission source, speaker, parent, and message shape. It returns true for ordinary conversational turns and false for turns where injecting saved skills would not match real user input.
+**Data flow**: It reads the turn’s admission source, speaker, and parent information. From those fields it returns true for ordinary skill-relevant turns and false for prepared intents or a root internal turn with no speaker.
 
-**Call relations**: _member_skill_block uses this before adding a saved-skills prompt block, and _run_turn uses it before launching shadow skill selection. It keeps skill behavior aligned with the turns that actually have meaningful user text.
+**Call relations**: It is used by _member_skill_block to decide whether to add a skill block to the prompt, and by _run_turn to decide whether to run background evidence gathering for skill selection.
 
 *Call graph*: called by 2 (_member_skill_block, _run_turn).
 
 
-##### `_member_skill_block`  (lines 180–187)
+##### `_member_skill_block`  (lines 181–188)
 
 ```
 def _member_skill_block(turn: Turn, view: MemberVisibility, enabled: bool) -> str
 ```
 
-**Purpose**: This chooses the saved-skills text block that should be added to a turn’s founding prompt. It only includes the block when member skills are enabled and the turn is eligible for them.
+**Purpose**: This chooses the saved-skills text that should be inserted into the model’s prompt for this turn. It returns an empty string when the feature is off or when this is not a skill-relevant turn.
 
-**Data flow**: It receives a turn, a prepared visibility view of matching skills, and a feature switch. If the switch is off or the turn is not eligible, it returns an empty string; otherwise it returns the view’s prompt block.
+**Data flow**: It takes the turn, a prepared view of visible member skills, and a feature flag. It checks whether the turn qualifies, then either returns the view’s text block or returns an empty block.
 
-**Call relations**: _run_turn calls this while preparing prompts for both main-agent and subagent turns. It relies on _member_skill_turn so the prompt does not mention workspace skills on turns where they should not apply.
+**Call relations**: During _run_turn, after skill visibility is computed, this function provides the actual prompt text that the engine will later receive.
 
 *Call graph*: calls 1 internal fn (_member_skill_turn); called by 1 (_run_turn).
 
 
-##### `_prompt_skill_index`  (lines 190–194)
+##### `_prompt_skill_index`  (lines 191–195)
 
 ```
 def _prompt_skill_index(skills: SkillRegistry, enabled: bool) -> tuple[tuple[str, str], ...]
 ```
 
-**Purpose**: This builds the skill index text that goes into a system prompt. When member skill prompt blocks are enabled, it uses the fold-aware prompt view; otherwise it falls back to the deploy-time skill index only.
+**Purpose**: This decides what skill list should appear in the system prompt. When member skills are enabled, it uses a fold-aware prompt index; otherwise it shows only the normal deployed skill index.
 
-**Data flow**: It receives the current skill registry and a boolean switch. It returns a tuple of skill index entries, either including prompt-aware member skill presentation or only the registry’s normal index.
+**Data flow**: It receives the skill registry and a boolean setting. It turns that registry into a tuple of skill names and descriptions, choosing either the richer prompt index or the registry’s basic index.
 
-**Call relations**: _run_turn calls this while rendering main-agent and subagent system prompts. It hands off to the skill registry or the skill selection helper depending on the configuration.
+**Call relations**: The turn setup calls this while building prompts for both main agents and subagents, so the model sees the right catalog of skills for the current configuration.
 
 *Call graph*: calls 1 internal fn (index); called by 1 (_run_turn); 1 external calls (prompt_index).
 
 
-##### `_fire_shadow_selection`  (lines 200–207)
+##### `_fire_shadow_selection`  (lines 201–208)
 
 ```
 def _fire_shadow_selection(index: IndexBackend, embed: EmbedClient, turn: Turn, cards: tuple[SkillCard, ...]) -> None
 ```
 
-**Purpose**: This starts a background experiment that compares two ways of choosing relevant workspace skills. It does not delay the user’s turn; it only keeps the task alive long enough to log its result.
+**Purpose**: This starts a background comparison of two skill-selection methods without making the turn wait. It is used to gather evidence about skill search quality while keeping user-facing latency unchanged.
 
-**Data flow**: It receives the search index, embedding client, turn, and candidate skill cards. It creates an asynchronous task and stores it in a module-level set until it finishes.
+**Data flow**: It receives the search index, embedding client, turn, and skill cards. It creates an asynchronous task and stores a reference so the task is not garbage-collected before it finishes.
 
-**Call relations**: _run_turn calls this only for eligible member-skill turns where the whole catalog does not fit in the prompt. It hands the real comparison work to _shadow_skill_selection while the turn continues running.
+**Call relations**: The main turn setup calls it when member skills exist but do not all fit in the prompt. It hands the actual work to _shadow_skill_selection and then steps aside.
 
 *Call graph*: calls 1 internal fn (_shadow_skill_selection); called by 1 (_run_turn); 1 external calls (create_task).
 
 
-##### `_shadow_skill_selection`  (lines 210–236)
+##### `_shadow_skill_selection`  (lines 211–237)
 
 ```
 async def _shadow_skill_selection(index: IndexBackend, embed: EmbedClient, turn: Turn, cards: tuple[SkillCard, ...]) -> None
 ```
 
-**Purpose**: This quietly tests skill retrieval quality for one turn. It compares lexical matching, which looks at words directly, with vector search, which searches by meaning using an embedding, and logs both results.
+**Purpose**: This compares keyword-style skill selection with vector search, then logs what each method would have chosen. It is best-effort: failures are recorded but never allowed to affect the turn.
 
-**Data flow**: It takes the turn’s inbound text and skill cards. It embeds a shortened version of the text, asks the index for vector matches, also computes lexical top matches, and writes a log entry; on any error or timeout it logs a failure instead of affecting the turn.
+**Data flow**: It takes a turn and skill cards, shortens the inbound text, creates an embedding, searches the index, and compares those hits with lexical top-k selection. The output is a log entry, not a value returned to the caller.
 
-**Call relations**: _fire_shadow_selection launches this in the background. It calls the embedding service, vector index, and lexical selector, but because it is best-effort, its failures never bubble back into _run_turn.
+**Call relations**: It runs only as the background task launched by _fire_shadow_selection. It calls the embedding and index services and records the comparison through logging.
 
 *Call graph*: calls 2 internal fn (embed, vector); called by 1 (_fire_shadow_selection); 3 external calls (timeout, log, select_top_k).
 
 
-##### `_agent_tools`  (lines 239–267)
+##### `with_implied_grants`  (lines 247–250)
+
+```
+def with_implied_grants(names: set[str]) -> set[str]
+```
+
+**Purpose**: This expands a set of allowed tool or action names with companion permissions that are required to make them useful. For example, a skill loader also needs the related skill search action.
+
+**Data flow**: It receives a mutable set of names. For each current name, it looks up any implied companion names and adds them to the same set, then returns the expanded set.
+
+**Call relations**: Tool and action selection for both agents and subagents call this before filtering the live registry. It keeps allowlists from accidentally granting a tool without the helper it depends on.
+
+*Call graph*: called by 4 (_agent_actions, _agent_tools, _subagent_actions, _subagent_tools).
+
+
+##### `_agent_actions`  (lines 253–268)
+
+```
+def _agent_actions(actions: Mapping[str, Mapping[str, BoundAction]], allowed: tuple[str, ...] | None, admission: TurnAdmissionSource, speaker_member_id: UUID | None=None) -> frozenset[str]
+```
+
+**Purpose**: This computes which canonical object actions the main agent is allowed to use during a turn. A canonical action id is the stable internal name for an action, even if tools expose it in different ways.
+
+**Data flow**: It reads the action registry, the agent’s optional allowlist, the admission source, and the speaker. It returns a frozen set of canonical action ids that are actually registered and permitted for this turn.
+
+**Call relations**: The main turn setup in _run_turn uses this beside _agent_tools. The result later tells the engine which object actions are granted and whether extra action-discovery tools must ride along.
+
+*Call graph*: calls 1 internal fn (with_implied_grants); called by 1 (_run_turn).
+
+
+##### `_subagent_actions`  (lines 271–289)
+
+```
+def _subagent_actions(actions: Mapping[str, Mapping[str, BoundAction]], profile: SubagentProfile, grants: frozenset[str]) -> frozenset[str]
+```
+
+**Purpose**: This computes which canonical object actions a subagent profile may use. It respects the profile’s own tool names and whether the subagent is isolated from broader grants.
+
+**Data flow**: It receives the action registry, a subagent profile, and cross-extension grants. It combines the profile’s allowed names with any non-isolated grants, expands implied grants, and returns the matching canonical action ids.
+
+**Call relations**: When _run_turn is preparing a subagent turn, it calls this to mirror the subagent tool selection and pass a clear set of granted actions into the engine.
+
+*Call graph*: calls 1 internal fn (with_implied_grants); called by 1 (_run_turn).
+
+
+##### `_with_action_verbs`  (lines 292–313)
+
+```
+def _with_action_verbs(selected: tuple[ToolDef, ...], all_tools: tuple[ToolDef, ...], granted_actions: frozenset[str]) -> tuple[ToolDef, ...]
+```
+
+**Purpose**: This adds the basic object-action dispatcher and read tools when a turn has at least one granted object action. Without these helper tools, the model might technically have an action but no way to discover or invoke it correctly.
+
+**Data flow**: It receives selected tools, all available tools, and granted action ids. If no actions are granted, it removes the generic object action dispatcher; if actions are granted, it adds the dispatcher and read helpers when available.
+
+**Call relations**: _run_turn calls this after selecting agent or subagent tools. It adjusts the final ToolRegistry so action permissions and action-discovery tools stay in sync.
+
+*Call graph*: called by 1 (_run_turn).
+
+
+##### `_agent_tools`  (lines 316–340)
 
 ```
 def _agent_tools(all_tools: tuple[ToolDef, ...], allowed: tuple[str, ...] | None, admission: TurnAdmissionSource, speaker_member_id: UUID | None=None) -> tuple[ToolDef, ...]
 ```
 
-**Purpose**: This decides which tools a normal agent is allowed to expose to the model for a turn. It protects profile-only tools from ordinary agents unless a profile explicitly names them.
+**Purpose**: This chooses the actual callable tools available to the main agent for a turn. It prevents profile-only tools from leaking to general agents unless an allowlist explicitly names them.
 
-**Data flow**: It receives all registered tools, an optional allowlist, the turn’s admission source, and optionally the speaking member. If there is no allowlist, or a speaking prepared intent is being admitted, it returns normal non-profile-only tools. If there is an allowlist, it returns only named live tools, adding skill_search when load_skill is allowed.
+**Data flow**: It receives all live tools, the agent’s optional allowlist, the admission source, and the speaker. It returns only the tools allowed under those rules, after adding implied grant names when an allowlist is present.
 
-**Call relations**: _run_turn uses this while building the ToolRegistry for main-agent turns. It is one of the gates that keeps powerful or specialized tools from being accidentally exposed.
+**Call relations**: _run_turn uses it while building the main agent’s ToolRegistry. Its output is then refined by _with_action_verbs before being given to the engine.
 
-*Call graph*: called by 1 (_run_turn).
+*Call graph*: calls 1 internal fn (with_implied_grants); called by 1 (_run_turn).
 
 
-##### `_resolve_profile`  (lines 270–285)
+##### `_resolve_profile`  (lines 343–358)
 
 ```
 def _resolve_profile(registry: SubagentRegistry, turn_id: str, name: str) -> SubagentProfile
 ```
 
-**Purpose**: This looks up the subagent profile named on a turn. If the profile has disappeared, it logs useful details before letting the failure continue.
+**Purpose**: This looks up the subagent profile requested by a turn. If the profile no longer exists, it logs useful details before letting the error continue.
 
-**Data flow**: It receives the subagent registry, turn id, and requested profile name. It returns the matching SubagentProfile, or logs the requested and registered names and re-raises the unknown-profile error.
+**Data flow**: It receives the subagent registry, turn id, and requested profile name. It returns the matching profile, or logs the requested and registered profile names before raising the lookup error.
 
-**Call relations**: _run_turn calls this before setting up a subagent turn. It delegates lookup to the SubagentRegistry and adds clearer observability if a queued child turn refers to an extension profile that is no longer deployed.
+**Call relations**: _run_turn calls this when a turn is a subagent turn. It depends on the SubagentRegistry and gives the rest of setup the profile that defines prompt, model, tools, and output contract.
 
 *Call graph*: calls 1 internal fn (get); called by 1 (_run_turn); 1 external calls (log_error).
 
 
-##### `_subagent_tools`  (lines 288–301)
+##### `_subagent_tools`  (lines 361–373)
 
 ```
 def _subagent_tools(all_tools: tuple[ToolDef, ...], profile: SubagentProfile, grants: frozenset[str]) -> tuple[ToolDef, ...]
 ```
 
-**Purpose**: This decides which tools a subagent can use. It starts with the profile’s declared tools, optionally adds granted tools, and includes default subagent tools when the profile is not isolated.
+**Purpose**: This chooses the concrete tools available to a subagent. It follows the subagent profile’s tool list and, unless isolated, includes shared grants and default subagent tools.
 
-**Data flow**: It receives all tools, a subagent profile, and the grant names available to that profile. It builds an allowed-name set, adds skill_search if load_skill is present, then returns the registered tools that match those rules.
+**Data flow**: It receives all tools, a profile, and grant names. It builds the allowed name set, expands implied grants, filters the live tools, and returns the selected tool definitions.
 
-**Call relations**: _run_turn calls this when preparing a subagent ToolRegistry. It mirrors _agent_tools for the subagent case, but obeys profile isolation and subagent grants.
+**Call relations**: _run_turn calls this while preparing a subagent ToolRegistry, then passes the result through _with_action_verbs so object actions have their helper tools.
 
-*Call graph*: called by 1 (_run_turn).
+*Call graph*: calls 1 internal fn (with_implied_grants); called by 1 (_run_turn).
 
 
-##### `_apply_provisions`  (lines 307–316)
+##### `_apply_provisions`  (lines 379–388)
 
 ```
 async def _apply_provisions(runtime: 'Runtime', workspace_id: UUID) -> None
 ```
 
-**Purpose**: This applies extension-shipped agent provisioning for a workspace once per process. It makes sure new or existing workspaces receive agents bundled by active extensions without repeating the work every turn.
+**Purpose**: This makes sure a workspace has the default agents shipped by active extensions. It runs at most once per workspace in the current process and is safe to repeat at the data level.
 
-**Data flow**: It receives the runtime and workspace id. If this process has already provisioned that workspace, it returns; otherwise it runs AgentProvisioning using the active manifests and records the workspace as done.
+**Data flow**: It receives the runtime and workspace id. If this process has already provisioned that workspace, it does nothing; otherwise it applies extension-provided agent provisioning and remembers the workspace.
 
-**Call relations**: _execute_turn calls this near the start of a turn. It uses AgentProvisioning so onboarding and first-turn setup can converge on the same workspace state.
+**Call relations**: _execute_turn calls it near the start of every workspace’s first turn in a process. This gives newly used workspaces the agents they should have before the turn runs.
 
 *Call graph*: called by 1 (_execute_turn); 1 external calls (__init__).
 
 
-##### `init_runtime`  (lines 358–369)
+##### `init_runtime`  (lines 430–441)
 
 ```
 def init_runtime(runtime: Runtime) -> None
 ```
 
-**Purpose**: This installs the process-wide Runtime object that all queued turn workflows will use. It also seeds sandbox carriers with bundled system skills so sandboxes can start with those skills available.
+**Purpose**: This installs the process-wide Runtime object that turn execution depends on. It also seeds sandbox carriers with bundled system skills so sandboxes can start with the built-in skill package.
 
-**Data flow**: It receives a Runtime containing configuration, registries, stores, clients, and services. If runtime was already installed, it raises an error; otherwise it builds a system skill bundle, seeds eligible sandbox carriers, and stores the runtime in the module global.
+**Data flow**: It receives a Runtime containing configuration, storage, registries, model access, sandboxes, and more. It refuses to run twice, builds a system skill bundle, seeds compatible sandbox carriers, and stores the runtime globally.
 
-**Call relations**: The serving process calls this before any turn workflow runs. Later, _execute_turn reads the installed runtime instead of rebuilding all shared services for every turn.
+**Call relations**: The server setup calls this before any queued turn runs. Later, _execute_turn reads the installed runtime and fails fast if it was never initialized.
 
 *Call graph*: calls 1 internal fn (from_skills).
 
 
-##### `reset_runtime`  (lines 372–377)
+##### `reset_runtime`  (lines 444–449)
 
 ```
 def reset_runtime() -> None
 ```
 
-**Purpose**: This clears the installed process runtime. It exists mainly for tests, where one test may need to replace the runtime with another.
+**Purpose**: This clears the process-wide Runtime so tests can install a fresh one. Production serving normally initializes once and does not use this reset path.
 
-**Data flow**: It takes no input, sets the module-level runtime back to None, and returns nothing.
+**Data flow**: It takes no input. It changes the module-level runtime reference from the current Runtime back to nothing.
 
-**Call relations**: Normal server startup installs runtime once and does not call this. Test code can call it before init_runtime to avoid the single-initialization guard.
+**Call relations**: It is a test seam around init_runtime’s single-initialization guard. It does not participate in normal turn processing.
 
 
-##### `_execute_turn`  (lines 380–432)
+##### `_execute_turn`  (lines 452–504)
 
 ```
 async def _execute_turn(workspace_id: str, turn_id: str) -> str
 ```
 
-**Purpose**: This is the outer body of a durable turn workflow. It binds the workspace, loads just enough turn information for tracing, applies workspace provisioning, runs the turn, catches setup failures, and finally tries to deliver child results to their parent.
+**Purpose**: This is the outer body of a queued turn workflow. It binds the workspace, opens observability context, runs the turn, catches setup-level failures, and finally tries to deliver child results to a parent.
 
-**Data flow**: It receives workspace and turn ids as strings from the workflow system. It reads the runtime and turn metadata from the database, enters the workspace scope, runs _run_turn, writes a failed terminal if something outside the engine crashes, triggers parent delivery, and returns a status string such as failed, parked, or superseded.
+**Data flow**: It receives workspace and turn ids as strings from the workflow queue. It loads basic turn metadata, applies provisions, runs _run_turn, writes a failed terminal result if an exception escapes, delivers to a parent if needed, and returns a status string.
 
-**Call relations**: turn_workflow calls this as the workflow entry. It calls _apply_provisions before running, _run_turn for the main work, _commit_failed_terminal for emergency failure reporting, and _deliver_to_parent after completion.
+**Call relations**: turn_workflow calls this as the DBOS workflow body. It delegates the main work to _run_turn, uses _commit_failed_terminal as the safety net, and always follows with _deliver_to_parent.
 
 *Call graph*: calls 4 internal fn (_apply_provisions, _commit_failed_terminal, _deliver_to_parent, _run_turn); called by 1 (turn_workflow); 6 external calls (select, agent, workspace_tx, turn_span, ws, UUID).
 
 
-##### `_deliver_to_parent`  (lines 435–467)
+##### `_deliver_to_parent`  (lines 507–539)
 
 ```
 async def _deliver_to_parent(runtime: Runtime, turn_id: UUID) -> None
 ```
 
-**Purpose**: This sends a finished child or subagent turn’s durable terminal result back to the parent conversation that spawned it. It intentionally treats delivery failure as a delay, not as a reason to mark the child turn failed.
+**Purpose**: This delivers a finished child or subagent turn’s terminal result back to the parent conversation. It avoids turning delivery problems into a false failure of the child turn itself.
 
-**Data flow**: It receives runtime and child turn id. It rereads the child turn from the database, exits early if there is no parent or no terminal result, then asks SubagentResult to deliver the saved result; if delivery fails, it logs that delivery is deferred.
+**Data flow**: It reads the durable turn row from the database. If the turn has no parent or no terminal result, it does nothing; otherwise it asks SubagentResult to deliver the saved result, logging and deferring if delivery fails.
 
-**Call relations**: _execute_turn calls this after _run_turn finishes or fails. It uses runtime.invoker_for and the subagent registry to route the result back, while swallowing non-cancellation errors so the already-finished turn is not mislabeled.
+**Call relations**: _execute_turn calls it after every turn attempt. It uses the runtime’s invoker and subagent registry to hand the child result back to the parent-side machinery.
 
 *Call graph*: called by 1 (_execute_turn); 6 external calls (__init__, invoker_for, model_validate, select, workspace_tx, log_error).
 
 
-##### `_enqueue_handoff`  (lines 470–505)
+##### `_enqueue_handoff`  (lines 542–577)
 
 ```
 async def _enqueue_handoff(client: DBOSClient, workspace_id: UUID, turn_id: UUID, conversation_id: UUID, workflow_id: str) -> None
 ```
 
-**Purpose**: This enqueues another turn that should run after the current claim handoff. It also clears the turn’s dispatch marker if enqueueing fails, so another dispatcher can try again later.
+**Purpose**: This enqueues another turn when claiming the current turn reveals a handoff is needed. The queue partition key is the conversation id, which keeps conversation work ordered.
 
-**Data flow**: It receives the DBOS client, workspace id, turn id, conversation id, and workflow id. It builds queue options using the conversation as the partition key, submits the workflow to DBOS, and on cancellation or failure updates the queued turn to show it is no longer dispatched.
+**Data flow**: It receives the DBOS client and ids for workspace, turn, conversation, and workflow. It asks DBOS to enqueue the workflow; if enqueueing is cancelled or fails, it clears the turn’s dispatch marker so another sweep can try again.
 
-**Call relations**: _run_turn calls this after claiming a turn if the claim process reports a handoff. It hands the next turn to DBOS while preserving queue recovery if the enqueue attempt does not complete.
+**Call relations**: _run_turn calls this after claiming a turn if the claim operation returns a handoff. It logs deferred enqueue failures instead of breaking the current turn setup.
 
 *Call graph*: called by 1 (_run_turn); 4 external calls (enqueue_async, update, workspace_tx, log).
 
 
-##### `_run_turn`  (lines 508–831)
+##### `_run_turn`  (lines 580–922)
 
 ```
 async def _run_turn(runtime: Runtime, turn_id: str) -> str
 ```
 
-**Purpose**: This is the main staging function for a turn. It claims the turn, loads its records, chooses tools and skills, prepares billing and sandbox access, builds the TurnEngine, and runs either a normal model loop or an intent action.
+**Purpose**: This is the main assembler and driver for a single turn. It claims the turn, loads all needed context, chooses model, tools, skills, billing, sandbox, and subagents, then runs the TurnEngine.
 
-**Data flow**: It receives the runtime and turn id. It claims the turn, loads the turn, agent, and audience, gathers extension tools and hooks, resolves main-agent or subagent settings, freezes billing and bring-your-own-key decisions, prepares sandbox authorization, loads preloaded skills when needed, constructs the engine with all services, and returns the engine’s final status. If the turn parks, it returns parked; if setup fails, it commits a failed terminal and returns failed.
+**Data flow**: It starts with a turn id and the already installed Runtime. It claims the turn, loads database records, builds prompts and registries, freezes billing and key decisions, prepares sandbox authorization, constructs TurnEngine, runs either normal or intent mode, and returns the final status such as completed, failed, parked, or superseded.
 
-**Call relations**: _execute_turn calls this as the core work. Inside, it coordinates many helpers in this file, including _load_turn, _agent_tools, _subagent_tools, _member_skill_block, _frozen_billing_identity, _frozen_byok, _open_sandbox through a late opener, and _commit_failed_terminal. It then hands the fully assembled state to TurnEngine.run or TurnEngine.run_intent.
+**Call relations**: _execute_turn calls this inside the workspace and tracing context. This function is the hub that calls most helpers in the file, then hands the fully prepared environment to TurnEngine.run or TurnEngine.run_intent.
 
-*Call graph*: calls 14 internal fn (_agent_tools, _commit_failed_terminal, _enqueue_handoff, _fire_shadow_selection, _frozen_billing_identity, _frozen_byok, _load_turn, _member_skill_block, _member_skill_turn, _previous_turn_ended_at (+4 more)); called by 1 (_execute_turn); 35 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__ (+15 more)).
+*Call graph*: calls 17 internal fn (_agent_actions, _agent_tools, _commit_failed_terminal, _enqueue_handoff, _fire_shadow_selection, _frozen_billing_identity, _frozen_byok, _load_turn, _member_skill_block, _member_skill_turn (+7 more)); called by 1 (_execute_turn); 35 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__ (+15 more)).
 
 
-##### `_run_turn.subagents_for`  (lines 547–551)
+##### `_run_turn.subagents_for`  (lines 619–623)
 
 ```
 def subagents_for(acting_member_id: UUID | None) -> tuple[Spawn, Subagents]
 ```
 
-**Purpose**: This small inner helper authorizes subagent spawning for a particular acting member. It returns both the spawn function and the authorized subagent controller for that member.
+**Purpose**: This small inner helper creates an authorized subagent interface for a particular acting member. It is used when tools need to spawn or interact with subagents under a member’s authority.
 
-**Data flow**: It receives an acting member id or None. It asks the Subagents object to authorize that actor, then returns the authorized spawn callable together with the authorized Subagents object.
+**Data flow**: It receives an acting member id or none. It asks the Subagents object to authorize that actor, then returns both the spawn function and the authorized Subagents wrapper.
 
-**Call relations**: _run_turn defines this while building the TurnEngine. The engine can later use it when a tool or model action needs to spawn work under a specific member’s authority.
+**Call relations**: _run_turn defines it while preparing the engine and passes it into TurnEngine. Later engine code can call it when a tool or model action needs member-scoped subagent access.
 
 
-##### `_commit_failed_terminal`  (lines 834–895)
+##### `_commit_failed_terminal`  (lines 925–986)
 
 ```
 async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException) -> None
 ```
 
-**Purpose**: This is the safety backstop that makes sure a turn ends visibly as failed when setup or outer orchestration crashes. It keeps retrying until it can write or publish the failure, so clients waiting on the turn are released.
+**Purpose**: This is the failure backstop for errors that happen before or outside the engine’s own failure recording. It keeps retrying until the turn has a failed terminal result and waiting clients are notified.
 
-**Data flow**: It receives the hub, turn id, and exception. It builds a terminal failure frame from the error class and shortened message, tries to update queued or running turns to failed, emits metrics and logs the stack only if it actually performed the transition, publishes the terminal to subscribers, and retries with backoff if the database or publish path fails.
+**Data flow**: It receives the hub, turn id, and exception. It builds a failed TerminalFrame, tries to update queued or running turns to failed, emits metrics and logs if it made the transition, publishes the terminal event, and retries with backoff if even that reporting path fails.
 
-**Call relations**: _execute_turn and _run_turn both call this when errors escape setup or engine construction. It publishes through the Hub so listeners see a final frame, and it avoids double-counting if the engine already wrote its own terminal.
+**Call relations**: Both _execute_turn and _run_turn call this when exceptions escape their normal paths. It publishes through the Hub so listeners learn that the turn is finished even after setup failures.
 
 *Call graph*: calls 1 internal fn (publish); called by 2 (_execute_turn, _run_turn); 10 external calls (__init__, __init__, sleep, update, workspace_tx, emit_metric, formatted_stack, log, log_error, turn_profile).
 
 
-##### `turn_workflow`  (lines 899–900)
+##### `turn_workflow`  (lines 990–991)
 
 ```
 async def turn_workflow(workspace_id: str, turn_id: str) -> str
 ```
 
-**Purpose**: This is the DBOS workflow entry for running one queued turn. DBOS uses it as the durable function name that can be enqueued, replayed, and recovered.
+**Purpose**: This is the DBOS workflow entry for running a turn from the durable queue. It is the named workflow that DBOS can enqueue, resume, and replay.
 
-**Data flow**: It receives workspace and turn ids as strings from DBOS, passes them to _execute_turn, and returns the resulting status string.
+**Data flow**: It receives workspace and turn ids as strings from DBOS. It simply forwards them to _execute_turn and returns that status result.
 
-**Call relations**: DBOS calls this when a turn workflow is dequeued from TURN_QUEUE. It is intentionally thin so _execute_turn contains the actual orchestration.
+**Call relations**: The TURN_QUEUE and enqueue code refer to this workflow name. Its only job is to connect DBOS workflow execution to the file’s real outer runner, _execute_turn.
 
 *Call graph*: calls 1 internal fn (_execute_turn).
 
 
-##### `_load_turn`  (lines 903–990)
+##### `_load_turn`  (lines 994–1081)
 
 ```
 async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]
 ```
 
-**Purpose**: This loads the database records needed to run a turn and converts them into typed Python objects. It also derives the audience for the conversation, meaning who the turn is meant to speak to or represent.
+**Purpose**: This loads the full turn record, its agent settings, and the conversation audience from the database. It converts raw database fields into typed objects the rest of the turn runner can trust.
 
-**Data flow**: It receives a turn id. It joins the turn, agent, and conversation tables, reads fields such as prompt, model, tools, context, terminal state, sandbox conversation, and audience, then returns a Turn object, an Agent object, and a parsed Audience object.
+**Data flow**: It receives a turn id. It queries the turn, agent, and conversation tables, validates nested fields like context and terminal frames, builds a Turn object, an Agent object, and an Audience, then returns all three.
 
-**Call relations**: _run_turn calls this after claiming the turn, and sometimes again when a claim is superseded. The typed objects it returns become the foundation for prompt rendering, tool selection, sandbox setup, and engine construction.
+**Call relations**: _run_turn calls this after claiming a turn, and also when a claim shows the turn was superseded and transcript repair needs the durable turn data.
 
 *Call graph*: called by 1 (_run_turn); 8 external calls (__init__, __init__, model_validate, model_validate, model_validate, select, workspace_tx, parse_audience).
 
 
-##### `_run_lineage`  (lines 993–1025)
+##### `_run_lineage`  (lines 1084–1116)
 
 ```
 async def _run_lineage(turn: Turn) -> RunLineage | None
 ```
 
-**Purpose**: This finds where a spawned turn’s live activity should be published. For nested child turns, it walks up to the root turn so the user interface can follow one coherent activity stream.
+**Purpose**: This finds where live activity from a spawned turn should be published. For child turns, it traces back to the root turn so user surfaces can follow one combined activity stream.
 
-**Data flow**: It receives a Turn. If the turn has no parent, it returns None. If it is a child, it follows parent links in the database until it reaches the root, determines the profile name to display, and returns a RunLineage object.
+**Data flow**: It receives a Turn. If the turn has no parent, it returns nothing; otherwise it walks parent links in the database to find the root, determines a profile label, and returns a RunLineage object.
 
-**Call relations**: _run_turn calls this before constructing TurnEngine. The engine uses the lineage to publish child or subagent activity under the right parent stream.
+**Call relations**: _run_turn calls it before constructing the engine. The resulting lineage is passed into TurnEngine so spawned or subagent activity appears under the right parent stream.
 
 *Call graph*: called by 1 (_run_turn); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `_previous_turn_ended_at`  (lines 1028–1040)
+##### `_previous_turn_ended_at`  (lines 1119–1131)
 
 ```
 async def _previous_turn_ended_at(turn: Turn) -> datetime | None
 ```
 
-**Purpose**: This finds when the previous turn in the same conversation ended. That timing can be used by the engine for context-sensitive behavior, such as activity summaries or recency decisions.
+**Purpose**: This finds when the previous turn in the same conversation ended. That timestamp helps the engine understand timing between turns.
 
-**Data flow**: It receives the current Turn. If it is the first turn, it returns None. Otherwise it reads the previous sequence number’s updated_at timestamp from the database and ensures the result has a timezone.
+**Data flow**: It receives a Turn. If this is the first turn, it returns nothing; otherwise it reads the previous sequence number’s updated time from the database and ensures the result has timezone information.
 
-**Call relations**: _run_turn calls this for non-intent turns before building the engine. Intent turns skip it because they do not follow the normal model-round flow.
+**Call relations**: _run_turn calls it for non-intent turns and passes the timestamp into TurnEngine as context.
 
 *Call graph*: called by 1 (_run_turn); 2 external calls (select, workspace_tx).
 
 
-##### `_frozen_billing_identity`  (lines 1043–1064)
+##### `_frozen_billing_identity`  (lines 1134–1155)
 
 ```
 async def _frozen_billing_identity(turn_id: UUID, candidate: _BillingIdentity) -> _BillingIdentity
 ```
 
-**Purpose**: This freezes the model and price information used to bill one workflow attempt. Freezing matters because crash recovery may replay setup, and the replay must use the same billing facts as the original attempt.
+**Purpose**: This freezes the billing model and prices for one workflow attempt. It prevents crash recovery from replaying the same attempt under different pricing information.
 
-**Data flow**: It receives a turn id and a candidate billing identity. It locks the turn row, checks whether the same attempt already stored billing data, returns the stored data if present, or writes and returns the candidate if not.
+**Data flow**: It receives a turn id and a candidate billing identity. It locks and reads the turn’s stored billing identity; if the same attempt is already stored, it returns that, otherwise it writes the candidate and returns it.
 
-**Call relations**: _run_turn calls this after resolving the model and current price table. The returned identity is then used to build the Pricing object and to force the agent’s model name for this attempt.
+**Call relations**: _run_turn calls it after resolving the model and current price. The returned billing identity is then used to build the Pricing object passed into the engine.
 
 *Call graph*: called by 1 (_run_turn); 4 external calls (model_dump, select, update, workspace_tx).
 
 
-##### `_frozen_byok`  (lines 1067–1116)
+##### `_frozen_byok`  (lines 1158–1207)
 
 ```
 async def _frozen_byok(workspace_id: UUID, turn_id: UUID, key_slot: str | None, attempt: str) -> bool
 ```
 
-**Purpose**: This decides, once per attempt, whether the workspace is using its own model provider key. BYOK means “bring your own key,” and the decision affects billing because calls paid by the workspace’s own key are treated differently.
+**Purpose**: This decides, once per workflow attempt, whether the workspace is using its own model provider key. BYOK means “bring your own key,” where the workspace pays the provider directly rather than using the platform key.
 
-**Data flow**: It receives workspace id, turn id, required key slot, and attempt id. It reads any stored BYOK decision for that attempt; if none exists, it checks whether the workspace owns the needed key, writes the decision if the attempt is still unset or different, rereads the settled row, and returns the settled boolean.
+**Data flow**: It receives workspace id, turn id, model key slot, and attempt id. It reads any stored decision for that attempt; if none exists, it checks key ownership, writes the decision for the attempt, rereads the settled value, and returns the final boolean.
 
-**Call relations**: _run_turn calls this before constructing the TurnEngine. It relies on workspace_owns_the_key for the actual key check, but stores the result on the turn so recovery and concurrent replay do not bill one attempt two different ways.
+**Call relations**: _run_turn calls it before constructing the engine. The engine uses the result for billing behavior, and the freeze protects crash recovery and parked-turn resumes from inconsistent charges.
 
 *Call graph*: called by 1 (_run_turn); 5 external calls (or_, select, update, workspace_owns_the_key, workspace_tx).
 
 
-##### `_open_sandbox`  (lines 1119–1182)
+##### `_open_sandbox`  (lines 1210–1273)
 
 ```
 async def _open_sandbox(sandboxes: ConversationSandbox, run_tokens: RunTokenCodec, turn: Turn, grants: GrantStore | None, clis: Mapping[str, CliCredential], credentials: CredentialStore | None, slots:
 ```
 
-**Purpose**: This opens or attaches to the sandbox container where a turn can run commands and access files. It prepares the signed run token and environment variables for git, tool bridge access, connector grants, and credential-backed providers.
+**Purpose**: This opens or attaches to the sandbox container where a turn can run commands and use files. It supplies a signed run token and only derives credentials when the sandbox is actually needed.
 
-**Data flow**: It receives sandbox services, token codec, the turn, optional grants and credential stores, CLI credential mappings, credential slots, and a cache rewrite flag. It builds a RunToken, optionally adds git cache configuration, derives credential and grant environment variables only at open time, and calls the sandbox service to open the conversation’s sandbox session.
+**Data flow**: It receives sandbox services, token codec, turn, grants, connector command-line credentials, credential store, credential slots, and a cache setting. It builds environment variables for conversation id, tool bridge, git proxy behavior, grants, and keyed providers, then opens the conversation’s sandbox session.
 
-**Call relations**: _run_turn passes this as the late opener for _LateSandbox, so a sandbox is only opened if the engine actually needs it. It calls token encoding and sandbox environment helpers, then hands the final request to ConversationSandbox.open.
+**Call relations**: _run_turn passes this as the lazy opener for _LateSandbox. That means the sandbox is not opened during setup unless the engine or tools actually need it.
 
 *Call graph*: calls 2 internal fn (open, encode); 7 external calls (__init__, span, cache_git_config, _git_config_env, _git_credential_config, _grant_cli_env, _keyed_provider_env).
 
 
-##### `SandboxAuthorizer.authorize`  (lines 1193–1205)
+##### `SandboxAuthorizer.authorize`  (lines 1284–1296)
 
 ```
 async def authorize(self, acting_member_id: UUID | None) -> Sandbox
 ```
 
-**Purpose**: This re-authorizes sandbox access for a specific acting member. It creates a fresh run token that includes that member and updates grant-related environment variables for the sandbox session.
+**Purpose**: This re-authorizes an existing sandbox for a specific acting member. It gives sandbox commands a fresh run token and member-scoped connector grant environment.
 
-**Data flow**: It receives an acting member id or None. It encodes a RunToken with workspace, turn, and actor information, derives grant CLI environment variables for that actor, and returns a sandbox object authorized with the new token and environment changes.
+**Data flow**: It receives an acting member id or none. It encodes a run token containing workspace, turn, and acting member, builds grant-related environment variables, and returns a sandbox wrapper authorized with those values.
 
-**Call relations**: _run_turn creates a SandboxAuthorizer and gives its authorize method to the TurnEngine for normal, non-intent turns. When a tool needs member-scoped sandbox authority, the engine calls this method to get the correctly authorized sandbox.
+**Call relations**: _run_turn creates a SandboxAuthorizer and passes its authorize method to the engine for normal turns. When the engine needs sandbox access on behalf of a member, this method updates the authorization without reopening the whole sandbox.
 
 *Call graph*: 2 external calls (__init__, _grant_cli_env).
 
 
 ### `core/src/ufo/loop/engine.py`
 
-`orchestration` · `per-turn execution, from claim through model/tool loop to terminal commit`
+`orchestration` · `turn execution`
 
-A “turn” is one unit of work where an agent responds to a user message, scheduled prompt, subagent request, or prepared tool intent. This file is the conductor for that work. It makes sure only one worker owns the turn, loads the transcript, adds context like time and speaker, calls the model, streams partial text to listeners, runs any tools the model asks for, and feeds tool results back into later model rounds until there is a final answer.
+A “turn” is one unit of work for an agent: a user asks something, the agent may think, call tools, receive more user messages while running, and eventually answer or stop. This file makes that whole journey reliable. Without it, a crash could call the model twice, run a tool twice, lose a user message, forget to bill tokens, or publish an answer that ignored something the user sent mid-run.
 
-The file is careful because a turn can last a while and can do real things: spend money, write files, call connectors, spawn child agents, and ask users for credentials. It uses DBOS steps, meaning selected actions are recorded so that after a crash they replay from saved results instead of happening twice. Think of it like a kitchen ticket with checkmarks: if the cook crashes after making the sauce, the replacement does not make a second sauce; they continue at the next unchecked step.
+The main class, TurnEngine, acts like an air-traffic controller. It first claims the turn in the database so only one worker owns it. It loads the saved conversation, adds context such as message time and sender, and then enters model rounds. In each round it checks seats and spending limits, compacts old context if needed, streams model text to live listeners, dispatches tool calls, and feeds tool results back to the model. New incoming messages are drained between rounds, never in the middle of a tool exchange.
 
-It also watches for new messages that arrive mid-turn, billing caps, revoked seats, model context overflow, overlarge tool outputs, screenshots, and cancellation. At the end it writes a durable terminal frame, updates the transcript, publishes live events, and records workspace changes. Without this file, the system would not have a reliable, resumable way to turn user input plus model/tool work into a safe final result.
+Several operations are wrapped as DBOS steps, meaning their outputs are recorded and replayed after a crash instead of being performed again. That is why model calls, tool calls, and arrival drains are written carefully as replay-safe boundaries. The file also handles special exits: parked turns when spending is blocked, cancelled turns, failed turns, subagent “finish” contracts, transcript repair, live activity updates, image offloading, and cost reporting.
 
 #### Function details
 
-##### `_claim_turn`  (lines 230–277)
+##### `_claim_turn`  (lines 238–285)
 
 ```
 async def _claim_turn(turn_id: UUID, attempt: str) -> str | None
 ```
 
-**Purpose**: Claims a queued or parked turn for one workflow attempt, or reclaims it if the same attempt is being replayed after a crash. This prevents two workers from running the same turn at the same time.
+**Purpose**: Claims a queued or parked turn for one workflow attempt, or reclaims a turn already running under the same attempt after crash recovery. This prevents two workers from actively running the same turn.
 
-**Data flow**: It receives a turn id and an attempt id. It reads the turn and locks its conversation, then updates the turn to running if it is available or already running under the same attempt. It returns whether the claim was fresh, adopted from the same attempt, or lost.
+**Data flow**: It receives a turn id and attempt id, reads the current turn row and locks its conversation, then updates the row to running only if the claim is allowed. It returns whether the claim was fresh, adopted from the same attempt, or not won at all.
 
-**Call relations**: TurnEngine._mark_running calls this at the start of normal and intent turns. _claim_turn_with_handoff also uses it before deciding whether to enqueue the next waiting turn.
+**Call relations**: TurnEngine._mark_running uses this at the start of normal and intent turns. _claim_turn_with_handoff also uses it before looking for the next queued turn to hand off.
 
 *Call graph*: called by 2 (_mark_running, _claim_turn_with_handoff); 5 external calls (and_, or_, select, update, workspace_tx).
 
 
-##### `_claim_turn_with_handoff`  (lines 288–348)
+##### `_claim_turn_with_handoff`  (lines 296–356)
 
 ```
 async def _claim_turn_with_handoff(turn_id: UUID, attempt: str) -> tuple[str | None, _TurnHandoff | None]
 ```
 
-**Purpose**: Claims a turn and, if possible, marks the next queued turn in the same conversation as ready to dispatch. This helps the worker hand off work without leaving the conversation idle.
+**Purpose**: Claims the current turn and, if possible, marks the next queued turn in the same conversation as ready to dispatch. This helps keep a conversation moving without racing two turns at once.
 
-**Data flow**: It takes a turn id and attempt id, first tries to claim the current turn, then checks the same conversation for the next queued turn. If it stamps a next turn for dispatch, it returns a small handoff record with ids needed to start it.
+**Data flow**: It takes a turn id and attempt id, tries to claim the turn, then checks the conversation for the next queued turn. If it finds one not already enqueued, it stamps it and returns a small handoff record with the ids needed to run it.
 
-**Call relations**: It builds on _claim_turn. It is designed for the dispatch layer outside this file, which needs both the claim result and possible next-turn handoff.
+**Call relations**: It builds on _claim_turn. The returned _TurnHandoff is used by higher-level queue logic outside this file to continue dispatching work.
 
 *Call graph*: calls 1 internal fn (_claim_turn); 5 external calls (__init__, select, update, workspace_tx, uuid4).
 
 
-##### `_activity_goal`  (lines 417–418)
+##### `_activity_goal`  (lines 425–426)
 
 ```
 def _activity_goal(requesters: Mapping[UUID, ActiveMessage]) -> str
 ```
 
-**Purpose**: Builds a short description of what active user messages are asking for. This text helps summarize tool activity in human-friendly words.
+**Purpose**: Turns the currently active requester messages into a plain goal string for activity summaries. It gives the activity summarizer the human request the tool is serving.
 
-**Data flow**: It receives active requester messages, extracts the member-visible message text from each, and joins them with newlines. The result is a plain text goal string.
+**Data flow**: It receives a mapping of message ids to active messages, extracts the member-facing text from each message, and joins them into one string.
 
-**Call relations**: TurnEngine._model_round and TurnEngine.run_intent use it before starting activity summaries for tool calls.
+**Call relations**: TurnEngine._model_round and TurnEngine.run_intent call it before starting activity generation for tool calls.
 
 *Call graph*: called by 2 (_model_round, run_intent); 1 external calls (member_message_text).
 
 
-##### `_RoundInput.__repr__`  (lines 430–435)
+##### `_RoundInput.__repr__`  (lines 438–443)
 
 ```
 def __repr__(self) -> str
 ```
 
-**Purpose**: Creates a compact debug string for a model round input. It avoids printing the full prompt and instead shows useful sizes and flags.
+**Purpose**: Provides a short debug-friendly summary of a model round request without dumping the full prompt. This makes logs readable and avoids exposing huge message bodies.
 
-**Data flow**: It reads the stored messages, system prompt length, and round options, then returns a short string summary. It does not change anything.
+**Data flow**: It reads the round input fields, counts messages and system prompt characters, and returns a compact string.
 
-**Call relations**: Python uses this when the object is logged or displayed, especially around DBOS step inputs.
+**Call relations**: It is used implicitly when _RoundInput is logged or displayed, especially around model-round DBOS steps.
 
 
-##### `_ResolvedToolCall.__repr__`  (lines 443–444)
+##### `EffectiveCall.semantic_call`  (lines 463–474)
+
+```
+def semantic_call(self) -> ToolUseBlock
+```
+
+**Purpose**: Returns the tool call under the meaningful tool identity that downstream code should reason about. This matters for object actions, where the wire tool may be a generic dispatcher but the real action has its own name.
+
+**Data flow**: It reads the original call and resolved call id. If they match, it returns the original call; otherwise it rewrites the name and input to the validated object action form.
+
+**Call relations**: TurnEngine._model_round uses this shape for activity and final-act parsing so later logic sees the action that actually ran.
+
+
+##### `EffectiveCall.meter_dimensions`  (lines 476–486)
+
+```
+def meter_dimensions(self) -> dict[str, str]
+```
+
+**Purpose**: Builds the labels used for tool telemetry, such as which real action ran and where it came from. This keeps metrics grouped by meaningful action rather than by transport wrapper.
+
+**Data flow**: It reads the resolved tool definition and extension context. It returns a small dictionary of metric labels, with extra bound-action details when applicable.
+
+**Call relations**: TurnEngine._bind_or_error, TurnEngine._dispatch_step, and _meter_dispatch use these labels when recording tool outcomes.
+
+
+##### `EffectiveCall.__repr__`  (lines 488–489)
 
 ```
 def __repr__(self) -> str
 ```
 
-**Purpose**: Creates a short debug label for a tool call that has been successfully bound to its execution context.
+**Purpose**: Creates a compact representation of a resolved call for logs and debugging. It shows the semantic call name and model-provided call id.
 
-**Data flow**: It reads the tool name and call id and returns a concise string. No state changes.
+**Data flow**: It reads the call id fields and returns a short string.
 
-**Call relations**: Used implicitly by logging/debugging when resolved tool calls are shown.
+**Call relations**: Used implicitly by Python debugging, logging, and error messages around resolved tool calls.
 
 
-##### `_BoundToolCall.__repr__`  (lines 452–453)
+##### `_BoundToolCall.call`  (lines 498–499)
+
+```
+def call(self) -> ToolUseBlock
+```
+
+**Purpose**: Gives easy access to the original tool call inside a bound dispatch item. It hides one layer of wrapping from dispatch code.
+
+**Data flow**: It reads the EffectiveCall stored in the bound item and returns its ToolUseBlock.
+
+**Call relations**: TurnEngine._dispatch_step and related dispatch helpers use this property so bound and rejected calls can be treated similarly.
+
+
+##### `_BoundToolCall.__repr__`  (lines 501–502)
 
 ```
 def __repr__(self) -> str
 ```
 
-**Purpose**: Creates a short debug label for a tool call ready to dispatch.
+**Purpose**: Creates a compact debug string for a tool call that has been bound to a context. This helps logs show which tool call is about to run.
 
-**Data flow**: It reads the tool name and call id and returns a concise string. No state changes.
+**Data flow**: It reads the tool name and call id and formats them into a short string.
 
-**Call relations**: Used implicitly by logging/debugging when bound dispatch inputs are shown.
+**Call relations**: Used implicitly when bound calls appear in logs, traces, or errors.
 
 
-##### `_RejectedToolCall.__repr__`  (lines 463–467)
+##### `_RejectedToolCall.__repr__`  (lines 513–517)
 
 ```
 def __repr__(self) -> str
 ```
 
-**Purpose**: Creates a short debug label for a tool call that could not be prepared.
+**Purpose**: Creates a compact debug string for a tool call rejected before real dispatch. It shows which tool failed, why category it fell into, and the error class.
 
-**Data flow**: It reads the tool name, call id, outcome, and error class, then returns a compact string. No state changes.
+**Data flow**: It reads the rejected call and stored error metadata, then returns a short string.
 
-**Call relations**: Used implicitly by logging/debugging when rejected dispatch inputs are shown.
+**Call relations**: Used implicitly when rejected calls are logged or inspected during dispatch.
 
 
-##### `ModelStreamError.__init__`  (lines 525–526)
+##### `ModelStreamError.__init__`  (lines 576–577)
 
 ```
 def __init__(self, error_class: str, message: str, partial_output: str='') -> None
 ```
 
-**Purpose**: Stores a model streaming failure with its original error class, message, and any partial output already received.
+**Purpose**: Stores a model streaming failure together with any partial text already received. This lets the caller bill usage and sometimes salvage cut-off output.
 
-**Data flow**: It receives the model error name, message, and optional partial text. It stores all three in the exception arguments so crash recovery and later error handling can read them.
+**Data flow**: It receives the provider error class, message, and optional partial output, and stores them in the exception arguments.
 
-**Call relations**: TurnEngine._stream_recovering_overflow creates this after a recorded model round reports an error instead of raising inside the DBOS step.
+**Call relations**: TurnEngine._stream_recovering_overflow creates this after a model-round step reports an error instead of raising directly.
 
 *Call graph*: called by 1 (_stream_recovering_overflow).
 
 
-##### `ModelStreamError.__str__`  (lines 528–530)
+##### `ModelStreamError.__str__`  (lines 579–581)
 
 ```
 def __str__(self) -> str
 ```
 
-**Purpose**: Formats the model stream error as a readable string that includes the original model-side error class.
+**Purpose**: Formats a model streaming error as a readable provider-class-plus-message string. It deliberately does not include partial output.
 
-**Data flow**: It reads the stored class and message and returns them as one string. It deliberately leaves out partial output.
+**Data flow**: It reads the stored error class and message and returns one combined string.
 
-**Call relations**: Used whenever the exception is converted to text, including terminal error reporting and overflow checks.
+**Call relations**: Used whenever the exception is logged or converted to terminal error text.
 
 
-##### `ModelStreamError.model_error_class`  (lines 533–535)
+##### `ModelStreamError.model_error_class`  (lines 584–586)
 
 ```
 def model_error_class(self) -> str
 ```
 
-**Purpose**: Exposes the original error class reported by the model provider.
+**Purpose**: Returns the original model provider’s error class. Callers use this to tell truncation or context overflow apart from other failures.
 
-**Data flow**: It reads the first stored exception argument and returns it. Nothing is changed.
+**Data flow**: It reads the first stored exception argument and returns it.
 
-**Call relations**: TurnEngine._model_round and TurnEngine._commit_once use this to distinguish truncation from other model failures and to report the right terminal error.
+**Call relations**: TurnEngine._model_round checks it when deciding whether a truncated response can be recovered.
 
 
-##### `ModelStreamError.partial_output`  (lines 538–540)
+##### `ModelStreamError.partial_output`  (lines 589–591)
 
 ```
 def partial_output(self) -> str
 ```
 
-**Purpose**: Exposes the partial text and tool-call fragments received before a model stream failed.
+**Purpose**: Returns text and raw tool-call fragments received before the model stream failed. This can be saved so the model can continue from what it already produced.
 
-**Data flow**: It reads the stored partial output string and returns it. Nothing is changed.
+**Data flow**: It reads the third stored exception argument and returns it.
 
-**Call relations**: TurnEngine._model_round uses it when recovering from model truncation by saving partial content to a workspace file.
+**Call relations**: TurnEngine._model_round uses it during truncation recovery and offloads it to a sandbox file when possible.
 
 
-##### `ModelStreamError.model_error_message`  (lines 543–545)
+##### `ModelStreamError.model_error_message`  (lines 594–596)
 
 ```
 def model_error_message(self) -> str
 ```
 
-**Purpose**: Exposes the original error message from the model provider.
+**Purpose**: Returns the original model provider’s error message. This preserves useful provider detail for terminal frames and overflow detection.
 
-**Data flow**: It reads the stored message and returns it. Nothing is changed.
+**Data flow**: It reads the second stored exception argument and returns it.
 
-**Call relations**: TurnEngine._commit_once uses it when building the terminal frame for a failed turn.
+**Call relations**: TurnEngine._commit_once uses it when writing a failed terminal frame for a model error.
 
 
-##### `TurnParked.__init__`  (lines 552–554)
+##### `TurnParked.__init__`  (lines 603–605)
 
 ```
 def __init__(self, message: str) -> None
 ```
 
-**Purpose**: Creates an exception that means the turn must pause, not fail, because a seat, balance, or spend limit stopped it.
+**Purpose**: Creates the exception used when a turn must pause because a seat, balance, or spending cap blocks further work. The turn is not failed; it is held for later resume.
 
-**Data flow**: It receives the member-facing reason and stores it both as the exception text and as a message field. The turn can later be resumed.
+**Data flow**: It receives the user-facing reason, stores it on the exception, and makes it available as message.
 
-**Call relations**: TurnEngine._enforce_spend raises it. TurnEngine.run catches it and parks the turn durably.
+**Call relations**: TurnEngine._enforce_spend raises it, and TurnEngine.run catches it to park the turn durably.
 
 *Call graph*: called by 1 (_enforce_spend).
 
 
-##### `_dispatch_segments`  (lines 563–587)
+##### `_intent_admits`  (lines 611–616)
 
 ```
-def _dispatch_segments(tools: ToolRegistry, tool_calls: tuple[ToolUseBlock, ...]) -> Iterator[tuple[ToolUseBlock, ...]]
+def _intent_admits(tool: ToolDef) -> bool
 ```
 
-**Purpose**: Splits model-requested tool calls into groups that can safely run together while preserving the order the model chose.
+**Purpose**: Decides whether a prepared member intent is allowed to call a tool. It limits this special lane to object mutations and tools/actions that declare a presentation.
 
-**Data flow**: It receives the tool registry and a tuple of tool calls. It yields small tuples: consecutive parallel-safe tools are grouped, while unsafe or unknown tools become ordering barriers.
+**Data flow**: It receives a tool definition and checks its name and presentation metadata. It returns true when the intent lane may reach it.
 
-**Call relations**: TurnEngine._model_round uses these segments before binding and dispatching tools, so concurrent work does not reorder important actions.
+**Call relations**: TurnEngine.run_intent uses this after resolving the intent call and before binding or dispatching it.
 
-*Call graph*: calls 1 internal fn (get); called by 1 (_model_round).
+*Call graph*: called by 1 (run_intent).
 
 
-##### `_parse_args`  (lines 590–592)
+##### `_dispatch_segments`  (lines 625–646)
+
+```
+def _dispatch_segments(resolved: tuple[_Resolution, ...]) -> Iterator[tuple[_Resolution, ...]]
+```
+
+**Purpose**: Splits a model’s tool calls into groups that can safely run in parallel while preserving the order of calls that must act as barriers. It is like grouping errands: independent ones can happen together, but a checkout step must happen in sequence.
+
+**Data flow**: It receives resolved calls, groups consecutive parallel-safe calls up to a limit, and yields one segment at a time.
+
+**Call relations**: TurnEngine._model_round uses these segments before binding and dispatching tools.
+
+*Call graph*: called by 1 (_model_round).
+
+
+##### `_parse_args`  (lines 649–651)
 
 ```
 def _parse_args(partials: list[str]) -> dict[str, object]
 ```
 
-**Purpose**: Turns streamed tool-call JSON fragments into a Python dictionary of arguments.
+**Purpose**: Turns streamed pieces of a tool-call JSON argument into a Python dictionary. Empty arguments become an empty dictionary.
 
-**Data flow**: It receives a list of partial JSON strings, joins them, and parses the JSON. Blank input becomes an empty dictionary.
+**Data flow**: It joins the string fragments, checks whether anything meaningful is present, and parses JSON when needed.
 
-**Call relations**: TurnEngine._stream_once uses it after the model stream finishes, when assembling final ToolUseBlock objects.
+**Call relations**: TurnEngine._stream_once uses it when converting model tool-call deltas into ToolUseBlock objects.
 
 *Call graph*: called by 1 (_stream_once); 1 external calls (loads).
 
 
-##### `_context_tag`  (lines 595–613)
+##### `_context_tag`  (lines 654–672)
 
 ```
 def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: datetime) -> str
 ```
 
-**Purpose**: Creates the small context block placed before a member message so the model knows when, who, and where the message came from.
+**Purpose**: Builds the small context block placed before a user message so the model knows when it was sent, who sent it, and what surface information came with it. This gives the model a clock and source details it otherwise lacks.
 
-**Data flow**: It receives a message id, optional turn context, and admission time. It formats the time in the sender’s timezone when available and returns a text tag with metadata.
+**Data flow**: It receives a message id, optional turn context, and admission time, formats the time in the sender’s timezone when known, and returns a text tag.
 
-**Call relations**: TranscriptRepair.load_messages uses it for the founding message. TurnEngine._render_arrival uses it for messages that arrive while a turn is running.
+**Call relations**: TranscriptRepair.load_messages uses it for the founding message, and TurnEngine._render_arrival uses it for later drained messages.
 
 *Call graph*: called by 2 (load_messages, _render_arrival); 2 external calls (astimezone, ZoneInfo).
 
 
-##### `_bounded`  (lines 616–621)
+##### `_bounded`  (lines 675–680)
 
 ```
 def _bounded(content: str) -> str
 ```
 
-**Purpose**: Cuts very large tool text down to the maximum size allowed in model context and adds a note saying how much was removed.
+**Purpose**: Limits tool-result text to the maximum size allowed back into the model context. This protects later prompts from being flooded by one huge result.
 
-**Data flow**: It receives a string. If it is short enough, it returns it unchanged; otherwise it returns the prefix plus a truncation notice.
+**Data flow**: It receives text, returns it unchanged if small enough, or returns a prefix plus a truncation notice.
 
-**Call relations**: TurnEngine._dispatch_step uses it for large error output, and TurnEngine._model_round uses it for forced finish validation errors.
+**Call relations**: TurnEngine._dispatch_step uses it for large errors, and TurnEngine._model_round uses it for finish-tool validation errors.
 
 *Call graph*: called by 2 (_dispatch_step, _model_round).
 
 
-##### `_meter_dispatch`  (lines 624–651)
+##### `_meter_dispatch`  (lines 683–717)
 
 ```
-def _meter_dispatch(tools: ToolRegistry, call: ToolUseBlock, started: float, outcome: str, error_class: str | None, profile: str) -> None
+def _meter_dispatch(tools: ToolRegistry, call: ToolUseBlock, started: float, outcome: str, error_class: str | None, profile: str, semantic: Mapping[str, str] | None=None) -> None
 ```
 
-**Purpose**: Records metrics for one tool call: how it ended and how long it took. This gives operators a clear view of slow or failing tools.
+**Purpose**: Records metrics for one tool dispatch: how long it took, what ran, and how it ended. These metrics let operators see slow tools, invalid calls, hook failures, and handler errors.
 
-**Data flow**: It receives the registry, call, start time, outcome, error class, and profile. It normalizes unknown tool names, emits a count, and emits a duration measurement.
+**Data flow**: It receives the tool registry, call, start time, outcome, error class, profile, and semantic labels, then emits count and timing metrics.
 
-**Call relations**: TurnEngine._bind_or_error records failures that happen before dispatch. TurnEngine._dispatch_step records the actual dispatch outcome.
+**Call relations**: TurnEngine._bind_or_error calls it when binding fails unusually, and TurnEngine._dispatch_step calls it in its final cleanup for every dispatch body.
 
 *Call graph*: called by 2 (_bind_or_error, _dispatch_step); 3 external calls (monotonic, emit_histogram, emit_metric).
 
 
-##### `_loaded_skill_closures`  (lines 654–697)
+##### `_loaded_skill_closures`  (lines 720–763)
 
 ```
 def _loaded_skill_closures(messages: tuple[Message, ...], skills: SkillRegistry) -> Iterator[tuple[LoadedRef, ...]]
 ```
 
-**Purpose**: Finds which skill packages are already present in the recent conversation window, so the engine does not reload the same skill instructions unnecessarily.
+**Purpose**: Finds which skill cards are already present in the current message window so they do not need to be loaded again. It reads reliable tool-call records rather than trusting prose inside skill text.
 
-**Data flow**: It scans model messages for completed load-skill tool calls, reads the requested skill names from the original call input, and asks the registry for each skill’s closure. It yields only complete, readable skill closures.
+**Data flow**: It scans messages for completed load-skill calls and matching results, asks the skill registry for each closure, and yields those closures.
 
-**Call relations**: TurnEngine._reseed_loaded_skills uses this before and after compaction to keep the loaded-skill tracker accurate.
+**Call relations**: TurnEngine._reseed_loaded_skills uses this to refresh the compaction skill tracker.
 
 *Call graph*: calls 1 internal fn (closure); called by 1 (_reseed_loaded_skills).
 
 
-##### `_final_act`  (lines 700–722)
+##### `_final_act`  (lines 766–788)
 
 ```
 def _final_act(tool_calls: tuple[ToolUseBlock, ...], results: tuple[ToolResultBlock, ...], tool_name: str, model: type[PayloadT]) -> PayloadT | None
 ```
 
-**Purpose**: Reads a structured payload from the last successful tool call in a round, when that tool is meant to be the round’s final action.
+**Purpose**: Extracts a structured payload from a successful final-act tool call when that tool was the last call in the round. This is used for things like a final question that should only count if it ended the round.
 
-**Data flow**: It receives the round’s tool calls, their results, a tool name, and a validation model. If the last call matches and its result contains valid JSON, it returns the parsed payload; otherwise it returns nothing.
+**Data flow**: It receives tool calls, tool results, a tool name, and a payload model. It checks the last call/result, parses the JSON payload from the result text, validates it, and returns it or nothing.
 
-**Call relations**: TurnEngine._model_round uses it to detect a final ask_user request, where only a final question should pause the turn for a user answer.
+**Call relations**: _round_acts calls it for final-act types whose rule says only the last call counts.
 
-*Call graph*: called by 1 (_model_round); 1 external calls (loads).
+*Call graph*: called by 1 (_round_acts); 1 external calls (loads).
 
 
-##### `_pending_act`  (lines 725–753)
+##### `_pending_act`  (lines 791–819)
 
 ```
 def _pending_act(tool_calls: tuple[ToolUseBlock, ...], results: tuple[ToolResultBlock, ...], tool_name: str, model: type[PayloadT]) -> PayloadT | None
 ```
 
-**Purpose**: Reads the most recent successful structured request of a given kind from anywhere in a round.
+**Purpose**: Extracts the latest successful structured handoff of a given tool type anywhere in a round. This is used for requests that remain owed until a member answers, such as credentials or connection approval.
 
-**Data flow**: It receives tool calls, results, a tool name, and a validation model. It searches backward, parses the handler’s JSON result, and returns the newest valid payload or nothing.
+**Data flow**: It receives calls, results, a tool name, and a payload model. It walks calls backward, finds the matching successful result, parses and validates its JSON payload, and returns it or nothing.
 
-**Call relations**: TurnEngine._model_round uses it for credential and account-connection requests. TurnEngine.run_intent uses it after a direct intent tool call.
+**Call relations**: _round_acts calls it for final-act types whose rule says the request remains pending even if other work happened afterward.
 
-*Call graph*: called by 2 (_model_round, run_intent); 1 external calls (loads).
+*Call graph*: called by 1 (_round_acts); 1 external calls (loads).
 
 
-##### `_created_refs`  (lines 756–788)
+##### `_round_acts`  (lines 822–853)
+
+```
+def _round_acts(resolved: tuple[_Resolution, ...], results: tuple[ToolResultBlock, ...]) -> dict[str, BaseModel]
+```
+
+**Purpose**: Collects the structured open requests produced by a tool-calling round, such as asking the user a question or requesting credentials. It normalizes object-action calls to their real semantic identity first.
+
+**Data flow**: It receives resolved calls and result blocks, chooses the right parser for each final-act declaration, and returns a dictionary keyed by terminal-frame field name.
+
+**Call relations**: TurnEngine._model_round uses it after tool dispatch, and TurnEngine.run_intent uses it after a direct intent tool call.
+
+*Call graph*: calls 2 internal fn (_final_act, _pending_act); called by 2 (_model_round, run_intent).
+
+
+##### `_act`  (lines 856–860)
+
+```
+def _act(acts: dict[str, BaseModel], frame_field: str, model: type[PayloadT]) -> PayloadT | None
+```
+
+**Purpose**: Fetches one typed act payload from the dictionary produced by _round_acts. It safely returns nothing if the payload is absent or not the expected type.
+
+**Data flow**: It receives the acts dictionary, a field name, and a model type. It reads the value and returns it only when it matches the requested model.
+
+**Call relations**: TurnEngine._model_round and TurnEngine.run_intent use it to pull question, credential, and connection requests into terminal frames.
+
+*Call graph*: called by 2 (_model_round, run_intent).
+
+
+##### `_created_refs`  (lines 863–895)
 
 ```
 def _created_refs(tool_calls: tuple[ToolUseBlock, ...], results: tuple[ToolResultBlock, ...]) -> tuple[ObjectRef, ...]
 ```
 
-**Purpose**: Extracts object references for objects actually created by object_apply tool results.
+**Purpose**: Finds object references created by successful object_apply calls in a round. This lets the terminal frame name what the turn created.
 
-**Data flow**: It receives tool calls and results, looks for successful object_apply results, parses their JSON, and returns valid object references whose result says created.
+**Data flow**: It receives tool calls and results, matches object_apply results, parses their JSON, and returns valid ObjectRef records for creations only.
 
-**Call relations**: TurnEngine._fold_created accumulates these during model turns. TurnEngine.run_intent uses it for direct intent turns.
+**Call relations**: TurnEngine._fold_created uses it during normal rounds, and TurnEngine.run_intent uses it after direct object intents.
 
 *Call graph*: called by 2 (_fold_created, run_intent); 2 external calls (__init__, loads).
 
 
-##### `_total_usage`  (lines 791–799)
+##### `_total_usage`  (lines 898–906)
 
 ```
 def _total_usage(usage_events: list[Usage]) -> Usage
 ```
 
-**Purpose**: Adds many model usage records into one total usage record.
+**Purpose**: Adds many token-usage events into one total. This gives billing, cost display, and metrics a single usage number for the turn so far.
 
-**Data flow**: It receives a list of usage events and sums input, output, and cache token fields. It returns a single Usage object with totals.
+**Data flow**: It receives a list of Usage records, sums each token category, and returns a new Usage record with totals.
 
-**Call relations**: Billing, spend enforcement, live cost publishing, parking, cancellation billing, committing, and model metrics all call this to price the turn consistently.
+**Call relations**: Billing, cost publishing, spend checks, parking, cancellation billing, committing, and model metrics all call it.
 
 *Call graph*: called by 6 (_bill_cancelled, _commit_once, _enforce_spend, _park, _publish_cost, _stream_once); 1 external calls (__init__).
 
 
-##### `TranscriptRepair.resolve`  (lines 814–838)
+##### `TranscriptRepair.resolve`  (lines 921–945)
 
 ```
 async def resolve(self) -> TerminalFrame | None
 ```
 
-**Purpose**: Republishes a terminal result for a turn that already finished, usually after a duplicate delivery or crash recovery.
+**Purpose**: Republishes a terminal frame for a turn that already finished but whose client may not have seen the final event. This repairs the live wait without rerunning the turn.
 
-**Data flow**: It reads the stored terminal frame from the database. If there is one, it persists the inbound transcript if needed, publishes the terminal live, and returns the frame; if not, it returns nothing.
+**Data flow**: It reads the turn’s terminal from the database. If present, it validates the frame, ensures inbound messages are preserved in the transcript, publishes the terminal, and returns the frame.
 
-**Call relations**: TurnEngine._resolve_unclaimed uses this when a worker cannot claim the turn, so duplicate workers do not overwrite live work.
+**Call relations**: TurnEngine._resolve_unclaimed calls it when this execution did not win the running claim.
 
 *Call graph*: calls 1 internal fn (persist_inbound); 5 external calls (__init__, model_validate, select, workspace_tx, log).
 
 
-##### `TranscriptRepair.persist_transcript`  (lines 840–847)
+##### `TranscriptRepair.persist_transcript`  (lines 947–954)
 
 ```
 async def persist_transcript(self, messages: tuple[Message, ...], answer: str, system: str, injected: str) -> None
 ```
 
-**Purpose**: Writes the completed conversation transcript, including the assistant’s final answer.
+**Purpose**: Writes the completed conversation transcript including the assistant’s final answer. This is the durable record future turns will read.
 
-**Data flow**: It receives the model messages, final answer, system prompt, and injected context. It appends the final assistant message and passes the full conversation to write_conversation.
+**Data flow**: It receives prior messages, answer text, system prompt, and injected context, appends an assistant answer message, and hands the full conversation to write_conversation.
 
-**Call relations**: TurnEngine persists successful turns through its wrapper, which delegates here.
+**Call relations**: TurnEngine._persist_transcript delegates to this after a successful terminal path.
 
 *Call graph*: calls 1 internal fn (write_conversation); 1 external calls (__init__).
 
 
-##### `TranscriptRepair.persist_inbound`  (lines 849–868)
+##### `TranscriptRepair.persist_inbound`  (lines 956–975)
 
 ```
 async def persist_inbound(self, arrivals: tuple[Message, ...]=(), founding_denial: str | None=None) -> None
 ```
 
-**Purpose**: Preserves user messages when a turn ends without a normal assistant answer, such as failure, cancellation, denial, or parked state.
+**Purpose**: Writes only the user-side messages when a turn ends without a complete assistant answer. This prevents member messages from disappearing after failures, cancellations, or denials.
 
-**Data flow**: It loads the founding message or builds a denied version, appends any absorbed arrivals, and writes that conversation without assistant error text.
+**Data flow**: It loads the founding inbound or builds a denial message, appends absorbed arrival messages, and writes that conversation state.
 
-**Call relations**: TranscriptRepair.resolve may call it before republishing a terminal. TurnEngine uses its wrapper on non-done exits.
+**Call relations**: TranscriptRepair.resolve calls it during repair, and TurnEngine._persist_inbound delegates to it on non-complete exits.
 
 *Call graph*: calls 3 internal fn (_prior_messages, load_messages, write_conversation); called by 1 (resolve); 1 external calls (__init__).
 
 
-##### `TranscriptRepair.load_messages`  (lines 870–879)
+##### `TranscriptRepair.load_messages`  (lines 977–986)
 
 ```
 async def load_messages(self) -> tuple[Message, ...]
 ```
 
-**Purpose**: Loads prior conversation messages and appends this turn’s founding inbound message in the form the model should see.
+**Purpose**: Loads the prior transcript and appends this turn’s founding user message. For normal member turns, it prefixes the message with the context tag.
 
-**Data flow**: It reads earlier transcript messages, adds a context tag for normal member turns, and returns the combined message tuple. Spawned turns keep their promised raw payload.
+**Data flow**: It reads previous messages, optionally wraps the inbound with _context_tag, creates a user message, and returns the combined tuple.
 
-**Call relations**: TurnEngine._load_messages delegates here. TranscriptRepair.persist_inbound also uses it when preserving inbound-only transcripts.
+**Call relations**: TurnEngine._load_messages delegates to this, and persist_inbound uses it when preserving inbound text.
 
 *Call graph*: calls 2 internal fn (_prior_messages, _context_tag); called by 1 (persist_inbound); 1 external calls (__init__).
 
 
-##### `TranscriptRepair._prior_messages`  (lines 881–887)
+##### `TranscriptRepair._prior_messages`  (lines 988–994)
 
 ```
 async def _prior_messages(self) -> tuple[Message, ...]
 ```
 
-**Purpose**: Reads the stored conversation before this turn, without accidentally reading this turn’s own replayed write.
+**Purpose**: Reads the conversation transcript before this turn, while avoiding reading this turn’s own previous write during replay. That prevents duplicated context.
 
-**Data flow**: It asks the transcript store for the saved conversation. If there is no older transcript, or it is already at this turn’s sequence or later, it returns an empty tuple; otherwise it returns stored messages.
+**Data flow**: It reads the transcript store, compares its sequence number with the current turn, and returns either stored messages or an empty tuple.
 
-**Call relations**: TranscriptRepair.load_messages and persist_inbound use this as the base for transcript writes.
+**Call relations**: TranscriptRepair.load_messages and persist_inbound call it when rebuilding the message window.
 
 *Call graph*: called by 2 (load_messages, persist_inbound).
 
 
-##### `TranscriptRepair.write_conversation`  (lines 889–909)
+##### `TranscriptRepair.write_conversation`  (lines 996–1016)
 
 ```
 async def write_conversation(self, messages: tuple[Message, ...], system: str | None=None, injected: str | None=None) -> None
 ```
 
-**Purpose**: Writes a conversation transcript with a few retries, so temporary storage errors do not immediately lose the record.
+**Purpose**: Writes a Conversation record to the transcript store with a few retries. This makes transcript persistence more tolerant of temporary storage failures.
 
-**Data flow**: It receives messages and optional system/injected text, builds a Conversation record, and tries to write it. On failure it logs and sleeps before retrying.
+**Data flow**: It receives messages and optional system/injected text, builds a Conversation, tries to write it, logs failures, waits briefly, and retries.
 
-**Call relations**: TranscriptRepair.persist_transcript and persist_inbound both use this as the actual durable transcript writer.
+**Call relations**: persist_transcript and persist_inbound both use it as the final write path.
 
 *Call graph*: called by 2 (persist_inbound, persist_transcript); 3 external calls (__init__, sleep, log).
 
 
-##### `_TurnMeter.exited`  (lines 943–960)
+##### `_TurnMeter.exited`  (lines 1050–1067)
 
 ```
 def exited(self, status: str) -> None
 ```
 
-**Purpose**: Records how long this execution of a turn took and how many model rounds it ran.
+**Purpose**: Records how long this execution ran and how many model rounds it entered. It reports the first exit only, so one execution is not counted twice.
 
-**Data flow**: It receives an exit status. If the meter has not already ended, it emits duration and round-count metrics and marks itself ended.
+**Data flow**: It receives an exit status, checks whether it already ended, computes elapsed time, and emits timing and round metrics.
 
-**Call relations**: TurnEngine._commit calls it after terminal commit or terminal readback. TurnEngine.run also calls it on parked, cancelled, and preempted exits.
+**Call relations**: TurnEngine._commit calls it after terminal commit or readback; TurnEngine.run and run_intent also trigger it on cancellation and parking paths.
 
 *Call graph*: called by 1 (_commit); 3 external calls (monotonic, emit_histogram, emit_metric).
 
 
-##### `TurnEngine.__post_init__`  (lines 1051–1062)
+##### `TurnEngine.__post_init__`  (lines 1160–1171)
 
 ```
 def __post_init__(self) -> None
 ```
 
-**Purpose**: Checks that the engine was wired with compatible audiences and no forbidden finish-tool conflict.
+**Purpose**: Checks that the engine was wired consistently after construction. It catches mismatched audiences and illegal subagent tool names early.
 
-**Data flow**: After the dataclass is built, it compares tool and hook audiences with the turn audience. For subagent output contracts, it also rejects a normal tool named finish.
+**Data flow**: It reads tool extension contexts, hooks, audience, output model, and tool registry. It raises a ValueError if the setup would route data to the wrong audience or conflict with the reserved finish tool.
 
-**Call relations**: Python dataclass construction calls this automatically before any turn runs.
+**Call relations**: Called automatically when a TurnEngine dataclass instance is created.
 
 
-##### `TurnEngine.__repr__`  (lines 1064–1068)
+##### `TurnEngine.__repr__`  (lines 1173–1177)
 
 ```
 def __repr__(self) -> str
 ```
 
-**Purpose**: Creates a short debug label for this engine instance.
+**Purpose**: Provides a compact text form of the engine for logs and debugging. It identifies the turn, agent, and profile.
 
-**Data flow**: It reads the turn id, agent id, and profile, then returns a compact string. It does not change state.
+**Data flow**: It reads the turn id, agent id, and computed profile and returns a formatted string.
 
-**Call relations**: Used implicitly by logging, tracing, or debugging when the engine object is displayed.
+**Call relations**: Used implicitly whenever a TurnEngine is represented in logs or debugging tools.
 
 
-##### `TurnEngine.profile`  (lines 1071–1074)
+##### `TurnEngine.profile`  (lines 1180–1183)
 
 ```
 def profile(self) -> str
 ```
 
-**Purpose**: Returns the telemetry profile name for this turn, such as main, agent, or a subagent profile.
+**Purpose**: Computes the telemetry profile for this turn, such as main, agent child, or a named subagent profile. Metrics use this to separate different kinds of work.
 
-**Data flow**: It reads whether the turn is spawned and its subagent profile, then delegates to the shared profile formatter. It returns a string.
+**Data flow**: It reads whether the turn is spawned and its subagent profile, then delegates to turn_profile.
 
-**Call relations**: Many engine methods use this when emitting metrics and logs so main and subagent work can be separated.
+**Call relations**: Many methods use this property when logging or emitting metrics.
 
 *Call graph*: 1 external calls (turn_profile).
 
 
-##### `TurnEngine.run`  (lines 1076–1281)
+##### `TurnEngine.run`  (lines 1185–1392)
 
 ```
 async def run(self) -> TerminalFrame | None
 ```
 
-**Purpose**: Runs a normal agent turn from claim to final terminal result. This is the main path for answering a prompt with model rounds and tools.
+**Purpose**: Runs a normal model-driven turn from claim to terminal result. It is the main body that loads context, calls the model, runs tools, handles arrivals, persists transcript, bills usage, and publishes live/final frames.
 
-**Data flow**: It starts metrics, claims the turn, builds ToolContext, fires prompt hooks, loads messages, loops through model/tool rounds, commits the terminal, writes transcripts, publishes live frames, and cleans up. On park, cancel, preemption, or failure, it records the appropriate durable state or billing and re-raises where needed.
+**Data flow**: It starts with the turn, agent, tools, model, sandbox, and services already attached. It claims the turn, prepares ToolContext and messages, loops through model rounds, commits a terminal or parks/fails/cancels, and changes database rows, transcripts, billing records, sandbox state, and hub events.
 
-**Call relations**: This is the central orchestration method. It calls helpers for claiming, loading, scheduled memory, model rounds, commits, publishing, billing, parking, arrival release, transcript persistence, sandbox stopping, and workspace-change recording.
+**Call relations**: This is the top-level turn workflow body. It calls most helpers in this file, including _mark_running, _model_round, _commit, _park, _persist_transcript, _publish_terminal, and cleanup paths.
 
 *Call graph*: calls 17 internal fn (_bill_cancelled, _commit, _load_messages, _mark_running, _model_round, _park, _persist_inbound, _persist_transcript, _publish, _publish_run (+7 more)); 12 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, escape, monotonic, emit_metric (+2 more)).
 
 
-##### `TurnEngine.run.rank_find`  (lines 1095–1117)
+##### `TurnEngine.run.rank_find`  (lines 1204–1227)
 
 ```
 async def rank_find(system: str, user: str) -> str
 ```
 
-**Purpose**: Runs the host-side model call used by the browser find tool to rank page elements.
+**Purpose**: Runs the host-side model call used by the browser find tool to rank page elements. Its usage is charged to the current turn.
 
-**Data flow**: It receives a system prompt and user prompt, sends a small model request, accumulates streamed text, and records usage into the current turn and dispatch-local usage list.
+**Data flow**: It receives a system prompt and user prompt, builds a small ModelRequest, streams text deltas into a result string, and records usage events both globally and for the current tool dispatch.
 
-**Call relations**: TurnEngine.run places this function into ToolContext as find, so tools can call it during dispatch and have its cost attached to the same turn.
+**Call relations**: TurnEngine.run places this function into ToolContext so browser tools can call it during dispatch.
 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
-##### `TurnEngine.run_intent`  (lines 1283–1412)
+##### `TurnEngine.run_intent`  (lines 1394–1523)
 
 ```
 async def run_intent(self) -> TerminalFrame | None
 ```
 
-**Purpose**: Runs a prepared intent turn, which is a direct tool call rather than a model conversation.
+**Purpose**: Runs a direct intent turn without asking the model. This is used for prepared UI actions or sandbox bridge calls that already name exactly one tool.
 
-**Data flow**: It claims the turn, parses the inbound intent or bridge request, builds one ToolUseBlock, binds and dispatches it, commits success or failure, writes the transcript, publishes the terminal, and cleans up.
+**Data flow**: It claims the turn, parses the inbound intent into one ToolUseBlock, resolves and checks it, binds requester authority, dispatches the tool through the same safe DBOS path, commits done or failed, writes transcript, and publishes the terminal.
 
-**Call relations**: It shares the same claiming, binding, dispatch recovery, commit, transcript, terminal publishing, and sandbox-cancel helpers as normal TurnEngine.run, but skips model rounds.
+**Call relations**: It shares many lower-level paths with model turns, including _resolve_call, _bind_or_error, _dispatch_step_recovering, _commit, and _publish_terminal.
 
-*Call graph*: calls 13 internal fn (_bind_or_error, _commit, _dispatch_step_recovering, _load_messages, _mark_running, _persist_transcript, _publish_terminal, _resolve_unclaimed, _start_activity, _stop_sandbox_commands (+3 more)); 12 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, model_validate_json, model_validate_json, monotonic (+2 more)).
+*Call graph*: calls 17 internal fn (_bind_or_error, _commit, _dispatch_step_recovering, _load_messages, _mark_running, _persist_transcript, _publish_terminal, _rejected, _resolve_call, _resolve_unclaimed (+7 more)); 11 external calls (__init__, __init__, __init__, __init__, __init__, __init__, model_validate_json, model_validate_json, monotonic, emit_metric (+1 more)).
 
 
-##### `TurnEngine._scheduled_system`  (lines 1414–1448)
+##### `TurnEngine._scheduled_system`  (lines 1525–1559)
 
 ```
 async def _scheduled_system(self, system: str) -> str
 ```
 
-**Purpose**: Adds recalled memory to the system prompt for scheduled turns, when memory search is available.
+**Purpose**: Adds recalled memory to the system prompt for scheduled turns. If memory search fails or finds nothing, the turn continues with the original prompt.
 
-**Data flow**: It receives the base system prompt, searches memory using the scheduled inbound text, formats matches as escaped bullet points, and returns an expanded prompt. If search fails or finds nothing, it returns the original prompt.
+**Data flow**: It receives the current system prompt, searches memory using the turn’s inbound text and audience subjects, formats matches as escaped recalled-memory bullets, and returns the augmented or original prompt.
 
-**Call relations**: TurnEngine.run calls this only for scheduled admissions before the model sees the prompt.
+**Call relations**: TurnEngine.run calls it only for scheduled admissions before user prompt hooks and model rounds begin.
 
 *Call graph*: called by 1 (run); 5 external calls (__init__, timeout, escape, log, audience_subjects).
 
 
-##### `TurnEngine._mark_running`  (lines 1450–1458)
+##### `TurnEngine._mark_running`  (lines 1561–1569)
 
 ```
 async def _mark_running(self) -> bool
 ```
 
-**Purpose**: Claims this turn for the engine’s workflow attempt.
+**Purpose**: Claims this turn as owned by the current workflow attempt. It is the engine’s local wrapper around the database claim function.
 
-**Data flow**: It passes the turn id and attempt id into _claim_turn and returns true if the claim succeeded. It does not do extra work itself.
+**Data flow**: It reads the turn id and attempt id from the engine, calls _claim_turn, and returns true if the claim succeeded.
 
-**Call relations**: TurnEngine.run and TurnEngine.run_intent call it at startup. If it fails, they use _resolve_unclaimed instead of running the turn.
+**Call relations**: TurnEngine.run and run_intent call it before doing real work; if it fails, they go to _resolve_unclaimed.
 
 *Call graph*: calls 1 internal fn (_claim_turn); called by 2 (run, run_intent).
 
 
-##### `TurnEngine._repair`  (lines 1460–1461)
+##### `TurnEngine._repair`  (lines 1571–1572)
 
 ```
 def _repair(self) -> TranscriptRepair
 ```
 
-**Purpose**: Creates the small TranscriptRepair helper tied to this turn, transcript store, and hub.
+**Purpose**: Creates a TranscriptRepair helper for this turn. This keeps transcript repair logic separate from the main engine flow.
 
-**Data flow**: It reads engine fields and returns a TranscriptRepair object. It changes nothing.
+**Data flow**: It reads the engine’s turn, transcript, and hub, and returns a TranscriptRepair object.
 
-**Call relations**: TurnEngine uses it from loading, transcript persistence, inbound persistence, and unclaimed-turn repair paths.
+**Call relations**: _load_messages, _persist_transcript, _persist_inbound, and _resolve_unclaimed all use this helper.
 
 *Call graph*: called by 5 (_load_messages, _persist_inbound, _persist_transcript, _resolve_unclaimed, run); 1 external calls (__init__).
 
 
-##### `TurnEngine._load_messages`  (lines 1463–1465)
+##### `TurnEngine._load_messages`  (lines 1574–1576)
 
 ```
 async def _load_messages(self) -> tuple[Message, ...]
 ```
 
-**Purpose**: Loads the transcript messages for this turn while wrapping the operation in a trace span.
+**Purpose**: Loads the message window for the turn while adding observability around the operation. It is the normal entry point for transcript loading inside TurnEngine.
 
-**Data flow**: It creates a repair helper and asks it to load messages. The returned tuple becomes the model’s starting conversation window.
+**Data flow**: It opens a tracing span, creates a TranscriptRepair helper, and returns its loaded messages.
 
-**Call relations**: TurnEngine.run and run_intent call it before writing transcripts or starting model work.
+**Call relations**: TurnEngine.run and run_intent call it when preparing transcript context or writing the final transcript.
 
 *Call graph*: calls 1 internal fn (_repair); called by 2 (run, run_intent); 1 external calls (span).
 
 
-##### `TurnEngine._model_round`  (lines 1467–1688)
+##### `TurnEngine._model_round`  (lines 1578–1810)
 
 ```
 async def _model_round(self, context: ToolContext, messages: tuple[Message, ...], usage_events: list[Usage], system: str, arrival_log: list[Message], absorbed_ids: list[UUID], requesters: dict[UUID, A
 ```
 
-**Purpose**: Runs the model/tool loop until there is a final answer, a pending user request, or the round budget is exhausted.
+**Purpose**: Runs the repeated model/tool loop until the agent has a final answer or exhausts its round budget. This is the heart of a normal conversational turn.
 
-**Data flow**: It receives current context, messages, usage lists, request trackers, and accumulators. Each loop absorbs arrivals, checks spend, compacts context, streams one model round, dispatches tool calls if present, records created objects and pending acts, and appends assistant/tool-result messages. It returns final messages, answer text, and any open question or credential/account request.
+**Data flow**: It receives current ToolContext, messages, usage list, system prompt, arrival and requester trackers, meter, change paths, and created objects. Each loop absorbs arrivals, checks spend, compacts context, streams one model round, dispatches tool calls, records acts and creations, and finally returns final messages, answer text, and any open user-facing requests.
 
-**Call relations**: TurnEngine.run calls this after setup. It coordinates arrival absorption, spend enforcement, compaction, streaming, speech, dispatching, forced final answers, forced finish, created-object folding, and cost publishing.
+**Call relations**: TurnEngine.run calls it after setup. It calls _absorb_arrivals, _stream_recovering_overflow, _dispatch_segments, _bind_or_error, _dispatch, _round_acts, _force_final, and many supporting helpers.
 
-*Call graph*: calls 19 internal fn (_absorb_arrivals, _bind_or_error, _dispatch, _enforce_spend, _fold_created, _force_final, _force_finish, _offload, _publish_cost, _reseed_loaded_skills (+9 more)); called by 1 (run); 10 external calls (__init__, __init__, __init__, __init__, gather, marked_replies, emit_metric, log, span, change_targets).
+*Call graph*: calls 20 internal fn (_absorb_arrivals, _bind_or_error, _dispatch, _enforce_spend, _fold_created, _force_final, _force_finish, _offload, _publish_cost, _reseed_loaded_skills (+10 more)); called by 1 (run); 10 external calls (__init__, __init__, __init__, gather, marked_replies, emit_metric, log, span, freeform_result_contract, change_targets).
 
 
-##### `TurnEngine._fold_created`  (lines 1690–1718)
+##### `TurnEngine._fold_created`  (lines 1812–1840)
 
 ```
 async def _fold_created(self, created: dict[ObjectRef, None], tool_calls: tuple[ToolUseBlock, ...], results: tuple[ToolResultBlock, ...]) -> None
 ```
 
-**Purpose**: Adds newly created object references from a round to the turn’s durable created list.
+**Purpose**: Adds newly created object references from a round into the durable turn row. This preserves creations even if the turn later parks, cancels, or fails.
 
-**Data flow**: It reads tool results, extracts created refs, compares them with the accumulator, updates the accumulator, and writes the full set back to the turn row if there are new ones.
+**Data flow**: It receives the accumulator, tool calls, and results, extracts new created refs, updates the accumulator, and writes the whole set to the database for non-terminal turns.
 
-**Call relations**: TurnEngine._model_round calls it after tool dispatch, even on unwind, so creations are not lost if later work fails.
+**Call relations**: TurnEngine._model_round calls it in a dispatch cleanup block so creations are recorded even if later dispatch handling raises.
 
 *Call graph*: calls 1 internal fn (_created_refs); called by 1 (_model_round); 2 external calls (update, workspace_tx).
 
 
-##### `TurnEngine._absorb_arrivals`  (lines 1720–1780)
+##### `TurnEngine._absorb_arrivals`  (lines 1842–1902)
 
 ```
 async def _absorb_arrivals(self, messages: tuple[Message, ...], arrival_log: list[Message], absorbed_ids: list[UUID], requesters: dict[UUID, ActiveMessage] | None=None) -> tuple[Message, ...]
 ```
 
-**Purpose**: Pulls newly queued inbound messages into the current model conversation between rounds.
+**Purpose**: Pulls queued inbound messages into the current model window between rounds. This lets the agent answer messages that arrived while it was already running.
 
-**Data flow**: It asks _claim_arrivals for a recorded batch, appends each rendered or denied arrival to messages and the arrival log, updates active requesters, tracks absorbed ids, and publishes an absorbed notice for member messages.
+**Data flow**: It receives current messages and tracking lists, claims arrivals through _claim_arrivals, converts each into a user message or denial marker, updates absorbed ids and requesters, logs the drain, publishes Absorbed frames for member messages, and returns the expanded message tuple.
 
-**Call relations**: TurnEngine._model_round calls it at the start of each round so new user guidance is seen before the next model call.
+**Call relations**: TurnEngine._model_round calls it at the start of every round.
 
 *Call graph*: calls 2 internal fn (_claim_arrivals, _publish); called by 1 (_model_round); 5 external calls (__init__, __init__, __init__, escape, log).
 
 
-##### `TurnEngine._speak`  (lines 1782–1834)
+##### `TurnEngine._speak`  (lines 1904–1956)
 
 ```
 async def _speak(self, spoken: tuple[MarkedReply, ...], round_index: int) -> None
 ```
 
-**Purpose**: Delivers mid-turn reply spans that the model explicitly marked as messages to members.
+**Purpose**: Delivers marked mid-turn replies to members before the whole turn is finished. It writes delivery rows and publishes live Reply frames.
 
-**Data flow**: It receives marked reply spans and a round number. For main turns, it writes idempotent mid-turn reply rows and publishes live Reply frames; for subagent turns or empty spans, it does nothing.
+**Data flow**: It receives marked reply spans and a round index, skips subagents, creates stable reply ids, inserts rows if not already present, logs new rows, and publishes each reply.
 
-**Call relations**: TurnEngine._model_round calls it when a tool-calling round has marked replies before continuing with tools.
+**Call relations**: TurnEngine._model_round calls it when a tool-calling round produced marked member-facing text.
 
 *Call graph*: calls 1 internal fn (_publish); called by 1 (_model_round); 4 external calls (__init__, workspace_tx, log, mid_turn_reply_id_for).
 
 
-##### `TurnEngine._stream_closing_spans`  (lines 1836–1846)
+##### `TurnEngine._stream_closing_spans`  (lines 1958–1968)
 
 ```
 async def _stream_closing_spans(self, spoken: tuple[MarkedReply, ...]) -> None
 ```
 
-**Purpose**: Streams marked reply text from the final round back to live listeners, because final-round spans are part of the final answer rather than separate mid-turn replies.
+**Purpose**: Publishes marked reply text from a closing round back onto the live text stream. This ensures terminal-style clients still see the final answer as streaming text.
 
-**Data flow**: It receives marked spans and publishes each span’s text as a TextDelta. It does not write delivery rows.
+**Data flow**: It receives marked reply spans and publishes each span’s text as a TextDelta.
 
-**Call relations**: TurnEngine._model_round and _force_final call it when a closing answer is ready.
+**Call relations**: TurnEngine._model_round and _force_final call it when the turn is closing without separate mid-turn Reply frames.
 
 *Call graph*: calls 1 internal fn (_publish); called by 2 (_force_final, _model_round); 1 external calls (__init__).
 
 
-##### `TurnEngine._render_arrival`  (lines 1848–1872)
+##### `TurnEngine._render_arrival`  (lines 1970–1994)
 
 ```
 async def _render_arrival(self, message_id: UUID, body: str, context: TurnContext | None, speaker_member_id: UUID | None, created_at: datetime) -> tuple[str | None, str | None]
 ```
 
-**Purpose**: Turns one queued inbound message into exactly the text the model should see, or into a safe denial.
+**Purpose**: Runs prompt-submission hooks for one queued arrival and builds the exact text the model should see. Denied messages become safe denial text instead of exposing the original body.
 
-**Data flow**: It receives the message id, body, context, speaker, and created time. It fires the user_prompt_submit hook, adds a context tag and injected context if allowed, or returns the denial text.
+**Data flow**: It receives arrival identity, body, context, speaker, and time. It fires the user_prompt_submit hook, returns a denial if blocked, or returns context-tagged content with injected context if supplied.
 
-**Call relations**: TurnEngine._claim_arrivals calls it inside the DBOS step so replay uses the same rendered text without firing hooks again.
+**Call relations**: TurnEngine._claim_arrivals calls it while claiming and memoizing arrival batches.
 
 *Call graph*: calls 1 internal fn (_context_tag); called by 1 (_claim_arrivals); 1 external calls (__init__).
 
 
-##### `TurnEngine._claim_arrivals`  (lines 1875–1944)
+##### `TurnEngine._claim_arrivals`  (lines 1997–2066)
 
 ```
 async def _claim_arrivals(self, absorbed: tuple[UUID, ...]) -> tuple[Arrival, ...]
 ```
 
-**Purpose**: Atomically claims pending inbound messages for this turn and records their rendered form as a replayable DBOS step.
+**Purpose**: Claims pending inbound messages for this turn as a replay-safe DBOS step. It guarantees a drained batch is not lost or consumed twice across crashes.
 
-**Data flow**: It receives ids already absorbed, marks unconsumed or recoverable inbound rows as consumed by this turn, renders them in sequence order, and returns Arrival records. For spawned turns, it claims only internal arrivals.
+**Data flow**: It receives already absorbed ids, stamps eligible inbound rows with this turn id, renders each row through _render_arrival, logs the claimed batch, closes adoption replay mode, and returns Arrival records.
 
-**Call relations**: TurnEngine._absorb_arrivals calls this. Because it is a DBOS step, crash recovery reuses the same claimed batch instead of consuming messages twice.
+**Call relations**: TurnEngine._absorb_arrivals calls it each round before adding arrivals to the message window.
 
 *Call graph*: calls 1 internal fn (_render_arrival); called by 1 (_absorb_arrivals); 7 external calls (__init__, model_validate, and_, or_, update, workspace_tx, log).
 
 
-##### `TurnEngine._release_unabsorbed`  (lines 1946–1965)
+##### `TurnEngine._release_unabsorbed`  (lines 2068–2087)
 
 ```
 async def _release_unabsorbed(self, absorbed: tuple[UUID, ...]) -> None
 ```
 
-**Purpose**: Returns arrival rows that were claimed but not safely absorbed, so a later turn can read them.
+**Purpose**: Returns arrival rows that were stamped by this turn but not fully absorbed back to the pending queue on failed or cancelled exits. This is a best-effort safety net against message loss.
 
-**Data flow**: It receives absorbed ids, clears consumed_turn_id for this turn’s other stamped arrivals, and logs any failure without stopping the exit path.
+**Data flow**: It receives absorbed ids, clears consumed_turn_id for rows claimed by this turn but not in that absorbed list, and logs if the cleanup fails.
 
-**Call relations**: TurnEngine.run calls it on cancellation, preemption, and failure paths where unfinished arrival claims should not be lost.
+**Call relations**: TurnEngine.run calls it on failure, cancellation, or preemption paths.
 
 *Call graph*: called by 1 (run); 3 external calls (update, workspace_tx, log).
 
 
-##### `TurnEngine._force_final`  (lines 1967–2005)
+##### `TurnEngine._force_final`  (lines 2089–2127)
 
 ```
 async def _force_final(self, messages: tuple[Message, ...], usage_events: list[Usage], system: str, requesters: dict[UUID, ActiveMessage]) -> tuple[tuple[Message, ...], str]
 ```
 
-**Purpose**: Gets a best-effort final answer when the model has used all allowed tool rounds.
+**Purpose**: Produces a best-effort final answer after the normal round budget is spent. Instead of failing immediately, it asks the model to answer without more tools, or forces a subagent finish.
 
-**Data flow**: It records exhaustion, checks spend, compacts context, then either forces a subagent finish tool or asks the model for one no-tool final answer. It publishes cost and returns final messages plus answer text.
+**Data flow**: It receives messages, usage, system prompt, and requesters. It emits exhaustion metrics, checks spend, compacts context, adds a force-final prompt, streams one no-tool round or forced finish, publishes cost, and returns final messages and answer.
 
-**Call relations**: TurnEngine._model_round calls it after the round limit. It uses _force_finish for subagents and _stream_recovering_overflow for normal forced answers.
+**Call relations**: TurnEngine._model_round calls it when the loop reaches max_rounds.
 
 *Call graph*: calls 5 internal fn (_enforce_spend, _force_finish, _publish_cost, _stream_closing_spans, _stream_recovering_overflow); called by 1 (_model_round); 4 external calls (__init__, marked_replies, emit_metric, log).
 
 
-##### `TurnEngine._force_finish`  (lines 2007–2032)
+##### `TurnEngine._force_finish`  (lines 2129–2154)
 
 ```
 async def _force_finish(self, messages: tuple[Message, ...], usage_events: list[Usage], system: str) -> tuple[tuple[Message, ...], str]
 ```
 
-**Purpose**: Forces a subagent to close through the finish tool so its answer matches the required output schema.
+**Purpose**: Forces a subagent to close with the reserved finish tool so its answer matches the required output schema. A malformed forced finish fails loudly.
 
-**Data flow**: It requires an output model, runs one model round with only finish available and selected, validates the finish arguments, and returns canonical JSON. If the model does not comply, it raises an error.
+**Data flow**: It receives messages, usage, and system prompt, streams one round with only finish available and required, validates the finish input against the output model, and returns JSON answer text.
 
-**Call relations**: TurnEngine._model_round uses it when a subagent stops with prose, and _force_final uses it when a subagent exhausts its round budget.
+**Call relations**: TurnEngine._model_round uses it for prose subagent endings, and _force_final uses it when a subagent exhausts rounds.
 
 *Call graph*: calls 2 internal fn (_publish_cost, _stream_recovering_overflow); called by 2 (_force_final, _model_round).
 
 
-##### `TurnEngine._stream_recovering_overflow`  (lines 2034–2097)
+##### `TurnEngine._stream_recovering_overflow`  (lines 2156–2219)
 
 ```
 async def _stream_recovering_overflow(self, messages: tuple[Message, ...], usage_events: list[Usage], system: str, offer_tools: bool=True, force_finish: bool=False, active_requests: tuple[str, ...]=()
 ```
 
-**Purpose**: Runs one model round and retries once after forced compaction if the provider says the context is too large.
+**Purpose**: Runs one model round and retries once after forced compaction if the provider says the context is too large. It turns recorded model-step errors into ModelStreamError for the caller.
 
-**Data flow**: It builds a RoundInput and calls _stream_once. It adds usage, turns recorded stream errors into ModelStreamError, and on context overflow asks compaction to shrink the messages before retrying.
+**Data flow**: It receives messages and round options, calls _stream_once, adds usage, checks for embedded errors, and returns messages plus result. If there is a context overflow, it forces compaction, reseeds skills, retries once, and returns the compacted window.
 
-**Call relations**: TurnEngine._model_round, _force_final, and _force_finish use this instead of calling _stream_once directly so overflow recovery is consistent.
+**Call relations**: _model_round, _force_final, and _force_finish all call it as their safe model-round wrapper.
 
 *Call graph*: calls 3 internal fn (__init__, _reseed_loaded_skills, _stream_once); called by 3 (_force_final, _force_finish, _model_round); 4 external calls (__init__, is_context_overflow, emit_metric, log).
 
 
-##### `TurnEngine._enforce_spend`  (lines 2099–2159)
+##### `TurnEngine._enforce_spend`  (lines 2221–2281)
 
 ```
 async def _enforce_spend(self, usage_events: list[Usage], requesters: dict[UUID, ActiveMessage]) -> None
 ```
 
-**Purpose**: Checks before each model round that the turn is still allowed to continue under seats, balance, and spending caps.
+**Purpose**: Checks before each model round whether the turn is still allowed to spend. It protects seats, balances, and caps while preserving already-spent work by parking instead of discarding it.
 
-**Data flow**: It receives usage so far and active requesters. It checks member seats, computes pending cost unless the user brings their own key, checks workspace balance, and checks spend caps. If blocked, it raises TurnParked with a reason.
+**Data flow**: It receives current usage events and active requesters, checks member seats, calculates pending cost unless using a bring-your-own-key path, checks workspace balance and spend caps, and raises TurnParked when blocked.
 
-**Call relations**: TurnEngine._model_round and _force_final call it before spending more model tokens. TurnEngine.run catches TurnParked and parks the turn.
+**Call relations**: TurnEngine._model_round and _force_final call it before more model work.
 
 *Call graph*: calls 2 internal fn (__init__, _total_usage); called by 2 (_force_final, _model_round); 7 external calls (__init__, __init__, __init__, applicable_caps_absent, balance_absent, workspace_tx, audience_member).
 
 
-##### `TurnEngine._stream_once`  (lines 2162–2404)
+##### `TurnEngine._stream_once`  (lines 2284–2526)
 
 ```
 async def _stream_once(self, round_input: _RoundInput) -> StreamResult
 ```
 
-**Purpose**: Performs one actual streamed model call and records its output as a DBOS step.
+**Purpose**: Performs one actual model stream as a replay-safe DBOS step. It streams visible text live, collects tool calls, reasoning blocks, and usage, and records errors as data so usage is not lost.
 
-**Data flow**: It receives round input, builds the model request with tools and reasoning settings, streams events, publishes visible text deltas, gathers tool-call fragments, reasoning blocks, and usage, records metrics, and returns a StreamResult. If the stream errors, it returns the error and partial output in the result.
+**Data flow**: It receives _RoundInput, builds a ModelRequest with the right tools and cache settings, streams provider events, buffers and redacts live text, collects usage and tool-call JSON, emits metrics, and returns a StreamResult.
 
-**Call relations**: TurnEngine._stream_recovering_overflow is its caller. Because this is a DBOS step, crash recovery replays the same model output without calling the model again.
+**Call relations**: TurnEngine._stream_recovering_overflow is its only direct caller and wraps its result with overflow recovery and error raising.
 
 *Call graph*: calls 2 internal fn (_parse_args, _total_usage); called by 1 (_stream_recovering_overflow); 14 external calls (__init__, __init__, __init__, __init__, __init__, Event, Lock, ensure_future, now, monotonic (+4 more)).
 
 
-##### `TurnEngine._stream_once.flush`  (lines 2241–2250)
+##### `TurnEngine._stream_once.flush`  (lines 2365–2374)
 
 ```
 async def flush() -> None
 ```
 
-**Purpose**: Flushes buffered streamed text to live listeners while respecting reply redaction.
+**Purpose**: Flushes buffered model text to live listeners while respecting reply redaction. It prevents tiny stream deltas from being published one character at a time.
 
-**Data flow**: It takes text chunks accumulated in the enclosing _stream_once call, feeds them through the redactor, clears the buffer, and publishes visible text if any.
+**Data flow**: It reads the local text buffer, feeds it through ReplyRedaction, clears the buffer, resets pending byte count, and publishes visible text if any.
 
-**Call relations**: Only TurnEngine._stream_once uses this helper, both when the buffer is large enough and when the stream ends.
+**Call relations**: The local pace task and the main streaming loop inside _stream_once call it during and after model streaming.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `TurnEngine._stream_once.pace`  (lines 2252–2257)
+##### `TurnEngine._stream_once.pace`  (lines 2376–2381)
 
 ```
 async def pace() -> None
 ```
 
-**Purpose**: Periodically flushes streamed text so live users see progress even when chunks are small.
+**Purpose**: Periodically flushes streamed model text even if the byte buffer is not full. This keeps live output feeling responsive.
 
-**Data flow**: It waits in short intervals until the stream stops, calling flush after each timeout. It returns when the stop event is set.
+**Data flow**: It waits in short intervals until stopped and calls flush whenever the interval expires.
 
-**Call relations**: TurnEngine._stream_once starts this as a background task during model streaming and stops it when streaming finishes.
+**Call relations**: _stream_once starts it as a background task for the lifetime of one model stream.
 
 *Call graph*: 1 external calls (wait_for).
 
 
-##### `TurnEngine._publish_cost`  (lines 2406–2421)
+##### `TurnEngine._publish_cost`  (lines 2528–2543)
 
 ```
 async def _publish_cost(self, usage_events: list[Usage]) -> None
 ```
 
-**Purpose**: Publishes a live cost update showing the turn’s spend so far.
+**Purpose**: Publishes a live estimate of the turn’s cost and token count so surfaces can show a running cost meter. Publish failures do not affect the turn.
 
-**Data flow**: It totals usage events, computes token count and micro-dollar cost, and sends a CostTick frame through the hub. Publish failures are swallowed by _publish.
+**Data flow**: It totals usage events, computes tokens and micro-dollar cost, wraps them in a CostTick, and sends it through _publish.
 
-**Call relations**: TurnEngine._model_round, _force_final, and _force_finish call it after model rounds so surfaces can show a live cost meter.
+**Call relations**: _model_round, _force_final, and _force_finish call it after model rounds.
 
 *Call graph*: calls 2 internal fn (_publish, _total_usage); called by 3 (_force_final, _force_finish, _model_round); 1 external calls (__init__).
 
 
-##### `TurnEngine._reseed_loaded_skills`  (lines 2423–2434)
+##### `TurnEngine._reseed_loaded_skills`  (lines 2545–2556)
 
 ```
 def _reseed_loaded_skills(self, messages: tuple[Message, ...]) -> None
 ```
 
-**Purpose**: Refreshes the tracker of skills currently present in the model’s conversation window.
+**Purpose**: Refreshes the record of which skills are already loaded in the current message window. This avoids repeating skill instructions that survived compaction.
 
-**Data flow**: It scans messages through _loaded_skill_closures and reseeds the compaction tracker, including preloaded skills. It changes only the loaded-skills tracker.
+**Data flow**: It scans messages through _loaded_skill_closures and reseeds the compaction tracker with those closures plus preloaded skills.
 
-**Call relations**: TurnEngine._model_round calls it around compaction, and _stream_recovering_overflow calls it after forced compaction.
+**Call relations**: _model_round calls it around compaction, and _stream_recovering_overflow calls it after forced compaction.
 
 *Call graph*: calls 1 internal fn (_loaded_skill_closures); called by 2 (_model_round, _stream_recovering_overflow).
 
 
-##### `TurnEngine._bind_or_error`  (lines 2436–2462)
+##### `TurnEngine._resolve_call`  (lines 2558–2572)
 
 ```
-async def _bind_or_error(self, context: ToolContext, call: ToolUseBlock, requesters: dict[UUID, ActiveMessage]) -> _BindResult
+def _resolve_call(self, call: ToolUseBlock) -> _Resolution
 ```
 
-**Purpose**: Prepares a tool call for dispatch, turning ordinary binding problems into model-visible tool errors.
+**Purpose**: Turns a raw model tool call into either a resolved callable tool/action or a structured rejection. This makes later dispatch logic operate on one common identity.
 
-**Data flow**: It receives a context, call, and active requesters. It tries to bind the requester and adjusted context; on success it returns a resolved call, while validation or requester problems become a rejected call with error text.
+**Data flow**: It receives a ToolUseBlock, routes object_action calls to _resolve_action, otherwise looks up the tool by name, and returns an EffectiveCall or _RejectedToolCall.
 
-**Call relations**: TurnEngine._model_round and run_intent call it before dispatch. Serious cancellation or missing-terminal cases are metered and re-raised.
+**Call relations**: _model_round resolves every model tool call with it; run_intent uses it for direct intent calls.
 
-*Call graph*: calls 2 internal fn (_bind_requester, _meter_dispatch); called by 2 (_model_round, run_intent); 4 external calls (__init__, __init__, __init__, monotonic).
+*Call graph*: calls 2 internal fn (_rejected, _resolve_action); called by 2 (_model_round, run_intent); 1 external calls (__init__).
 
 
-##### `TurnEngine._dispatch`  (lines 2464–2470)
+##### `TurnEngine._resolve_action`  (lines 2574–2648)
+
+```
+def _resolve_action(self, call: ToolUseBlock) -> _Resolution
+```
+
+**Purpose**: Resolves a generic object_action call into the specific bound object action it names, while enforcing shape, grants, target rules, and input validation. Invalid actions become safe tool errors rather than uncontrolled dispatches.
+
+**Data flow**: It parses the object-action input, looks up the kind and action, checks binding requirements, agent targeting, granted actions, and input schema, then returns an EffectiveCall with validated action args or a rejection.
+
+**Call relations**: TurnEngine._resolve_call delegates object_action calls here.
+
+*Call graph*: calls 1 internal fn (_rejected); called by 1 (_resolve_call); 3 external calls (__init__, model_validate, replace).
+
+
+##### `TurnEngine._rejected`  (lines 2650–2662)
+
+```
+def _rejected(self, call: ToolUseBlock, error: Exception, dimensions: Mapping[str, str] | None=None) -> _RejectedToolCall
+```
+
+**Purpose**: Builds a standardized rejected tool call result from an exception. This lets invalid names, bad arguments, and early policy-like failures occupy their normal place in tool-result order.
+
+**Data flow**: It receives the call, exception, and optional metric labels, formats error text, chooses an outcome category, and returns a _RejectedToolCall.
+
+**Call relations**: _resolve_call, _resolve_action, _bind_or_error, and run_intent use it whenever a call should become an is_error tool result.
+
+*Call graph*: called by 4 (_bind_or_error, _resolve_action, _resolve_call, run_intent); 1 external calls (__init__).
+
+
+##### `TurnEngine._bind_or_error`  (lines 2664–2699)
+
+```
+async def _bind_or_error(self, context: ToolContext, item: _Resolution, requesters: dict[UUID, ActiveMessage]) -> _DispatchInput
+```
+
+**Purpose**: Binds a resolved call to the right requester-specific ToolContext, or turns binding problems into rejected calls. Binding decides whose authority, sandbox, and subagents the tool runs under.
+
+**Data flow**: It receives base context, a resolved item, and active requesters. Rejected items pass through; valid calls go through _bind_requester and become _BoundToolCall; exceptions become rejection results or terminal errors.
+
+**Call relations**: _model_round and run_intent call it before dispatching tools.
+
+*Call graph*: calls 3 internal fn (_bind_requester, _rejected, _meter_dispatch); called by 2 (_model_round, run_intent); 5 external calls (__init__, __init__, meter_dimensions, replace, monotonic).
+
+
+##### `TurnEngine._dispatch`  (lines 2701–2707)
 
 ```
 async def _dispatch(self, bound: _DispatchInput, usage_events: list[Usage] | None=None) -> ToolResultBlock
 ```
 
-**Purpose**: Runs one prepared dispatch input and converts its stored dispatch result into a model-facing tool result block.
+**Purpose**: Runs a bound or rejected tool call and converts the recorded dispatch result into the model-facing ToolResultBlock. It is the normal dispatch wrapper used by model rounds.
 
-**Data flow**: It receives a bound or rejected tool call plus optional usage list. It runs the recovering DBOS dispatch step, then rehydrates images or text into a ToolResultBlock.
+**Data flow**: It receives a dispatch input and optional usage list, calls _dispatch_step_recovering, then rehydrates the result through _dispatch_result.
 
-**Call relations**: TurnEngine._model_round calls this for each tool in a dispatch segment.
+**Call relations**: TurnEngine._model_round calls it for each bound item in a dispatch segment.
 
 *Call graph*: calls 2 internal fn (_dispatch_result, _dispatch_step_recovering); called by 1 (_model_round).
 
 
-##### `TurnEngine._dispatch_result`  (lines 2472–2504)
+##### `TurnEngine._dispatch_result`  (lines 2709–2741)
 
 ```
 async def _dispatch_result(self, result: DispatchResult) -> ToolResultBlock
 ```
 
-**Purpose**: Converts a DispatchResult into the ToolResultBlock that is fed back to the model.
+**Purpose**: Converts a serialized DispatchResult back into a ToolResultBlock the model can read. If images were offloaded, it loads them from blob storage at this point.
 
-**Data flow**: It receives serialized result text, error state, activity flag, and optional image references. If images are present, it reads their blobs and builds image blocks; otherwise it builds a plain text result.
+**Data flow**: It receives a DispatchResult, either creates a text-only result or fetches image blobs and builds text/image blocks, records the result for activity labeling, and returns the ToolResultBlock.
 
-**Call relations**: TurnEngine._dispatch calls it after _dispatch_step_recovering returns.
+**Call relations**: TurnEngine._dispatch calls it after _dispatch_step_recovering completes.
 
 *Call graph*: called by 1 (_dispatch); 4 external calls (__init__, __init__, __init__, __init__).
 
 
-##### `TurnEngine._dispatch_step_recovering`  (lines 2506–2514)
+##### `TurnEngine._dispatch_step_recovering`  (lines 2743–2753)
 
 ```
 async def _dispatch_step_recovering(self, bound: _DispatchInput, usage_events: list[Usage] | None) -> DispatchResult
 ```
 
-**Purpose**: Keeps running dispatch steps until it gets a non-interrupted result accepted by the live execution.
+**Purpose**: Repeats dispatch steps when a previous dispatch was interrupted in a way that DBOS recorded. It keeps retrying until a non-interrupted result is accepted.
 
-**Data flow**: It receives one dispatch input and an optional usage accumulator. It calls _dispatch_step, passes the result to _accept_dispatch_result, and repeats if the result represented an interrupted checkpoint.
+**Data flow**: It receives a dispatch input and usage list, calls _dispatch_step with an optional resume target, updates the resume target from the result, and stops when _accept_dispatch_result approves it.
 
-**Call relations**: TurnEngine._dispatch and run_intent use this around the DBOS dispatch step.
+**Call relations**: TurnEngine._dispatch and run_intent use it to execute tool dispatches safely.
 
 *Call graph*: calls 2 internal fn (_accept_dispatch_result, _dispatch_step); called by 2 (_dispatch, run_intent).
 
 
-##### `TurnEngine._accept_dispatch_result`  (lines 2516–2527)
+##### `TurnEngine._accept_dispatch_result`  (lines 2755–2766)
 
 ```
 def _accept_dispatch_result(self, result: DispatchResult, usage_events: list[Usage] | None) -> bool
 ```
 
-**Purpose**: Decides whether a dispatch result should be used, retried, or treated as a live cancellation.
+**Purpose**: Decides whether a DispatchResult should be used or whether dispatch should continue after interruption. It also adds recorded tool-side model usage exactly when appropriate.
 
-**Data flow**: It receives a DispatchResult and optional usage list. It checks whether the step body ran live, adds usage when appropriate, removes the call from live tracking, raises cancellation for live interrupted work, and returns whether the result is acceptable.
+**Data flow**: It receives a dispatch result and optional usage list, checks whether this was a live dispatch body, merges usage for replayed recorded work, raises cancellation for live interruption, and returns whether to accept the result.
 
-**Call relations**: TurnEngine._dispatch_step_recovering calls it after every _dispatch_step result.
+**Call relations**: _dispatch_step_recovering calls it after each _dispatch_step result.
 
 *Call graph*: called by 1 (_dispatch_step_recovering).
 
 
-##### `TurnEngine._bind_requester`  (lines 2529–2574)
+##### `TurnEngine._bind_requester`  (lines 2768–2811)
 
 ```
-async def _bind_requester(self, context: ToolContext, call: ToolUseBlock, requesters: dict[UUID, ActiveMessage]) -> tuple[ToolContext, ToolUseBlock]
+async def _bind_requester(self, context: ToolContext, item: EffectiveCall, requesters: dict[UUID, ActiveMessage]) -> tuple[ToolContext, ToolUseBlock]
 ```
 
-**Purpose**: Applies the model’s requested-by message reference to a tool call, selecting the right member authority and sandbox where needed.
+**Purpose**: Applies requester identity to a tool call and selects requester-specific sandbox and subagent controls. This enforces that tools acting for a member are tied to an active inbound message.
 
-**Data flow**: It copies the tool input, validates and removes the requested-by marker when present, finds the member requester, asks optional factories for member-specific sandbox and subagent controls, and returns an updated context plus cleaned call.
+**Data flow**: It receives base context, an EffectiveCall, and requesters. It parses and removes requested_by when present, validates the referenced message, picks the acting member, asks provider callbacks for member-specific resources when available, and returns updated context plus cleaned call.
 
-**Call relations**: TurnEngine._bind_or_error calls this before a tool can be dispatched.
+**Call relations**: _bind_or_error calls it for every valid resolved tool call.
 
-*Call graph*: called by 1 (_bind_or_error); 3 external calls (model_copy, replace, UUID).
+*Call graph*: called by 1 (_bind_or_error); 2 external calls (replace, UUID).
 
 
-##### `TurnEngine._offload`  (lines 2576–2601)
+##### `TurnEngine._offload`  (lines 2813–2838)
 
 ```
 async def _offload(self, name: str, content: str) -> str | None
 ```
 
-**Purpose**: Writes large text content into the sandbox tool-output directory and returns a path the model can use instead of inline content.
+**Purpose**: Writes large text content to the sandbox runtime output directory and returns a display path. This keeps huge tool results or salvaged model output out of the prompt while still making them available.
 
-**Data flow**: It receives a file name and content, ensures the output directory exists, writes the bytes, and returns a display path. On failure it logs, records a metric, and returns nothing.
+**Data flow**: It receives a file name and content, ensures the output directory exists, writes bytes to the sandbox, logs and returns nothing on failure, or returns the display path.
 
-**Call relations**: TurnEngine._dispatch_step uses it for large tool output. TurnEngine._model_round uses it to save partial model output after truncation.
+**Call relations**: _dispatch_step uses it for oversized tool output, and _model_round uses it for truncated model-output salvage.
 
 *Call graph*: called by 2 (_dispatch_step, _model_round); 2 external calls (emit_metric, log).
 
 
-##### `TurnEngine._start_activity`  (lines 2603–2608)
+##### `TurnEngine._start_activity`  (lines 2840–2845)
 
 ```
 def _start_activity(self, call: ToolUseBlock, goal: str) -> None
 ```
 
-**Purpose**: Starts a background task that summarizes what a tool call is doing for live activity updates.
+**Purpose**: Starts background generation of a short human-readable activity label for a tool call. This lets live surfaces show what the agent is doing.
 
-**Data flow**: It increments an activity sequence number, creates an async task for _generate_activity, and tracks the task until it finishes.
+**Data flow**: It receives a tool call and goal text, increments an activity sequence, starts _generate_activity as an asyncio task, and tracks the task for later cleanup.
 
-**Call relations**: TurnEngine._model_round and run_intent call it after a tool call is successfully resolved.
+**Call relations**: _model_round and run_intent call it just before dispatching a real bound tool call.
 
 *Call graph*: calls 1 internal fn (_generate_activity); called by 2 (_model_round, run_intent); 1 external calls (create_task).
 
 
-##### `TurnEngine._generate_activity`  (lines 2610–2622)
+##### `TurnEngine._generate_activity`  (lines 2847–2859)
 
 ```
 async def _generate_activity(self, call: ToolUseBlock, goal: str, sequence: int) -> None
 ```
 
-**Purpose**: Generates and publishes a short human-friendly activity label for a tool call.
+**Purpose**: Creates and publishes an activity summary for a tool call in the original call order. This avoids activity messages arriving out of sequence when summaries finish at different speeds.
 
-**Data flow**: It asks the activity summarizer for text, stores the label by call id, and publishes ready labels in original sequence order. It also mirrors subagent activity when relevant.
+**Data flow**: It receives the call, goal, and sequence number, asks the activity summarizer for text, stores any label by call id, then publishes ready summaries in order.
 
-**Call relations**: TurnEngine._start_activity launches it as a background task.
+**Call relations**: _start_activity launches it as a background task; it publishes through _publish and _publish_run.
 
 *Call graph*: calls 2 internal fn (_publish, _publish_run); called by 1 (_start_activity); 1 external calls (__init__).
 
 
-##### `TurnEngine._stop_activity`  (lines 2624–2626)
+##### `TurnEngine._stop_activity`  (lines 2861–2863)
 
 ```
 def _stop_activity(self) -> None
 ```
 
-**Purpose**: Cancels any unfinished background activity-summary tasks.
+**Purpose**: Cancels outstanding background activity-summary tasks when the turn terminal is published. This prevents leftover tasks from running after the turn is over.
 
-**Data flow**: It loops over tracked activity tasks and cancels each one. It does not wait for new summaries.
+**Data flow**: It reads the tracked task set and cancels each task.
 
-**Call relations**: TurnEngine._publish_terminal calls it once the turn has ended, because live activity is no longer needed.
+**Call relations**: _publish_terminal calls it after sending the terminal and subagent status update.
 
 *Call graph*: called by 1 (_publish_terminal).
 
 
-##### `TurnEngine._dispatch_step`  (lines 2629–2832)
+##### `TurnEngine._dispatch_step`  (lines 2866–3123)
 
 ```
-async def _dispatch_step(self, bound: _DispatchInput) -> DispatchResult
+async def _dispatch_step(self, bound: _DispatchInput, resume_target: ObjectActionTarget | None=None) -> DispatchResult
 ```
 
-**Purpose**: Runs one tool call as a recorded DBOS step, including validation, hooks, handler execution, output bounding, image offload, and metrics.
+**Purpose**: Runs one tool call as a replay-safe DBOS step. It validates inputs, fires hooks, handles object-action targets, runs the handler, bounds or offloads output, walls untrusted content, stores images separately, records usage, and returns a serialized DispatchResult.
 
-**Data flow**: It receives a bound or rejected dispatch input. Rejections become error results; valid calls pass through pre-tool hooks, run the tool handler with an idempotency key when needed, collect text/images and find usage, bound or offload large output, wall off untrusted text, fire post hooks, store images in blobs, and return a DispatchResult.
+**Data flow**: It receives a bound or rejected dispatch item and optional resume target. Rejections become error results immediately; valid calls are validated, checked through hooks, run with an idempotency key when side-effecting, converted to text/images, passed through post hooks, image-bounded and blob-offloaded, metered, and returned.
 
-**Call relations**: TurnEngine._dispatch_step_recovering calls this. Because it is a DBOS step, completed tool calls replay without running again after a crash.
+**Call relations**: _dispatch_step_recovering is its caller. It calls helpers such as _pending_member_guidance, _redoes_on_replay, _offload, _bounded_image, _bounded, and _meter_dispatch.
 
 *Call graph*: calls 6 internal fn (_bounded_image, _offload, _pending_member_guidance, _redoes_on_replay, _bounded, _meter_dispatch); called by 1 (_dispatch_step_recovering); 13 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, replace, monotonic (+3 more)).
 
 
-##### `TurnEngine._redoes_on_replay`  (lines 2834–2843)
+##### `TurnEngine._redoes_on_replay`  (lines 3125–3132)
 
 ```
-def _redoes_on_replay(self, name: str) -> bool
+def _redoes_on_replay(self, tool: ToolDef) -> bool
 ```
 
-**Purpose**: Tells whether rerunning a tool after crash recovery would redo work in a way that should yield to pending member guidance.
+**Purpose**: Tells whether rerunning a tool body would redo work and can therefore be preempted by newer member guidance during crash recovery. Side-effecting tools rely on idempotency instead.
 
-**Data flow**: It receives a tool name, looks it up, and returns true for registered non-side-effecting tools. Unknown tools return false.
+**Data flow**: It receives a tool definition and returns true for non-side-effecting tools.
 
-**Call relations**: TurnEngine._dispatch_step uses it during adoption replay before deciding to preempt a live re-executed call.
+**Call relations**: _dispatch_step uses it during adoption replay before rerunning a dispatch body.
 
 *Call graph*: called by 1 (_dispatch_step).
 
 
-##### `TurnEngine._pending_member_guidance`  (lines 2845–2861)
+##### `TurnEngine._pending_member_guidance`  (lines 3134–3150)
 
 ```
 async def _pending_member_guidance(self) -> bool
 ```
 
-**Purpose**: Checks whether an unconsumed member message is waiting in the conversation.
+**Purpose**: Checks whether an unclaimed member message is waiting in this conversation. During crash recovery, this can stop stale non-side-effecting work from running ahead of new user guidance.
 
-**Data flow**: It queries inbound messages for the turn’s conversation looking for an unconsumed member admission and returns a boolean.
+**Data flow**: It queries inbound_message for one pending member-admitted row in the turn’s conversation and returns whether one exists.
 
-**Call relations**: TurnEngine._dispatch_step uses it during crash-recovery adoption to avoid redoing read-like work ahead of new user guidance.
+**Call relations**: _dispatch_step calls it only inside a live dispatch body during adoption replay.
 
 *Call graph*: called by 1 (_dispatch_step); 2 external calls (select, workspace_tx).
 
 
-##### `TurnEngine._bounded_image`  (lines 2863–2891)
+##### `TurnEngine._bounded_image`  (lines 3152–3180)
 
 ```
 async def _bounded_image(self, image: ImageBlock) -> ImageBlock
 ```
 
-**Purpose**: Shrinks oversized tool-result images before sending them back to the model.
+**Purpose**: Shrinks oversized tool-result images before sending them back to the model. This avoids provider limits and wasting context on pixels the model will not use.
 
-**Data flow**: It receives an ImageBlock with base64 data, opens it, checks its dimensions, creates a thumbnail if needed, re-encodes it, and returns a new ImageBlock. If image processing fails, it logs and returns the original image.
+**Data flow**: It receives an ImageBlock, decodes and opens the image, leaves it alone if already small, otherwise thumbnails it, converts format if needed, re-encodes it, and returns a new ImageBlock; on image errors it logs and returns the original.
 
-**Call relations**: TurnEngine._dispatch_step calls it before writing tool images to blob storage.
+**Call relations**: _dispatch_step calls it before storing successful image outputs in the blob store.
 
 *Call graph*: called by 1 (_dispatch_step); 7 external calls (__init__, __init__, to_thread, b64decode, b64encode, BytesIO, log).
 
 
-##### `TurnEngine._commit`  (lines 2893–2965)
+##### `TurnEngine._commit`  (lines 3182–3254)
 
 ```
 async def _commit(self, status: TerminalStatus, usage_events: list[Usage], meter: _TurnMeter, answer: str='', error: BaseException | None=None, question: AskUserInput | None=None, credential_request:
 ```
 
-**Purpose**: Retries until the turn’s terminal state is durably written or a pending-arrival guard asks the model loop to continue.
+**Purpose**: Retries terminal commit until it succeeds, then records terminal metrics and execution timing. This makes a final answer durable even through temporary database trouble.
 
-**Data flow**: It receives the desired status, usage, answer or error, pending requests, created refs, and guard options. It repeatedly calls _commit_once with backoff, emits terminal metrics if it wrote the transition, records execution timing, logs the outcome, and returns the terminal frame or none.
+**Data flow**: It receives status, usage, meter, answer/error/request fields, created refs, and arrival guards. It repeatedly calls _commit_once with backoff, emits metrics if this call wrote the terminal, marks the meter exited, logs the terminal, and returns the frame or None when arrivals prevented closing.
 
-**Call relations**: TurnEngine.run and run_intent call it for success and failure paths. It delegates the database work to _commit_once.
+**Call relations**: TurnEngine.run and run_intent use it for done and failed terminal paths.
 
 *Call graph*: calls 2 internal fn (_commit_once, exited); called by 2 (run, run_intent); 4 external calls (sleep, emit_metric, formatted_stack, log).
 
 
-##### `TurnEngine._publish_terminal`  (lines 2967–2970)
+##### `TurnEngine._publish_terminal`  (lines 3256–3259)
 
 ```
 async def _publish_terminal(self, frame: TerminalFrame) -> None
 ```
 
-**Purpose**: Publishes the final terminal frame to live listeners and stops activity summaries.
+**Purpose**: Publishes the terminal frame to live listeners and mirrors subagent status if needed. It also stops activity-summary background tasks.
 
-**Data flow**: It receives a TerminalFrame, publishes it on the turn stream, mirrors subagent status if needed, and cancels outstanding activity tasks.
+**Data flow**: It receives a TerminalFrame, publishes it as a Terminal live frame, publishes run status through _publish_run, and cancels activity tasks.
 
-**Call relations**: TurnEngine.run and run_intent call it after a terminal frame is committed.
+**Call relations**: TurnEngine.run and run_intent call it after a terminal frame has been committed.
 
 *Call graph*: calls 3 internal fn (_publish, _publish_run, _stop_activity); called by 2 (run, run_intent); 1 external calls (__init__).
 
 
-##### `TurnEngine._record_workspace_changes`  (lines 2972–2985)
+##### `TurnEngine._record_workspace_changes`  (lines 3261–3274)
 
 ```
 async def _record_workspace_changes(self, targets: tuple[str, ...]) -> None
 ```
 
-**Purpose**: Scans and records sandbox workspace changes after the turn is finished enough that the user is no longer waiting on the answer.
+**Purpose**: Scans and records workspace file changes after the turn is done. It waits until transcript and terminal publishing are complete so the user is not blocked by the scan.
 
-**Data flow**: It receives accumulated change targets, builds a WorkspaceChangeRecorder with sandbox and conversation identifiers, and asks it to record changes.
+**Data flow**: It receives accumulated target paths, builds a WorkspaceChangeRecorder for the sandbox’s owning conversation, and asks it to record changes.
 
 **Call relations**: TurnEngine.run calls it after publishing the terminal for normal turns.
 
 *Call graph*: called by 1 (run); 1 external calls (__init__).
 
 
-##### `TurnEngine._commit_once`  (lines 2987–3101)
+##### `TurnEngine._commit_once`  (lines 3276–3390)
 
 ```
 async def _commit_once(self, status: TerminalStatus, usage_events: list[Usage], answer: str, error: BaseException | None, question: AskUserInput | None, credential_request: CredentialRequest | None, c
 ```
 
-**Purpose**: Performs the actual database transaction that bills usage and writes the terminal frame.
+**Purpose**: Performs one database transaction to bill usage and write or read the terminal frame. It also refuses to close over unabsorbed arrivals when requested.
 
-**Data flow**: It totals usage, optionally locks the conversation and refuses to close if arrivals are still pending, records billing, reads final cost, builds a TerminalFrame, and updates the turn if it is still non-terminal. If another path already ended it, it reads and returns the existing terminal.
+**Data flow**: It totals usage, optionally locks the conversation and checks pending arrivals, records turn usage, reads billed cost, builds a TerminalFrame, updates the turn if still non-terminal, or reads the existing terminal if someone already ended it.
 
-**Call relations**: TurnEngine._commit wraps this with retry, metrics, and logging.
+**Call relations**: _commit wraps it with retry, metrics, and logging.
 
 *Call graph*: calls 1 internal fn (_total_usage); called by 1 (_commit); 11 external calls (__init__, model_validate, and_, or_, select, update, read_turn_cost, record_turn_usage, workspace_tx, log (+1 more)).
 
 
-##### `TurnEngine._park`  (lines 3103–3141)
+##### `TurnEngine._park`  (lines 3392–3430)
 
 ```
 async def _park(self, message: str, usage_events: list[Usage]) -> None
 ```
 
-**Purpose**: Puts a turn into the parked state when it hits a spend, balance, or seat gate, preserving work so it can resume later.
+**Purpose**: Durably pauses a turn when spending or seat checks say it cannot continue. It bills usage so far, releases claimed arrivals, publishes a Parked frame, and leaves the turn resumable.
 
-**Data flow**: It marks the turn parked, records usage for the attempt, releases consumed inbound messages for future re-drain, then publishes a Parked frame and emits metrics if the update happened.
+**Data flow**: It receives a reason message and usage events, updates the turn to parked in the database, records usage, clears consumed arrivals, then publishes the parked notice and metrics if the update succeeded.
 
-**Call relations**: TurnEngine.run catches TurnParked from _enforce_spend and calls this before re-raising.
+**Call relations**: TurnEngine.run catches TurnParked and calls this.
 
 *Call graph*: calls 2 internal fn (_publish, _total_usage); called by 1 (run); 6 external calls (__init__, update, record_turn_usage, workspace_tx, emit_metric, log).
 
 
-##### `TurnEngine._publish`  (lines 3143–3152)
+##### `TurnEngine._publish`  (lines 3432–3441)
 
 ```
 async def _publish(self, frame: LiveFrame) -> None
 ```
 
-**Purpose**: Publishes one live frame while ensuring live-publish failure never fails the turn.
+**Purpose**: Publishes one live frame to the hub without letting publish failures break the turn. The database remains the source of truth.
 
-**Data flow**: It receives a live frame, asks the hub to publish it for this turn, and logs any exception. It returns nothing.
+**Data flow**: It receives a live frame, attempts to publish it for this turn id, and logs any failure.
 
-**Call relations**: Many helpers use it for text deltas, cost ticks, replies, absorbed notices, parked notices, activity, and terminal frames.
+**Call relations**: Many methods use it for text deltas, absorbed notices, replies, cost ticks, activity, parked notices, and terminal frames.
 
 *Call graph*: called by 8 (_absorb_arrivals, _generate_activity, _park, _publish_cost, _publish_terminal, _speak, _stream_closing_spans, run); 1 external calls (log).
 
 
-##### `TurnEngine._publish_run`  (lines 3154–3176)
+##### `TurnEngine._publish_run`  (lines 3443–3465)
 
 ```
 async def _publish_run(self, activity: str='', status: str='') -> None
 ```
 
-**Purpose**: Mirrors subagent activity and status onto the root turn stream that user surfaces are watching.
+**Purpose**: Mirrors subagent activity and status onto the root turn stream that user surfaces are watching. Main turns do nothing here.
 
-**Data flow**: If lineage exists, it builds a SubagentActivity frame with parent/root context, optional activity text, and status, then publishes it to the root turn. Without lineage it does nothing.
+**Data flow**: It receives optional activity text and status, checks lineage, builds a SubagentActivity frame, and publishes it to the root turn id while logging failures.
 
-**Call relations**: TurnEngine.run announces subagent start, _generate_activity announces subagent activity, and _publish_terminal announces subagent completion.
+**Call relations**: TurnEngine.run, _generate_activity, and _publish_terminal call it for subagent lifecycle updates.
 
 *Call graph*: called by 3 (_generate_activity, _publish_terminal, run); 2 external calls (__init__, log).
 
 
-##### `TurnEngine._stop_sandbox_commands`  (lines 3178–3194)
+##### `TurnEngine._stop_sandbox_commands`  (lines 3467–3483)
 
 ```
 async def _stop_sandbox_commands(self) -> None
 ```
 
-**Purpose**: Stops running sandbox commands when a user deliberately cancels the workflow.
+**Purpose**: Stops sandbox commands after a deliberate workflow cancellation. It avoids killing work during ordinary worker preemption, because that work may be resumed.
 
-**Data flow**: It asks the sandbox to stop commands and logs any failure. It does not change the already-durable cancellation result.
+**Data flow**: It calls sandbox.stop_commands and logs any failure without changing the already durable cancellation outcome.
 
-**Call relations**: TurnEngine.run and run_intent call it on DBOS workflow cancellation, not on ordinary executor preemption.
+**Call relations**: TurnEngine.run and run_intent call it on DBOS workflow cancellation paths.
 
 *Call graph*: called by 2 (run, run_intent); 1 external calls (log_error).
 
 
-##### `TurnEngine._bill_cancelled`  (lines 3196–3216)
+##### `TurnEngine._bill_cancelled`  (lines 3485–3505)
 
 ```
 async def _bill_cancelled(self, usage_events: list[Usage]) -> None
 ```
 
-**Purpose**: Best-effort billing for tokens already consumed by a cancelled or preempted normal turn.
+**Purpose**: Best-effort billing for tokens consumed before cancellation or preemption. Cancellation should not wait forever on billing, but usage should still count when possible.
 
-**Data flow**: It totals usage and tries to record it in a database transaction. If billing fails, it logs and lets cancellation continue.
+**Data flow**: It totals usage events, opens a database transaction, records turn usage, and logs if billing fails.
 
 **Call relations**: TurnEngine.run calls it on DBOS cancellation and asyncio preemption paths.
 
 *Call graph*: calls 1 internal fn (_total_usage); called by 1 (run); 3 external calls (record_turn_usage, workspace_tx, log).
 
 
-##### `TurnEngine._resolve_unclaimed`  (lines 3218–3223)
+##### `TurnEngine._resolve_unclaimed`  (lines 3507–3512)
 
 ```
 async def _resolve_unclaimed(self) -> TerminalFrame | None
 ```
 
-**Purpose**: Handles the case where this execution did not win ownership of the turn.
+**Purpose**: Handles an execution that did not win the running claim. It either republishes an already committed terminal or returns nothing while another live execution owns the turn.
 
-**Data flow**: It creates a TranscriptRepair helper and asks it to resolve the situation. The result is either a republished committed terminal or nothing if another live execution is still running.
+**Data flow**: It creates a TranscriptRepair helper and calls resolve, returning the repaired terminal frame or None.
 
-**Call relations**: TurnEngine.run and run_intent call it after _mark_running returns false.
+**Call relations**: TurnEngine.run and run_intent call it when _mark_running returns false.
 
 *Call graph*: calls 1 internal fn (_repair); called by 2 (run, run_intent).
 
 
-##### `TurnEngine._persist_transcript`  (lines 3225–3251)
+##### `TurnEngine._persist_transcript`  (lines 3514–3540)
 
 ```
 async def _persist_transcript(self, messages: tuple[Message, ...], answer: str, system: str, injected: str) -> None
 ```
 
-**Purpose**: Writes the completed transcript, adding activity labels to tool result blocks before handing it to TranscriptRepair.
+**Purpose**: Writes the final transcript while attaching generated activity labels to tool results. This gives later readers a richer conversation record.
 
-**Data flow**: It receives messages, answer, system prompt, and injected context. It copies tool result blocks that have recorded activity labels, then delegates to TranscriptRepair.persist_transcript.
+**Data flow**: It receives messages, answer, system prompt, and injected text, copies tool-result blocks that have matching activity labels, then delegates to TranscriptRepair.persist_transcript.
 
 **Call relations**: TurnEngine.run and run_intent call it after committing a terminal result.
 
 *Call graph*: calls 1 internal fn (_repair); called by 2 (run, run_intent).
 
 
-##### `TurnEngine._persist_inbound`  (lines 3253–3258)
+##### `TurnEngine._persist_inbound`  (lines 3542–3547)
 
 ```
 async def _persist_inbound(self, arrivals: tuple[Message, ...]=(), founding_denial: str | None=None) -> None
 ```
 
-**Purpose**: Persists only the inbound side of the conversation for non-normal exits.
+**Purpose**: Persists only inbound messages for non-complete exits through the transcript repair helper. This keeps user messages available for future turns.
 
-**Data flow**: It receives optional arrival messages and an optional founding denial marker, creates a repair helper, and delegates to TranscriptRepair.persist_inbound.
+**Data flow**: It receives optional arrival messages and founding denial text, creates a TranscriptRepair helper, and delegates to persist_inbound.
 
-**Call relations**: TurnEngine.run calls it on parked, cancelled, failed, or non-done terminal paths where assistant output should not be written as a normal answer.
+**Call relations**: TurnEngine.run calls it on parked, cancelled, failed, or non-done terminal paths.
 
 *Call graph*: calls 1 internal fn (_repair); called by 1 (run).
 
 
-### Skill Assembly
-These files define the skill runtime, persist user-created skills, choose relevant skills for a turn, and generate built-in skill guides from live system registries.
-
-### `core/src/ufo/skills/__init__.py`
-
-`other` · `import/package discovery`
-
-This is an intentionally empty package file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to modules under `ufo.skills` using normal import paths.
-
-Think of it like a label on a drawer: the label does not contain the tools, but it lets the rest of the workshop know that this drawer exists and can be opened by name. Without this file, depending on the Python version and project setup, imports involving `ufo.skills` might fail or behave differently.
-
-There are no functions, classes, settings, or side effects here. Its value is structural: it helps organize the codebase and gives the `skills` area a clear place in the project’s module hierarchy.
-
-
-### `core/src/ufo/skills/runtime.py`
-
-`domain_logic` · `startup and skill loading during turns`
-
-A skill is a small folder that teaches the agent how to do something. Its main file, SKILL.md, contains a short metadata header plus the actual instructions. This file is the bridge between those folders on disk, the registry of skills available at runtime, the text shown to the agent, and the files copied into the sandbox.
-
-The file first defines the shapes used by the system: a lightweight SkillCard for search and dependency lookup, a RuntimeSkill for the full parsed skill with instructions and assets, and LoadedSkill for a skill chosen for one conversation turn. It can parse skills from folders, including nested child skills. Child skills get path-like names such as parent/child, but they are not automatically pulled in; only an explicit depends list does that.
-
-SkillRegistry is the main switchboard. It knows about built-in deploy skills and optional member-saved skills. When asked to load a skill, it expands the request into the full dependency closure, like making sure a recipe includes every ingredient it depends on. It then materializes those references into real RuntimeSkill objects.
-
-Finally, the file formats the skill instructions for the model, avoids repeating instructions already in the conversation, builds a readable tree of loaded files, and sends the skill files to the sandbox. Without this file, the agent could not reliably find, verify, de-duplicate, or install the instructions and assets that skills provide.
-
-#### Function details
-
-##### `skill_root`  (lines 51–53)
-
-```
-def skill_root(name: str) -> str
-```
-
-**Purpose**: Builds the stable sandbox path where a named skill should live. This gives every skill a predictable home under $UFO_HOME/skills.
-
-**Data flow**: It receives a skill name, joins it to the common skills root path, and returns that path as text. It does not read or change anything else.
-
-**Call relations**: RuntimeSkill.root uses this helper whenever another part of the runtime needs to know where a skill's files will appear inside the sandbox.
-
-*Call graph*: called by 1 (root).
-
-
-##### `RuntimeSkill.all_files`  (lines 89–90)
-
-```
-def all_files(self) -> dict[str, bytes]
-```
-
-**Purpose**: Returns every file that belongs to a skill, including SKILL.md and any bundled asset files. This is the complete file set used for hashing and sandbox installation.
-
-**Data flow**: It reads the skill's stored raw SKILL.md text and asset file list, turns SKILL.md into bytes, combines them into one path-to-bytes dictionary, and returns it.
-
-**Call relations**: RuntimeSkill.content_digest uses this complete file map to make a stable fingerprint, and _wire_skill uses it to prepare files for transfer into the sandbox.
-
-*Call graph*: called by 2 (content_digest, _wire_skill).
-
-
-##### `RuntimeSkill.root`  (lines 92–93)
-
-```
-def root(self) -> str
-```
-
-**Purpose**: Returns the sandbox directory path for this particular skill. It is a small convenience method so callers do not have to know the path formula.
-
-**Data flow**: It reads the skill's name, passes it to skill_root, and returns the resulting $UFO_HOME/skills/... path.
-
-**Call relations**: _wire_skill calls this when it is making sandbox-safe file paths for a skill's files.
-
-*Call graph*: calls 1 internal fn (skill_root); called by 1 (_wire_skill).
-
-
-##### `RuntimeSkill.card`  (lines 95–103)
-
-```
-def card(self) -> SkillCard
-```
-
-**Purpose**: Creates the lightweight routing view of a full skill. The card keeps only the information needed for search and dependency resolution, not the instruction body.
-
-**Data flow**: It reads the skill's name, description, dependencies, and target agents, then returns a new SkillCard with those fields.
-
-**Call relations**: The registry uses cards so it can resolve skill names and dependencies without always loading or carrying the full instruction text.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `RuntimeSkill.content_digest`  (lines 105–111)
-
-```
-def content_digest(self) -> str
-```
-
-**Purpose**: Computes a stable fingerprint for a skill's contents. The fingerprint changes when any file path or file content changes, which helps caches and sandboxes know exactly what version they have.
-
-**Data flow**: It gathers all skill files, sorts them for repeatable ordering, hashes each path and each file's bytes, combines those hashes, and returns a sha256:... digest string.
-
-**Call relations**: System skill bundles, _wire_skill, and sandbox loading use this digest as a compact identity for the exact skill contents.
-
-*Call graph*: calls 1 internal fn (all_files); called by 1 (_wire_skill); 1 external calls (sha256).
-
-
-##### `SystemSkillBundle.from_skills`  (lines 123–148)
-
-```
-def from_skills(cls, skills: Iterable[RuntimeSkill]) -> 'SystemSkillBundle'
-```
-
-**Purpose**: Packages a set of deploy-time system skills into a deterministic ZIP archive and manifest. This gives servers, terminals, and sandboxes one fixed bundle to share and cache.
-
-**Data flow**: It receives RuntimeSkill objects, checks that duplicate names do not disagree in content, builds a JSON manifest with each skill's digest and file list, computes a bundle digest, writes the manifest and files into a ZIP archive, and returns a SystemSkillBundle.
-
-**Call relations**: Startup and serving code call this when they need the system skill bundle for runtime initialization, shared surfaces, or sandbox image building.
-
-*Call graph*: called by 4 (init_runtime, _mount_shared_surfaces, run, system_skill_bundle); 4 external calls (sha256, BytesIO, dumps, ZipFile).
-
-
-##### `SystemSkillBundle._write`  (lines 151–154)
-
-```
-def _write(archive: zipfile.ZipFile, path: str, content: bytes) -> None
-```
-
-**Purpose**: Writes one file into a ZIP archive in a repeatable way. It fixes timestamps and permissions so the same inputs produce the same archive bytes.
-
-**Data flow**: It receives an open ZIP archive, a path, and file bytes, creates a ZIP entry with a fixed date and normal file permissions, then writes the bytes into the archive.
-
-**Call relations**: SystemSkillBundle.from_skills uses this helper for both the manifest and every skill file it places in the bundle.
-
-*Call graph*: 2 external calls (writestr, ZipInfo).
-
-
-##### `LoadedSkill.prompt_body`  (lines 167–177)
-
-```
-def prompt_body(self) -> str
-```
-
-**Purpose**: Turns one loaded skill into the text block shown to the agent. It labels whether the agent asked for the skill directly or it arrived as a dependency.
-
-**Data flow**: It reads the loaded skill's name, dependency marker, and instruction body, builds a markdown header, appends the instructions, and returns the resulting text.
-
-**Call relations**: loaded_context uses this when assembling the full skill text that will be put in front of the model.
-
-
-##### `LoadedSkills.reseed`  (lines 203–222)
-
-```
-def reseed(self, loads: Iterable[tuple[LoadedRef, ...]], preloaded: tuple[LoadedSkill, ...]=()) -> None
-```
-
-**Purpose**: Rebuilds the memory of which skill instructions are already in the model's conversation context. This prevents the system from paying to show the same long instructions again.
-
-**Data flow**: It receives past resolved loads and optional preloaded skills, clears the current sets, records every skill now considered in context, and separately records which ones the agent directly asked for.
-
-**Call relations**: It calls reset first to avoid stale state, then rebuilds the tracker from resolved load records rather than trusting loose text in the transcript.
-
-*Call graph*: calls 1 internal fn (reset).
-
-
-##### `LoadedSkills.drain`  (lines 224–229)
-
-```
-def drain(self) -> tuple[str, ...]
-```
-
-**Purpose**: Returns the names of skills the agent directly requested, then clears the tracker. This is useful at a boundary where old instruction bodies are dropped but the system wants to remember what should be re-loadable later.
-
-**Data flow**: It reads the asked_for set, sorts it into a tuple, clears both tracking sets, and returns the tuple of names.
-
-**Call relations**: It relies on reset for clearing, just like reseed does, so the tracker has one consistent way to empty itself.
-
-*Call graph*: calls 1 internal fn (reset).
-
-
-##### `LoadedSkills.reset`  (lines 231–233)
-
-```
-def reset(self) -> None
-```
-
-**Purpose**: Clears all remembered loaded-skill state. After this, the tracker behaves as if no skill instructions are currently in context.
-
-**Data flow**: It empties the in_context set and the asked_for set. It returns nothing.
-
-**Call relations**: LoadedSkills.reseed calls it before rebuilding state, and LoadedSkills.drain calls it after handing names across a boundary.
-
-*Call graph*: called by 2 (drain, reseed).
-
-
-##### `_split_frontmatter`  (lines 236–242)
-
-```
-def _split_frontmatter(text: str) -> tuple[str, str]
-```
-
-**Purpose**: Separates the metadata header from the markdown instructions inside SKILL.md. The metadata is YAML, meaning a simple structured text format, and the body is the workflow the agent reads.
-
-**Data flow**: It receives raw SKILL.md text, checks that it starts with the expected --- fence, finds the closing fence, and returns the metadata text and body text. If the fences are missing, it raises an error.
-
-**Call relations**: parse_skill_content calls this before interpreting a skill, so malformed skill files fail early and clearly.
-
-*Call graph*: called by 1 (parse_skill_content).
-
-
-##### `_child_skill_dirs`  (lines 245–250)
-
-```
-def _child_skill_dirs(skill_dir: Path) -> list[Path]
-```
-
-**Purpose**: Finds immediate subfolders that are themselves skills. A child skill is recognized by having its own SKILL.md.
-
-**Data flow**: It receives a directory path, looks at its direct children, keeps only child directories containing SKILL.md, sorts them, and returns the list.
-
-**Call relations**: parse_skill uses it to keep child skill files out of the parent's asset bundle, and discover_skills uses it to recursively register child skills.
-
-*Call graph*: called by 2 (discover_skills, parse_skill); 1 external calls (iterdir).
-
-
-##### `parse_skill_content`  (lines 253–290)
-
-```
-def parse_skill_content(dir_name: str, files: Mapping[str, bytes], registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
-```
-
-**Purpose**: Builds a RuntimeSkill from files already held in memory. This lets the system validate a saved or sandbox-read skill the same way it validates one from disk.
-
-**Data flow**: It receives a directory name, a map of file paths to bytes, and optional registry naming details. It reads SKILL.md, splits and parses the YAML metadata, checks that the declared name matches the folder name, extracts description, dependencies, agent targeting, and asset files, then returns a RuntimeSkill.
-
-**Call relations**: parse_skill gathers files from disk and hands them here. This function is the central parser that turns raw bytes into the runtime object the rest of the skill system understands.
-
-*Call graph*: calls 1 internal fn (_split_frontmatter); called by 1 (parse_skill); 3 external calls (__init__, PurePosixPath, safe_load).
-
-
-##### `parse_skill`  (lines 293–302)
-
-```
-def parse_skill(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> RuntimeSkill
-```
-
-**Purpose**: Reads one skill directory from disk and parses it. It treats nested child skill folders as separate skills, not as ordinary assets of the parent.
-
-**Data flow**: It receives a filesystem path, finds child skill directories, reads all ordinary files that belong to the current skill, and passes those bytes to parse_skill_content. It returns one RuntimeSkill.
-
-**Call relations**: discover_skills calls this for each skill folder it visits while flattening a tree of parent and child skills into registry entries.
-
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill_content); called by 1 (discover_skills); 1 external calls (rglob).
-
-
-##### `discover_skills`  (lines 305–323)
-
-```
-def discover_skills(skill_dir: Path, registry_name: str | None=None, parent: str | None=None) -> dict[str, RuntimeSkill]
-```
-
-**Purpose**: Discovers a skill and all of its nested child skills, returning them in one flat name-to-skill map. This turns a folder tree into the registry names the runtime can load.
-
-**Data flow**: It receives a skill directory and optional parent naming information, parses the current skill, records it under its registry name, then recursively discovers each immediate child skill under a path-like name such as parent/child.
-
-**Call relations**: _load_core_skills uses this when reading the built-in skills. The function also calls parse_skill for the current folder and _child_skill_dirs to decide what children to recurse into.
-
-*Call graph*: calls 2 internal fn (_child_skill_dirs, parse_skill); called by 1 (_load_core_skills).
-
-
-##### `_load_core_skills`  (lines 326–333)
-
-```
-def _load_core_skills(root: Path) -> dict[str, RuntimeSkill]
-```
-
-**Purpose**: Loads all built-in skills shipped beside this runtime file. These core skills define the baseline abilities and house style available in every deployment.
-
-**Data flow**: It receives the root directory, scans visible child directories, discovers skills inside each one, merges the results into a dictionary, and returns that dictionary by skill name.
-
-**Call relations**: The module calls this during import to build CORE_SKILLS_BY_NAME, which then feeds the default CORE_SKILL_REGISTRY.
-
-*Call graph*: calls 1 internal fn (discover_skills); 1 external calls (iterdir).
-
-
-##### `SkillRegistry.__post_init__`  (lines 360–362)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: Fills in the default set of bundled skill names after a SkillRegistry is created. If no explicit bundled set is provided, every deploy skill is treated as bundled.
-
-**Data flow**: It checks whether bundled_names is missing. If so, it stores a frozen set of the current deploy skill names on the registry.
-
-**Call relations**: This runs automatically after SkillRegistry construction, including registries created by merged_with and with_member.
-
-
-##### `SkillRegistry.named`  (lines 364–368)
-
-```
-def named(self, name: str) -> RuntimeSkill
-```
-
-**Purpose**: Looks up a deploy skill by name and returns the full RuntimeSkill. It gives a helpful error if the name is not known.
-
-**Data flow**: It receives a name, checks the deploy-skill dictionary, and returns the matching RuntimeSkill. If the name is absent, it asks _unknown to build an error with close-name suggestions.
-
-**Call relations**: This is the direct lookup path for code that specifically needs a deploy skill, rather than the mixed deploy/member card lookup used during closure resolution.
-
-*Call graph*: calls 1 internal fn (_unknown).
-
-
-##### `SkillRegistry._unknown`  (lines 370–373)
-
-```
-def _unknown(self, name: str) -> ValueError
-```
-
-**Purpose**: Creates a clear error for an unknown skill name, optionally suggesting similar known names. This helps users recover from typos.
-
-**Data flow**: It receives the missing name, gathers all known names, finds a few close matches, and returns a ValueError message containing the missing name and any suggestions.
-
-**Call relations**: SkillRegistry.named and SkillRegistry._card use this when a requested skill cannot be found.
-
-*Call graph*: calls 1 internal fn (known_names); called by 2 (_card, named); 1 external calls (get_close_matches).
-
-
-##### `SkillRegistry._card`  (lines 375–382)
-
-```
-def _card(self, name: str) -> SkillCard
-```
-
-**Purpose**: Gets the lightweight routing card for a skill name, whether it is a deploy skill or a member-saved skill. This gives dependency resolution one common shape to work with.
-
-**Data flow**: It receives a name, first checks deploy skills and converts a found RuntimeSkill to a card, then checks member cards. If neither exists, it raises the unknown-skill error.
-
-**Call relations**: SkillRegistry.closure and its internal add step call this whenever they need to resolve a requested skill or dependency name.
-
-*Call graph*: calls 1 internal fn (_unknown); called by 2 (closure, add).
-
-
-##### `SkillRegistry.known_names`  (lines 384–387)
-
-```
-def known_names(self) -> frozenset[str]
-```
-
-**Purpose**: Returns every skill name this registry can currently resolve. That includes deploy skills and member-saved skill cards.
-
-**Data flow**: It reads the deploy-skill names and member-card names, combines them into one frozen set, and returns it.
-
-**Call relations**: SkillRegistry._unknown uses this list to produce typo suggestions and to decide whether any close matches exist.
-
-*Call graph*: called by 1 (_unknown).
-
-
-##### `SkillRegistry.all_cards`  (lines 389–394)
-
-```
-def all_cards(self) -> tuple[SkillCard, ...]
-```
-
-**Purpose**: Returns the searchable card view of every loadable skill. Search and selection can use this without loading full instruction bodies.
-
-**Data flow**: It converts deploy skills to cards, appends member cards, and returns them as one tuple.
-
-**Call relations**: This method supports the skill-selection side of the system: it gives search a compact catalog of names, descriptions, dependencies, and targeting.
-
-
-##### `SkillRegistry.bundled_skills`  (lines 396–399)
-
-```
-def bundled_skills(self) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: Returns the deploy skills that are part of the static bundle. These are the skills expected to be shipped with the terminal archive or sandbox image.
-
-**Data flow**: It reads the bundled_names set, filters the deploy-skill dictionary to names in that set, and returns the matching RuntimeSkill objects as a tuple.
-
-**Call relations**: Serving code uses this when mounting shared runtime surfaces, so the sandbox and clients can rely on the same bundled skill contents.
-
-*Call graph*: called by 1 (_mount_shared_surfaces).
-
-
-##### `SkillRegistry.closure`  (lines 401–425)
-
-```
-def closure(self, *names: str) -> tuple[LoadedRef, ...]
-```
-
-**Purpose**: Expands requested skill names into the full ordered set of skills that must be loaded, including dependencies. A dependency is another skill explicitly named in metadata.depends.
-
-**Data flow**: It receives one or more requested names, creates direct LoadedRef entries for each unique requested skill, then walks each dependency chain once, recording which skill pulled each dependency. It returns the ordered tuple of LoadedRef objects.
-
-**Call relations**: The engine calls this when figuring out what a load request means. It uses _card for every name so deploy and member skills are resolved uniformly.
-
-*Call graph*: calls 1 internal fn (_card); called by 1 (_loaded_skill_closures); 1 external calls (__init__).
-
-
-##### `SkillRegistry.closure.add`  (lines 415–420)
-
-```
-def add(card: SkillCard, dependency_of: str | None) -> None
-```
-
-**Purpose**: Adds one dependency and its own dependencies to the closure, while avoiding duplicates and cycles. It is the recursive worker inside closure.
-
-**Data flow**: It receives a SkillCard and the name of the skill that required it. If the skill is already recorded, it stops; otherwise it records a LoadedRef and repeats the process for each dependency listed on that card.
-
-**Call relations**: SkillRegistry.closure calls this while walking dependencies. It hands off each dependency name to _card so the registry can find the correct routing card.
-
-*Call graph*: calls 1 internal fn (_card); 1 external calls (__init__).
-
-
-##### `SkillRegistry.materialize`  (lines 427–449)
-
-```
-async def materialize(self, refs: Sequence[LoadedRef]) -> tuple[LoadedSkill, ...]
-```
-
-**Purpose**: Turns resolved skill references into full loaded skills with instruction bodies and files. This is where member-saved skills are actually read, instead of just represented by cards.
-
-**Data flow**: It receives a sequence of LoadedRef objects. For each one, it gets the RuntimeSkill directly from deploy skills or asks the async materializer to load a member skill, checks that the returned name matches, wraps it as a LoadedSkill with dependency and bundled flags, and returns the tuple.
-
-**Call relations**: After closure has decided what names are needed, materialize supplies the real content that loaded_context and sandbox installation use.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `SkillRegistry.index`  (lines 451–460)
-
-```
-def index(self) -> tuple[tuple[str, str], ...]
-```
-
-**Purpose**: Builds the skill index inserted into prompts: top-level deploy skill names and descriptions. It intentionally leaves out child skills and member skills.
-
-**Data flow**: It reads deploy skills in registry order, keeps only those with no parent, and returns name-description pairs.
-
-**Call relations**: Prompt-building code calls this when rendering the {{skill_index}} slot and when creating skill-selection prompts.
-
-*Call graph*: called by 2 (_prompt_skill_index, prompt_index).
-
-
-##### `SkillRegistry.merged_with`  (lines 462–483)
-
-```
-def merged_with(self, generated: tuple[RuntimeSkill, ...]) -> 'SkillRegistry'
-```
-
-**Purpose**: Returns a new registry with generated deploy-controlled skills appended. If a generated or member skill would shadow a deploy skill name, it is refused and logged.
-
-**Data flow**: It copies the deploy skill map, adds each generated skill whose name is not already taken, copies member cards, removes any member card now hidden by deploy skills, and returns a new SkillRegistry with the same materializer and bundled set.
-
-**Call relations**: This is used when a turn composes the base registry with generated skills such as setup or spawn-catalog skills, while preserving the rule that deploy-controlled skills win name conflicts.
-
-*Call graph*: 2 external calls (__init__, log).
-
-
-##### `SkillRegistry.with_member`  (lines 485–504)
-
-```
-def with_member(self, cards: Sequence[SkillCard], materialize: SkillMaterializer) -> 'SkillRegistry'
-```
-
-**Purpose**: Returns a new registry that includes the bound agent's saved member skills. Member skills are allowed to be loadable, but they may not replace deploy skills with the same name.
-
-**Data flow**: It receives member SkillCard objects and a materializer function, filters out any card whose name collides with a deploy skill while logging that refusal, then returns a new SkillRegistry containing those member cards.
-
-**Call relations**: Turn setup uses this shape so closure can resolve both deploy and member skill names, while materialize later knows how to fetch the member skill bodies.
-
-*Call graph*: 2 external calls (__init__, log).
-
-
-##### `_loaded_tree`  (lines 510–528)
-
-```
-def _loaded_tree(loaded: Sequence[LoadedSkill]) -> str
-```
-
-**Purpose**: Builds a compact text tree of every file included in a resolved skill load. This lets the agent see where files are available without dumping their contents.
-
-**Data flow**: It receives LoadedSkill entries, gathers every loaded file path under each skill name, sorts them, adds directory lines only once, and returns an indented tree rooted at $UFO_HOME/skills.
-
-**Call relations**: loaded_context appends this tree after the instruction blocks so the model can refer to bundled files by path.
-
-*Call graph*: called by 1 (loaded_context); 1 external calls (PurePosixPath).
-
-
-##### `loaded_context`  (lines 531–544)
-
-```
-def loaded_context(loaded: tuple[LoadedSkill, ...], in_context: Container[str]=frozenset()) -> str
-```
-
-**Purpose**: Creates the full text shown to the model for one skill load. It includes new skill instructions, a note for instructions already present, and a file tree for everything loaded.
-
-**Data flow**: It receives loaded skills and a set of skill names already in context. It renders prompt bodies only for new skills, adds one “already loaded” note for repeated ones, appends the loaded file tree, and returns the combined text.
-
-**Call relations**: Both normal load_skill behavior and subagent preloading use this so skills look the same whether loaded by a tool result or preloaded into a child agent prompt.
-
-*Call graph*: calls 1 internal fn (_loaded_tree).
-
-
-##### `_wire_skill`  (lines 547–554)
-
-```
-def _wire_skill(skill: RuntimeSkill) -> dict[str, object]
-```
-
-**Purpose**: Converts a RuntimeSkill into the wire format expected by the sandbox loader. “Wire format” here means a safe dictionary of file paths and base64-encoded bytes suitable for transport.
-
-**Data flow**: It receives a RuntimeSkill, gathers all files, makes each path safe relative to the skill root, base64-encodes each file's bytes, computes the skill digest, and returns a dictionary containing the digest and encoded files.
-
-**Call relations**: install_skill and load_skills call this before asking Sandbox.load_skills to place user-provided or non-bundled skill files in the runtime directory.
-
-*Call graph*: calls 3 internal fn (all_files, content_digest, root); called by 2 (install_skill, load_skills); 2 external calls (urlsafe_b64encode, contained_relative).
-
-
-##### `install_skill`  (lines 557–561)
-
-```
-async def install_skill(sandbox: Sandbox, skill: RuntimeSkill) -> None
-```
-
-**Purpose**: Installs one materialized skill into the sandbox under $UFO_HOME/skills. This is the single-skill version of sandbox loading.
-
-**Data flow**: It receives a Sandbox and a RuntimeSkill, converts the skill with _wire_skill, sends it to the sandbox as a user skill, then checks that the sandbox returned a path for that skill. If not, it raises an error.
-
-**Call relations**: It hands the prepared skill package to Sandbox.load_skills, which performs the actual sandbox-side loading.
-
-*Call graph*: calls 2 internal fn (load_skills, _wire_skill).
-
-
-##### `load_skills`  (lines 564–571)
-
-```
-async def load_skills(sandbox: Sandbox, loaded: Sequence[LoadedSkill]) -> None
-```
-
-**Purpose**: Installs a whole resolved skill load into the sandbox. Bundled deploy skills are identified by digest, while non-bundled skills are sent with their file contents.
-
-**Data flow**: It receives a Sandbox and LoadedSkill entries, separates bundled skills from user/network-loaded ones, prepares non-bundled skills with _wire_skill, calls Sandbox.load_skills with both groups, then verifies every requested skill got a returned root path.
-
-**Call relations**: This is the final handoff after closure and materialization: the registry decides what skills are needed, and this function makes those files available inside the sandbox.
-
-*Call graph*: calls 2 internal fn (load_skills, _wire_skill).
-
-
-### `extensions/skill_create/ufo_ext_skill_create/store.py`
-
-`domain_logic` · `request handling and skill loading`
-
-A “skill” here is a small bundle of files, usually including instructions in `SKILL.md`, that an agent can load and use later. This file is the workspace’s skill cabinet: it saves each skill under one name, lists what is available, loads the files back, and deletes skills when asked.
-
-The important safety rule is that saving is not just “write this over whatever is there.” Each saved skill has a `generation`, which works like a version sticker on a document. If someone reads version A, but another writer saves version B before they submit changes, this file refuses the older save instead of silently overwriting the newer work.
-
-It also keeps a compact “card” for each skill: the name, description, dependencies, target agents, and whether it is pinned. Agents can read these cards quickly without unpacking the full stored files.
-
-Skill file bytes are stored in the database as base64 text, which is a safe text form for raw bytes. When loading, the file turns that text back into bytes and parses the skill again. Bulk loading is tolerant: if one stored skill is corrupt, it logs the problem and keeps loading the others. But loading one named skill fails loudly, because silently pretending it does not exist would hide data damage.
-
-#### Function details
-
-##### `_save_lock_key`  (lines 54–56)
-
-```
-def _save_lock_key(workspace_id: UUID) -> int
-```
-
-**Purpose**: This helper turns a workspace ID into a stable number used as a database lock key. The lock makes saves for the same workspace line up instead of racing each other.
-
-**Data flow**: It receives a workspace identifier → hashes its text form with SHA-256, a standard way to make a fixed-size fingerprint → takes part of that fingerprint and turns it into an integer. The result is only a lock label; it does not reveal or change the workspace ID.
-
-**Call relations**: When `UserSkillStore.save` is about to write a skill, it asks this helper for the workspace’s lock key. On PostgreSQL, that key is handed to the database so only one save for that workspace can pass through the critical section at a time.
-
-*Call graph*: called by 1 (save); 1 external calls (sha256).
-
-
-##### `UserSkillStore.save`  (lines 123–238)
-
-```
-async def save(self, name: str, files: Mapping[str, bytes], registry_names: frozenset[str], pinned: bool=False, generation: UUID | None=None) -> RuntimeSkill
-```
-
-**Purpose**: This saves a new or edited workspace skill after checking that it is valid and safe to store. It prevents bad skill names, overwriting someone else’s newer edit, shadowing built-in skills, exceeding workspace limits, and pinning too many skills.
-
-**Data flow**: It receives a skill name, a set of file paths with byte contents, the names already used by built-in or pack skills, a pinned flag, and optionally the generation that the caller previously read → checks the name, parses the files into a real runtime skill, encodes the files into database-safe text, computes a digest fingerprint, and opens a database transaction → compares the caller’s generation with the stored row, checks workspace and pinned-skill limits, then inserts or updates the row with a fresh generation → returns the parsed runtime skill that was saved. The database row is changed only if all checks pass.
-
-**Call relations**: This is the main write path for the store. It calls `_save_lock_key` before writing so concurrent saves are serialized where needed. It calls `_count` when adding a brand-new skill, and `_pinned_count` when a save would add another pinned skill. If any safety check fails, it raises a specific error so the caller can explain the problem rather than corrupting or overwriting data.
-
-*Call graph*: calls 3 internal fn (_count, _pinned_count, _save_lock_key); 16 external calls (__init__, __init__, __init__, __init__, __init__, __init__, b64encode, sha256, dumps, cast (+6 more)).
-
-
-##### `UserSkillStore.cards`  (lines 240–281)
-
-```
-async def cards(self) -> tuple[SkillCard, ...]
-```
-
-**Purpose**: This returns lightweight routing cards for every saved skill in the current workspace. Agents can use these cards to decide what skills are available without loading every file bundle.
-
-**Data flow**: It reads the current workspace from the agent context → queries the database for each saved skill’s name, description, dependencies, agent list, and pinned flag → skips rows with an empty description because those cannot form useful routing cards → turns the remaining rows into `SkillCard` objects and returns them as an immutable tuple.
-
-**Call relations**: This is a read path used when the system wants the workspace’s skill catalog. It does not call the heavier file-loading paths, so a corrupt stored bundle can still leave its card visible unless the description is missing. JSON text stored in the database is decoded back into dependency and agent lists before each card is returned.
-
-*Call graph*: 4 external calls (__init__, loads, select, agent_current).
-
-
-##### `UserSkillStore.listing`  (lines 283–307)
-
-```
-async def listing(self) -> tuple[SkillListing, ...]
-```
-
-**Purpose**: This returns the simple list shown to users or tools: each skill’s name, description, and pinned status. It is meant for browsing, not for loading the skill’s full contents.
-
-**Data flow**: It gets the current workspace → reads matching rows from the database in name order → ignores rows with no description → wraps each remaining row in a `SkillListing` object → returns the listings as a tuple.
-
-**Call relations**: This is the display-oriented sibling of `cards`. Where `cards` builds objects for agent routing, `listing` builds smaller objects for a human-facing or object-list view.
-
-*Call graph*: 3 external calls (__init__, select, agent_current).
-
-
-##### `UserSkillStore.record`  (lines 309–340)
-
-```
-async def record(self, name: str) -> SkillRecord | None
-```
-
-**Purpose**: This fetches the full saved record for one skill, including its files, description, generation, pin state, and timestamps. It is the read path a caller uses before editing, because the generation it returns is needed for a safe later save.
-
-**Data flow**: It receives a skill name → looks up that name in the current workspace → if there is no row, returns `None` → otherwise validates the stored JSON bundle, decodes each base64 file back into bytes, and builds a `SkillRecord` containing the files and metadata. If the stored bundle is corrupt, the error is allowed to surface.
-
-**Call relations**: This supports detailed object reads. Its returned generation connects directly to `UserSkillStore.save`: callers pass that generation back when editing so the save can detect whether someone else changed the skill in between.
-
-*Call graph*: 4 external calls (__init__, b64decode, select, agent_current).
-
-
-##### `UserSkillStore.materialize`  (lines 342–349)
-
-```
-async def materialize(self, name: str) -> RuntimeSkill | None
-```
-
-**Purpose**: This loads one named skill into the runtime form that an agent can actually use. It is for going from stored files back to an executable or loadable skill object.
-
-**Data flow**: It receives a skill name → asks `files` for that skill’s stored file bytes → if there are no files, returns `None` → otherwise parses the files as skill content and returns a `RuntimeSkill`. The database is not changed.
-
-**Call relations**: This is a small bridge between raw storage and runtime use. It delegates the database read and decoding to `UserSkillStore.files`, then hands the resulting files to the shared skill parser so the same validation rules are used when loading as when saving.
-
-*Call graph*: calls 1 internal fn (files); 1 external calls (parse_skill_content).
-
-
-##### `UserSkillStore.materialize_all`  (lines 351–379)
-
-```
-async def materialize_all(self) -> tuple[RuntimeSkill, ...]
-```
-
-**Purpose**: This loads every saved skill in the workspace into runtime form. It is useful when an agent needs all workspace skills, while making sure one damaged row does not stop the rest from loading.
-
-**Data flow**: It reads the current workspace → queries every saved skill’s name and stored content → for each row, validates the stored JSON, decodes file contents from base64, and parses the skill → collects successfully parsed skills into a tuple. If one row fails to decode or parse, it logs a warning and continues with the next row.
-
-**Call relations**: This is the bulk-loading path. Unlike `materialize`, which is strict for one named skill, this function is deliberately forgiving so a single bad saved skill does not hide all the healthy workspace skills from the agent.
-
-*Call graph*: 4 external calls (b64decode, select, agent_current, parse_skill_content).
-
-
-##### `UserSkillStore.files`  (lines 381–396)
-
-```
-async def files(self, name: str) -> dict[str, bytes] | None
-```
-
-**Purpose**: This returns the raw files for one saved skill as normal byte contents. It is useful when another part of the system wants the stored bundle without immediately turning it into a runtime skill.
-
-**Data flow**: It receives a skill name → reads the matching stored content for the current workspace → returns `None` if no row exists → otherwise validates the stored JSON and decodes each base64 string back into bytes. The output is a dictionary from file path to file bytes.
-
-**Call relations**: This is the lower-level read helper used by `UserSkillStore.materialize`. It stops at recovering the files, while `materialize` takes the next step and parses those files into a runtime skill.
-
-*Call graph*: called by 1 (materialize); 3 external calls (b64decode, select, agent_current).
-
-
-##### `UserSkillStore.delete`  (lines 398–420)
-
-```
-async def delete(self, name: str) -> None
-```
-
-**Purpose**: This removes one saved skill from the workspace and also cleans up its search/index data if an index is available. The order is careful so a crash does not leave hard-to-clean leftover indexed chunks.
-
-**Data flow**: It receives a skill name → gets the current workspace → if an index service exists, first marks the skill’s indexed digest as stale in the database, then asks the index to delete entries for that skill → finally deletes the skill row from the database. After it succeeds, the skill is no longer saved for the workspace.
-
-**Call relations**: This is the store’s delete path. It coordinates with the optional index subsystem by creating an `IndexScope` for the skill name, so the external searchable copy is pruned before the database row disappears.
-
-*Call graph*: 4 external calls (__init__, delete, update, agent_current).
-
-
-##### `UserSkillStore._count`  (lines 422–430)
-
-```
-async def _count(self, connection: AsyncConnection) -> int
-```
-
-**Purpose**: This counts how many user-created skills are currently saved in the workspace. It is used to enforce the maximum number of saved skills.
-
-**Data flow**: It receives an open database connection → reads the current workspace from context → asks the database to count rows in `user_skill` for that workspace → returns the count as an integer. It does not change anything.
-
-**Call relations**: `UserSkillStore.save` calls this only when creating a new skill. That lets `save` refuse the insert if the workspace has already reached its skill limit.
-
-*Call graph*: called by 1 (save); 3 external calls (execute, select, agent_current).
-
-
-##### `UserSkillStore._pinned_count`  (lines 432–444)
-
-```
-async def _pinned_count(self, connection: AsyncConnection, excluding: str) -> int
-```
-
-**Purpose**: This counts pinned skills in the workspace, excluding one named skill. It helps decide whether pinning another skill would go over the allowed pinned-skill limit.
-
-**Data flow**: It receives an open database connection and a skill name to exclude → reads the current workspace → counts rows in that workspace where `pinned` is true and the name is not the excluded one → returns that number. It only reads the database.
-
-**Call relations**: `UserSkillStore.save` calls this when a save would make a skill pinned and it was not already pinned. Excluding the current skill means re-saving an already selected skill does not incorrectly count against itself.
-
-*Call graph*: called by 1 (save); 3 external calls (execute, select, agent_current).
-
-
-### `core/src/ufo/skills/selection.py`
-
-`domain_logic` · `request handling`
-
-An agent may have many saved skills, each with a name, description, and sometimes a “pinned” flag meaning it should be favored. The model needs to know these skills exist, but there is limited room in the prompt. This file is the rulebook for fitting those skill cards into that limited space.
-
-It uses two places. If the saved skill list is small, it “folds” into the normal system prompt beside built-in skills, so the model sees everything in the usual skill index. If the list is too large, it is moved into a separate saved-skills block in the turn message. That block has its own size limit.
-
-The file follows a ladder. First, pinned skills get full name-and-description lines. If the whole catalog fits, all skills get full lines. If not, it chooses a small top set using simple word matching against the user’s current query, gives those full descriptions, and still lists the remaining skills by name. If even names do not fit, it drops lines from the end and adds a note saying how many were left out and that skill_search can find them.
-
-Everything here is pure calculation: no files, network, database, or random choices. That matters because this runs every turn and must be predictable and cheap.
-
-#### Function details
-
-##### `_query_terms`  (lines 35–42)
-
-```
-def _query_terms(query: str) -> tuple[str, ...]
-```
-
-**Purpose**: Turns a user query into a clean list of searchable words. It removes punctuation-like separators, ignores very short words, removes duplicates, and caps very long input so a pasted wall of text cannot make scoring too expensive.
-
-**Data flow**: It takes a query string in. It reads only the first allowed number of characters, lowercases it in a language-safe way, splits it into word-like pieces, keeps pieces long enough to matter, preserves first-seen order while removing repeats, and returns those terms as a tuple.
-
-**Call relations**: This is the shared first step for word matching. lexical_score uses it when scoring one card, and select_top_k uses it once before ranking many cards, so both paths interpret the query the same way.
-
-*Call graph*: called by 2 (lexical_score, select_top_k).
-
-
-##### `_term_hits`  (lines 45–47)
-
-```
-def _term_hits(terms: Sequence[str], card: SkillCard) -> int
-```
-
-**Purpose**: Counts how many query terms appear in a skill card’s name or description. It is a small scoring helper for deciding whether a card matches the current request.
-
-**Data flow**: It takes already-prepared query terms and one SkillCard. It combines the card name and description into one lowercase search string, checks each term against it, and returns the number of distinct terms found.
-
-**Call relations**: lexical_score calls this after preparing terms. select_top_k uses the same idea through its ranking key, so the visible top skills are based on this simple “how many words matched” measure.
-
-*Call graph*: called by 1 (lexical_score).
-
-
-##### `lexical_score`  (lines 50–55)
-
-```
-def lexical_score(query: str, card: SkillCard) -> int
-```
-
-**Purpose**: Gives one skill card a simple match score for a query. Someone would use it to ask, “How many meaningful words from this request show up in this saved skill?”
-
-**Data flow**: It takes a query and a SkillCard. It converts the query into cleaned search terms with _query_terms, counts matches in the card through _term_hits, and returns that count as an integer score.
-
-**Call relations**: This is the public, single-card version of the matching logic. It delegates query cleanup to _query_terms and matching to _term_hits, while select_top_k uses the same style of matching to choose several cards for display.
-
-*Call graph*: calls 2 internal fn (_query_terms, _term_hits).
-
-
-##### `select_top_k`  (lines 58–66)
-
-```
-def select_top_k(query: str, cards: Sequence[SkillCard]) -> tuple[SkillCard, ...]
-```
-
-**Purpose**: Chooses the best few unpinned skills for the current query. It is used when there are too many saved skills to show every description, so only the most relevant unpinned cards get full detail.
-
-**Data flow**: It takes the query and a sequence of SkillCards. It prepares the query terms once, removes pinned cards from consideration, sorts the remaining cards by how many terms appear in each card, keeps the original order for ties, and returns up to the configured top count.
-
-**Call relations**: member_visibility calls this only after deciding the full catalog is too large for the saved-skills block. The chosen cards then receive full name-and-description lines, while other unpinned cards may be shown only by name.
-
-*Call graph*: calls 1 internal fn (_query_terms); called by 1 (member_visibility).
-
-
-##### `skill_line`  (lines 69–71)
-
-```
-def skill_line(card: SkillCard) -> str
-```
-
-**Purpose**: Formats one skill card as a prompt-friendly line. It includes the skill name and description, but cuts the line off at a fixed length so one long description cannot consume all the space.
-
-**Data flow**: It takes a SkillCard. It builds text like “- name: description”, trims it to the maximum allowed line length, and returns that string.
-
-**Call relations**: This is the common renderer for full skill entries. folds_into_prompt, prompt_index, catalog_fits, and member_visibility all call it so size checks and final display are based on the same text.
-
-*Call graph*: called by 4 (catalog_fits, folds_into_prompt, member_visibility, prompt_index).
-
-
-##### `folds_into_prompt`  (lines 74–78)
-
-```
-def folds_into_prompt(cards: Sequence[SkillCard]) -> bool
-```
-
-**Purpose**: Answers whether all member saved skills are small enough to be placed directly in the system prompt. This is the first placement decision: small lists stay with the normal skill index; larger lists move elsewhere.
-
-**Data flow**: It takes a sequence of SkillCards. It renders each card with skill_line, measures the combined size using _joined_size, compares that to the prompt-fold limit, and returns true or false.
-
-**Call relations**: prompt_index calls this before deciding whether to add member cards to the system skill index. It relies on skill_line and _joined_size so the decision matches what would actually be shown.
-
-*Call graph*: calls 2 internal fn (_joined_size, skill_line); called by 1 (prompt_index).
-
-
-##### `prompt_index`  (lines 81–93)
-
-```
-def prompt_index(registry: SkillRegistry) -> tuple[tuple[str, str], ...]
-```
-
-**Purpose**: Builds the skill index entries that belong in the system prompt for a turn. It always includes deployed, built-in skills, and adds member saved skills only when the saved list is small enough.
-
-**Data flow**: It takes a SkillRegistry, reads its member cards, and asks folds_into_prompt whether they fit. If they do not fit, it returns the registry’s normal deployed-skill index. If they do fit, it appends each member skill with the same capped description used for the size check.
-
-**Call relations**: This function is the bridge between the skill registry and the prompt. It calls SkillRegistry.index for the deploy-tier skills, uses folds_into_prompt for the placement decision, and uses skill_line so member entries match the measured text.
-
-*Call graph*: calls 3 internal fn (index, folds_into_prompt, skill_line).
-
-
-##### `catalog_fits`  (lines 96–99)
-
-```
-def catalog_fits(cards: Sequence[SkillCard]) -> bool
-```
-
-**Purpose**: Checks whether every saved skill can be shown as a full line inside the saved-skills block. It is used to decide whether retrieval ranking is needed at all.
-
-**Data flow**: It takes a sequence of SkillCards. It renders all cards with skill_line, measures the wrapped block size with _block_size, compares that to the block limit, and returns true or false.
-
-**Call relations**: This standalone check mirrors one of the decisions made inside member_visibility. It uses skill_line and _block_size to answer, “Can we show the whole catalog fully?”
-
-*Call graph*: calls 2 internal fn (_block_size, skill_line).
-
-
-##### `member_visibility`  (lines 113–146)
-
-```
-def member_visibility(query: str, cards: Sequence[SkillCard]) -> MemberVisibility
-```
-
-**Purpose**: Makes the full saved-skill visibility decision for one turn. It decides whether skills fold into the system prompt, whether the full catalog fits in the saved-skills block, and what block text should be sent if a block is needed.
-
-**Data flow**: It takes the current query and the saved skill cards. It renders each full line once, checks the system-prompt budget with _joined_size, checks the saved-block budget with _block_size, and returns a MemberVisibility result. If the cards are folded or absent, the block is empty. If the full catalog fits, it renders pinned cards first and then the rest. If the catalog is too large, it calls select_top_k, shows pinned and selected cards with descriptions, lists remaining unpinned cards by name, trims from the end until the block fits, and may add a final count of dropped skills.
-
-**Call relations**: member_block calls this as the main decision-maker. Inside, member_visibility coordinates the small helpers: skill_line creates display lines, _joined_size and _block_size measure budgets, select_top_k chooses relevant full-description cards when needed, and _render wraps the final lines in saved-skills tags.
-
-*Call graph*: calls 5 internal fn (_block_size, _joined_size, _render, select_top_k, skill_line); called by 1 (member_block); 1 external calls (__init__).
-
-
-##### `member_block`  (lines 149–157)
-
-```
-def member_block(query: str, cards: Sequence[SkillCard]) -> str
-```
-
-**Purpose**: Returns just the saved-skills text block that should be attached to a turn message. It is the simple public entry point for callers that only need the rendered block, not the extra decision details.
-
-**Data flow**: It takes the query and saved skill cards. It asks member_visibility to make all placement and budget decisions, then returns the block field from that result, which may be an empty string if no separate block is needed.
-
-**Call relations**: This function sits on top of member_visibility. It does not repeat the logic; it hands off the real work and exposes the final text for the turn message.
-
-*Call graph*: calls 1 internal fn (member_visibility).
-
-
-##### `_joined_size`  (lines 163–164)
-
-```
-def _joined_size(lines: Sequence[str]) -> int
-```
-
-**Purpose**: Measures how many characters a set of lines will take when joined with newline characters. It is a tiny budgeting helper used before wrapping text in any tags.
-
-**Data flow**: It takes a sequence of already-rendered strings. It adds each line’s length plus one newline character, subtracts the extra newline at the end when there is at least one line, and returns the total size.
-
-**Call relations**: folds_into_prompt and member_visibility use this to check the system-prompt budget. _block_size also calls it as the base measurement before adding saved-skills wrapper text.
-
-*Call graph*: called by 3 (_block_size, folds_into_prompt, member_visibility).
-
-
-##### `_block_size`  (lines 167–168)
-
-```
-def _block_size(lines: Sequence[str]) -> int
-```
-
-**Purpose**: Measures how large a saved-skills block would be after adding its opening and closing tags. This keeps the block under the fixed turn-message budget.
-
-**Data flow**: It takes already-rendered skill lines. It asks _joined_size for the body size, adds the characters needed for the saved-skills wrapper tags and spacing, and returns the total block size.
-
-**Call relations**: catalog_fits and member_visibility use this to decide whether the whole catalog can be shown in the saved-skills block. It builds directly on _joined_size so the measuring rules stay consistent.
-
-*Call graph*: calls 1 internal fn (_joined_size); called by 2 (catalog_fits, member_visibility).
-
-
-##### `_render`  (lines 171–172)
-
-```
-def _render(lines: tuple[str, ...]) -> str
-```
-
-**Purpose**: Wraps saved-skill lines in the saved-skills opening and closing tags. This creates the exact block text the model will see.
-
-**Data flow**: It takes a tuple of lines that have already been chosen and ordered. It places the opening tag before them, the closing tag after them, joins everything with newlines, and returns one string.
-
-**Call relations**: member_visibility calls this at the end of the block-building path. By keeping rendering here, the larger visibility function can focus on choosing and trimming lines before handing them off for final formatting.
-
-*Call graph*: called by 1 (member_visibility).
-
-
-### `core/src/ufo/loop/spawn_catalog.py`
-
-`domain_logic` · `per-turn skill assembly`
-
-This file solves a simple but important problem: an agent needs to know who it can delegate work to, and what information to send. Instead of keeping a separate, hand-written list that could become stale, this file builds that list fresh each turn.
-
-It combines two kinds of spawn targets. First are subagent profiles, which are fixed definitions loaded into the running system. Second are workspace agents, which are rows stored in the database and can differ by workspace, owner, and permissions. The file checks who the current member is, whether they are an admin, and then reads only the workspace agents that member is allowed to spawn. Admins can see every active agent in the workspace; non-admins see their own active agents.
-
-For each target, it describes the payload, meaning the named pieces of input that must or may be provided. If a workspace agent has the same name as a profile, the workspace agent is shown with an `agent:` prefix, because that is the exact name needed to spawn it without ambiguity.
-
-The result is returned as a `RuntimeSkill`: a piece of instructions available to the agent during the turn. Like a current menu in a restaurant, it shows what can actually be ordered right now, not what used to exist at startup.
-
-#### Function details
-
-##### `_profile_payload`  (lines 29–36)
-
-```
-def _profile_payload(profile: SubagentProfile) -> str
-```
-
-**Purpose**: This helper turns a subagent profile's input definition into a short human-readable list of payload fields. It marks which fields are optional so an agent can build the right input before spawning that profile.
-
-**Data flow**: It receives a `SubagentProfile`, reads the fields from its input model, and sorts them by name. If there are no fields, it returns `(no fields)`; otherwise it returns text such as `` `task` `` or `` `note` (optional) `` for each field.
-
-**Call relations**: It is used by `spawn_catalog_skill` while building the table of spawn targets. For every registered profile, `spawn_catalog_skill` asks this helper to describe that profile's expected payload.
-
-*Call graph*: called by 1 (spawn_catalog_skill).
-
-
-##### `_schema_payload`  (lines 39–49)
-
-```
-def _schema_payload(schema: Mapping[str, object] | None) -> str
-```
-
-**Purpose**: This helper turns a workspace agent's stored input schema into a short human-readable list of payload fields. A schema is a structured description of expected input, and this function makes it readable in the catalog.
-
-**Data flow**: It receives either a schema mapping or `None`. If there is no schema, it falls back to the standard `TaskInput` fields. If the schema has no usable properties, it returns `(no fields)`. Otherwise it reads the schema's properties and required list, then returns sorted field names, marking fields not listed as required as optional.
-
-**Call relations**: It is used by `spawn_catalog_skill` for each workspace agent fetched from the database. This lets the final catalog show the payload expected by database-backed agents as well as fixed profile-backed agents.
-
-*Call graph*: called by 1 (spawn_catalog_skill).
-
-
-##### `spawn_catalog_skill`  (lines 52–104)
-
-```
-async def spawn_catalog_skill(registry: SubagentRegistry, member_id: UUID | None) -> RuntimeSkill
-```
-
-**Purpose**: This async function builds the actual `spawn-catalog` runtime skill for the current turn. It lists every target that `spawn` can dispatch to, using the same live registry and workspace records that spawning itself depends on.
-
-**Data flow**: It receives the live `SubagentRegistry` and the current member's ID, if there is one. It gathers profile names from the registry, opens a workspace database transaction, checks whether the member is an admin, and queries active workspace agents visible to that member. It then formats profiles and agents into a Markdown table, adds explanatory text and front matter, and returns a `RuntimeSkill` containing those instructions.
-
-**Call relations**: This is the main builder in the file. It calls `_profile_payload` to describe fixed subagent profiles and `_schema_payload` to describe workspace agents. It also relies on `workspace_tx` for a database connection, `ws_current` to know the active workspace, `member_is_admin` to decide visibility, and SQLAlchemy's `select` to read agent rows. The finished `RuntimeSkill` is what an agent loads when it wants to learn how to delegate with `spawn`.
-
-*Call graph*: calls 2 internal fn (_profile_payload, _schema_payload); 5 external calls (__init__, select, workspace_tx, member_is_admin, ws_current).
-
-
-### `core/src/ufo/models/catalog_skill.py`
-
-`domain_logic` · `startup`
-
-This file solves a simple but important problem: people need a trustworthy list of available models, but hand-written lists easily go stale. Instead of maintaining a separate document, this file turns the system’s live model registry into a readable skill. The registry is the source of truth for model facts such as provider, knowledge cutoff, context window size, price, reasoning support, and API surface.
-
-At startup, `model_catalog_skill` receives a `ModelRegistry`. It sorts all registered model specifications by model id, then writes them into a Markdown table. Think of it like printing a menu from the restaurant’s actual kitchen inventory, rather than from a separate brochure that someone might forget to update.
-
-Prices are stored internally as tiny units called micro-dollars. The helper `_per_mtok` converts those internal values into normal dollar text, shown as price per million tokens. A token is a small piece of text used for model input and output billing.
-
-Finally, the file wraps the Markdown table in a `RuntimeSkill`, including front-matter metadata with the skill name and description. Without this file, users or agents choosing a model would lose an automatically accurate, runtime-backed catalog and might rely on outdated or incomplete information.
-
-#### Function details
-
-##### `_per_mtok`  (lines 18–19)
-
-```
-def _per_mtok(micro_usd_per_mtok: int) -> str
-```
-
-**Purpose**: This helper turns an internal price value into a friendly dollar amount. It exists so the model table can show prices in a way people understand instead of exposing low-level billing units.
-
-**Data flow**: It receives a price stored as micro-dollars per million tokens. It divides that by the number of micro-dollars in one dollar, formats the result with two decimal places, and returns text like `$1.25`.
-
-**Call relations**: When `model_catalog_skill` is building each row of the catalog table, it calls `_per_mtok` for the input price and again for the output price. `_per_mtok` does only this formatting step, then hands the readable price text back for inclusion in the Markdown table.
-
-*Call graph*: called by 1 (model_catalog_skill).
-
-
-##### `model_catalog_skill`  (lines 22–50)
-
-```
-def model_catalog_skill(registry: ModelRegistry) -> RuntimeSkill
-```
-
-**Purpose**: This function creates the complete model catalog skill from the live model registry. Someone would use it during startup to make a readable, built-in reference showing every model the deployment can run.
-
-**Data flow**: It receives a `ModelRegistry`, which contains the current model specifications. It reads each model’s id, provider, knowledge cutoff, context window, prices, reasoning support, and API surface; formats those facts into a Markdown table; wraps that table with the skill name and description; and returns a `RuntimeSkill` containing both the user-facing instructions and the raw Markdown form.
-
-**Call relations**: This is the main builder in the file. As it loops through registry entries, it asks `_per_mtok` to turn stored price numbers into dollar text. At the end, it passes the finished name, description, instructions, and raw Markdown into `RuntimeSkill.__init__` so the rest of the skill runtime can load it like any other skill.
-
-*Call graph*: calls 1 internal fn (_per_mtok); 1 external calls (__init__).
-
-
-### Conversation Context
-These files keep the model-facing conversation context compact and enrich it with safe summaries of scheduled automations.
+### Conversation state shaping
+This file keeps reconstructed conversation history within usable context limits while preserving recent transcript fidelity.
 
 ### `core/src/ufo/loop/compaction.py`
 
-`domain_logic` · `request handling`
+`domain_logic` · `request handling, when a conversation window is near or over the model limit`
 
-A running assistant conversation can become too large to send back to the model. This file solves that by doing “compaction”: it compresses the older part of the transcript into one structured summary, keeps the recent tail exactly as it was, checks that important facts survived, and saves both the old and new versions for later inspection. Think of it like archiving old email threads into a careful digest while leaving the latest replies in your inbox.
+Large language models can only read a limited amount of text at once. This file solves that by compacting the transcript when it gets too large: it summarizes the older “head” of the conversation and keeps the newer “tail” unchanged. Think of it like moving old paperwork into a labeled archive box while leaving the current papers on the desk.
 
-The main `Compaction` class first decides whether compaction is needed by estimating the token count, where tokens are the chunks of text a model reads. If the conversation is too large, it splits messages into safe conversation rounds so tool calls and their results are not separated. It sends the older rounds to a model with special instructions asking for a JSON summary, then validates that JSON into a `CompactionSummary` object.
+The process is careful because a bad summary can silently lose important facts. The file first decides whether compaction is needed. If so, it splits the transcript at safe boundaries so tool calls and tool results stay together. It sends the old part to the model with special instructions asking for a structured JSON summary. It also watches for provider errors that mean the summary request itself was too large, and retries with less old material.
 
-The file is cautious about trust. It harvests “anchors,” meaning exact important strings such as file paths, error names, loaded skills, and active request references, from the original text rather than from the model summary. It then verifies whether those anchors are still present in the replacement window. If the summary dropped them, it retries once with explicit correction instructions. Finally, it enforces that the new window is actually smaller when the pipeline could reasonably make it smaller, records logs and metrics, and writes compressed before/after/summary records to blob storage.
+After a summary comes back, the code does not trust it blindly. It checks that important “anchors” survived, such as file paths, error names, loaded skills, and active request references. It removes file paths the model invented, renders the accepted summary into one replacement user message, verifies that the new window is actually smaller, then stores compressed before/after/summary records in the workspace blob store. Hooks and metrics are fired so operators can observe what happened.
 
 #### Function details
 
@@ -2712,11 +1852,11 @@ The file is cautious about trust. It harvests “anchors,” meaning exact impor
 def is_context_overflow(error: Exception) -> bool
 ```
 
-**Purpose**: This function recognizes errors that mean a model request was too large for the provider to accept. It lets the system shrink and retry instead of treating that situation like an ordinary failure.
+**Purpose**: Recognizes errors that likely mean the model provider rejected a request because the prompt was too large. This lets the system shrink and retry instead of treating the problem like an ordinary failure.
 
-**Data flow**: It receives an exception, combines the exception's class name and message into lowercase text, and searches for phrases such as “context length” or “prompt is too large.” It returns `true` when the error looks like a context overflow, otherwise `false`.
+**Data flow**: It receives an exception, combines the exception class name and message into lowercase text, and searches for known phrases such as “context length” or “prompt is too large”. It returns true when one of those phrases is found, otherwise false.
 
-**Call relations**: During summarization, `Compaction._summarize` calls this after a failed model request. If it says the prompt was too large, summarization drops some old rounds and tries again.
+**Call relations**: Compaction._summarize calls this after a summary attempt fails. If this detector says the failure was due to size, the summarizer drops some old rounds and tries again.
 
 *Call graph*: called by 1 (_summarize).
 
@@ -2727,11 +1867,11 @@ def is_context_overflow(error: Exception) -> bool
 def harvest_anchors(head_text: str, loaded_skills: tuple[str, ...], active_requests: tuple[str, ...]) -> tuple[Anchor, ...]
 ```
 
-**Purpose**: This function collects exact facts that must survive compaction, such as durable tool-output file paths, error class names, loaded skill names, and active request references. These are used as a fairness test for the summary.
+**Purpose**: Finds small but important facts from the old transcript that the replacement window must carry forward exactly. These facts are used as a safety checklist for the summary.
 
-**Data flow**: It receives the old head text, the skills currently loaded, and active request text. It scans those inputs for known patterns, removes duplicates while preserving recent items, limits how many of each kind it keeps, and returns `Anchor` objects containing the kind of fact and its exact text.
+**Data flow**: It receives rendered old transcript text, loaded skill names, and active request text. It extracts durable tool-output paths, error class names, loaded skills, and message references, trims each kind to a bounded recent set, and returns Anchor objects for them.
 
-**Call relations**: `Compaction._compact` calls this after choosing the part of the transcript to summarize. The resulting anchors are later used by verification to decide whether the replacement window carried forward enough of the old context.
+**Call relations**: Compaction._compact calls this while building the boundary that summaries are judged against. Later, Compaction._verify uses the resulting anchors indirectly to see what the compacted window lost.
 
 *Call graph*: called by 1 (_compact); 1 external calls (__init__).
 
@@ -2742,11 +1882,11 @@ def harvest_anchors(head_text: str, loaded_skills: tuple[str, ...], active_reque
 def missing_anchors(anchors: tuple[Anchor, ...], carried: str) -> tuple[Anchor, ...]
 ```
 
-**Purpose**: This function finds which required anchor facts are absent from the replacement text. It uses exact containment, not a fuzzy similarity check.
+**Purpose**: Checks which required facts are absent from the text that will remain after compaction. It uses exact text containment rather than a fuzzy similarity check.
 
-**Data flow**: It receives a set of anchors and a text string that represents what will remain after compaction. It keeps only the anchors whose literal text does not appear in that carried-forward text, and returns them.
+**Data flow**: It receives the required anchors and the carried-forward text. It returns only the anchors whose literal text is not present in that carried text.
 
-**Call relations**: `Compaction._verify` calls this while grading a candidate summary. Missing anchors can cause a correction retry and are also recorded in the compaction verification.
+**Call relations**: Compaction._verify calls this after rendering a candidate compacted window. Missing anchors can trigger one retry that explicitly tells the model what it dropped.
 
 *Call graph*: called by 1 (_verify).
 
@@ -2757,546 +1897,747 @@ def missing_anchors(anchors: tuple[Anchor, ...], carried: str) -> tuple[Anchor, 
 def __repr__(self) -> str
 ```
 
-**Purpose**: This gives a short debug-friendly label for a compaction request without printing the entire transcript. It helps logs or developer tools show what kind of request is being processed.
+**Purpose**: Provides a short, safe display form for a compaction request. It avoids printing the full transcript while still showing useful counts.
 
-**Data flow**: It reads the number of messages, the compaction reason, and the number of active requests from the object. It returns a compact string such as a summary card, not the full data.
+**Data flow**: It reads the request’s number of messages, reason, and number of active requests. It returns a compact string containing those counts.
 
-**Call relations**: This is used automatically by Python when the request object is printed or logged. It does not drive the compaction flow itself.
+**Call relations**: This is used implicitly by Python when the request is logged, inspected, or shown in debugging output. It supports the request object that Compaction.maybe_compact passes into Compaction._compact.
 
 
-##### `Compaction.__repr__`  (lines 223–224)
+##### `_InvalidSummary.__init__`  (lines 193–196)
+
+```
+def __init__(self, error_class: str, message: str, usage: Usage) -> None
+```
+
+**Purpose**: Creates a special error for cases where the model answered the summary request, but the answer could not be used as a valid compaction summary. It keeps the model usage so the caller can still account for spent tokens.
+
+**Data flow**: It receives an error class name, a human-readable message, and usage information. It stores the class name and usage on the exception and passes the details to the base RuntimeError.
+
+**Call relations**: Compaction._summarize_once raises this when parsing or validating the model’s summary fails. Compaction._compact decides whether to ignore it for automatic compaction or raise it for forced recovery.
+
+*Call graph*: called by 1 (_summarize_once).
+
+
+##### `_InvalidSummary.__str__`  (lines 198–199)
+
+```
+def __str__(self) -> str
+```
+
+**Purpose**: Shows only the useful validation message when the invalid-summary error is converted to text.
+
+**Data flow**: It reads the stored exception arguments and returns the message part as a string.
+
+**Call relations**: This affects how invalid summary failures appear in logs, warnings, and raised errors created by Compaction._summarize_once.
+
+
+##### `Compaction.__repr__`  (lines 240–241)
 
 ```
 def __repr__(self) -> str
 ```
 
-**Purpose**: This gives a short readable name for a `Compaction` object. It identifies the conversation and model without exposing large internal state.
+**Purpose**: Gives a compact debug label for a Compaction object. It identifies the conversation and model without printing large internal state.
 
-**Data flow**: It reads the conversation id and model name from the object and returns a concise string representation.
+**Data flow**: It reads the conversation ID and model name from the instance. It returns a short string containing those two values.
 
-**Call relations**: Python uses this automatically when a `Compaction` instance is displayed in debugging or logs. The rest of the pipeline does not call it directly.
+**Call relations**: This is used implicitly when a Compaction instance is displayed during debugging or logging.
 
 
-##### `Compaction.maybe_compact`  (lines 226–246)
+##### `Compaction.maybe_compact`  (lines 243–270)
 
 ```
 async def maybe_compact(self, messages: tuple[Message, ...], force: bool=False, active_requests: tuple[str, ...]=()) -> tuple[tuple[Message, ...], tuple[Usage, ...]]
 ```
 
-**Purpose**: This is the public decision point: given the current messages, it either returns them unchanged or runs compaction. It can also be forced, for example after the model provider says the request is too large.
+**Purpose**: Decides whether a transcript should be compacted now, then returns either the original messages or the smaller replacement window. It is the public gate used before sending a conversation to the model.
 
-**Data flow**: It receives the current message window, a force flag, and active requests. It checks whether there are enough messages to compact, estimates token size, compares it with the trigger threshold unless forced, and either returns the original messages with no usage records or passes a compaction request into the full compaction pipeline.
+**Data flow**: It receives messages, a force flag, and active request text. It checks simple no-op cases, estimates token count, compares it with the trigger, and if needed builds a _CompactionRequest and calls Compaction._compact. It returns the chosen message window plus any usage records from summary model calls.
 
-**Call relations**: The conversation loop calls this before sending a large window to the model or after an overflow recovery path. When compaction is needed, it creates a `_CompactionRequest` and hands control to `Compaction._compact`.
+**Call relations**: This is the main entry into the file’s compaction workflow. It calls Compaction._tokens and Compaction._trigger for the decision, then hands real work to Compaction._compact.
 
 *Call graph*: calls 3 internal fn (_compact, _tokens, _trigger); 1 external calls (__init__).
 
 
-##### `Compaction._trigger`  (lines 248–254)
+##### `Compaction._trigger`  (lines 272–278)
 
 ```
 def _trigger(self) -> int
 ```
 
-**Purpose**: This calculates the token limit at which automatic compaction should start. It leaves room for the summary output and a safety buffer so the next model call does not run right up against the provider limit.
+**Purpose**: Calculates the transcript size at which automatic compaction should begin. It leaves room for the summary response and a safety buffer inside the model’s total context window.
 
-**Data flow**: It reads either a manually supplied trigger value or the model context window, summary budget, and buffer constants. It returns the token threshold used for decisions and budget checks.
+**Data flow**: It reads an explicit trigger override if one is set. Otherwise it subtracts the summary token reserve and buffer from the configured context window and returns that number.
 
-**Call relations**: `Compaction.maybe_compact` uses this to decide whether to compact. `Compaction._require_budget` uses the same threshold to confirm the compacted window will not immediately need compaction again when that is avoidable.
+**Call relations**: Compaction.maybe_compact uses this to decide when to compact. Compaction._require_budget uses the same value to make sure the result will not immediately need compaction again.
 
 *Call graph*: called by 2 (_require_budget, maybe_compact).
 
 
-##### `Compaction._compact`  (lines 257–335)
+##### `Compaction._compact`  (lines 281–373)
 
 ```
 async def _compact(self, request: _CompactionRequest) -> tuple[tuple[Message, ...], tuple[Usage, ...]]
 ```
 
-**Purpose**: This is the main compaction workflow. It selects what to summarize, asks the model for a structured summary, verifies the replacement, persists records, fires observation hooks, and returns the new message window.
+**Purpose**: Runs the full compaction pipeline: choose what to summarize, ask for a summary, verify it, persist the records, and return the replacement window. It is the core workflow of the file.
 
-**Data flow**: It receives a `_CompactionRequest` containing messages, reason, and active requests. It splits the transcript into old head and recent tail, records pre-compaction information, summarizes the head, drains loaded skills into the summary, gathers references and anchors, verifies the result, retries once if important anchors were missed, enforces size rules, writes compressed before/after/summary records, logs verification, fires hooks, and returns the compacted messages plus model usage records.
+**Data flow**: It receives a _CompactionRequest containing the current messages and reason. It selects head and tail, summarizes the head, drains loaded skills, builds verification boundaries, retries once if important anchors are missing, checks the token budget, writes compressed before/after/summary records, logs verification, fires hooks, and returns the new messages plus usage.
 
-**Call relations**: `Compaction.maybe_compact` calls this only after the guard checks say compaction should happen. Inside, it coordinates helpers for selection, summarization, verification, budget enforcement, persistence, and reporting.
+**Call relations**: Compaction.maybe_compact calls this after deciding compaction is needed. This function coordinates most helpers in the file, including selection, summarization, reference harvesting, verification, persistence, and observability.
 
-*Call graph*: calls 11 internal fn (_next_index, _persist, _record_verification, _references, _require_budget, _select, _summarize, _tokens, _verify, _window_text (+1 more)); called by 1 (maybe_compact); 6 external calls (__init__, __init__, __init__, replace, from_iterable, warn).
+*Call graph*: calls 11 internal fn (_next_index, _persist, _record_verification, _references, _require_budget, _select, _summarize, _tokens, _verify, _window_text (+1 more)); called by 1 (maybe_compact); 7 external calls (__init__, __init__, __init__, replace, from_iterable, log_error, warn).
 
 
-##### `Compaction._select`  (lines 337–353)
+##### `Compaction._select`  (lines 375–391)
 
 ```
 def _select(self, messages: tuple[Message, ...]) -> tuple[tuple[tuple[Message, ...], ...], tuple[Message, ...]] | None
 ```
 
-**Purpose**: This chooses the older messages to summarize and the newest messages to keep exactly as written. It keeps whole conversation rounds so a tool call is not separated from its result.
+**Purpose**: Splits the transcript into old messages to summarize and recent messages to keep exactly. It preserves whole conversation rounds so related tool calls and results are not separated.
 
-**Data flow**: It receives all messages, groups them into rounds, then walks backward until it has kept at least the configured number of recent messages. It returns the older rounds as the head and the flattened recent messages as the tail, or `None` if nothing is safe to summarize.
+**Data flow**: It receives all messages, groups them into rounds, then keeps enough trailing rounds to cover the configured recent-message count. It returns the old head rounds and the kept tail, or nothing if there is no safe head to summarize.
 
-**Call relations**: `Compaction._compact` calls this at the beginning. It depends on `Compaction._rounds` to make safe groups before deciding where the boundary goes.
+**Call relations**: Compaction._compact calls this at the start of the workflow. It relies on Compaction._rounds to form safe groups.
 
 *Call graph*: calls 1 internal fn (_rounds); called by 1 (_compact).
 
 
-##### `Compaction._rounds`  (lines 355–369)
+##### `Compaction._rounds`  (lines 393–407)
 
 ```
 def _rounds(self, messages: tuple[Message, ...]) -> tuple[tuple[Message, ...], ...]
 ```
 
-**Purpose**: This groups transcript messages into conversation rounds that should stay together. The main reason is to keep assistant tool-use messages with the user/tool-result messages that answer them.
+**Purpose**: Groups messages into API rounds, where each assistant message starts a new round and following user/tool-result messages stay with it. This protects the meaning of tool interactions.
 
-**Data flow**: It receives a sequence of messages and walks through them in order. Each assistant message starts a new round when there is already content in the current round; all other messages are added to the current round. It returns a tuple of message groups.
+**Data flow**: It receives a tuple of messages and walks through them in order. It starts a new group when it sees an assistant message after existing content, then returns all groups as tuples.
 
-**Call relations**: `Compaction._select` calls this before picking the compacted head and kept tail. It is the grouping rule that protects tool-call structure during compaction.
+**Call relations**: Compaction._select calls this before choosing which rounds become the summarized head and which remain as the verbatim tail.
 
 *Call graph*: called by 1 (_select).
 
 
-##### `Compaction._summarize`  (lines 371–397)
+##### `Compaction._summarize`  (lines 409–436)
 
 ```
 async def _summarize(self, head_rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]=()) -> tuple[CompactionSummary, tuple[Usage, ...]]
 ```
 
-**Purpose**: This runs one bounded attempt sequence to turn old transcript rounds into a validated summary. If the summary request itself is too large, it drops some oldest rounds and retries a limited number of times.
+**Purpose**: Asks the model to summarize the old transcript, with bounded retries if the summary prompt itself is too large. This keeps compaction from failing just because the old head is enormous.
 
-**Data flow**: It receives the head rounds and, optionally, anchors missed by a previous summary. It calls one summarize attempt; if the provider rejects the prompt as too large, it removes the oldest portion and tries again until success or the retry limit is reached. It returns a `CompactionSummary` and the usage records from the successful call.
+**Data flow**: It receives head rounds and optional missed anchors from a previous attempt. It calls Compaction._summarize_once; if the provider reports a context overflow, it drops the oldest portion of the rounds and retries up to the configured limit. It returns a valid CompactionSummary and usage records.
 
-**Call relations**: `Compaction._compact` calls this first for the normal summary and sometimes again for an anchor-correction retry. It delegates each actual model call to `Compaction._summarize_once`, uses `is_context_overflow` to classify failures, and uses `Compaction._drop_oldest` to shrink oversized prompts.
+**Call relations**: Compaction._compact calls this for the first summary and possibly a second anchor-repair summary. It uses is_context_overflow to distinguish size failures and Compaction._drop_oldest to shrink retries.
 
 *Call graph*: calls 3 internal fn (_drop_oldest, _summarize_once, is_context_overflow); called by 1 (_compact).
 
 
-##### `Compaction._summarize_once`  (lines 399–420)
+##### `Compaction._summarize_once`  (lines 438–466)
 
 ```
 async def _summarize_once(self, rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]) -> tuple[CompactionSummary, Usage]
 ```
 
-**Purpose**: This performs one actual model call asking for a compaction summary. It streams the model's text response, captures usage information, and parses the result as structured data.
+**Purpose**: Performs one actual model call to turn rendered old transcript text into a structured compaction summary. It also captures token usage for accounting.
 
-**Data flow**: It receives the rounds to summarize and any missed anchors to mention. It builds a `ModelRequest` with the compaction system prompt and prepared transcript text, streams text chunks from the model client, records the usage event, joins the chunks, validates them as a summary, and returns the summary plus usage.
+**Data flow**: It prepares a ModelRequest using the compaction prompt, rendered transcript text, model name, token limit, session ID, and reasoning settings. It streams text deltas from the model, records the usage event, parses the final text into a CompactionSummary, and returns the summary plus usage. If parsing fails, it raises _InvalidSummary with usage attached.
 
-**Call relations**: `Compaction._summarize` calls this for each attempt. It uses `Compaction._prepare` to build the prompt and `Compaction._parse_summary` to turn the model's response into a trusted object.
+**Call relations**: Compaction._summarize calls this inside its retry loop. It delegates input creation to Compaction._prepare and output validation to Compaction._parse_summary.
 
-*Call graph*: calls 2 internal fn (_parse_summary, _prepare); called by 1 (_summarize); 2 external calls (__init__, __init__).
+*Call graph*: calls 3 internal fn (_parse_summary, _prepare, __init__); called by 1 (_summarize); 2 external calls (__init__, __init__).
 
 
-##### `Compaction._prepare`  (lines 422–444)
+##### `Compaction._prepare`  (lines 468–490)
 
 ```
 def _prepare(self, rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]) -> str
 ```
 
-**Purpose**: This turns old transcript rounds into the text prompt given to the summarizing model. It also adds correction instructions when a previous summary missed required anchor facts.
+**Purpose**: Builds the text that is sent to the summarizing model. It turns structured messages into readable transcript blocks and adds instructions when a retry must preserve missed facts.
 
-**Data flow**: It receives grouped messages and missed anchors. It renders each message as `role: text`, converts non-text blocks into readable markers, folds long repeated runs into a short count marker, optionally appends a list of missed anchors, and ends with a reminder to return only JSON. The result is one prompt string.
+**Data flow**: It receives rounds and any missed anchors. It renders each message as role plus text, folds large repeated runs, optionally appends a correction list of missed anchor literals, and ends with a reminder to return only the required JSON object.
 
-**Call relations**: `Compaction._summarize_once` calls this before sending the model request. It relies on `Compaction._text` for message rendering, `Compaction._fold_repeated_runs` to reduce spam-like repetition, and `Compaction._bullets` to format missed anchors.
+**Call relations**: Compaction._summarize_once calls this before making the model request. It uses Compaction._text to render messages, Compaction._fold_repeated_runs to reduce bulk, and Compaction._bullets for retry facts.
 
 *Call graph*: calls 3 internal fn (_bullets, _fold_repeated_runs, _text); called by 1 (_summarize_once).
 
 
-##### `Compaction._fold_repeated_runs`  (lines 446–459)
+##### `Compaction._fold_repeated_runs`  (lines 492–505)
 
 ```
 def _fold_repeated_runs(self, text: str) -> str
 ```
 
-**Purpose**: This shrinks text that repeats the same short phrase many times in a row. It preserves the information that repetition happened without sending all repeated copies to the summarizer.
+**Purpose**: Compresses long stretches of repeated text before sending them to the summarizer. This keeps spammy or stuck-tool output from making the summary request too large.
 
-**Data flow**: It receives a text string, searches for long consecutive repeated word sequences, and replaces each run with one copy plus a marker saying how many times it repeated. It returns the shortened text.
+**Data flow**: It receives rendered transcript text. It replaces repeated short word sequences with one copy plus a marker saying how many times it repeated, and returns the shortened text.
 
-**Call relations**: `Compaction._prepare` calls this while building the summarizer prompt. It helps compaction succeed on transcripts bloated by loops, pasted spam, or repeated tool output.
+**Call relations**: Compaction._prepare calls this while building the summary prompt. Its nested fold helper formats each individual replacement.
 
 *Call graph*: called by 1 (_prepare).
 
 
-##### `Compaction._fold_repeated_runs.fold`  (lines 454–457)
+##### `Compaction._fold_repeated_runs.fold`  (lines 500–503)
 
 ```
 def fold(match: re.Match[str]) -> str
 ```
 
-**Purpose**: This small inner helper builds the replacement text for one repeated run. It calculates the repeat count and formats the marker.
+**Purpose**: Formats one repeated-text match into a shorter phrase with a repetition count. It is the small replacement function used by the regular expression substitution.
 
-**Data flow**: It receives a regular-expression match for a repeated text run. It extracts the repeated unit, estimates how many copies were present, and returns one unit followed by a `[repeated N times]` marker.
+**Data flow**: It receives a regex match, extracts the repeated unit, estimates how many times it appeared, and returns the unit followed by a “[repeated N times]” marker.
 
-**Call relations**: It is used internally by `Compaction._fold_repeated_runs` as the replacement function passed to the regular-expression engine.
+**Call relations**: It is used only inside Compaction._fold_repeated_runs when the regular expression finds a repeated run.
 
 
-##### `Compaction._drop_oldest`  (lines 461–466)
+##### `Compaction._drop_oldest`  (lines 507–512)
 
 ```
 def _drop_oldest(self, rounds: tuple[tuple[Message, ...], ...]) -> tuple[tuple[Message, ...], ...]
 ```
 
-**Purpose**: This removes the oldest slice of the head when the summarizer prompt is too large. It is a controlled way to shrink the prompt rather than failing immediately.
+**Purpose**: Shrinks an oversized summary prompt by removing the oldest part of the head. This gives the retry a better chance of fitting within the provider’s limit.
 
-**Data flow**: It receives the current head rounds, drops at least one round and generally about the oldest fifth, and returns the remaining newer rounds.
+**Data flow**: It receives the head rounds and removes the oldest fifth, with at least one round removed. It returns the remaining newer rounds.
 
-**Call relations**: `Compaction._summarize` calls this only after `is_context_overflow` says the provider rejected the summary prompt for size. The smaller set of rounds is then retried.
+**Call relations**: Compaction._summarize calls this only after is_context_overflow identifies a prompt-too-large failure.
 
 *Call graph*: called by 1 (_summarize).
 
 
-##### `Compaction._parse_summary`  (lines 468–509)
+##### `Compaction._parse_summary`  (lines 514–554)
 
 ```
 def _parse_summary(self, text: str) -> CompactionSummary
 ```
 
-**Purpose**: This turns the model's raw text response into a validated `CompactionSummary`. It is deliberately strict enough to avoid installing an unusable or empty summary.
+**Purpose**: Turns the model’s raw text response into a validated CompactionSummary object. It tolerates extra text around the JSON but rejects missing, malformed, schema-invalid, or empty summaries.
 
-**Data flow**: It receives raw text from the model, finds the first balanced JSON object inside it, validates that object against the expected summary schema, and checks that the intent field is not blank. It returns a typed summary or raises a `RuntimeError` if parsing or validation fails.
+**Data flow**: It receives raw model output text, finds the first balanced JSON object, validates it against the CompactionSummary schema, checks that the intent is not empty, and returns the typed summary. On failure it raises RuntimeError.
 
-**Call relations**: `Compaction._summarize_once` calls this after collecting the streamed model response. A failure stops compaction rather than letting bad text replace real conversation history.
+**Call relations**: Compaction._summarize_once calls this after collecting the model stream. If it raises, Compaction._summarize_once wraps the problem in _InvalidSummary.
 
 *Call graph*: called by 1 (_summarize_once); 1 external calls (model_validate_json).
 
 
-##### `Compaction._references`  (lines 511–528)
+##### `Compaction._references`  (lines 556–573)
 
 ```
 def _references(self, head_rounds: tuple[tuple[Message, ...], ...], tail: tuple[Message, ...]) -> tuple[str, ...]
 ```
 
-**Purpose**: This finds durable tool-output files from the part of the transcript being summarized and carries their paths forward. These files can be reread later, so the compacted message can reference them instead of copying their full contents.
+**Purpose**: Finds durable tool-output file paths from the summarized head that should be mentioned after compaction. These paths let later turns reread large outputs without pasting them into the summary.
 
-**Data flow**: It receives the head rounds and the kept tail. It scans the tail for paths already still visible, then scans the head for tool-output paths that are not already visible, removes duplicates, keeps only the most recent few, and returns those paths.
+**Data flow**: It receives head rounds and the kept tail. It scans text for tool-output paths, skips paths already visible in the tail, keeps unique paths, bounds the list to the most recent few, and returns them.
 
-**Call relations**: `Compaction._compact` calls this while building the boundary facts for verification and rendering. It uses `Compaction._text` to inspect each message's readable content.
+**Call relations**: Compaction._compact calls this while building the boundary for the replacement message. Compaction._render later includes these references outside the model-authored summary.
 
 *Call graph*: calls 1 internal fn (_text); called by 1 (_compact).
 
 
-##### `Compaction._render`  (lines 530–569)
+##### `Compaction._render`  (lines 575–614)
 
 ```
 def _render(self, summary: CompactionSummary, references: tuple[str, ...], active_requests: tuple[str, ...]) -> str
 ```
 
-**Purpose**: This converts a validated summary plus carried references and active requests into the single replacement user message. It creates a deterministic, readable compacted-context block.
+**Purpose**: Turns a validated summary plus system-carried facts into the single user message that replaces the old transcript head. The output is deterministic, so the same inputs always produce the same compacted context.
 
-**Data flow**: It receives a `CompactionSummary`, durable reference paths, and active request strings. It adds sections only when they contain content, includes active requests verbatim, and returns one string beginning with the compacted-context prefix.
+**Data flow**: It receives a CompactionSummary, durable references, and active requests. It creates titled sections only for fields that have content, appends references and active requests verbatim, prefixes the whole thing as compacted context, and returns the final text.
 
-**Call relations**: `Compaction._verify` calls this to build the candidate replacement message. `Compaction._require_budget` also calls it with an empty summary to calculate the unavoidable minimum size of the compacted block.
+**Call relations**: Compaction._verify calls this to build the candidate replacement window. Compaction._require_budget also calls it with an empty summary to estimate the unavoidable carried text.
 
 *Call graph*: calls 1 internal fn (_bullets); called by 2 (_require_budget, _verify).
 
 
-##### `Compaction._bullets`  (lines 571–572)
+##### `Compaction._bullets`  (lines 616–617)
 
 ```
 def _bullets(self, items: tuple[str, ...]) -> str
 ```
 
-**Purpose**: This formats a list of strings as simple markdown-style bullet lines. It keeps repeated rendering code out of the larger prompt and summary builders.
+**Purpose**: Formats a list of strings as markdown-style bullet lines. It gives summaries and retry instructions a consistent readable shape.
 
-**Data flow**: It receives a tuple of strings and returns one text block where each item is prefixed with `- ` and separated by newlines.
+**Data flow**: It receives a tuple of text items and returns one string where each item is prefixed with “- ” and separated by newlines.
 
-**Call relations**: `Compaction._prepare` uses this for missed-anchor correction instructions. `Compaction._render` uses it for summary sections such as concepts, errors, pending tasks, skills, and references.
+**Call relations**: Compaction._prepare uses it for missed-anchor correction instructions. Compaction._render uses it for summary sections and durable references.
 
 *Call graph*: called by 2 (_prepare, _render).
 
 
-##### `Compaction._window_text`  (lines 574–575)
+##### `Compaction._window_text`  (lines 619–620)
 
 ```
 def _window_text(self, messages: tuple[Message, ...]) -> str
 ```
 
-**Purpose**: This flattens a message window into plain text for searching and verification. It gives other checks one combined string to inspect.
+**Purpose**: Renders a sequence of messages into plain text for searching and verification. It is used when the code needs to ask, “does this fact appear anywhere in this window?”
 
-**Data flow**: It receives messages, converts each message to text with `Compaction._text`, joins them with newlines, and returns the combined text.
+**Data flow**: It receives messages, converts each message to text with Compaction._text, joins them with newlines, and returns the combined text.
 
-**Call relations**: `Compaction._compact` uses this to capture the before-window text and head text. `Compaction._verify` uses it to check whether anchors appear in the candidate after-window.
+**Call relations**: Compaction._compact uses this to define what existed before compaction. Compaction._verify uses it to check what remains after compaction.
 
 *Call graph*: calls 1 internal fn (_text); called by 2 (_compact, _verify).
 
 
-##### `Compaction._verify`  (lines 577–613)
+##### `Compaction._verify`  (lines 622–658)
 
 ```
 def _verify(self, summary: CompactionSummary, boundary: _Boundary, retried: bool) -> _Candidate
 ```
 
-**Purpose**: This grades one candidate summary before it can replace the old transcript head. It removes invented file paths, renders the replacement, counts missing anchors, and records size information.
+**Purpose**: Checks one candidate summary before it can replace live conversation history. It removes invented file paths, adds known loaded skills, renders the replacement, and records what important anchors were lost.
 
-**Data flow**: It receives a summary, a fixed boundary describing the original window, and a flag saying whether this is a retry. It keeps only summary file references that appeared in the original text, injects pipeline-known loaded skills, renders the compacted message, joins it with the kept tail, estimates token counts, finds missing anchors, and returns a `_Candidate` containing the checked summary, rendered text, new messages, and verification record.
+**Data flow**: It receives a summary, a boundary describing the original window, and whether this is a retry. It keeps only summary file references that appeared in the original text, renders the compacted message, combines it with the unchanged tail, counts tokens, finds missing anchors, builds a CompactionVerification, and returns a _Candidate containing all of that.
 
-**Call relations**: `Compaction._compact` calls this after each successful summarization attempt. It uses `Compaction._render`, `Compaction._tokens`, `Compaction._window_text`, and `missing_anchors` to decide whether the candidate is good enough or needs a retry.
+**Call relations**: Compaction._compact calls this after a first summary and possibly after an anchor-repair retry. It uses missing_anchors to grade exact fact preservation and Compaction._render to create the replacement text.
 
 *Call graph*: calls 4 internal fn (_render, _tokens, _window_text, missing_anchors); called by 1 (_compact); 4 external calls (__init__, __init__, __init__, model_copy).
 
 
-##### `Compaction._require_budget`  (lines 615–653)
+##### `Compaction._require_budget`  (lines 660–698)
 
 ```
 def _require_budget(self, verification: CompactionVerification, boundary: _Boundary) -> None
 ```
 
-**Purpose**: This enforces the key size promise of compaction: when the pipeline had enough room to make things smaller, the replacement must actually be smaller and must not immediately retrigger compaction. It prevents paying for a summary that makes the situation worse.
+**Purpose**: Refuses to install a compacted window when it clearly failed the size goal. This prevents wasting summary calls while making the next model request no better or even worse.
 
-**Data flow**: It receives a verification record and the original boundary. It computes the trigger threshold, the fixed cost of the compacted block with an empty summary, the old head size, and the room available for summary text. If the candidate violates the size rules in a situation the pipeline could have fixed, it raises an error; otherwise it returns nothing.
+**Data flow**: It receives verification data and the fixed boundary. It estimates unavoidable carried text, compares before tokens, after tokens, tail tokens, summary allowance, and the compaction trigger, then either returns silently or raises RuntimeError.
 
-**Call relations**: `Compaction._compact` calls this after verification and before persistence. It relies on `Compaction._trigger`, `Compaction._render`, and `Compaction._tokens` to compare old and new window sizes.
+**Call relations**: Compaction._compact calls this after verification and before persistence. It uses Compaction._trigger, Compaction._render, and Compaction._tokens to apply the same budget rules as the trigger decision.
 
 *Call graph*: calls 3 internal fn (_render, _tokens, _trigger); called by 1 (_compact); 1 external calls (__init__).
 
 
-##### `Compaction._record_verification`  (lines 655–678)
+##### `Compaction._record_verification`  (lines 700–723)
 
 ```
 def _record_verification(self, index: int, reason: Literal['auto', 'force'], verification: CompactionVerification) -> None
 ```
 
-**Purpose**: This reports the quality of a completed compaction. It records whether anchors were lost, whether paths were dropped, and whether a retry was used.
+**Purpose**: Reports the quality of a completed compaction. It makes losses visible in logs and metrics instead of hiding them inside a stored summary.
 
-**Data flow**: It receives the compaction index, reason, and verification record. It writes a structured log with token counts and loss details, then emits a metric labeled as clean or lossy and retried or not.
+**Data flow**: It receives the compaction index, reason, and verification object. It logs token counts, missing anchors, dropped paths, and retry status, then emits a metric labeled as clean or lossy and retried or not.
 
-**Call relations**: `Compaction._compact` calls this after persistence succeeds. The emitted log and metric let operators monitor compaction quality across many conversations.
+**Call relations**: Compaction._compact calls this after persistence. Operators and evaluation tooling can use the log and metric output to understand how well compaction is preserving information.
 
 *Call graph*: called by 1 (_compact); 2 external calls (emit_metric, log).
 
 
-##### `Compaction._persist`  (lines 680–691)
+##### `Compaction._persist`  (lines 725–736)
 
 ```
 async def _persist(self, index: int, before: tuple[Message, ...], after: tuple[Message, ...], summary: CompactionSummary) -> None
 ```
 
-**Purpose**: This saves the evidence of a compaction: the full message window before compaction, the replacement window after compaction, and the structured summary. That makes the transformation auditable later.
+**Purpose**: Stores the full compaction record: the original window, the replacement window, and the structured summary. This creates an audit trail and lets later readers inspect exactly what changed.
 
-**Data flow**: It receives an index, before messages, after messages, and the summary. It writes the before and after windows through `Compaction._write`, compresses the summary JSON with LZ4 compression, and stores it in the blob store under the compaction key.
+**Data flow**: It receives an index, before messages, after messages, and the summary. It writes before and after windows through Compaction._write, compresses the summary JSON with lz4, and stores it in the blob store under the summary key.
 
-**Call relations**: `Compaction._compact` calls this once a candidate passes verification and budget checks. It uses `Compaction._key` to place all three records in the conversation's compaction area.
+**Call relations**: Compaction._compact calls this only after verification and budget checks pass. It relies on Compaction._key to place each stored piece at the correct path.
 
 *Call graph*: calls 2 internal fn (_key, _write); called by 1 (_compact); 1 external calls (model_dump_json).
 
 
-##### `Compaction._next_index`  (lines 693–697)
+##### `Compaction._next_index`  (lines 738–742)
 
 ```
 async def _next_index(self) -> int
 ```
 
-**Purpose**: This finds the next available compaction number for the conversation. Each compaction is stored under a numbered slot.
+**Purpose**: Finds the next available numbered slot for a compaction record in the blob store. This keeps multiple compactions in one conversation ordered and separate.
 
-**Data flow**: It starts at index 1 and checks whether an `after` record already exists at that index. It increments until it finds a free index and returns that number.
+**Data flow**: It starts at index 1, checks whether an “after” record already exists for that index, and increments until it finds an unused slot. It returns that index.
 
-**Call relations**: `Compaction._compact` calls this before writing records. It uses `Compaction._key` to ask the blob store about each possible location.
+**Call relations**: Compaction._compact calls this before writing records. It uses Compaction._key to ask the blob store about the expected paths.
 
 *Call graph*: calls 1 internal fn (_key); called by 1 (_compact).
 
 
-##### `Compaction.read_record`  (lines 699–706)
+##### `Compaction.read_record`  (lines 744–751)
 
 ```
 async def read_record(self, index: int) -> CompactionRecord | None
 ```
 
-**Purpose**: This reads back one saved compaction record if it exists. It is useful for inspection, replay, or evaluation tools that need the before window, after window, and summary.
+**Purpose**: Reads a previously stored compaction record for inspection. It returns nothing if that numbered record does not exist.
 
-**Data flow**: It receives a compaction index. It tries to fetch the compressed before, after, and summary blobs; if any are missing, it returns `None`. If all are present, it decodes them into a `CompactionRecord` and returns it.
+**Data flow**: It receives an index, tries to read compressed before, after, and summary blobs using their keys, and if all are found passes them to decode_compaction. It returns a CompactionRecord or None when any blob is missing.
 
-**Call relations**: This is the read-side companion to `Compaction._persist`. It uses `Compaction._key` to find the blobs and hands the raw data to the transcript decoding helper.
+**Call relations**: This is a lookup utility for consumers that want to inspect saved compactions. It uses Compaction._key for paths and the transcript decoder to rebuild the typed record.
 
 *Call graph*: calls 1 internal fn (_key); 1 external calls (decode_compaction).
 
 
-##### `Compaction._write`  (lines 708–716)
+##### `Compaction._write`  (lines 753–761)
 
 ```
 async def _write(self, index: int, half: Literal['before', 'after'], messages: tuple[Message, ...]) -> None
 ```
 
-**Purpose**: This writes either the before or after message window to blob storage in a compact, deterministic form. It is used for audit records of the compaction boundary.
+**Purpose**: Writes either the “before” or “after” message window for a compaction record. It serializes the window in a stable form and compresses it before storage.
 
-**Data flow**: It receives an index, a label saying `before` or `after`, and messages. It wraps the messages in a `CompactionWindow`, converts that to sorted compact JSON, compresses it with LZ4, and stores it under the right key.
+**Data flow**: It receives an index, a half name, and messages. It wraps messages in a CompactionWindow, dumps stable compact JSON, compresses the bytes with lz4, and stores them in the blob store at the computed key.
 
-**Call relations**: `Compaction._persist` calls this twice, once for the original window and once for the replacement window. It uses `Compaction._key` to compute the storage path.
+**Call relations**: Compaction._persist calls this twice, once for the original window and once for the replacement window. It uses Compaction._key to choose the storage path.
 
 *Call graph*: calls 1 internal fn (_key); called by 1 (_persist); 2 external calls (__init__, dumps).
 
 
-##### `Compaction._key`  (lines 718–719)
+##### `Compaction._key`  (lines 763–764)
 
 ```
 def _key(self, index: int, half: Literal['before', 'after', 'summary']) -> str
 ```
 
-**Purpose**: This builds the blob-storage key for one compaction artifact. It keeps all before, after, and summary files in the same naming scheme.
+**Purpose**: Builds the blob-store path for one piece of a compaction record. It centralizes the naming rule so all reads and writes agree.
 
-**Data flow**: It receives a compaction index and a part name such as `before`, `after`, or `summary`. It combines those with the conversation id through the shared compaction-key helper and returns the storage key string.
+**Data flow**: It receives a compaction index and a half name such as before, after, or summary. It combines those with the conversation ID through compaction_key and returns the resulting path string.
 
-**Call relations**: `Compaction._next_index`, `Compaction._persist`, `Compaction._write`, and `Compaction.read_record` all use this so reads and writes agree on the exact storage location.
+**Call relations**: Compaction._next_index, Compaction._persist, Compaction._write, and Compaction.read_record all call this whenever they need to locate compaction data.
 
 *Call graph*: called by 4 (_next_index, _persist, _write, read_record); 1 external calls (compaction_key).
 
 
-##### `Compaction._tokens`  (lines 721–744)
+##### `Compaction._tokens`  (lines 766–789)
 
 ```
 def _tokens(self, messages: tuple[Message, ...]) -> int
 ```
 
-**Purpose**: This estimates how many model tokens a message window costs. The estimate includes text, hidden reasoning payloads, and images, so image-heavy or reasoning-heavy windows still trigger compaction.
+**Purpose**: Estimates how many model tokens a set of messages will cost. This is used to decide when to compact and whether the compacted result is small enough.
 
-**Data flow**: It receives messages. For each one, it counts role text, rendered text, opaque reasoning bytes, and a fixed token estimate for each image, converts character cost into token cost, and sums everything into one integer.
+**Data flow**: It receives messages. For each message it counts role text, rendered content text, hidden reasoning bytes, and an estimated cost for images, then sums those estimates and returns the total.
 
-**Call relations**: `Compaction.maybe_compact` uses this to decide whether to compact. `Compaction._compact`, `Compaction._verify`, and `Compaction._require_budget` use it to record and compare before, tail, and after sizes.
+**Call relations**: Compaction.maybe_compact uses this for the initial trigger check. Compaction._compact, Compaction._verify, and Compaction._require_budget use it to measure before, after, and tail sizes.
 
 *Call graph*: calls 3 internal fn (_image_count, _opaque_chars, _text); called by 4 (_compact, _require_budget, _verify, maybe_compact).
 
 
-##### `Compaction._opaque_chars`  (lines 746–765)
+##### `Compaction._opaque_chars`  (lines 791–810)
 
 ```
 def _opaque_chars(self, message: Message) -> int
 ```
 
-**Purpose**: This counts hidden reasoning data that is sent back to the model but is not useful readable transcript text. Without this, the system could badly undercount some model messages.
+**Purpose**: Counts hidden reasoning data that is sent back to the model but not rendered as normal summary text. This prevents token estimates from accidentally treating those blocks as free.
 
-**Data flow**: It receives one message. If the content is plain text, it returns zero; otherwise it scans structured blocks and adds the lengths of thinking signatures, redacted reasoning data, and encrypted reasoning content. It returns that extra character count.
+**Data flow**: It receives one message. If the content is plain text it returns zero; otherwise it scans blocks for thinking signatures, redacted thinking data, and encrypted reasoning content, sums their byte-string lengths, and returns the total.
 
-**Call relations**: `Compaction._tokens` calls this while estimating the cost of each message. It complements `Compaction._text`, which renders human-readable parts only.
+**Call relations**: Compaction._tokens calls this for each message so token estimates include invisible but still costly reasoning payloads.
 
 *Call graph*: called by 1 (_tokens).
 
 
-##### `Compaction._image_count`  (lines 767–777)
+##### `Compaction._image_count`  (lines 812–822)
 
 ```
 def _image_count(self, message: Message) -> int
 ```
 
-**Purpose**: This counts images inside a message so the token estimate can include their cost. Images do not have much text, but they still consume model context.
+**Purpose**: Counts inline images in a message so token estimates include their approximate cost. Images may contain little or no text, but they still consume model context.
 
-**Data flow**: It receives one message. If the content is plain text, it returns zero; otherwise it scans top-level image blocks and images nested inside tool-result blocks, counts them, and returns the total.
+**Data flow**: It receives one message. If the content is plain text it returns zero; otherwise it counts ImageBlock objects directly and images inside tool-result parts, then returns the total.
 
-**Call relations**: `Compaction._tokens` calls this for each message. Its count is multiplied by a fixed image token estimate.
+**Call relations**: Compaction._tokens calls this for each message and multiplies the count by a fixed image token estimate.
 
 *Call graph*: called by 1 (_tokens).
 
 
-##### `Compaction._text`  (lines 779–803)
+##### `Compaction._text`  (lines 824–848)
 
 ```
 def _text(self, message: Message) -> str
 ```
 
-**Purpose**: This turns one message into readable text for prompts, searching, token estimates, and verification. It gives every supported content block a plain-text representation.
+**Purpose**: Converts a structured message into plain text for summarizing, scanning, and token estimation. It gives every relevant block a readable representation, including markers for images and redacted reasoning.
 
-**Data flow**: It receives a message. If the content is already a string, it returns it; otherwise it walks through structured blocks, keeping text and thinking summaries, replacing images and redacted reasoning with markers, rendering tool results, and formatting tool calls with their JSON arguments. It returns the joined text.
+**Data flow**: It receives one message. Plain string content is returned directly; structured content is walked block by block, extracting text, thinking summaries, tool results, tool-use calls, image markers, and redacted markers, then joining them with newlines.
 
-**Call relations**: `Compaction._prepare`, `Compaction._references`, `Compaction._tokens`, and `Compaction._window_text` all call this. It is the common translation layer between rich message objects and the plain text that compaction can inspect.
+**Call relations**: Compaction._prepare uses this to render the summary prompt. Compaction._references and Compaction._window_text use it for searching, and Compaction._tokens uses it as part of size estimation.
 
 *Call graph*: called by 4 (_prepare, _references, _tokens, _window_text); 1 external calls (dumps).
 
 
-### `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/conversation_slot.py`
+### Prompt context inputs
+These files assemble the auxiliary context shown to the model, including skills, delivery rules, and hosted site links.
 
-`domain_logic` · `conversation context rendering`
+### `core/src/ufo/skills/selection.py`
 
-This file is the bridge between the scheduled-tasks extension and the conversation “slot” system. A slot is a named bundle of information attached to a conversation, like a side panel that says, “Here are the automations connected to this chat.” Without this file, scheduled tasks might still exist, but the conversation would not have a standard way to show them, count them, or hide sensitive parts.
+`domain_logic` · `per-turn prompt construction`
 
-The main flow starts from the conversation context. The context says which scheduled-task records are currently visible and authorized for this conversation. The file opens a ScheduleStore, asks it for matching tasks, and then double-checks that each stored task still matches a visible item and the expected authorization generation. That check matters because it stops stale or unauthorized task data from leaking into the conversation.
+An agent can have saved skill cards, each with a name, description, and sometimes a pinned flag. This file decides where those cards appear: either folded into the normal system prompt when the list is small, or placed in a separate saved-skills block when the list is larger. Without this, a big skill library could crowd out the actual conversation, or the model might not know that useful skills exist.
 
-For each allowed task, it fetches inspection details such as the next run time, last run time, last status, and last response. It then trims long text to fixed limits so the slot stays small and predictable. If anything had to be omitted or shortened, it marks the result as truncated. It also respects content visibility: when task content is not visible, descriptions and latest responses are hidden.
+The file uses fixed character budgets, like suitcase size limits. Short lists go directly into the main skill index. Bigger lists get a special `<saved_skills>` block. That block is filled in a careful order: pinned skills first, then the whole catalog if it fits, and if not, the best-matching skills get full descriptions while the rest still appear by name. This means the model can see that a skill exists even if its full description had to be shortened away.
 
-At the bottom, `AUTOMATIONS_SLOT` registers this behavior under the id `automations`, with a label, icon, summary function, and full read function.
+The matching is simple and deterministic: the query is split into meaningful words, and a skill scores higher when those words appear in its name or description. There is no file access, network access, or randomness here. The main combined helper, `member_visibility`, does the decisions and rendering together so each turn can run quickly even with many cards.
 
 #### Function details
 
-##### `_scheduler`  (lines 16–19)
+##### `_query_terms`  (lines 35–42)
 
 ```
-def _scheduler(ctx: ConversationSlotContext) -> ScheduleStore
+def _query_terms(query: str) -> tuple[str, ...]
 ```
 
-**Purpose**: This helper creates the schedule storage object used to read scheduled tasks. It also makes sure the conversation context actually contains the scheduled-tasks extension state needed to open that storage.
+**Purpose**: Turns a user's query into a clean list of search words. It removes tiny words, ignores punctuation, limits very long input, and keeps each useful term only once.
 
-**Data flow**: It receives a conversation slot context. If the context has no extension object, it stops with an error because there is nowhere to read schedules from. If the extension object is present, it uses it to create and return a `ScheduleStore`, which is the object that knows how to query scheduled tasks.
+**Data flow**: It receives a query string → cuts it down to the maximum allowed length, lowercases it in a Unicode-safe way, splits it wherever there are non-word characters, drops terms shorter than the minimum length, and removes duplicates while keeping the original order → returns a tuple of search terms.
 
-**Call relations**: _conversation` and `_read` both call this when they need access to stored schedules. It is the small doorway from the generic conversation-slot world into the scheduled-tasks storage world.
+**Call relations**: This is the shared preparation step for matching skills. `lexical_score` uses it before scoring one card, and `select_top_k` uses it once before ranking many cards.
 
-*Call graph*: called by 2 (_conversation, _read); 1 external calls (__init__).
-
-
-##### `_conversation`  (lines 22–28)
-
-```
-async def _conversation(ctx: ConversationSlotContext) -> tuple[ScheduledTask, ...]
-```
-
-**Purpose**: This function asks the schedule store for the scheduled tasks that belong to the current conversation and match the visible item names. It fetches one more than the display limit so the caller can tell whether there are too many to show fully.
-
-**Data flow**: It receives a conversation slot context, pulls the names from `ctx.visible_items`, opens the schedule store through `_scheduler`, and asks for tasks with the current conversation id and those names. It returns the matching scheduled task records as a tuple.
-
-**Call relations**: _read` calls this as its first task-listing step. `_conversation` relies on `_scheduler` to get the store, then hands the raw scheduled task rows back to `_read` for authorization checks, inspection, trimming, and packaging.
-
-*Call graph*: calls 1 internal fn (_scheduler); called by 1 (_read).
+*Call graph*: called by 2 (lexical_score, select_top_k).
 
 
-##### `_read`  (lines 31–90)
+##### `_term_hits`  (lines 45–47)
 
 ```
-async def _read(ctx: ConversationSlotContext) -> AutomationsSlotPayload
+def _term_hits(terms: Sequence[str], card: SkillCard) -> int
 ```
 
-**Purpose**: This is the main reader for the Automations slot. It builds the full slot payload: a safe list of visible automations, their schedule details, recent run information, and a flag saying whether anything was left out or shortened.
+**Purpose**: Counts how many prepared search terms appear in a skill card. It is the small scoring helper that says, in plain terms, how well this card matches the query words.
 
-**Data flow**: It receives a conversation slot context. It opens the schedule store, loads candidate tasks for the conversation, and compares them against the visible items in the context. Only tasks whose name and authorization generation match are kept. It inspects the kept tasks to learn run status and timing, hides content when the visible item says content is not allowed, cuts long fields down to fixed lengths, and notes whether truncation happened. It returns an `AutomationsSlotPayload` containing `ConversationAutomation` entries plus the truncation flag.
+**Data flow**: It receives already-cleaned search terms and one skill card → combines the card's name and description into one lowercase text area → counts each query term that appears anywhere in that text → returns that count as an integer.
 
-**Call relations**: This function is registered as the slot’s full `read` callback in `AUTOMATIONS_SLOT`, so the conversation-slot system calls it when it needs the detailed Automations content. Inside the flow, it calls `_scheduler` to reach storage, `_conversation` to load candidate tasks, asks the schedule store for inspection details, and then creates the payload objects that the rest of the system can display or consume.
+**Call relations**: `lexical_score` calls this after preparing the query. It is the actual comparison step between the query words and a card's visible text.
 
-*Call graph*: calls 2 internal fn (_conversation, _scheduler); 2 external calls (__init__, __init__).
+*Call graph*: called by 1 (lexical_score).
 
 
-##### `_summarize`  (lines 93–95)
+##### `lexical_score`  (lines 50–55)
+
+```
+def lexical_score(query: str, card: SkillCard) -> int
+```
+
+**Purpose**: Gives one skill card a simple match score for a query. Someone would use it to ask, “How many of the query's meaningful words show up in this skill's name or description?”
+
+**Data flow**: It receives a query string and a skill card → uses `_query_terms` to turn the query into useful terms, then uses `_term_hits` to count matches in the card → returns the number of distinct terms found.
+
+**Call relations**: This is the public single-card scoring function. It is built from `_query_terms` and `_term_hits`, while the larger ranking path in this file uses the same idea through `select_top_k`.
+
+*Call graph*: calls 2 internal fn (_query_terms, _term_hits).
+
+
+##### `select_top_k`  (lines 58–66)
+
+```
+def select_top_k(query: str, cards: Sequence[SkillCard]) -> tuple[SkillCard, ...]
+```
+
+**Purpose**: Chooses the best-matching unpinned saved skills for a query. It deliberately leaves pinned cards out because pinned cards are always shown first elsewhere.
+
+**Data flow**: It receives a query and a sequence of skill cards → prepares the query terms once, removes pinned cards from consideration, sorts the remaining cards by how many terms match their names or descriptions, and keeps only the configured number of top results → returns those selected cards as a tuple.
+
+**Call relations**: `member_visibility` calls this when the full catalog is too large to show with descriptions. The selected cards are the ones that get full lines in the saved-skills block.
+
+*Call graph*: calls 1 internal fn (_query_terms); called by 1 (member_visibility).
+
+
+##### `skill_line`  (lines 69–71)
+
+```
+def skill_line(card: SkillCard) -> str
+```
+
+**Purpose**: Formats one skill card as a compact display line. It also caps the line length so one long description cannot push out many other skills.
+
+**Data flow**: It receives a skill card → builds text in the form `- name: description` → cuts that text to the configured maximum line length → returns the shortened line.
+
+**Call relations**: This is the standard way this file renders a full skill card. `folds_into_prompt`, `prompt_index`, `catalog_fits`, and `member_visibility` all rely on it so size checks and final display use the same text.
+
+*Call graph*: called by 4 (catalog_fits, folds_into_prompt, member_visibility, prompt_index).
+
+
+##### `folds_into_prompt`  (lines 74–78)
+
+```
+def folds_into_prompt(cards: Sequence[SkillCard]) -> bool
+```
+
+**Purpose**: Decides whether all member skill cards are small enough to fit directly into the system prompt. This keeps small saved-skill sets looking just like built-in skills.
+
+**Data flow**: It receives a sequence of skill cards → turns each card into a capped `skill_line`, measures the combined joined size, and compares it with the prompt-fold budget → returns true if the cards fit, otherwise false.
+
+**Call relations**: `prompt_index` calls this before adding member skills to the main prompt index. It uses `_joined_size` for the measurement and `skill_line` for the exact text being measured.
+
+*Call graph*: calls 2 internal fn (_joined_size, skill_line); called by 1 (prompt_index).
+
+
+##### `prompt_index`  (lines 81–93)
+
+```
+def prompt_index(registry: SkillRegistry) -> tuple[tuple[str, str], ...]
+```
+
+**Purpose**: Builds the skill index entries that go into the main prompt for a turn. It includes deployed skills always, and member saved skills only when their list is small enough.
+
+**Data flow**: It receives a skill registry → reads the registry's member cards and deployed skill index → checks whether member cards fold into the prompt; if not, it returns only the deployed index, and if yes, it appends member skill names and capped descriptions in the same style → returns a tuple of skill index entries.
+
+**Call relations**: This function is the bridge between the registry and prompt construction. It calls the registry's `index()` for deployed skills, uses `folds_into_prompt` to decide whether member cards join them, and uses `skill_line` so the prompt text matches the size check.
+
+*Call graph*: calls 3 internal fn (index, folds_into_prompt, skill_line).
+
+
+##### `catalog_fits`  (lines 96–99)
+
+```
+def catalog_fits(cards: Sequence[SkillCard]) -> bool
+```
+
+**Purpose**: Checks whether every saved skill can be shown as a full line inside the saved-skills block. If this is true, no search ranking is needed.
+
+**Data flow**: It receives skill cards → renders each as a capped line, measures the total block size including the wrapper tags, and compares that to the block budget → returns true if the whole catalog fits.
+
+**Call relations**: This is a standalone version of one decision also made inside `member_visibility`. It relies on `skill_line` for consistent text and `_block_size` for the budget calculation.
+
+*Call graph*: calls 2 internal fn (_block_size, skill_line).
+
+
+##### `member_visibility`  (lines 113–146)
+
+```
+def member_visibility(query: str, cards: Sequence[SkillCard]) -> MemberVisibility
+```
+
+**Purpose**: Makes the full saved-skill visibility decision for one turn. It says whether skills fold into the prompt, whether the whole catalog fits the saved-skills block, and what block text should be shown.
+
+**Data flow**: It receives the current query and saved skill cards → renders each card line once, checks the prompt budget and block budget, and returns an empty block if there are no cards or the cards already fold into the prompt. If the full catalog fits, it renders pinned cards first and then unpinned cards. If it does not fit, it renders pinned cards, then top query matches with full descriptions, then the remaining unpinned skills by bare name, trimming from the end if needed and adding a count of dropped skills → returns a `MemberVisibility` result containing the decisions and final block.
+
+**Call relations**: `member_block` calls this as the main worker. Inside, it uses `_joined_size` and `_block_size` for budget checks, `skill_line` for card text, `select_top_k` when it must choose described matches, and `_render` to wrap the final lines in saved-skills tags.
+
+*Call graph*: calls 5 internal fn (_block_size, _joined_size, _render, select_top_k, skill_line); called by 1 (member_block); 1 external calls (__init__).
+
+
+##### `member_block`  (lines 149–157)
+
+```
+def member_block(query: str, cards: Sequence[SkillCard]) -> str
+```
+
+**Purpose**: Returns just the saved-skills text block for a turn. This is the simple function to call when the caller only needs text to insert into the turn message.
+
+**Data flow**: It receives the query and saved skill cards → asks `member_visibility` to make all placement and budget decisions → returns only the block string from that result, which may be empty.
+
+**Call relations**: This is a convenience wrapper around `member_visibility`. It lets callers use the full saved-skill rendering behavior without needing the extra folded/catalog flags.
+
+*Call graph*: calls 1 internal fn (member_visibility).
+
+
+##### `_joined_size`  (lines 163–164)
+
+```
+def _joined_size(lines: Sequence[str]) -> int
+```
+
+**Purpose**: Measures how long a group of lines would be if joined with newline characters. It is a small helper for enforcing character budgets consistently.
+
+**Data flow**: It receives a sequence of already-rendered lines → adds each line length plus the newline spacing between lines, with a special case for no lines → returns the total character count.
+
+**Call relations**: `folds_into_prompt` and `member_visibility` use this to check the prompt-fold budget. `_block_size` also builds on it to measure a wrapped saved-skills block.
+
+*Call graph*: called by 3 (_block_size, folds_into_prompt, member_visibility).
+
+
+##### `_block_size`  (lines 167–168)
+
+```
+def _block_size(lines: Sequence[str]) -> int
+```
+
+**Purpose**: Measures how large a saved-skills block would be after adding its opening and closing tags. This prevents the block from exceeding the configured prompt space.
+
+**Data flow**: It receives rendered skill lines → uses `_joined_size` to measure the body, adds the fixed wrapper tag sizes and needed newline spacing → returns the total character count.
+
+**Call relations**: `catalog_fits` and `member_visibility` call this when deciding whether all full skill lines fit inside the saved-skills block.
+
+*Call graph*: calls 1 internal fn (_joined_size); called by 2 (catalog_fits, member_visibility).
+
+
+##### `_render`  (lines 171–172)
+
+```
+def _render(lines: tuple[str, ...]) -> str
+```
+
+**Purpose**: Wraps saved-skill lines in the `<saved_skills>` and `</saved_skills>` tags. This gives the model a clear marked section for saved skills.
+
+**Data flow**: It receives a tuple of lines → places the opening tag before them and the closing tag after them, separated by newlines → returns one formatted string.
+
+**Call relations**: `member_visibility` calls this after it has chosen exactly which lines fit. It is the final formatting step before the saved-skills block is returned.
+
+*Call graph*: called by 1 (member_visibility).
+
+
+### `core/src/ufo/turns/delivery_register.py`
+
+`config` · `startup and prompt assembly`
+
+This file is a small but important rulebook loader. The project has a shared “delivery register,” meaning a standard voice and format for any final answer an agent gives to a human member or to another agent. Rather than copying those rules into many places, this file reads them once from `delivery_register.md` and exposes them as `DELIVERY_REGISTER_BLOCK` for other parts of the system to insert into prompts.
+
+It also defines limits for two kinds of results. `DIRECT_PROSE_RESULT_MAX_CHARS` caps short direct prose results. `SUBAGENT_RESULT_MAX_WORDS` caps the short message a subagent is allowed to send upward. The longer `SUBAGENT_RESULT_DESCRIPTION` is prompt text that tells a subagent exactly how to finish: produce one parent-visible result, keep it very short, follow the shared delivery rules, and call `finish` instead of first writing the result as ordinary assistant text.
+
+In everyday terms, this file is like a laminated house style card placed at every workstation. Without it, different agents or extensions could answer in inconsistent formats, repeat artifact contents unnecessarily, or leak intermediate prose when they should only return a concise final result.
+
+
+### `extensions/sites/ufo_ext_sites/conversation_slot.py`
+
+`domain_logic` · `request handling`
+
+A conversation can have related hosted sites, but the system should not simply show every site it knows about. This file is the gatekeeper for the conversation’s Sites slot: a small panel or section that lists sites connected to the current conversation.
+
+The important idea is authorization. The conversation context includes visible items, which are objects the current viewer is allowed to know about. The code first translates those visible object names into site names. Then it asks the hosted-sites store for matching site records in this workspace and conversation. After that, it double-checks that each returned site still matches the visible authorization object and its generation number. A generation is like a version stamp; it helps prevent showing a stale or replaced authorization.
+
+Once the allowed sites are known, the file builds `ConversationSite` entries. Each entry includes the site name, timestamps, the authorization information, and a public URL made from the public base address, workspace, conversation, and site name. It only returns up to the configured maximum, and marks the result as truncated if more were available.
+
+At the bottom, `SITES_SLOT` registers this behavior with the larger conversation system. Without this file, sites might not appear in conversations, or worse, the system could risk showing site links that the viewer is not meant to see.
+
+#### Function details
+
+##### `_read`  (lines 13–46)
+
+```
+async def _read(ctx: ConversationSlotContext) -> SitesSlotPayload
+```
+
+**Purpose**: This function builds the full Sites slot content for one conversation. It finds the sites that are both connected to the conversation and authorized by the viewer’s visible items, then returns display-ready site records with URLs.
+
+**Data flow**: It receives a conversation slot context containing the conversation ID, visible authorization items, workspace/store access, transaction, and public base URL. It translates visible item names into expected site names, reads matching hosted-site rows from storage, filters out any row whose authorization name or generation does not match, converts the remaining rows into `ConversationSite` objects with public URLs, and returns a `SitesSlotPayload`. The output contains only the allowed sites up to the maximum limit, plus a flag saying whether extra allowed sites were left out.
+
+**Call relations**: The conversation slot provider calls `_read` when the system needs the actual Sites content to show. Inside, it relies on `site_name_from_object` and `site_object_name` to move between authorization-object names and site names, uses `HostedSites` to fetch stored site records, calls `site_url` to make browser-usable links, and packages the result with `ConversationSite` and `SitesSlotPayload`.
+
+*Call graph*: 6 external calls (__init__, __init__, __init__, site_name_from_object, site_object_name, site_url).
+
+
+##### `_summarize`  (lines 49–51)
 
 ```
 async def _summarize(ctx: ConversationSlotContext) -> int | None
 ```
 
-**Purpose**: This function gives a quick count for the Automations slot without loading all task details. It returns how many visible automations should be advertised, capped at the maximum the slot can show.
+**Purpose**: This function gives a quick count for the Sites slot without reading full site details. It is used when the interface only needs to know whether there are sites, and roughly how many can be shown.
 
-**Data flow**: It receives a conversation slot context and counts `ctx.visible_items`, but never above `CONVERSATION_AUTOMATIONS_MAX`. If the count is zero, it returns `None` instead of `0`, which likely means “do not show a summary badge.” Otherwise it returns the count.
+**Data flow**: It receives the conversation slot context and looks only at the number of visible items. It caps that number at the configured maximum for conversation sites. If the result is zero, it returns `None` so the slot can be treated as empty; otherwise it returns the count.
 
-**Call relations**: This function is registered as the slot’s `summarize` callback in `AUTOMATIONS_SLOT`. The conversation-slot system can use it for a lightweight preview before calling the heavier `_read` function that queries storage and inspection details.
-
-
-### Prompt Construction
-These files expose shared reply-shaping instructions and render the final checked system prompt sent to the model.
-
-### `core/src/ufo/loop/prompts/__init__.py`
-
-`other` · `import time`
-
-This is an empty Python package file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, it makes `core/src/ufo/loop/prompts` available as a named place where prompt-related code can live. Think of it like a label on a filing cabinet drawer: the label does not contain the documents, but it lets the rest of the system find that drawer reliably. Without this file, depending on the Python version and packaging setup, imports that expect `ufo.loop.prompts` to be a package could fail or behave differently. Since the file is empty, it performs no setup, exposes no shortcuts, and changes no data at runtime.
+**Call relations**: The conversation slot provider calls `_summarize` when it needs a lightweight summary instead of the full list. Unlike `_read`, it does not go to storage or build URLs; it simply uses the visible items already present in the context to support quick slot display decisions.
 
 
-### `core/src/ufo/turns/delivery_register.py`
-
-`config` · `prompt assembly`
-
-This file is a small bridge between a Markdown rule document and the Python code that builds agent prompts. The real content lives next to it in `delivery_register.md`. When this Python file is imported, it reads that Markdown file from disk, removes extra whitespace at the ends, and stores the result in `DELIVERY_REGISTER_BLOCK`.
-
-The “delivery register” is described as the house set of writing rules for anything an agent says to a user or another agent, including text inside schema-owned fields. In plain terms, it is like a style and safety notice that gets stapled into every relevant instruction packet before an agent writes. Without this file, the rest of the system would not have a simple, reliable Python name to use when it needs that shared instruction block.
-
-The file does not define any functions or classes. Its main behavior happens immediately at import time: find the neighboring Markdown file, read its full text, clean the edges, and expose it as a constant. Other prompt-building code can then reuse the exact same delivery rules instead of copying the text in multiple places.
-
+### System prompt rendering
+This file turns the assembled context into the final checked and digestible system prompt sent to the model.
 
 ### `core/src/ufo/loop/prompts/render.py`
 
 `domain_logic` · `turn setup before sending a prompt to the model`
 
-A language model is guided by a system prompt: a block of instructions that tells it how to behave. This file is the prompt assembly station. It starts with core prompt files such as the shell template, citation text, knowledge-cutoff text, and compaction prompt, then fills named slots like the agent's own instructions, available skills, contributed sections, citation rules, and the model's knowledge cutoff date.
+A system prompt is the instruction sheet the project gives to the model before a turn begins. This file is the prompt assembly station. It starts from core Markdown templates on disk, such as the outer shell, citation text, knowledge-cutoff wording, and compaction prompt. Then it inserts the agent’s own instructions, available skills, contributed capability sections, the shared citation block, and the model’s knowledge cutoff date.
 
-The important safety feature is strict placeholder checking. Placeholders use double braces, such as {{name}}. If an agent prompt declares a variable, the caller must supply it. If the caller supplies a variable the prompt did not declare, that is also an error. After all substitutions, any leftover {{...}} placeholder causes a loud failure. This prevents broken prompts from reaching the model with raw template markers still inside them.
+The important idea is that prompt holes must be filled deliberately. Placeholders like `{{agent-prompt}}` or `{{sections}}` are treated like labeled blanks on a form. If a required blank is left behind, or if an agent prompt asks for a variable that was not supplied, the code raises an error instead of quietly sending curly-brace text to the model. This protects the model from seeing broken instructions and protects developers from subtle prompt mistakes.
 
-The file also normalizes extra blank lines and computes a SHA-256 digest, which is a short fingerprint of the final prompt content. That digest lets logs and observability tools tell exactly which prompt text was used. In everyday terms, this file is like a careful print shop: it merges form letters, refuses missing fields, tidies the final page, and stamps each finished copy with a unique tracking code.
+The file also normalizes extra blank lines and computes a SHA-256 digest, which is a short fingerprint of the final prompt text. That fingerprint helps observability: if behavior changes, people can tell exactly which prompt version was used.
 
 #### Function details
 
@@ -3306,11 +2647,11 @@ The file also normalizes extra blank lines and computes a SHA-256 digest, which 
 def rendered_prompt(content: str) -> RenderedPrompt
 ```
 
-**Purpose**: This wraps finished prompt text in a small result object and adds a digest, which is a fingerprint of the exact text. Someone uses it when they need both the prompt content and a stable way to identify that content in logs or tracing.
+**Purpose**: This wraps finished prompt text together with a content fingerprint. The fingerprint lets the rest of the system record exactly which prompt text was used without storing or comparing the whole text every time.
 
-**Data flow**: It receives the final prompt text as a string. It encodes that text, computes a SHA-256 hash from it, prefixes the hash with "sha256:", and returns a RenderedPrompt containing both the digest and the original content. It does not change any outside state.
+**Data flow**: It receives the final prompt string. It hashes that string with SHA-256, prefixes the hash with `sha256:`, and returns a `RenderedPrompt` object containing both the digest and the original content. It does not change any outside state.
 
-**Call relations**: After render_template has filled every prompt slot and cleaned up spacing, it calls rendered_prompt as the final packaging step. rendered_prompt hands back the object that the rest of the turn can send to the model and record for observability.
+**Call relations**: After `render_template` has filled every slot and cleaned up the text, it calls `rendered_prompt` as the final packaging step. `rendered_prompt` hands back the finished prompt object that can be sent onward and logged by digest.
 
 *Call graph*: called by 1 (render_template); 2 external calls (__init__, sha256).
 
@@ -3321,11 +2662,11 @@ def rendered_prompt(content: str) -> RenderedPrompt
 def render_system_prompt(agent_prompt: str, sections: Sequence[tuple[str, str]], skills: Sequence[tuple[str, str]]=(), *, knowledge_cutoff: str) -> RenderedPrompt
 ```
 
-**Purpose**: This builds the main agent system prompt from the standard shell template. It adds the agent instructions, contributed capability sections, available skills, and the model's knowledge cutoff in a human-readable form.
+**Purpose**: This builds the normal system prompt for the main agent. It combines the shared shell template with the agent prompt, skill list, capability sections, citation text, and a human-readable knowledge cutoff date.
 
-**Data flow**: It receives the agent prompt, a list of section name/body pairs, an optional list of skill name/description pairs, and a required knowledge cutoff like "2026-02". It turns that cutoff into a readable month and year such as "February 2026", inserts it into the knowledge-cutoff block, places that block into the shell template, and then passes the result to render_template. The output is a RenderedPrompt with final text and digest.
+**Data flow**: It takes an agent prompt, a list of section name/body pairs, an optional list of skill name/description pairs, and a machine-formatted knowledge cutoff such as `2026-02`. It turns that date into a readable month like `February 2026`, inserts it into the knowledge-cutoff wording, places that into the shell template, and then asks `render_template` to fill the remaining slots. The result is a `RenderedPrompt` with content and digest.
 
-**Call relations**: This is the higher-level entry for normal system prompt creation in this file. It prepares the model-specific knowledge cutoff and then delegates the detailed slot filling and validation to render_template.
+**Call relations**: This is the higher-level entry for normal prompt rendering in this file. When code needs the main agent’s system prompt, it calls `render_system_prompt`, which prepares the knowledge-cutoff block and then delegates the detailed slot filling and validation to `render_template`.
 
 *Call graph*: calls 1 internal fn (render_template); 1 external calls (strptime).
 
@@ -3336,11 +2677,11 @@ def render_system_prompt(agent_prompt: str, sections: Sequence[tuple[str, str]],
 def render_template(template: str, agent_prompt: str, variables: Mapping[str, str], skills: Sequence[tuple[str, str]], sections: Sequence[tuple[str, str]]) -> RenderedPrompt
 ```
 
-**Purpose**: This is the main template-filling function. It combines a prompt template, agent-specific instructions, variables, skills, sections, and shared citation text into one final prompt, while refusing to let unresolved placeholders slip through.
+**Purpose**: This is the main template-filling routine. It replaces the known slots in a prompt template and refuses to return a prompt if any placeholder is missing, extra, or left unresolved.
 
-**Data flow**: It receives a template, an agent prompt, a mapping of variable names to values, a list of skills, and a list of sections. First it asks _substitute_vars to fill variables inside the agent prompt. If there is agent text but the outer template has no agent-prompt slot, it raises an error. Then it replaces the skill, citation, section, and agent-prompt slots. It scans the finished text for any remaining {{...}} placeholders; if any are found, it raises an error. Otherwise it collapses long blank-line runs, trims the end, and returns a RenderedPrompt through rendered_prompt.
+**Data flow**: It receives a template, an agent prompt, a mapping of variable names to values, a skill list, and section bodies. First it fills variables inside the agent prompt using `_substitute_vars`. If there is agent text but the template has no `{{agent-prompt}}` slot, it raises an error. Then it replaces the skill, citation, sections, and agent-prompt slots. It checks the filled text for any leftover `{{name}}` placeholders, collapses long runs of blank lines, trims the end, and returns a digested `RenderedPrompt`.
 
-**Call relations**: render_system_prompt calls this after preparing the standard shell prompt. Inside this function, _substitute_vars checks the agent prompt variables, render_skill_index formats the skill list, and rendered_prompt packages the finished prompt with its digest.
+**Call relations**: `render_system_prompt` calls this after preparing the shell. Inside, `render_template` calls `_substitute_vars` to safely fill agent-specific variables, `render_skill_index` to format the skills block, and `rendered_prompt` to package the final text with its digest.
 
 *Call graph*: calls 3 internal fn (_substitute_vars, render_skill_index, rendered_prompt); called by 1 (render_system_prompt).
 
@@ -3351,11 +2692,11 @@ def render_template(template: str, agent_prompt: str, variables: Mapping[str, st
 def render_skill_index(skills: Sequence[tuple[str, str]]) -> str
 ```
 
-**Purpose**: This turns the list of available skills into a small prompt block the model can read. If there are no skills, it returns an empty string so the prompt does not include an empty skills section.
+**Purpose**: This turns the list of available skills into the small prompt block the model can read. If there are no skills, it returns an empty string so the prompt does not include a pointless empty section.
 
-**Data flow**: It receives a sequence of skill names and descriptions. With no skills, it outputs an empty string. With skills, it creates a text block wrapped in <available_skills> and </available_skills>, with one bullet line per skill. It does not modify the input list.
+**Data flow**: It receives a sequence of skill names and descriptions. With no skills, it outputs `""`. With skills, it creates an `<available_skills>` block where each skill appears as a bullet with its description, then returns that text.
 
-**Call relations**: render_template calls this while filling the skill-index slot. The resulting text becomes the part of the final prompt that tells the model which loadable skills are available.
+**Call relations**: `render_template` calls this while filling the `{{skill_index}}` slot. The formatted block is inserted into the larger prompt so the model knows which loadable skills are available.
 
 *Call graph*: called by 1 (render_template).
 
@@ -3366,35 +2707,38 @@ def render_skill_index(skills: Sequence[tuple[str, str]]) -> str
 def _substitute_vars(template: str, variables: Mapping[str, str]) -> str
 ```
 
-**Purpose**: This fills variables inside the agent prompt, but only when the prompt and the supplied variable values match exactly. It exists to catch mistakes early, such as forgetting to provide a value or providing a value the prompt never uses.
+**Purpose**: This safely fills variable placeholders inside the agent prompt. It checks both sides: every placeholder in the prompt must have a value, and every supplied value must correspond to a placeholder.
 
-**Data flow**: It receives a template string and a mapping of variable names to replacement strings. It finds all {{variable}} names declared in the template and compares them with the keys supplied by the caller. If any declared variable is missing, it raises an error. If any supplied variable was not declared, it raises an error. If both sides match, it replaces each placeholder with its supplied value and returns the filled string.
+**Data flow**: It receives a prompt fragment and a mapping of variable names to replacement strings. It scans the fragment for placeholders like `{{user_name}}`, compares them with the supplied keys, and raises an error if anything is missing or extra. If the sets match, it replaces each placeholder with its supplied value and returns the filled text.
 
-**Call relations**: render_template calls this before placing the agent prompt into the larger shell. Its job is to make sure the agent-specific part is already complete and trustworthy before the rest of the prompt is assembled.
+**Call relations**: `render_template` calls this before inserting the agent prompt into the larger shell. This makes variable mistakes fail early, before the prompt is packaged by `rendered_prompt` or sent to the model.
 
 *Call graph*: called by 1 (render_template).
 
 ## 📊 State Registers Touched
 
-- `reg-pack-and-feature-selection` — The chosen product packs and feature switches that decide which parts of the system are enabled.
-- `reg-extension-capability-registry` — The live catalog of everything enabled extensions add, such as tools, routes, jobs, credentials, hooks, and backends.
-- `reg-database-session-workspace-scope` — The shared database access layer that keeps reads and writes inside the right workspace and transaction.
-- `reg-agent-profiles` — The saved assistant definitions, including each agent's model, tools, visibility, setup needs, internet access, and identity.
-- `reg-conversation-records` — The durable conversation list, including titles, audience, surface labels, sandbox links, and visibility rules.
-- `reg-turn-state` — The shared status record for each unit of agent work, including claiming, running, completion, failure, parent-child links, and billing markers.
-- `reg-transcript-store` — The saved conversation history and compacted summaries that later turns, portals, and auditors read back.
-- `reg-live-update-stream` — The temporary live feed of progress messages that open clients and other server processes can follow.
-- `reg-cancellation-flags` — The shared stop signals and cleanup markers used to cancel turns, child work, sandboxes, and stuck jobs safely.
-- `reg-tool-catalog` — The current list of tools the agent may call, with their names, inputs, permissions, and implementations.
-- `reg-skill-store` — The shared library of built-in and user-created skills that can be selected, checked, and loaded into a turn.
-- `reg-model-catalog` — The shared list of available AI models, their abilities, prices, limits, and required credentials.
-- `reg-billing-ledger` — The shared money and usage record for tokens, images, videos, sandbox use, egress, balances, caps, and exports.
-- `reg-sandbox-handles` — The remembered execution workspaces, browser workbenches, terminal sessions, and sandbox IDs used across a conversation or turn.
-- `reg-search-indexes` — The shared searchable indexes and embeddings that let turns, research tools, and memory lookup find relevant text.
-- `reg-memory-store` — The long-term saved facts, profiles, notes, and summaries that can be recalled in later conversations.
-- `reg-subagent-objectives` — The shared plan and delegation state for child agents, objectives, steps, evidence, attempts, and result delivery.
-- `reg-observability-context` — The shared tracing, logging, metrics, health, and redaction context used to understand what happened safely.
-- `reg-conversation-todo-store` — Durable conversation checklist/todo state exposed as workspace objects and updated by tools or agents across turns.
-- `reg-delivery-format-registry` — Shared per-surface reply and delivery-format rules used when constructing prompts and shaping delivered responses.
-- `reg-turn-created-reference-store` — Saved references created by a turn, linking its work to newly produced artifacts, objects, sources, sites, or other records for later display, replay, and cleanup.
-- `reg-content-provenance-trust-labels` — Visibility, provenance, and trust labels attached to messages, source content, and external text so prompt construction and policy checks can separate trusted instructions from untrusted content.
+- `reg-agent-registry` — The durable list of agents, including their names, visibility, owners, purposes, model behavior, provisioning source, and tool policy.
+- `reg-conversation-turn-state` — The conversation and turn queue state that tracks each unit of agent work from admission through running, completion, cancellation, or recovery.
+- `reg-transcript-history` — The saved conversation transcript, including compacted summaries and durable final results that later stages read instead of relying on memory.
+- `reg-live-update-hub` — The live activity stream that carries turn progress, tool status, cancellations, mid-turn replies, and final updates to connected viewers.
+- `reg-runtime-fleet-liveness` — The heartbeat and listener-claim records that show which long-running service instances are alive and what work they currently own.
+- `reg-workflow-claims` — The workflow attempt and run-claim state that prevents two workers from running the same turn, scheduled task, listener, or cleanup job at once.
+- `reg-cancellation-state` — The shared brake state that marks work as stopping or cancelled so model calls, tools, workflows, and retries do not continue stale work.
+- `reg-sandbox-handles` — The remembered sandbox or workspace handle for each conversation so tools can resume the same isolated files, terminals, browsers, and services.
+- `reg-tool-catalog-policy` — The current tool catalog and allowlist rules that say which built-in, extension, connector, MCP, and sandbox tools may be called.
+- `reg-model-catalog` — The shared AI model catalog that records available providers, model names, prices, limits, API routes, key sources, and reasoning support.
+- `reg-billing-ledger` — The usage ledger, spend caps, price versions, exports, and prepaid balance records used to meter and charge workspace activity.
+- `reg-observability-traces` — The shared logs, metrics, traces, traceparent links, and safety-filtered operator views used to understand what the system is doing.
+- `reg-audience-visibility` — The saved visibility and audience rules that decide who may see a conversation, transcript, agent, source, artifact, or object.
+- `reg-artifact-blob-store` — The shared file, blob, attachment, artifact, signed download, and media-preview storage used to publish and recover produced work.
+- `reg-index-memory-store` — The searchable index and long-term memory store built from synced pages, embeddings, recalled facts, and deduplicated notes.
+- `reg-scheduled-jobs` — The durable background-job state for scheduled tasks, pauses, monitor checks, report writing, thumbnail repair, product metrics, and self-improvement runs.
+- `reg-subagent-tasks` — The parent-child delegation state that tracks spawned helper agents, their inputs, outputs, names, costs, and undelivered results.
+- `reg-skill-store` — The saved and selected skills that can be provisioned by packs, loaded into agent sandboxes, or created by users inside a workspace.
+- `reg-hosted-site-registry` — The hosted-site records that remember who owns each site, which conversation created it, where it runs, and how previews or sharing are allowed.
+- `reg-prompt-and-delivery-policy` — The prompt, delivery-rule, compaction, and prompt-change proposal state that controls what instructions are rendered and how replies should be shaped.
+- `reg-turn-resource-budget` — In-flight per-turn resource budget and usage accumulator for spend, model tokens, cache reads, sandbox tokens, egress, retries, and stop conditions before final ledger reconciliation.
+- `reg-human-question-state` — Pending human-question and answer state used when tools or workflows ask a member for input and later resume the affected turn.
+- `reg-conversation-slot-provider-registry` — Registered providers that summarize and read extension conversation slots such as artifacts, sources, sites, automations, and task panels.
+- `reg-durable-workflow-store` — Serialized durable workflow/checkpoint objects used to reload or resume long-running turns, jobs, and recovery work after crashes or code changes.
+- `reg-rendered-prompt-audit` — Per-turn rendered prompt metadata, slot validation results, and prompt digests used to trace or replay the exact model prompt later.

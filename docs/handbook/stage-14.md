@@ -1,1428 +1,1453 @@
-# Delegation, Subagents, Objectives, and Multi-Agent Workflows  `stage-14`
+# Source ingestion, page sync, indexing, and memory building  `stage-14`
 
-This stage is part of the main work loop, with some shared support behind the scenes. It lets the main agent act like a project lead: break work into tasks, send tasks to helper agents, track progress, and collect results.
+This stage is the system’s knowledge intake and memory workshop. It runs mostly behind the scenes during setup and ongoing sync. When a member connects an account, the connected helper creates the needed feeds, and can repair missed setup later. The connector rules define the shared language every source must use. The REST helper handles ordinary web API calls, including sign-in, retries, and paging. The backend turns provider records into standard pages, deletes, cursors, and warnings. The sync engine stores page bodies, notices changes, and passes updated pages onward.
 
-The subagent core starts and manages these helpers. Profiles define the default helper and specialized helpers, while contracts check that each task and result has the expected shape, like using a form before work begins and after it ends. The subagent manager queues child turns, waits for them or lets them run separately, cancels them when needed, and returns their final answers.
+Around this core, many adapters bring in data from Markdown folders and GitHub, Google and Microsoft, workplace tools, CRM and support systems, HR tools, finance services, forms, documents, and seeded evaluation data. All of them feed the same pipeline.
 
-Several extensions provide ready-made helpers. Browser delegation sends web tasks to one or many browser agents. Research profiles define normal and deep research agents. Site tools hand website-building to a focused builder. The brief pipeline runs outline, draft, and critique as three linked writing jobs.
+After pages arrive, the indexing parts split text into smaller searchable chunks, create embeddings, and store them in the default database index or Turbopuffer. The memory parts then recall useful facts, extract lasting notes, merge duplicates, and keep long-term knowledge tidy.
 
-Objectives tools and storage support longer plans. They record steps, evidence, attempts, and completion, and they re-check real success conditions instead of trusting a simple “done.” The self-improvement files build test sets from past failures, compare prompt changes, and only accept changes that prove reliable.
+## Sub-stages
+
+- [Local and repository Markdown sources](stage-14.1.md) `stage-14.1` — 3 files
+- [Search chunking and index backends](stage-14.2.md) `stage-14.2` — 3 files
+- [Memory storage, recall, and consolidation](stage-14.3.md) `stage-14.3` — 4 files
+- [Google and Microsoft source connectors](stage-14.4.md) `stage-14.4` — 10 files
+- [Work, engineering, and collaboration connectors](stage-14.5.md) `stage-14.5` — 14 files
+- [CRM, support, marketing, and social connectors](stage-14.6.md) `stage-14.6` — 12 files
+- [HR and recruiting connectors](stage-14.7.md) `stage-14.7` — 6 files
+- [Finance, billing, commerce, and document connectors](stage-14.8.md) `stage-14.8` — 12 files
 
 ## Files in this stage
 
-### Objective planning state
-Tools and durable storage let agents plan multi-step objectives, track evidence, delegate ready work, and verify completion conditions.
+### Feed bootstrap and connector ingestion
+Account connection hooks create default feeds, while connector utilities define and adapt provider data into UFO’s standard source records.
 
-### `extensions/objectives/ufo_ext_objectives/tools.py`
+### `extensions/sources/ufo_ext_sources/connected.py`
 
-`domain_logic` · `request handling`
+`domain_logic` · `connection hook and periodic retry`
 
-This file is the working interface for the objectives extension. It gives agents a small set of verbs: plan an objective, record a step, run independent steps in subagents, and read the objective later. The problem it solves is memory and honesty across turns. A future agent turn may not remember the full conversation, so the objective plan records the goal, the ordered steps, and the real-world checks that prove each step is complete.
+When a member connects an outside service, the system records that the account is connected. But the content from that account is stored separately as source rows, one row per stream of content. Without this file, a member could connect an account and still not get its main content feeds unless another step created those rows.
 
-The central idea is like a checklist where some boxes can only be ticked after looking at the actual room, not after someone says they cleaned it. For example, a step may require that a file exists, that a file contains certain text, or that a command succeeds. When a step is recorded as attempted, this file runs those checks in the sandbox and stores whether they truly hold.
+The file closes that gap. Right after a connection is recorded, it looks up the connector for that provider and creates sources for the connector’s canonical streams. “Canonical” means the main streams the connector exists to bring in, not every extra list or endpoint the provider offers. Each new source is private to the member who owns the connection, and it is granted to the main agent by the normal source registration behavior.
 
-It also protects against weak plans. If a planned step says it will produce a file, but that file already exists before the step starts, the plan is refused because that condition would prove nothing. Command checks are treated differently because a test suite may already pass before work begins and still be a useful guard later.
+The same logic is also used by a retry job. If the hook failed, a process died, or a source grant arrived another way, the retry job checks all main-agent connections and creates only the missing source rows.
 
-Finally, the file turns objective state into readable text and defines the actual tool objects that the agent platform exposes.
-
-#### Function details
-
-##### `_require_ext`  (lines 95–98)
-
-```
-def _require_ext(ctx: ToolContext) -> ExtensionContext
-```
-
-*Call graph*: called by 4 (plan_objective, read_objective, record_step, run_independent_steps).
-
-
-##### `render`  (lines 101–116)
-
-```
-def render(view: ObjectiveView) -> str
-```
-
-*Call graph*: called by 3 (plan_objective, read_objective, record_step); 1 external calls (condition_summary).
-
-
-##### `evaluate`  (lines 119–123)
-
-```
-async def evaluate(ctx: ToolContext, step: StepView) -> tuple[ConditionVerdict, ...]
-```
-
-*Call graph*: calls 1 internal fn (_verdict); called by 2 (read_objective, record_step).
-
-
-##### `_verdict`  (lines 126–150)
-
-```
-async def _verdict(ctx: ToolContext, condition: Condition, phase: str) -> ConditionVerdict
-```
-
-*Call graph*: called by 2 (evaluate, plan_objective); 4 external calls (__init__, quote, emit_metric, condition_summary).
-
-
-##### `plan_objective`  (lines 153–208)
-
-```
-async def plan_objective(ctx: ToolContext, args: PlanObjectiveInput) -> ToolResult
-```
-
-*Call graph*: calls 3 internal fn (_require_ext, _verdict, render); 5 external calls (__init__, __init__, __init__, agent_current, condition_summary).
-
-
-##### `record_step`  (lines 211–259)
-
-```
-async def record_step(ctx: ToolContext, args: RecordStepInput) -> ToolResult
-```
-
-*Call graph*: calls 4 internal fn (_require_ext, _with_verdicts, evaluate, render); 5 external calls (__init__, __init__, __init__, agent_current, emit_metric).
-
-
-##### `run_independent_steps`  (lines 262–308)
-
-```
-async def run_independent_steps(ctx: ToolContext, args: RunIndependentStepsInput) -> ToolResult
-```
-
-*Call graph*: calls 1 internal fn (_require_ext); 6 external calls (__init__, __init__, __init__, spawn, agent_current, emit_metric).
-
-
-##### `read_objective`  (lines 311–330)
-
-```
-async def read_objective(ctx: ToolContext, args: ReadObjectiveInput) -> ToolResult
-```
-
-*Call graph*: calls 4 internal fn (_require_ext, _with_verdicts, evaluate, render); 4 external calls (__init__, __init__, __init__, agent_current).
-
-
-##### `_with_verdicts`  (lines 333–343)
-
-```
-def _with_verdicts(view: ObjectiveView, title: str, verdicts: tuple[ConditionVerdict, ...]) -> ObjectiveView
-```
-
-*Call graph*: called by 2 (read_objective, record_step); 1 external calls (replace).
-
-
-### `extensions/objectives/ufo_ext_objectives/store.py`
-
-`domain_logic` · `during objective planning, turn startup, progress recording, and frontier selection`
-
-An objective is a small plan made of steps. This file makes sure that plan survives across turns, heartbeats, and subagent hand-backs. That matters because the next turn must not rely on the last worker’s temporary memory or self-report. It must read the lasting record and decide from facts.
-
-The file defines database tables for objectives, steps, events, and condition checks. Events are append-only: once something was tried or blocked, that history is not edited away. Checks are also appended, so the system can remember what the extension observed at the time.
-
-It also defines the small data shapes used in this record. A step may say what will count as acceptance, such as “this file exists,” “this file contains this text,” or “this command succeeds.” These checks are deliberately concrete. Like a checklist taped to a work order, they stop a worker from later changing the definition of success after the task turns out to be hard.
-
-The main store class, `Objectives`, reads and writes one workspace’s objectives. It can find an objective, create or revise a plan, record that a step was done or blocked, save condition verdicts, and rebuild a readable `ObjectiveView`. The view then derives useful states such as pending, attempted, done, blocked, or unmet from the stored events and checks.
+The careful part is that it does not blindly recreate things. If a source row already exists, it leaves it alone. If the member removed that source before, it stays removed. If any existing row for the connection is already shared with a different subject, this file backs away rather than mixing private automatic rows into a shared binding. It also skips providers that need a tenant-specific URL, because only the member can supply that.
 
 #### Function details
 
-##### `StepView.attempted`  (lines 157–158)
+##### `on_connection_recorded`  (lines 51–58)
 
 ```
-def attempted(self) -> bool
+async def on_connection_recorded(ctx: HookContext) -> HookOutcome
 ```
 
-**Purpose**: This property answers the simple question: has anyone recorded that work was done on this step? It treats only a `did` event as an actual attempt.
+**Purpose**: This is the hook that runs immediately after an account connection is recorded. Its job is to give that new connection its default source rows before the connect flow finishes for the member.
 
-**Data flow**: It reads the step’s stored event list → looks for any event whose kind is `did` → returns `True` if it finds one, otherwise `False`. It does not change anything.
+**Data flow**: It receives a hook context containing an event payload and an extension context. If the payload says a connection was recorded, it takes the connection ID, builds a ConnectedSources helper around the extension context, and asks it to register sources for that one connection. If the payload is not the expected kind, it raises an error because this hook was called for the wrong event. It returns no special outcome when registration is done.
 
-**Call relations**: Other state-reading code uses this as a building block. `StepView.state` uses it to distinguish a step that has never been tried from one that was tried but not yet confirmed, and `ObjectiveView.runnable` uses it to avoid dispatching already-attempted independent steps.
-
-
-##### `StepView.open_block`  (lines 161–166)
-
-```
-def open_block(self) -> StepEvent | None
-```
-
-**Purpose**: This property finds the current unanswered block on a step, if there is one. A block means the worker got stuck and asked for help or clarification.
-
-**Data flow**: It reads the step’s events → looks only at the latest event → if that latest event is `blocked`, it returns that event; otherwise it returns `None`. It does not edit the event history.
-
-**Call relations**: This helps prevent noisy repeats. `Objectives.record` checks it before writing another block, and `ObjectiveView.runnable` uses it so a step with an open block is not treated as ready to run.
-
-
-##### `StepView.state`  (lines 169–184)
-
-```
-def state(self) -> str
-```
-
-**Purpose**: This property turns the raw history of a step into a plain status such as pending, attempted, done, blocked, or unmet. It is the central rule for deciding whether a step is complete.
-
-**Data flow**: It reads the latest event, whether the step was attempted, the step’s acceptance conditions, and any saved verdicts → applies the file’s rules in order → returns a state string. It does not write anything back.
-
-**Call relations**: Higher-level views depend on this answer. `ObjectiveView.confirmed` counts steps whose state is done, and `ObjectiveView.frontier` keeps every step whose state is not done.
-
-
-##### `ObjectiveView.attempts`  (lines 199–200)
-
-```
-def attempts(self) -> int
-```
-
-**Purpose**: This property counts how many recorded work attempts exist across the whole objective. It gives a quick sign of how much effort has already been spent.
-
-**Data flow**: It reads every step and every event inside those steps → counts events whose kind is `did` → returns that count. Nothing is changed.
-
-**Call relations**: It summarizes the history stored in the view. Other code can use it to notice objectives that keep getting attempts without much confirmed progress.
-
-
-##### `ObjectiveView.confirmed`  (lines 203–204)
-
-```
-def confirmed(self) -> int
-```
-
-**Purpose**: This property counts how many steps are truly done according to the extension’s own state rules. It is not just a count of worker claims.
-
-**Data flow**: It reads every step → asks each step for its derived `state` → counts the ones marked `done` → returns that number. It does not alter the objective.
-
-**Call relations**: It relies on `StepView.state`, so it inherits the rule that a step with acceptance conditions is not done until the extension has checked them.
-
-
-##### `ObjectiveView.runnable`  (lines 207–215)
-
-```
-def runnable(self) -> tuple[StepView, ...]
-```
-
-**Purpose**: This property identifies the steps that may be sent out to run in parallel. It selects only unfinished steps that were explicitly marked independent, have not already been attempted, and are not waiting on an open block.
-
-**Data flow**: It starts with the objective’s `frontier` of unfinished steps → filters for independent steps with no attempt and no open block → returns those steps as a tuple. It does not start the work itself.
-
-**Call relations**: It builds on `ObjectiveView.frontier`, `StepView.attempted`, and `StepView.open_block`. A dispatcher can use this result when deciding which steps can safely fan out at the same time.
-
-
-##### `ObjectiveView.frontier`  (lines 218–219)
-
-```
-def frontier(self) -> tuple[StepView, ...]
-```
-
-**Purpose**: This property returns the unfinished part of the objective. It is the current work queue in its broadest form.
-
-**Data flow**: It reads all steps → asks each step for its state → keeps every step whose state is not `done` → returns those steps. It does not change the plan or the records.
-
-**Call relations**: This is the base list used by `ObjectiveView.runnable`. Anything deciding what remains to do can start here.
-
-
-##### `condition_summary`  (lines 222–229)
-
-```
-def condition_summary(condition: Condition) -> str
-```
-
-**Purpose**: This helper turns a machine-readable acceptance condition into a short human-readable sentence. It is useful when showing or explaining what must be true for a step to pass.
-
-**Data flow**: It receives one condition object → checks which kind it is: file exists, file contains text, or command succeeds → returns a short text summary. It does not read or write the database.
-
-**Call relations**: It sits beside the storage logic as a display helper. Code that needs to present conditions to a person can call it instead of formatting each condition type itself.
-
-
-##### `Objectives.named`  (lines 239–253)
-
-```
-async def named(self, conversation_id: UUID, name: str) -> ObjectiveView | None
-```
-
-**Purpose**: This method finds one objective by conversation and name within the current workspace. Scoping by conversation prevents a subagent or another conversation from accidentally taking over an objective with the same name.
-
-**Data flow**: It receives a conversation ID and objective name → queries the objective table for a matching row in this workspace → if found, asks `_view` to build the full readable objective; if not found, returns `None`.
-
-**Call relations**: `Objectives.plan` calls this first to decide whether it is creating a new objective or revising an existing one. When a row is found, this method hands off to `Objectives._view` to load the steps, events, and checks.
-
-*Call graph*: calls 1 internal fn (_view); called by 1 (plan); 1 external calls (select).
-
-
-##### `Objectives.on_conversation`  (lines 255–267)
-
-```
-async def on_conversation(self, conversation_id: UUID) -> ObjectiveView | None
-```
-
-**Purpose**: This method finds the most recently created objective for a conversation in the current workspace. It is a convenient way to reopen the current objective when only the conversation is known.
-
-**Data flow**: It receives a conversation ID → queries the objective table for objectives in that conversation and workspace → orders them newest first and takes one → returns a full `ObjectiveView` through `_view`, or `None` if none exists.
-
-**Call relations**: Like `Objectives.named`, it uses `Objectives._view` to turn a database row into the full in-memory view. It is called when code wants the latest objective for a conversation rather than a particular named one.
-
-*Call graph*: calls 1 internal fn (_view); 1 external calls (select).
-
-
-##### `Objectives.plan`  (lines 269–332)
-
-```
-async def plan(self, conversation_id: UUID, name: str, directive: str, steps: tuple[StepPlan, ...]) -> ObjectiveView
-```
-
-**Purpose**: This method creates a new objective or revises an existing objective’s plan. It is careful not to let already-attempted steps change their acceptance conditions after the fact.
-
-**Data flow**: It receives a conversation ID, name, directive, and planned steps → looks for an existing objective with `named` → inserts a new objective if needed, or updates the directive if it already exists → keeps acceptance conditions frozen for steps that have already been attempted → removes unstarted old steps that are no longer in the plan → updates or inserts the current steps → reloads and returns the finished `ObjectiveView`.
-
-**Call relations**: This is the main write path for planning. It calls `Objectives.named` at the start and again at the end, and uses database insert, update, and delete operations to make the durable record match the revised plan while preserving important history.
-
-*Call graph*: calls 1 internal fn (named); 5 external calls (delete, insert, true, update, uuid4).
-
-
-##### `Objectives.record`  (lines 334–354)
-
-```
-async def record(self, step: StepView, kind: str, actor_turn_id: UUID, evidence: str) -> bool
-```
-
-**Purpose**: This method appends a new event to a step, such as work being done or the step becoming blocked. It refuses to write the same still-open block again, which prevents repeated heartbeat turns from flooding the record with the same question.
-
-**Data flow**: It receives a step view, event kind, actor turn ID, and evidence text → trims the evidence to the maximum allowed length → checks whether the same block is already open → if it is a duplicate block, returns `False`; otherwise inserts a new event row and returns `True`.
-
-**Call relations**: It uses `StepView.open_block` to recognize a standing block before writing. Other objective tools call this when a worker reports progress or blockage, and the saved event later feeds into `Objectives._view` and `StepView.state`.
-
-*Call graph*: 2 external calls (insert, uuid4).
-
-
-##### `Objectives.checked`  (lines 356–383)
-
-```
-async def checked(self, step: StepView, verdicts: tuple[ConditionVerdict, ...], actor_turn_id: UUID) -> None
-```
-
-**Purpose**: This method records what the extension observed when it evaluated a step’s acceptance conditions. These verdicts are stored as observations, not as worker claims.
-
-**Data flow**: It receives a step, a tuple of condition verdicts, and an actor turn ID → converts each verdict into JSON-friendly data containing the condition, whether it held, and detail text → inserts a new check row. It returns no value.
-
-**Call relations**: This is called after the extension has actually checked the conditions. Later, `Objectives._view` reads the latest check back so `StepView.state` can decide whether the step is done, still attempted, or unmet.
-
-*Call graph*: 2 external calls (insert, uuid4).
-
-
-##### `Objectives._view`  (lines 385–436)
-
-```
-async def _view(self, row: sa.Row[tuple[object, ...]]) -> ObjectiveView
-```
-
-**Purpose**: This private method rebuilds a complete readable objective from database rows. It gathers the objective’s steps, their events, and the latest saved condition checks into one `ObjectiveView`.
-
-**Data flow**: It receives an objective table row → queries for that objective’s steps, events, and checks → groups events by step → keeps the latest check per step → parses saved conditions and verdicts back into typed objects → returns an `ObjectiveView` containing `StepView` objects.
-
-**Call relations**: `Objectives.named` and `Objectives.on_conversation` call this after finding an objective row. It hands off JSON parsing to `_conditions` and `_verdicts`, then builds the view objects that the rest of the extension reads.
-
-*Call graph*: calls 2 internal fn (_conditions, _verdicts); called by 2 (named, on_conversation); 4 external calls (__init__, __init__, __init__, select).
-
-
-##### `_conditions`  (lines 439–453)
-
-```
-def _conditions(payload: object) -> tuple[Condition, ...]
-```
-
-**Purpose**: This helper turns raw saved JSON condition data back into condition objects the code can trust and use. It rejects unknown condition kinds instead of silently guessing.
-
-**Data flow**: It receives a payload from the database → if the payload is not a list, returns an empty tuple → otherwise reads each item’s `kind` → validates it as `FileExists`, `FileContains`, or `CommandSucceeds` → returns the parsed conditions as a tuple.
-
-**Call relations**: `Objectives._view` uses it when rebuilding steps from the database. `_verdicts` also uses it to parse the condition stored inside each saved verdict.
-
-*Call graph*: called by 2 (_view, _verdicts).
-
-
-##### `_verdicts`  (lines 456–467)
-
-```
-def _verdicts(payload: object) -> tuple[ConditionVerdict, ...]
-```
-
-**Purpose**: This helper turns raw saved JSON verdict data back into `ConditionVerdict` objects. A verdict says whether one acceptance condition held and includes a short detail message.
-
-**Data flow**: It receives a database payload → if it is not a list, returns an empty tuple → for each dictionary item, parses the nested condition with `_conditions`, converts the hold value to a boolean, converts the detail to text → returns a tuple of verdict objects.
-
-**Call relations**: `Objectives._view` calls this when loading the latest condition check for each step. It depends on `_conditions` so verdicts and planned conditions are interpreted using the same rules.
-
-*Call graph*: calls 1 internal fn (_conditions); called by 1 (_view); 1 external calls (__init__).
-
-
-### Subagent lifecycle contracts
-Core profiles, orchestration, and validation define how child agents are configured, spawned, monitored, messaged, cancelled, and returned.
-
-### `core/src/ufo/loop/profiles.py`
-
-`config` · `startup and subagent creation`
-
-This file is the system’s fallback recipe for creating a child agent. A child agent is like a focused coworker: the main agent gives it a self-contained job, and it works in the same shared workspace to produce a result.
-
-The profile here is called `general_purpose`. It is deliberately useful but limited. It can read, write, edit, search files, run shell commands, load skills, share files, and use certain optional extension tools if those extensions are installed. But it cannot ask the user questions, create more subagents, message or cancel sibling subagents, or approve account access. That matters because a delegated helper should make progress independently without taking over coordination or user-facing decisions.
-
-The file also builds the actual instruction text the subagent will see. Those instructions tell it to make reasonable assumptions, avoid retry loops, load relevant skills first, use proper Office formats for formal document deliverables, and save useful work in `/workspace` with clear names. A skill index placeholder is included so the available skills can be inserted later.
-
-Finally, the file wraps all of this into a `SubagentProfile` object and exposes it as the only core subagent profile. Extensions can add more specialized profiles, but this one is the safe default.
-
-
-### `core/src/ufo/loop/subagents.py`
-
-`orchestration` · `request handling`
-
-This file solves a common problem in agent systems: a main agent often needs to delegate work without blocking the whole conversation. Think of it like asking a coworker to research something. Sometimes you wait at their desk for the answer. Other times you send them off and keep talking to the customer, then read their report later.
-
-The file supports two kinds of helpers. A subagent profile is a predefined helper recipe: prompt, allowed tools, and input/output shapes. A workspace agent is a real saved agent in the workspace, with its own identity, tools, model, and ownership rules. The code resolves the requested name, checks that the caller is allowed to use it, validates the input, creates a new child conversation and turn in the database, and puts that child turn on the DBOS work queue.
-
-If the caller asks for foreground mode, the parent waits for the child to finish and returns only a schema-checked final answer. If a user message arrives while waiting, the child can be detached so the parent can answer the user while the child keeps running. If the child runs in background, this file later delivers its result back into the parent conversation in a guarded envelope, protecting the parent from untrusted or invalid content.
-
-#### Function details
-
-##### `SubagentRegistry.__post_init__`  (lines 133–137)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: Checks that the configured subagent profiles do not reuse the same name. This matters because spawning by name would be unsafe or confusing if two different helper recipes had the same label.
-
-**Data flow**: It reads the profile names stored in the registry, looks for repeated names, and either leaves the registry usable or raises an error listing the duplicates.
-
-**Call relations**: This runs automatically when a SubagentRegistry is created, before any lookup happens. It protects later calls such as SubagentRegistry.get and SubagentRegistry.find from ambiguous profile names.
-
-
-##### `SubagentRegistry.get`  (lines 139–145)
-
-```
-def get(self, name: str) -> SubagentProfile
-```
-
-**Purpose**: Returns the subagent profile with a given name, and treats a missing name as an error. Use this when the caller requires the profile to exist.
-
-**Data flow**: It receives a profile name, asks SubagentRegistry.find for a matching profile, and returns it if found. If not found, it raises an UnknownSubagentProfile error that includes the valid profile names.
-
-**Call relations**: It builds on SubagentRegistry.find for the actual search. The queue setup code uses it when it must resolve a profile and cannot continue safely without one.
-
-*Call graph*: calls 2 internal fn (find, __init__); called by 1 (_resolve_profile).
-
-
-##### `SubagentRegistry.find`  (lines 147–148)
-
-```
-def find(self, name: str) -> SubagentProfile | None
-```
-
-**Purpose**: Looks up a subagent profile by name, returning nothing if it is absent. This is the gentle lookup used when absence is allowed and the caller will decide what to do next.
-
-**Data flow**: It receives a name, scans the registry's stored profiles, and returns the first profile whose name matches. If none match, it returns null.
-
-**Call relations**: SubagentRegistry.get calls this and turns a null result into a clear error. Other code in this file also uses the same idea when it needs to know whether a profile is still registered.
-
-*Call graph*: called by 1 (get).
-
-
-##### `_target_model`  (lines 163–171)
-
-```
-def _target_model(resolved: SubagentProfile | AgentTarget) -> str | None
-```
-
-**Purpose**: Figures out which model should be billed or selected for a spawn target when that target is a profile. Workspace agents do not return a model here because their model is read from their own agent record.
-
-**Data flow**: It receives a resolved spawn target. If the target is a subagent profile, it returns the model pinned by that profile; otherwise it returns null.
-
-**Call relations**: Subagents.spawn uses this just before admitting a child turn, so the balance check can weigh the new work against the model that will actually answer.
-
-*Call graph*: called by 1 (spawn).
-
-
-##### `subagent_system_prompt`  (lines 174–205)
-
-```
-def subagent_system_prompt(profile: SubagentProfile, *, skills: Sequence[tuple[str, str]]=CORE_SKILL_INDEX, preload: tuple[LoadedSkill, ...]=()) -> str
-```
-
-**Purpose**: Builds the system prompt for a profile-based subagent. The system prompt is the instruction text the child agent sees before doing its work.
-
-**Data flow**: It receives a profile plus optional skill information. It fills the skill index slot, checks for leftover template slots, optionally appends preloaded skill text within a size limit, then appends shared rules about citations, result delivery, and finishing through the required output schema.
-
-**Call relations**: It relies on prompt rendering helpers and skill-loading helpers to turn profile instructions into final text. It is used by the broader turn execution path when preparing a profile child to run.
-
-*Call graph*: 3 external calls (findall, render_skill_index, loaded_context).
-
-
-##### `Subagents.authorize`  (lines 222–223)
-
-```
-def authorize(self, requester_member_id: UUID | None) -> 'Subagents'
-```
-
-**Purpose**: Returns a copy of the Subagents helper that is bound to a specific requesting member. This lets later permission checks know whose authority the spawn is using.
-
-**Data flow**: It receives a member id, copies the current Subagents object, and stores that id as the requester. The original object is unchanged.
-
-**Call relations**: Later methods such as Subagents.acting_member_id and Subagents._may_spawn read this requester when deciding whether a workspace agent may be spawned.
-
-*Call graph*: 1 external calls (replace).
-
-
-##### `Subagents.acting_member_id`  (lines 226–235)
-
-```
-def acting_member_id(self) -> UUID | None
-```
-
-**Purpose**: Chooses the member identity that a spawn should act under. This is important because ownership, billing visibility, and follow-up authority must all agree on the same person.
-
-**Data flow**: It reads, in order, the explicitly authorized requester, the parent turn's speaker, and the member the parent turn acts on behalf of. It returns the first one that exists, or null if none is known.
-
-**Call relations**: Permission checks, child turn admission, follow-up messages, and child ownership checks all depend on this value so they apply a consistent authority model.
-
-
-##### `Subagents.spawn`  (lines 237–350)
-
-```
-async def spawn(self, target: str, payload: dict[str, Any], background: bool=False, dedup_key: str | None=None, delivers_result: bool=False, name: str='', detach_on_arrival: bool=False) -> SpawnResult
-```
-
-**Purpose**: Starts a child helper turn. It is the main entry for asking a profile or workspace agent to do delegated work.
-
-**Data flow**: It receives a target name, input payload, and options such as background mode or deduplication. It resolves the target, checks permissions, validates the input, creates or reuses a child conversation and turn, enqueues it, and either returns the child id immediately or waits for a checked final answer.
-
-**Call relations**: This is the central flow that calls the resolver, admission, queueing, waiting, detaching, billing, and output-validation pieces. Tool code calls it when a model uses the spawn feature.
-
-*Call graph*: calls 7 internal fn (_admit, _await_terminal, _await_terminal_or_detach, _enqueue, _may_spawn, _resolve, _target_model); 8 external calls (__init__, __init__, turn_id_for, cancel_one_turn, input_contract, output_contract, uuid4, uuid5).
-
-
-##### `Subagents.result`  (lines 352–389)
-
-```
-async def result(self, turn_id: UUID) -> SpawnResult
-```
-
-**Purpose**: Reads the final result of a child turn that has already finished. It gives host-side code a safe way to inspect what happened without asking a model to repeat it.
-
-**Data flow**: It receives a child turn id, confirms the turn belongs to this spawning conversation, loads its terminal record from the database, finds the right output contract, and returns a SpawnResult with validated output when possible.
-
-**Call relations**: It depends on Subagents._require_child for authorization and on schema helpers to validate the output. It is used after a child has completed, especially for background-result workflows.
-
-*Call graph*: calls 3 internal fn (_agent_output_schema, _require_child, _untrusted_output); 5 external calls (__init__, model_validate, select, workspace_tx, output_contract).
-
-
-##### `Subagents.wait`  (lines 391–411)
-
-```
-async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]
-```
-
-**Purpose**: Waits for one or more child turns to finish and returns their status and final text. This is for tools that deliberately hold open their own call while a child works.
-
-**Data flow**: It receives child turn ids, verifies each one belongs to this conversation, waits for each terminal result, and returns a tuple of simple status objects including text and whether the output should be treated as untrusted.
-
-**Call relations**: It uses the same child check and terminal-waiting path as foreground spawn. Unlike normal background delivery, this function is for a bounded, explicit wait inside a tool call.
-
-*Call graph*: calls 3 internal fn (_await_terminal, _require_child, _untrusted_output); 1 external calls (__init__).
-
-
-##### `Subagents.cancel`  (lines 413–430)
-
-```
-async def cancel(self, turn_id: UUID) -> SubagentStatus
-```
-
-**Purpose**: Cancels a running child turn that this conversation spawned. It prevents abandoned helper work from continuing when the parent no longer wants it.
-
-**Data flow**: It receives a child turn id, verifies ownership, asks the shared cancellation routine to stop it, reloads its status and terminal text from the database, and returns a SubagentStatus.
-
-**Call relations**: It is the cancellation companion to spawn and wait. It uses Subagents._require_child to make sure one conversation cannot cancel another conversation's helper.
-
-*Call graph*: calls 1 internal fn (_require_child); 5 external calls (__init__, model_validate, select, workspace_tx, cancel_one_turn).
-
-
-##### `Subagents.message`  (lines 432–554)
-
-```
-async def message(self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool=False) -> SubagentStatus
-```
-
-**Purpose**: Sends a follow-up message to a background child. This lets the parent answer a child's question or continue a child conversation without starting from scratch.
-
-**Data flow**: It receives an existing child turn id, message text, a deduplication key, and a delivery option. It verifies the child, checks the profile still exists when needed, creates or reuses the next turn in the child's conversation, checks balance for new work, and enqueues it if it is ready.
-
-**Call relations**: It fits after a spawned child has gone background or asked a question. It uses the same queueing and balance machinery as new spawns, but appends work to the child's own conversation.
-
-*Call graph*: calls 4 internal fn (_enqueue, _profile_model, _require_balance, _require_child); 8 external calls (__init__, exists, insert, select, update, workspace_tx, current_traceparent, turn_id_for).
-
-
-##### `Subagents._resolve`  (lines 556–579)
-
-```
-async def _resolve(self, target: str) -> SubagentProfile | AgentTarget
-```
-
-**Purpose**: Turns a user-supplied spawn target name into either a profile or a workspace agent. It also catches ambiguous names so the caller must be explicit.
-
-**Data flow**: It receives a target string. If the string has a profile: or agent: prefix, it searches only that namespace; otherwise it searches both profiles and workspace agents. It returns the matching target or raises a clear unknown or ambiguous target error.
-
-**Call relations**: Subagents.spawn calls this before it can validate input or create a child. It uses profile-name and agent-name helpers to produce helpful error messages.
-
-*Call graph*: calls 5 internal fn (_agent_names, _agent_target, _profile_names, __init__, __init__); called by 1 (spawn).
-
-
-##### `Subagents._profile_names`  (lines 581–582)
-
-```
-def _profile_names(self) -> tuple[str, ...]
-```
-
-**Purpose**: Returns the list of registered profile names. This is mainly used to explain what valid profile targets exist.
-
-**Data flow**: It reads the registry's profiles, sorts their names, and returns them as an immutable tuple.
-
-**Call relations**: Subagents._resolve uses this when reporting unknown or ambiguous target errors.
-
-*Call graph*: called by 1 (_resolve).
-
-
-##### `Subagents._agent_names`  (lines 584–596)
-
-```
-async def _agent_names(self) -> tuple[str, ...]
-```
-
-**Purpose**: Returns the names of active workspace agents that can be considered as spawn targets. Archived agents are left out.
-
-**Data flow**: It opens a workspace database transaction, selects non-archived agent names for the parent workspace, orders them, and returns the names.
-
-**Call relations**: Subagents._resolve uses this to build clear error messages when a requested target cannot be found.
-
-*Call graph*: called by 1 (_resolve); 2 external calls (select, workspace_tx).
-
-
-##### `Subagents._agent_target`  (lines 598–623)
-
-```
-async def _agent_target(self, name: str) -> AgentTarget | None
-```
-
-**Purpose**: Looks up a workspace agent by name and packages the facts needed to spawn it. These facts include its id, owner, and input/output schemas.
-
-**Data flow**: It receives an agent name, queries the workspace database for a non-archived agent with that name, and returns an AgentTarget if found. If no row matches, it returns null.
-
-**Call relations**: Subagents._resolve calls this while deciding whether a target name refers to a workspace agent.
-
-*Call graph*: called by 1 (_resolve); 3 external calls (__init__, select, workspace_tx).
-
-
-##### `Subagents._agent_output_schema`  (lines 625–631)
-
-```
-async def _agent_output_schema(self, agent_id: UUID) -> dict[str, object] | None
-```
-
-**Purpose**: Fetches the output schema for a workspace agent. The output schema describes the shape of a valid final answer.
-
-**Data flow**: It receives an agent id, queries the agent table, and returns that agent's output schema, which may be null if no custom schema is declared.
-
-**Call relations**: Subagents.result uses this when reading the result of an agent child, because agent children do not use profile output contracts.
-
-*Call graph*: called by 1 (result); 2 external calls (select, workspace_tx).
-
-
-##### `Subagents._may_spawn`  (lines 633–645)
-
-```
-async def _may_spawn(self, owner_member_id: UUID | None) -> bool
-```
-
-**Purpose**: Decides whether the current acting member is allowed to spawn a workspace agent. Owners may run their own agents, and workspace admins may run any agent.
-
-**Data flow**: It receives the target agent's owner member id. It compares that owner to the acting member, and if that is not enough, checks the database to see whether the acting member is a workspace admin.
-
-**Call relations**: Subagents.spawn calls this only for workspace-agent targets. Profile children do not go through this ownership gate because they run under the parent's agent.
-
-*Call graph*: called by 1 (spawn); 2 external calls (workspace_tx, member_is_admin).
-
-
-##### `Subagents._untrusted_output`  (lines 647–656)
-
-```
-def _untrusted_output(self, profile: str | None) -> bool
-```
-
-**Purpose**: Decides whether a child's output should be treated as untrusted content. Untrusted content is wrapped so the parent agent reads it as data, not as new instructions.
-
-**Data flow**: It receives a profile name or null for an agent child. Agent children are always untrusted; missing profiles are treated as untrusted; registered profiles use their own untrusted-output setting.
-
-**Call relations**: Subagents.result and Subagents.wait use this when reporting child output. SubagentResult._body applies the same idea when delivering background results.
-
-*Call graph*: called by 2 (result, wait).
-
-
-##### `Subagents._require_child`  (lines 658–694)
-
-```
-async def _require_child(self, turn_id: UUID) -> str | None
-```
-
-**Purpose**: Confirms that a turn id names a child spawned by this conversation and by the same acting member. This prevents one user or conversation from controlling another user's helper.
-
-**Data flow**: It receives a turn id, loads its parent, profile, and acting member from the database, and checks whether it was spawned by this turn or by another turn in the same parent conversation. It returns the child's profile name, or null for an agent child, if allowed.
-
-**Call relations**: Cancel, message, result, and wait all call this before touching a child. It is the main safety gate for operations on existing subagents.
-
-*Call graph*: called by 4 (cancel, message, result, wait); 2 external calls (select, workspace_tx).
-
-
-##### `Subagents._profile_model`  (lines 696–702)
-
-```
-def _profile_model(self, profile: str | None) -> str | None
-```
-
-**Purpose**: Finds the model pinned by a profile name, if that profile still exists. It is used for billing follow-up work on profile children.
-
-**Data flow**: It receives a profile name or null, searches the current registry, and returns the profile's model if found. If the profile is absent or unnamed, it returns null.
-
-**Call relations**: Subagents.message uses this before checking balance for a follow-up turn. It deliberately does not fail if a profile disappeared, because the child already exists.
-
-*Call graph*: called by 1 (message).
-
-
-##### `Subagents._require_balance`  (lines 704–722)
-
-```
-async def _require_balance(self, connection: AsyncConnection, model: str | None, agent_id: UUID | None=None) -> None
-```
-
-**Purpose**: Checks whether the workspace has enough prepaid balance to start new child work. This prevents a fan-out of helper turns from bypassing spending limits.
-
-**Data flow**: It receives a database connection, an optional model, and optionally the child agent id. It asks the balance gate whether the work is allowed and raises BalanceExhausted if the answer is no.
-
-**Call relations**: Subagents._admit calls this for a new child turn, and Subagents.message calls it for a new follow-up turn. Reused or already-running work does not pass through this check again.
-
-*Call graph*: called by 2 (_admit, message); 2 external calls (__init__, __init__).
-
-
-##### `Subagents._admit`  (lines 724–813)
-
-```
-async def _admit(self, conversation_id: UUID, turn_id: UUID, *, agent_id: UUID, profile: str | None, inherits_sandbox: bool, inbound: str, delivers_result: bool=False, name: str='', model: str | None=
-```
-
-**Purpose**: Creates the database records for a child conversation and its first turn, or reconnects to existing records when a deduplication key is reused. Admission is the durable step before queueing work.
-
-**Data flow**: It receives child ids, agent/profile details, input text, sandbox behavior, delivery options, and billing model information. It inserts the conversation and turn if missing, verifies the acting member, checks balance for a queued new turn, stamps it as ready for dispatch, and returns whether it should be enqueued.
-
-**Call relations**: Subagents.spawn calls this after resolving and validating the target. If it returns true, Subagents.spawn hands the turn to Subagents._enqueue.
-
-*Call graph*: calls 1 internal fn (_require_balance); called by 1 (spawn); 6 external calls (select, update, workspace_tx, conversation_name, current_traceparent, audience_member).
-
-
-##### `Subagents._enqueue`  (lines 815–844)
-
-```
-async def _enqueue(self, turn_id: UUID, conversation_id: UUID) -> None
-```
-
-**Purpose**: Puts a child or follow-up turn onto the DBOS workflow queue so a worker can run it. DBOS is the durable workflow system used here to run queued turns.
-
-**Data flow**: It receives a turn id and conversation id, builds queue options, and asks the DBOS client to enqueue the workflow. If enqueueing is cancelled or fails, it clears the dispatch marker in the database so another dispatcher can try later.
-
-**Call relations**: Subagents.spawn uses this for first child turns, and Subagents.message uses it for follow-up turns. It is the bridge from database admission to actual execution.
-
-*Call graph*: called by 2 (message, spawn); 3 external calls (update, workspace_tx, log).
-
-
-##### `Subagents._await_terminal`  (lines 846–889)
-
-```
-async def _await_terminal(self, turn_id: UUID) -> TerminalFrame
-```
-
-**Purpose**: Waits until a child turn has a terminal frame, meaning a recorded final state such as done, failed, or cancelled. It also handles workflow restarts and parked children.
-
-**Data flow**: It receives a child turn id, watches the DBOS workflow result when possible, repeatedly checks the database for a terminal or parked state, follows a newer running attempt if one appears, and returns the terminal frame once committed.
-
-**Call relations**: Foreground spawn, explicit wait, and interruptible wait all depend on this function. It delegates database checks to Subagents._terminal_or_park and running-attempt lookup to Subagents._running_attempt.
-
-*Call graph*: calls 2 internal fn (_running_attempt, _terminal_or_park); called by 3 (_await_terminal_or_detach, spawn, wait); 1 external calls (sleep).
-
-
-##### `Subagents._running_attempt`  (lines 891–897)
-
-```
-async def _running_attempt(self, turn_id: UUID) -> str | None
-```
-
-**Purpose**: Reads which workflow attempt is currently running for a turn. This helps waiting code follow a turn if execution was retried under a different workflow id.
-
-**Data flow**: It receives a turn id, queries the turn row, and returns the running attempt id or null.
-
-**Call relations**: Subagents._await_terminal uses this when the workflow it was watching is missing or ended before a terminal was stored.
-
-*Call graph*: called by 1 (_await_terminal); 2 external calls (select, workspace_tx).
-
-
-##### `Subagents._await_terminal_or_detach`  (lines 899–954)
-
-```
-async def _await_terminal_or_detach(self, turn_id: UUID) -> TerminalFrame | None
-```
-
-**Purpose**: Waits for a child to finish, but stops waiting if a member message arrives for the parent conversation first. In that case, the child is moved to background delivery instead of being cancelled.
-
-**Data flow**: It receives a child turn id, starts one task waiting for the child terminal and another waiting for parent-conversation arrivals. If the child finishes first, it returns the terminal; if a valid member arrival wins, it marks the child for result delivery and returns null.
-
-**Call relations**: Subagents.spawn uses this when detach_on_arrival is requested. It calls Subagents._await_terminal for the normal wait path and Subagents._detach to safely hand result delivery to the background path.
-
-*Call graph*: calls 2 internal fn (_await_terminal, _detach); called by 1 (spawn); 5 external calls (create_task, ensure_future, gather, wait, log).
-
-
-##### `Subagents._terminal_or_park`  (lines 956–972)
-
-```
-async def _terminal_or_park(self, turn_id: UUID) -> TerminalFrame | None
-```
-
-**Purpose**: Checks whether a turn has finished, and treats a parked child as something the parent should stop waiting on. A parked turn is one paused on a spending limit or similar condition without a final result.
-
-**Data flow**: It receives a turn id, reads the turn's terminal and status from the database, and returns a TerminalFrame if present. If the status is parked, it cancels the child and raises SubagentParked; otherwise it returns null.
-
-**Call relations**: Subagents._await_terminal calls this repeatedly while waiting. It is the safety valve that prevents a parent turn from hanging forever on a child that cannot make progress.
-
-*Call graph*: called by 1 (_await_terminal); 5 external calls (__init__, model_validate, select, workspace_tx, cancel_one_turn).
-
-
-##### `Subagents._detach`  (lines 974–1005)
-
-```
-async def _detach(self, turn_id: UUID, arrival_id: UUID) -> bool
-```
-
-**Purpose**: Marks a still-running foreground child so its result will be delivered later instead of returned inline. It does this only if the parent really has a fresh member message waiting.
-
-**Data flow**: It receives a child turn id and an arrival id, then performs one guarded database update. The update succeeds only if the child has no terminal, is not already marked for delivery, and the arrival belongs to the parent conversation and has not been consumed.
-
-**Call relations**: Subagents._await_terminal_or_detach calls this when an arrival notification appears. Its true or false return resolves the race between the child finishing and the parent being interrupted.
-
-*Call graph*: called by 1 (_await_terminal_or_detach); 4 external calls (exists, select, update, workspace_tx).
-
-
-##### `SubagentResult.deliver`  (lines 1029–1070)
-
-```
-async def deliver(self, child: Turn) -> None
-```
-
-**Purpose**: Posts a finished background child's result back into the conversation that spawned it. This lets the parent receive the child result as a normal incoming event instead of staying blocked.
-
-**Data flow**: It receives a child Turn, ignores it unless result delivery is pending, confirms it has a terminal, loads the parent conversation and any needed child-agent data, builds the delivery body, invokes a new parent-side turn with a stable idempotency key, and marks the child result as delivered.
-
-**Call relations**: This is the background-result path paired with Subagents.spawn and Subagents._detach. It calls SubagentResult._body to create safe message content before handing it to the turn invoker.
-
-*Call graph*: calls 1 internal fn (_body); 3 external calls (select, update, workspace_tx).
-
-
-##### `SubagentResult._body`  (lines 1072–1101)
-
-```
-def _body(self, child: Turn, child_agent: sa.Row | None) -> str
-```
-
-**Purpose**: Builds the actual text delivered to the parent conversation for a child result. It wraps the payload in a clear spawn-result envelope that names the child and target.
-
-**Data flow**: It receives the child turn and, for agent children, the child agent row. It chooses the target label, finds the right output contract, asks SubagentResult._payload for checked content and status, wraps untrusted content when needed, escapes closing tags inside the payload, and returns the final message body.
-
-**Call relations**: SubagentResult.deliver calls this before invoking the parent conversation. It uses output-contract and untrusted-content helpers so delivered results follow the same safety rules as foreground results.
-
-*Call graph*: calls 1 internal fn (_payload); called by 1 (deliver); 2 external calls (output_contract, wall).
-
-
-##### `SubagentResult._payload`  (lines 1103–1122)
-
-```
-def _payload(self, contract: Contract | None, terminal: TerminalFrame) -> tuple[str, str]
-```
-
-**Purpose**: Turns a child's terminal frame into the payload and status used in a delivered spawn result. It distinguishes success, questions, failures, missing schemas, and invalid output.
-
-**Data flow**: It receives an output contract or null plus a terminal frame. If the child failed, it returns diagnostic text and the failure status; if the child asked a question, it returns the structured question; if there is no contract, it returns a withheld-result message; otherwise it validates the final text and returns either clean JSON or an invalid-output explanation.
-
-**Call relations**: SubagentResult._body calls this while building the result envelope. This is the last validation step before a background child result is shown to the parent conversation.
-
-*Call graph*: called by 1 (_body); 1 external calls (model_validate_json).
-
-
-### `core/src/ufo/turns/contracts.py`
-
-`domain_logic` · `spawn, dispatch, delivery validation, and schema write-time checks`
-
-When one agent gives work to another, both sides need a clear agreement about the shape of the data being passed. This file is that agreement layer. By default, a task is a simple object with a `task` string, and a result is a simple object with a `result` string. But workspace agents can also declare their own JSON Schema, which is a plain-data rulebook for JSON objects.
-
-The important idea is that both kinds of contract behave the same way. A Pydantic model and this file’s `JsonContract` can both show their schema, validate Python data, and validate JSON text. That means the rest of the system does not need two separate paths.
-
-The file is also defensive. User-declared schemas are checked before they are stored. They must be small, must describe a top-level object, must be valid JSON Schema, and cannot contain references or regular-expression features. This matters because references could cause the server to look outside the stored data, and regular expressions can sometimes be made expensive to run. In everyday terms, it only accepts self-contained rulebooks that are small enough and safe enough to read during normal service.
-
-#### Function details
-
-##### `ValidatedJson.model_dump`  (lines 53–54)
-
-```
-def model_dump(self) -> object
-```
-
-**Purpose**: Returns the already-validated payload as ordinary Python data. It lets a raw JSON-Schema-validated value act like a Pydantic model when other code asks for its contents.
-
-**Data flow**: It starts with a `ValidatedJson` object holding some data that has already passed validation. It simply gives that stored data back unchanged.
-
-**Call relations**: This is part of the small adapter that makes raw JSON Schema validation look like normal model validation. After `JsonContract.model_validate` accepts a payload and wraps it in `ValidatedJson`, later code can call this method the same way it would call it on a Pydantic model.
-
-
-##### `ValidatedJson.model_dump_json`  (lines 56–57)
-
-```
-def model_dump_json(self) -> str
-```
-
-**Purpose**: Turns the already-validated payload into a JSON string. This is useful when the rest of the system expects a model-like object that can serialize itself.
-
-**Data flow**: It reads the stored validated data, passes it to JSON encoding, and returns the resulting text. It does not re-check the data or change it.
-
-**Call relations**: This completes the model-like wrapper created by `JsonContract.model_validate`. Together with `model_dump`, it lets JSON-Schema-backed payloads be used in places that expect Pydantic-style validated objects.
-
-*Call graph*: 1 external calls (dumps).
-
-
-##### `JsonContract.model_json_schema`  (lines 66–67)
-
-```
-def model_json_schema(self) -> dict[str, object]
-```
-
-**Purpose**: Returns the JSON Schema that defines this contract. Other code can use this to inspect or publish the rules for a payload.
-
-**Data flow**: It reads the schema stored inside the `JsonContract`, copies it into a normal dictionary, and returns that copy. The original stored schema is not changed.
-
-**Call relations**: This is one of the methods that makes `JsonContract` stand in for a Pydantic model class. Wherever the system asks a contract what shape it expects, this method supplies the raw schema.
-
-
-##### `JsonContract.model_validate`  (lines 69–104)
-
-```
-def model_validate(self, data: object) -> ValidatedJson
-```
-
-**Purpose**: Checks ordinary Python data against the stored JSON Schema. If the data is valid, it wraps it in `ValidatedJson`; if not, it raises a Pydantic `ValidationError` so callers see the same kind of error they get from normal Pydantic models.
-
-**Data flow**: It takes incoming Python data and the contract’s stored schema. It runs a JSON Schema validator over the data, using an empty reference registry so schema references cannot fetch or resolve outside material. If the schema contains an unresolvable reference, or if the data breaks one or more schema rules, it converts those problems into Pydantic-style validation errors. If there are no problems, it returns a `ValidatedJson` wrapper around the original data.
-
-**Call relations**: This is the main validation step for raw JSON-Schema-backed contracts. `JsonContract.model_validate_json` calls it after turning JSON text into Python data, so both text input and already-parsed input end up going through the same rule checker.
-
-*Call graph*: called by 1 (model_validate_json); 6 external calls (__init__, from_exception_data, Draft202012Validator, InitErrorDetails, PydanticCustomError, Registry).
-
-
-##### `JsonContract.model_validate_json`  (lines 106–122)
-
-```
-def model_validate_json(self, text: str) -> ValidatedJson
-```
-
-**Purpose**: Checks JSON text against the stored JSON Schema. It first makes sure the text is valid JSON, then reuses the normal data validation path.
-
-**Data flow**: It receives a string. It tries to parse that string as JSON; if parsing fails, it raises a Pydantic-style validation error explaining that the JSON is invalid. If parsing succeeds, it sends the parsed data to `JsonContract.model_validate` and returns that result.
-
-**Call relations**: This is the text-entry version of contract validation. It hands parsed data to `JsonContract.model_validate`, which means JSON strings and Python objects get the same schema checking and the same error shape.
-
-*Call graph*: calls 1 internal fn (model_validate); 4 external calls (from_exception_data, loads, InitErrorDetails, PydanticCustomError).
-
-
-##### `input_contract`  (lines 128–129)
-
-```
-def input_contract(schema: Mapping[str, object] | None) -> Contract
-```
-
-**Purpose**: Chooses the contract used for an incoming task payload. If no custom schema is supplied, it uses the default task model; otherwise it wraps the supplied schema in `JsonContract`.
-
-**Data flow**: It receives either `None` or a mapping that represents a JSON Schema. With `None`, it returns the built-in `TaskInput` model. With a schema, it creates and returns a `JsonContract` around that schema.
-
-**Call relations**: This is a small factory for the input side of spawning or dispatching work. It hides the difference between the default Pydantic model and a declared JSON Schema, so later validation code can treat both as a contract.
+**Call relations**: The connect flow calls this hook after saving a connection. This function is only the front door: it checks that the event is the right one, creates ConnectedSources, and hands the real work to its register method for the specific connection.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `output_contract`  (lines 132–133)
+##### `retry_connected_sources`  (lines 61–63)
 
 ```
-def output_contract(schema: Mapping[str, object] | None) -> Contract
+async def retry_connected_sources(ctx: ExtensionContext) -> None
 ```
 
-**Purpose**: Chooses the contract used for a result payload. If no custom schema is supplied, it uses the default result model; otherwise it wraps the supplied schema in `JsonContract`.
+**Purpose**: This is the safety-net job for connections whose automatic source creation did not happen the first time. It scans existing main-agent connections and fills in any missing default source rows.
 
-**Data flow**: It receives either `None` or a mapping that represents a JSON Schema. With `None`, it returns the built-in `ResultOutput` model. With a schema, it creates and returns a `JsonContract` around that schema.
+**Data flow**: It receives the extension context for the running job. It builds a ConnectedSources helper and calls register without naming a single connection, which means the helper considers every relevant main-agent connection. It returns nothing; its effect is any source rows it creates.
 
-**Call relations**: This is the output-side partner to `input_contract`. It gives the rest of the delivery flow one contract object to use, whether the result shape is the standard one or a workspace-declared schema.
+**Call relations**: A scheduled or background retry flow calls this when it wants to repair missing connected-account sources. Like the hook, it delegates the detailed checking and creation work to ConnectedSources.register, but it asks for the broad all-connections path instead of one just-created connection.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `check_declared_schema`  (lines 136–151)
+##### `ConnectedSources.register`  (lines 74–82)
 
 ```
-def check_declared_schema(candidate: Mapping[str, object], field: str) -> None
+async def register(self, connection_id: UUID | None=None) -> None
 ```
 
-**Purpose**: Checks a user-declared schema before it is stored, so unsafe or unsuitable schemas are rejected early. It protects the running service from oversized schemas, outside references, and regular-expression features that could be expensive to evaluate.
+**Purpose**: This method decides which connected accounts should get automatic source rows. It can work on one connection, for the immediate hook, or on all connections, for the retry job.
 
-**Data flow**: It receives a candidate schema and the name of the field being checked. It serializes the schema to measure its size, confirms that the top-level payload is an object, asks `_refused_keyword` whether forbidden keywords appear anywhere inside, and then asks the JSON Schema library whether the schema itself is valid. If any check fails, it raises `ValueError`; otherwise it returns nothing, meaning the schema is acceptable.
+**Data flow**: It first reads the current live source rows so it can avoid duplicating or disturbing them. Then it asks for the connections held by the main agent. For each connection, it optionally filters down to the requested connection ID, finds the connector class for that provider, and skips providers it cannot register safely, such as tenant-specific providers with no base URL. For each suitable connection, it creates a connector instance and passes the connection, connector, and current source list to _register. Its output is not a return value; the result is that missing source rows may be added.
 
-**Call relations**: This function is meant to run when a declared contract is written or saved, not later when an agent is spawned. It calls `_refused_keyword` to search the whole schema tree before letting the JSON Schema library compile-check the remaining shape.
+**Call relations**: Both entry paths in this file call this method: on_connection_recorded calls it for one fresh connection, and retry_connected_sources calls it for all connections. It uses the connector registry to understand each provider, reads main-agent connections, and then hands each eligible connection to ConnectedSources._register for the stream-by-stream work.
 
-*Call graph*: calls 1 internal fn (_refused_keyword); 2 external calls (dumps, check_schema).
+*Call graph*: calls 1 internal fn (_register); 2 external calls (main_agent_connections, get).
 
 
-##### `_refused_keyword`  (lines 154–166)
+##### `ConnectedSources._register`  (lines 84–129)
 
 ```
-def _refused_keyword(node: object) -> str | None
+async def _register(self, connection: MainAgentConnection, connector: Connector, live: tuple[SourceRecord, ...]) -> None
 ```
 
-**Purpose**: Searches through a schema for keywords this project does not allow in declared contracts. It finds references and regular-expression-related rules no matter how deeply they are nested.
+**Purpose**: This method creates the missing canonical source rows for one connected account, while respecting existing rows and past removals. It is the part that turns a connection into actual feed entries.
 
-**Data flow**: It receives any value from the schema tree. If the value is a mapping, it checks each key and then recursively checks each nested value. If the value is a list, it recursively checks each item. It returns the first forbidden keyword it finds, or `None` if the whole subtree is clean.
+**Data flow**: It receives one connection, the connector for that provider, and the current live source records. It builds the member subject for the connection owner, then finds any existing rows already bound to that connection. If any of those rows belongs to another subject, it stops, because automatic private rows should not be mixed into an already shared binding. If there is an existing bound row, it reads that row’s source configuration to reuse its requested backfill setting. It then checks every stream exposed by the connector, keeps only canonical streams, calculates how far back the first sync should reach, and builds a source configuration for that stream. For each would-be source, it computes the stable source ID and skips it if the source already exists. Before creating anything, it asks which of the missing IDs were previously removed, and skips those too. Finally, it registers each remaining source as private to the connection owner and tied to the connection.
 
-**Call relations**: This is the helper used by `check_declared_schema` during schema write-time validation. It acts like a careful inspector walking every room of a house, reporting the first banned item it sees so the caller can reject the schema with a clear message.
+**Call relations**: ConnectedSources.register calls this after it has found an eligible connection and connector. This method calls into the connector to learn its streams, uses effective_days to combine a requested backfill with the stream’s own limit, uses member_subject to identify the owner’s private subject, and finally uses the extension context to register only the rows that are truly new and not deleted.
 
-*Call graph*: called by 1 (check_declared_schema).
-
-
-### Specialized delegation workflows
-Extension profiles and tools describe reusable child-agent workflows for brief writing, browser work, research, and website building.
-
-### `extensions/brief_pipeline/ufo_ext_brief_pipeline/pipeline.py`
-
-`config` · `extension load`
-
-This file is like a recipe card for a small writing assembly line. The goal is to produce a better brief by splitting the work into three focused stages instead of asking one agent to do everything at once. First, an outline agent receives a topic and audience and returns an outline. Next, a draft agent receives the topic plus that outline and writes the draft. Finally, a critic agent reads the draft and returns a verdict with suggested improvements.
-
-The file uses Pydantic models, which are simple typed data shapes that check fields are present and in the expected form. These models act like labeled boxes passed between stages, so the parent agent knows exactly what information to send and what to expect back.
-
-The three SubagentProfile objects describe the actual worker roles. Each profile names the subagent, loads its instruction prompt from a nearby Markdown file, says it has no tools, sets its input and output data shapes, and limits how many conversation rounds it may take. Because these subagents cannot spawn other subagents and have no tools, the pipeline stays predictable: the parent agent drives the sequence from outline to draft to critique.
+*Call graph*: calls 1 internal fn (streams); called by 1 (register); 6 external calls (__init__, model_validate, now, timedelta, member_subject, effective_days).
 
 
-### `extensions/browser/ufo_ext_browser/delegation.py`
+### `core/src/ufo/sources/backend.py`
 
-`orchestration` · `tool request handling`
+`orchestration` · `source sync run`
 
-This file is the bridge between a general agent and a specialized browser agent. Instead of giving the main agent direct control of a browser, it asks a child agent with the browser profile to do the web task and report back. This keeps browser work isolated, like hiring a specialist courier instead of giving everyone the keys to the delivery truck.
+A connector knows how to talk to one outside service, such as a ticketing or code-hosting provider, and return records from one stream of data. The rest of the system expects a simpler shape: one sync run should produce a bundle of internal Pages, a next-place-to-resume marker, and any records that should be deleted. ConnectorBackend is the adapter that makes those two worlds fit together.
 
-The single-task tool, `browser_task`, starts one fresh browser session with a URL, a task description, and a friendly task name. It waits for the browser subagent to finish, but only up to a bounded timeout. If the website hangs or the browser agent gets stuck, this file cancels the child task so the parent does not wait forever.
+For each source row, it finds the right stream, asks the authentication proxy for a Credential, calls the connector, and converts each provider record into a recallable Page. If a record has no usable primary key, or the Page model rejects it, the backend does not fail the whole run. It warns, counts the record as dropped, and keeps going. This prevents one bad provider row from blocking every later row.
 
-The batch tool, `wide_browse`, reads a workspace file containing one entity per line, such as websites or company names. It removes blank lines and duplicates, limits the total size, then sends each entity to a browser subagent. It uses a small parallel pool so several browser visits can happen at once without launching too many at the same time. Each result is collected into `wide_browse.json` and also returned to the caller.
-
-The file also defines the input shapes for these tools, including required fields and limits. Its most important safety ideas are bounded time, bounded fan-out, and deterministic deduplication keys so recovered runs reconnect to already-started child work instead of accidentally duplicating it.
+The file also protects sync jobs from running forever. Incremental streams are capped at a fixed number of stored records per run. If the connector provides its own checkpoint, the backend uses it. If not, the backend stores its own small “backfill envelope” in the cursor: where it started, how many records were already consumed, and the best timestamp watermark seen so far. On the next run it replays from the same origin and skips ahead. Full snapshot streams are different: they are never capped, because the system must see the complete collection before safely tombstoning missing records.
 
 #### Function details
 
-##### `_browser_task`  (lines 92–121)
+##### `binding_name`  (lines 101–111)
 
 ```
-async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult
+def binding_name(provider: str, account: str, base_url: str | None) -> str
 ```
 
-**Purpose**: Runs one complete browser automation task by spawning a browser subagent and waiting for its summary. It protects the parent agent from a stuck website or runaway browser loop by enforcing a timeout and cancelling the child if needed.
+**Purpose**: Creates a stable, human-safe name for a connector binding from the provider, account, and optional tenant base URL. Someone would use this when the same connected account needs to be referred to consistently across source rows, UI actions, and stored pages.
 
-**Data flow**: It receives the current tool context and a `BrowserTaskInput` containing the starting URL, task instructions, task name, and time budget. It checks that subagent control is available, starts a browser-profile child task with the requested work, then waits for that child to finish. If the wait times out or the child is cancelled, it returns an error-style tool result explaining that the task was cancelled. If the child finishes normally, it parses the browser subagent's JSON summary into a `BrowserResult` and returns that summary as text.
+**Data flow**: It takes a provider name, an account identifier, and maybe a base URL. It turns those values into sorted JSON, hashes that text with SHA-256, keeps a short digest, replaces underscores in the provider name with dashes, and returns a name like provider-digest. The original inputs are not changed.
 
-**Call relations**: This is the handler behind the `browser_task` tool definition. When the agent calls that tool, this function uses `ToolContext.spawn` to create the browser child turn, waits under `asyncio.timeout`, and packages the final message with `TextContent` and `ToolResult` for the caller.
+**Call relations**: This is a standalone naming helper for the connector source layer. It relies on JSON formatting and hashing so the same identity always produces the same short name, while different accounts or tenant URLs get different names.
 
-*Call graph*: 5 external calls (__init__, __init__, timeout, spawn, model_validate_json).
-
-
-##### `_read_lines`  (lines 124–137)
-
-```
-async def _read_lines(ctx: ToolContext, path: str) -> list[str]
-```
-
-**Purpose**: Reads a workspace text file and turns it into a clean list of unique non-empty lines. `wide_browse` uses this to turn a user-provided file of URLs or names into the set of browser jobs to run.
-
-**Data flow**: It receives the tool context and a file path. It safely quotes the path for the shell, runs `cat` in the sandbox to read the file, and raises an error if the file cannot be read. It then trims whitespace from each line, skips blank lines, removes duplicates while preserving first-seen order, and returns the resulting list of entities.
-
-**Call relations**: `_wide_browse` calls this first, before starting any browser work. By doing the cleanup here, the batch browser tool can focus on spawning visits and writing results, while this helper handles the file-reading and duplicate-removal step.
-
-*Call graph*: called by 1 (_wide_browse); 1 external calls (quote).
+*Call graph*: 2 external calls (sha256, dumps).
 
 
-##### `_wide_browse`  (lines 140–167)
+##### `ConnectorBackend.fetch`  (lines 149–256)
 
 ```
-async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult
+async def fetch(self, config: ConnectorSourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult
 ```
 
-**Purpose**: Runs browser automation over many entities from a file and collects the results into a JSON output file. It is useful when the agent needs to perform the same extraction task across many sites or names.
+**Purpose**: Runs one sync for one connector stream and returns the system’s standard SyncResult. It is the main workhorse that obtains credentials, reads provider records, converts good records into Pages, records deletions, advances the cursor, and stops safely when an incremental run reaches its cap.
 
-**Data flow**: It receives the tool context and a `WideBrowseInput` containing an entities file, a prompt template, and an optional schema file path. It reads and deduplicates the entities, rejects the request if there are too many, reads the output schema if available, and creates a semaphore, which is a small gate that limits how many browser jobs can run at once. It then runs one `visit` task per entity, gathers all rows, writes them to `wide_browse.json` in the workspace, and returns a tool result containing both the rows and the output file name.
+**Data flow**: It receives a source config, the previous cursor, and authentication context. First it asks the auth proxy for a Credential, finds the requested stream, resolves the base URL, and interprets the cursor if it is one of this backend’s backfill envelopes. Then it calls the connector to fetch pages of records. Each record is either skipped because it belongs to an already-consumed prefix, converted into an internal Page, or counted as dropped if it cannot be represented. Along the way it gathers deletes, tracks a watermark from the stream’s cursor field, and watches for the run-size cap. It returns a SyncResult containing stored pages, the next cursor, deletes, whether this was a full snapshot, and the dropped-record count.
 
-**Call relations**: This is the handler behind the `wide_browse` tool definition. It calls `_read_lines` to prepare the input list, uses its nested `visit` function for each entity, runs those visits together with `asyncio.gather`, and returns the final combined report through `ToolResult`.
+**Call relations**: This function drives the whole flow. It calls _stream to choose the stream, _decode_cursor to understand UFO-owned resume state, _page to turn provider records into Pages, and _max_str to advance a text watermark. If the grant cannot be used, it raises StreamSkipped so the wider sync runner can treat the stream as waiting for authorization instead of broken. When a capped run needs to resume later, it creates a _BackfillEnvelope and serializes it as JSON for the next fetch call.
 
-*Call graph*: calls 1 internal fn (_read_lines); 6 external calls (__init__, __init__, Semaphore, gather, dumps, quote).
+*Call graph*: calls 5 internal fn (_decode_cursor, _page, _stream, _max_str, __init__); 4 external calls (__init__, __init__, dumps, warn).
 
 
-##### `_wide_browse.visit`  (lines 148–161)
+##### `ConnectorBackend._stream`  (lines 258–262)
 
 ```
-async def visit(entity: str) -> dict[str, object]
+def _stream(self, name: str) -> StreamSpec
 ```
 
-**Purpose**: Runs the browser subagent for one entity inside a larger `wide_browse` batch. It builds the per-entity prompt, optionally appends the desired output schema, and records the child agent's answer.
+**Purpose**: Finds the stream definition with the requested name inside the connector. This lets a source row say “sync this one stream” and turns that name into the StreamSpec that describes how the stream behaves.
 
-**Data flow**: It receives one entity string from the outer `_wide_browse` loop. Before doing work, it passes through the semaphore so only a limited number of visits run at the same time. It replaces `{entity}` in the prompt template with the current entity, appends schema instructions if a schema was read, spawns a browser-profile subagent for that one task, and returns a dictionary with the entity and the child's JSON output text, or an empty string if there is no output.
+**Data flow**: It receives a stream name. It loops over the connector’s declared streams and returns the one whose name matches. If no stream matches, it raises an error saying the connector does not have that stream.
 
-**Call relations**: `_wide_browse` creates this inner function and schedules one copy for each entity. Each `visit` is one worker in the batch: it hands one browser job to `ctx.spawn`, then returns a row that `_wide_browse` later gathers, writes to the workspace file, and reports to the caller.
+**Call relations**: ConnectorBackend.fetch calls this near the start of a sync run, before any provider request is made. The returned StreamSpec controls later choices such as which primary key to use, whether missing records mean deletes, and whether cursor or timestamp fields exist.
 
-
-### `extensions/research/ufo_ext_research/subagent.py`
-
-`config` · `startup or extension load`
-
-This file is like a job description and equipment list for research helpers. Instead of letting every agent use every possible tool, it creates two named subagent profiles: `research` for ordinary scoped research work, and `deep_research` for larger tasks that may need many steps and sources.
-
-Both profiles use the same research tool kit. That includes web search and page fetching tools, a browser task tool, external tool access, file tools, memory search, and spreadsheet support. The important boundary is that these agents get research-oriented tools, not unrestricted control of every browsing surface. This keeps delegated research focused and safer.
-
-The file also loads two prompt files from disk. These prompts are the written instructions that tell each subagent how to behave. The deep research version gets a much higher round limit, meaning it can spend more back-and-forth reasoning/tool-use cycles before stopping.
-
-Finally, the file defines simple input and output models. A research subagent receives an `objective`, which is the task to accomplish, and returns a `result`, which is its completed answer. Without this file, the rest of the system would not have a ready-made, consistent way to spin up these research workers with the right instructions, tools, limits, and data contract.
+*Call graph*: called by 1 (fetch).
 
 
-### `extensions/sites/ufo_ext_sites/delegation.py`
+##### `ConnectorBackend._decode_cursor`  (lines 265–282)
 
-`orchestration` · `request handling`
+```
+def _decode_cursor(cursor: str | None) -> '_BackfillEnvelope | None'
+```
 
-This file is a small bridge between the main conversation and a dedicated website-building subagent. Think of it like a work order form plus a dispatch button: the main agent writes down exactly what kind of site is needed, then sends that request to a specialist who does the build work in the same workspace.
+**Purpose**: Checks whether a stored cursor is one of this backend’s special backfill envelopes. If it is, it converts it back into a validated object; if it is not, it leaves the cursor to be treated as ordinary connector state.
 
-The key input type is `BuildWebsiteInput`. It asks for a self-contained `objective`, because the child agent does not inherit the main conversation history. It can also include a friendly task name, a list of skills to preload, and an option to allow a longer work session for bigger builds.
+**Data flow**: It receives a cursor string or None. None, invalid JSON, JSON that is not an object, or JSON without the reserved ufo_backfill key all produce None. If the reserved key is present, it validates the contents as an origin, skip count, and watermark. A malformed reserved envelope raises an error, because only this backend is supposed to write that format.
 
-The tool definition, `DELEGATION_TOOLS`, exposes this as `build_website`. It is marked as side-effecting, meaning it can change the workspace by creating files, starting or registering a site, or otherwise producing lasting results. To make retries safer, the actual spawn call uses the current tool call's idempotency key. In plain terms, if the system crashes and repeats the same dispatch step, it tries to reconnect to the same child build instead of accidentally starting a duplicate job.
+**Call relations**: ConnectorBackend.fetch calls this before starting an incremental stream. When it returns an envelope, fetch knows to replay from the envelope’s origin and skip records already consumed. When it returns None, fetch passes the original cursor through as opaque connector-owned state.
 
-The important boundary is that the child agent gets its own conversation, but not its own separate filesystem. Anything it builds remains available in this conversation's sandbox afterward.
+*Call graph*: called by 1 (fetch); 1 external calls (loads).
+
+
+##### `ConnectorBackend._page`  (lines 284–337)
+
+```
+def _page(self, stream: StreamSpec, record: dict[str, Any]) -> Page | None
+```
+
+**Purpose**: Turns one raw provider record into one internal Page, or decides that the record must be dropped. It protects the sync from being blocked by a single bad record while still warning operators that data was lost.
+
+**Data flow**: It receives a stream definition and a provider record. It asks the connector for the record’s stable identity and display reference; if there is no identity, it warns and returns None. Otherwise it asks the connector to render a title and body, extracts created and updated timestamps, and builds a Page whose source identity is based on stream name plus record identity. If Page validation fails, it warns with the validation fault and returns None. A successful conversion returns the Page.
+
+**Call relations**: ConnectorBackend.fetch calls this for every record that is not skipped by a backfill envelope. _page calls _record_timestamp for date fields, uses the Page model to enforce the internal shape, and sends warnings through the observability system when a record cannot be safely stored.
+
+*Call graph*: calls 1 internal fn (_record_timestamp); called by 1 (fetch); 3 external calls (__init__, warn, validation_fault).
+
+
+##### `_record_timestamp`  (lines 340–371)
+
+```
+def _record_timestamp(record: dict[str, Any], field: str | None, *, connector: str, stream: str) -> str | None
+```
+
+**Purpose**: Extracts and normalizes one timestamp field from a provider record. It gives Pages consistent timestamp strings while tolerating missing or malformed provider data.
+
+**Data flow**: It receives a record, a field name or None, and connector/stream names for warning messages. If there is no field name, or the field value is missing or None, it returns None. If the field is present, it reads either a direct key or a nested path, accepts string timestamps and non-boolean integers, and passes them through normalize_page_timestamp. If normalization fails or the value has an unsupported type, it warns and returns None.
+
+**Call relations**: ConnectorBackend._page calls this for the stream’s created-at and updated-at fields while building a Page. It delegates nested lookup to get_path, timestamp formatting to normalize_page_timestamp, and warning emission to the observability layer.
+
+*Call graph*: called by 1 (_page); 3 external calls (warn, get_path, normalize_page_timestamp).
+
+
+##### `_max_str`  (lines 374–379)
+
+```
+def _max_str(current: str | None, value: Any) -> str | None
+```
+
+**Purpose**: Keeps the larger of two string cursor values. It is used as a simple watermark helper for streams whose progress is represented by sortable text, such as timestamp strings.
+
+**Data flow**: It receives the current watermark and a new value from a record. If the new value is not a string, it returns the current watermark unchanged. If there is no current watermark, or the new string sorts after the current one, it returns the new string. Otherwise it returns the current string.
+
+**Call relations**: ConnectorBackend.fetch calls this while reading records from a stream with a cursor field. The resulting watermark can become the next cursor at the end of an uncapped run, or be stored inside a backfill envelope when a capped run must resume later.
+
+*Call graph*: called by 1 (fetch).
+
+
+### `core/src/ufo/sources/rest.py`
+
+`io_transport` · `request handling during source sync reads`
+
+Many outside services do not return all records in one reply. They return one page at a time, may ask the caller to slow down, and may use different ways to say where the next page is. This file keeps every REST connector from having to rewrite that same careful plumbing.
+
+The main class, RestConnector, is like a reusable delivery truck for API data. A specific connector supplies the destination details: the base web address, the available streams of records, and sometimes special pagination rules. RestConnector builds an asynchronous HTTP client, meaning it can wait for the network without freezing other work. It sends GET or read-only POST requests, checks errors, retries temporary failures such as rate limits and server errors, and gives up safely if a service keeps looping forever.
+
+It also normalizes the shape of results. Pages must be lists of dictionary-like records, and each record can be flattened before the sync system writes it onward. The file supports several common pagination styles: next cursor tokens, Link headers, offset and limit, page numbers, and Microsoft OData next links. Without this file, each connector would have to solve authentication, retries, pagination safety, and record validation on its own, which would make bugs and inconsistent behavior much more likely.
 
 #### Function details
 
-##### `_build_website`  (lines 54–61)
+##### `list_or_empty`  (lines 50–54)
 
 ```
-async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResult
+def list_or_empty(value: Any) -> list[dict[str, Any]]
 ```
 
-**Purpose**: This is the actual worker behind the `build_website` tool. It starts the specialized website-building child agent, passes along the user's build request, then returns the child agent's summary as the tool result.
+**Purpose**: This small helper safely turns a value into a list of records. It only keeps items that are dictionaries, because downstream sync code expects each record to be a dictionary-shaped object.
 
-**Data flow**: It receives a tool context, which includes the ability to spawn child agents and an idempotency key, plus a `BuildWebsiteInput` object containing the website objective and options. It converts that input into a plain data payload, leaving out empty fields, then asks the context to spawn the website-building profile with that payload. When the child finishes, it takes the child's output, turns it into JSON text if there is any output, wraps that text in `TextContent`, and returns it inside a `ToolResult`.
+**Data flow**: It receives any value. If the value is not a list, it returns an empty list; if it is a list, it filters out anything that is not a dictionary and returns the remaining records.
 
-**Call relations**: This function is registered as the handler for the `build_website` tool, so it runs when the main agent chooses to delegate a web build. Its main handoff is to `ToolContext.spawn`, which creates or reconnects to the website-building child agent. After that child returns, `_build_website` packages the result into the standard tool-response shape using `TextContent` and `ToolResult`.
+**Call relations**: Pagination helpers use this when reading API responses so that badly shaped or unexpected data does not flow forward as records. It is used by record extraction, raw response list parsing, and the OData page reader.
 
-*Call graph*: 4 external calls (__init__, __init__, spawn, model_dump).
-
-
-### `extensions/sites/ufo_ext_sites/subagent.py`
-
-`config` · `when a website-building subagent is configured or spawned`
-
-This file is like a job description and toolbox list for a temporary website-building helper. When the main assistant needs a site built, it can start this subagent with a clear task. The subagent then works inside the same project files, using only the tools it is allowed to use.
-
-The file loads a website-building prompt from a nearby Markdown file. That prompt contains the detailed working instructions. It also names the tools the subagent may use: basic file tools for reading and editing, build and local website tools, JavaScript and spreadsheet REPL tools for testing or inspecting behavior, and optional web research tools if they are available.
-
-A key detail is what the subagent is not allowed to do. It does not get `publish_website`, because publishing a live app with a backend is reserved for the parent assistant that is directly talking to the user. It also does not get `share_file`, because the child agent has no direct user to deliver files to. Instead, it leaves its work in the shared workspace, and the parent reads the files afterward.
-
-The two small data models, `WebsiteBuildingTask` and `WebsiteBuildingResult`, define the shape of the message sent into the subagent and the summary returned from it. Finally, `WEBSITE_BUILDING_PROFILE` bundles all of this into one profile the system can register and run.
+*Call graph*: called by 3 (_get_odata_pages, _response_list, records_at).
 
 
-### Self-improvement evaluation
-Corpus construction, replay evaluation, and statistical gatekeeping decide whether proposed prompt changes are safe improvements.
+##### `dict_or_empty`  (lines 57–60)
 
-### `extensions/self_improvement/ufo_ext_self_improvement/corpus.py`
+```
+def dict_or_empty(value: Any) -> dict[str, Any]
+```
 
-`domain_logic` · `self-improvement corpus building`
+**Purpose**: This helper safely treats a value as a single record-like dictionary. It is useful when a connector reaches into nested API data and wants a harmless empty object if the expected object is missing.
 
-This file answers a practical question: “Which past failures should the system learn from, and how do we test whether a proposed improvement really helps?” A trajectory is a recorded conversation, including user messages, assistant tool calls, and tool results. Since the system does not have a separate channel where it says “I struggled here,” this code treats tool errors as the visible sign of friction.
+**Data flow**: It receives any value. If the value is a dictionary, it returns it unchanged; otherwise it returns an empty dictionary.
 
-The file defines two small data shapes. A TaskExample is one useful failed conversation, reduced to the user’s original request, the full message history needed to replay it, and a plain description of the tool error. A TaskClass is a group of those examples for one kind of failure, named after the tool that errored, such as “tool:search”.
+**Call relations**: This is a standalone shaping helper for connector code that needs it. It is not called inside this file, but it belongs with the other safe record-shaping functions.
 
-The flow is like sorting broken workshop jobs by which machine broke. First it finds the first user request in a conversation. Then it finds the first tool result marked as an error and connects it back to the tool call it answered. If both exist, the trajectory becomes a training/evaluation example. Finally, examples are grouped by failing tool and split into two sets: a “mine” set, used to inspire a proposed fix, and a “held_out” set, used later to test the fix on different conversations. That split matters because grading on the same examples used to invent a fix would make success look too easy.
+
+##### `records_at`  (lines 63–68)
+
+```
+def records_at(data: Any, path: str | None) -> list[dict[str, Any]]
+```
+
+**Purpose**: This helper pulls a list of records out of an API response, optionally from a nested path. It lets pagination code say, for example, 'the records live under data.items' without duplicating path-walking logic.
+
+**Data flow**: It receives a response-like value and an optional path. With no path, it treats the whole value as the list; with a path, it first walks into the mapping at that path, then returns only dictionary items from the list found there.
+
+**Call relations**: Several pagination loops call this after receiving JSON. The small parser inside link-header pagination also uses it when a stream declares that records are nested inside a response body.
+
+*Call graph*: calls 1 internal fn (list_or_empty); called by 4 (_get_cursor_pages, _get_offset_pages, _get_page_number_pages, parse); 1 external calls (get_path).
+
+
+##### `_int_or_none`  (lines 71–76)
+
+```
+def _int_or_none(value: Any) -> int | None
+```
+
+**Purpose**: This helper reads a value as an integer only when that is clearly safe. It avoids guessing when an API returns something that is not a clean whole number.
+
+**Data flow**: It receives any value. It returns the integer if the value is already an integer, or if it is a string made only of digits; otherwise it returns nothing.
+
+**Call relations**: Offset-based pagination uses this when an API reports the page size it actually applied. That lets the next request advance by the server's real page size when available.
+
+*Call graph*: called by 1 (_get_offset_pages).
+
+
+##### `with_context`  (lines 79–82)
+
+```
+def with_context(records: Iterable[dict[str, Any]], **context: Any) -> list[dict[str, Any]]
+```
+
+**Purpose**: This helper copies records and stamps extra context onto each one, such as a parent ID or cloud account ID. That helps later steps know where a record came from.
+
+**Data flow**: It receives many record dictionaries and named context values. It returns a new list where each record is copied and combined with the context fields, leaving the original records untouched.
+
+**Call relations**: This is a convenience for provider-specific connectors, especially those that fan out from one object to child objects. It is not used by the base class itself.
+
+
+##### `next_link`  (lines 85–90)
+
+```
+def next_link(headers: httpx.Headers) -> str | None
+```
+
+**Purpose**: This helper finds the 'next page' URL in an HTTP Link header. Some APIs put pagination directions in headers instead of in the JSON body.
+
+**Data flow**: It receives response headers, reads the Link header, searches for a link marked as rel=next, and returns that URL if found. If there is no such link, it returns nothing.
+
+**Call relations**: The link-header pagination loop calls this after each page. If it returns a URL, the loop follows it; if it returns nothing, the loop stops.
+
+*Call graph*: called by 1 (_get_link_header_pages); 1 external calls (get).
+
+
+##### `_is_retryable`  (lines 93–98)
+
+```
+def _is_retryable(error: BaseException) -> bool
+```
+
+**Purpose**: This helper decides whether a failed request is worth trying again. It treats network transport problems and temporary HTTP statuses, such as rate limits or server errors, as retryable.
+
+**Data flow**: It receives an error. It checks the error type and, for HTTP status errors, the response status code, then returns true for temporary failures and false for permanent-looking failures.
+
+**Call relations**: The shared send routine calls this inside its retry loop. It prevents retries for errors that are unlikely to succeed on a second attempt.
+
+*Call graph*: called by 1 (_send).
+
+
+##### `_retry_after`  (lines 101–121)
+
+```
+def _retry_after(error: BaseException) -> float | None
+```
+
+**Purpose**: This helper reads a Retry-After header, which is an API's way of saying 'wait this many seconds before trying again.' It only accepts safe, finite, non-negative numbers.
+
+**Data flow**: It receives an error. If the error is a suitable HTTP response with a Retry-After header, it converts that header to a number of seconds; otherwise it returns nothing.
+
+**Call relations**: The retry-wait calculator calls this before choosing a sleep time. It gives the API's own backoff instruction a chance to influence the retry delay.
+
+*Call graph*: called by 1 (_retry_wait); 1 external calls (isfinite).
+
+
+##### `_retry_wait`  (lines 124–141)
+
+```
+def _retry_wait(error: BaseException, delay: float) -> float
+```
+
+**Purpose**: This helper chooses how long to wait before retrying a temporary failure. It mixes exponential backoff, which waits longer after repeated failures, with jitter, which adds randomness so many workers do not retry at the exact same moment.
+
+**Data flow**: It receives the error and the current delay level. It checks for a Retry-After value, compares it with the normal retry delay, applies caps, adds random jitter, and returns the number of seconds to sleep.
+
+**Call relations**: The shared send routine asks this for the next wait time after a retryable failure. It relies on _retry_after when the server has provided explicit timing.
+
+*Call graph*: calls 1 internal fn (_retry_after); called by 1 (_send); 1 external calls (uniform).
+
+
+##### `_raise_for_status`  (lines 144–155)
+
+```
+def _raise_for_status(response: httpx.Response) -> None
+```
+
+**Purpose**: This function turns an unsuccessful HTTP response into a clear exception. Unlike the default library error, it includes a capped snippet of the response body so the real API complaint is visible.
+
+**Data flow**: It receives an HTTP response. If the status is successful, it does nothing; otherwise it reads a short part of the body and raises an HTTP status error containing the method, URL, status, and body text.
+
+**Call relations**: The shared send routine calls this after every response. That makes all GET and POST helpers fail consistently and with useful error messages.
+
+*Call graph*: called by 1 (_send); 1 external calls (HTTPStatusError).
+
+
+##### `_json_or_empty`  (lines 158–162)
+
+```
+def _json_or_empty(response: httpx.Response) -> dict[str, Any]
+```
+
+**Purpose**: This helper reads a JSON object from a response, while treating empty responses as an empty dictionary. It is useful for endpoints that return no body when there is nothing to say.
+
+**Data flow**: It receives an HTTP response. If the response is empty or has status 204, it returns an empty dictionary; otherwise it parses and returns the JSON body.
+
+**Call relations**: The higher-level _get and _post methods use this after the raw request succeeds, so callers get a dictionary-shaped body instead of an HTTP response object.
+
+*Call graph*: called by 2 (_get, _post); 1 external calls (json).
+
+
+##### `_response_list`  (lines 165–168)
+
+```
+def _response_list(response: httpx.Response) -> list[dict[str, Any]]
+```
+
+**Purpose**: This helper reads a JSON response that is expected to be a top-level list of records. It safely returns only dictionary-shaped items.
+
+**Data flow**: It receives an HTTP response. Empty responses become an empty list; non-empty responses are parsed as JSON and passed through list_or_empty.
+
+**Call relations**: The link-header pagination loop uses this when no custom record parser is supplied. It is the default way to treat each linked page as a list of records.
+
+*Call graph*: calls 1 internal fn (list_or_empty); called by 1 (_get_link_header_pages); 1 external calls (json).
+
+
+##### `_bound_pages`  (lines 171–177)
+
+```
+def _bound_pages(who: str, pages: int) -> None
+```
+
+**Purpose**: This safety check stops a pagination loop that has run for an unreasonable number of pages. It protects the sync from getting stuck forever on a broken or hostile API response.
+
+**Data flow**: It receives a label describing the request and the current page count. If the count is above the maximum, it raises an error; otherwise it lets the loop continue.
+
+**Call relations**: Every built-in pagination loop calls this once per page. It acts as a circuit breaker before a sync can hold resources forever.
+
+*Call graph*: called by 5 (_get_cursor_pages, _get_link_header_pages, _get_odata_pages, _get_offset_pages, _get_page_number_pages).
+
+
+##### `_bound_cursor`  (lines 180–186)
+
+```
+def _bound_cursor(who: str, token: str, seen: set[str]) -> None
+```
+
+**Purpose**: This safety check stops pagination when an API repeats the same next-page token or URL. A repeated cursor usually means the API is not advancing and would make the connector fetch the same page forever.
+
+**Data flow**: It receives a label, the next cursor or link, and a set of cursors already seen. If the token is already in the set, it raises an error; otherwise it records the token.
+
+**Call relations**: Cursor, link-header, and OData pagination call this whenever they receive a new continuation value. It catches endless loops earlier than the general page limit.
+
+*Call graph*: called by 3 (_get_cursor_pages, _get_link_header_pages, _get_odata_pages).
+
+
+##### `RestConnector.streams`  (lines 195–196)
+
+```
+def streams(self) -> list[StreamSpec]
+```
+
+**Purpose**: This method returns the streams this connector can read. A stream is a named collection of records, such as users, issues, or projects.
+
+**Data flow**: It reads the class's streams_list and returns a fresh list copy. The copy means callers can inspect the list without directly mutating the class-level definition.
+
+**Call relations**: The broader sync system asks connectors what streams they expose. Provider-specific subclasses fill in streams_list, and this base method reports it.
+
+
+##### `RestConnector._make_client`  (lines 198–215)
+
+```
+def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient
+```
+
+**Purpose**: This method builds the asynchronous HTTP client used for one account's API calls. It applies the right authentication style, timeout settings, base URL, and JSON headers.
+
+**Data flow**: It receives a base URL and a resolved credential. It creates a client using either a proxy transport, a bearer token, or explicit headers; if no authentication is available, it raises an error.
+
+**Call relations**: fetch_page calls this at the start of a read. All later request helpers use the client it creates, so authentication and timeouts are consistent for the whole fetch.
+
+*Call graph*: called by 1 (fetch_page); 2 external calls (AsyncClient, Timeout).
+
+
+##### `RestConnector._get`  (lines 217–220)
+
+```
+async def _get(self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None=None) -> dict[str, Any]
+```
+
+**Purpose**: This method performs a GET request and returns the response body as a JSON dictionary. It is the common helper for API endpoints that return normal object-shaped JSON.
+
+**Data flow**: It receives an HTTP client, a path, and optional query parameters. It asks _get_raw to send the request with retries, then converts the successful response through _json_or_empty.
+
+**Call relations**: Several pagination loops call this when they only need the JSON body. It delegates the network and retry work to _get_raw and the response shaping to _json_or_empty.
+
+*Call graph*: calls 2 internal fn (_get_raw, _json_or_empty); called by 3 (_get_cursor_pages, _get_offset_pages, _get_page_number_pages).
+
+
+##### `RestConnector._get_raw`  (lines 222–226)
+
+```
+async def _get_raw(self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None=None) -> httpx.Response
+```
+
+**Purpose**: This method performs a GET request and returns the full HTTP response. It is used when callers need headers as well as the body, such as for Link-header pagination.
+
+**Data flow**: It receives an HTTP client, path, and optional query parameters. It wraps client.get in the shared _send retry routine and returns the successful response.
+
+**Call relations**: _get builds on this for JSON-only calls. Link-header and OData pagination use it directly because their continuation information may live in headers or full response metadata.
+
+*Call graph*: calls 1 internal fn (_send); called by 3 (_get, _get_link_header_pages, _get_odata_pages).
+
+
+##### `RestConnector._post`  (lines 228–233)
+
+```
+async def _post(self, client: httpx.AsyncClient, path: str, *, json: dict[str, Any] | None=None) -> dict[str, Any]
+```
+
+**Purpose**: This method performs a read-only POST request and returns a JSON dictionary. Some APIs use POST for searches or queries even when no data is being written.
+
+**Data flow**: It receives an HTTP client, path, and optional JSON body. It sends the POST through the shared retry routine and converts the response into a dictionary or an empty dictionary.
+
+**Call relations**: Provider-specific connectors can call this for read endpoints such as search APIs. It shares the same retry and error behavior as GET requests.
+
+*Call graph*: calls 2 internal fn (_send, _json_or_empty).
+
+
+##### `RestConnector._post_raw`  (lines 235–241)
+
+```
+async def _post_raw(self, client: httpx.AsyncClient, path: str, *, json: dict[str, Any] | None=None) -> httpx.Response
+```
+
+**Purpose**: This method performs a read-only POST request and returns the full HTTP response. It is for unusual read endpoints where the caller needs to parse the raw body shape itself.
+
+**Data flow**: It receives an HTTP client, path, and optional JSON body. It sends the POST through the shared retry routine and returns the successful response without parsing it.
+
+**Call relations**: Provider-specific connectors can use this when _post's dictionary parsing is not suitable. It still benefits from the same retry and status-checking path.
+
+*Call graph*: calls 1 internal fn (_send).
+
+
+##### `RestConnector._send`  (lines 243–264)
+
+```
+async def _send(self, request: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response
+```
+
+**Purpose**: This is the shared retry wrapper for HTTP requests. It makes one request, checks whether it succeeded, and retries temporary failures within fixed attempt and time limits.
+
+**Data flow**: It receives a callable that starts an HTTP request. It runs it, raises clear errors for bad statuses, sleeps and retries for retryable failures, and finally returns a successful response or raises the last failure.
+
+**Call relations**: _get_raw, _post, and _post_raw all route through this method. It calls the retry decision, wait calculation, and status-check helpers so every request behaves the same way.
+
+*Call graph*: calls 3 internal fn (_is_retryable, _raise_for_status, _retry_wait); called by 3 (_get_raw, _post, _post_raw); 1 external calls (sleep).
+
+
+##### `RestConnector.fetch_page`  (lines 266–303)
+
+```
+async def fetch_page(self, stream: StreamSpec, *, cursor: str | None, credential: Credential, base_url: str, self_user_id: str | None, backfill_after: datetime | None=None) -> AsyncIterator[list[dict[
+```
+
+**Purpose**: This is the main reading method used by the sync engine to fetch records from a stream. It opens the HTTP client, runs pagination, validates each page, flattens records, and yields clean pages onward.
+
+**Data flow**: It receives the stream to read, authentication, base URL details, cursor information, and optional run context. It creates a client, gets pages from paginate_source, skips empty pages, validates record shape, flattens records, preserves delete and cursor metadata when present, and yields the prepared page.
+
+**Call relations**: This method is the bridge between the wider connector framework and this REST helper. It calls _make_client for transport setup, paginate_source for provider-specific page production, and flatten and _validate_page before handing data back to the sync driver.
+
+*Call graph*: calls 4 internal fn (_make_client, _validate_page, flatten, paginate_source); 1 external calls (__init__).
+
+
+##### `RestConnector.paginate_source`  (lines 305–318)
+
+```
+def paginate_source(self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None, self_user_id: str | None, backfill_after: datetime | None=None) -> AsyncIterator[list[dict[str, Any]] |
+```
+
+**Purpose**: This method is a narrow extension point between fetch_page and pagination. By default it ignores extra run context, but subclasses can override it if they need details such as the acting user or a backfill floor.
+
+**Data flow**: It receives the client, stream, cursor, user identity, and optional backfill date. The default implementation passes only the client, stream, and cursor into paginate and returns that async stream of pages.
+
+**Call relations**: fetch_page calls this rather than calling paginate directly. That gives specialized connectors a place to widen the pagination inputs without changing the main fetch_page flow.
+
+*Call graph*: calls 1 internal fn (paginate); called by 1 (fetch_page).
+
+
+##### `RestConnector.paginate`  (lines 320–332)
+
+```
+async def paginate(self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None) -> AsyncIterator[list[dict[str, Any]] | StreamPage]
+```
+
+**Purpose**: This method produces raw pages of records for a stream. The default version uses the stream's declared pagination strategy, while subclasses can override it for APIs with special shapes.
+
+**Data flow**: It receives the HTTP client, stream, and optional cursor. If the stream has a supported pagination declaration, it yields pages from paginate_from_strategy; otherwise it raises an error saying the connector must implement pagination itself.
+
+**Call relations**: paginate_source calls this in the default flow. It hands ordinary declared pagination to paginate_from_strategy and leaves unusual provider-specific pagination to subclasses.
+
+*Call graph*: calls 1 internal fn (paginate_from_strategy); called by 1 (paginate_source).
+
+
+##### `RestConnector.paginate_from_strategy`  (lines 334–396)
+
+```
+async def paginate_from_strategy(self, stream: StreamSpec, *, client: httpx.AsyncClient) -> AsyncIterator[list[dict[str, Any]]]
+```
+
+**Purpose**: This method turns a stream's pagination declaration into actual page-fetching behavior. It chooses the correct loop for cursor, link-header, or offset-and-limit pagination.
+
+**Data flow**: It reads the stream's pagination settings, resolves the request path, checks that required fields are present, and then yields pages from the matching helper. If the strategy is absent or says none, it simply returns.
+
+**Call relations**: The default paginate method calls this for normal streams. It dispatches to _get_cursor_pages, _get_link_header_pages, or _get_offset_pages, and may call _strategy_path when the stream did not provide an explicit path.
+
+*Call graph*: calls 4 internal fn (_get_cursor_pages, _get_link_header_pages, _get_offset_pages, _strategy_path); called by 1 (paginate).
+
+
+##### `RestConnector.paginate_from_strategy.parse`  (lines 366–368)
+
+```
+def parse(response: httpx.Response) -> list[dict[str, Any]]
+```
+
+**Purpose**: This inner parser extracts records from a link-header paginated response when the records are nested inside the JSON body. It adapts a generic linked-page loop to APIs that wrap their lists.
+
+**Data flow**: It receives an HTTP response, parses its JSON body if present, and returns the list of dictionary records found at the configured record path.
+
+**Call relations**: paginate_from_strategy creates this parser only for next-link streams with a record_path. It passes the parser into _get_link_header_pages so that loop can focus on following links while this function handles body shape.
+
+*Call graph*: calls 1 internal fn (records_at); 1 external calls (json).
+
+
+##### `RestConnector._get_link_header_pages`  (lines 398–426)
+
+```
+async def _get_link_header_pages(self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None=None, page_size_param: str | None='per_page', page_size: int | None=None, parse_records: C
+```
+
+**Purpose**: This method reads pages from APIs that put the next-page URL in the HTTP Link header. It follows each rel=next link until there is no next link.
+
+**Data flow**: It receives a client, starting path, optional query parameters, optional page size settings, and an optional record parser. It fetches the first page, yields records from each response, checks for too many pages or repeated links, and follows the next link until finished.
+
+**Call relations**: paginate_from_strategy calls this for next_link streams. It uses _get_raw to fetch responses, next_link to find the continuation, _response_list or a supplied parser to read records, and the pagination safety checks to avoid infinite loops.
+
+*Call graph*: calls 5 internal fn (_get_raw, _bound_cursor, _bound_pages, _response_list, next_link); called by 1 (paginate_from_strategy).
+
+
+##### `RestConnector._get_cursor_pages`  (lines 428–460)
+
+```
+async def _get_cursor_pages(self, client: httpx.AsyncClient, path: str, *, records_path: str | None, next_cursor_path: str, params: dict[str, Any] | None=None, cursor_param: str='cursor', page_size_pa
+```
+
+**Purpose**: This method reads pages from APIs that return a next cursor token inside the response body. The cursor is sent back on the next request to continue where the last page ended.
+
+**Data flow**: It receives a client, path, record path, cursor path, parameter names, page size, and extra query parameters. It repeatedly sends GET requests, extracts records, yields non-empty pages, reads the next cursor, and stops when no valid cursor remains.
+
+**Call relations**: paginate_from_strategy calls this for next_cursor streams. It uses _get for JSON requests, records_at for record extraction, get_path for cursor extraction, and safety checks for page count and repeated cursors.
+
+*Call graph*: calls 4 internal fn (_get, _bound_cursor, _bound_pages, records_at); called by 1 (paginate_from_strategy); 1 external calls (get_path).
+
+
+##### `RestConnector._get_odata_pages`  (lines 462–488)
+
+```
+async def _get_odata_pages(self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None=None) -> AsyncIterator[list[dict[str, Any]]]
+```
+
+**Purpose**: This method reads Microsoft Graph or OData-style pages, where records live under value and the next page is named by @odata.nextLink. OData is a common web API convention used by Microsoft services.
+
+**Data flow**: It receives a client, path, and optional parameters. It fetches the current URL, yields dictionary records from the value field, follows @odata.nextLink when present, and stops when there is no next link.
+
+**Call relations**: This helper is available for provider-specific connectors that need OData pagination. It uses _get_raw for requests, list_or_empty for record safety, and the shared page and cursor bounds to avoid endless loops.
+
+*Call graph*: calls 4 internal fn (_get_raw, _bound_cursor, _bound_pages, list_or_empty).
+
+
+##### `RestConnector._get_offset_pages`  (lines 490–530)
+
+```
+async def _get_offset_pages(self, client: httpx.AsyncClient, path: str, *, records_path: str | None, limit: int, params: dict[str, Any] | None=None, limit_param: str='limit', offset_param: str='offset
+```
+
+**Purpose**: This method reads pages from APIs that use offset and limit numbers. In plain terms, it asks for 'start at record 0, give me 100,' then 'start at record 100, give me 100,' and so on.
+
+**Data flow**: It receives a client, path, record path, limit, parameter names, optional extra parameters, and optional response paths that say whether more data exists or what limit was actually used. It fetches each page, yields records, decides whether to stop, and advances the offset.
+
+**Call relations**: paginate_from_strategy calls this for offset_limit streams. It uses _get for JSON requests, records_at for extracting records, get_path for optional continuation signals, _int_or_none for server-reported limits, and _bound_pages for safety.
+
+*Call graph*: calls 4 internal fn (_get, _bound_pages, _int_or_none, records_at); called by 1 (paginate_from_strategy); 1 external calls (get_path).
+
+
+##### `RestConnector._get_page_number_pages`  (lines 532–561)
+
+```
+async def _get_page_number_pages(self, client: httpx.AsyncClient, path: str, *, records_path: str | None, page_size: int, params: dict[str, Any] | None=None, page_param: str='page', page_size_param: s
+```
+
+**Purpose**: This method reads APIs that use page numbers instead of cursors or offsets. It starts at a page number and increases it until a short page shows there is no more data.
+
+**Data flow**: It receives a client, path, record path, page size, optional parameters, parameter names, and starting page. It requests each numbered page, yields records if present, stops when fewer than the requested page size are returned, and otherwise moves to the next page number.
+
+**Call relations**: This helper is available for subclasses or custom pagination flows. It uses _get for requests, records_at for extracting records, and _bound_pages to prevent runaway loops.
+
+*Call graph*: calls 3 internal fn (_get, _bound_pages, records_at).
+
+
+##### `RestConnector._strategy_path`  (lines 563–569)
+
+```
+def _strategy_path(self, stream: StreamSpec) -> str
+```
+
+**Purpose**: This method resolves the request path for a stream when the pagination declaration did not include one. The base class raises an error because only a provider-specific connector can know that mapping.
+
+**Data flow**: It receives a stream. In the base class, it does not produce a path; it raises an error explaining that the connector must either set Pagination.path or override this method.
+
+**Call relations**: paginate_from_strategy calls this only when it needs a path and the stream did not provide one. Subclasses can override it to look up paths from their own per-stream table.
+
+*Call graph*: called by 1 (paginate_from_strategy).
+
+
+##### `RestConnector.flatten`  (lines 571–574)
+
+```
+def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]
+```
+
+**Purpose**: This method converts one API record into the flat dictionary shape the sync writer expects. The default does nothing because many APIs already return usable records.
+
+**Data flow**: It receives a record and the stream it belongs to. It returns the same record unchanged unless a subclass overrides the method to lift nested fields or reshape the record.
+
+**Call relations**: fetch_page calls this for every record after validation. Provider-specific connectors override it when their API wraps useful fields inside an envelope.
+
+*Call graph*: called by 1 (fetch_page).
+
+
+##### `RestConnector._validate_page`  (lines 576–587)
+
+```
+def _validate_page(self, page: Any, stream: StreamSpec) -> None
+```
+
+**Purpose**: This method checks that pagination produced the kind of data the sync system can write: a list of dictionary records. It fails early with a clear error when connector code yields the wrong shape.
+
+**Data flow**: It receives a page-like value and the stream being read. It raises a type error if the page is not a list or if any item inside it is not a dictionary; otherwise it changes nothing.
+
+**Call relations**: fetch_page calls this before flattening and yielding data. It protects the rest of the sync pipeline from malformed pages produced by custom pagination code.
+
+*Call graph*: called by 1 (fetch_page).
+
+
+### `core/src/ufo/sources/connector.py`
+
+`domain_logic` · `source registration and sync runs`
+
+This file is the contract and toolkit for bringing outside data into the system. A connector is the piece that knows how to talk to one provider, such as a mail service, chat service, document store, or repository host. It declares its streams, meaning the provider-side collections it can sync, and then yields records from those streams in pages.
+
+The file also defines small value objects that describe those streams: what field is the stable record ID, whether the stream is a full snapshot or an incremental update, how paging works, and which timestamp acts like a bookmark. Think of a cursor as a bookmark in a long book: after one sync stops, the next sync can reopen at the right place instead of rereading everything.
+
+The most involved part is `PartitionWalk`. It supports streams split into many partitions, such as many repositories or many chat channels. Each partition needs its own bookmark, but the wider sync system expects one cursor. `PartitionWalk` packs all those per-partition bookmarks into one JSON string and updates it safely as pages are read. It also knows how to resume oldest-first, newest-first, and unordered streams without skipping records.
+
+Finally, the base `Connector` class provides default record rendering. If a provider does not supply custom readable text, the record is turned into a simple title plus JSON body so it can still be stored and recalled.
 
 #### Function details
 
-##### `first_request`  (lines 39–43)
+##### `get_path`  (lines 36–45)
 
 ```
-def first_request(messages: tuple[Message, ...]) -> str | None
+def get_path(data: Mapping[str, Any], path: str, default: Any=None) -> Any
 ```
 
-**Purpose**: Finds the first real user request in a conversation. This gives the later evaluation a clear question or task to judge against.
+**Purpose**: Reads a value from nested dictionary-like data using a dotted path such as `author.id`. This lets stream definitions point to IDs or timestamps that are not at the top level of a record.
 
-**Data flow**: It receives the full tuple of conversation messages. It scans from the beginning until it finds a message from the user whose content is non-empty plain text. It returns that text, or returns nothing if no suitable user request exists.
+**Data flow**: It receives a mapping, a dotted path, and an optional default value. It walks through the mapping one part at a time; if any step is missing, not a mapping, or `None`, it returns the default. If the full path exists, it returns the found value.
 
-**Call relations**: bad_trajectory calls this while deciding whether a recorded conversation is usable. If there is no clear user request, bad_trajectory rejects the conversation because there would be no stable task to evaluate.
+**Call relations**: This is a small helper used by `record_key` when a record’s primary key is not a simple top-level field. It does not call back into the connector system; it only reads nested data.
 
-*Call graph*: called by 1 (bad_trajectory).
-
-
-##### `first_tool_error`  (lines 46–65)
-
-```
-def first_tool_error(messages: tuple[Message, ...]) -> tuple[str, str] | None
-```
-
-**Purpose**: Finds the first tool failure in a conversation and identifies which tool failed. This is the main signal the self-improvement loop uses to decide what kind of problem the conversation represents.
-
-**Data flow**: It receives the full tuple of messages. First it scans tool-use blocks and remembers which tool name belongs to each tool-call id. Then it scans tool-result blocks looking for the first one marked as an error. When it finds one, it uses the stored id-to-name map to return the tool name and the error text. If no matching error is found, it returns nothing.
-
-**Call relations**: bad_trajectory calls this before creating a TaskExample. The tool name it returns becomes the class label, so failures from the same tool are grouped together later by task_classes.
-
-*Call graph*: called by 1 (bad_trajectory).
+*Call graph*: called by 1 (record_key).
 
 
-##### `bad_trajectory`  (lines 68–78)
+##### `record_key`  (lines 48–60)
 
 ```
-def bad_trajectory(trajectory: Trajectory) -> tuple[str, TaskExample] | None
+def record_key(record: Mapping[str, Any], primary_key: str) -> str | None
 ```
 
-**Purpose**: Turns one recorded conversation into a self-improvement example if it contains both a user request and a tool error. It filters out conversations that do not provide enough evidence to learn from or test against.
+**Purpose**: Finds the stable provider ID for one record. The system needs this so the same outside record updates the same stored page instead of creating a new page every time its content changes.
 
-**Data flow**: It receives a Trajectory, which includes a conversation id and all messages. It asks first_tool_error for the earliest tool failure and first_request for the first user request. If either is missing, it returns nothing. If both are present, it builds a TaskExample containing the conversation id, request, full messages, and a readable problem statement, then returns it together with a class name like “tool:<name>”.
+**Data flow**: It receives a record and the name of the primary-key field. It first checks for that field directly on the record, then tries the same name as a dotted nested path through `get_path`. If the value is a string or integer, it returns it as text; if it is missing, empty, a boolean, or another unsupported type, it returns `None`.
 
-**Call relations**: task_classes calls this for every trajectory it is given. bad_trajectory is the bridge between raw conversation logs and the cleaner examples that the rest of the corpus-building code can group and split.
+**Call relations**: This function is called by `Connector.record_identity`, which is the base connector’s way to ask, “What is this record’s durable identity?” It relies on `get_path` for nested keys.
 
-*Call graph*: calls 2 internal fn (first_request, first_tool_error); called by 1 (task_classes); 1 external calls (__init__).
-
-
-##### `task_classes`  (lines 81–94)
-
-```
-def task_classes(trajectories: tuple[Trajectory, ...]) -> tuple[TaskClass, ...]
-```
-
-**Purpose**: Builds the final set of task classes from many past conversations. Each class represents failures from one specific tool and contains separate examples for proposing improvements and for later evaluation.
-
-**Data flow**: It receives a tuple of trajectories. For each one, it asks bad_trajectory whether the conversation is a usable failure example. Usable examples are collected under their failure class name. Each group is then passed to _split, which either turns it into a TaskClass or rejects it if the group is too small. The function returns the surviving classes sorted so larger classes come first, with names used as a tie-breaker.
-
-**Call relations**: This is the top-level function in the file. Other parts of the self-improvement system would call it when they need a prepared corpus. It delegates individual conversation filtering to bad_trajectory and delegates the mine-versus-held-out division to _split.
-
-*Call graph*: calls 2 internal fn (_split, bad_trajectory).
+*Call graph*: calls 1 internal fn (get_path); called by 1 (record_identity).
 
 
-##### `_split`  (lines 97–102)
+##### `PartitionWalk.stream`  (lines 261–368)
 
 ```
-def _split(name: str, examples: tuple[TaskExample, ...]) -> TaskClass | None
+async def stream(self, cursor: str | None) -> AsyncIterator[StreamPage]
 ```
 
-**Purpose**: Divides one group of examples into a proposer set and a held-out evaluation set. This keeps the system from judging a candidate improvement only on the same examples that inspired it.
+**Purpose**: Turns many separately bookmarked partitions into one continuous async stream of sync pages. It exists so a source split across many buckets, like channels or repositories, can still fit into the system’s single-cursor sync model.
 
-**Data flow**: It receives a class name and all examples for that class. If there are not enough examples to make both required sets, it returns nothing. Otherwise, it sorts examples by conversation id for a stable, repeatable order, chooses an evaluation count, and returns a TaskClass whose held_out examples come first in that order and whose mine examples are the remaining ones.
+**Data flow**: It receives the previously stored cursor as text. First it decodes that cursor into a per-partition map. Then it asks for partitions one by one, requests pages for each partition using the right boundary, updates that partition’s bookmark after each page, and yields `StreamPage` objects containing records, deletes, and the newly encoded cursor. At the end, it cleans up cursor entries for partitions that disappeared or dissolves temporary backfill windows when a walk finishes.
 
-**Call relations**: task_classes calls this after grouping failures by tool. _split is the final gate: it decides whether a tool-failure class has enough material to be useful and packages accepted groups into TaskClass objects for the rest of the self-improvement loop.
+**Call relations**: This is the main driver inside `PartitionWalk`. It calls `_decode` before walking, calls `_encode` whenever it needs to publish a fresh cursor, creates `PartitionBound` values to tell the page factory where to resume, and yields `StreamPage` values to the sync layer. If a page factory raises `PartitionSkipped`, it leaves that partition’s saved state alone and moves on.
 
-*Call graph*: called by 1 (task_classes); 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (_decode, _encode); 3 external calls (__init__, __init__, __init__).
 
 
-### `extensions/self_improvement/ufo_ext_self_improvement/evaluation.py`
+##### `PartitionWalk._decode`  (lines 371–400)
 
-`domain_logic` · `self-improvement evaluation and gating`
+```
+def _decode(cursor: str | None) -> dict[str, str | _Window]
+```
 
-This file is the evidence-gathering part of the self-improvement system. A new prompt should not be trusted just because it sounds better. The system needs a fair comparison, like giving two students the same exam and grading them with the same answer key. Here, the two “students” are the current prompt and the candidate prompt.
+**Purpose**: Converts the stored cursor string back into the per-partition bookmark map used by `PartitionWalk`. It also protects the sync from silently accepting corrupted cursor data.
 
-`CandidateEvaluation` takes a replay model, which can rerun saved task conversations, and a judge model, which decides whether an answer satisfies the original user request. For each held-out task, it replays the task twice: once with the current prompt and once with the candidate prompt. The replay uses the same saved task setup so the prompt is intended to be the only meaningful difference. Each regenerated answer is then sent to the judge, which must return a small JSON result saying whether the answer was accepted.
+**Data flow**: It receives a cursor string or `None`. Empty, non-JSON, or non-object cursor values become an empty map, meaning the walk starts fresh. A JSON object is read entry by entry: plain strings become normal watermarks, dictionaries are validated as temporary backfill windows, and malformed entries raise an error instead of being ignored.
 
-The results are turned into simple success-or-failure labels. Local held-out tasks measure whether the candidate improved on the kind of task it was designed for. Global held-out tasks check that it did not make other task types worse. Finally, the file passes both sets of labels to the two-stage gate, which makes the accept-or-reject decision using those comparisons.
+**Call relations**: `PartitionWalk.stream` calls this at the start of a walk to recover where each partition left off. It uses JSON parsing to read the cursor text and validation to check stored backfill windows.
+
+*Call graph*: called by 1 (stream); 1 external calls (loads).
+
+
+##### `PartitionWalk._encode`  (lines 403–408)
+
+```
+def _encode(partition_map: Mapping[str, 'str | _Window']) -> str
+```
+
+**Purpose**: Converts the current per-partition bookmark map into a JSON cursor string that can be saved between sync runs.
+
+**Data flow**: It receives a mapping from partition names to either plain string watermarks or `_Window` objects. It turns any `_Window` into a regular dictionary, leaves string watermarks as strings, and serializes the whole map to sorted JSON text. The output is the next cursor stored by the sync system.
+
+**Call relations**: `PartitionWalk.stream` calls this whenever it yields a page or needs to publish a cleanup checkpoint. It is the matching opposite of `_decode`.
+
+*Call graph*: called by 1 (stream); 1 external calls (dumps).
+
+
+##### `Connector.streams`  (lines 427–428)
+
+```
+def streams(self) -> list[StreamSpec]
+```
+
+**Purpose**: Declares which streams a connector knows how to sync. A stream is one provider-side collection, such as messages, documents, issues, or users.
+
+**Data flow**: A concrete connector implements this method with no input besides itself. It returns a list of `StreamSpec` objects, each describing one stream’s name, stable ID field, cursor field, deletion behavior, pagination style, and related sync rules.
+
+**Call relations**: During registration, `ConnectedSources._register` calls this method to discover what the connector offers. The returned stream definitions become the system’s map for later sync runs.
+
+*Call graph*: called by 1 (_register).
+
+
+##### `Connector.fetch_page`  (lines 431–446)
+
+```
+def fetch_page(self, stream: StreamSpec, *, cursor: str | None, credential: Credential, base_url: str, self_user_id: str | None, backfill_after: datetime | None) -> AsyncIterator[list[dict[str, Any]]
+```
+
+**Purpose**: Defines the contract for fetching records from one connector stream. Concrete connectors implement it to call the provider and yield pages of records, optionally including deletes and a provider cursor.
+
+**Data flow**: It receives the stream definition, the previous cursor, a resolved credential, the provider base URL, an optional current user ID to exclude where needed, and an optional backfill floor date. An implementation uses those inputs to request provider data and asynchronously yields either plain lists of record dictionaries or richer `StreamPage` objects. It does not return one final list; it produces pages over time.
+
+**Call relations**: This abstract method is the fetching hook that provider-specific connector classes must fill in. The rest of the connector framework can treat every provider the same because each implementation follows this shape.
+
+
+##### `Connector.render`  (lines 448–468)
+
+```
+def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]
+```
+
+**Purpose**: Turns one provider record into a title and body text that the system can store as a recallable page. It gives every connector a useful default, while content-heavy connectors can override it for nicer prose.
+
+**Data flow**: It receives a record and its stream definition. It looks for a human-friendly title field such as `title`, `name`, or `subject`. If none exists, it asks `record_identity` and `record_ref` for a stable fallback name. It then returns a pair: the chosen title and a body containing a heading plus the record serialized as sorted JSON. If the record has neither a title nor a usable identity, it raises an error.
+
+**Call relations**: This method calls `Connector.record_identity` to find the provider-stable ID, `Connector.record_ref` to build a source-side reference when needed, and JSON serialization to write the default body. It is the base rendering path used when a connector does not provide custom record-to-text behavior.
+
+*Call graph*: calls 2 internal fn (record_identity, record_ref); 1 external calls (dumps).
+
+
+##### `Connector.record_identity`  (lines 470–472)
+
+```
+def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None
+```
+
+**Purpose**: Returns the stable identity for a record inside its provider stream. This is the value used to recognize the same outside record across sync runs.
+
+**Data flow**: It receives a record and the stream definition. It passes the record and the stream’s primary-key path to `record_key`, then returns the resulting string ID or `None` if no valid ID is present.
+
+**Call relations**: `Connector.render` calls this when it needs a fallback title and identity for a record. This method delegates the actual key lookup rules to `record_key`.
+
+*Call graph*: calls 1 internal fn (record_key); called by 1 (render).
+
+
+##### `Connector.record_ref`  (lines 474–481)
+
+```
+def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None
+```
+
+**Purpose**: Builds the reference used when a page row is first created for a record. It prefers the provider’s primary key but can fall back to a hash when the primary key is not a simple string or number.
+
+**Data flow**: It receives a record and the stream definition. It reads the stream’s primary-key field directly from the record. If the value is a string or integer, it returns that value as text; if it is a boolean, it returns `None`; otherwise it serializes the whole record and returns a SHA-256 hash, which is a compact fingerprint of the content.
+
+**Call relations**: `Connector.render` calls this when it needs a reference for a fallback title. It uses JSON serialization and hashing to create a deterministic fallback when a direct reference is not available.
+
+*Call graph*: called by 1 (render); 2 external calls (sha256, dumps).
+
+
+### Source sync storage
+The sync engine stores incoming documents, tracks deletions and cursors, and exposes changed pages for downstream indexing.
+
+### `core/src/ufo/sources/sync.py`
+
+`orchestration` · `scheduled source sync and downstream page-feed replay`
+
+This file turns outside content into the system’s internal “pages.” A source backend is like a plug-in adapter: one backend may read a local folder, another may read a service such as Slack or GitHub. The sync driver claims sources that are due to run, asks the right backend to fetch documents, writes changed document bodies to blob storage, and updates database rows that describe each page. It avoids doing extra work by comparing a content digest, which is a fingerprint of the page body. If the fingerprint has not changed, it can skip rewriting the body and only update browsing metadata such as title or timestamps.
+
+The file also defines how failures are treated. A real error backs off future retries so the system does not hammer a broken provider. A refused stream, such as one blocked by missing permissions, is skipped rather than treated as corrupt data; repeated refusals can “park” the source so it retries less often. This distinction matters because old pages should remain visible when a provider temporarily refuses access.
+
+Finally, the file provides a page feed. Indexers read this feed using a cursor, like a bookmark, to replay page changes in a stable order. Tombstoned pages carry an empty body so downstream systems know to remove their derived data.
 
 #### Function details
 
-##### `CandidateEvaluation.evaluate`  (lines 24–33)
+##### `SourceRowConfig.requested_fields`  (lines 94–97)
 
 ```
-async def evaluate(self, candidate_prompt: str, current_prompt: str, local_held_out: tuple[TaskExample, ...], global_held_out: tuple[TaskExample, ...]=()) -> GateVerdict
+def requested_fields(cls) -> frozenset[str]
 ```
 
-**Purpose**: This is the main entry point for judging a candidate prompt. It compares the candidate prompt against the current prompt on local test tasks and optional broader test tasks, then returns the gate’s final verdict.
+**Purpose**: Returns the configuration fields that a caller must repeat exactly when registering the same source again. It separates fields that describe what was requested from fields that are resolved later by the system.
 
-**Data flow**: It receives the candidate prompt, the current prompt, and two groups of saved task examples. It asks `_labels` to turn each group into pass-or-fail results for both prompts. It then gives those two result sets to the gate, which returns whether the candidate should pass.
+**Data flow**: It reads the class-level sets of non-identity fields and resolved fields. It subtracts the resolved fields from the non-identity fields, then returns the remaining field names as an immutable set.
 
-**Call relations**: When the self-improvement system needs to decide if a prompt change is good enough, it calls this method. This method delegates the repeated replay-and-grade work to `_labels`, then hands the collected evidence to `two_stage_gate` so the final decision is made in one consistent place.
-
-*Call graph*: calls 1 internal fn (_labels); 1 external calls (two_stage_gate).
+**Call relations**: This is used by source configuration models that inherit from SourceRowConfig. It supports the larger registration flow by helping decide whether a new registration matches an existing source row or represents a different request.
 
 
-##### `CandidateEvaluation._labels`  (lines 35–45)
+##### `normalize_page_timestamp`  (lines 100–120)
 
 ```
-async def _labels(self, candidate_prompt: str, current_prompt: str, held_out: tuple[TaskExample, ...]) -> tuple[OutcomeLabel, ...]
+def normalize_page_timestamp(value: str) -> str
 ```
 
-**Purpose**: This helper produces the raw comparison evidence for a group of held-out tasks. For every task, it tests both the current prompt and the candidate prompt, then records whether each answer was accepted.
+**Purpose**: Turns a page timestamp into a consistent UTC ISO timestamp string. This keeps timestamps from different providers comparable, even if one sends Unix seconds and another sends an ISO date.
 
-**Data flow**: It receives both prompts and a tuple of saved task examples. For each example, it creates a replay evaluator, reruns the example with the current prompt and then the candidate prompt, sends each final answer to `_accepts`, and stores an `OutcomeLabel` showing which prompt was used and whether it succeeded. It returns all labels as an immutable tuple.
+**Data flow**: It receives a string. If the string is numeric, it treats it as seconds or milliseconds since the Unix epoch; otherwise it parses it as an ISO-style timestamp. It rejects unclear timestamps without a timezone except plain dates, then returns the time converted to UTC with microsecond precision.
 
-**Call relations**: `evaluate` calls this once for local tasks and once for global tasks. Inside the loop, `_labels` relies on `ReplayEvaluation` to regenerate answers from saved examples and on `_accepts` to judge each answer, then packages the outcomes for the gate logic.
+**Call relations**: Page.normalize_timestamp calls this whenever a Page model receives created_at or updated_at. It is the shared gate that keeps provider timestamps clean before they reach the database.
 
-*Call graph*: calls 1 internal fn (_accepts); called by 1 (evaluate); 2 external calls (__init__, __init__).
-
-
-##### `CandidateEvaluation._accepts`  (lines 47–59)
-
-```
-async def _accepts(self, request: str, answer: str) -> bool
-```
-
-**Purpose**: This helper asks the judge model whether one answer correctly satisfies one user request. It is deliberately strict: if the judge does not return valid JSON with `accepted` set to true, the answer is treated as not accepted.
-
-**Data flow**: It receives the original request text and the answer produced by replay. It builds a user message containing both, sends it with grading instructions to the judge model, searches the judge’s reply for a JSON object, parses it, and returns true only when that object says `accepted` is exactly true. Bad formatting, missing JSON, or invalid JSON all become false.
-
-**Call relations**: `_labels` calls this after each replayed answer is produced. This function is the bridge between raw generated text and the simple success-or-failure labels that the evaluation gate can count and compare.
-
-*Call graph*: called by 1 (_labels); 2 external calls (__init__, loads).
+*Call graph*: called by 1 (normalize_timestamp); 2 external calls (fromisoformat, fromtimestamp).
 
 
-### `extensions/self_improvement/ufo_ext_self_improvement/gate.py`
-
-`domain_logic` · `self-improvement evaluation`
-
-This file is the “promotion gate” for self-improvement. When the system tests a candidate prompt, it compares two groups of replayed examples: cases where the candidate prompt was present and cases where it was absent. The goal is not just to ask, “Did the candidate win more often?” but “Are we confident enough that the win is real?”
-
-It does this by counting accepted answers in each group, then estimating a safe lower bound for the improvement in acceptance rate. A lower bound means the pessimistic end of the estimate: if even that is high enough, the candidate probably helped. The file uses Wilson confidence bounds, a statistical method for estimating a success rate when there may be only a few examples. Think of it like checking whether a small product sample is convincing enough before changing the whole assembly line.
-
-There are two checks. First, the local gate asks whether the candidate improves the target task class enough, with enough examples on both sides. Second, the global check makes sure the change does not clearly hurt other task classes. Importantly, the global check only blocks when there is strong evidence of harm; weak or incomplete evidence is allowed through. The final result is a GateVerdict saying whether the candidate passed, why, and how much evidence was used.
-
-#### Function details
-
-##### `wilson_lower_bound`  (lines 53–60)
+##### `Page.digest`  (lines 137–138)
 
 ```
-def wilson_lower_bound(accepted: int, total: int, z: float=WILSON_Z_95) -> float
+def digest(self) -> str
 ```
 
-**Purpose**: This estimates a cautious lower success rate for a set of accepted-versus-total results. Someone would use it when they want to avoid over-trusting a small sample, such as treating 1 success out of 1 as definitely perfect.
+**Purpose**: Builds a stable fingerprint for a page body. The sync driver uses this fingerprint to tell whether a document’s content actually changed.
 
-**Data flow**: It takes the number accepted, the total number tested, and an optional confidence setting. If there are no examples, it returns 0. Otherwise it computes a Wilson lower confidence bound and returns a number between 0 and 1, representing the pessimistic plausible success rate.
+**Data flow**: It reads the Page body text, encodes it as bytes, hashes it with SHA-256, and returns the hash with a sha256: prefix. It does not change the page.
 
-**Call relations**: This is a building block for the lift calculations. When the file needs the cautious side of the candidate’s success rate, or the cautious side of the baseline’s success rate, the lift functions call this helper before combining the uncertainty from both groups.
+**Call relations**: SyncDriver._commit reads this property while comparing fetched pages with prior database rows. If the digest matches, the driver can avoid rewriting the body to blob storage.
 
-*Call graph*: called by 2 (lift_lower_bound, lift_upper_bound); 1 external calls (sqrt).
-
-
-##### `wilson_upper_bound`  (lines 63–70)
-
-```
-def wilson_upper_bound(accepted: int, total: int, z: float=WILSON_Z_95) -> float
-```
-
-**Purpose**: This estimates a generous upper success rate for accepted-versus-total results. It is used when the code needs to know the optimistic plausible end of a success rate, not just the observed rate.
-
-**Data flow**: It takes accepted and total counts plus an optional confidence setting. If there are no examples, it returns 1, meaning the rate is completely unconstrained. Otherwise it computes a Wilson upper confidence bound and returns a number between 0 and 1.
-
-**Call relations**: This pairs with wilson_lower_bound. The lift functions use it to build a safe interval around the difference between candidate and baseline acceptance rates.
-
-*Call graph*: called by 2 (lift_lower_bound, lift_upper_bound); 1 external calls (sqrt).
+*Call graph*: 1 external calls (sha256).
 
 
-##### `lift_lower_bound`  (lines 73–84)
+##### `Page.normalize_timestamp`  (lines 142–145)
 
 ```
-def lift_lower_bound(cont: Contingency) -> float
+def normalize_timestamp(cls, value: str | None) -> str | None
 ```
 
-**Purpose**: This calculates the cautious lower estimate of how much better the candidate prompt is than the current one. It answers: even after accounting for uncertainty, how much improvement can we safely claim?
+**Purpose**: Validates and standardizes the optional created_at and updated_at fields on a Page. It keeps each page model from carrying ambiguous time values.
 
-**Data flow**: It receives a Contingency object containing accepted and total counts for the candidate-present group and candidate-absent group. If either group has no examples, it returns 0. Otherwise it compares their observed acceptance rates, subtracts an uncertainty penalty built from Wilson bounds, and returns the lower bound of the improvement.
+**Data flow**: It receives either a timestamp string or None. None passes through unchanged; a string is sent to normalize_page_timestamp and returned in normalized form.
 
-**Call relations**: score_gate calls this after the replay labels have been counted. It relies on the Wilson bound helpers to avoid giving a candidate too much credit for a lucky small sample.
+**Call relations**: Pydantic calls this validator when a Page is created by a backend such as FolderSource or an extension source. It delegates the actual parsing rules to normalize_page_timestamp.
 
-*Call graph*: calls 2 internal fn (wilson_lower_bound, wilson_upper_bound); called by 1 (score_gate); 1 external calls (sqrt).
-
-
-##### `lift_upper_bound`  (lines 87–98)
-
-```
-def lift_upper_bound(cont: Contingency) -> float
-```
-
-**Purpose**: This calculates the optimistic upper estimate of the candidate’s lift over the baseline. It is mainly used to decide whether there is clear evidence that the candidate made other tasks worse.
-
-**Data flow**: It receives counted results for the candidate-present and candidate-absent groups. If either side has no examples, it returns 0. Otherwise it compares the observed rates, adds an uncertainty allowance, and returns the upper end of the possible improvement interval.
-
-**Call relations**: global_non_inferior calls this during the safety check for other task classes. If even this optimistic estimate is still too negative, the candidate is treated as a real regression.
-
-*Call graph*: calls 2 internal fn (wilson_lower_bound, wilson_upper_bound); called by 1 (global_non_inferior); 1 external calls (sqrt).
+*Call graph*: calls 1 internal fn (normalize_page_timestamp).
 
 
-##### `contingency`  (lines 101–109)
+##### `StreamSkipped.__init__`  (lines 195–198)
 
 ```
-def contingency(labels: tuple[OutcomeLabel, ...]) -> Contingency
+def __init__(self, reason: str, *, awaits_grant: bool=False) -> None
 ```
 
-**Purpose**: This turns individual replay results into the four counts needed for the statistical checks. It separates examples where the candidate prompt was present from those where it was absent, then counts successes in each group.
+**Purpose**: Creates a skip signal for a source stream that cannot be read right now for a non-data-failure reason, such as missing permission or a provider gate. It records whether the stream is waiting for a grant event before it can recover.
 
-**Data flow**: It takes a tuple of OutcomeLabel records. Each label says whether the candidate was present and whether the answer was accepted. It produces a Contingency object with accepted and total counts for both the present and absent groups.
+**Data flow**: It receives a human-readable reason and an awaits_grant flag. It stores both on the exception and passes the reason to the base RuntimeError.
 
-**Call relations**: Both score_gate and global_non_inferior use this first, because the later math works on counts rather than individual replay records. It is the small counting step before the confidence calculations begin.
+**Call relations**: Connector backends and provider paginators raise this when they know the stream should be skipped, not failed. SyncDriver.run catches it, logs the skip, and hands the source to SyncDriver._skip for rescheduling or parking.
 
-*Call graph*: called by 2 (global_non_inferior, score_gate); 1 external calls (__init__).
-
-
-##### `score_gate`  (lines 112–139)
-
-```
-def score_gate(labels: tuple[OutcomeLabel, ...], lower_bound: float=LIFT_LOWER_BOUND, n_floor: int=N_FLOOR) -> GateVerdict
-```
-
-**Purpose**: This makes the local promotion decision for the task class being improved. It checks that there are enough replay examples on both sides and that the candidate’s cautious improvement clears the required floor.
-
-**Data flow**: It takes replay labels, plus optional thresholds for the required improvement and minimum examples per group. It counts the labels, computes the lower bound on acceptance lift, and returns a GateVerdict. The verdict says pass or fail, gives a human-readable reason, and records the evidence size.
-
-**Call relations**: two_stage_gate calls this first. If this local check fails, the full promotion process stops immediately, because there is no reason to test broader safety unless the candidate first proves a local win.
-
-*Call graph*: calls 2 internal fn (contingency, lift_lower_bound); called by 1 (two_stage_gate); 1 external calls (__init__).
+*Call graph*: called by 54 (fetch, paginate, paginate, paginate, paginate, paginate, _org_stream, paginate, paginate, paginate (+15 more)).
 
 
-##### `global_non_inferior`  (lines 142–154)
+##### `validation_fault`  (lines 201–207)
 
 ```
-def global_non_inferior(labels: tuple[OutcomeLabel, ...], margin: float=GLOBAL_REGRESSION_MARGIN, n_floor: int=N_FLOOR) -> bool
+def validation_fault(error: ValidationError) -> str
 ```
 
-**Purpose**: This checks whether the candidate avoids clearly harming other task classes. It is deliberately forgiving when evidence is thin, and only rejects when the data strongly suggests a meaningful regression.
+**Purpose**: Turns a validation error into a safe, compact explanation of which fields failed and why. It avoids including raw provider values, which may contain private data.
 
-**Data flow**: It takes replay labels for the broader held-out tasks, plus optional margin and sample-size settings. It counts the labels. If either group has too few examples, it returns true. Otherwise it computes the optimistic upper bound of lift and returns whether that is not worse than the allowed negative margin.
+**Data flow**: It receives a Pydantic ValidationError, reads its structured error list, and formats each item as a field path plus an error type. It returns one semicolon-separated string.
 
-**Call relations**: two_stage_gate calls this only after the local gate has passed. It uses lift_upper_bound because the question is not “did the candidate definitely improve globally?” but “can we rule out serious harm?”
+**Call relations**: SyncDriver._report_failed calls this when a fetched config or page shape fails validation. The resulting text becomes the safe provider_fault field in failure telemetry.
 
-*Call graph*: calls 2 internal fn (contingency, lift_upper_bound); called by 1 (two_stage_gate).
+*Call graph*: called by 1 (_report_failed); 1 external calls (errors).
 
 
-##### `two_stage_gate`  (lines 157–174)
+##### `response_fault`  (lines 210–236)
 
 ```
-def two_stage_gate(local_labels: tuple[OutcomeLabel, ...], global_labels: tuple[OutcomeLabel, ...]) -> GateVerdict
+def response_fault(response: httpx.Response) -> str
 ```
 
-**Purpose**: This gives the final promote-or-reject decision for a candidate prompt. It requires both a strong local improvement and no clear global regression.
+**Purpose**: Extracts useful, safe error reasons from an HTTP response body, especially GraphQL-style errors. It helps failure logs say what the provider rejected without storing the whole response body.
 
-**Data flow**: It takes two sets of replay labels: one for the task class being improved and one for other task classes. It first asks score_gate for the local verdict. If that fails, it returns that failure. If the local check passes, it runs the global safety check. A global failure becomes a new failing GateVerdict; otherwise it returns the successful local verdict.
+**Data flow**: It receives an httpx Response, tries to parse JSON, looks for an errors array, and collects each error message plus an optional code. If the body is missing, unreadable, or not in the expected shape, it returns an empty string.
 
-**Call relations**: This is the top-level decision point in this file. It ties together the local improvement test and the wider safety test, so a candidate prompt is promoted only when both parts of the story look acceptable.
+**Call relations**: SyncDriver._report_failed calls this for HTTP status errors. It supplements the status code and URL with provider-authored messages while avoiding sensitive response payloads.
 
-*Call graph*: calls 2 internal fn (global_non_inferior, score_gate); 1 external calls (__init__).
+*Call graph*: called by 1 (_report_failed); 1 external calls (json).
+
+
+##### `StreamFault.__init__`  (lines 246–248)
+
+```
+def __init__(self, reason: str) -> None
+```
+
+**Purpose**: Creates a failure signal for a provider response whose shape cannot be read safely. Backends use it when they can describe the problem without exposing the provider’s raw data.
+
+**Data flow**: It receives a reason string, stores it on the exception, and passes the same text to RuntimeError. It has no other side effects.
+
+**Call relations**: Several extension backends raise this when provider content or metadata is unusable. SyncDriver._report_failed recognizes it and records its reason as the safe provider fault.
+
+*Call graph*: called by 8 (_read, _markdown_entries, _spool_tarball, _refuse_client_error, decoded, _account_base, _sheet_value_records, _ensure_tenant).
+
+
+##### `SourceBackend.config_model`  (lines 288–288)
+
+```
+def config_model(self) -> type[ConfigT]
+```
+
+**Purpose**: Defines the typed configuration model a source backend expects. This lets each backend validate its own settings instead of receiving an unstructured dictionary.
+
+**Data flow**: As a protocol property, it promises that a backend will provide a Pydantic model class. The sync driver reads that class and uses it to validate the source row’s stored config.
+
+**Call relations**: SyncDriver._fetch relies on this protocol member before calling SourceBackend.fetch. FolderSource and extension backends supply concrete versions.
+
+
+##### `SourceBackend.fetch`  (lines 290–290)
+
+```
+async def fetch(self, config: ConfigT, cursor: str | None, auth: SourceAuth) -> SyncResult
+```
+
+**Purpose**: Defines the contract for fetching documents from a source. A backend implements this to turn provider-specific data into SyncResult pages, deletes, and a next cursor.
+
+**Data flow**: It receives typed backend config, the previous cursor, and SourceAuth for workspace/provider access. The implementation returns a SyncResult or raises a meaningful exception such as CursorExpired, StreamSkipped, or StreamFault.
+
+**Call relations**: SyncDriver._fetch calls this after choosing and validating the backend. Concrete backends, including FolderSource and extension connectors, provide the real fetching behavior.
+
+
+##### `FolderSource.fetch`  (lines 304–315)
+
+```
+async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult
+```
+
+**Purpose**: Reads a configured local folder and turns every file into a Page. It is the built-in source backend for local filesystem content.
+
+**Data flow**: It receives SourceConfig, ignores cursor and auth, and reads the folder path in a background thread so file I/O does not block the event loop. It wraps each file’s relative path and text content as a Page, then returns a full snapshot SyncResult.
+
+**Call relations**: SyncDriver._fetch calls this through the SourceBackend interface when a source row uses the folder backend. It delegates the actual filesystem walk to FolderSource._read.
+
+*Call graph*: 4 external calls (__init__, __init__, to_thread, Path).
+
+
+##### `FolderSource._read`  (lines 318–325)
+
+```
+def _read(root: Path) -> tuple[tuple[str, str], ...]
+```
+
+**Purpose**: Scans a local directory and reads every file as UTF-8 text. It provides the raw file list used by FolderSource.fetch.
+
+**Data flow**: It receives a root Path, checks that it is a directory, walks all files below it in sorted order, and returns pairs of relative path and decoded file text. If the folder itself is missing, it raises FileNotFoundError.
+
+**Call relations**: FolderSource.fetch runs this in a worker thread. Its choice to fail when the root folder is missing protects the system from treating a temporary missing mount as a mass deletion.
+
+*Call graph*: 2 external calls (is_dir, rglob).
+
+
+##### `source_row_id`  (lines 328–348)
+
+```
+def source_row_id(workspace_id: UUID, backend: str, config: Mapping[str, object], *, connection_id: UUID | None=None, non_identity_keys: frozenset[str]=frozenset()) -> UUID
+```
+
+**Purpose**: Creates a deterministic database id for a source row. The same workspace, backend, and identity-defining config always produce the same UUID, so restarting does not duplicate sources.
+
+**Data flow**: It receives a workspace id, backend name, config mapping, optional connection id, and keys that should not count toward identity. It removes non-identity keys, serializes the rest in a stable order, includes the connection generation if present, and returns a UUID version 5.
+
+**Call relations**: register_sources calls this while bootstrapping configured sources. The same idea is used across the system to make source rows stable and repeatable.
+
+*Call graph*: called by 1 (register_sources); 2 external calls (dumps, uuid5).
+
+
+##### `page_id_for`  (lines 351–354)
+
+```
+def page_id_for(source_id: UUID, source_ref: str) -> UUID
+```
+
+**Purpose**: Creates a deterministic id for a page inside a source. This lets re-fetches, updates, and delete records all point to the same page row.
+
+**Data flow**: It receives a source id and a source_ref string. It combines them into a stable UUID version 5 and returns that UUID.
+
+**Call relations**: SyncDriver._commit calls this while matching fetched pages and explicit delete references to existing database rows.
+
+*Call graph*: called by 1 (_commit); 1 external calls (uuid5).
+
+
+##### `register_sources`  (lines 357–422)
+
+```
+async def register_sources(configured: tuple[SourceEntry, ...]) -> None
+```
+
+**Purpose**: Ensures that sources listed in configuration exist in the database. It runs at startup so configured sources are ready for the scheduled sync job.
+
+**Data flow**: It receives configured SourceEntry objects. It opens a workspace transaction, finds the workspace and main agent, computes each source’s stable id, inserts missing source rows, and grants the main agent access. Existing active rows are left in place; removed rows are not revived.
+
+**Call relations**: Startup code calls this outside the regular sync polling loop. It uses source_row_id to avoid creating duplicates and writes source_grant rows so the main agent can read the source.
+
+*Call graph*: calls 1 internal fn (source_row_id); 4 external calls (now, insert, select, workspace_tx).
+
+
+##### `_rescheduled`  (lines 440–451)
+
+```
+def _rescheduled(claimed: ClaimedSource, when: datetime | sa.Case[datetime]) -> sa.Case[datetime]
+```
+
+**Purpose**: Builds the database expression that decides a source’s next sync time after a run finishes. It protects manual or event-driven resync requests that arrived while the source was already being synced.
+
+**Data flow**: It receives a ClaimedSource and a proposed next time. It returns a SQL case expression: use the proposed time only if next_sync_at has not been moved forward since the claim was taken; otherwise keep the newer requested time.
+
+**Call relations**: SyncDriver._write, SyncDriver._release, and SyncDriver._skip use this when freeing a claim. It keeps completion cleanup from accidentally burying a fresh resync request.
+
+*Call graph*: called by 3 (_release, _skip, _write); 1 external calls (case).
+
+
+##### `_stream_tags`  (lines 454–459)
+
+```
+def _stream_tags(source: ClaimedSource) -> dict[str, str]
+```
+
+**Purpose**: Builds metric tags that identify the provider and stream for a sync outcome. Tags are small labels used by monitoring systems to group events and counters.
+
+**Data flow**: It receives a ClaimedSource, reads its backend name, extracts the stream value from config when present, and returns a provider/stream dictionary.
+
+**Call relations**: SyncDriver.run, SyncDriver._report_ok, SyncDriver._report_failed, SyncDriver._report_parked, and _check_tags use these tags when logging or emitting metrics.
+
+*Call graph*: calls 1 internal fn (_config_value); called by 5 (_report_failed, _report_ok, _report_parked, run, _check_tags).
+
+
+##### `_check_tags`  (lines 462–470)
+
+```
+def _check_tags(source: ClaimedSource) -> dict[str, str]
+```
+
+**Purpose**: Builds service-check tags that identify one specific source row. This prevents two sources for the same provider stream from overwriting each other’s health status.
+
+**Data flow**: It receives a ClaimedSource, starts with _stream_tags, adds the source_id as a string, and returns the combined tag dictionary.
+
+**Call relations**: SyncDriver._report_ok and SyncDriver._report_failed use this for service checks. It calls _stream_tags so metrics and checks describe streams consistently, while checks also include row identity.
+
+*Call graph*: calls 1 internal fn (_stream_tags); called by 2 (_report_failed, _report_ok).
+
+
+##### `_config_value`  (lines 473–475)
+
+```
+def _config_value(source: ClaimedSource, key: str) -> str
+```
+
+**Purpose**: Safely reads a string value from a source config mapping. It returns an empty string if the key is missing or not a string.
+
+**Data flow**: It receives a ClaimedSource and a config key. It looks up the key in source.config and returns the value only when it is a string; otherwise it returns "".
+
+**Call relations**: _stream_tags uses it to find stream names, and reporting methods use it for account ids. It keeps telemetry formatting simple and safe when configs differ by backend.
+
+*Call graph*: called by 3 (_report_failed, _report_ok, _stream_tags).
+
+
+##### `_readers_remain`  (lines 495–521)
+
+```
+def _readers_remain() -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Creates a database condition that says a source still has at least one live reader, or has no grants at all. This avoids syncing content that no active agent can use.
+
+**Data flow**: It builds SQL subqueries over source_grant and agent rows. The returned condition is true when there are no grants, or when at least one granted agent is not archived.
+
+**Call relations**: SyncDriver.candidate_workspaces and SyncDriver._claim_due include this condition when looking for due work. It prevents unnecessary provider calls, blob writes, and indexing for unreachable feeds.
+
+*Call graph*: called by 2 (_claim_due, candidate_workspaces); 5 external calls (and_, exists, literal, or_, select).
+
+
+##### `SyncDriver.candidate_workspaces`  (lines 543–564)
+
+```
+async def candidate_workspaces(self) -> tuple[UUID, ...]
+```
+
+**Purpose**: Finds workspaces that currently have at least one source due to sync. This lets the scheduler avoid opening per-workspace work when nothing is ready.
+
+**Data flow**: It reads the current time, opens an owner-level transaction, queries source rows that are due, not removed, not actively claimed, and still readable, then returns distinct workspace ids.
+
+**Call relations**: A dispatcher can call this before binding work to a workspace. It uses _readers_remain to filter out sources whose only readers are archived.
+
+*Call graph*: calls 1 internal fn (_readers_remain); 4 external calls (now, or_, select, owner_tx).
+
+
+##### `SyncDriver.run`  (lines 566–585)
+
+```
+async def run(self) -> None
+```
+
+**Purpose**: Runs one sync pass for due sources in the current workspace. It claims sources, fetches content, commits successful results, and records or reschedules failures.
+
+**Data flow**: It creates a unique claim id, asks _claim_due for source rows, and processes each one. A normal fetch goes through _fetch and _commit; a StreamSkipped goes to _skip; other exceptions are classified, reported, and released with backoff.
+
+**Call relations**: This is the main driver method used by the scheduled source-sync job. It coordinates the lower-level helpers without letting one broken source stop the rest of the batch.
+
+*Call graph*: calls 8 internal fn (_claim_due, _commit, _error_backoff, _fetch, _release, _report_failed, _skip, _stream_tags); 4 external calls (suppress, now, log, uuid4).
+
+
+##### `SyncDriver._claim_due`  (lines 587–638)
+
+```
+async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]
+```
+
+**Purpose**: Claims a limited batch of source rows that are ready to sync. Claiming is a lease, meaning it marks the row so another worker does not sync the same source at the same time.
+
+**Data flow**: It reads the current time, selects due rows that are not removed and not held by a valid claim, optionally uses database row locking on PostgreSQL, writes claimed_by and claim_expires_at, and returns ClaimedSource objects.
+
+**Call relations**: SyncDriver.run calls this at the start of a pass. It uses _readers_remain so sources without live readers are not claimed.
+
+*Call graph*: calls 1 internal fn (_readers_remain); called by 1 (run); 7 external calls (__init__, now, timedelta, or_, select, update, workspace_tx).
+
+
+##### `SyncDriver._fetch`  (lines 640–659)
+
+```
+async def _fetch(self, source: ClaimedSource) -> SyncResult
+```
+
+**Purpose**: Calls the correct backend for a claimed source and returns its SyncResult. It also prepares the authentication context the backend may need to reach its provider.
+
+**Data flow**: It receives a ClaimedSource, looks up the backend, validates the stored config using the backend’s config_model, resolves an optional self user id, binds source credentials if available, and awaits backend.fetch. The output is the backend’s SyncResult.
+
+**Call relations**: SyncDriver.run calls this before committing anything. It is the bridge between generic core sync logic and provider-specific backend code.
+
+*Call graph*: called by 1 (run); 1 external calls (__init__).
+
+
+##### `SyncDriver._commit`  (lines 661–740)
+
+```
+async def _commit(self, source: ClaimedSource, result: SyncResult) -> None
+```
+
+**Purpose**: Compares fetched pages with existing page rows and decides what must be written, metadata-only updated, or tombstoned. It is the main reconciliation step after a successful fetch.
+
+**Data flow**: It receives a claimed source and SyncResult, loads prior pages, assigns stable page ids, compares digests and browse metadata, writes changed bodies to blob storage, builds delete lists, and then calls _write. After the database write, it reports success.
+
+**Call relations**: SyncDriver.run calls this after _fetch succeeds. It uses _prior_pages to know current state, page_id_for for stable ids, _write for database changes, and _report_ok for telemetry.
+
+*Call graph*: calls 4 internal fn (_prior_pages, _report_ok, _write, page_id_for); called by 1 (run); 3 external calls (__init__, __init__, uuid5).
+
+
+##### `SyncDriver._prior_pages`  (lines 742–786)
+
+```
+async def _prior_pages(self, source_id: UUID) -> tuple[dict[UUID, tuple[str, bool, PageBrowse]], dict[str, tuple[str, bool, PageBrowse]]]
+```
+
+**Purpose**: Loads the existing page state for a source before reconciliation. This lets the driver detect unchanged pages, renamed identities, existing tombstones, and metadata changes.
+
+**Data flow**: It receives a source id, queries page rows for that source, and builds two lookup tables: one by page id and one by source_identity. Each entry carries digest, tombstone state, and browse metadata.
+
+**Call relations**: SyncDriver._commit calls this before examining fetched pages. The returned lookups guide whether the driver writes a new blob, updates only metadata, or reuses an existing row.
+
+*Call graph*: called by 1 (_commit); 3 external calls (__init__, select, workspace_tx).
+
+
+##### `SyncDriver._write`  (lines 788–916)
+
+```
+async def _write(self, source: ClaimedSource, next_cursor: str | None, changed: list[ChangedPage], metadata: list[PageBrowse], fetched: list[UUID], deleted: list[UUID], snapshot: bool) -> int
+```
+
+**Purpose**: Persists one successful sync result into the database and releases the source claim. It writes changed pages, metadata updates, tombstones deleted pages, updates the source cursor, and schedules the next normal run.
+
+**Data flow**: It receives prepared changed pages, metadata updates, fetched ids, delete ids, the next cursor, and whether the result was a full snapshot. Inside a workspace transaction it checks the claim still has authority, updates or inserts page rows, tombstones explicit deletes and missing snapshot pages, resets error/refusal state, clears the claim, and returns how many rows were tombstoned.
+
+**Call relations**: SyncDriver._commit calls this after it has written changed bodies to blob storage. It uses _rescheduled so a resync request made during the run is not lost.
+
+*Call graph*: calls 1 internal fn (_rescheduled); called by 1 (_commit); 6 external calls (now, timedelta, insert, select, update, workspace_tx).
+
+
+##### `SyncDriver._report_ok`  (lines 918–941)
+
+```
+async def _report_ok(self, source: ClaimedSource, fetched: int, written: int, tombstoned: int, dropped: int) -> None
+```
+
+**Purpose**: Records a successful source sync in logs and service checks. It says how many pages were fetched, written, tombstoned, and dropped by the backend.
+
+**Data flow**: It receives counts and the source, builds tags, writes a source_sync.ok log, and emits an OK service check. Each telemetry action is protected so telemetry problems do not break the sync.
+
+**Call relations**: SyncDriver._commit calls this after _write succeeds. It uses _stream_tags, _check_tags, and _config_value to label the event clearly.
+
+*Call graph*: calls 3 internal fn (_check_tags, _config_value, _stream_tags); called by 1 (_commit); 3 external calls (suppress, emit_service_check, log).
+
+
+##### `SyncDriver._error_backoff`  (lines 943–951)
+
+```
+def _error_backoff(self, source: ClaimedSource, now: datetime) -> tuple[int, datetime]
+```
+
+**Purpose**: Calculates how long to wait before retrying a source after a failure. The delay doubles with each consecutive error, up to a cap.
+
+**Data flow**: It receives the source and current time, increments the source’s consecutive error count, computes a bounded exponential backoff delay, and returns both the new count and the next sync time.
+
+**Call relations**: SyncDriver.run calls this when _fetch or _commit raises an ordinary exception. The result is passed to _report_failed and _release so the log and database agree.
+
+*Call graph*: called by 1 (run); 1 external calls (timedelta).
+
+
+##### `SyncDriver._report_failed`  (lines 953–1011)
+
+```
+async def _report_failed(self, source: ClaimedSource, error: Exception, cursor_reset: bool, errors: int, next_sync_at: datetime) -> None
+```
+
+**Purpose**: Records a failed source sync without leaking sensitive provider data. It logs the failure, emits a failure counter, and marks the source service check as critical.
+
+**Data flow**: It receives the source, exception, cursor-reset flag, error count, and next retry time. It classifies the exception, builds a safe provider_fault string for known cases, emits log and metric records, and sends a critical service check.
+
+**Call relations**: SyncDriver.run calls this after computing backoff for a failed source. It uses response_fault for HTTP errors and validation_fault for validation errors, plus shared tag helpers for telemetry labels.
+
+*Call graph*: calls 5 internal fn (_check_tags, _config_value, _stream_tags, response_fault, validation_fault); called by 1 (run); 5 external calls (suppress, isoformat, emit_metric, emit_service_check, log_error).
+
+
+##### `SyncDriver._release`  (lines 1013–1039)
+
+```
+async def _release(self, source: ClaimedSource, cursor_reset: bool, errors: int, next_sync_at: datetime) -> None
+```
+
+**Purpose**: Frees a claimed source after a failed run and records its retry state. This ensures one failed source does not remain stuck as claimed forever.
+
+**Data flow**: It receives the source, whether to clear the cursor, the new error count, and next retry time. In a workspace transaction it updates the source row, optionally clears the cursor, sets next_sync_at using _rescheduled, stores the error count, and clears the claim.
+
+**Call relations**: SyncDriver.run calls this after _report_failed. A successful run does not use it because SyncDriver._write performs the release and resets counters.
+
+*Call graph*: calls 1 internal fn (_rescheduled); called by 1 (run); 2 external calls (update, workspace_tx).
+
+
+##### `SyncDriver._skip`  (lines 1041–1106)
+
+```
+async def _skip(self, source: ClaimedSource, reason: str, *, awaits_grant: bool) -> None
+```
+
+**Purpose**: Reschedules a source whose backend deliberately skipped the stream instead of failing it. It keeps existing pages untouched and slows repeated refusals by parking the source when needed.
+
+**Data flow**: It receives the source, refusal reason, and awaits_grant flag. It increments the stored refusal count, decides whether the source should park, sets the next sync time to a normal interval or a longer hold, clears errors and the claim, and records park metadata. If the row was parked, it reports that separately.
+
+**Call relations**: SyncDriver.run calls this when it catches StreamSkipped. It uses _rescheduled to preserve newer resync requests and calls _report_parked only after the database update confirms the park.
+
+*Call graph*: calls 2 internal fn (_report_parked, _rescheduled); called by 1 (run); 5 external calls (now, timedelta, case, update, workspace_tx).
+
+
+##### `SyncDriver._report_parked`  (lines 1108–1133)
+
+```
+async def _report_parked(self, source: ClaimedSource, reason: str, refusals: int) -> None
+```
+
+**Purpose**: Records that a refused source stream has been parked after repeated skips. A park is a warning, not an alert, because an operator usually cannot fix a missing grant or provider refusal.
+
+**Data flow**: It receives the source, reason, and refusal count. It builds stream tags, writes a warning log, and emits a parked counter; telemetry failures are suppressed.
+
+**Call relations**: SyncDriver._skip calls this after successfully writing a parked state. It uses _stream_tags so the warning and metric are grouped by provider and stream.
+
+*Call graph*: calls 1 internal fn (_stream_tags); called by 1 (_skip); 3 external calls (suppress, emit_metric, warn).
+
+
+##### `PageFeed.pages_changed_since`  (lines 1173–1173)
+
+```
+async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch
+```
+
+**Purpose**: Defines the interface an indexer uses to read page changes after a cursor. The cursor is a bookmark that lets the indexer resume without rereading everything.
+
+**Data flow**: As a protocol method, it promises to accept an optional cursor and limit, then return a PageBatch containing ordered changes and the next cursor. The concrete implementation supplies the database and blob-reading behavior.
+
+**Call relations**: CorePageFeed.pages_changed_since implements this contract. Extension contexts can expose a PageFeed so downstream indexers depend on the interface rather than the core implementation.
+
+
+##### `page_cursor`  (lines 1176–1185)
+
+```
+def page_cursor(cursor: object) -> tuple[int, UUID]
+```
+
+**Purpose**: Parses and validates a page-feed cursor. The cursor must contain a revision number and page id separated by a vertical bar.
+
+**Data flow**: It receives an object, verifies it is a string, splits it into revision and UUID text, checks the revision is numeric, parses the UUID, and returns both pieces. Bad input raises ValueError.
+
+**Call relations**: CorePageFeed.pages_changed_since calls this when a reader supplies a cursor. The parsed values become the database boundary for reading only later page changes.
+
+*Call graph*: called by 1 (pages_changed_since); 1 external calls (UUID).
+
+
+##### `CorePageFeed.pages_changed_since`  (lines 1197–1255)
+
+```
+async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch
+```
+
+**Purpose**: Reads changed pages from the core database in a stable order and includes each live page’s body. Indexers use this to keep their own derived indexes up to date.
+
+**Data flow**: It receives an optional cursor and requested limit, caps the limit, builds a query ordered by revision and page id, and applies the cursor boundary if present. It loads rows, fetches each non-tombstoned body from blob storage, turns rows into PageChange objects, and returns a PageBatch with a next cursor when rows were found.
+
+**Call relations**: This is the concrete PageFeed implementation used by downstream indexing code. It calls page_cursor to resume correctly and reads both the page table and blob store to provide complete change records.
+
+*Call graph*: calls 1 internal fn (page_cursor); 7 external calls (__init__, __init__, fromisoformat, and_, or_, select, workspace_tx).
 
 ## 📊 State Registers Touched
 
-- `reg-agent-profiles` — The saved assistant definitions, including each agent's model, tools, visibility, setup needs, internet access, and identity.
-- `reg-conversation-records` — The durable conversation list, including titles, audience, surface labels, sandbox links, and visibility rules.
-- `reg-turn-state` — The shared status record for each unit of agent work, including claiming, running, completion, failure, parent-child links, and billing markers.
-- `reg-live-update-stream` — The temporary live feed of progress messages that open clients and other server processes can follow.
-- `reg-cancellation-flags` — The shared stop signals and cleanup markers used to cancel turns, child work, sandboxes, and stuck jobs safely.
-- `reg-tool-catalog` — The current list of tools the agent may call, with their names, inputs, permissions, and implementations.
-- `reg-skill-store` — The shared library of built-in and user-created skills that can be selected, checked, and loaded into a turn.
-- `reg-model-catalog` — The shared list of available AI models, their abilities, prices, limits, and required credentials.
-- `reg-sandbox-handles` — The remembered execution workspaces, browser workbenches, terminal sessions, and sandbox IDs used across a conversation or turn.
-- `reg-subagent-objectives` — The shared plan and delegation state for child agents, objectives, steps, evidence, attempts, and result delivery.
-- `reg-proposal-state` — Durable proposed-change records, including pending, approved, or rejected prompt/config/self-improvement proposals and their before/after payloads.
-- `reg-evaluation-run-store` — Durable evaluation test cases, replay runs, comparison results, and self-improvement validation state used to accept or reject changes.
+- `reg-extension-catalog` — The installed extension and pack catalog that says which extra tools, routes, agents, skills, jobs, and backends are available.
+- `reg-workspace-records` — The saved workspace records that identify each customer space and hold its limits, setup state, balance settings, and routing boundaries.
+- `reg-credentials-and-grants` — The encrypted secrets, account connections, and grants that say which member or agent may use an outside service.
+- `reg-egress-network-policy` — The outbound network permission state that decides which external hosts, proxies, and secret injections are allowed for a workspace or agent.
+- `reg-audience-visibility` — The saved visibility and audience rules that decide who may see a conversation, transcript, agent, source, artifact, or object.
+- `reg-source-page-sync-state` — The source and page records that remember connected feeds, cursors, backoff, deletes, ownership, grants, and the latest synced content.
+- `reg-index-memory-store` — The searchable index and long-term memory store built from synced pages, embeddings, recalled facts, and deduplicated notes.
+- `reg-extension-data-store` — The per-workspace extension storage area where optional features save their own small durable JSON state.
+- `reg-service-connection-pools` — Process-local shared connection/client pools for database, Redis/pubsub, HTTP/provider calls, and other long-lived service clients reused by requests, workers, tools, and jobs.
+- `reg-background-runner-handles` — Process-local async task handles, wakeup queues, and scheduler loop state for live background workers distinct from their durable job records.
+- `reg-backend-provider-registry` — Process-local registry mapping provider names to active backend implementations for models, search, embeddings, memory, connectors, browser access, auth, billing, and feature services.
+- `reg-source-trigger-wakeup-queue` — Durable wakeup records created from source/page changes so background runners can later admit agent work without losing or duplicating change-triggered starts.

@@ -1,555 +1,1790 @@
-# External Connectors, Credentials, and Egress Requests  `stage-13`
+# Subagents, delegation, and multi-step agent workflows  `stage-13`
 
-This stage is shared support for the moments when UFO must reach outside its own walls. Sync jobs use it to read data from services, and agents use it to call tools or send messages, while secrets stay controlled.
+This stage is part of the main work loop, when the assistant decides a job is too large, specialized, or slow to do alone. It can hand work to child agents, like asking helpers in a workshop to research, browse, write, or build while the main conversation continues. The fallback profile defines what a basic helper may do, and the spawn catalog shows the agent which helpers are available right now. The core subagents code starts those helpers, checks permissions and costs, validates the agreed input and output formats, and returns results either immediately or later in the parent conversation.
 
-The source connector framework gives sync jobs a common way to fetch records from different services. Direct and keyed connectors cover the simpler case where a member supplies an API key. The main connector access file defines the rules all providers must follow, and checks that a credential still belongs to the right workspace, member, provider, and account.
-
-Composio and Pipedream integrations act as safe middlemen. They manage connected accounts, expose available actions, proxy web requests, run tools, and handle files without handing raw tokens to the sandbox. Generic connector objects and agent tools make these accounts visible and usable inside UFO, while evaluation fakes provide predictable test versions.
-
-GitHub App credentials support coding work with verified, short-lived access. Slack and iMessage flows guide messaging setup. Finally, egress rules decide which network calls a sandboxed agent may make, and where secrets are safely added outside the sandbox.
-
-## Sub-stages
-
-- [Source Connector Framework](stage-13.1.md) `stage-13.1` — 2 files
-- [Direct and Keyed API-Credential Connectors](stage-13.2.md) `stage-13.2` — 2 files
-- [Composio Brokered Connector Integration](stage-13.3.md) `stage-13.3` — 6 files
-- [Pipedream Brokered Connector Integration](stage-13.4.md) `stage-13.4` — 4 files
-- [Generic Connector Objects, Agent Tools, and Evaluation Fakes](stage-13.5.md) `stage-13.5` — 3 files
-- [Coding GitHub App Connector Credentials](stage-13.6.md) `stage-13.6` — 2 files
-- [Slack and iMessage Connector Flows](stage-13.7.md) `stage-13.7` — 3 files
+Specialized profiles give helpers narrower jobs. The browser helper can use web tools; browser delegation runs one browsing session or many parallel visits. Research delegation runs many research helpers and merges their JSON results into a saved file. The brief pipeline passes typed messages through outline, draft, and critique helpers. The document helper drafts and edits prose. The objectives store records plans, steps, evidence, and blockers. The site tools hand off website building, guide safe app creation, and audit the result before accepting it.
 
 ## Files in this stage
 
-### Connector Access and Egress Policy
-Defines how external connector credentials are validated and translated into sandbox-safe outbound network rules.
+### Core subagent orchestration
+These files define the default child-agent contract, advertise spawnable helpers, and run the lifecycle for synchronous and background subagents.
 
-### `core/src/ufo/access/connectors.py`
+### `core/src/ufo/loop/profiles.py`
 
-`domain_logic` · `cross-cutting: connector discovery, tool execution, feed sync credential resolution, and proxied request handling`
+`config` · `subagent setup and dispatch`
 
-This file is the connector doorway for the system. A connector is code that lets UFO talk to outside services, like Gmail or GitHub. The file separates two very different ways of authenticating: a broker can keep the secret token on its own server and proxy requests, or UFO can read a workspace-owned key directly from its credential store. The `Credential` object represents exactly one of those paths, and it is designed not to reveal secrets if accidentally printed.
+This file is the default instruction sheet for a delegated worker agent. In this system, a parent agent can spawn a subagent, which is like asking a helper to work on a clearly scoped task in the same shared workspace. If no extension names a more specialized helper, the system uses this file’s `general_purpose` profile.
 
-The file also defines the broker interface: how UFO asks a broker what tools exist, what inputs a tool needs, how to run a tool, how to stage files, and how to resolve credentials for feed sync. Think of the broker as a concierge: UFO asks for a service, but the concierge keeps the keys behind the desk.
+The profile gives that helper a focused prompt: work independently, make reasonable assumptions, avoid asking the user questions, use available skills, and write useful files into `/workspace` so the parent or other helpers can read them later. It also warns the helper not to repeat a failing action forever, and to produce formal Office files such as `.docx`, `.pptx`, or `.xlsx` when those are requested instead of using Markdown.
 
-`ConnectorRegistry` is the routing table. It knows which provider belongs to which broker, can ask an open resolver about providers that were not registered one by one, and can fall back to direct credentials.
+The file also defines the tool allow-list for this helper. It includes practical tools such as reading and writing files, searching text, running shell commands, loading skills, sharing files, web access, external tool connectors, and spreadsheet support. It intentionally leaves out tools that would let the helper ask the user, spawn more agents, message or cancel siblings, or approve account connections. In plain terms, the helper can do the work, but it cannot take over coordination or user-facing decisions.
 
-The most important safety behavior is source binding. Feed-sync sources may be tied to a specific member-owned connection. Before using that connection, and again before each proxied HTTP request, the code checks the database to make sure the connection is still active and still matches the original owner, provider, and account. Without this, an old or reassigned source could keep using access it should no longer have.
+Finally, the file packages the name, prompt, allowed tools, input contract, and output contract into a `SubagentProfile`, then exposes it as the core set of subagent profiles.
+
+
+### `core/src/ufo/loop/spawn_catalog.py`
+
+`domain_logic` · `per turn, before or during delegation`
+
+When an agent wants to delegate work, it needs to know which targets it can name and what input each target expects. This file creates that guide on demand, like printing a fresh menu before every order so it matches what the kitchen can actually make.
+
+There are two kinds of spawn targets. First are fixed subagent profiles, which come from the running program’s registry. Second are workspace agents, which live in the database and can differ by workspace, owner, and permissions. Because workspace agents can change, the catalog is built per turn instead of once at startup.
+
+The main function checks whether the current member is a workspace admin. Admins can see all unarchived agents in the workspace; non-admins only see their own. It then combines those database rows with the registered profiles and formats them into a markdown table. Each row names the target, says whether it is a profile or an agent, and lists the payload keys it accepts. If an agent has the same name as a profile, it is shown with an `agent:` prefix, because that is the unambiguous name `spawn` expects.
+
+The result is packaged as a `RuntimeSkill`, so an agent can load `spawn-catalog` like any other skill before choosing a spawn target.
 
 #### Function details
 
-##### `Credential.__repr__`  (lines 57–66)
+##### `_profile_payload`  (lines 29–36)
 
 ```
-def __repr__(self) -> str
+def _profile_payload(profile: SubagentProfile) -> str
 ```
 
-**Purpose**: Returns a safe text version of a credential without exposing the actual secret. This matters because credentials can accidentally appear in logs or error messages.
+**Purpose**: This helper turns a subagent profile’s input model into a short human-readable list of payload fields. It marks which fields are required and which are optional so the spawning agent knows what to send.
 
-**Data flow**: It looks at the credential fields to see whether authentication is via a transport, bearer token, headers, or nothing. It returns a short label that says which kind is present, but replaces the sensitive value with “redacted”. It does not change the credential.
+**Data flow**: It receives a `SubagentProfile`, reads the fields from its input model, and sorts them by name. If there are no fields, it returns “(no fields)”; otherwise it returns a comma-separated string where required fields are shown plainly and optional fields are labeled as optional.
 
-**Call relations**: This is used automatically by Python when a `Credential` is printed or shown in debugging output. It acts as a last line of defense if surrounding code accidentally includes a credential in a message.
+**Call relations**: The catalog builder calls this while writing the table rows for fixed subagent profiles. Its output becomes the payload column for each profile target in the generated `spawn-catalog` skill.
 
-
-##### `AuthProxy.credential`  (lines 85–85)
-
-```
-async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
-```
-
-**Purpose**: Defines the promise that an authentication backend can turn a workspace, provider, and account name into a usable `Credential`. Implementations may return a brokered transport, a bearer token, or provider-specific headers.
-
-**Data flow**: The caller supplies the workspace ID, provider slug, and account handle. An implementation checks its own storage or broker and returns a `Credential` object that the connector can use to make provider requests.
-
-**Call relations**: This is a protocol method, meaning this file defines the shape but not the body. `_credential` and bound source credential resolution call objects through this contract so the rest of the system does not need to know which authentication backend is installed.
+*Call graph*: called by 1 (spawn_catalog_skill).
 
 
-##### `GrantUnusable.__init__`  (lines 113–115)
+##### `_schema_payload`  (lines 39–49)
 
 ```
-def __init__(self, reason: str, *, awaits_grant: bool=False) -> None
+def _schema_payload(schema: Mapping[str, object] | None) -> str
 ```
 
-**Purpose**: Creates an error that says a brokered account grant cannot currently be used. It also records whether the only fix is for the member to reconnect the account.
+**Purpose**: This helper turns a workspace agent’s stored input schema into a readable list of payload fields. A schema is a structured description of what input data an agent accepts.
 
-**Data flow**: It receives a human-readable reason and an optional `awaits_grant` flag. It stores the reason in the normal exception machinery and saves the flag on the exception object for callers to inspect later.
+**Data flow**: It receives either a schema mapping or nothing. If there is no schema, it falls back to the standard `TaskInput` fields. If the schema has no usable properties, it returns “(no fields)”. Otherwise it reads the property names, checks which ones are marked required, and returns a sorted comma-separated field list with optional fields labeled.
 
-**Call relations**: Broker integrations such as Composio and Pipedream create this error when they discover a revoked, expired, unhealthy, or unknown account grant. Downstream sync code can treat this differently from a temporary provider outage, often parking the feed instead of raising an operator alert.
+**Call relations**: The catalog builder calls this for each workspace agent read from the database. Its result fills the payload column for agent rows in the generated catalog.
 
-*Call graph*: called by 4 (credential, _account, credential, _account).
-
-
-##### `stale_grant_guidance`  (lines 118–125)
-
-```
-def stale_grant_guidance(provider: str) -> str
-```
-
-**Purpose**: Builds a clear error message for a grant that points to an account the current broker does not recognize. The message tells the reader that retrying will not help and that the member should reconnect.
-
-**Data flow**: It takes a provider name and formats it into a standard guidance sentence. The output is just text; no state is read or changed.
-
-**Call relations**: Broker implementations can use this helper when turning a stale or unknown account reference into a `GrantUnusable` error. It keeps the user-facing explanation consistent across broker backends.
+*Call graph*: called by 1 (spawn_catalog_skill).
 
 
-##### `ConnectorBroker.tools`  (lines 196–198)
+##### `spawn_catalog_skill`  (lines 52–104)
 
 ```
-async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]
+async def spawn_catalog_skill(registry: SubagentRegistry, member_id: UUID | None) -> RuntimeSkill
 ```
 
-**Purpose**: Defines how UFO asks a broker for the tools available for a provider, optionally filtered by a search query. A tool here means an action the agent can ask the outside service to perform.
+**Purpose**: This asynchronous function builds the complete `spawn-catalog` runtime skill for the current turn. It tells an agent exactly which spawn targets are available and what payload each one expects.
 
-**Data flow**: The caller gives a workspace ID, provider name, and query text. An implementation returns a tuple of `BrokerTool` descriptions that match what the broker offers.
+**Data flow**: It receives the live subagent registry and the current member’s ID, if there is one. It reads the current workspace, opens a workspace database transaction, checks whether the member is an admin, and queries the unarchived agents the member is allowed to spawn. It then combines those agents with the registry’s profiles, formats everything into a markdown table, wraps that table in skill metadata, and returns a `RuntimeSkill` object.
 
-**Call relations**: This is a protocol method. Dynamic connector discovery code calls broker implementations through this shape when it needs to list possible actions for an agent or user.
+**Call relations**: This is the file’s main assembly point. It calls `_profile_payload` for registry profiles and `_schema_payload` for workspace agents, uses the database transaction and SQL query to read current agent rows, asks the seat/permission code whether the member is an admin, and uses the workspace context to stay inside the right workspace. The finished `RuntimeSkill` is what the rest of the runtime can offer to an agent that needs to decide how to delegate.
 
+*Call graph*: calls 2 internal fn (_profile_payload, _schema_payload); 5 external calls (__init__, select, workspace_tx, member_is_admin, ws_current).
 
-##### `ConnectorBroker.schema`  (lines 200–200)
 
-```
-async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool
-```
+### `core/src/ufo/loop/subagents.py`
 
-**Purpose**: Defines how UFO asks for the detailed input shape of one broker tool. This lets the agent know what arguments it must provide before trying to run the tool.
+`orchestration` · `request handling`
 
-**Data flow**: The caller supplies the workspace ID, provider name, and tool slug. The implementation returns a `BrokerTool` with its input schema filled in, or raises `UnknownBrokerTool` if the slug is not known for that provider.
+This file is the control room for “spawned” helper work. A parent turn can ask for a named subagent profile, or for another workspace agent, to do a child turn. Without this layer, the system could start duplicate helpers, charge the wrong model, wait forever on stuck work, or let untrusted output flow back into a conversation as if it were safe instructions.
 
-**Call relations**: This is part of the broker contract used by dynamic connector tools when describing a specific tool. It sits between high-level tool selection and actual execution.
+The flow is like giving a task to an assistant in another room. First the target name is resolved: is it a built-in profile or a workspace agent? Then the payload is checked against that target’s expected input contract, meaning the required shape of the data. A child conversation and first turn are written to the database, with a link back to the parent turn. The child is put onto the turn queue so the normal worker system can run it.
 
-
-##### `ConnectorBroker.execute`  (lines 202–210)
-
-```
-async def execute(self, workspace_id: UUID, provider: str, slug: str, arguments: Mapping[str, object], account_id: str, idempotency_key: str | None) -> dict[str, object]
-```
-
-**Purpose**: Defines how UFO asks a broker to run one provider tool under a connected account. The broker injects the real account secret on its side, so UFO does not receive the token.
-
-**Data flow**: The caller provides the workspace, provider, tool slug, tool arguments, account ID, and an optional idempotency key, which is a repeat-safe request identifier. The implementation sends the request to the broker and returns the broker’s response as a dictionary.
-
-**Call relations**: Dynamic connector execution code calls broker implementations through this method after a tool has been chosen and arguments prepared. File staging and output extraction happen through separate broker methods around this execution step.
-
-
-##### `ConnectorBroker.file_outputs`  (lines 212–212)
-
-```
-def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]
-```
-
-**Purpose**: Defines how a broker turns a tool response into downloadable file references. The actual file bytes stay outside the serve process.
-
-**Data flow**: It receives the dictionary returned by a broker execution. The implementation extracts any produced files and returns them as `BrokerFile` objects containing names and short-lived download URLs.
-
-**Call relations**: This protocol method is used after tool execution when a broker may have produced files. It keeps file transfer as references rather than moving bytes through the core service.
-
-
-##### `ConnectorBroker.stage_upload`  (lines 214–222)
-
-```
-async def stage_upload(self, workspace_id: UUID, provider: str, slug: str, filename: str, mimetype: str, md5: str) -> StagedUpload
-```
-
-**Purpose**: Defines how UFO asks a broker where a workspace file should be uploaded before a tool consumes it. This supports tools that need file inputs without routing file contents through the main service.
-
-**Data flow**: The caller gives the workspace, provider, tool slug, filename, MIME type, and MD5 hash. The implementation returns a `StagedUpload` with a PUT URL when bytes must be uploaded, or no PUT URL when the broker already has the same content.
-
-**Call relations**: Dynamic connector tools use this before execution when an argument points to a workspace file. The sandbox performs the upload directly to the broker’s storage, then execution receives only the staged reference.
-
-
-##### `ConnectorBroker.search`  (lines 224–224)
-
-```
-async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch
-```
-
-**Purpose**: Defines semantic search over a broker’s tools. Instead of only matching names, the broker may return tools plus planning advice, guidance, or warnings.
-
-**Data flow**: The caller supplies workspace ID, provider, and a query. The implementation returns a `BrokerSearch` containing matching tools and optional notes about how to use them.
-
-**Call relations**: This protocol method supports richer tool discovery. Broker implementations can provide smarter routing while callers still use one common interface.
-
-
-##### `ConnectorBroker.credential`  (lines 226–226)
-
-```
-async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
-```
-
-**Purpose**: Defines how a broker resolves feed-sync credentials for a connected account. For brokered accounts, this normally returns a transport that forwards requests through the broker instead of exposing the secret.
-
-**Data flow**: The caller gives a workspace ID, provider, and account handle. The implementation verifies the account and returns a `Credential` that the feed-sync connector can use.
-
-**Call relations**: _credential calls this method after `_broker` finds the broker for a non-direct account. `_BoundSourceCredentials.credential` relies on the result and requires brokered source credentials to include a proxy transport.
-
-
-##### `RequestForwarder.forward`  (lines 245–247)
-
-```
-async def forward(self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes) -> ForwardedResponse
-```
-
-**Purpose**: Defines how a captured provider HTTP request is sent through a broker using a granted account. This lets command-line tools in the sandbox authenticate without ever seeing the true provider token.
-
-**Data flow**: The caller provides the account ID, HTTP method, URL, headers, and body bytes. The implementation forwards the request through the broker and returns a `ForwardedResponse` with status, headers, and body from the provider side.
-
-**Call relations**: This is used through `CliCredential`, where a connector declares which environment variable and header carry a harmless sentinel value. The egress proxy can then hand matching requests to the forwarder.
-
-
-##### `ConnectorResolver.transfer_hosts`  (lines 302–302)
-
-```
-def transfer_hosts(self) -> tuple[str, ...]
-```
-
-**Purpose**: Defines which broker file-storage hosts are allowed for file transfers in an open connector namespace. These hosts are extra destinations the egress proxy may permit for grants handled by that resolver.
-
-**Data flow**: The implementation exposes a tuple of host names. Callers read it; nothing is changed.
-
-**Call relations**: This property belongs to the open-namespace resolver contract. It supports brokers that can serve many provider slugs without each one being explicitly registered.
-
-
-##### `ConnectorResolver.claims`  (lines 304–304)
-
-```
-async def claims(self, provider: str) -> bool
-```
-
-**Purpose**: Defines how UFO asks whether an open resolver really serves a provider slug. This avoids assuming that an open namespace owns every unknown provider name.
-
-**Data flow**: The caller supplies a provider slug. The implementation may consult the broker’s live catalog and returns true if that provider is available, otherwise false.
-
-**Call relations**: This is part of the resolver protocol. Code choosing between brokered connectors and workspace-owned direct credentials can use it to avoid routing a provider to the wrong backend.
-
-
-##### `ConnectorResolver.entry`  (lines 306–306)
-
-```
-def entry(self, provider: str) -> ConnectorEntry
-```
-
-**Purpose**: Defines how an open resolver builds a `ConnectorEntry` for a provider it serves. The entry tells the registry which broker should receive requests for that provider.
-
-**Data flow**: The caller provides a provider slug. The implementation returns a `ConnectorEntry` with that provider, a label, and the shared broker.
-
-**Call relations**: ConnectorRegistry.entry and the private `_broker` helper call this when a provider is not in the explicit registry but a resolver is installed. It is the bridge from an unknown slug to a concrete broker.
-
-
-##### `ConnectorResolver.catalog`  (lines 308–308)
-
-```
-async def catalog(self, query: str, limit: int, after: str | None) -> CatalogPage
-```
-
-**Purpose**: Defines how UFO pages through the broker’s live list of connectable services. This lets the discovery tool show services that were not hard-coded into the registry.
-
-**Data flow**: The caller gives search text, a maximum count, and an optional cursor saying where to continue. The implementation returns a `CatalogPage` with entries and possibly another cursor.
-
-**Call relations**: ConnectorRegistry.search_catalog and ConnectorRegistry.catalog call this when a resolver is present. The resolver’s answers are combined with explicitly registered connectors.
-
-
-##### `ConnectorRegistry.entry`  (lines 325–331)
-
-```
-def entry(self, provider: str) -> ConnectorEntry
-```
-
-**Purpose**: Finds the connector entry for a provider so later code knows which broker owns it. If the provider is not explicitly registered, it asks the open resolver if one exists.
-
-**Data flow**: It receives a provider slug. It first looks in the registry’s `entries` mapping, then asks the resolver to build an entry if a resolver is installed, and otherwise raises a clear `KeyError`.
-
-**Call relations**: This is the registry’s main routing lookup for dynamic connector code. It hands callers the `ConnectorEntry` that contains the broker they should use.
-
-
-##### `ConnectorRegistry.search_catalog`  (lines 333–338)
-
-```
-async def search_catalog(self, query: str, limit: int) -> tuple[CatalogEntry, ...]
-```
-
-**Purpose**: Returns search results from the open connector catalog only. If no open resolver is installed, it returns an empty result.
-
-**Data flow**: It receives query text and a limit. It asks the resolver for the first catalog page when available, then returns just that page’s entries as a tuple.
-
-**Call relations**: Discovery flows can use this to append live resolver results to known registered providers. It delegates the real search to `ConnectorResolver.catalog`.
-
-
-##### `ConnectorRegistry.catalog`  (lines 340–360)
-
-```
-async def catalog(self, query: str, limit: int, after: str | None) -> CatalogPage
-```
-
-**Purpose**: Builds one combined page of connectable services from explicitly registered connectors and the open resolver catalog. It also removes duplicates by provider name.
-
-**Data flow**: It receives search text, a limit, and an optional cursor. On the first page, it filters the explicit registry by provider or label text. It then asks the resolver for a page if one exists, appends those entries, keeps the first entry for each provider, and returns a `CatalogPage` with the resolver’s next cursor.
-
-**Call relations**: This is used by connector discovery when a caller wants both fixed registered providers and live broker-catalog providers in one answer. It creates `CatalogEntry` and `CatalogPage` objects while merging the two sources.
-
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-##### `_broker`  (lines 363–369)
-
-```
-def _broker(registry: ConnectorRegistry, provider: str) -> ConnectorBroker | None
-```
-
-**Purpose**: Finds the broker responsible for a provider, or returns nothing if no broker is available. It is a small internal routing helper.
-
-**Data flow**: It receives a registry and provider slug. It looks for an explicit entry first, then asks the resolver for an entry if one exists, and returns that entry’s broker; if neither path works, it returns `None`.
-
-**Call relations**: _credential calls this when it needs brokered credentials for a non-direct account. `_broker` keeps that credential logic from duplicating registry lookup rules.
-
-*Call graph*: called by 1 (_credential).
-
-
-##### `_credential`  (lines 372–385)
-
-```
-async def _credential(registry: ConnectorRegistry, workspace_id: UUID, provider: str, account: str) -> Credential
-```
-
-**Purpose**: Chooses the right authentication path for a feed-sync source. Brokered accounts go to their connector broker; direct accounts go to the fallback authentication backend.
-
-**Data flow**: It receives the registry, workspace ID, provider, and account handle. If the account is not the special direct-account handle, it finds a broker and asks it for a credential. If the account is direct, it asks the fallback auth proxy. If no suitable path exists, it raises a runtime error.
-
-**Call relations**: _BoundSourceCredentials.credential calls this after enforcing source rules. `_credential` calls `_broker` to locate the broker for connected accounts.
-
-*Call graph*: calls 1 internal fn (_broker); called by 1 (credential).
-
-
-##### `_require_source_connection`  (lines 388–412)
-
-```
-async def _require_source_connection(workspace_id: UUID, connection_id: UUID, owner_member_id: UUID, provider: str, account: str) -> None
-```
-
-**Purpose**: Checks that a source’s saved connection is still valid for the same workspace, owner member, provider, and account. This prevents stale or mismatched feed sources from continuing to use access they no longer own.
-
-**Data flow**: It receives the workspace ID, connection ID, owner member ID, provider, and account. It enters the workspace context, opens a database transaction, and searches the connection table for an exact match. If the match exists, it returns nothing; if not, it raises `ValueError`.
-
-**Call relations**: _BoundSourceCredentials.credential calls this before issuing a brokered credential. `_ConnectionTransport.handle_async_request` calls it again before every proxied HTTP request, so revocation is noticed even after a credential transport has been created.
-
-*Call graph*: called by 2 (credential, handle_async_request); 3 external calls (select, workspace_tx, ws).
-
-
-##### `_ConnectionTransport.handle_async_request`  (lines 424–432)
-
-```
-async def handle_async_request(self, request: httpx.Request) -> httpx.Response
-```
-
-**Purpose**: Wraps a brokered HTTP transport with a fresh connection-validity check before each request. This keeps a feed-sync job from continuing to send provider requests after its connection is removed or changed.
-
-**Data flow**: It receives an HTTP request from the connector. Before forwarding it, it calls `_require_source_connection` using the stored workspace, connection, owner, provider, and account. If the check passes, it passes the request to the inner transport and returns the inner transport’s HTTP response.
-
-**Call relations**: _BoundSourceCredentials.credential creates this wrapper around broker-provided transports. It hands actual network forwarding to the inner transport only after the database check succeeds.
-
-*Call graph*: calls 1 internal fn (_require_source_connection).
-
-
-##### `_ConnectionTransport.aclose`  (lines 434–435)
-
-```
-async def aclose(self) -> None
-```
-
-**Purpose**: Closes the wrapped HTTP transport when the client is done with it. This releases whatever network resources the inner transport owns.
-
-**Data flow**: It takes no new data beyond the stored inner transport. It calls the inner transport’s close method and returns when that cleanup is complete.
-
-**Call relations**: HTTP client cleanup code calls this as part of normal transport shutdown. The wrapper does not own separate resources; it simply forwards the close operation to the transport it protects.
-
-
-##### `_BoundSourceCredentials.credential`  (lines 444–474)
-
-```
-async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
-```
-
-**Purpose**: Resolves credentials for one feed-sync source while enforcing whether that source is direct-key based or bound to a specific member-owned connection. It is the main guardrail around source credential use.
-
-**Data flow**: It receives a workspace ID, provider, and account. For the direct account handle, it rejects sources that are connection-bound, then delegates to `_credential`. For brokered accounts, it requires stored connection and owner IDs, verifies the database connection, gets a credential through `_credential`, requires that it contains a transport, and returns a new `Credential` whose transport is wrapped in `_ConnectionTransport`.
-
-**Call relations**: SourceCredentialResolver.bind creates this object for a particular source. This method then calls `_require_source_connection` and `_credential`, and wraps broker transports so `_ConnectionTransport.handle_async_request` can re-check access on every request.
-
-*Call graph*: calls 2 internal fn (_credential, _require_source_connection); 2 external calls (__init__, __init__).
-
-
-##### `SourceCredentialResolver.bind`  (lines 481–486)
-
-```
-def bind(self, connection_id: UUID | None, owner_member_id: UUID | None) -> AuthProxy
-```
-
-**Purpose**: Creates an authentication proxy tied to a particular feed-sync source’s connection information. This lets the sync runner ask for credentials later without forgetting which source they belong to.
-
-**Data flow**: It receives an optional connection ID and optional owner member ID. It packages those values with the registry into a `_BoundSourceCredentials` object and returns it as an `AuthProxy`.
-
-**Call relations**: The sync runner uses this binding step before resolving source credentials. The returned object’s `credential` method performs the actual checks and routing when the source starts authenticating provider requests.
-
-*Call graph*: 1 external calls (__init__).
-
-
-### `core/src/ufo/access/egress_rules.py`
-
-`domain_logic` · `per-turn rule derivation before egress proxy enforcement`
-
-A sandboxed agent should not be able to call any internet host it wants, and it should not directly see real API keys. This file builds the rulebook for the egress proxy, which is the gatekeeper for outgoing network traffic. Think of it like a security desk: it knows which doors are open, which visitors must be counted, and which badge placeholder should be replaced with a real badge only at the door.
-
-The rules are small value objects. A scope rule says which exact hosts are allowed. An internet rule allows broader public internet access for a live turn. An injection rule replaces a fake secret value, called a sentinel, with the real secret as the request leaves the sandbox. A meter rule says requests to a host should be counted for billing or usage tracking. A forward rule sends certain authenticated requests through the broker instead of using a local secret. A service rule allows special local services to be reached through synthetic hosts.
-
-The derivation functions build these rules from different sources: the chosen model provider, extension manifests, artifact storage, workspace credentials, connector grants, and CLI-style connector credentials. A key design point is safety by omission: if a credential cannot be resolved, this file logs a warning and simply does not open that route. That keeps one bad secret from accidentally widening network access.
+If the caller wants a foreground result, this file waits for the child’s terminal frame, which is the saved final state of the child turn. If a member sends a new message while the parent is waiting, the child can be detached and allowed to finish later, so the parent is not trapped waiting. Background children deliver their results through a special result arrival. Finished output is checked against the declared output contract, and unsafe or invalid content is wrapped or withheld instead of being blindly trusted.
 
 #### Function details
 
-##### `provider_host`  (lines 112–116)
+##### `SubagentRegistry.__post_init__`  (lines 146–150)
 
 ```
-def provider_host(model: str) -> str
+def __post_init__(self) -> None
 ```
 
-**Purpose**: Finds which model provider host should be used for a model name. For example, model names starting with OpenAI-style prefixes map to OpenAI's API host, while Claude-style names map to Anthropic's host.
+**Purpose**: Checks that the registered subagent profiles do not reuse the same name. This matters because a spawn request by name must point to exactly one profile.
 
-**Data flow**: It receives a model name as text. It checks the known model-name prefixes in order and returns the matching API host. If no prefix matches, it raises an error because the system would not know where that model is served.
+**Data flow**: It reads the profile names stored in the registry → looks for names that appear more than once → either leaves the registry usable or raises an error before ambiguous spawning can happen.
 
-**Call relations**: This is a helper used by derive_model_rules. Before the model rules can allow network access or inject the model API key, they need this function to identify the correct provider host.
-
-*Call graph*: called by 1 (derive_model_rules).
+**Call relations**: This runs automatically when a SubagentRegistry is created. It protects later lookups, such as those done by get and find, from having to choose between duplicates.
 
 
-##### `derive_model_rules`  (lines 119–134)
+##### `SubagentRegistry.get`  (lines 152–158)
 
 ```
-def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]
+def get(self, name: str) -> SubagentProfile
 ```
 
-**Purpose**: Builds the network rules needed for the sandbox to call the selected language model provider. It allows only the provider's host, arranges for the real model API key to be injected at the proxy, and marks model traffic for token metering.
+**Purpose**: Returns a registered subagent profile by name, and raises a clear error if the name is unknown. Use this when the caller requires the profile to exist.
 
-**Data flow**: It receives a model name and the real API key for that model provider. It first turns the model name into a provider host, then chooses the right authentication header shape for that provider. It returns a small set of rules: allow the host, replace the sandbox's fake key with the real key, and meter the traffic as token usage.
+**Data flow**: It receives a profile name → asks find to search the registry → returns the matching profile, or raises an UnknownSubagentProfile error that includes the known names.
 
-**Call relations**: This function calls provider_host to identify the destination service. It then creates scope, injection, and meter rules that the egress proxy will later read when model requests leave the sandbox.
+**Call relations**: Queue setup code calls this when it must resolve a profile for a turn. It relies on find for the search and turns a missing result into a user-facing failure.
 
-*Call graph*: calls 1 internal fn (provider_host); 3 external calls (__init__, __init__, __init__).
-
-
-##### `derive_manifest_rules`  (lines 137–139)
-
-```
-def derive_manifest_rules(manifests: tuple[Manifest, ...]) -> tuple[InternetRule, ...]
-```
-
-**Purpose**: Checks whether any installed extension asks for sandbox internet access, and if so grants live turns access to the public internet. Without this, extensions that genuinely need internet access would be blocked by default.
-
-**Data flow**: It receives the extension manifests. It looks for any manifest marked as needing sandbox internet. If at least one asks for it, it returns an internet rule; otherwise it returns no rules.
-
-**Call relations**: This is one input into the overall egress rule set. It does not call other project logic; it simply turns manifest declarations into the broad internet permission the proxy understands.
-
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (find, __init__); called by 1 (_resolve_profile).
 
 
-##### `derive_artifact_store_rules`  (lines 142–158)
+##### `SubagentRegistry.find`  (lines 160–161)
 
 ```
-async def derive_artifact_store_rules(blob: FilesystemBlobStore | S3BlobStore) -> tuple[Rule, ...]
+def find(self, name: str) -> SubagentProfile | None
 ```
 
-**Purpose**: Allows the sandbox to upload shared files to the configured artifact store when that store is backed by S3. This matters because sharing a produced file may require the sandbox to PUT data to a presigned S3 URL, even if the agent otherwise has no public internet access.
+**Purpose**: Looks up a subagent profile by name and quietly returns nothing if it is not present. Use this when missing profiles are allowed and the caller will decide what to do next.
 
-**Data flow**: It receives the blob store configuration. If the store is S3, it asks the store for the upload host, then returns rules that allow exactly that host and meter requests to it. If the store is local filesystem storage, it returns no network rules because no external host is needed.
+**Data flow**: It receives a name → scans the registry’s stored profiles → returns the first profile with that name, or null if none match.
 
-**Call relations**: This function is used when composing the sandbox's allowed outbound routes. It hands the proxy exact host permission for artifact uploads without granting full public internet access.
+**Call relations**: get uses this to perform the actual search. Other registry users also depend on this softer lookup when they need to handle missing profiles without immediately failing.
 
-*Call graph*: 3 external calls (__init__, __init__, put_host).
-
-
-##### `derive_credential_rules`  (lines 161–224)
-
-```
-async def derive_credential_rules(slots: tuple[CredentialSlot, ...], workspace_id: UUID, store: CredentialStore) -> tuple[Rule, ...]
-```
-
-**Purpose**: Builds rules for workspace credentials that should be safely injected into outgoing requests. It lets a sandbox use stored credentials without ever placing the raw secret inside the sandbox itself.
-
-**Data flow**: It receives credential slot declarations, a workspace ID, and the credential store. For each slot that has an injection target, it tries to read the stored secret and resolve the host that credential is allowed to reach. If either step fails or produces no usable result, it logs a warning or skips the slot. For usable slots, it creates injection rules, groups them by host, adds one host allow rule per host, and adds metering when the slot declares a metering dimension. For Git basic authentication, it converts the username and secret into the Basic authorization format before building the injection rule.
-
-**Call relations**: This function is a major part of per-workspace egress setup. It calls the credential store helpers to fetch secrets and resolve hosts, uses warning logs when a slot cannot be used, and returns the rules the proxy needs to allow and authenticate only those credential-backed destinations.
-
-*Call graph*: 7 external calls (__init__, __init__, __init__, b64encode, credential_host, slot_secret, warn).
+*Call graph*: called by 1 (get).
 
 
-##### `derive_grant_rules`  (lines 227–244)
+##### `_target_model`  (lines 176–184)
 
 ```
-def derive_grant_rules(grants: tuple[Grant, ...], transfer_hosts: 'ConnectorTransferHosts | None'=None) -> tuple[Rule, ...]
+def _target_model(resolved: SubagentProfile | AgentTarget) -> str | None
 ```
 
-**Purpose**: Builds network allow and metering rules for active connector grants. A grant admits the connector provider's host, plus any broker file-transfer hosts needed to move tool input and output files.
+**Purpose**: Figures out whether a spawn target names a specific model to bill or run against. Profiles may pin a model, while workspace agents use the model stored on their own agent record.
 
-**Data flow**: It receives active grants and, optionally, a lookup object for connector transfer hosts. For each grant, it collects the provider host and any extra transfer hosts, removes duplicates while preserving order, and ignores empty host names. If any hosts remain, it returns a scope rule for them and a request-metering rule for each host.
+**Data flow**: It receives either a profile target or an agent target → checks which kind it is → returns the profile’s model name for profile targets, or null for agent targets.
 
-**Call relations**: This function is used when connector access has already been granted. It does not inject credentials; connector secrets live with the broker. It may ask ConnectorTransferHosts.of for extra file-store hosts, then hands the proxy only admission and metering rules.
+**Call relations**: Subagents.spawn calls this before admitting a child turn. The result is passed into the admission and balance-check path so the right model is considered.
 
-*Call graph*: 2 external calls (__init__, __init__).
-
-
-##### `derive_cli_rules`  (lines 247–267)
-
-```
-def derive_cli_rules(grants: tuple[Grant, ...], acting_member_id: UUID | None, clis: Mapping[str, CliCredential]) -> tuple[Rule, ...]
-```
-
-**Purpose**: Creates forwarding rules for connector grants that expose a command-line-style credential. These rules say that requests carrying the grant's sentinel should be executed through the broker, where the real account credential lives.
-
-**Data flow**: It receives grants, the acting member ID if there is one, and a mapping of connector providers to CLI credential declarations. It keeps only grants whose provider has a CLI credential and whose account the acting member is allowed to use: either a shared connection or the member's own grant. For each allowed grant, it creates a forward rule with the host, header, sentinel, account ID, and broker forwarding behavior.
-
-**Call relations**: This sits beside connector tool authorization. It uses grant_sentinel to recognize the placeholder credential value, then returns forward rules that tell the egress proxy to send matching requests through the broker instead of trying to inject a local secret.
-
-*Call graph*: 2 external calls (__init__, grant_sentinel).
+*Call graph*: called by 1 (spawn).
 
 
-##### `ConnectorTransferHosts.of`  (lines 281–282)
+##### `subagent_system_prompt`  (lines 187–223)
 
 ```
-def of(self, provider: str) -> tuple[str, ...]
+def subagent_system_prompt(profile: SubagentProfile, *, skills: Sequence[tuple[str, str]]=CORE_SKILL_INDEX, preload: tuple[LoadedSkill, ...]=()) -> str
 ```
 
-**Purpose**: Looks up which file-transfer hosts should be allowed for a connector provider. If the provider was explicitly listed, it uses that provider's declared hosts; otherwise it falls back to the default open-namespace hosts.
+**Purpose**: Builds the full instruction text given to a profile-based subagent. It combines the profile’s own prompt, optional skill information, shared output rules, and the final-answer contract.
 
-**Data flow**: It receives a provider name. It checks the explicit provider-to-hosts mapping stored on the object. If the provider is present, it returns that tuple of hosts; if not, it returns the default tuple.
+**Data flow**: It receives a profile, an available skill list, and optional preloaded skills → fills the skill-index slot, checks for forgotten prompt placeholders, appends preloaded skill text if it is not too large, and adds the required finish-tool instructions → returns one complete system prompt string.
 
-**Call relations**: derive_grant_rules calls this when it needs to add broker file-store hosts for a grant. This small lookup keeps the grant-rule code from needing to know how manifest defaults and explicit connector declarations were built.
+**Call relations**: This is used when preparing a profile child to run. It calls the prompt-rendering and skill-loading helpers so the child receives both its special instructions and the system-wide rules for returning structured output.
+
+*Call graph*: 3 external calls (findall, render_skill_index, loaded_context).
 
 
-##### `connector_transfer_hosts`  (lines 285–296)
+##### `Subagents.authorize`  (lines 240–241)
 
 ```
-def connector_transfer_hosts(manifests: tuple[Manifest, ...]) -> ConnectorTransferHosts
+def authorize(self, requester_member_id: UUID | None) -> 'Subagents'
 ```
 
-**Purpose**: Builds the lookup table that maps connector providers to the broker file-store hosts they may need. It also records default transfer hosts for providers covered by the open connector namespace.
+**Purpose**: Creates a copy of the Subagents controller that acts on behalf of a specific member. This is used when permission checks need to know which human is responsible for the spawn.
 
-**Data flow**: It receives all manifests. It walks through every declared connector and records that connector's provider name with its declared transfer hosts. Then it checks for an open connector namespace and, if present, uses that namespace's transfer hosts as the default. It returns a ConnectorTransferHosts object containing both the explicit map and the default hosts.
+**Data flow**: It receives a member id or null → copies the existing Subagents object with that requester set → returns the new copy without changing the original.
 
-**Call relations**: This function prepares data later used by derive_grant_rules. It calls open_connector_namespace to find the default namespace, then packages the result into ConnectorTransferHosts so grant rule derivation can make a simple provider lookup.
+**Call relations**: Later methods read requester_member_id through acting_member_id. This method is the small handoff that stamps the controller with the member whose authority should be used.
 
-*Call graph*: 2 external calls (__init__, open_connector_namespace).
+*Call graph*: 1 external calls (replace).
+
+
+##### `Subagents.acting_member_id`  (lines 244–253)
+
+```
+def acting_member_id(self) -> UUID | None
+```
+
+**Purpose**: Chooses the member whose permissions should apply to this spawn operation. It gives priority to an explicitly authorized requester, then the parent turn’s speaker, then the member the parent is acting for.
+
+**Data flow**: It reads requester_member_id and fields from the parent turn → picks the first available member id in that order → returns that id, or null if no member is known.
+
+**Call relations**: Permission checks, child admission, follow-up messages, and child ownership checks all use this property so the whole spawn flow agrees on who is responsible.
+
+
+##### `Subagents.spawn`  (lines 255–368)
+
+```
+async def spawn(self, target: str, payload: dict[str, Any], background: bool=False, dedup_key: str | None=None, delivers_result: bool=False, name: str='', detach_on_arrival: bool=False) -> SpawnResult
+```
+
+**Purpose**: Starts a child turn for a named subagent profile or workspace agent. It can return immediately for background work, wait for a foreground answer, or detach if a new member message arrives.
+
+**Data flow**: It receives a target name, input payload, and options such as background mode and deduplication key → resolves the target, checks permissions and input shape, creates or reuses a child conversation and turn, enqueues the work, optionally waits for completion, validates the final output → returns a SpawnResult with the child ids and possibly the validated output.
+
+**Call relations**: This is the main public entry for spawning. It calls the resolver, admission, queueing, balance, waiting, and detaching helpers; if anything goes wrong during a foreground wait, it cancels the child so orphaned work is not left running.
+
+*Call graph*: calls 7 internal fn (_admit, _await_terminal, _await_terminal_or_detach, _enqueue, _may_spawn, _resolve, _target_model); 8 external calls (__init__, __init__, turn_id_for, cancel_one_turn, input_contract, output_contract, uuid4, uuid5).
+
+
+##### `Subagents.result`  (lines 370–407)
+
+```
+async def result(self, turn_id: UUID) -> SpawnResult
+```
+
+**Purpose**: Reads the finished result of a child turn that this conversation spawned. It validates the stored final answer before handing it back.
+
+**Data flow**: It receives a child turn id → confirms the turn belongs to this spawning conversation, loads its terminal record and output contract, validates the saved text if possible → returns a SpawnResult with the terminal and either a trusted structured output or no output.
+
+**Call relations**: Host-side tools can call this after a child has already completed. It relies on _require_child for safety, uses _agent_output_schema when the child was a workspace agent, and uses _untrusted_output to mark whether the answer must be treated carefully.
+
+*Call graph*: calls 3 internal fn (_agent_output_schema, _require_child, _untrusted_output); 5 external calls (__init__, model_validate, select, workspace_tx, output_contract).
+
+
+##### `Subagents.wait`  (lines 409–429)
+
+```
+async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]
+```
+
+**Purpose**: Waits until one or more child turns finish, then reports their final status and text. This is for tool flows that explicitly need to block for child completion.
+
+**Data flow**: It receives a tuple of child turn ids → checks each one belongs to this conversation, waits for each terminal frame, builds a status object for each → returns all statuses as a tuple.
+
+**Call relations**: This method uses _require_child before waiting so callers cannot wait on unrelated turns. It then uses _await_terminal and _untrusted_output to produce the same cautious result status the rest of the spawn system expects.
+
+*Call graph*: calls 3 internal fn (_await_terminal, _require_child, _untrusted_output); 1 external calls (__init__).
+
+
+##### `Subagents.cancel`  (lines 431–448)
+
+```
+async def cancel(self, turn_id: UUID) -> SubagentStatus
+```
+
+**Purpose**: Cancels a running child turn that belongs to this parent conversation. It then reports the child’s current stored status.
+
+**Data flow**: It receives a child turn id → verifies ownership, asks the shared cancellation routine to stop the turn, reloads the turn’s status and terminal text from the database → returns a SubagentStatus.
+
+**Call relations**: This public control method depends on _require_child to enforce boundaries. It hands the actual stopping work to cancel_one_turn, the same cancellation path used elsewhere in the turn system.
+
+*Call graph*: calls 1 internal fn (_require_child); 5 external calls (__init__, model_validate, select, workspace_tx, cancel_one_turn).
+
+
+##### `Subagents.message`  (lines 450–572)
+
+```
+async def message(self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool=False) -> SubagentStatus
+```
+
+**Purpose**: Sends a follow-up message to a background child conversation. This lets a parent answer a child’s question or continue work without starting the child over.
+
+**Data flow**: It receives the original child turn id, message text, a deduplication key, and a delivery option → verifies the child, checks the profile still exists when needed, finds or creates the next turn in the child conversation, checks balance for new work, marks it ready for dispatch if no earlier queued turn blocks it, and enqueues it if appropriate → returns the follow-up turn’s status.
+
+**Call relations**: This is the continuation path after a child has already been spawned. It calls _require_child for safety, _profile_model and _require_balance for billing, and _enqueue to schedule the follow-up through the same queue as ordinary turns.
+
+*Call graph*: calls 4 internal fn (_enqueue, _profile_model, _require_balance, _require_child); 8 external calls (__init__, exists, insert, select, update, workspace_tx, current_traceparent, turn_id_for).
+
+
+##### `Subagents._resolve`  (lines 574–597)
+
+```
+async def _resolve(self, target: str) -> SubagentProfile | AgentTarget
+```
+
+**Purpose**: Translates a spawn target string into the actual thing to run: either a profile or a workspace agent. It also catches ambiguous names and gives useful errors for unknown names.
+
+**Data flow**: It receives a target such as a bare name, profile:name, or agent:name → searches the profile registry and workspace agent table as needed → returns the matching profile or agent target, or raises an ambiguity or unknown-target error.
+
+**Call relations**: Subagents.spawn calls this at the start of every spawn. It uses _profile_names, _agent_names, and _agent_target to build both the answer and helpful error messages.
+
+*Call graph*: calls 5 internal fn (_agent_names, _agent_target, _profile_names, __init__, __init__); called by 1 (spawn).
+
+
+##### `Subagents._profile_names`  (lines 599–600)
+
+```
+def _profile_names(self) -> tuple[str, ...]
+```
+
+**Purpose**: Returns the list of profile names known to this registry. It is mainly used to explain what targets are available when a spawn name is wrong.
+
+**Data flow**: It reads the registry’s profiles → sorts their names → returns them as a tuple.
+
+**Call relations**: _resolve uses this when it needs to report available profile targets in an error.
+
+*Call graph*: called by 1 (_resolve).
+
+
+##### `Subagents._agent_names`  (lines 602–614)
+
+```
+async def _agent_names(self) -> tuple[str, ...]
+```
+
+**Purpose**: Returns the names of active workspace agents that can be considered as spawn targets. Archived agents are left out.
+
+**Data flow**: It opens a workspace database transaction → selects non-archived agent names for the parent workspace → returns the ordered names as a tuple.
+
+**Call relations**: _resolve calls this when it needs to explain unknown targets. It gives the error message the current agent-side namespace.
+
+*Call graph*: called by 1 (_resolve); 2 external calls (select, workspace_tx).
+
+
+##### `Subagents._agent_target`  (lines 616–641)
+
+```
+async def _agent_target(self, name: str) -> AgentTarget | None
+```
+
+**Purpose**: Looks up a workspace agent by name and packages the facts needed to spawn it. These facts include its id, owner, and declared input and output schemas.
+
+**Data flow**: It receives an agent name → queries the workspace database for a non-archived matching agent → returns an AgentTarget if found, or null if not.
+
+**Call relations**: _resolve uses this to decide whether a target name refers to a workspace agent. Later spawn logic uses the returned owner and schemas for permission and validation.
+
+*Call graph*: called by 1 (_resolve); 3 external calls (__init__, select, workspace_tx).
+
+
+##### `Subagents._agent_output_schema`  (lines 643–649)
+
+```
+async def _agent_output_schema(self, agent_id: UUID) -> dict[str, object] | None
+```
+
+**Purpose**: Loads the declared output schema for a workspace agent. This is needed when reading or delivering a finished agent-child result.
+
+**Data flow**: It receives an agent id → queries the database for that agent’s output schema → returns the schema dictionary or null.
+
+**Call relations**: Subagents.result calls this when the child was spawned as an agent rather than as a profile, so it can validate the saved terminal text against the agent’s contract.
+
+*Call graph*: called by 1 (result); 2 external calls (select, workspace_tx).
+
+
+##### `Subagents._may_spawn`  (lines 651–663)
+
+```
+async def _may_spawn(self, owner_member_id: UUID | None) -> bool
+```
+
+**Purpose**: Checks whether the acting member is allowed to spawn a workspace agent. Owners can spawn their own agents, and workspace admins can spawn any agent.
+
+**Data flow**: It receives the target agent’s owner id → compares it with the acting member id, and if needed checks admin membership in the database → returns true if spawning is allowed, otherwise false.
+
+**Call relations**: Subagents.spawn calls this before admitting an agent child. This keeps chat-based spawning aligned with the same ownership rules used elsewhere in the workspace.
+
+*Call graph*: called by 1 (spawn); 2 external calls (workspace_tx, member_is_admin).
+
+
+##### `Subagents._untrusted_output`  (lines 665–674)
+
+```
+def _untrusted_output(self, profile: str | None) -> bool
+```
+
+**Purpose**: Decides whether a child’s output must be treated as untrusted content. Agent children are always considered untrusted, and missing profile definitions also fail safely.
+
+**Data flow**: It receives a profile name or null → for agent children returns true, for profile children looks up the profile and reads its untrusted-output flag → returns a boolean trust decision.
+
+**Call relations**: Subagents.result and Subagents.wait call this when reporting child results. The decision tells later consumers whether to wrap or wall off the text instead of treating it as safe instructions.
+
+*Call graph*: called by 2 (result, wait).
+
+
+##### `Subagents._require_child`  (lines 676–712)
+
+```
+async def _require_child(self, turn_id: UUID) -> str | None
+```
+
+**Purpose**: Verifies that a given turn id belongs to a child spawned by this conversation and by the same acting member. It prevents one conversation or member from controlling another person’s child work.
+
+**Data flow**: It receives a turn id → loads the turn’s parent link, profile, and member stamp from the database → checks whether it was spawned by this parent turn or a sibling turn in the same conversation and whether the member matches → returns the child’s profile name, or raises an error.
+
+**Call relations**: Public operations such as result, wait, cancel, and message call this first. It is the shared guardrail before reading, stopping, or continuing a child turn.
+
+*Call graph*: called by 4 (cancel, message, result, wait); 2 external calls (select, workspace_tx).
+
+
+##### `Subagents._profile_model`  (lines 714–720)
+
+```
+def _profile_model(self, profile: str | None) -> str | None
+```
+
+**Purpose**: Finds the model pinned by a named profile, if any. If the profile is missing, it quietly returns null because this is used for billing already-existing child work.
+
+**Data flow**: It receives a profile name or null → searches the registry → returns the profile’s model name when present, otherwise null.
+
+**Call relations**: Subagents.message uses this before billing a follow-up turn. The result is passed to _require_balance so the balance check weighs the correct model.
+
+*Call graph*: called by 1 (message).
+
+
+##### `Subagents._require_balance`  (lines 722–740)
+
+```
+async def _require_balance(self, connection: AsyncConnection, model: str | None, agent_id: UUID | None=None) -> None
+```
+
+**Purpose**: Stops new child work from starting when the workspace does not have enough prepaid balance. This prevents spawned helpers from becoming a way to get unpaid model calls.
+
+**Data flow**: It receives a database connection, an optional model name, and optionally the child agent id → asks the billing BalanceGate whether the workspace may start this work → returns normally if allowed, or raises BalanceExhausted if rejected.
+
+**Call relations**: _admit calls this for a newly spawned child, and message calls it for a new follow-up. It is deliberately placed only on new work, not on recovery paths that reconnect to work already admitted.
+
+*Call graph*: called by 2 (_admit, message); 2 external calls (__init__, __init__).
+
+
+##### `Subagents._admit`  (lines 742–831)
+
+```
+async def _admit(self, conversation_id: UUID, turn_id: UUID, *, agent_id: UUID, profile: str | None, inherits_sandbox: bool, inbound: str, delivers_result: bool=False, name: str='', model: str | None=
+```
+
+**Purpose**: Creates the database records for a child conversation and its first turn, or safely reuses them during retry. It also stamps the child with ownership, tracing, delivery, sandbox, and billing information.
+
+**Data flow**: It receives child ids, target agent/profile details, input text, and delivery settings → inserts the conversation and first turn if they do not already exist, checks the existing row belongs to the same acting member, checks balance, and marks the queued turn as dispatched → returns true when the caller should enqueue the turn, or false when it was already past queued.
+
+**Call relations**: Subagents.spawn calls this after resolving and validating the target. _admit calls _require_balance before work is dispatched and sets up the rows that _enqueue and later wait/delivery code depend on.
+
+*Call graph*: calls 1 internal fn (_require_balance); called by 1 (spawn); 6 external calls (select, update, workspace_tx, conversation_name, current_traceparent, audience_member).
+
+
+##### `Subagents._enqueue`  (lines 833–862)
+
+```
+async def _enqueue(self, turn_id: UUID, conversation_id: UUID) -> None
+```
+
+**Purpose**: Asks DBOS, the durable workflow queue, to run a turn workflow for the child or follow-up. If enqueueing fails, it clears the dispatch marker so another dispatcher can try later.
+
+**Data flow**: It receives a turn id and conversation id → builds queue options using the turn as workflow id and the conversation as partition key → attempts to enqueue; on cancellation or failure, resets dispatch_enqueued_at in the database and either re-raises cancellation or logs the deferred enqueue.
+
+**Call relations**: Subagents.spawn and Subagents.message call this after admission says a turn is ready. It is the bridge from saved database work to the background worker system.
+
+*Call graph*: called by 2 (message, spawn); 3 external calls (update, workspace_tx, log).
+
+
+##### `Subagents._await_terminal`  (lines 864–907)
+
+```
+async def _await_terminal(self, turn_id: UUID) -> TerminalFrame
+```
+
+**Purpose**: Waits until a child turn has a saved terminal frame, meaning it has finished in the database. It also handles workflow retries and parked turns so the parent does not wait forever.
+
+**Data flow**: It receives a child turn id → tries to attach to the DBOS workflow, waits for its result, checks the database for a terminal or parked status, follows a newer running attempt if one exists → returns the TerminalFrame or raises if the workflow ended without one.
+
+**Call relations**: Foreground spawn, wait, and interruptible wait all use this. It relies on _terminal_or_park for the database truth and _running_attempt when DBOS has moved the work to another attempt.
+
+*Call graph*: calls 2 internal fn (_running_attempt, _terminal_or_park); called by 3 (_await_terminal_or_detach, spawn, wait); 1 external calls (sleep).
+
+
+##### `Subagents._running_attempt`  (lines 909–915)
+
+```
+async def _running_attempt(self, turn_id: UUID) -> str | None
+```
+
+**Purpose**: Reads the workflow attempt id currently recorded for a turn. This helps the waiter follow a retried or replaced workflow attempt.
+
+**Data flow**: It receives a turn id → queries the turn row for its running_attempt field → returns that workflow id string or null.
+
+**Call relations**: _await_terminal calls this when the workflow it was watching is missing or ended without a terminal. It lets waiting continue on the live attempt instead of failing too early.
+
+*Call graph*: called by 1 (_await_terminal); 2 external calls (select, workspace_tx).
+
+
+##### `Subagents._await_terminal_or_detach`  (lines 917–972)
+
+```
+async def _await_terminal_or_detach(self, turn_id: UUID) -> TerminalFrame | None
+```
+
+**Purpose**: Waits for a child to finish, but stops waiting if a new member message arrives for the parent conversation. In that case the child is moved to background delivery so the parent can respond now.
+
+**Data flow**: It receives a child turn id → starts one task waiting for the child terminal and another listening for parent conversation arrivals → if the terminal wins, returns it; if a valid member arrival wins and _detach succeeds, returns null; otherwise keeps waiting or falls back to terminal waiting.
+
+**Call relations**: Subagents.spawn uses this when detach_on_arrival is requested. It combines _await_terminal with hub arrival notifications and calls _detach to make the race safe in the database.
+
+*Call graph*: calls 2 internal fn (_await_terminal, _detach); called by 1 (spawn); 5 external calls (create_task, ensure_future, gather, wait, log).
+
+
+##### `Subagents._terminal_or_park`  (lines 974–990)
+
+```
+async def _terminal_or_park(self, turn_id: UUID) -> TerminalFrame | None
+```
+
+**Purpose**: Checks whether a child has finished, and cancels it if it is parked on a spend limit. A parked child has no usable final answer, so the parent should not keep waiting.
+
+**Data flow**: It receives a turn id → reads terminal and status from the database → returns a parsed TerminalFrame if present, cancels and raises SubagentParked if status is parked, or returns null if the child is still running.
+
+**Call relations**: _await_terminal uses this as its database source of truth after workflow events. It calls the shared cancellation path when a parked child would otherwise leave the parent stuck.
+
+*Call graph*: called by 1 (_await_terminal); 5 external calls (__init__, model_validate, select, workspace_tx, cancel_one_turn).
+
+
+##### `Subagents._detach`  (lines 992–1023)
+
+```
+async def _detach(self, turn_id: UUID, arrival_id: UUID) -> bool
+```
+
+**Purpose**: Marks a foreground child so it will deliver its result later instead of returning inline. It only succeeds if a real, unconsumed member message interrupted the parent and the child has not already finished.
+
+**Data flow**: It receives a child turn id and an arrival id → performs a guarded database update that sets result_delivery to pending only when the child has no terminal and the arrival belongs to the parent’s conversation → returns true if exactly one row was updated.
+
+**Call relations**: _await_terminal_or_detach calls this to resolve the race between child completion and a new member message. If it succeeds, delivery later goes through SubagentResult; if it fails, the foreground wait continues or returns the terminal.
+
+*Call graph*: called by 1 (_await_terminal_or_detach); 4 external calls (exists, select, update, workspace_tx).
+
+
+##### `SubagentResult.deliver`  (lines 1047–1088)
+
+```
+async def deliver(self, child: Turn) -> None
+```
+
+**Purpose**: Posts a finished background child’s result back into the conversation that spawned it. It then marks the child result as delivered so the same result is not posted again.
+
+**Data flow**: It receives a child Turn → ignores it unless delivery is pending and it has a parent, requires a committed terminal, loads parent conversation details and possibly the child agent row, builds the result body, invokes a new arrival in the parent conversation using a deterministic key, then updates the child delivery status to delivered.
+
+**Call relations**: This is the delivery half of background spawning and detached foreground spawning. It calls _body to format the safe result envelope, then uses TurnInvoker to feed that envelope into the parent conversation as ordinary incoming work.
+
+*Call graph*: calls 1 internal fn (_body); 3 external calls (select, update, workspace_tx).
+
+
+##### `SubagentResult._body`  (lines 1090–1119)
+
+```
+def _body(self, child: Turn, child_agent: sa.Row | None) -> str
+```
+
+**Purpose**: Builds the text envelope that carries a child’s result back to the parent conversation. The envelope names the target, child id, and result status, and walls off untrusted payloads.
+
+**Data flow**: It receives a finished child turn and, for agent children, the agent row → chooses the target label and output contract, asks _payload for the validated payload and status, wraps unsafe content with an untrusted-content wall, escapes any closing result tag inside the payload → returns the final spawn_result text block.
+
+**Call relations**: SubagentResult.deliver calls this before invoking the parent conversation. It calls _payload for validation and uses the wall helper when profile rules or agent-child rules say the content should not be treated as trusted instructions.
+
+*Call graph*: calls 1 internal fn (_payload); called by 1 (deliver); 2 external calls (output_contract, wall).
+
+
+##### `SubagentResult._payload`  (lines 1121–1140)
+
+```
+def _payload(self, contract: Contract | None, terminal: TerminalFrame) -> tuple[str, str]
+```
+
+**Purpose**: Turns a child’s terminal frame into the payload and status that should be delivered. It distinguishes success, questions, failures, missing contracts, and invalid output.
+
+**Data flow**: It receives an output contract or null and a terminal frame → if the child failed, returns a diagnostic and failure status; if it asked a question, returns the question JSON; if there is no contract, returns a withheld-result message; otherwise validates the final text and returns structured JSON or an invalid-output explanation → returns a payload string and status string.
+
+**Call relations**: _body calls this while formatting a delivery. This function is the last safety check before a child’s answer is handed back to the parent conversation.
+
+*Call graph*: called by 1 (_body); 1 external calls (model_validate_json).
+
+
+### Specialist subagent profiles
+These files declare focused helper-agent shapes for brief writing, browser work, and prose drafting.
+
+### `extensions/brief_pipeline/ufo_ext_brief_pipeline/pipeline.py`
+
+`config` · `extension load / subagent setup`
+
+This file is the blueprint for a simple writing assembly line. Instead of asking one agent to do everything at once, the brief pipeline splits the work into three focused stages: outline, draft, and critique. Each stage is a subagent profile, meaning a named setup that tells the system what prompt to use, what input shape to expect, what output shape to return, and how many conversation rounds it may take.
+
+The typed models are built with Pydantic, a library that checks that data has the expected fields. For example, the outline stage receives a topic and audience, and must return an outline. The draft stage receives the topic plus that outline, and must return draft text. The critic receives the draft and returns a verdict plus optional improvements. This keeps each handoff predictable, like forms passed along a production line.
+
+A notable design choice is that these subagents have no tools and cannot spawn further agents. Their entire job is to read their input and produce structured text. That makes the pipeline shallow and controlled: the parent agent decides the sequence, and each stage contributes one clear piece.
+
+
+### `extensions/browser/ufo_ext_browser/subagent.py`
+
+`config` · `subagent setup and launch`
+
+This file is like the job description and equipment list for a specialized web assistant. The main agent can hand off a browser task, such as visiting a site, collecting information, filling a form, or saving screenshots. This profile tells the system how that browser-focused helper should behave.
+
+The file loads a prompt from `subagent_browser.md`, which is the written instruction set for the browser subagent. It then builds the list of tools the subagent is allowed to use: browser automation tools, plus a few basic file and web-search tools so it can save notes, edit files, read shared workspace material, and search the web when needed.
+
+It also defines two small data shapes using Pydantic, a library that checks that data has the expected fields. `BrowserTask` describes what the parent agent sends in: the task text, an optional URL, an optional task name, and whether the subagent should get extended context. `BrowserResult` describes what comes back: a freeform result string.
+
+Finally, `BROWSER_PROFILE` packages all of this into a `SubagentProfile`. That profile is what the larger system uses when it wants to launch this browser helper. Without this file, the browser subagent would not have a clear name, prompt, allowed tools, input format, output format, or model choice.
+
+
+### `extensions/documents/ufo_ext_documents/subagent.py`
+
+`config` · `subagent setup`
+
+This file is like a job description and tool badge for a specialized writing helper. The larger system can spawn child assistants, called subagents, for narrower tasks. This one is meant only for prose work: reading drafts, writing or editing files, searching text, and loading its writing workflow skill.
+
+The file names the profile “writing” and pins it to the model `gpt-5.6-terra`, so the writing child does not simply inherit whatever model the parent assistant is using. It also loads a prompt from `prompts/subagent_writing.md`, which gives the child its instructions.
+
+Two small Pydantic models define the contract for talking to this child. Pydantic is a library that checks that data has the expected shape. `WritingTask` says the parent must send an `objective`, and by default the child starts with the `writing-drafts` skill already loaded. `WritingResult` says the child returns a freeform `result`.
+
+The tool list is intentionally narrow. The child can read, write, edit, search files, and load skills. It cannot run shell commands, use a coding REPL, browse the web, or share files directly. That keeps it as a writing assistant, not a second programmer or researcher. Without this file, the system would not have a clear, safe, reusable profile for spinning up a prose-focused subagent.
+
+
+### Parallel delegation workflows
+These files support fan-out delegation for browsing, objective-backed work tracking, and wide research aggregation.
+
+### `extensions/browser/ufo_ext_browser/delegation.py`
+
+`orchestration` · `request handling`
+
+This file exists so the main agent does not have to drive a browser directly. Instead, it delegates the work to a specialized “browser” subagent, which is like sending a task to a helper with its own fresh browser window. That matters because web automation can be slow, can get stuck, and can involve many steps; this file puts limits around that work so one bad website does not freeze the parent task forever.
+
+The single-task path, exposed as `browser_task`, starts one browser subagent with a URL, a self-contained task description, and a friendly task name. It waits for the child task to finish, but only up to a bounded timeout. If the browser task runs too long, it is cancelled and the caller gets a clear error message.
+
+The batch path, exposed as `wide_browse`, reads a workspace file containing URLs or site names, removes blank lines and duplicates, and sends each item to a browser subagent. It keeps the parallel work bounded, like only opening a limited number of checkout lanes at once, so the system is not flooded. Each result is collected into `wide_browse.json` and also returned to the caller.
+
+Both tools use deterministic keys for spawned work. This helps recovery: if a parent task is retried after a crash, it can reconnect to already-started browser children instead of accidentally starting duplicate sessions.
+
+#### Function details
+
+##### `_browser_task`  (lines 92–121)
+
+```
+async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult
+```
+
+**Purpose**: Runs one complete browser automation job by spawning a browser subagent and waiting for its summary. It protects the parent task by cancelling the browser work if it exceeds the requested time limit.
+
+**Data flow**: It receives the tool context and a `BrowserTaskInput` containing the starting URL, instructions, task name, and timeout. It sends those details to the browser profile through the context’s spawn mechanism, then waits for that child turn. If the wait times out or the child reports cancellation, it returns an error-style tool result saying the browser task was cancelled. If the child finishes successfully, it validates the child’s JSON summary as a `BrowserResult` and returns that JSON text to the caller.
+
+**Call relations**: This is the handler behind the `browser_task` tool definition. When the main agent calls that tool, this function creates the browser child through `ToolContext.spawn`, waits under an `asyncio.timeout` budget, and converts the browser child’s final text into the tool result the parent agent sees.
+
+*Call graph*: 5 external calls (__init__, __init__, timeout, spawn, model_validate_json).
+
+
+##### `_read_lines`  (lines 124–137)
+
+```
+async def _read_lines(ctx: ToolContext, path: str) -> list[str]
+```
+
+**Purpose**: Reads a workspace text file and turns it into a clean list of unique, non-empty lines. It is used to load the URLs or site names for batch browsing.
+
+**Data flow**: It receives the tool context and a file path. It safely quotes the path for a shell command, reads the file with `cat` inside the sandbox, and raises an error if the file cannot be read. From the file contents, it strips whitespace, skips blank lines, removes duplicates while keeping the first occurrence, and returns the resulting list of strings.
+
+**Call relations**: `_wide_browse` calls this first, before starting any browser subagents. Its output becomes the set of entities that the batch browser run will visit.
+
+*Call graph*: called by 1 (_wide_browse); 1 external calls (quote).
+
+
+##### `_wide_browse`  (lines 140–167)
+
+```
+async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult
+```
+
+**Purpose**: Runs many browser extraction tasks from a list of URLs or site names, with a fixed cap on both total items and parallel workers. It saves all collected results into a JSON file for later use.
+
+**Data flow**: It receives the tool context and a `WideBrowseInput` containing an entities file, a prompt template, and a schema file path. It reads and deduplicates the entities, rejects the request if there are too many, reads the optional JSON schema text, and creates a semaphore, which is a simple gate that limits how many visits can run at the same time. It then launches one `visit` operation per entity, gathers their result rows, writes those rows to `wide_browse.json` in the workspace, and returns a tool result containing both the rows and the output file name.
+
+**Call relations**: This is the handler behind the `wide_browse` tool definition. It relies on `_read_lines` to prepare the entity list, uses `asyncio.gather` to run many `visit` tasks concurrently, and wraps the final JSON summary in a `ToolResult` for the caller.
+
+*Call graph*: calls 1 internal fn (_read_lines); 6 external calls (__init__, __init__, Semaphore, gather, dumps, quote).
+
+
+##### `_wide_browse.visit`  (lines 148–161)
+
+```
+async def visit(entity: str) -> dict[str, object]
+```
+
+**Purpose**: Runs the browser subtask for one entity in a `wide_browse` batch. It builds the per-entity prompt and returns one result row for that entity.
+
+**Data flow**: It receives one entity string from the batch list. After entering the semaphore gate, it replaces `{entity}` in the prompt template with the actual entity. If a schema was read from the schema file, it appends instructions asking the browser result to match that schema. It then spawns a browser subagent with a deterministic deduplication key and returns a dictionary containing the entity and the browser child’s JSON output, or an empty string if there was no output.
+
+**Call relations**: `_wide_browse` creates this inner helper and runs it once for each entity through `asyncio.gather`. The semaphore around it keeps only a limited number of browser children active at once, so the batch fan-out stays controlled.
+
+
+### `extensions/objectives/ufo_ext_objectives/store.py`
+
+`domain_logic` · `cross-cutting`
+
+An objective is a planned piece of work, broken into steps. This file makes sure those steps are not judged only by what a worker says happened. Instead, each step has recorded events, such as “did this” or “blocked,” and optional acceptance conditions, such as “this file exists” or “this command succeeds.” The extension, not the worker, decides whether those conditions currently hold.
+
+The file defines database tables for objectives, steps, step events, and condition checks. It also defines small data shapes for the allowed checks: a file must exist, a file must contain text, or a command must succeed. Think of the database as a notebook where entries are added in ink: events and checks are appended, not edited away, so later turns can see what really happened over time.
+
+The main store class, `Objectives`, reads and writes one workspace’s objective records. It can find an objective, create or revise a plan, append evidence that a step was attempted or blocked, and save the extension’s latest condition check. The view classes then turn raw database rows into a plain picture of the objective: which steps are pending, done, blocked, unmet, or still waiting for a check.
+
+#### Function details
+
+##### `StepView.attempted`  (lines 157–158)
+
+```
+def attempted(self) -> bool
+```
+
+**Purpose**: This tells whether anyone has recorded that work was actually done for this step. A step is not treated as complete just because it exists in the plan.
+
+**Data flow**: It reads the step’s event history → looks for any event whose kind is `did` → returns true if at least one such event exists, otherwise false.
+
+**Call relations**: Other step-state decisions use this as a basic fact. For example, `StepView.state` uses it to distinguish a planned-but-untouched step from a step that was tried but still needs confirmation.
+
+
+##### `StepView.open_block`  (lines 161–166)
+
+```
+def open_block(self) -> StepEvent | None
+```
+
+**Purpose**: This finds the currently standing blocker, if the last thing recorded for the step was a block. It prevents the system from asking the same unresolved question again and again.
+
+**Data flow**: It reads the step’s events → looks only at the most recent event → returns that event if it is a `blocked` event, or returns nothing if the step is not currently blocked.
+
+**Call relations**: This is used when deciding whether a step can run and when recording new blocked events. `ObjectiveView.runnable` avoids blocked steps, and `Objectives.record` uses it to avoid writing a duplicate block with the same evidence.
+
+
+##### `StepView.state`  (lines 169–184)
+
+```
+def state(self) -> str
+```
+
+**Purpose**: This translates a step’s history and condition checks into a simple status such as pending, blocked, done, attempted, or unmet. It is the main rulebook for deciding what a step means right now.
+
+**Data flow**: It reads the step’s latest event, whether it has been attempted, its acceptance conditions, and its saved verdicts → applies the rules in order → returns one state string describing the step’s current status.
+
+**Call relations**: Objective-level views depend on this state. `ObjectiveView.confirmed` counts steps whose state is done, and `ObjectiveView.frontier` uses it to find steps that are not done yet.
+
+
+##### `ObjectiveView.attempts`  (lines 199–200)
+
+```
+def attempts(self) -> int
+```
+
+**Purpose**: This counts how many times work was recorded across all steps in the objective. It gives a quick sense of effort spent.
+
+**Data flow**: It reads every step and every event inside those steps → counts events marked `did` → returns that count.
+
+**Call relations**: This property summarizes the objective for callers that need to compare effort against confirmed progress. It does not change anything; it reports what the recorded events already say.
+
+
+##### `ObjectiveView.confirmed`  (lines 203–204)
+
+```
+def confirmed(self) -> int
+```
+
+**Purpose**: This counts how many steps are currently considered done. It shows confirmed progress, not just claimed effort.
+
+**Data flow**: It reads each step → asks each step for its current state → counts the steps whose state is `done` → returns that count.
+
+**Call relations**: It relies on `StepView.state` for the actual judgment. Together with `ObjectiveView.attempts`, it helps show whether repeated attempts are producing confirmed results.
+
+
+##### `ObjectiveView.runnable`  (lines 207–215)
+
+```
+def runnable(self) -> tuple[StepView, ...]
+```
+
+**Purpose**: This lists the steps that may be started in parallel right now. It only includes steps that were declared independent, have not already been attempted, and are not blocked.
+
+**Data flow**: It starts from the unfinished steps in the frontier → filters to independent steps with no attempt and no open block → returns those steps as a tuple.
+
+**Call relations**: It builds on `ObjectiveView.frontier`, `StepView.attempted`, and `StepView.open_block`. A dispatcher can use this to decide which planned steps are safe to fan out at the same time.
+
+
+##### `ObjectiveView.frontier`  (lines 218–219)
+
+```
+def frontier(self) -> tuple[StepView, ...]
+```
+
+**Purpose**: This returns the remaining work: every step that is not currently done. It is the objective’s active edge, like the visible row of tasks still on the board.
+
+**Data flow**: It reads all steps in order → asks each for its state → keeps only steps whose state is not `done` → returns those unfinished steps.
+
+**Call relations**: Other objective summaries build on this. `ObjectiveView.runnable` narrows the frontier further to the unfinished steps that can be launched independently.
+
+
+##### `condition_summary`  (lines 222–229)
+
+```
+def condition_summary(condition: Condition) -> str
+```
+
+**Purpose**: This turns a machine-readable acceptance condition into a short human-readable sentence. It is useful when explaining what a step is waiting to prove.
+
+**Data flow**: It receives one condition object → checks which kind it is → returns text such as “path exists,” “path contains text,” or “command succeeds.”
+
+**Call relations**: This is a presentation helper for the condition types defined in this file. It does not read the database or affect objective state.
+
+
+##### `Objectives.named`  (lines 239–253)
+
+```
+async def named(self, conversation_id: UUID, name: str) -> ObjectiveView | None
+```
+
+**Purpose**: This looks up one objective by conversation and name. The conversation scope matters because a subagent may reuse a name without accidentally taking over its parent’s objective.
+
+**Data flow**: It receives a conversation ID and objective name → queries the objective table for this workspace, conversation, and name → if found, passes the database row to `_view` to build a complete `ObjectiveView`; otherwise returns nothing.
+
+**Call relations**: It is called directly when someone needs a specific named objective, and `Objectives.plan` uses it before creating or revising a plan. When a row is found, it hands off to `Objectives._view` to gather the related steps, events, and checks.
+
+*Call graph*: calls 1 internal fn (_view); called by 1 (plan); 1 external calls (select).
+
+
+##### `Objectives.on_conversation`  (lines 255–267)
+
+```
+async def on_conversation(self, conversation_id: UUID) -> ObjectiveView | None
+```
+
+**Purpose**: This finds the most recently created objective for a conversation. It gives callers a way to resume the current objective without knowing its name.
+
+**Data flow**: It receives a conversation ID → queries the objective table for matching records in this workspace → orders them newest first and takes one → returns a full `ObjectiveView` through `_view`, or nothing if there is no objective.
+
+**Call relations**: This follows the same read path as `Objectives.named`: first find the objective row, then ask `Objectives._view` to assemble the complete readable picture.
+
+*Call graph*: calls 1 internal fn (_view); 1 external calls (select).
+
+
+##### `Objectives.plan`  (lines 269–332)
+
+```
+async def plan(self, conversation_id: UUID, name: str, directive: str, steps: tuple[StepPlan, ...]) -> ObjectiveView
+```
+
+**Purpose**: This creates a new objective or revises an existing one. It preserves acceptance conditions for steps that have already been attempted, so a worker cannot loosen the success rules after discovering the work is hard.
+
+**Data flow**: It receives a conversation ID, name, directive, and planned steps → checks whether the objective already exists → inserts or updates the objective row → updates, inserts, or removes step rows according to the new plan while keeping attempted steps’ old acceptance conditions → returns the freshly loaded `ObjectiveView`.
+
+**Call relations**: It begins by calling `Objectives.named` to see what already exists. It then uses database insert, update, and delete operations to make the stored plan match the requested plan, and finally calls `Objectives.named` again so callers get the same complete view that normal readers use.
+
+*Call graph*: calls 1 internal fn (named); 5 external calls (delete, insert, true, update, uuid4).
+
+
+##### `Objectives.record`  (lines 334–354)
+
+```
+async def record(self, step: StepView, kind: str, actor_turn_id: UUID, evidence: str) -> bool
+```
+
+**Purpose**: This appends an event saying what happened to a step, such as that work was done or the step is blocked. It avoids recording the exact same standing block twice, which would spam the history with repeated unresolved questions.
+
+**Data flow**: It receives a step, event kind, actor turn ID, and evidence text → trims the evidence to the maximum stored length → checks whether this is a duplicate of the current open block → if not duplicate, inserts a new event row → returns true if it wrote something, false if it skipped a duplicate block.
+
+**Call relations**: It uses `StepView.open_block` through the supplied step view to recognize duplicate blockers. Other parts of the extension call this after a worker attempt or block so the next turn can read the durable record instead of relying on temporary memory.
+
+*Call graph*: 2 external calls (insert, uuid4).
+
+
+##### `Objectives.checked`  (lines 356–383)
+
+```
+async def checked(self, step: StepView, verdicts: tuple[ConditionVerdict, ...], actor_turn_id: UUID) -> None
+```
+
+**Purpose**: This saves what the extension found when it evaluated a step’s acceptance conditions. These saved verdicts let later turns know whether the step really passed, even after the live working context is gone.
+
+**Data flow**: It receives a step, a set of condition verdicts, and the actor turn ID → converts each verdict into database-friendly data → inserts a new check row with the current time → changes no existing check rows.
+
+**Call relations**: This is called after the extension evaluates conditions such as file existence or command success. `Objectives._view` later reads the latest saved check for each step and includes it in the `StepView` used by `StepView.state`.
+
+*Call graph*: 2 external calls (insert, uuid4).
+
+
+##### `Objectives._view`  (lines 385–436)
+
+```
+async def _view(self, row: sa.Row[tuple[object, ...]]) -> ObjectiveView
+```
+
+**Purpose**: This builds the full readable picture of an objective from raw database rows. It gathers the objective’s steps, their event history, and their latest condition checks into an `ObjectiveView`.
+
+**Data flow**: It receives one objective row → queries step rows for that objective → queries event rows and check rows for those steps → groups events by step and keeps the latest check per step → parses stored condition data and verdict data → returns an `ObjectiveView` containing `StepView` and `StepEvent` objects.
+
+**Call relations**: `Objectives.named` and `Objectives.on_conversation` call this after finding an objective row. It hands JSON-like stored data to `_conditions` and `_verdicts` so the rest of the code can work with typed condition and verdict objects instead of raw database payloads.
+
+*Call graph*: calls 2 internal fn (_conditions, _verdicts); called by 2 (named, on_conversation); 4 external calls (__init__, __init__, __init__, select).
+
+
+##### `_conditions`  (lines 439–453)
+
+```
+def _conditions(payload: object) -> tuple[Condition, ...]
+```
+
+**Purpose**: This converts stored condition data back into the specific condition objects the code understands. It also rejects unknown condition kinds instead of silently pretending they are valid.
+
+**Data flow**: It receives a raw payload, usually read from the database → if the payload is not a list, returns an empty tuple → for each list item, checks its `kind` and validates it as the matching condition type → returns the parsed conditions as a tuple.
+
+**Call relations**: `Objectives._view` uses this when loading a step’s acceptance conditions. `_verdicts` also uses it to parse the condition stored inside each saved verdict.
+
+*Call graph*: called by 2 (_view, _verdicts).
+
+
+##### `_verdicts`  (lines 456–467)
+
+```
+def _verdicts(payload: object) -> tuple[ConditionVerdict, ...]
+```
+
+**Purpose**: This converts stored check results into `ConditionVerdict` objects. A verdict says which condition was checked, whether it held, and a short detail about the result.
+
+**Data flow**: It receives a raw payload from the check table → if the payload is not a list, returns an empty tuple → for each dictionary item, parses its embedded condition with `_conditions`, converts the result fields into normal Python values, and creates a `ConditionVerdict` → returns all verdicts as a tuple.
+
+**Call relations**: `Objectives._view` calls this when building each `StepView`. It depends on `_conditions` so verdicts refer to the same validated condition shapes used by planned steps.
+
+*Call graph*: calls 1 internal fn (_conditions); called by 1 (_view); 1 external calls (__init__).
+
+
+### `extensions/research/ufo_ext_research/delegation.py`
+
+`orchestration` · `tool invocation / request handling`
+
+This file solves a practical bottleneck: researching a long list one item at a time is slow and fragile. The wide_research tool reads an entities file, removes blank lines and duplicates, then starts a limited number of research subagents in parallel. Think of it like giving the same worksheet to several assistants at once, each with a different company or topic filled in.
+
+The input names three things: the file of entities, a prompt template containing {entity}, and an optional JSON schema file that tells each child what shape its answer should have. For each entity, the tool builds a prompt, asks a research-profile subagent to write JSON to a private result file, then reads that file back. Good results become rows with a result. Failures become rows with a short error message.
+
+Because this is a side-effecting tool, it uses an idempotency key: a stable call identifier that lets a repeated run reconnect to earlier child work instead of starting everything over. It also writes a recovery aggregate file as rows complete, so partial progress is not lost. At the end it writes wide_research.json, marked as untrusted because it contains web-researched content, and returns the path and collected rows.
+
+#### Function details
+
+##### `_read_lines`  (lines 58–71)
+
+```
+async def _read_lines(ctx: ToolContext, path: str) -> list[str]
+```
+
+**Purpose**: This helper reads the user-supplied entities file from the sandbox and turns it into a clean list of unique entity names. It protects the shell command by quoting the file path, so unusual characters in the path are treated as a path, not as a command.
+
+**Data flow**: It receives the tool context and a file path. It asks the sandbox shell to run cat on that path, then checks whether the read succeeded. It splits the file into lines, trims spaces, skips empty lines, removes duplicates while keeping the first occurrence, and returns the final list of entity strings. If the file cannot be read, it raises an error instead of returning a partial list.
+
+**Call relations**: _wide_research calls this near the start, before doing any fan-out work. The clean list it returns becomes the master list that every later step follows: size checking, result-path creation, child spawning, recovery ordering, and final output.
+
+*Call graph*: called by 1 (_wide_research); 1 external calls (quote).
+
+
+##### `_wide_research`  (lines 74–201)
+
+```
+async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResult
+```
+
+**Purpose**: This is the main body of the wide_research tool. It takes one batch research request, fans it out to research subagents, saves progress as it goes, and writes a single JSON file containing all rows.
+
+**Data flow**: It receives the tool context and validated input: an entities file, a prompt template, and an output schema file. It first requires an idempotency key, reads and deduplicates entities, refuses overly large batches, computes stable names for recovery and child result files, and removes old recovery files from previous turns. It tries to reload any valid recovery file for this same call, reads the optional schema, then runs one visit task per entity with a semaphore, which is a counter-like lock that limits how many tasks run at once. As each entity finishes, its row is saved into the recovery aggregate. After all visits complete, it writes wide_research.json and returns a ToolResult containing the collected JSON plus the output file name.
+
+**Call relations**: This function is registered as the handler for WIDE_RESEARCH_TOOL, so the tool system calls it when a user invokes wide_research. It calls _read_lines to get the work list, defines small inner helpers for cleanup, recovery writing, row saving, and per-entity visits, then uses asyncio.gather to run the visits together. It hands individual research work to ctx.spawn using the research profile, and hands the final answer back to the tool framework as TextContent inside a ToolResult.
+
+*Call graph*: calls 1 internal fn (_read_lines); 10 external calls (__init__, __init__, __init__, Lock, Semaphore, gather, sha256, dumps, loads, quote).
+
+
+##### `_wide_research.remove_result_files`  (lines 118–125)
+
+```
+async def remove_result_files() -> None
+```
+
+**Purpose**: This cleanup helper deletes temporary per-entity result files that were created or recovered during the wide research run. It keeps the workspace from accumulating hidden intermediate files after the tool has collected their contents.
+
+**Data flow**: It reads the shared set of result-file paths that should be removed. If the set is empty, it does nothing. Otherwise it builds a safely quoted rm command and asks the sandbox shell to delete those files. If deletion fails, it raises an operating-system style error with the sandbox’s message.
+
+**Call relations**: _wide_research registers this helper with ctx.cleanup while setting up the run. It is not part of the main research result itself; it is a teardown step that the tool context can call later to remove scratch files after they have served their purpose.
+
+*Call graph*: 1 external calls (quote).
+
+
+##### `_wide_research.install_recovery`  (lines 129–139)
+
+```
+async def install_recovery(rows: tuple[WideResearchRow, ...]) -> None
+```
+
+**Purpose**: This helper writes the current aggregate progress to the recovery file in a careful way. Its job is to make sure that, if the run is interrupted, a later retry can pick up completed rows instead of starting from zero.
+
+**Data flow**: It receives an ordered tuple of completed rows. It wraps them in a WideResearchFile object with the current call id, converts that object to JSON, writes it to a temporary staging file, and then moves the staging file into the real recovery path. Writing to a temporary file first is like drafting a replacement page before swapping it into a binder; readers should see either the old complete file or the new complete file, not a half-written one.
+
+**Call relations**: _wide_research uses this helper in two moments: after each saved row through save_row, and once more at the end with the full set of rows. It calls sandbox file-writing and shell move operations, while the surrounding _wide_research flow decides which rows belong in the recovery snapshot.
+
+*Call graph*: 3 external calls (__init__, dumps, quote).
+
+
+##### `_wide_research.save_row`  (lines 141–147)
+
+```
+async def save_row(row: WideResearchRow) -> None
+```
+
+**Purpose**: This helper records one finished entity row and immediately refreshes the recovery file. It makes progress durable one row at a time, so a long batch does not lose everything if interrupted late.
+
+**Data flow**: It receives a WideResearchRow, which contains an entity plus either a JSON result or an error. It takes a lock, meaning only one parallel task can update the shared aggregate at a time. Then it stores the row, rebuilds the completed rows in the original entity order, asks install_recovery to write them, and marks that entity’s result file for later cleanup.
+
+**Call relations**: The visit helper calls save_row whenever an entity finishes, whether successfully or with an error. Because many visit tasks run at once, save_row acts as the safe doorway into shared state; it prevents two tasks from writing overlapping recovery snapshots at the same time.
+
+
+##### `_wide_research.visit`  (lines 149–193)
+
+```
+async def visit(entity: str) -> WideResearchRow
+```
+
+**Purpose**: This helper performs the research workflow for one entity. It either reuses an already recovered row or asks a research subagent to produce JSON for that specific entity.
+
+**Data flow**: It receives one entity name. It waits for permission from the semaphore so the batch does not start too many child agents at once. If recovery already has this entity, it returns that row immediately. Otherwise it builds a stable child key, chooses the entity’s hidden result path, fills {entity} into the prompt template, adds instructions to write JSON to that path, and spawns a research subagent. After the child finishes or reconnects, it reads the result file. If the file is missing, it records a short error, optionally including the child’s own reported result. If the file exists but is not valid JSON, it records a JSON error. If parsing succeeds, it stores the parsed JSON as the row result. In all non-recovered cases, it calls save_row before returning the row.
+
+**Call relations**: _wide_research creates one visit task for every entity and runs them together with asyncio.gather. visit is the bridge between the batch coordinator and the research subagent: it turns a single entity into a concrete subagent objective, calls ctx.spawn with the research profile, then converts the child’s file output into a WideResearchRow for the aggregate result.
+
+*Call graph*: 4 external calls (__init__, model_validate, loads, quote).
+
+
+### Website application building
+These files hand website-building requests to a specialized child agent, run the controlled app-building workflow, and audit the result for acceptance or repair.
+
+### `extensions/sites/ufo_ext_sites/delegation.py`
+
+`orchestration` · `tool invocation during website build requests`
+
+This file exists so the main assistant does not have to build every website directly. Instead, it can delegate the work to a specialized “website_building” subagent, much like asking a dedicated contractor to build and test a site while still working in the same workshop. The child agent has its own conversation history, but it shares this conversation’s sandbox, so any files it creates remain available here afterward.
+
+The file defines the shape of the request through `BuildWebsiteInput`. The most important field is `objective`, which must contain the full brief because the child agent does not know the earlier chat history. Optional fields let the caller give the build a friendly name, preload useful skills before the child starts, or allow more work rounds for a larger site.
+
+The main work is done by `_build_website`, which calls `ctx.spawn` to start or reconnect to the website-building child. It uses the current call’s idempotency key, meaning if the system retries after a crash, it can reconnect to the same delegated build instead of accidentally starting a duplicate one.
+
+Finally, `DELEGATION_TOOLS` registers this as a side-effecting tool because it can create files, run a site, and register a hosted result.
+
+#### Function details
+
+##### `_build_website`  (lines 56–63)
+
+```
+async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResult
+```
+
+**Purpose**: This function performs the actual handoff to the website-building subagent. It takes the user’s build brief and options, starts or reconnects to the child build session, and returns the child agent’s summary as tool output.
+
+**Data flow**: It receives a tool context, which contains things like the current idempotency key, and a `BuildWebsiteInput` object containing the website objective and optional settings. It turns the input into a plain data payload, leaving out missing values, then asks the context to spawn the `website_building` profile with that payload. When the child returns, it converts the child’s output to JSON text if there is any output, wraps that text in a `TextContent`, and returns it inside a `ToolResult`.
+
+**Call relations**: This function is the handler registered for the `build_website` tool. When an agent calls that tool, the tool system invokes `_build_website`; `_build_website` then hands the work to `ToolContext.spawn`, using the website-building profile and the current idempotency key so repeated dispatch can reconnect to the same child run. After the spawned child finishes or reports back, this function packages the result for the original caller.
+
+*Call graph*: 4 external calls (__init__, __init__, spawn, model_dump).
+
+
+### `extensions/sites/ufo_ext_sites/application_builder.py`
+
+`orchestration` · `request handling`
+
+This file is the guard-railed workshop for building a hosted application page. Without it, an agent could write files in the wrong place, skip design approval, deploy untested code, or return a site that does not match what was actually checked. The file sets up a fixed scaffold under /workspace/ufo-app, where the only real app source is app.tsx. Before source code is accepted, the builder must first write a visual SVG design contract. That design is parsed, rendered, checked for safe SVG content, checked for named regions, and saved with evidence. Then the builder can write app.tsx, but only if it imports the allowed UFO kit, mounts into the page correctly, avoids unsafe styling shortcuts, and compiles with Vite. If the first write fails, the builder repairs the retained candidate through exact text replacements rather than rewriting freely. The file also creates a simple PNG preview image from a typed design summary so a member can approve the direction before the deeper build begins. Finally, deployment is not trusted just because the worker says it succeeded. ApplicationBuildAcceptance checks stored QA proof, deployed source hashes, site ownership, and homepage binding. In everyday terms, this file is both the assembly line and the quality inspector for one generated app page.
+
+#### Function details
+
+##### `ApplicationBuilderTask.source_is_the_scaffolds_app_tsx`  (lines 525–537)
+
+```
+def source_is_the_scaffolds_app_tsx(self) -> 'ApplicationBuilderTask'
+```
+
+**Purpose**: Checks that the requested source file is exactly app.tsx inside the requested scaffold folder, and that both live under /workspace. This prevents the builder from being pointed at some other file by mistake or by a malicious path.
+
+**Data flow**: It reads scaffold_path and source_path from the task, converts them into safe workspace-relative paths, and compares them. If the source is exactly scaffold/app.tsx, the task is kept; otherwise validation stops with a clear error.
+
+**Call relations**: This validation runs when an ApplicationBuilderTask is created, including before the worker is spawned and during acceptance checks. It relies on contained_relative to enforce the workspace boundary before any build tool uses the paths.
+
+*Call graph*: 2 external calls (PurePosixPath, contained_relative).
+
+
+##### `ApplicationBuilderResult.result_matches_status`  (lines 580–589)
+
+```
+def result_matches_status(self) -> 'ApplicationBuilderResult'
+```
+
+**Purpose**: Makes sure a worker result tells a consistent story. A deployed result must name the deployed site, while a blocked result must explain what stopped it.
+
+**Data flow**: It reads the result status plus site name, site URL, and blocker fields. It either returns the same result as valid, or rejects impossible combinations such as “deployed” with a blocker.
+
+**Call relations**: This runs whenever ApplicationBuilderResult is validated, especially when the parent tool receives the worker’s output. It helps ApplicationBuildAcceptance start from a structurally sane result.
+
+
+##### `ApplicationBuildAcceptance.accept`  (lines 599–699)
+
+```
+async def accept(self, result: ApplicationBuilderResult) -> ApplicationBuilderResult
+```
+
+**Purpose**: Decides whether a worker’s claimed deployment can be trusted. It only accepts a deployed app if product QA passed, the deployed site exists, the owner is correct, and the deployed app.tsx matches the approved source.
+
+**Data flow**: It receives a worker result and reads stored QA proof, hosted site records, the deployed source manifest, and the accepted source hash from the sandbox. If all checks match, it binds the site as the agent’s homepage and returns an updated deployed result; if anything is missing or mismatched, it returns a blocked result.
+
+**Call relations**: build_ufo_application calls this after the child builder returns. It hands failures to ApplicationBuildAcceptance._blocked and uses helper paths such as _source_acceptance_path and _runtime_root to compare what was QA-checked with what was deployed.
+
+*Call graph*: calls 3 internal fn (_blocked, _runtime_root, _source_acceptance_path); 6 external calls (__init__, __init__, model_validate, model_copy, model_validate_json, site_url).
+
+
+##### `ApplicationBuildAcceptance._blocked`  (lines 701–714)
+
+```
+def _blocked(self, result: ApplicationBuilderResult, reason: str, browser_batches: int) -> ApplicationBuilderResult
+```
+
+**Purpose**: Builds a clean blocked result when acceptance finds a problem. It preserves useful evidence, such as checked controls and observed errors, while replacing the success claim with a specific blocker reason.
+
+**Data flow**: It takes the original result, a reason, and a browser QA count. It creates a new ApplicationBuilderResult with status blocked, the fixed source path, copied evidence fields, and the supplied blocker message.
+
+**Call relations**: ApplicationBuildAcceptance.accept calls this whenever a deployment claim fails one of its checks. It is the common exit ramp from an untrusted or incomplete worker result.
+
+*Call graph*: called by 1 (accept); 1 external calls (__init__).
+
+
+##### `EditApplicationSourceInput.json_text_edits_are_objects`  (lines 762–784)
+
+```
+def json_text_edits_are_objects(cls, value: object) -> object
+```
+
+**Purpose**: Accepts source edits in a few convenient text formats and normalizes them into structured old_text/new_text replacements. This makes the repair tool more forgiving without making the actual edit rules loose.
+
+**Data flow**: It receives the raw edits value. String items that look like JSON are parsed, patch-style SEARCH/REPLACE strings are split into old and new text, and paired strings can become replacement objects. The output is a tuple of normalized edit entries for later validation.
+
+**Call relations**: This validator runs before EditApplicationSourceInput is fully validated. edit_application_source later uses the cleaned edits to apply exact replacements.
+
+*Call graph*: 1 external calls (loads).
+
+
+##### `_validate_application_source`  (lines 787–828)
+
+```
+def _validate_application_source(source: str) -> None
+```
+
+**Purpose**: Checks that app.tsx follows the product’s rules before it can be compiled or accepted. It protects the app from unsupported imports, unsafe style escape hatches, and design-system violations.
+
+**Data flow**: It reads the full source text and scans it with several patterns. If the source imports only from ufo/kit, mounts correctly, avoids exports and forbidden styling patterns, and follows spacing/token rules, nothing is returned; otherwise it raises a repair-focused error.
+
+**Call relations**: write_application_source and edit_application_source call this before compiling and publishing source. It is the main source-code gate in the builder’s workflow.
+
+*Call graph*: called by 2 (edit_application_source, write_application_source).
+
+
+##### `_validate_application_design`  (lines 831–944)
+
+```
+def _validate_application_design(source: str) -> tuple[tuple[str, ...], int]
+```
+
+**Purpose**: Checks that the SVG design contract is safe, measurable, and useful before source work begins. It makes sure the design is a plain drawing with the expected width, height, named regions, and no active or external content.
+
+**Data flow**: It receives SVG text, parses it as XML, inspects the root size, drawing elements, IDs, effects, scripts, external links, and data-app-region labels. It returns the ordered region names and page height, or raises a clear error if the design breaks the rules.
+
+**Call relations**: write_application_design calls this before browser-rendering the design, and _require_application_design calls it again before source writing. It feeds region names and height into _render_application_design.
+
+*Call graph*: called by 2 (_require_application_design, write_application_design); 3 external calls (isfinite, split, fromstring).
+
+
+##### `_build_application_project`  (lines 947–961)
+
+```
+async def _build_application_project(ctx: ToolContext, project: str, runtime_root: str | None=None) -> None
+```
+
+**Purpose**: Builds the application project with the UFO page kit and Vite compiler. This catches real TypeScript or bundling problems before a file is accepted.
+
+**Data flow**: It receives a project path and optionally a runtime root. It writes the project config, unpacks the page kit, runs vite build, and either finishes silently or raises an error containing the compiler message.
+
+**Call relations**: _compile_application_source uses this for temporary compile checks, while write_application_source and edit_application_source use it again on the real scaffold after publishing app.tsx.
+
+*Call graph*: called by 3 (_compile_application_source, edit_application_source, write_application_source); 1 external calls (unpack_page_kit).
+
+
+##### `_compile_application_source`  (lines 964–977)
+
+```
+async def _compile_application_source(ctx: ToolContext, task: ApplicationBuilderTask, source: str) -> None
+```
+
+**Purpose**: Compiles a proposed app.tsx in a temporary project before it touches the real scaffold. This is like test-fitting a part before bolting it onto the machine.
+
+**Data flow**: It receives the tool context, the build task, and source text. It copies the existing index.html and proposed app.tsx into a runtime check folder, then calls _build_application_project. It returns nothing if the source compiles, or raises if it fails.
+
+**Call relations**: write_application_source and edit_application_source call this after source validation. It depends on _runtime_root and _build_application_project to create and build the isolated check project.
+
+*Call graph*: calls 2 internal fn (_build_application_project, _runtime_root); called by 2 (edit_application_source, write_application_source).
+
+
+##### `_source_claim_path`  (lines 980–984)
+
+```
+async def _source_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
+```
+
+**Purpose**: Creates the runtime path used to record that this builder turn owns the initial app.tsx candidate. The path includes a hash so the marker is stable but does not expose raw path details unnecessarily.
+
+**Data flow**: It reads the task source path and turn id, hashes the source path, and asks the sandbox for the matching runtime path. The result is a claim-file path.
+
+**Call relations**: write_application_source uses this to claim the first source write, and _require_application_source uses it to confirm that a candidate exists before reading or editing.
+
+*Call graph*: called by 2 (_require_application_source, write_application_source); 1 external calls (sha256).
+
+
+##### `_runtime_root`  (lines 987–988)
+
+```
+async def _runtime_root(ctx: ToolContext) -> str
+```
+
+**Purpose**: Finds the sandbox runtime root used by the small helper scripts. These scripts need a trusted base folder when reading and writing contained files.
+
+**Data flow**: It asks the sandbox for the runtime path to tool-output, takes its parent folder, and returns that as a string. It does not change files itself.
+
+**Call relations**: Many source, design, acceptance, and delegation functions call this before running containment-aware Python snippets. It is the shared doorway into runtime-owned files.
+
+*Call graph*: called by 9 (accept, _compile_application_source, _require_application_design, _require_application_source, build_ufo_application, edit_application_source, read_application_source, write_application_design, write_application_source); 1 external calls (PurePosixPath).
+
+
+##### `_design_path`  (lines 991–992)
+
+```
+def _design_path(task: ApplicationBuilderTask) -> str
+```
+
+**Purpose**: Returns the fixed SVG design path for a build task. The design always lives beside app.tsx in the scaffold.
+
+**Data flow**: It reads the task scaffold path and appends application-design.svg. The output is the workspace path where the visual contract should be written.
+
+**Call relations**: write_application_design uses this as the target design path, while _design_claim_path and _require_application_design use it to locate the design’s ownership and presence checks.
+
+*Call graph*: called by 3 (_design_claim_path, _require_application_design, write_application_design).
+
+
+##### `_design_claim_path`  (lines 995–999)
+
+```
+async def _design_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
+```
+
+**Purpose**: Creates the runtime path used to record that this builder turn owns the accepted design. This prevents competing or repeated design writes from silently overwriting each other.
+
+**Data flow**: It derives the design path from the task, hashes it, combines it with the turn id, and asks the sandbox for the runtime path. The output is a claim-file path.
+
+**Call relations**: write_application_design creates and later cleans up this claim. _require_application_design checks it before allowing app.tsx to be written.
+
+*Call graph*: calls 1 internal fn (_design_path); called by 2 (_require_application_design, write_application_design); 1 external calls (sha256).
+
+
+##### `application_design_acceptance_relative`  (lines 1002–1008)
+
+```
+def application_design_acceptance_relative(design_path: str, turn_id: UUID) -> str
+```
+
+**Purpose**: Builds the relative runtime filename for the accepted SVG design. Other code can use this predictable location to find the product-approved design for one builder turn.
+
+**Data flow**: It takes a design path and turn id, hashes the design path, and returns a relative path ending in accepted.svg. It does not touch the filesystem.
+
+**Call relations**: write_application_design uses this to choose where the accepted design copy is stored after validation.
+
+*Call graph*: called by 1 (write_application_design); 1 external calls (sha256).
+
+
+##### `application_design_evidence_relative`  (lines 1011–1017)
+
+```
+def application_design_evidence_relative(design_path: str, turn_id: UUID) -> str
+```
+
+**Purpose**: Builds the relative runtime filename for the accepted design evidence JSON. The evidence records what the browser audit saw, such as visible regions.
+
+**Data flow**: It takes a design path and turn id, hashes the design path, and returns a relative path ending in accepted-design.json. It does not read or write files.
+
+**Call relations**: write_application_design uses this alongside application_design_acceptance_relative so the design and its proof are stored as a matched pair.
+
+*Call graph*: called by 1 (write_application_design); 1 external calls (sha256).
+
+
+##### `_source_candidate_path`  (lines 1020–1026)
+
+```
+async def _source_candidate_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
+```
+
+**Purpose**: Creates the runtime path for the current editable app.tsx candidate. Repairs happen against this candidate before the real workspace file is updated.
+
+**Data flow**: It reads the task source path and turn id, hashes the source path, and returns a runtime path for a candidate .tsx file. No file is changed by this helper.
+
+**Call relations**: write_application_source writes the first candidate there. read_application_source and edit_application_source later read or update the same candidate during repair.
+
+*Call graph*: called by 3 (edit_application_source, read_application_source, write_application_source); 1 external calls (sha256).
+
+
+##### `_render_application_design`  (lines 1029–1075)
+
+```
+async def _render_application_design(ctx: ToolContext, candidate_path: str, names: tuple[str, ...], page_height: int) -> tuple[ApplicationAuditRegion, ...]
+```
+
+**Purpose**: Runs a browser-style audit of the SVG design and turns its output into checked region data. This catches visual problems that plain XML parsing cannot see, such as overlaps or content outside the view box.
+
+**Data flow**: It receives a candidate SVG path, expected region names, and page height. It writes the audit script, runs Node.js against the SVG, validates the JSON output, checks that visible regions match and do not overlap, and returns the audited region records.
+
+**Call relations**: write_application_design calls this after _validate_application_design. It also uses application_region_relation from the audit module to confirm region relationships.
+
+*Call graph*: called by 1 (write_application_design); 2 external calls (search, application_region_relation).
+
+
+##### `_source_acceptance_path`  (lines 1078–1084)
+
+```
+async def _source_acceptance_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
+```
+
+**Purpose**: Creates the runtime path where the accepted source hash is stored. That hash is later used to prove that QA, deployment, and accepted source all refer to the same app.tsx.
+
+**Data flow**: It hashes the task source path, combines it with the turn id, and returns a runtime path ending in accepted. It does not write the hash itself.
+
+**Call relations**: write_application_source and edit_application_source write the accepted hash there after a successful build. ApplicationBuildAcceptance.accept reads it during final deployment acceptance.
+
+*Call graph*: called by 3 (accept, edit_application_source, write_application_source); 1 external calls (sha256).
+
+
+##### `_require_application_source`  (lines 1087–1096)
+
+```
+async def _require_application_source(ctx: ToolContext, task: ApplicationBuilderTask) -> None
+```
+
+**Purpose**: Refuses repair actions unless an initial source candidate has already been claimed. This keeps read and edit tools from operating before there is a file to repair.
+
+**Data flow**: It computes the source claim path, runs a contained helper script to check for a regular file, and either returns silently, raises a user-facing ordering error, or raises a runtime error for unexpected failures.
+
+**Call relations**: read_application_source and edit_application_source call this before touching the candidate. It uses _source_claim_path and _runtime_root.
+
+*Call graph*: calls 2 internal fn (_runtime_root, _source_claim_path); called by 2 (edit_application_source, read_application_source).
+
+
+##### `_require_application_design`  (lines 1099–1112)
+
+```
+async def _require_application_design(ctx: ToolContext, task: ApplicationBuilderTask) -> None
+```
+
+**Purpose**: Refuses app.tsx writing until a design contract has been accepted. This enforces the workflow: design first, code second.
+
+**Data flow**: It checks the design claim file, reads the design SVG from the workspace, and re-validates the SVG. If the claim or design is missing or invalid, it raises an error telling the builder to complete write_application_design first.
+
+**Call relations**: write_application_source calls this before claiming source ownership. It uses _design_claim_path, _design_path, _runtime_root, and _validate_application_design.
+
+*Call graph*: calls 4 internal fn (_design_claim_path, _design_path, _runtime_root, _validate_application_design); called by 1 (write_application_source).
+
+
+##### `write_application_design`  (lines 1115–1254)
+
+```
+async def write_application_design(ctx: ToolContext, args: WriteApplicationDesignInput) -> ToolResult
+```
+
+**Purpose**: Accepts and publishes one full SVG design contract for the application. It is the official design gate before any app source can be written.
+
+**Data flow**: It reads the builder task and idempotency key, validates the SVG text, writes a candidate copy, browser-audits it, creates evidence, claims ownership, publishes accepted runtime copies, and finally writes the design into the workspace. It returns JSON describing the path, digest, size, height, and rendered regions.
+
+**Call relations**: This is exposed as the write_application_design tool for the application builder profile. It coordinates _validate_application_design, _render_application_design, the acceptance/evidence path helpers, _design_claim_path, _runtime_root, and _complete_application_design_cleanup if anything fails partway through.
+
+*Call graph*: calls 8 internal fn (_complete_application_design_cleanup, _design_claim_path, _design_path, _render_application_design, _runtime_root, _validate_application_design, application_design_acceptance_relative, application_design_evidence_relative); 6 external calls (__init__, __init__, __init__, sha256, dumps, application_design_region_size_failure).
+
+
+##### `_complete_application_design_cleanup`  (lines 1257–1273)
+
+```
+async def _complete_application_design_cleanup(ctx: ToolContext, program: str, *args: str) -> tuple[ExecResult | None, tuple[str, ...]]
+```
+
+**Purpose**: Finishes cleanup of design claims or accepted design files even if cancellation happens. It tries hard not to leave half-owned design state behind.
+
+**Data flow**: It starts a sandbox Python cleanup program with the supplied arguments and waits for it while shielding the task from cancellation. It returns the cleanup result if available plus any interruption or cleanup failure messages.
+
+**Call relations**: write_application_design calls this when publishing the design fails after a claim or accepted files may have been created. It is the safety broom for the design-write transaction.
+
+*Call graph*: called by 1 (write_application_design); 2 external calls (create_task, shield).
+
+
+##### `read_application_source`  (lines 1276–1330)
+
+```
+async def read_application_source(ctx: ToolContext, args: ReadApplicationSourceInput) -> ToolResult
+```
+
+**Purpose**: Shows limited, useful excerpts from the current app.tsx candidate during repair. It avoids dumping the whole file while still helping the builder find exact text to replace.
+
+**Data flow**: It validates that a source candidate exists, reads the candidate file, searches for requested terms, builds small line-numbered windows around matches plus the top and bottom of the file, and returns those excerpts as tool text.
+
+**Call relations**: This is exposed as the read_application_source tool. It is normally used after an edit mismatch, and it depends on _require_application_source, _source_candidate_path, and _runtime_root.
+
+*Call graph*: calls 3 internal fn (_require_application_source, _runtime_root, _source_candidate_path); 2 external calls (__init__, __init__).
+
+
+##### `edit_application_source`  (lines 1333–1381)
+
+```
+async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceInput) -> ToolResult
+```
+
+**Purpose**: Applies exact text replacements to the current app.tsx candidate and accepts the result only if it still validates and builds. It is the repair path after the initial full write.
+
+**Data flow**: It reads the candidate source, checks that each old_text appears exactly once and edits do not overlap, applies replacements, checks size, validates product source rules, compiles in a temporary project, writes the real workspace file, builds the real scaffold, records the accepted source hash, and returns edit counts and size.
+
+**Call relations**: This is exposed as the edit_application_source tool. It follows read_application_source in repair loops and calls _require_application_source, _source_candidate_path, _validate_application_source, _compile_application_source, _build_application_project, and _source_acceptance_path.
+
+*Call graph*: calls 7 internal fn (_build_application_project, _compile_application_source, _require_application_source, _runtime_root, _source_acceptance_path, _source_candidate_path, _validate_application_source); 4 external calls (__init__, __init__, sha256, dumps).
+
+
+##### `write_application_source`  (lines 1384–1428)
+
+```
+async def write_application_source(ctx: ToolContext, args: WriteApplicationSourceInput) -> ToolResult
+```
+
+**Purpose**: Writes the first complete app.tsx candidate for the build. It only succeeds after a design is accepted, and it forces later fixes through the repair tools.
+
+**Data flow**: It checks that a design exists, claims the source write, stores the candidate source in runtime storage, validates the source rules, compiles it, writes it to the scaffold, builds the real project, records the accepted source hash, and returns the path and byte size. If validation fails, the candidate is kept for repair instead of allowing another full rewrite.
+
+**Call relations**: This is exposed as the write_application_source tool for the child builder. It calls _require_application_design, _source_claim_path, _source_candidate_path, _validate_application_source, _compile_application_source, _build_application_project, _source_acceptance_path, and _runtime_root.
+
+*Call graph*: calls 8 internal fn (_build_application_project, _compile_application_source, _require_application_design, _runtime_root, _source_acceptance_path, _source_candidate_path, _source_claim_path, _validate_application_source); 4 external calls (__init__, __init__, sha256, dumps).
+
+
+##### `_preview_font`  (lines 1431–1432)
+
+```
+def _preview_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont
+```
+
+**Purpose**: Provides a font object for drawing the preview image. It centralizes the simple font choice used by the preview renderer.
+
+**Data flow**: It receives a font size and returns Pillow’s default font at that size. It does not read project state or change files.
+
+**Call relations**: _application_preview and _preview_card call this whenever they draw text into the generated PNG.
+
+*Call graph*: called by 2 (_application_preview, _preview_card); 1 external calls (load_default).
+
+
+##### `_preview_text`  (lines 1435–1441)
+
+```
+def _preview_text(value: str, width: int, lines: int) -> str
+```
+
+**Purpose**: Wraps and trims text so it fits into a preview area. If the text is too long, it ends the last visible line with an ellipsis.
+
+**Data flow**: It receives a string, a character width, and a maximum line count. It strips and wraps the text, keeps only the allowed lines, possibly shortens the final line, and returns the display string.
+
+**Call relations**: _application_preview and _preview_card call this before drawing purpose, priority, region, and direction text.
+
+*Call graph*: called by 2 (_application_preview, _preview_card); 1 external calls (wrap).
+
+
+##### `_preview_card`  (lines 1444–1477)
+
+```
+def _preview_card(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], title: str, detail: str) -> None
+```
+
+**Purpose**: Draws one region card in the preview PNG. A card shows the region name and a short placeholder description.
+
+**Data flow**: It receives a drawing surface, a rectangle, a title, and detail text. It draws a rounded box, title, divider line, and optional detail text inside that box. It returns nothing because it changes the image directly.
+
+**Call relations**: _application_preview calls this once for each requested region, after _preview_boxes decides where each card should go.
+
+*Call graph*: calls 2 internal fn (_preview_font, _preview_text); called by 1 (_application_preview); 3 external calls (line, rounded_rectangle, text).
+
+
+##### `_preview_boxes`  (lines 1480–1524)
+
+```
+def _preview_boxes(layout: ApplicationLayout, count: int) -> tuple[tuple[int, int, int, int], ...]
+```
+
+**Purpose**: Calculates where region cards should sit in the preview image for each layout type. It turns layout names like timeline or metrics into simple rectangles.
+
+**Data flow**: It receives a layout and region count. Based on fixed preview dimensions and gaps, it returns a tuple of box coordinates for the cards.
+
+**Call relations**: _application_preview calls this before drawing cards. Its output is paired with the region names and passed to _preview_card.
+
+*Call graph*: called by 1 (_application_preview).
+
+
+##### `_application_preview`  (lines 1527–1594)
+
+```
+def _application_preview(args: RenderApplicationPreviewInput) -> bytes
+```
+
+**Purpose**: Creates the preview PNG from the member-facing design contract. It gives a quick visual sketch without running the full app or touching deployment.
+
+**Data flow**: It receives purpose, first-screen priority, regions, layout, and optional design direction. It creates a blank image, draws a header, summary area, region cards, and footer direction text, then returns the PNG bytes.
+
+**Call relations**: _PillowApplicationPreview.render calls this as the concrete renderer. It uses _preview_font, _preview_text, _preview_boxes, and _preview_card to assemble the image.
+
+*Call graph*: calls 4 internal fn (_preview_boxes, _preview_card, _preview_font, _preview_text); called by 1 (render); 3 external calls (new, Draw, BytesIO).
+
+
+##### `_PillowApplicationPreview.render`  (lines 1599–1600)
+
+```
+def render(args: RenderApplicationPreviewInput) -> bytes
+```
+
+**Purpose**: Provides a small wrapper around the Pillow preview renderer. It gives the rest of the file a simple render method that can be run in a worker thread.
+
+**Data flow**: It receives the typed preview input and passes it directly to _application_preview. The output is PNG bytes.
+
+**Call relations**: render_application_preview calls this through asyncio.to_thread so image drawing does not block the async request flow.
+
+*Call graph*: calls 1 internal fn (_application_preview).
+
+
+##### `homepage_design_block`  (lines 1603–1616)
+
+```
+def homepage_design_block(contract: RenderApplicationPreviewInput) -> str
+```
+
+**Purpose**: Turns the approved preview contract into plain text instructions for the application builder. This keeps the builder aligned with the exact regions, order, layout, and direction the member saw.
+
+**Data flow**: It reads the preview contract fields, fills in the default direction if needed, and returns a multi-line “Homepage design” block.
+
+**Call relations**: render_application_preview calls this when returning the preview result. The resulting text can be carried into the application-building prompt.
+
+*Call graph*: called by 1 (render_application_preview).
+
+
+##### `render_application_preview`  (lines 1619–1632)
+
+```
+async def render_application_preview(ctx: ToolContext, args: RenderApplicationPreviewInput) -> ToolResult
+```
+
+**Purpose**: Generates and shares one PNG preview from a typed design summary. It is a safe, stateless preview step before the heavier build workflow.
+
+**Data flow**: It receives the preview input, renders PNG bytes in a background thread, shares the image artifact, hashes the contract JSON to make a design digest, builds a structured result, and returns it as tool text.
+
+**Call relations**: This is exposed as the render_application_preview tool. It calls _PillowApplicationPreview.render through asyncio.to_thread, shares the artifact through ToolContext, and uses homepage_design_block for the text contract.
+
+*Call graph*: calls 2 internal fn (share_artifact, homepage_design_block); 7 external calls (__init__, __init__, __init__, to_thread, model_dump, sha256, dumps).
+
+
+##### `_ensure_application_scaffold`  (lines 1635–1643)
+
+```
+async def _ensure_application_scaffold(ctx: ToolContext) -> None
+```
+
+**Purpose**: Makes sure the fixed application scaffold files exist before the child builder starts. It creates index.html, placeholder app.tsx, and preview.html only if they are missing.
+
+**Data flow**: It checks each expected scaffold path by trying to read a byte. For missing files, it writes the built-in default content into the sandbox workspace.
+
+**Call relations**: build_ufo_application calls this before spawning the child builder so the worker starts from a known project shape.
+
+*Call graph*: called by 1 (build_ufo_application).
+
+
+##### `build_ufo_application`  (lines 1646–1714)
+
+```
+async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInput) -> ToolResult
+```
+
+**Purpose**: Delegates the current member request to the specialized application builder worker and returns the accepted result. It is the parent-facing tool that starts the controlled build process.
+
+**Data flow**: It checks extension context and idempotency, claims that delegation for this turn, records redeploy and audit contract metadata when present, ensures the scaffold exists, builds the worker objective, spawns the application builder profile, then validates or blocks the worker output through ApplicationBuildAcceptance. It returns the final structured result as tool text.
+
+**Call relations**: This is exposed as the build_ufo_application tool. It starts the child subagent, calls _ensure_application_scaffold and _runtime_root, and hands the child result to ApplicationBuildAcceptance.accept.
+
+*Call graph*: calls 2 internal fn (_ensure_application_scaffold, _runtime_root); 9 external calls (__init__, __init__, __init__, __init__, __init__, spawn, sha256, format, format).
+
+
+##### `limit_application_builder_repair_reads`  (lines 1717–1752)
+
+```
+async def limit_application_builder_repair_reads(ctx: HookContext) -> Deny | None
+```
+
+**Purpose**: Limits how many times the builder can keep rereading source during a repair attempt without editing. This nudges the worker toward making fixes instead of looping on inspection.
+
+**Data flow**: It reads the hook context, ignores unrelated turns and tools, checks whether a product audit repair attempt exists, resets the read count when an edit happens, increments it when a read happens, and returns a denial once the limit is reached.
+
+**Call relations**: This runs as a pre-tool-use hook for the application builder profile. It can deny read_application_source after too many repair reads, while allowing edit_application_source to reset the count.
+
+*Call graph*: 2 external calls (__init__, format).
+
+
+##### `require_application_builder_qa`  (lines 1755–1768)
+
+```
+async def require_application_builder_qa(ctx: HookContext) -> Deny | None
+```
+
+**Purpose**: Blocks deployment until product-owned QA proof exists and is valid. It prevents the builder from deploying an app that has not passed the deterministic browser checks.
+
+**Data flow**: It reads the current builder turn and looks up the stored QA proof for that turn. If no proof exists, it returns a denial; if proof exists but is malformed, it raises a runtime error; otherwise it allows the tool call.
+
+**Call relations**: This hook is meant to guard the deployment tool for the application builder profile. ApplicationBuildAcceptance later relies on the same proof to compare the deployed source against the QA-checked source.
+
+*Call graph*: 2 external calls (__init__, model_validate).
+
+
+### `extensions/sites/ufo_ext_sites/application_audit.py`
+
+`domain_logic` · `application audit / acceptance checking`
+
+This file is a deterministic quality gate for an interactive application. In plain terms, it asks: did the page render in the required sizes and color modes, is the text readable, does the layout avoid broken or overlapping content, does it match the accepted design, and can a user actually interact with it? Without this file, the system would have no shared, repeatable standard for accepting an application or telling the builder what to fix.
+
+Most of the file defines typed records using Pydantic, a validation library that checks incoming data has the expected shape. These records describe facts the app must show, measured browser views, text contrast failures, visible regions, controls, interactions, audit issues, and final proof objects.
+
+The main audit function, `audit_application`, receives a complete browser report. It checks for missing views, empty pages, low contrast, horizontal overflow, clipped text, accidental overlaps, browser console errors, too few controls, too few successful interactions, missing required facts, and facts that are not visible near the top of the desktop page. A separate design-fidelity check compares named layout regions from the accepted design with the rendered desktop app. The result is an `ApplicationAuditVerdict`: either no issues, meaning it passed, or a bounded list of concrete repair messages.
+
+#### Function details
+
+##### `AcceptedApplicationDesignEvidence.regions_are_unique`  (lines 129–133)
+
+```
+def regions_are_unique(self) -> 'AcceptedApplicationDesignEvidence'
+```
+
+**Purpose**: This validation step makes sure an accepted design does not name two visible regions the same thing. Unique names matter because later checks compare design regions to application regions by name.
+
+**Data flow**: It reads the `regions` already placed on the design evidence object → collects their names → compares the number of names with the number of unique names → returns the same object if all names are unique, or raises an error before the object can be accepted.
+
+**Call relations**: This is called automatically by Pydantic when an `AcceptedApplicationDesignEvidence` object is created. It protects later design comparison code from confusing two different regions that share one label.
+
+
+##### `ApplicationAuditReport.views_are_unique`  (lines 198–202)
+
+```
+def views_are_unique(self) -> 'ApplicationAuditReport'
+```
+
+**Purpose**: This validation step makes sure the browser report has at most one measurement for each combination of color scheme and viewport width. The audit relies on each required view being unambiguous.
+
+**Data flow**: It reads the report’s `views` → turns each view into a key made from its color scheme and width → checks for duplicate keys → returns the same report if all view keys are unique, or raises an error if duplicates are present.
+
+**Call relations**: This runs automatically when Pydantic builds an `ApplicationAuditReport`. It gives `audit_application` a clean report where looking up, for example, the dark 1440px view has one clear answer.
+
+
+##### `ApplicationAuditVerdict.passed`  (lines 223–226)
+
+```
+def passed(self) -> bool
+```
+
+**Purpose**: This property gives a simple yes-or-no answer: the audit passed only when there are no repair issues. It is a convenience for callers that do not want to inspect the issue list themselves.
+
+**Data flow**: It reads the verdict’s `issues` tuple → checks whether that tuple is empty → returns `True` if there are no issues and `False` otherwise. It does not change the verdict.
+
+**Call relations**: Code that receives an `ApplicationAuditVerdict` can use this property after `audit_application` has finished. It turns the detailed repair report into a single pass/fail signal.
+
+
+##### `_needed_ratio`  (lines 273–278)
+
+```
+def _needed_ratio(item: ApplicationAuditText) -> float
+```
+
+**Purpose**: This helper decides the minimum contrast ratio a piece of text needs. Contrast ratio is the difference between text color and background color; higher means easier to read.
+
+**Data flow**: It receives one measured text item → checks whether it is in a special quiet UI slot, or whether it is large or bold enough to use the lower large-text standard → returns the required numeric contrast threshold for that item.
+
+**Call relations**: `audit_application` calls this while reviewing every measured text sample. The returned threshold is used to decide whether each text item should become a contrast repair issue.
+
+*Call graph*: called by 1 (audit_application).
+
+
+##### `_issue`  (lines 281–288)
+
+```
+def _issue(code: AuditIssueCode, message: str, terms: tuple[str, ...]=()) -> ApplicationAuditIssue
+```
+
+**Purpose**: This helper creates one audit issue while enforcing the file’s size limits for messages and search terms. It keeps feedback compact so the builder receives a bounded, readable repair list.
+
+**Data flow**: It receives an issue code, a message, and optional related terms → trims the message to the maximum allowed length and keeps only the first ten terms → creates and returns an `ApplicationAuditIssue` object.
+
+**Call relations**: `audit_application` calls this whenever it finds a problem, such as missing views, poor contrast, or failed interactions. The helper hands back standardized issue objects that are later packed into the final verdict.
+
+*Call graph*: called by 1 (audit_application); 1 external calls (__init__).
+
+
+##### `application_first_screen_scale`  (lines 291–301)
+
+```
+def application_first_screen_scale(page_height: int) -> float
+```
+
+**Purpose**: This helper converts the fixed first-screen height into a fraction of a measured page. It lets layout rules mean the same physical pixel size even when the full page is taller.
+
+**Data flow**: It receives a page height in pixels → divides the fixed first-screen height, 844 pixels, by that page height → returns the scaling factor used for vertical measurements.
+
+**Call relations**: `application_region_relation` uses it to keep the allowed near-touch gap realistic on tall pages. `application_design_region_size_failure` uses it so minimum region height and area are judged consistently across accepted page heights.
+
+*Call graph*: called by 2 (application_design_region_size_failure, application_region_relation).
+
+
+##### `application_region_relation`  (lines 304–324)
+
+```
+def application_region_relation(first: ApplicationAuditRegion, second: ApplicationAuditRegion, page_height: int=APPLICATION_DESIGN_FOLD) -> tuple[Literal['horizontal', 'vertical'], int] | None
+```
+
+**Purpose**: This function tells whether two visible regions are separated vertically or horizontally, and in which order. It is used to check whether the app keeps the same layout order as the accepted design.
+
+**Data flow**: It receives two regions and the page height their coordinates were measured against → scales the small vertical tolerance for that page height → compares the regions’ top, height, left, and width values → returns a pair such as `("vertical", -1)` or `("horizontal", 1)` when one region clearly comes before the other, or `None` if they overlap or cannot be separated.
+
+**Call relations**: `application_design_fidelity` calls this first to reject overlapping design regions, then again to compare each matching pair of design and rendered application regions. It depends on `application_first_screen_scale` so vertical spacing is judged fairly on taller pages.
+
+*Call graph*: calls 1 internal fn (application_first_screen_scale); called by 1 (application_design_fidelity).
+
+
+##### `application_design_region_size_failure`  (lines 327–345)
+
+```
+def application_design_region_size_failure(regions: tuple[ApplicationAuditRegion, ...], page_height: int=APPLICATION_DESIGN_FOLD) -> str | None
+```
+
+**Purpose**: This function checks whether any accepted design region is too small to count as a meaningful visible part of the screen. Tiny regions would make design matching unreliable, like trying to compare a whole room by looking at a postage stamp.
+
+**Data flow**: It receives the design regions and the page height → calculates the first-screen scaling factor → checks each region’s width, height, and area against minimum useful sizes → returns the first human-readable failure message it finds, or `None` if all regions are large enough.
+
+**Call relations**: `application_design_fidelity` calls this before comparing the design to the app. If a design region is too small, fidelity checking stops early because the design evidence itself is not strong enough.
+
+*Call graph*: calls 1 internal fn (application_first_screen_scale); called by 1 (application_design_fidelity).
+
+
+##### `application_design_fidelity`  (lines 348–431)
+
+```
+def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDesignFidelity
+```
+
+**Purpose**: This function scores how well the rendered desktop application matches the accepted design’s named layout regions. It checks region count, names, useful size, overlap, above-the-fold visibility, and relative order.
+
+**Data flow**: It receives a full audit report → reads the accepted design regions and the measured desktop views → first validates that the design has the right number of unique, non-overlapping, useful regions → then, for both light and dark desktop views, compares region names, visibility near the top of the page, and pair-by-pair layout order → returns an `ApplicationDesignFidelity` object with passed checks, total checks, and failure messages.
+
+**Call relations**: `audit_application` calls this as the design portion of the overall audit. Inside, it uses `application_design_region_size_failure` to reject weak design regions and `application_region_relation` to compare layout order between the design and the rendered app.
+
+*Call graph*: calls 2 internal fn (application_design_region_size_failure, application_region_relation); called by 1 (audit_application); 1 external calls (__init__).
+
+
+##### `audit_application`  (lines 434–570)
+
+```
+def audit_application(report: ApplicationAuditReport, contract: ApplicationAuditContract | None=None) -> ApplicationAuditVerdict
+```
+
+**Purpose**: This is the main acceptance check for a staged application. It turns raw browser evidence and optional required facts into a final verdict that either passes or tells the builder what to repair.
+
+**Data flow**: It receives an `ApplicationAuditReport` and, optionally, an `ApplicationAuditContract` containing facts the page must show → organizes measured views by color scheme and width → checks for missing or empty views, unreadable contrast, horizontal overflow, clipped content, overlaps, design mismatch, browser errors, too few controls, too few successful interactions, missing facts, and required facts not visible above the desktop fold → creates a bounded list of standardized issues → returns an `ApplicationAuditVerdict` containing those issues.
+
+**Call relations**: This function is the file’s central flow. It calls `_needed_ratio` while judging text contrast, `_issue` whenever it needs to add a repair item, and `application_design_fidelity` for the design-match portion. At the end it constructs the `ApplicationAuditVerdict` that downstream builder logic can inspect or send back as feedback.
+
+*Call graph*: calls 3 internal fn (_issue, _needed_ratio, application_design_fidelity); 1 external calls (__init__).
 
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The current trusted settings for how the service should run, including database, provider, deployment, and safety options.
-- `reg-extension-capability-registry` — The live catalog of everything enabled extensions add, such as tools, routes, jobs, credentials, hooks, and backends.
-- `reg-database-session-workspace-scope` — The shared database access layer that keeps reads and writes inside the right workspace and transaction.
-- `reg-member-auth-principals` — The shared answer to who the current person or service is and what member identity they are acting as.
-- `reg-surface-routing` — The mapping from outside places like web, Slack, terminal, and iMessage to the right workspace, conversation, member, and agent.
-- `reg-tool-catalog` — The current list of tools the agent may call, with their names, inputs, permissions, and implementations.
-- `reg-billing-ledger` — The shared money and usage record for tokens, images, videos, sandbox use, egress, balances, caps, and exports.
-- `reg-credential-vault` — The encrypted store of API keys, connected accounts, grants, and approvals that lets tools use outside services without exposing secrets.
-- `reg-egress-policy` — The shared network exit rules that decide which outside addresses sandboxes may contact and when secrets may be added.
-- `reg-sandbox-handles` — The remembered execution workspaces, browser workbenches, terminal sessions, and sandbox IDs used across a conversation or turn.
-- `reg-source-sync-state` — The saved state of connected content sources, including pages, checkpoints, errors, ownership, and read grants.
-- `reg-observability-context` — The shared tracing, logging, metrics, health, and redaction context used to understand what happened safely.
-- `reg-extension-data-store` — Durable extension-scoped key/value or JSON state used by installed extensions beyond their manifest capabilities and lockfile selection.
-- `reg-auth-and-oauth-flow-state` — Short-lived login and OAuth handoff state such as nonces, return targets, code-verifier data, pending claims, and callback correlation before it becomes an authenticated principal or stored credential.
-- `reg-runtime-connection-pools` — Live pooled connections and reusable clients for shared services such as the database, Redis/live hub, blob storage, model providers, connector APIs, and sandbox/browser providers.
-- `reg-egress-policy-generation` — Per-workspace egress-rule version or invalidation counter used to rebuild cached sandbox proxy rules after credential, grant, or network-policy changes.
+- `reg-agent-registry` — The durable list of agents, including their names, visibility, owners, purposes, model behavior, provisioning source, and tool policy.
+- `reg-conversation-turn-state` — The conversation and turn queue state that tracks each unit of agent work from admission through running, completion, cancellation, or recovery.
+- `reg-transcript-history` — The saved conversation transcript, including compacted summaries and durable final results that later stages read instead of relying on memory.
+- `reg-live-update-hub` — The live activity stream that carries turn progress, tool status, cancellations, mid-turn replies, and final updates to connected viewers.
+- `reg-workflow-claims` — The workflow attempt and run-claim state that prevents two workers from running the same turn, scheduled task, listener, or cleanup job at once.
+- `reg-cancellation-state` — The shared brake state that marks work as stopping or cancelled so model calls, tools, workflows, and retries do not continue stale work.
+- `reg-execution-environment` — The controlled runtime environment given to commands, files, terminals, browsers, and documents, including safe environment variables and containment rules.
+- `reg-tool-catalog-policy` — The current tool catalog and allowlist rules that say which built-in, extension, connector, MCP, and sandbox tools may be called.
+- `reg-model-catalog` — The shared AI model catalog that records available providers, model names, prices, limits, API routes, key sources, and reasoning support.
+- `reg-billing-ledger` — The usage ledger, spend caps, price versions, exports, and prepaid balance records used to meter and charge workspace activity.
+- `reg-observability-traces` — The shared logs, metrics, traces, traceparent links, and safety-filtered operator views used to understand what the system is doing.
+- `reg-scheduled-jobs` — The durable background-job state for scheduled tasks, pauses, monitor checks, report writing, thumbnail repair, product metrics, and self-improvement runs.
+- `reg-subagent-tasks` — The parent-child delegation state that tracks spawned helper agents, their inputs, outputs, names, costs, and undelivered results.
+- `reg-skill-store` — The saved and selected skills that can be provisioned by packs, loaded into agent sandboxes, or created by users inside a workspace.
+- `reg-hosted-site-registry` — The hosted-site records that remember who owns each site, which conversation created it, where it runs, and how previews or sharing are allowed.
+- `reg-prompt-and-delivery-policy` — The prompt, delivery-rule, compaction, and prompt-change proposal state that controls what instructions are rendered and how replies should be shaped.
+- `reg-objectives-plan-store` — Durable objective, plan, step, evidence, and blocker records used by multi-step agent workflows and objective-tracking extensions.
+- `reg-turn-created-reference-index` — Durable per-turn list of objects, artifacts, sites, files, or other references created during a turn for later transcript display, panels, delivery, and recovery.

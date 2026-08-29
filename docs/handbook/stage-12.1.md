@@ -1,1581 +1,2454 @@
-# Browser Automation and Hosted Site Building  `stage-12.1`
+# Sandbox carrier implementations and terminal transports  `stage-12.1`
 
-This stage is the web-working part of the system. It is used during the main work loop when an agent must open Chrome, inspect a page, press buttons, fill forms, download files, or build and publish a small hosted site.
+This stage is the system’s “workshop selector and wiring.” It sits behind the scenes when a conversation needs a place to run commands, edit files, serve a web port, or show a live terminal. The selector chooses the sandbox carrier, meaning the kind of workspace to use, and keeps old choices available so paused work can resume.
 
-The Chrome session layer is the engine. It starts Chrome, talks to it through the Chrome DevTools Protocol, which is Chrome’s remote-control channel, manages tabs, waits for pages to settle, and watches downloads. The page modeling layer turns the visible page into text and stable references, so the agent can understand and act on buttons, links, and fields. The action layer is the control panel: tools accept requests like click, type, upload, or screenshot, check and fix them, then send them to Chrome. Provider code decides where the browser comes from, such as a sandbox, a remote browser, or a delegated browser worker.
-
-The site-building files add publishing. They move source files into a sandbox, guide a safe build-test-repair-deploy workflow, audit the finished app in the browser, and register hosted sites with ownership, visibility, port, and homepage rules.
-
-## Sub-stages
-
-- [Chrome Session and CDP Infrastructure](stage-12.1.1.md) `stage-12.1.1` — 8 files
-- [Browser Page Modeling and Content Inspection](stage-12.1.2.md) `stage-12.1.2` — 4 files
-- [Browser Action Execution and Tool Surface](stage-12.1.3.md) `stage-12.1.3` — 8 files
-- [Browser Providers and Delegated Browser Agents](stage-12.1.4.md) `stage-12.1.4` — 5 files
+The local carrier runs commands in an ordinary folder on the host computer, useful for simple development without containers. The Docker carrier gives each conversation its own container, a more isolated mini-computer, and manages creating it, copying files, running commands, exposing ports, and cleaning up idle ones. The E2B carrier does the same kind of work on a remote cloud sandbox service. The member-terminal carrier lets a user’s own connected terminal act as the sandbox, with safe request-and-reply handling even if the browser connection blips. The Redis stream terminal adds a transport bridge for multi-pod deployments, passing small control messages through Redis Streams and larger terminal data through blob storage.
 
 ## Files in this stage
 
-### Site Tool Entrypoints
-Agent-facing workflows for building, previewing, publishing, and binding hosted sites and application pages.
+### Terminal relays
+Member-terminal sandbox execution and Redis-backed stream relaying keep terminal sessions usable across reconnects and pods.
 
-### `extensions/sites/ufo_ext_sites/tools.py`
+### `extensions/redis_hub/ufo_ext_redis_hub/stream_terminal.py`
 
-`orchestration` · `request handling`
+`io_transport` · `request handling and long-held terminal streams`
 
-This file is the website workshop for the system. It lets an agent run a build, start a server, publish a static site or app, take a preview image, and make one hosted site the agent’s homepage. Without it, an agent might start a server that is not ready yet, overwrite another process on the same port, leave a dead hosted link, expose a site to the wrong audience, or lose the source files needed to edit a deployed static site later.
+In a single-process setup, a workflow can talk directly to the terminal connection it is holding. In a fleet of pods, that assumption breaks: the user's long-held terminal stream may be on one pod while the workflow turn that wants to run a command is on another. This file is the meeting place between them.
 
-The main idea is: work happens inside a sandbox, then a proven live port is registered as a public-facing site. Like checking that a shop is open before putting its address on a flyer, the code starts the server and polls the port before returning a URL. It also clears old server tasks and log files safely, so stale processes and risky file links do not interfere.
+It publishes a short-lived Redis binding that says, “this conversation currently has a terminal, here is its workspace.” A background heartbeat refreshes that binding while the client is connected. When a workflow wants to run an operation, it waits briefly for that binding, takes a per-conversation lock so only one operation runs at a time, stores any input bytes in the blob store, and writes an operation record to a Redis Stream. The connection pod reads that stream, claims one operation so reconnects do not run it twice, renders it to the client, and later posts a reply. Small replies go through Redis; large replies go through the blob store.
 
-For static deployments, it lists the served directory, records file sizes and hashes, uploads those files to the blob store, and saves a manifest as the site’s source of record. For dynamic published apps, it registers the running sandbox server instead. After hosting, it asks a preview service to capture the page for cards and artifacts. It also has special rules for the UFO application builder: product QA must pass before deploy, and the source cannot change after QA. Homepage binding is treated as a visibility-changing act, so only the creator, usually while a member is actively speaking, can do it.
+The file is careful about failure. Every wait has a deadline, Redis keys expire, and cleanup is best-effort. This matters because a broken socket, crashed pod, or lost client should turn into a clear “terminal gone” error, not leave a workflow stuck forever.
 
 #### Function details
 
-##### `StartServerInput.validate_port`  (lines 408–413)
+##### `_text`  (lines 55–58)
 
 ```
-def validate_port(self) -> 'StartServerInput'
+def _text(value: bytes | str) -> str
 ```
 
-**Purpose**: Checks that a server start request is sensible before the tool runs. It rejects an empty command and rejects port numbers outside the valid internet port range.
+**Purpose**: Turns a Redis field into normal Python text. Redis may return either bytes or strings, and the rest of this file wants one predictable shape.
 
-**Data flow**: It reads the parsed input fields: command and port. If the command is blank or the port is invalid, it raises a validation error; otherwise it returns the same input object unchanged.
+**Data flow**: It receives one Redis value. If it is already text, it returns it unchanged; if it is bytes, it decodes the bytes into text. Nothing else is changed.
 
-**Call relations**: This runs automatically when a StartServerInput is created for the start_server tool. It protects start_server from receiving values that would fail later in a less clear way.
+**Call relations**: Many later steps use this as a small adapter before reading Redis data: operation decoding, reply decoding, binding reads, gate checks, and Lua-script results all pass through it so they do not care which Redis response type they got.
 
+*Call graph*: called by 7 (_decode_op, _decode_reply, _gate_ok, _read_binding, _run_op, next_op, _pairs).
 
-##### `_json_result`  (lines 450–451)
 
-```
-def _json_result(payload: dict[str, object]) -> ToolResult
-```
-
-**Purpose**: Turns a Python dictionary into the standard tool response format. Tool callers get one JSON text block instead of raw Python data.
-
-**Data flow**: A dictionary goes in. The function serializes it to JSON text, wraps that text as tool content, and returns a ToolResult.
-
-**Call relations**: Most public tools call this at the end, after they have built, served, hosted, audited, or bound something. It is the common exit door for successful tool replies.
-
-*Call graph*: called by 7 (_redeploy_homepage, deploy_website, publish_website, qa_ufo_application, set_homepage, start_server, website); 3 external calls (__init__, __init__, dumps).
-
-
-##### `_free_log`  (lines 454–474)
-
-```
-async def _free_log(ctx: ToolContext, log_path: str) -> None
-```
-
-**Purpose**: Safely clears the chosen log-file name before a background server writes to it. This avoids following a planted symbolic link, which is a file shortcut that could otherwise redirect logs into an unintended file.
-
-**Data flow**: It receives the tool context and a log path. It decides which safe root the path belongs under, asks the sandbox to remove that exact file through a containment guard, and raises an error if the guard refuses.
-
-**Call relations**: _serve calls this before starting any server. It prepares the log path so the later shell redirect creates a fresh file instead of overwriting something unsafe.
-
-*Call graph*: called by 1 (_serve); 1 external calls (PurePosixPath).
-
-
-##### `_stop_server`  (lines 477–482)
-
-```
-async def _stop_server(ctx: ToolContext, port: int) -> None
-```
-
-**Purpose**: Frees a port by stopping any process that is already listening on it. This keeps a new preview or deployment from accidentally talking to an old server.
-
-**Data flow**: It receives a port number. It runs a sandbox Python program that finds listeners on that port and terminates them; if that program fails, it raises an error.
-
-**Call relations**: _serve uses this before launching a server. _audit_builder_application also uses it after an audit so the temporary audit server does not stay running.
-
-*Call graph*: called by 2 (_audit_builder_application, _serve).
-
-
-##### `_stop_server_task`  (lines 485–501)
-
-```
-async def _stop_server_task(ctx: ToolContext, command: str, base: str, pid: str) -> None
-```
-
-**Purpose**: Stops a background server task that this tool just started, especially when readiness checks fail or are interrupted. It makes cleanup deliberate instead of leaving an orphaned process.
-
-**Data flow**: It receives the context, the server command, the task journal base path, and the task process id. It asks the sandbox to signal that task and then waits for the detached task record to finish; errors become RuntimeErrors.
-
-**Call relations**: _serve calls this only on failure paths after a background task was launched. It is the emergency brake for starts that do not become usable servers.
-
-*Call graph*: called by 1 (_serve).
-
-
-##### `_reset_server_task`  (lines 504–522)
-
-```
-async def _reset_server_task(ctx: ToolContext, base: str) -> None
-```
-
-**Purpose**: Clears the saved task record for a server slot before starting a new one. This prevents the sandbox task runner from reconnecting to an old task instead of launching the new server.
-
-**Data flow**: It receives a task base path. Inside the sandbox, it stops any still-running task recorded there and removes the related pid, log, exit, and lock files.
-
-**Call relations**: _serve calls this after freeing the log and port, just before starting a detached server. It gives every serve attempt a clean task journal.
-
-*Call graph*: called by 1 (_serve).
-
-
-##### `_serve`  (lines 525–592)
-
-```
-async def _serve(ctx: ToolContext, command: str, project: str, port: int, log_path: str) -> dict[str, object]
-```
-
-**Purpose**: Starts a server in the sandbox and waits until it is actually reachable. It returns only after the port answers, so callers do not race ahead with a dead or still-starting server.
-
-**Data flow**: It receives a command, project directory, port, and log path. It clears the log, frees the port, resets the task journal, launches the command in the background with PORT set, probes localhost until the port accepts connections, and returns the sandbox URL, port, and log path. On failure, it stops the new task and reports useful log output.
-
-**Call relations**: This is the central serving helper. start_server uses it for scratch previews, deploy_website and publish_website use it before hosting, _redeploy_homepage uses it for homepage updates, and _audit_builder_application uses it for the temporary audit server.
-
-*Call graph*: calls 4 internal fn (_free_log, _reset_server_task, _stop_server, _stop_server_task); called by 5 (_audit_builder_application, _redeploy_homepage, deploy_website, publish_website, start_server); 3 external calls (sha256, quote, shell_path).
-
-
-##### `_site_media_type`  (lines 595–597)
-
-```
-def _site_media_type(path: str) -> str
-```
-
-**Purpose**: Chooses the web content type for a file based on its extension. This tells browsers whether a file is HTML, JavaScript, CSS, an image, and so on.
-
-**Data flow**: It receives a file path string. It looks at the part after the final dot, finds a known media type or uses a safe generic default, and adds a text character-set marker for text files.
-
-**Call relations**: _promote_source calls this while building the source manifest for a static site. The manifest later tells the hosting layer how to serve each stored file.
-
-*Call graph*: called by 1 (_promote_source).
-
-
-##### `_source_listing`  (lines 600–621)
-
-```
-async def _source_listing(ctx: ToolContext, project: str) -> dict[str, dict[str, object]]
-```
-
-**Purpose**: Creates a safe inventory of the files in a static site directory. It records file sizes and SHA-256 hashes, which are digital fingerprints used to verify exact bytes.
-
-**Data flow**: It receives a sandbox project path. A sandbox script walks the directory, skips folders like .git and node_modules, refuses oversized sites, and returns JSON describing each regular file; the function parses that JSON into a dictionary.
-
-**Call relations**: _served_directory calls this to understand what can be hosted. If the directory is too large or empty, deployment stops before anything is registered.
-
-*Call graph*: called by 1 (_served_directory); 1 external calls (loads).
-
-
-##### `_promote_source`  (lines 624–665)
-
-```
-async def _promote_source(ctx: ToolContext, project: str, conversation_id: UUID, name: str, listing: dict[str, dict[str, object]]) -> str
-```
-
-**Purpose**: Copies a static site’s served files into the blob store and creates the manifest that records them. This makes the deployed site recoverable later without dialing back into the sandbox.
-
-**Data flow**: It receives the project path, conversation id, site name, and file listing. It creates a new storage prefix, builds a manifest with size, media type, and hash for each file, uploads the bytes either through presigned upload URLs or direct streams, and returns the manifest as JSON.
-
-**Call relations**: deploy_website and _redeploy_homepage call this before registering or updating a static site. It relies on _site_media_type to label files and hands the manifest to _host or the homepage redeploy write.
-
-*Call graph*: calls 1 internal fn (_site_media_type); called by 2 (_redeploy_homepage, deploy_website); 4 external calls (__init__, __init__, transfer, uuid4).
-
-
-##### `_illustrate`  (lines 668–690)
-
-```
-async def _illustrate(ctx: ToolContext, name: str, port: int, conversation_id: UUID) -> None
-```
-
-**Purpose**: Creates visual previews for a hosted site after it has been registered. These images are used for artifact cards and share cards.
-
-**Data flow**: It receives the context, site name, serving port, and the conversation id of the site row. It asks the preview service to render the site, saves the preview if one is returned, and then asks the share-card code to draw a card from the page.
-
-**Call relations**: deploy_website, publish_website, and _redeploy_homepage call this after hosting is already written. It runs after registration so the preview captures the current official site, not the one it displaced.
-
-*Call graph*: calls 1 internal fn (render_site_preview); called by 3 (_redeploy_homepage, deploy_website, publish_website); 2 external calls (__init__, draw_from_page).
-
-
-##### `_refuse_before_serving`  (lines 693–733)
-
-```
-async def _refuse_before_serving(ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None) -> tuple[str, HostedSite | None]
-```
-
-**Purpose**: Checks whether a site is allowed to be hosted before the tool kills anything on the target port. This protects existing hosted sites from being knocked offline by a deploy that would later be refused.
-
-**Data flow**: It receives the requested site name, port, and optional visibility. It confirms there is an acting member, checks that visibility changes have a live speaker, normalizes the site name, validates the future URL shape, and asks the site registry whether registration would be refused or what site would be displaced.
-
-**Call relations**: deploy_website and publish_website call this before starting their server. _host repeats the key checks when it writes, but this early pass keeps failed requests from causing damage.
-
-*Call graph*: called by 2 (deploy_website, publish_website); 3 external calls (__init__, site_name, site_url).
-
-
-##### `_host`  (lines 736–780)
-
-```
-async def _host(ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None, manifest: str | None) -> dict[str, object]
-```
-
-**Purpose**: Registers a live sandbox port as a hosted site and returns the stable link details. This is the step that turns a local server into a deliverable URL.
-
-**Data flow**: It receives a raw name, port, optional visibility, and optional source manifest. It confirms ownership and speaker rules, normalizes the name, builds the public URL, writes the site row through HostedSites.register, computes the effective visibility, and returns site metadata.
-
-**Call relations**: deploy_website and publish_website call this after _serve proves the port is reachable. _illustrate then uses the registered site to capture previews.
-
-*Call graph*: called by 2 (deploy_website, publish_website); 5 external calls (__init__, effective_visibility, site_object_name, site_name, site_url).
-
-
-##### `website`  (lines 783–792)
-
-```
-async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult
-```
-
-**Purpose**: Runs a website build command inside the sandbox and reports what files are now in the project directory. It is a simple build tool, not a hosting tool.
-
-**Data flow**: It receives a build command and optional project path. It scopes the path to the workspace, runs the command there, raises an error if the build fails, lists the directory, and returns the project path plus file names as JSON.
-
-**Call relations**: This is one of the exported website tools. It calls _json_result for its response but does not call the serving or hosting helpers.
-
-*Call graph*: calls 1 internal fn (_json_result); 2 external calls (quote, workspace_path).
-
-
-##### `start_server`  (lines 795–815)
-
-```
-async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult
-```
-
-**Purpose**: Starts a temporary server in the sandbox and returns its local URL. It is meant for previews and validation, not for permanent hosted links.
-
-**Data flow**: It receives a project path, optional command, optional port, and optional log file. It validates special UFO application-builder restrictions, chooses defaults, scopes paths, starts the server through _serve, adjusts the preview URL for the application builder when needed, and returns the details as JSON.
-
-**Call relations**: This exported tool is the direct user-facing wrapper around _serve. Unlike deploy_website and publish_website, it does not call _host, so no permanent site is registered.
-
-*Call graph*: calls 2 internal fn (_json_result, _serve); 1 external calls (workspace_path).
-
-
-##### `_application_audit_attempts`  (lines 818–826)
-
-```
-async def _application_audit_attempts(ctx: ToolContext) -> int
-```
-
-**Purpose**: Reads how many product-audit attempts have already been used in the current turn. This enforces a small retry budget for the UFO application builder.
-
-**Data flow**: It receives the tool context. It reads a store key based on the turn id, returns zero if nothing is stored, returns the stored integer if valid, and errors if the stored value has the wrong type.
-
-**Call relations**: _audit_builder_application calls this before running an audit. The count controls whether another audit may proceed.
-
-*Call graph*: called by 1 (_audit_builder_application); 1 external calls (format).
-
-
-##### `_application_audit_feedback`  (lines 829–841)
-
-```
-async def _application_audit_feedback(ctx: ToolContext, issues: tuple[ApplicationAuditIssue, ...], attempts: int) -> ApplicationAuditFeedback
-```
-
-**Purpose**: Records a failed audit attempt and packages the issues into feedback for the builder. It tells the builder what to fix and how many tries remain.
-
-**Data flow**: It receives audit issues and the previous attempt count. It increments and stores the count, builds an ApplicationAuditFeedback object with remaining attempts and issues, and returns it.
-
-**Call relations**: _audit_builder_application calls this whenever the browser audit cannot run, cannot produce a valid report, or finds product problems. qa_ufo_application returns this feedback to the caller as JSON.
-
-*Call graph*: called by 1 (_audit_builder_application); 2 external calls (__init__, format).
-
-
-##### `_audit_builder_application`  (lines 844–942)
-
-```
-async def _audit_builder_application(ctx: ToolContext, project: str) -> ApplicationAuditReport | ApplicationAuditFeedback
-```
-
-**Purpose**: Runs the deterministic browser-based product audit for a UFO application. It checks whether the app behaves and displays correctly before deployment is allowed.
-
-**Data flow**: It receives the context and project path. It checks attempt limits, writes audit scripts into runtime storage, starts a temporary preview server with _serve, runs the Node audit script, reads and validates the report, compares it with the stored contract, and returns either a full report or repair feedback. It always stops the audit port afterward.
-
-**Call relations**: qa_ufo_application calls this as its main work. It uses _application_audit_attempts and _application_audit_feedback to enforce retries, and _serve plus _stop_server to control the temporary audit server.
-
-*Call graph*: calls 4 internal fn (_application_audit_attempts, _application_audit_feedback, _serve, _stop_server); called by 1 (qa_ufo_application); 8 external calls (__init__, model_validate, model_validate_json, quote, shell_path, format, audit_application, application_design_acceptance_relative).
-
-
-##### `_application_source_sha256`  (lines 945–951)
-
-```
-async def _application_source_sha256(ctx: ToolContext) -> str
-```
-
-**Purpose**: Computes a fingerprint of the UFO application source file. This proves whether the source changed after QA passed.
-
-**Data flow**: It asks the sandbox to read the application source file safely. If reading succeeds, it hashes the source text with SHA-256 and returns the hex digest; otherwise it raises an error.
-
-**Call relations**: qa_ufo_application stores this hash after a successful audit. _require_current_application_qa later compares the current hash against the stored proof before deployment.
-
-*Call graph*: called by 2 (_require_current_application_qa, qa_ufo_application); 1 external calls (sha256).
-
-
-##### `_require_current_application_qa`  (lines 954–966)
-
-```
-async def _require_current_application_qa(ctx: ToolContext) -> ApplicationQaProof
-```
-
-**Purpose**: Enforces that the UFO application builder cannot deploy without a current passing QA proof. It also blocks deployment if the source changed after QA.
-
-**Data flow**: It reads the stored QA proof for the current turn, validates its shape, recomputes the source hash, compares the two, and returns the proof if everything matches. Missing, invalid, or stale proof becomes an error.
-
-**Call relations**: deploy_website calls this when the special application-builder profile is deploying. It connects the qa_ufo_application step to the later deploy step.
-
-*Call graph*: calls 1 internal fn (_application_source_sha256); called by 1 (deploy_website); 2 external calls (model_validate, format).
-
-
-##### `qa_ufo_application`  (lines 969–1011)
-
-```
-async def qa_ufo_application(ctx: ToolContext, args: QaUfoApplicationInput) -> ToolResult
-```
-
-**Purpose**: Runs product QA for the special UFO application builder and records proof when it passes. This is the gate before that builder may deploy.
-
-**Data flow**: It checks that the caller is the application-builder profile, reads and increments the QA call count, runs _audit_builder_application, and either returns repair feedback or stores a proof containing the current source hash and audit batch count. On success, it returns a summary of checked views and controls.
-
-**Call relations**: This is an exported profile-only tool. It depends on _audit_builder_application for the browser checks, _application_source_sha256 for the proof, and _json_result for the response.
-
-*Call graph*: calls 3 internal fn (_application_source_sha256, _audit_builder_application, _json_result); 4 external calls (__init__, __init__, format, format).
-
-
-##### `deploy_ufo_application`  (lines 1014–1024)
-
-```
-async def deploy_ufo_application(ctx: ToolContext, args: DeployUfoApplicationInput) -> ToolResult
-```
-
-**Purpose**: Deploys the special UFO application builder’s fixed scaffold under a chosen site name. It is a narrow wrapper that prevents the builder from choosing arbitrary deploy inputs.
-
-**Data flow**: It checks that the current profile is the UFO application builder. Then it creates a DeployWebsiteInput for the fixed scaffold and index.html, calls deploy_website, and returns that result.
-
-**Call relations**: This exported profile-only deploy tool delegates the actual hosting flow to deploy_website. The QA requirement is enforced inside deploy_website for this profile.
-
-*Call graph*: calls 1 internal fn (deploy_website); 1 external calls (__init__).
-
-
-##### `deploy_website`  (lines 1027–1058)
-
-```
-async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult
-```
-
-**Purpose**: Hosts a built static website at a stable link and stores its source files for future retrieval. Re-deploying the same site name updates the link instead of creating a new one.
-
-**Data flow**: It receives a static output path, site name, entry point, and optional visibility. It scopes the path, applies application-builder restrictions and QA checks, chooses the conversation’s serve port, handles homepage redeploys when appropriate, checks hosting permissions, prepares or builds the served directory, uploads source files, starts a static server, registers the site, captures previews, and returns serving plus hosted-link details.
-
-**Call relations**: This is the main exported static-site deployment tool. It ties together _refuse_before_serving, _served_directory, _promote_source, _serve, _host, _illustrate, and sometimes _redeploy_homepage.
-
-*Call graph*: calls 11 internal fn (_agent_homepage, _host, _illustrate, _json_result, _promote_source, _redeploy_homepage, _refuse_before_serving, _require_current_application_qa, _serve, _served_directory (+1 more)); called by 1 (deploy_ufo_application); 4 external calls (serve_port, workspace_path, site_object_name, site_name).
-
-
-##### `_served_directory`  (lines 1061–1087)
-
-```
-async def _served_directory(ctx: ToolContext, project: str) -> tuple[str, dict[str, dict[str, object]]]
-```
-
-**Purpose**: Decides what directory should actually be served for a static deployment. If the input is source for an editable app page, it builds it first and serves the generated dist folder.
-
-**Data flow**: It receives a project path. It lists the files; if the special source file is absent, it returns the original project and listing. If the source file is present, it writes needed config, unpacks the page kit, runs the build, then lists and returns the dist directory.
-
-**Call relations**: deploy_website and _redeploy_homepage call this before promoting source. It prevents raw source directories from being served as if browsers could run them directly.
-
-*Call graph*: calls 1 internal fn (_source_listing); called by 2 (_redeploy_homepage, deploy_website); 2 external calls (quote, unpack_page_kit).
-
-
-##### `_agent_homepage`  (lines 1090–1093)
-
-```
-async def _agent_homepage(ctx: ToolContext) -> HostedSite | None
-```
-
-**Purpose**: Finds the hosted site currently bound as the acting agent’s homepage, if any. This lets deployment know whether a request is really updating an existing homepage.
-
-**Data flow**: It receives the context, gets the site registry, asks for the homepage attached to the current agent id, and returns either a HostedSite or None.
-
-**Call relations**: deploy_website calls this near the start. If the requested name matches a homepage from another conversation, deploy_website may route into _redeploy_homepage instead of creating a separate site.
-
-*Call graph*: calls 1 internal fn (_sites_registry); called by 1 (deploy_website).
-
-
-##### `_sites_registry`  (lines 1096–1099)
-
-```
-def _sites_registry(ctx: ToolContext) -> HostedSites
-```
-
-**Purpose**: Creates the HostedSites registry object for the current workspace transaction. It is a small helper so site database access is constructed consistently.
-
-**Data flow**: It reads the extension context for the workspace id and transaction. It returns a HostedSites object connected to that store context, or raises if extension context is missing.
-
-**Call relations**: _agent_homepage, deploy_website, and _redeploy_homepage use this when they need to read or write hosted-site records.
-
-*Call graph*: called by 3 (_agent_homepage, _redeploy_homepage, deploy_website); 1 external calls (__init__).
-
-
-##### `_redeploy_homepage`  (lines 1102–1171)
-
-```
-async def _redeploy_homepage(ctx: ToolContext, args: DeployWebsiteInput, bound: HostedSite, scratch_port: int) -> ToolResult
-```
-
-**Purpose**: Updates an agent’s already-bound homepage in place from a new build. The public homepage link stays the same while its stored source and preview are refreshed.
-
-**Data flow**: It checks that the redeploy was requested by a live speaker or an approved builder flow, rejects explicit visibility changes, checks ownership, prepares and promotes the new static source, serves it on a scratch port, updates the existing homepage row’s manifest, unregisters any site displaced by the scratch port, captures previews, and returns the unchanged hosted link details.
-
-**Call relations**: deploy_website calls this when a deploy name matches the acting agent’s bound homepage from another conversation. It uses _served_directory, _promote_source, _serve, _sites_registry, _illustrate, and _json_result.
-
-*Call graph*: calls 7 internal fn (agent_visibility, _illustrate, _json_result, _promote_source, _serve, _served_directory, _sites_registry); called by 1 (deploy_website); 4 external calls (workspace_path, format, site_object_name, site_url).
-
-
-##### `publish_website`  (lines 1174–1191)
-
-```
-async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolResult
-```
-
-**Purpose**: Publishes a web app at a stable link, optionally running install and backend commands first. Unlike static deploy, it does not store source files as the site’s record.
-
-**Data flow**: It receives project and dist paths, app name, visibility, and optional install or run commands. It chooses the conversation’s port, checks hosting permission, optionally runs installation, decides whether to serve the project with a custom command or serve the dist folder statically, starts the server, registers the live port without a manifest, captures previews, and returns the URLs.
-
-**Call relations**: This exported tool shares the hosting path with deploy_website through _refuse_before_serving, _serve, _host, _illustrate, and _json_result, but skips _promote_source because the running app remains the source of responses.
-
-*Call graph*: calls 5 internal fn (_host, _illustrate, _json_result, _refuse_before_serving, _serve); 3 external calls (quote, serve_port, workspace_path).
-
-
-##### `set_homepage`  (lines 1194–1237)
-
-```
-async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult
-```
-
-**Purpose**: Makes one hosted site the acting agent’s homepage. This changes which audience rules apply to that site, so it is restricted to the site creator and usually requires a live speaker.
-
-**Data flow**: It receives the site object name. It loads all hosted sites, finds the named one, checks that the acting member created it, allows speakerless binding only for a site deployed in this same turn, writes the homepage pointer, and returns the homepage URL, agent visibility, and agent id.
-
-**Call relations**: This exported tool uses HostedSites directly rather than _host because it is not starting or registering a server. It finishes through _json_result after writing the homepage binding.
-
-*Call graph*: calls 2 internal fn (agent_visibility, _json_result); 3 external calls (__init__, site_object_name, site_url).
-
-
-### `extensions/sites/ufo_ext_sites/application_builder.py`
-
-`orchestration` · `application preview and build request handling`
-
-This file is the rulebook and toolbelt for the application builder. A parent conversation can ask for an app, and this file creates a fixed workspace with an `index.html`, an `app.tsx`, and a preview page. Then it delegates the work to a special subagent profile with only the tools it needs.
-
-The workflow is deliberately strict. First, the worker must write an SVG design contract, which is a drawing of the first screen. The file checks that the SVG is safe, visible, and divided into named regions. Only after that can the worker write `app.tsx`. The source must import only from `ufo/kit`, mount into the expected page root, avoid exports, and compile successfully. If the first source write is wrong, the worker cannot simply overwrite it; it must read small excerpts and apply exact text replacements. This is like requiring tracked edits on a draft instead of allowing a new mystery document.
-
-Before deployment, separate product QA must pass and leave proof. After the worker returns, this file verifies that the deployed site really matches the accepted source and belongs to the right member. It also includes a lightweight image preview renderer, so users can approve a direction before the full app is built.
-
-#### Function details
-
-##### `ApplicationBuilderTask.source_is_the_scaffolds_app_tsx`  (lines 324–336)
-
-```
-def source_is_the_scaffolds_app_tsx(self) -> 'ApplicationBuilderTask'
-```
-
-**Purpose**: This validation step makes sure the build task points to exactly one allowed source file: `app.tsx` directly inside the scaffold folder under `/workspace`. It prevents a worker from being sent to edit some other file or escape the intended project folder.
-
-**Data flow**: It reads the task's scaffold path and source path, converts both into safe workspace-relative paths, and compares them. If the source is exactly the scaffold's `app.tsx`, the task is accepted unchanged; otherwise validation fails with a clear error.
-
-**Call relations**: This runs when an `ApplicationBuilderTask` is created or validated, including before spawning the builder worker and during source/design tool calls. It relies on the sandbox path checker so later file-writing functions can trust the task's paths.
-
-*Call graph*: 2 external calls (PurePosixPath, contained_relative).
-
-
-##### `ApplicationBuilderResult.result_matches_status`  (lines 373–382)
-
-```
-def result_matches_status(self) -> 'ApplicationBuilderResult'
-```
-
-**Purpose**: This validation step checks that a worker's final answer is internally consistent. A deployed app must include a site name and URL, while a blocked app must explain what stopped it.
-
-**Data flow**: It reads the result status and related fields. If the status is `deployed`, it requires deployment identity and forbids a blocker message; if the status is `blocked`, it requires a blocker and forbids site identity. It returns the same result if everything fits.
-
-**Call relations**: This runs when the worker result is parsed or created. It protects `build_ufo_application` and `ApplicationBuildAcceptance.accept` from acting on contradictory deployment evidence.
-
-
-##### `ApplicationBuildAcceptance.accept`  (lines 392–492)
-
-```
-async def accept(self, result: ApplicationBuilderResult) -> ApplicationBuilderResult
-```
-
-**Purpose**: This is the final gatekeeper for a worker's deployed app. It accepts the result only if QA proof, deployed source, ownership, and accepted source all line up.
-
-**Data flow**: It takes the worker's `ApplicationBuilderResult`, reads stored QA proof, checks the deployed site record, compares source hashes, and reads the accepted source hash from the sandbox. If every check passes, it updates the result with the bound homepage URL; if any check fails, it returns a blocked result explaining why.
-
-**Call relations**: After `build_ufo_application` receives the worker's output, it hands that output here. This function calls helper path functions and uses `_blocked` whenever a safety or ownership check fails, and it consults hosted-site storage before binding the accepted site as the homepage.
-
-*Call graph*: calls 3 internal fn (_blocked, _runtime_root, _source_acceptance_path); 6 external calls (__init__, __init__, model_validate, model_copy, model_validate_json, site_url).
-
-
-##### `ApplicationBuildAcceptance._blocked`  (lines 494–507)
-
-```
-def _blocked(self, result: ApplicationBuilderResult, reason: str, browser_batches: int) -> ApplicationBuilderResult
-```
-
-**Purpose**: This helper turns a failed acceptance check into a clean blocked build result. It preserves useful evidence, such as controls checked and observed errors, while replacing deployment identity with a blocker reason.
-
-**Data flow**: It receives the worker result, a human-readable reason, and the number of browser QA batches. It creates a new `ApplicationBuilderResult` with status `blocked`, the fixed source path, preserved evidence, and the supplied blocker message.
-
-**Call relations**: `ApplicationBuildAcceptance.accept` calls this whenever the worker's claimed deployment cannot be trusted. It keeps all rejection paths shaped the same way.
-
-*Call graph*: called by 1 (accept); 1 external calls (__init__).
-
-
-##### `EditApplicationSourceInput.json_text_edits_are_objects`  (lines 547–569)
-
-```
-def json_text_edits_are_objects(cls, value: object) -> object
-```
-
-**Purpose**: This input normalizer lets the source-edit tool accept a few convenient edit formats while converting them into one standard shape. It is there because model-generated tool input may arrive as JSON strings, patch-style strings, or pairs of plain strings.
-
-**Data flow**: It receives the raw `edits` value before validation. It leaves already-structured objects alone, parses JSON-looking strings, converts search/replace patch text into `old_text` and `new_text`, and can pair an even list of strings into edit objects. The output is a tuple of normalized edit entries.
-
-**Call relations**: This runs before `edit_application_source` sees its arguments. It makes the edit tool more forgiving at the boundary while still requiring exact replacements later.
-
-*Call graph*: 1 external calls (loads).
-
-
-##### `_validate_application_source`  (lines 572–587)
-
-```
-def _validate_application_source(source: str) -> None
-```
-
-**Purpose**: This function checks that `app.tsx` follows the builder's strict source rules. It keeps the app tied to the expected UFO kit runtime and blocks risky or unsupported code patterns.
-
-**Data flow**: It reads the full source text, scans imports, exports, the root mount call, and a known bad color pattern. If the source imports only from `ufo/kit`, mounts correctly, and avoids forbidden patterns, it returns nothing; otherwise it raises a clear validation error.
-
-**Call relations**: `write_application_source` uses this on the first full source write, and `edit_application_source` uses it after repairs. Passing this check is required before compilation and acceptance.
-
-*Call graph*: called by 2 (edit_application_source, write_application_source).
+##### `_pairs`  (lines 61–66)
 
-
-##### `_validate_application_design`  (lines 590–682)
-
-```
-def _validate_application_design(source: str) -> tuple[str, ...]
-```
-
-**Purpose**: This function checks that the SVG design contract is safe, valid, visible, and divided into the required named regions. It prevents the design file from hiding scripts, links, duplicate IDs, malformed SVG, or unusable layout regions.
-
-**Data flow**: It receives SVG text, rejects dangerous XML features, parses the SVG, checks its `viewBox`, walks every element, counts visible drawing elements, validates region markers, and rejects active or external content. It returns the ordered region names when the design is acceptable.
-
-**Call relations**: `write_application_design` calls this before accepting a design, and `_require_application_design` calls it before source writing. The returned names are later compared with the browser-rendered region audit.
-
-*Call graph*: called by 2 (_require_application_design, write_application_design); 3 external calls (isfinite, split, fromstring).
-
-
-##### `_build_application_project`  (lines 685–699)
-
-```
-async def _build_application_project(ctx: ToolContext, project: str, runtime_root: str | None=None) -> None
-```
-
-**Purpose**: This function runs the real build step for the app project. It writes the project configuration, unpacks the shared page kit, and asks Vite, the JavaScript build tool, to compile the app.
-
-**Data flow**: It receives a tool context, a project path, and optionally a runtime root. It writes configuration files in the right place, installs the page kit files, runs `vite build`, and either finishes silently or raises a shortened compiler error.
-
-**Call relations**: `_compile_application_source` uses this for isolated compile checks, while `write_application_source` and `edit_application_source` use it to build the actual scaffold after accepted source changes.
-
-*Call graph*: called by 3 (_compile_application_source, edit_application_source, write_application_source); 1 external calls (unpack_page_kit).
-
-
-##### `_compile_application_source`  (lines 702–715)
-
-```
-async def _compile_application_source(ctx: ToolContext, task: ApplicationBuilderTask, source: str) -> None
-```
-
-**Purpose**: This function checks whether a proposed `app.tsx` can compile before it is allowed into the real scaffold. It gives the worker a safe trial build area.
-
-**Data flow**: It reads the scaffold's existing `index.html`, writes that and the proposed source into a temporary runtime project, and calls `_build_application_project`. Nothing is returned if the source compiles; a failure becomes an error before the real app is overwritten.
-
-**Call relations**: `write_application_source` and `edit_application_source` call this after source validation. It uses `_runtime_root` and then delegates the actual build to `_build_application_project`.
-
-*Call graph*: calls 2 internal fn (_build_application_project, _runtime_root); called by 2 (edit_application_source, write_application_source).
-
-
-##### `_source_claim_path`  (lines 718–722)
-
-```
-async def _source_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: This helper computes the hidden runtime file used as the ownership marker for the current source-write attempt. The marker stops repeated full writes after an initial candidate exists.
-
-**Data flow**: It takes the context, task, and turn ID, hashes the source path, and builds a runtime path ending in `.claimed`. The result is a safe internal path, not a user-facing source path.
-
-**Call relations**: `write_application_source` uses this to claim the first source write. `_require_application_source` checks the same marker before allowing reads or repairs.
-
-*Call graph*: called by 2 (_require_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `_runtime_root`  (lines 725–726)
-
-```
-async def _runtime_root(ctx: ToolContext) -> str
-```
-
-**Purpose**: This helper finds the sandbox runtime root used by the small containment scripts. It keeps internal claim and candidate files separate from normal workspace files.
-
-**Data flow**: It asks the sandbox for the runtime path to `tool-output`, then returns that path's parent as a string. The output is used as a base directory for contained file operations.
-
-**Call relations**: Many source and design helpers call this before running sandbox Python snippets. It is a common bridge between high-level tool logic and low-level safe file access.
-
-*Call graph*: called by 8 (accept, _compile_application_source, _require_application_design, _require_application_source, edit_application_source, read_application_source, write_application_design, write_application_source); 1 external calls (PurePosixPath).
-
-
-##### `_design_path`  (lines 729–730)
-
-```
-def _design_path(task: ApplicationBuilderTask) -> str
-```
-
-**Purpose**: This helper gives the fixed workspace path for the design SVG belonging to a build task. It makes sure all design-writing code points to the same expected filename.
-
-**Data flow**: It reads the scaffold path from the task and appends `application-design.svg`. The result is the workspace path where the visible design contract is stored.
-
-**Call relations**: `write_application_design`, `_design_claim_path`, and `_require_application_design` all use this so the design claim, validation, and final write refer to one shared location.
-
-*Call graph*: called by 3 (_design_claim_path, _require_application_design, write_application_design).
-
-
-##### `_design_claim_path`  (lines 733–737)
-
-```
-async def _design_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: This helper computes the hidden runtime file used to mark that the design has been claimed for this build turn. It prevents a worker from replacing the design after it has been fixed.
-
-**Data flow**: It takes the context, task, and turn ID, gets the design path, hashes it, and returns a runtime `.claimed` path. The output is an internal ownership marker.
-
-**Call relations**: `write_application_design` creates this marker, and `_require_application_design` checks it before source writing can begin.
-
-*Call graph*: calls 1 internal fn (_design_path); called by 2 (_require_application_design, write_application_design); 1 external calls (sha256).
-
-
-##### `application_design_acceptance_relative`  (lines 740–746)
-
-```
-def application_design_acceptance_relative(design_path: str, turn_id: UUID) -> str
-```
-
-**Purpose**: This function creates the runtime-relative path where an accepted design copy is stored. That accepted copy acts like a sealed receipt for the design used in this builder turn.
-
-**Data flow**: It receives a design path and turn ID, hashes the design path, and returns a predictable relative path ending in `.accepted.svg`. It does not touch the file system itself.
-
-**Call relations**: `write_application_design` uses this path while staging and accepting a candidate SVG. Other code can use the same formula to find the accepted design artifact for the turn.
-
-*Call graph*: called by 1 (write_application_design); 1 external calls (sha256).
-
-
-##### `_source_candidate_path`  (lines 749–755)
-
-```
-async def _source_candidate_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: This helper computes the hidden runtime path for the current candidate `app.tsx`. The candidate is the draft source kept for repair even if the first validation or compile attempt fails.
-
-**Data flow**: It receives the context, task, and turn ID, hashes the source path, and returns a runtime path ending in `.candidate.tsx`. The path is stable for that task and turn.
-
-**Call relations**: `write_application_source` writes the first candidate there. `read_application_source` and `edit_application_source` use the same path during repair.
-
-*Call graph*: called by 3 (edit_application_source, read_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `_render_application_design`  (lines 758–792)
-
-```
-async def _render_application_design(ctx: ToolContext, candidate_path: str, names: tuple[str, ...]) -> tuple[ApplicationAuditRegion, ...]
-```
-
-**Purpose**: This function runs a browser-based audit of the SVG design to confirm its named regions are actually visible and do not overlap. It catches problems that plain XML parsing cannot see.
-
-**Data flow**: It writes an audit script into the runtime area, runs it with Node.js against the candidate SVG, parses the JSON region output, compares it with the expected names, and checks each region pair for overlap. It returns the measured region records if everything is valid.
-
-**Call relations**: `write_application_design` calls this after `_validate_application_design`. The plain SVG check verifies structure, and this function verifies what the design looks like when rendered.
-
-*Call graph*: called by 1 (write_application_design); 1 external calls (application_region_relation).
-
-
-##### `_source_acceptance_path`  (lines 795–801)
-
-```
-async def _source_acceptance_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str
-```
-
-**Purpose**: This helper computes the hidden runtime path where the accepted source hash is stored. That hash is later used to prove the deployed app matches the checked source.
-
-**Data flow**: It receives the context, task, and turn ID, hashes the source path, and returns a runtime path ending in `.accepted`. The path holds the SHA-256 digest, which is a fingerprint of the accepted source.
-
-**Call relations**: `write_application_source` and `edit_application_source` write to this path after successful validation and build. `ApplicationBuildAcceptance.accept` reads it before accepting the final deployment.
-
-*Call graph*: called by 3 (accept, edit_application_source, write_application_source); 1 external calls (sha256).
-
-
-##### `_require_application_source`  (lines 804–813)
-
-```
-async def _require_application_source(ctx: ToolContext, task: ApplicationBuilderTask) -> None
-```
-
-**Purpose**: This guard makes sure an initial source candidate exists before the worker can read or repair it. It prevents repair tools from being used before there is anything to repair.
-
-**Data flow**: It looks up the source claim marker for the current turn through a sandbox containment script. If the marker is missing, it raises a user-facing error; if the check itself fails, it raises a runtime error; otherwise it returns nothing.
-
-**Call relations**: `read_application_source` and `edit_application_source` call this first. It depends on `_source_claim_path` and `_runtime_root` to find the internal claim marker.
-
-*Call graph*: calls 2 internal fn (_runtime_root, _source_claim_path); called by 2 (edit_application_source, read_application_source).
-
-
-##### `_require_application_design`  (lines 816–829)
-
-```
-async def _require_application_design(ctx: ToolContext, task: ApplicationBuilderTask) -> None
-```
-
-**Purpose**: This guard makes sure a valid design has been written before any source code can be written. It enforces the workflow order: design first, code second.
-
-**Data flow**: It checks for the design claim marker, reads the design SVG from the workspace, and validates the SVG again. If the design is missing or invalid, it raises an error; otherwise it returns nothing.
-
-**Call relations**: `write_application_source` calls this before accepting the initial `app.tsx`. It uses the design path and claim helpers plus `_validate_application_design`.
-
-*Call graph*: calls 4 internal fn (_design_claim_path, _design_path, _runtime_root, _validate_application_design); called by 1 (write_application_source).
-
-
-##### `write_application_design`  (lines 832–924)
-
-```
-async def write_application_design(ctx: ToolContext, args: WriteApplicationDesignInput) -> ToolResult
-```
-
-**Purpose**: This tool writes and fixes the SVG design contract for the app's first screen. Once it succeeds, the design is considered locked for that build.
-
-**Data flow**: It reads the build task from the turn, validates the SVG text, writes a candidate design, runs the browser design audit, claims ownership, stores an accepted copy, and writes the visible workspace file. It returns JSON with the design path, digest, and size.
-
-**Call relations**: This is exposed as the builder-only `write_application_design` tool. It calls the design validators, path helpers, browser audit, and cleanup helper; later `write_application_source` requires this work to have completed.
-
-*Call graph*: calls 7 internal fn (_complete_application_design_cleanup, _design_claim_path, _design_path, _render_application_design, _runtime_root, _validate_application_design, application_design_acceptance_relative); 4 external calls (__init__, __init__, sha256, dumps).
-
-
-##### `_complete_application_design_cleanup`  (lines 927–943)
-
 ```
-async def _complete_application_design_cleanup(ctx: ToolContext, program: str, *args: str) -> tuple[ExecResult | None, tuple[str, ...]]
+def _pairs(flat: object) -> _StreamFields
 ```
 
-**Purpose**: This helper tries hard to finish cleanup for design claim or accepted-design files, even if cancellation happens. It reduces the chance of leaving stale locks behind.
+**Purpose**: Converts Redis's flat list of stream fields into a simple field-to-value map. This makes a stream entry easier to read after the Lua claim script returns it.
 
-**Data flow**: It starts a sandbox Python cleanup program as an asynchronous task, shields it while waiting, records interruption messages, and finally returns either the execution result or no result plus failure notes.
+**Data flow**: It receives a list shaped like field, value, field, value. It converts each item to text and builds a dictionary from each field to its matching value. If the input is not a list, it raises an error instead of guessing.
 
-**Call relations**: `write_application_design` calls this only when an error occurs after claiming or accepting a design. It supports the rollback path rather than the normal success path.
+**Call relations**: RedisTerminals.next_op uses this after the Lua script finds an operation. _pairs relies on _text so the later operation decoder receives clean text-like fields.
 
-*Call graph*: called by 1 (write_application_design); 2 external calls (create_task, shield).
+*Call graph*: calls 1 internal fn (_text); called by 1 (next_op).
 
 
-##### `read_application_source`  (lines 946–1000)
+##### `_bind_payload`  (lines 69–74)
 
 ```
-async def read_application_source(ctx: ToolContext, args: ReadApplicationSourceInput) -> ToolResult
+def _bind_payload(cwd: str, member_id: UUID | None, runtime_id: str) -> str
 ```
 
-**Purpose**: This tool gives the worker small, targeted excerpts from the current candidate source during repair. It avoids dumping the whole file while still showing enough context to make exact edits.
+**Purpose**: Builds the small JSON message that describes where a terminal is connected and who it belongs to. Both the live binding and the in-flight binding use this same shape.
 
-**Data flow**: It validates the task, requires an existing source claim, reads the candidate `app.tsx`, counts matches for requested search terms, selects line windows around the start, end, and matches, and returns a bounded text report.
+**Data flow**: It receives a current working directory, an optional member ID, and a runtime ID. It turns them into a JSON string, using the member ID's hex form when present. The result is stored in Redis.
 
-**Call relations**: The builder uses this after an edit fails because the old text did not match. It calls `_require_application_source`, `_source_candidate_path`, and `_runtime_root`, and its use is limited by `limit_application_builder_repair_reads`.
+**Call relations**: RedisTerminals._heartbeat uses it to publish the live terminal binding. RedisTerminals._run_op uses it again to pin the same binding while an operation is in progress.
 
-*Call graph*: calls 3 internal fn (_require_application_source, _runtime_root, _source_candidate_path); 2 external calls (__init__, __init__).
+*Call graph*: called by 2 (_heartbeat, _run_op); 1 external calls (dumps).
 
 
-##### `edit_application_source`  (lines 1003–1051)
+##### `_stream_entries`  (lines 148–157)
 
 ```
-async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceInput) -> ToolResult
+def _stream_entries(batch: XReadResponse) -> list[StreamEntry]
 ```
 
-**Purpose**: This tool applies exact source repairs to the current candidate `app.tsx`. It requires each old text snippet to appear exactly once so the change cannot land in the wrong place.
+**Purpose**: Extracts entries from the particular Redis XREAD response shape this code expects. It protects the code from silently misreading an unexpected Redis protocol response.
 
-**Data flow**: It reads the candidate source, checks every requested replacement for uniqueness and non-overlap, applies replacements, validates the new source, compiles it in a trial project, writes it to the real scaffold, builds the scaffold, stores the accepted source hash, and returns JSON about the edit.
+**Data flow**: It receives the raw result of an XREAD call. Empty results become an empty list. A normal response is unpacked to the stream entries. An unexpected response type raises an error.
 
-**Call relations**: The builder uses this after the first full source write has created a candidate. It calls the source guard, candidate and acceptance path helpers, source validation, compile check, and final build step.
+**Call relations**: RedisTerminals._await_reply uses this while waiting for a reply stream. It is the small parsing step between Redis's wire-shaped response and the reply decoder.
 
-*Call graph*: calls 7 internal fn (_build_application_project, _compile_application_source, _require_application_source, _runtime_root, _source_acceptance_path, _source_candidate_path, _validate_application_source); 4 external calls (__init__, __init__, sha256, dumps).
+*Call graph*: called by 1 (_await_reply).
 
 
-##### `write_application_source`  (lines 1054–1098)
+##### `RedisTerminals._client`  (lines 185–202)
 
 ```
-async def write_application_source(ctx: ToolContext, args: WriteApplicationSourceInput) -> ToolResult
+def _client(self) -> Redis
 ```
 
-**Purpose**: This tool performs the one allowed full write of `app.tsx` for the build. If the source is invalid, the draft is kept and the worker must repair it with exact edits instead of rewriting from scratch.
+**Purpose**: Returns the Redis client for the current asyncio event loop. This matters because asyncio clients are tied to the loop that created them, and this transport is used from different loops.
 
-**Data flow**: It reads the task, requires a valid design, claims source ownership, writes the candidate source, validates and compiles it, then writes it into the real scaffold, builds the project, records the accepted source hash, and returns JSON with path and size.
+**Data flow**: It reads the currently running event loop. If a Redis client already exists for that loop, it returns it. Otherwise it creates one from the configured Redis URL with explicit socket timeouts, stores it, and returns it.
 
-**Call relations**: This is the builder's main source-writing tool. It must follow `write_application_design`, and if it fails validation it pushes the worker toward `read_application_source` and `edit_application_source`.
+**Call relations**: Almost every Redis operation goes through this method. It is used by binding reads, heartbeats, operation sending, reply waiting, reply delivery, cleanup, staging, and operation polling so all of them share the same per-loop connection discipline.
 
-*Call graph*: calls 8 internal fn (_build_application_project, _compile_application_source, _require_application_design, _runtime_root, _source_acceptance_path, _source_candidate_path, _source_claim_path, _validate_application_source); 4 external calls (__init__, __init__, sha256, dumps).
+*Call graph*: called by 9 (_await_reply, _clear_op, _deliver_reply, _heartbeat, _read_binding, _run_op, next_op, send, staged); 2 external calls (get_running_loop, from_url).
 
 
-##### `_preview_font`  (lines 1101–1102)
+##### `RedisTerminals._bind_key`  (lines 204–205)
 
 ```
-def _preview_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont
+def _bind_key(self, conversation_id: UUID) -> str
 ```
 
-**Purpose**: This small helper returns the font used in generated preview images. It keeps the preview renderer from repeating font-loading details everywhere.
+**Purpose**: Builds the Redis key name for the live terminal binding of a conversation.
 
-**Data flow**: It receives a font size and asks Pillow, the image library, for the default font at that size. It returns the font object for drawing text.
+**Data flow**: It receives a conversation ID and formats it into the key string used for the heartbeat-published binding. It does not read or write Redis itself.
 
-**Call relations**: `_application_preview` and `_preview_card` call this whenever they draw labels or descriptions in the preview PNG.
+**Call relations**: RedisTerminals._heartbeat uses this key when refreshing liveness. RedisTerminals._read_binding checks the same key first when another pod wants to know whether a terminal is connected.
 
-*Call graph*: called by 2 (_application_preview, _preview_card); 1 external calls (load_default).
+*Call graph*: called by 2 (_heartbeat, _read_binding).
 
 
-##### `_preview_text`  (lines 1105–1111)
+##### `RedisTerminals._inflight_key`  (lines 207–208)
 
 ```
-def _preview_text(value: str, width: int, lines: int) -> str
+def _inflight_key(self, conversation_id: UUID) -> str
 ```
 
-**Purpose**: This helper wraps and shortens text so it fits inside the preview image. It adds an ellipsis when text is too long, like a card title in a user interface.
+**Purpose**: Builds the Redis key name for the temporary binding kept alive while an operation is running.
 
-**Data flow**: It receives raw text, a target line width, and a maximum number of lines. It trims and wraps the text, cuts it to the allowed lines, adds `…` if needed, and returns the display string.
+**Data flow**: It receives a conversation ID and returns the matching in-flight key string. It only names the storage location.
 
-**Call relations**: `_application_preview` and `_preview_card` use this before drawing user-provided labels and descriptions into fixed-size areas.
+**Call relations**: RedisTerminals._run_op writes this key so other accessors can still see the terminal during a long operation. RedisTerminals._read_binding falls back to it, and RedisTerminals._clear_op deletes it during cleanup.
 
-*Call graph*: called by 2 (_application_preview, _preview_card); 1 external calls (wrap).
+*Call graph*: called by 3 (_clear_op, _read_binding, _run_op).
 
 
-##### `_preview_card`  (lines 1114–1147)
+##### `RedisTerminals._op_stream`  (lines 210–211)
 
 ```
-def _preview_card(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], title: str, detail: str) -> None
+def _op_stream(self, conversation_id: UUID) -> str
 ```
 
-**Purpose**: This helper draws one region card in the preview image. Each card represents one planned area of the app screen.
+**Purpose**: Builds the Redis Stream name that carries operations for one conversation.
 
-**Data flow**: It receives a drawing surface, a rectangle, a title, and detail text. It draws a rounded box, writes the wrapped title, draws a divider line, and adds wrapped detail text when there is room.
+**Data flow**: It receives a conversation ID and returns the stream key where operation records are written and read. It has no side effects.
 
-**Call relations**: `_application_preview` calls this once per requested region after `_preview_boxes` has chosen where each card should sit.
+**Call relations**: RedisTerminals._run_op writes operations to this stream, RedisTerminals.next_op reads and claims them for the held terminal stream, and RedisTerminals._clear_op removes a completed entry when possible.
 
-*Call graph*: calls 2 internal fn (_preview_font, _preview_text); called by 1 (_application_preview); 3 external calls (line, rounded_rectangle, text).
+*Call graph*: called by 3 (_clear_op, _run_op, next_op).
 
 
-##### `_preview_boxes`  (lines 1150–1194)
+##### `RedisTerminals._reply_stream`  (lines 213–214)
 
 ```
-def _preview_boxes(layout: ApplicationLayout, count: int) -> tuple[tuple[int, int, int, int], ...]
+def _reply_stream(self, op_id: str) -> str
 ```
 
-**Purpose**: This helper calculates where region cards should appear in the preview image for different layout styles. It turns abstract layout choices such as `timeline` or `metrics` into actual rectangles.
+**Purpose**: Builds the Redis Stream name where one operation's reply will appear.
 
-**Data flow**: It receives the layout name and region count, then computes card boxes within the fixed preview canvas. It returns a tuple of rectangle coordinates sized and arranged for that layout.
+**Data flow**: It receives an operation ID and returns the reply stream key for that operation. It only constructs the name.
 
-**Call relations**: `_application_preview` calls this before drawing cards. The returned boxes are paired with region names and passed to `_preview_card`.
+**Call relations**: RedisTerminals._await_reply waits on this stream, RedisTerminals._deliver_reply writes to it, and RedisTerminals._clear_op removes it after the operation is done.
 
-*Call graph*: called by 1 (_application_preview).
+*Call graph*: called by 3 (_await_reply, _clear_op, _deliver_reply).
 
 
-##### `_application_preview`  (lines 1197–1264)
+##### `RedisTerminals._lock_key`  (lines 216–217)
 
 ```
-def _application_preview(args: RenderApplicationPreviewInput) -> bytes
+def _lock_key(self, conversation_id: UUID) -> str
 ```
 
-**Purpose**: This function draws the full PNG preview image from a small design contract. It gives the user a quick visual sketch without running the app builder or browser.
+**Purpose**: Builds the Redis lock key that keeps a conversation to one terminal operation at a time.
 
-**Data flow**: It receives preview input, creates a blank image, draws a header, purpose, first-screen priority panel, region cards, and design direction note, then saves the image into memory as PNG bytes.
+**Data flow**: It receives a conversation ID and returns the lock key string. The actual locking happens elsewhere.
 
-**Call relations**: `_PillowApplicationPreview.render` calls this as the actual rendering implementation. It uses the preview text, font, box, and card helpers to assemble the image.
+**Call relations**: RedisTerminals.send uses this key before posting an operation, so two workflows do not ask the same user terminal to run commands at the same time.
 
-*Call graph*: calls 4 internal fn (_preview_boxes, _preview_card, _preview_font, _preview_text); called by 1 (render); 3 external calls (new, Draw, BytesIO).
+*Call graph*: called by 1 (send).
 
 
-##### `_PillowApplicationPreview.render`  (lines 1269–1270)
+##### `RedisTerminals._deliv_key`  (lines 219–220)
 
 ```
-def render(args: RenderApplicationPreviewInput) -> bytes
+def _deliv_key(self, op_id: str) -> str
 ```
 
-**Purpose**: This wrapper exposes preview rendering through a simple static method. It makes the renderer easy to call from an asynchronous tool without tying that tool directly to the drawing function.
+**Purpose**: Builds the Redis key for the delivery marker that says an operation has already been handed to a terminal stream.
 
-**Data flow**: It receives the typed preview input and returns the PNG bytes produced by `_application_preview`. It does not change any files or state itself.
+**Data flow**: It receives an operation ID and returns the marker key. It does not set or delete the marker itself.
 
-**Call relations**: `render_application_preview` calls this inside a background thread so image generation does not block the async request flow.
+**Call relations**: The Lua script in RedisTerminals.next_op creates these markers to stop duplicate delivery. RedisTerminals._clear_op later deletes the marker during cleanup.
 
-*Call graph*: calls 1 internal fn (_application_preview).
+*Call graph*: called by 1 (_clear_op).
 
 
-##### `render_application_preview`  (lines 1273–1284)
+##### `RedisTerminals._opmeta_key`  (lines 222–223)
 
 ```
-async def render_application_preview(ctx: ToolContext, args: RenderApplicationPreviewInput) -> ToolResult
+def _opmeta_key(self, op_id: str) -> str
 ```
 
-**Purpose**: This tool creates and shares a preview PNG for a proposed application design. It also returns a digest, a stable fingerprint of the preview contract, so the conversation can refer back to exactly what was previewed.
+**Purpose**: Builds the Redis key for operation metadata, which records the conversation and member allowed to use the operation.
 
-**Data flow**: It receives typed preview fields, renders the PNG in a worker thread, shares the image artifact, serializes the preview contract, hashes it, and returns JSON containing the shared filename and digest.
+**Data flow**: It receives an operation ID and returns the metadata key string. It only names the record.
 
-**Call relations**: This is exposed as the public `render_application_preview` tool. It calls `_PillowApplicationPreview.render`, uses the tool context to share the artifact, and returns a structured tool result.
+**Call relations**: RedisTerminals._run_op writes metadata before posting an operation. RedisTerminals.staged and RedisTerminals._deliver_reply read it to check whether a copy-in or reply request is allowed, and RedisTerminals._clear_op removes it afterward.
 
-*Call graph*: calls 1 internal fn (share_artifact); 7 external calls (__init__, __init__, __init__, to_thread, model_dump, sha256, dumps).
+*Call graph*: called by 4 (_clear_op, _deliver_reply, _run_op, staged).
 
 
-##### `_ensure_application_scaffold`  (lines 1287–1295)
+##### `RedisTerminals._body_blob`  (lines 225–226)
 
 ```
-async def _ensure_application_scaffold(ctx: ToolContext) -> None
+def _body_blob(self, op_id: str) -> str
 ```
 
-**Purpose**: This helper makes sure the fixed application workspace exists before the builder worker starts. It creates the basic page files only when they are missing.
+**Purpose**: Builds the blob-store path for input bytes attached to an operation.
 
-**Data flow**: It checks for `index.html`, placeholder `app.tsx`, and `preview.html` by trying to read each file. For any missing file, it writes the built-in default content.
+**Data flow**: It receives an operation ID and returns the blob key where the operation body is stored. It does not touch the blob store itself.
 
-**Call relations**: `build_ufo_application` calls this before spawning the application builder subagent. It prepares the known scaffold that later source and build tools rely on.
+**Call relations**: RedisTerminals._run_op stores copy-in bytes under this key. RedisTerminals.staged reads them for the terminal-side request, and RedisTerminals._clear_op deletes them when the operation ends.
 
-*Call graph*: called by 1 (build_ufo_application).
+*Call graph*: called by 3 (_clear_op, _run_op, staged).
 
 
-##### `build_ufo_application`  (lines 1298–1350)
+##### `RedisTerminals._reply_blob`  (lines 228–229)
 
 ```
-async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInput) -> ToolResult
+def _reply_blob(self, op_id: str) -> str
 ```
 
-**Purpose**: This is the main delegation tool that starts one full application build. It prepares the request, spawns the restricted builder worker, and then verifies the worker's result before returning it.
+**Purpose**: Builds the blob-store path for a large reply body.
 
-**Data flow**: It records redeploy and audit-contract information when available, ensures the scaffold exists, builds an objective from the agent prompt and user request, spawns the builder profile, parses the returned result, runs acceptance checks, and returns a structured deployed-or-blocked result.
+**Data flow**: It receives an operation ID and returns the blob key for that operation's reply bytes. It only formats the name.
 
-**Call relations**: This is exposed as `build_ufo_application` to the parent flow. It calls `_ensure_application_scaffold`, spawns the `APPLICATION_BUILDER_PROFILE`, and hands the worker output to `ApplicationBuildAcceptance.accept`.
+**Call relations**: RedisTerminals._deliver_reply writes large replies under this key, RedisTerminals._decode_reply reads them when the sender sees a blob marker, and RedisTerminals._clear_op deletes them during cleanup.
 
-*Call graph*: calls 1 internal fn (_ensure_application_scaffold); 9 external calls (__init__, __init__, __init__, __init__, __init__, spawn, sha256, format, format).
+*Call graph*: called by 3 (_clear_op, _decode_reply, _deliver_reply).
 
 
-##### `limit_application_builder_repair_reads`  (lines 1353–1388)
+##### `RedisTerminals.connect`  (lines 231–253)
 
 ```
-async def limit_application_builder_repair_reads(ctx: HookContext) -> Deny | None
+def connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None, runtime_id: str | None=None) -> None
 ```
-
-**Purpose**: This hook limits how many consecutive source-read calls the builder can make after product QA has asked for repair. It nudges the worker to stop inspecting and actually edit, test, and redeploy.
-
-**Data flow**: It checks whether the current turn belongs to the application builder and whether the tool about to run is source read or edit. If repair attempts are active, it increments a read counter, resets it on edit, or returns a denial once the read limit is reached.
-
-**Call relations**: The tool system calls this before tool use. It only affects the builder profile and works with audit-attempt state written elsewhere in the application audit flow.
-
-*Call graph*: 2 external calls (__init__, format).
-
-
-##### `require_application_builder_qa`  (lines 1391–1404)
-
-```
-async def require_application_builder_qa(ctx: HookContext) -> Deny | None
-```
-
-**Purpose**: This hook blocks deployment until deterministic product QA has passed. Deterministic QA means a repeatable check, not just the worker saying the app looks fine.
-
-**Data flow**: It checks whether the current turn belongs to the application builder, looks for stored QA proof for that turn, and validates that proof. If proof is missing, it returns a denial; if proof is malformed, it raises an error; otherwise deployment may continue.
-
-**Call relations**: The tool system calls this as a deployment guard for the builder. `ApplicationBuildAcceptance.accept` later reuses the stored proof to verify the deployed source matches what QA checked.
-
-*Call graph*: 2 external calls (__init__, model_validate).
-
-
-### Application QA Rules
-Pass/fail audit logic that translates browser measurements into actionable repair guidance.
-
-### `extensions/sites/ufo_ext_sites/application_audit.py`
-
-`domain_logic` · `QA audit after browser measurement`
-
-This file is a quality gate for an application built by the system. A browser has already opened the app and recorded what it saw: text contrast, page width, clipped content, visible regions, console errors, accessible controls, and interaction results. This file gives that report a fixed, repeatable judgment.
-
-It also defines the shapes of the data used in that judgment. For example, an audit report contains several measured views: light and dark mode, desktop and narrow phone width. A contract can list facts that the app must display. A verdict contains a short list of issues the builder should fix.
-
-The main audit works like a checklist. It asks: did all required views get measured? Is there readable text? Does text meet accessibility contrast rules? Does the page overflow sideways? Are important design regions present, visible, and in the same relative order as the accepted design? Did the browser report errors? Are there enough accessible controls and real interactions? Are required facts shown, and are they visible early on the desktop page?
-
-The important behavior is that this is deterministic: the same report should produce the same verdict every time. It limits issue counts and message lengths so feedback stays bounded and usable.
-
-#### Function details
-
-##### `ApplicationAuditReport.views_are_unique`  (lines 172–176)
-
-```
-def views_are_unique(self) -> 'ApplicationAuditReport'
-```
-
-**Purpose**: This validation step makes sure an audit report does not contain two measurements for the same color scheme and screen width. Without this, later checks could silently pick one duplicate and ignore another, making the verdict unreliable.
-
-**Data flow**: It reads the report's list of views, turns each view into a pair like light mode plus 1440 pixels, and checks whether any pair appears more than once. If all pairs are unique, the report is accepted unchanged; if not, report creation fails with an error.
-
-**Call relations**: This runs automatically when an ApplicationAuditReport is created by the data validation library. The later audit code depends on this promise when it builds a lookup table of views by scheme and width.
-
-
-##### `ApplicationAuditVerdict.passed`  (lines 197–200)
-
-```
-def passed(self) -> bool
-```
-
-**Purpose**: This property answers the simple question: did the application pass every audit check? It gives callers a plain yes/no result instead of making them inspect the issue list themselves.
-
-**Data flow**: It reads the verdict's issues. If the issue list is empty, it returns true; if there is even one issue, it returns false. It does not change the verdict.
-
-**Call relations**: Code that receives an ApplicationAuditVerdict can call this after audit_application has built the verdict. It is the small final interpretation layer over the detailed repair messages.
-
-
-##### `_needed_ratio`  (lines 247–250)
-
-```
-def _needed_ratio(px: float, weight: int) -> float
-```
-
-**Purpose**: This helper decides what text contrast ratio is required for a piece of text. Larger or bold text is allowed a lower contrast threshold; ordinary body text must meet a stricter one.
-
-**Data flow**: It receives a text size in pixels and a font weight. If the text counts as large, or large-and-bold, it returns the large-text accessibility threshold; otherwise it returns the normal body-text threshold.
-
-**Call relations**: audit_application calls this while checking every measured text item. It supplies the standard used to decide whether a browser-reported contrast ratio is acceptable.
-
-*Call graph*: called by 1 (audit_application).
-
-
-##### `_issue`  (lines 253–260)
-
-```
-def _issue(code: AuditIssueCode, message: str, terms: tuple[str, ...]=()) -> ApplicationAuditIssue
-```
-
-**Purpose**: This helper creates one audit issue in a safe, bounded format. It trims long messages and too many search terms so feedback cannot grow without limit.
-
-**Data flow**: It receives an issue code, a human-readable message, and optional terms related to the problem. It shortens the message to the maximum allowed length, keeps only the first ten terms, and returns an ApplicationAuditIssue object.
-
-**Call relations**: audit_application uses this every time it finds a problem, such as missing views, poor contrast, browser errors, or missing facts. It centralizes the rules for making repair messages consistent.
-
-*Call graph*: called by 1 (audit_application); 1 external calls (__init__).
-
-
-##### `application_region_relation`  (lines 263–277)
-
-```
-def application_region_relation(first: ApplicationAuditRegion, second: ApplicationAuditRegion) -> tuple[Literal['horizontal', 'vertical'], int] | None
-```
-
-**Purpose**: This function compares two named screen regions and says whether one is clearly above, below, left of, or right of the other. It is used to check whether the application keeps the same layout order as the accepted design.
-
-**Data flow**: It receives two rectangular regions whose positions and sizes are expressed as fractions of the screen. It compares their edges with a small allowance for near-touching regions. It returns the separation direction and order, or nothing if the regions overlap or cannot be cleanly ordered.
-
-**Call relations**: application_design_fidelity calls this first on design regions and then on matching application regions. It acts like a ruler for deciding whether layout relationships have been preserved.
-
-*Call graph*: called by 1 (application_design_fidelity).
-
-
-##### `application_design_fidelity`  (lines 280–354)
-
-```
-def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDesignFidelity
-```
-
-**Purpose**: This function scores how closely the running application matches the accepted design's named regions. It checks that the same regions exist, are visible early on the desktop page, and keep the same relative order.
-
-**Data flow**: It receives a full audit report. It reads the accepted design regions, verifies their count and names, rejects overlapping design regions, then compares those regions against each desktop measurement in light and dark mode. It returns a score object containing how many checks passed, how many were attempted, and the specific failures.
-
-**Call relations**: audit_application calls this as the design-matching part of the overall audit. Inside, it repeatedly calls application_region_relation to compare pairs of regions, then hands back failures that become a design issue in the final verdict.
-
-*Call graph*: calls 1 internal fn (application_region_relation); called by 1 (audit_application); 1 external calls (__init__).
-
-
-##### `audit_application`  (lines 357–473)
-
-```
-def audit_application(report: ApplicationAuditReport, contract: ApplicationAuditContract | None=None) -> ApplicationAuditVerdict
-```
-
-**Purpose**: This is the main checker for the file. It turns a browser audit report, and optionally a list of required facts, into a bounded verdict telling the builder what must be repaired.
-
-**Data flow**: It receives the measured browser report and an optional contract of facts that must appear. It checks required views, empty pages, text contrast, horizontal overflow, clipped content, design fidelity, console errors, accessible controls, interaction success, required facts, and whether those facts appear above the fold on desktop. It collects problems as audit issues and returns an ApplicationAuditVerdict containing at most the allowed number of issues.
-
-**Call relations**: This function is the place other parts of the system call when they need an accept-or-repair decision. It uses _needed_ratio for contrast rules, application_design_fidelity for layout matching, and _issue to package each problem into consistent feedback before returning the final verdict.
-
-*Call graph*: calls 3 internal fn (_issue, _needed_ratio, application_design_fidelity); 1 external calls (__init__).
-
-
-### Source Staging
-Movement and preparation of saved site source files between persistent storage and editable build sandboxes.
-
-### `extensions/sites/ufo_ext_sites/source.py`
-
-`io_transport` · `request handling`
-
-A hosted site’s source code is not kept as one neat folder in the sandbox forever. It lives in blob storage, described by a manifest, and is copied into a sandbox only when a conversation or tool needs to read or edit it. This file is the bridge that does that copying safely.
-
-The main job is to “materialize” a site: recreate the saved source tree under the sandbox’s sites directory. Before writing files, it checks a generation stamp. If the sandbox already has the same deployed version, it skips the download so ordinary reads, like asking for a link or visibility, do not waste time or overwrite in-progress edits.
-
-When it must copy files, it first clears and “claims” the destination paths using containment checks. In plain terms, it makes sure every file being touched really stays inside the intended workspace folder. This matters because the sandbox is writable by other agents or tools, and unsafe paths or symbolic links could otherwise cause a download to overwrite the wrong file.
-
-The file supports two storage shapes. In production-like storage, it asks for temporary download or upload web links and runs curl inside the sandbox. In development filesystem storage, it streams bytes through this process. It also packages and unpacks a shared page SDK, so app pages can rebuild using today’s components rather than the version from their first deployment.
-
-#### Function details
-
-##### `_page_kit_archive`  (lines 101–113)
-
-```
-def _page_kit_archive() -> bytes
-```
-
-**Purpose**: This function bundles the page SDK files into one compressed archive. It is used so the sandbox can receive one archive and unpack it, instead of copying many small files one by one.
-
-**Data flow**: It starts with the kit directory on disk. It walks through the files, adds each regular file into an in-memory gzip tar archive, and returns the archive as bytes. Nothing is written to disk by this function; it produces a ready-to-send package.
-
-**Call relations**: This runs when the module is imported to create the shared PAGE_KIT_ARCHIVE value. Later, unpack_page_kit uses that prepared archive when it needs to place the SDK into a sandbox project.
-
-*Call graph*: 2 external calls (BytesIO, open).
-
-
-##### `transfer`  (lines 120–130)
-
-```
-async def transfer(ctx: ToolContext, script: str, pairs: list[tuple[str, str]], total_bytes: int) -> None
-```
-
-**Purpose**: This function copies many files by running a small shell script in the sandbox, usually using temporary web links. It batches the work so large source trees do not require one separate sandbox command per file.
-
-**Data flow**: It receives a sandbox tool context, a script, pairs of local paths and remote URLs, and the total byte count. It calculates a timeout based on the amount of data, sends the pairs to the sandbox in chunks, and waits for each chunk to finish. If any chunk fails, it raises an error with the sandbox’s message; otherwise it returns nothing after the files have been moved.
-
-**Call relations**: materialize_source calls this when blob storage can provide presigned download links, meaning temporary URLs that grant short-lived access. transfer is the lower-level mover: materialize_source decides what should move, and transfer carries out the batched copy inside the sandbox.
-
-*Call graph*: called by 1 (materialize_source).
-
-
-##### `materialize_source`  (lines 133–199)
-
-```
-async def materialize_source(ctx: ToolContext, site: HostedSite, object_name: str) -> tuple[str, list[str]]
-```
-
-**Purpose**: This function recreates a site’s stored source files inside the current sandbox. A tool uses it when it needs the real editable project tree for a hosted site, instead of just metadata about the site.
-
-**Data flow**: It receives the tool context, the site record, and the sandbox object name to write under. It reads the site’s source manifest, chooses a destination folder, and checks a generation stamp to see whether the same deploy version is already present. If not, it safely empties and prepares the destination files, downloads or streams each manifest file from blob storage, writes the new generation stamp, and returns the destination path plus the list of restored relative file paths.
-
-**Call relations**: This is the main public flow in the file. It validates the stored manifest, uses workspace_path to place files inside the sandbox workspace, uses shlex.quote when safely reading the stamp path through a shell command, and calls transfer when downloads happen through temporary URLs. If the storage backend does not support those URLs, it falls back to reading each blob through this process and writing it into the sandbox.
-
-*Call graph*: calls 1 internal fn (transfer); 3 external calls (model_validate_json, quote, workspace_path).
-
-
-##### `unpack_page_kit`  (lines 202–220)
-
-```
-async def unpack_page_kit(ctx: ToolContext, dest: str, runtime_root: str | None=None) -> None
-```
-
-**Purpose**: This function installs the current page SDK into a sandbox project folder. That SDK is what app pages import while building, so adding it at build time lets old app-page source use the current components.
-
-**Data flow**: It receives the tool context, a destination folder, and optionally a runtime root used for containment checks. It writes the prebuilt SDK archive into the destination, either as a normal sandbox file or as a runtime path, then runs a guarded Python unpack script inside the sandbox. The script expands only regular files into the intended destination and deletes the archive afterward. If unpacking fails, this function raises an error.
-
-**Call relations**: This function uses the archive produced earlier by _page_kit_archive. It is called by higher-level site build or deployment code when preparing an app page project, placing the SDK beside the project files before the build runs.
-
-
-### Hosted Site Registry
-Persistent registry and ownership enforcement for hosted site ports, static files, visibility, and replacement rules.
-
-### `extensions/sites/ufo_ext_sites/store.py`
-
-`domain_logic` · `request handling`
 
-A hosted site is like a forwarding card in a directory: when someone opens a permanent site link, the system looks up this card to learn what page to serve, who owns it, and who is allowed to see it. This file defines that card in the database and provides the safe ways to create, update, read, and remove it.
+**Purpose**: Records that this pod is currently holding a terminal connection for a conversation. It starts the heartbeat that publishes the terminal's workspace into Redis.
 
-The main table, `hosted_site`, stores the site identity, the sandbox port it comes from, its visibility, its creator, preview images, share-card data, homepage binding, and, for static sites, a source manifest that points to files saved in blob storage. Blob storage means durable file storage outside the live sandbox.
+**Data flow**: It receives the conversation, current working directory, optional member ID, and optional runtime ID. Under a thread lock, it either creates a new local hold and starts a heartbeat task, or increments the count for an existing hold. It returns nothing but changes local state and starts background Redis refreshes.
 
-The `HostedSites` class is the main doorway. Callers give it a workspace and a database transaction factory, and every query is scoped to that workspace so one workspace cannot accidentally see or edit another workspace’s sites. Its methods enforce rules before writing: a site name is unique within a conversation, one port cannot silently serve two different site names, only the creator can change disclosure settings, and taking over someone else’s hosted port is blocked.
+**Call relations**: This is called by the held terminal stream when a client connects. It creates the _Hold record and launches RedisTerminals._heartbeat, which keeps other pods able to find the terminal.
 
-A subtle but important detail is the `deploy_generation` value. It works like a fresh version stamp so the web frame knows when to reload, even if a site was deleted and later recreated under the same name.
+*Call graph*: calls 1 internal fn (_heartbeat); 2 external calls (__init__, get_running_loop).
 
-#### Function details
 
-##### `SourceManifest._rooted`  (lines 96–99)
+##### `RedisTerminals.disconnect`  (lines 255–264)
 
 ```
-def _rooted(cls, root: str) -> str
+def disconnect(self, conversation_id: UUID) -> None
 ```
 
-**Purpose**: Checks that the saved source-file prefix lives in an allowed storage area. This prevents a manifest from pointing at an unexpected part of blob storage.
+**Purpose**: Records that one held terminal connection has ended. When the last local holder leaves, it stops the heartbeat.
 
-**Data flow**: It receives a root string from a `SourceManifest`. If the string starts with `sites/` or `apps/` and ends with `/`, it is returned unchanged. Otherwise, validation fails with an error before the manifest can be accepted.
+**Data flow**: It receives a conversation ID. Under a thread lock, it finds the local hold, decreases its connection count, and if none remain, cancels the heartbeat task and removes the hold. It deliberately does not delete the Redis binding.
 
-**Call relations**: This runs automatically when a `SourceManifest` is built. It is an early guard before any code trusts the manifest’s root path.
+**Call relations**: This is the counterpart to RedisTerminals.connect. By cancelling the heartbeat but leaving the key to expire naturally, it avoids deleting a fresh binding that another reconnecting pod may have just published.
 
 
-##### `SourceManifest._pathed`  (lines 103–118)
+##### `RedisTerminals._heartbeat`  (lines 266–280)
 
 ```
-def _pathed(cls, files: dict[str, SiteFile]) -> dict[str, SiteFile]
+async def _heartbeat(self, conversation_id: UUID, cwd: str, member_id: UUID | None, runtime_id: str) -> None
 ```
 
-**Purpose**: Checks that every file path in a static site manifest is a plain relative path inside the site. It blocks paths that try to escape the site folder, such as paths with leading slashes or parent-directory tricks.
+**Purpose**: Keeps the Redis binding alive while this pod holds a terminal connection. The binding is like a signpost saying where the terminal currently is.
 
-**Data flow**: It receives the manifest’s file map. For each path, it rejects unsafe characters, backslashes, absolute paths, and paths that do not resolve cleanly under the fixed site-source anchor. If every path is safe, the same file map comes out unchanged.
+**Data flow**: It receives the conversation and workspace details. It builds the JSON binding, then repeatedly writes it to Redis with a time-to-live and sleeps before refreshing it again. Redis errors are ignored for a single beat so the loop can try again.
 
-**Call relations**: This runs during `SourceManifest` validation. It calls `ufo.sdk.sandbox.contained_relative`, which is the shared path-safety checker, to make sure reads later answer only with files from the intended site.
+**Call relations**: RedisTerminals.connect starts this as a background task. It uses _bind_payload to make the value, _bind_key to choose the Redis key, and _client to write it.
 
-*Call graph*: 1 external calls (contained_relative).
+*Call graph*: calls 3 internal fn (_bind_key, _client, _bind_payload); called by 1 (connect); 2 external calls (sleep, suppress).
 
 
-##### `site_name`  (lines 149–157)
+##### `RedisTerminals.workspace`  (lines 282–295)
 
 ```
-def site_name(raw: str) -> str
+def workspace(self, conversation_id: UUID) -> TerminalWorkspace | None
 ```
 
-**Purpose**: Turns a user-provided site name into the safe stored name used in links and object names. It makes names predictable and URL-friendly.
+**Purpose**: Returns the workspace for a terminal connection held on this same pod. It is a local, no-network lookup.
 
-**Data flow**: It takes raw text, lowercases it, turns runs of non-letter-or-digit characters into hyphens, trims extra hyphens, and limits the length. If nothing usable remains, it raises `InvalidSiteName`; otherwise it returns the cleaned slug.
+**Data flow**: It receives a conversation ID. Under a lock, it checks the local holds table. If found, it returns a TerminalWorkspace with the stored directory, member, and runtime; otherwise it returns None.
 
-**Call relations**: Callers use this before registering a site, because registration assumes the name is already safe. When the name cannot produce a real slug, it creates an `InvalidSiteName` error so the caller can report a useful tool failure.
+**Call relations**: This is useful on the pod that actually owns the held connection. Cross-pod send paths do not rely on it; they use RedisTerminals.arrived and RedisTerminals._read_binding instead.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `default_visibility`  (lines 160–168)
+##### `RedisTerminals.arrived`  (lines 297–310)
 
 ```
-def default_visibility(audience: Audience) -> Visibility
+async def arrived(self, conversation_id: UUID, grace_s: float) -> TerminalWorkspace | None
 ```
 
-**Purpose**: Chooses the starting visibility for a newly hosted site based on the conversation audience. This avoids accidentally sharing externally sensitive work with a whole workspace.
+**Purpose**: Waits briefly for a terminal binding to appear in Redis. This covers normal reconnect gaps where the client is between held streams.
 
-**Data flow**: It receives an audience description, parses it, and checks whether it names a single member or an external audience. Member-only and foreign audiences become `private`; internal shared audiences become `workspace`.
+**Data flow**: It receives a conversation ID and a grace period. Until the deadline, it repeatedly asks _read_binding for a workspace. If one appears, it returns it; if time runs out, it returns None.
 
-**Call relations**: This is used by `HostedSites.register` only when a new site is created without an explicit visibility choice. It relies on the audience helpers to understand what kind of room produced the site.
+**Call relations**: RedisTerminals.send calls this before trying to run an operation. It delegates the actual Redis lookup to RedisTerminals._read_binding and sleeps between polls.
 
-*Call graph*: called by 1 (register); 2 external calls (audience_member, parse_audience).
-
-
-##### `visibility_level`  (lines 171–179)
-
-```
-def visibility_level(value: str) -> Visibility
-```
-
-**Purpose**: Validates a visibility string from storage or input. It ensures the rest of the code only works with the three supported choices: private, workspace, or public.
-
-**Data flow**: It receives a string. If it is one of the accepted visibility words, the same value comes out as a typed visibility value. Anything else raises a `ValueError`.
-
-**Call relations**: `_site` uses this while turning database rows into `HostedSite` objects. That means a bad database value is caught at the boundary before it spreads through the system.
-
-*Call graph*: called by 1 (_site).
+*Call graph*: calls 1 internal fn (_read_binding); called by 1 (send); 2 external calls (get_running_loop, sleep).
 
 
-##### `HostedSites.register`  (lines 213–306)
+##### `RedisTerminals._read_binding`  (lines 312–330)
 
 ```
-async def register(self, conversation_id: UUID, name: str, port: int, creator_member_id: UUID, visibility: Visibility | None, audience: Audience, may_unhost: bool, *, manifest: str | None) -> HostedSi
+async def _read_binding(self, conversation_id: UUID) -> TerminalWorkspace | None
 ```
 
-**Purpose**: Creates or updates the registry row for a site after a deploy. It is the main write path that decides what link points to what port or static manifest.
+**Purpose**: Reads the terminal workspace from Redis, either from the live connection binding or from the temporary in-flight binding.
 
-**Data flow**: It receives the conversation, safe site name, port, creator, optional visibility, audience, unhost permission, and optional static-source manifest. It opens a transaction, checks whether the write is allowed, removes any same-conversation site that would be displaced from the port, updates an existing row or inserts a new one, stamps a fresh deploy generation, and returns the final `HostedSite`.
+**Data flow**: It receives a conversation ID. It first reads the live binding key; if missing, it reads the in-flight key. If neither exists, it returns None. Otherwise it parses the JSON and returns a TerminalWorkspace.
 
-**Call relations**: This is the central registration flow. It calls `_refuse` to enforce ownership and unhosting rules, `_read` to inspect and return rows, `default_visibility` for new sites without an explicit choice, and SQLAlchemy update/insert/delete helpers to make the database changes.
+**Call relations**: RedisTerminals.arrived calls this while waiting for a terminal. It uses _bind_key and _inflight_key to find the records, _client to read Redis, and _text plus JSON parsing to turn the stored payload back into a workspace.
 
-*Call graph*: calls 3 internal fn (_read, _refuse, default_visibility); 6 external calls (case, delete, insert, update, time_ns, uuid4).
-
-
-##### `HostedSites.redeploy`  (lines 308–335)
-
-```
-async def redeploy(self, conversation_id: UUID, name: str, manifest: str) -> HostedSite | None
-```
-
-**Purpose**: Replaces the stored static source for an existing site without changing its identity, owner, port, or visibility. This lets a known link show new bytes while staying the same site.
-
-**Data flow**: It receives a conversation id, site name, and new manifest string. It updates the matching row’s source manifest, updated time, and deploy generation, then reads the row back. If the row disappeared, it returns `None`.
-
-**Call relations**: This is a narrower update path than `register`. It uses the same generation-stamp idea as registration and finishes through `_read` so callers get the current `HostedSite` view.
-
-*Call graph*: calls 1 internal fn (_read); 3 external calls (case, update, time_ns).
+*Call graph*: calls 4 internal fn (_bind_key, _client, _inflight_key, _text); called by 1 (arrived); 3 external calls (__init__, loads, UUID).
 
 
-##### `HostedSites.homepage`  (lines 337–349)
+##### `RedisTerminals.send`  (lines 332–388)
 
 ```
-async def homepage(self, agent_id: UUID) -> HostedSite | None
+async def send(self, conversation_id: UUID, kind: str, timeout_s: int, name: str='', arg: str='', params: str='', body: bytes | None=None) -> bytes
 ```
 
-**Purpose**: Finds the site currently bound as a specific agent’s homepage. If the agent has no bound homepage, it returns nothing.
+**Purpose**: Sends one operation to a conversation's terminal and waits for the answer. It is the main workflow-side entry point for running terminal work across pods.
 
-**Data flow**: It receives an agent id, queries this workspace for a row whose homepage binding matches that agent, and converts the row into a `HostedSite`. If no row is found, it returns `None`.
+**Data flow**: It receives the conversation, operation kind, timeout, optional names and parameters, and optional input bytes. It waits for a binding, creates an operation ID, takes the per-conversation Redis lock, runs the operation posting and reply wait, and returns reply bytes. If the terminal is absent, unreachable, busy too long, or silent past the deadline, it raises a terminal-specific error.
 
-**Call relations**: This is a read path for homepage lookup. It builds the common column selection with `_columns` and hands any result to `_site` for conversion into the in-code data object.
+**Call relations**: This method ties together the sender side: it calls RedisTerminals.arrived, uses _lock_key and _client for the Redis lock, then hands the real operation work to RedisTerminals._run_op. It is balanced by RedisTerminals.next_op on the terminal-stream side and RedisTerminals.resolve on the reply side.
 
-*Call graph*: calls 2 internal fn (_columns, _site).
-
-
-##### `HostedSites.set_preview`  (lines 351–371)
-
-```
-async def set_preview(self, conversation_id: UUID, name: str, preview: StoredPreview) -> None
-```
-
-**Purpose**: Stores the screenshot-like preview captured for a site after deployment. It keeps the registry row linked to the preview blob and its exact size.
-
-**Data flow**: It receives the site identity and a `StoredPreview` containing a blob key and byte size. It updates the matching row’s preview fields and updated time. It returns no value.
-
-**Call relations**: This runs after `register`, because the site can be registered before its preview image finishes rendering. If the site has been removed or renamed by then, the update simply matches nothing.
-
-*Call graph*: 1 external calls (update).
+*Call graph*: calls 4 internal fn (_client, _lock_key, _run_op, arrived); 6 external calls (__init__, __init__, __init__, wait_for, suppress, uuid4).
 
 
-##### `HostedSites.set_share_card`  (lines 373–397)
+##### `RedisTerminals._run_op`  (lines 390–436)
 
 ```
-async def set_share_card(self, conversation_id: UUID, name: str, blob_key: str, digest: str) -> None
+async def _run_op(self, conversation_id: UUID, op: TerminalOp, body: bytes | None, bound: TerminalWorkspace, deadline_s: float) -> bytes
 ```
 
-**Purpose**: Stores the social/share-card image made from a site, along with a digest of that image. The digest lets public share-card URLs refer to an exact version.
+**Purpose**: Performs the actual send after the conversation lock is held. It publishes the operation, stages any input body, waits for the reply, and cleans up.
 
-**Data flow**: It receives the site identity, the share-card blob key, and the digest string. It writes those values plus an updated time to the matching row. It returns no value.
+**Data flow**: It receives the conversation, a TerminalOp, optional body bytes, the bound workspace, and the reply deadline. It writes operation metadata and an in-flight binding to Redis, stores the body in the blob store if present, adds an operation entry to the Redis Stream, waits for a reply, and finally clears operation state. The normal output is reply bytes.
 
-**Call relations**: This is called by `extensions/sites/ufo_ext_sites/share_card._compose` after a card has been generated. Like preview writing, it happens after registration and safely does nothing if the site no longer matches.
+**Call relations**: RedisTerminals.send calls this once it has the lock. It uses helper methods to name keys and format fields, calls RedisTerminals._await_reply for the answer, and always calls RedisTerminals._clear_op in the end.
 
-*Call graph*: called by 1 (_compose); 1 external calls (update).
-
-
-##### `HostedSites.read`  (lines 399–401)
-
-```
-async def read(self, conversation_id: UUID, name: str) -> HostedSite | None
-```
-
-**Purpose**: Looks up one hosted site by conversation and name. It is the simple public read method for one registry entry.
-
-**Data flow**: It receives a conversation id and site name, opens a transaction, and delegates to `_read`. The result is either a `HostedSite` or `None`.
-
-**Call relations**: This wraps `_read` with transaction handling so callers do not need to pass a database connection themselves.
-
-*Call graph*: calls 1 internal fn (_read).
+*Call graph*: calls 10 internal fn (_await_reply, _body_blob, _clear_op, _client, _inflight_key, _op_fields, _op_stream, _opmeta_key, _bind_payload, _text); called by 1 (send); 2 external calls (wait_for, dumps).
 
 
-##### `HostedSites.all`  (lines 403–413)
+##### `RedisTerminals._op_fields`  (lines 438–446)
 
 ```
-async def all(self) -> tuple[HostedSite, ...]
+def _op_fields(self, op: TerminalOp) -> dict[FieldT, EncodableT]
 ```
 
-**Purpose**: Returns every hosted site in the workspace, ordered from oldest to newest. Other parts of the system can then apply their own access rules or display them.
+**Purpose**: Turns a TerminalOp into the field dictionary stored in the Redis operation stream.
 
-**Data flow**: It opens a transaction, selects all rows for the workspace, orders them by creation time and name, converts each row into a `HostedSite`, and returns them as a tuple.
+**Data flow**: It receives a TerminalOp and returns a dictionary containing its ID, kind, timeout, name, argument, and parameters as Redis-encodable values. It does not write anything itself.
 
-**Call relations**: This uses `_columns` to keep the selected fields consistent and `_site` to convert raw database rows into application objects.
+**Call relations**: RedisTerminals._run_op calls this just before adding the operation to Redis. RedisTerminals._decode_op performs the reverse conversion on the reader side.
 
-*Call graph*: calls 2 internal fn (_columns, _site).
-
-
-##### `HostedSites.conversation`  (lines 415–432)
-
-```
-async def conversation(self, conversation_id: UUID, names: tuple[str, ...], limit: int) -> tuple[HostedSite, ...]
-```
-
-**Purpose**: Returns selected hosted sites from one conversation. It is useful when a caller already knows which names it wants to inspect.
-
-**Data flow**: It receives a conversation id, a tuple of names, and a limit. It queries matching rows in the workspace and conversation, orders them oldest first, limits the result count, converts rows to `HostedSite` objects, and returns them.
-
-**Call relations**: This is a filtered list read. It shares the common selection shape through `_columns` and row conversion through `_site`.
-
-*Call graph*: calls 2 internal fn (_columns, _site).
+*Call graph*: called by 1 (_run_op).
 
 
-##### `HostedSites.visible_conversation`  (lines 434–464)
+##### `RedisTerminals._decode_op`  (lines 448–456)
 
 ```
-async def visible_conversation(self, conversation_id: UUID, member_id: UUID, limit: int, *, admin: bool, homepage_agents: frozenset[UUID]) -> tuple[HostedSite, ...]
+def _decode_op(self, fields: _StreamFields) -> TerminalOp
 ```
 
-**Purpose**: Returns the sites in a conversation that a particular member is allowed to open. It applies the main visibility rules for private sites, shared sites, homepage-bound sites, and admins.
+**Purpose**: Turns Redis stream fields back into a TerminalOp object for the terminal connection to render.
 
-**Data flow**: It receives a conversation id, member id, result limit, admin flag, and the set of homepage agents visible to that member. It builds a database condition: creators can see their own sites, non-private sites are visible, homepage-bound sites may be visible through their agent, and admins bypass this gate. It returns the matching rows as `HostedSite` objects.
+**Data flow**: It receives a field map from Redis. It reads and converts the operation ID, kind, timeout, and optional text fields, then returns a TerminalOp.
 
-**Call relations**: This is the access-filtered list path. It uses SQLAlchemy’s `or_` to combine visibility checks, then uses `_columns` and `_site` like the other read methods.
+**Call relations**: RedisTerminals.next_op calls this after the Lua claim script has selected an operation and _pairs has shaped its fields. It is the counterpart to RedisTerminals._op_fields.
 
-*Call graph*: calls 2 internal fn (_columns, _site); 1 external calls (or_).
-
-
-##### `HostedSites.set_visibility`  (lines 466–481)
-
-```
-async def set_visibility(self, conversation_id: UUID, name: str, visibility: Visibility) -> HostedSite | None
-```
-
-**Purpose**: Changes one site’s visibility setting and returns the updated site. It also changes the site generation so existing permission checks can notice the change.
-
-**Data flow**: It receives a conversation id, site name, and new visibility. It updates the matching row’s visibility, assigns a new generation id, updates the timestamp, then reads the row back. If the row is gone, it returns `None`.
-
-**Call relations**: This is the direct visibility update path. It uses a fresh `uuid4` value for the generation and `_read` to provide the caller with the final row.
-
-*Call graph*: calls 1 internal fn (_read); 2 external calls (update, uuid4).
+*Call graph*: calls 1 internal fn (_text); called by 1 (next_op); 2 external calls (__init__, get).
 
 
-##### `HostedSites.set_homepage`  (lines 483–509)
+##### `RedisTerminals._await_reply`  (lines 458–481)
 
 ```
-async def set_homepage(self, agent_id: UUID, conversation_id: UUID, name: str) -> HostedSite | None
+async def _await_reply(self, op_id: str, deadline_s: float, timeout_s: int) -> bytes
 ```
 
-**Purpose**: Binds a named site as an agent’s homepage. It first clears any older homepage binding for that same agent so there is only one current homepage.
+**Purpose**: Waits for the reply to one operation without waiting forever. It repeatedly blocks on the operation's reply stream only up to the remaining deadline.
 
-**Data flow**: It receives an agent id, conversation id, and site name. In one transaction, it removes that agent id from any existing homepage row, writes the agent id onto the named site, and reads that site back. If the named site no longer exists, it returns `None`.
+**Data flow**: It receives an operation ID, a deadline budget, and the user-facing timeout. It reads from the reply stream until an entry appears or time runs out. When a reply entry arrives, it passes the fields to _decode_reply and returns the resulting bytes; on timeout or Redis failure it raises TerminalGone.
 
-**Call relations**: This coordinates two database updates before using `_read` for the result. The database’s uniqueness rule and the explicit clearing step work together to keep one homepage per agent.
+**Call relations**: RedisTerminals._run_op calls this after posting an operation. It uses _reply_stream to choose the stream, _stream_entries to parse Redis's response, and RedisTerminals._decode_reply to turn the reply record into bytes or an operation failure.
 
-*Call graph*: calls 1 internal fn (_read); 1 external calls (update).
-
-
-##### `HostedSites.release_homepage`  (lines 511–535)
-
-```
-async def release_homepage(self, conversation_id: UUID, name: str, visibility: Visibility) -> None
-```
-
-**Purpose**: Removes a site’s homepage binding and restores the site’s own visibility level. This matters because a homepage-bound site follows the agent’s visibility while it is bound.
-
-**Data flow**: It receives the site identity and the visibility that should apply after release. It clears the homepage agent id, writes the supplied visibility, assigns a new generation id, updates the timestamp, and returns nothing.
-
-**Call relations**: This is the unbinding counterpart to `set_homepage`. It uses `uuid4` so any held authorization tied to the old generation will no longer silently apply.
-
-*Call graph*: 2 external calls (update, uuid4).
+*Call graph*: calls 4 internal fn (_client, _decode_reply, _reply_stream, _stream_entries); called by 1 (_run_op); 2 external calls (__init__, get_running_loop).
 
 
-##### `HostedSites.unregister`  (lines 537–548)
+##### `RedisTerminals._decode_reply`  (lines 483–496)
 
 ```
-async def unregister(self, conversation_id: UUID, name: str) -> None
+async def _decode_reply(self, op_id: str, fields: _StreamFields) -> bytes
 ```
 
-**Purpose**: Removes a site from the registry so its permanent link stops resolving. The sandbox process may still exist, but the site is no longer hosted through this directory.
+**Purpose**: Interprets one reply record from Redis. It understands failed operations, small inline replies, and large replies stored in the blob store.
 
-**Data flow**: It receives a conversation id and site name. It deletes the matching row for this workspace and returns nothing.
+**Data flow**: It receives an operation ID and reply fields. If the fields contain a failure message, it raises TerminalOpFailed. If they point to a blob, it reads that blob and returns its bytes. Otherwise it base64-decodes the inline reply and returns the bytes.
 
-**Call relations**: This is the explicit unhost path. It uses SQLAlchemy delete directly and does not call the read helpers because it does not need to return the removed row.
+**Call relations**: RedisTerminals._await_reply calls this when a reply stream entry arrives. It uses _reply_blob for large replies and _text to normalize Redis field values.
 
-*Call graph*: 1 external calls (delete).
-
-
-##### `HostedSites.refuse_or_pass`  (lines 550–570)
-
-```
-async def refuse_or_pass(self, conversation_id: UUID, name: str, port: int, creator_member_id: UUID, visibility: Visibility | None, may_unhost: bool) -> HostedSite | None
-```
-
-**Purpose**: Checks whether a future registration would be allowed, without writing anything. It also tells the caller which existing site would be displaced from the port.
-
-**Data flow**: It receives the same key permission inputs used for registration: conversation, name, port, creator, optional visibility, and unhost permission. It opens a transaction and runs `_refuse`. If rules are violated, an error is raised; otherwise the displaced `HostedSite` or `None` is returned.
-
-**Call relations**: This is a dry-run companion to `register`. The deploy flow can call it before serving on a port, while the old site is still alive, and `register` later repeats the same check during the actual write.
-
-*Call graph*: calls 1 internal fn (_refuse).
+*Call graph*: calls 2 internal fn (_reply_blob, _text); called by 1 (_await_reply); 5 external calls (__init__, __init__, get, wait_for, b64decode).
 
 
-##### `HostedSites._refuse`  (lines 572–601)
+##### `RedisTerminals.next_op`  (lines 498–529)
 
 ```
-async def _refuse(self, connection: AsyncConnection, conversation_id: UUID, name: str, port: int, creator_member_id: UUID, visibility: Visibility | None, may_unhost: bool) -> HostedSite | None
+async def next_op(self, conversation_id: UUID, exclude_op_id: str | None=None) -> TerminalOp
 ```
 
-**Purpose**: Enforces the rules that can block site registration. It protects visibility ownership and prevents a deploy from silently unhosting another member’s site.
+**Purpose**: Waits for the next operation that should be delivered to the held terminal stream. It also claims the operation so reconnects or duplicate streams do not run it twice.
 
-**Data flow**: It receives an open database connection plus the proposed registration details. It reads the existing same-name site, checks whether a non-creator is trying to change visibility, finds any different site already using the port, and checks whether the actor owns it and is allowed to unhost. It returns the displaced site if registration may proceed, or raises an error if not.
+**Data flow**: It receives a conversation ID and optionally an operation ID to skip. It runs a Redis Lua script that scans the operation stream, removes expired entries, skips excluded or already-delivered operations, and marks one as delivered. If an operation is found, it returns a TerminalOp; otherwise it waits briefly for more stream data and tries again. Redis failures become TerminalGone.
 
-**Call relations**: Both `register` and `refuse_or_pass` call this so the same refusal logic is used for dry runs and real writes. It uses `_read` for the same-name row and `_on_port` to find a port conflict, then raises `NotTheSiteCreator` or `UnhostNeedsASpeaker` when the rules say no.
+**Call relations**: This is the terminal-stream side of RedisTerminals.send. It uses _op_stream for the stream name, _pairs and _decode_op to turn the claimed Redis fields into a TerminalOp, and _text to interpret script results.
 
-*Call graph*: calls 2 internal fn (_on_port, _read); called by 2 (refuse_or_pass, register); 2 external calls (__init__, __init__).
-
-
-##### `HostedSites._on_port`  (lines 603–618)
-
-```
-async def _on_port(self, connection: AsyncConnection, conversation_id: UUID, port: int, name: str) -> HostedSite | None
-```
-
-**Purpose**: Finds whether a different site in the same conversation is already registered on a given port. This is how the code detects that a new registration would displace an old name.
-
-**Data flow**: It receives a database connection, conversation id, port, and current site name to exclude. It queries for another row in the same workspace and conversation with that port and a different name. It returns that site as a `HostedSite`, or `None` if no conflict exists.
-
-**Call relations**: `_refuse` calls this during registration checks. It uses `_columns` for the shared select list and `_site` to turn any raw row into the normal data object.
-
-*Call graph*: calls 2 internal fn (_columns, _site); called by 1 (_refuse); 1 external calls (execute).
+*Call graph*: calls 5 internal fn (_client, _decode_op, _op_stream, _pairs, _text); 1 external calls (__init__).
 
 
-##### `HostedSites._read`  (lines 620–632)
+##### `RedisTerminals.staged`  (lines 531–546)
 
 ```
-async def _read(self, connection: AsyncConnection, conversation_id: UUID, name: str) -> HostedSite | None
+async def staged(self, conversation_id: UUID, op_id: str, member_id: UUID | None=None) -> bytes | None
 ```
 
-**Purpose**: Reads one site row using an already-open database connection. It is the shared low-level lookup used by many public methods.
+**Purpose**: Fetches input bytes that were staged for an in-flight operation. It only returns them if the request matches the right conversation and member.
 
-**Data flow**: It receives a connection, conversation id, and site name. It selects the matching row within the workspace, converts it to a `HostedSite` if found, and returns `None` otherwise.
+**Data flow**: It receives a conversation ID, operation ID, and optional member ID. It reads the operation metadata from Redis, checks it with _gate_ok, and if allowed reads the body blob. Missing metadata, failed checks, missing blobs, or blob timeouts all result in None.
 
-**Call relations**: This is called by `_refuse`, `read`, `redeploy`, `register`, `set_homepage`, and `set_visibility`. It centralizes the single-site lookup so all those paths use the same workspace scoping and row conversion.
+**Call relations**: This is used by the serving side when it needs the operation's copy-in body. It relies on metadata written by RedisTerminals._run_op and the same gate logic used by RedisTerminals._deliver_reply.
 
-*Call graph*: calls 2 internal fn (_columns, _site); called by 6 (_refuse, read, redeploy, register, set_homepage, set_visibility); 1 external calls (execute).
-
-
-##### `HostedSites._columns`  (lines 634–651)
-
-```
-def _columns(self) -> sa.Select
-```
-
-**Purpose**: Builds the standard database select statement for hosted-site rows. It keeps every read method asking for the same fields in the same shape.
-
-**Data flow**: It takes no outside data beyond the `HostedSites` object. It returns a SQLAlchemy select object containing the hosted-site columns needed to build a `HostedSite`.
-
-**Call relations**: Read helpers and list methods call this before adding their own filters. `_on_port`, `_read`, `all`, `conversation`, `homepage`, and `visible_conversation` all depend on it so `_site` receives rows with the expected fields.
-
-*Call graph*: called by 6 (_on_port, _read, all, conversation, homepage, visible_conversation); 1 external calls (select).
+*Call graph*: calls 4 internal fn (_body_blob, _client, _gate_ok, _opmeta_key); 1 external calls (wait_for).
 
 
-##### `_aware`  (lines 654–657)
+##### `RedisTerminals.resolve`  (lines 548–563)
 
 ```
-def _aware(moment: datetime) -> datetime
+def resolve(self, conversation_id: UUID, op_id: str, reply: bytes, failed: str | None=None, member_id: UUID | None=None) -> bool
 ```
 
-**Purpose**: Makes sure a database timestamp includes a timezone. This avoids mistakes when comparing times from databases that return timezone-less values.
+**Purpose**: Accepts a terminal reply and schedules it to be delivered to Redis. It returns immediately so the HTTP reply route is not held up by Redis or blob-store work.
 
-**Data flow**: It receives a `datetime`. If it already has timezone information, it returns it unchanged. If not, it marks it as UTC and returns the corrected value.
+**Data flow**: It receives the conversation, operation ID, reply bytes, optional failure message, and optional member ID. It gets the running event loop, schedules _deliver_reply as a tracked background task, and returns True immediately.
 
-**Call relations**: `_site` calls this for `created_at` and `updated_at` while converting database rows. It uses `datetime.replace` only to attach UTC when the database omitted the timezone.
+**Call relations**: This is the reply-side public entry point. It hands actual delivery to RedisTerminals._deliver_reply through RedisTerminals._spawn, while RedisTerminals._await_reply on the sender side waits independently for the reply stream entry.
 
-*Call graph*: called by 1 (_site); 1 external calls (replace).
+*Call graph*: calls 2 internal fn (_deliver_reply, _spawn); 1 external calls (get_running_loop).
 
 
-##### `_site`  (lines 660–677)
+##### `RedisTerminals._deliver_reply`  (lines 565–594)
 
 ```
-def _site(row: sa.Row) -> HostedSite
+async def _deliver_reply(self, conversation_id: UUID, op_id: str, reply: bytes, failed: str | None, member_id: UUID | None) -> None
 ```
 
-**Purpose**: Converts a raw database row into a `HostedSite` object that the rest of the code can use safely. It is the boundary between database-shaped data and application-shaped data.
+**Purpose**: Writes an operation reply so the waiting sender can receive it. It also refuses replies that do not match the operation's conversation or member.
 
-**Data flow**: It receives a SQLAlchemy row, validates the visibility string, fixes timestamp timezone awareness, copies all relevant fields, and returns a frozen `HostedSite` dataclass instance.
+**Data flow**: It receives conversation and operation IDs, reply bytes, an optional failure message, and an optional member ID. It reads operation metadata, checks the gate, then writes either a failure field, a small base64-encoded reply, or a blob marker after storing a large reply. It adds the result to the reply stream and sets the stream to expire.
 
-**Call relations**: All read paths that return hosted sites use this converter, including `_on_port`, `_read`, `all`, `conversation`, `homepage`, and `visible_conversation`. It calls `visibility_level` and `_aware` so every returned object has checked visibility and consistent timestamps.
+**Call relations**: RedisTerminals.resolve schedules this in the background. It uses _gate_ok to protect the operation, _reply_blob for large data, _reply_stream for the Redis reply, and warn to log dropped replies.
 
-*Call graph*: calls 2 internal fn (_aware, visibility_level); called by 6 (_on_port, _read, all, conversation, homepage, visible_conversation); 1 external calls (__init__).
+*Call graph*: calls 5 internal fn (_client, _gate_ok, _opmeta_key, _reply_blob, _reply_stream); called by 1 (resolve); 3 external calls (wait_for, b64encode, warn).
+
+
+##### `RedisTerminals._gate_ok`  (lines 596–607)
+
+```
+def _gate_ok(self, meta_raw: bytes | str, conversation_id: UUID, member_id: UUID | None) -> bool
+```
+
+**Purpose**: Checks whether a staged-body or reply request is allowed to touch an operation. It fails closed, meaning uncertain or mismatched requests are denied.
+
+**Data flow**: It receives raw operation metadata, the requested conversation ID, and an optional member ID. It parses the metadata, compares the conversation, then compares the member when one was supplied. It returns True only when the request matches the recorded operation.
+
+**Call relations**: RedisTerminals.staged uses this before serving copy-in bytes. RedisTerminals._deliver_reply uses it before accepting a reply. Both depend on metadata written by RedisTerminals._run_op.
+
+*Call graph*: calls 1 internal fn (_text); called by 2 (_deliver_reply, staged); 2 external calls (loads, UUID).
+
+
+##### `RedisTerminals.in_flight`  (lines 609–612)
+
+```
+def in_flight(self, conversation_id: UUID) -> TerminalOp | None
+```
+
+**Purpose**: Reports no local in-flight operation for this cross-pod transport. The operation may be waiting on another pod, so this object cannot safely expose a local view.
+
+**Data flow**: It receives a conversation ID and always returns None. It does not read Redis or local state.
+
+**Call relations**: This preserves the transport interface while making the limitation explicit. Other methods use Redis to coordinate real in-flight work instead of this local inspection hook.
+
+
+##### `RedisTerminals._clear_op`  (lines 614–635)
+
+```
+async def _clear_op(self, conversation_id: UUID, op_id: str, entry_id: str | None) -> None
+```
+
+**Purpose**: Cleans up Redis keys, stream entries, and blob objects that belonged to an operation. The cleanup is best-effort because safety also comes from expirations and delivery markers.
+
+**Data flow**: It receives a conversation ID, operation ID, and optional stream entry ID. It tries to delete the operation stream entry, operation metadata, delivery marker, in-flight binding, reply stream, input blob, and reply blob. Redis and blob-delete failures are suppressed or bounded so cleanup cannot hang for a long time.
+
+**Call relations**: RedisTerminals._run_op calls this in a finally block after the reply wait ends or fails. It uses all the key-building helpers to remove the pieces created by _run_op, next_op, and _deliver_reply.
+
+*Call graph*: calls 8 internal fn (_body_blob, _client, _deliv_key, _inflight_key, _op_stream, _opmeta_key, _reply_blob, _reply_stream); called by 1 (_run_op); 2 external calls (wait_for, suppress).
+
+
+##### `RedisTerminals._spawn`  (lines 637–644)
+
+```
+def _spawn(self, coro: Coroutine[object, object, None], loop: asyncio.AbstractEventLoop) -> None
+```
+
+**Purpose**: Starts a background delivery task and keeps a reference to it until it finishes. This prevents a fire-and-return task from disappearing silently.
+
+**Data flow**: It receives a coroutine and an event loop. It wraps the coroutine with _logged, creates a task on the loop, stores the task in a set, and arranges for the task to remove itself from the set when done.
+
+**Call relations**: RedisTerminals.resolve calls this to run RedisTerminals._deliver_reply without blocking the request. It hands failures to RedisTerminals._logged so they are reported.
+
+*Call graph*: calls 1 internal fn (_logged); called by 1 (resolve); 1 external calls (create_task).
+
+
+##### `RedisTerminals._logged`  (lines 646–650)
+
+```
+async def _logged(self, coro: Coroutine[object, object, None]) -> None
+```
+
+**Purpose**: Runs a background coroutine and logs any exception it raises. It keeps background delivery failures visible instead of swallowing them.
+
+**Data flow**: It receives a coroutine. It awaits it normally; if any exception escapes, it records a warning with the error text. It does not re-raise the exception.
+
+**Call relations**: RedisTerminals._spawn wraps background reply deliveries with this function. That means failures from RedisTerminals._deliver_reply are logged through the observability warning system.
+
+*Call graph*: called by 1 (_spawn); 1 external calls (warn).
+
+
+### `core/src/ufo/sandbox/terminal.py`
+
+`io_transport` · `request handling and tool execution`
+
+Most sandboxes can be reached by opening a network connection to them. A member’s own terminal is different: the server cannot dial into it directly. Instead, the server sends a request down the terminal’s already-held connection, and the terminal replies on its next request back. This file is the rendezvous point for that back-and-forth.
+
+The main idea is a per-conversation “slot,” like a ticket window. The server puts one operation in the slot, such as “run this command,” “read this file,” or “write these bytes.” The connected terminal asks for the next operation, performs it locally on the member’s machine, then resolves the slot with the result. Because the terminal connection may end and reconnect between steps, the state belongs to the conversation, not to one network connection.
+
+The file also exposes a sandbox carrier, `TerminalCarrier`, that makes this terminal look like other sandbox backends. It rewrites `/workspace/...` paths to the real directory where the member launched the tool, sends operations to the terminal, decodes command replies, streams reads in chunks, and rejects features that do not make sense for a local terminal, such as dialing an exposed port.
+
+A lock is used because the workflow and the terminal connection run on different event loops, often on different threads. Without this file, a tool call could get lost, be answered by the wrong reconnect, or leave the agent waiting forever.
+
+#### Function details
+
+##### `TerminalTransport.connect`  (lines 250–256)
+
+```
+def connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None, runtime_id: str | None=None) -> None
+```
+
+**Purpose**: Defines the interface for telling a terminal transport that a member’s terminal is now connected for a conversation. Implementations use this to remember where the terminal is and who is allowed to answer for it.
+
+**Data flow**: The caller provides a conversation id, current working directory, optional member id, and optional runtime id. An implementation records that information as the live binding for that conversation. There is no returned value; the change is stored in the transport.
+
+**Call relations**: Surface routes call this kind of method when a terminal connection arrives. `Terminals.connect` is the in-process implementation, while other deployments can provide a different backend with the same shape.
+
+
+##### `TerminalTransport.disconnect`  (lines 258–258)
+
+```
+def disconnect(self, conversation_id: UUID) -> None
+```
+
+**Purpose**: Defines the interface for telling the transport that a terminal connection has gone away. This lets the transport stop advertising a terminal that is no longer present.
+
+**Data flow**: The caller gives a conversation id. An implementation decreases or removes the stored connection state for that conversation. It returns nothing.
+
+**Call relations**: Surface routes use this when a held terminal stream closes. `Terminals.disconnect` implements the local version of this behavior.
+
+
+##### `TerminalTransport.workspace`  (lines 260–260)
+
+```
+def workspace(self, conversation_id: UUID) -> TerminalWorkspace | None
+```
+
+**Purpose**: Defines the interface for checking which workspace a terminal is currently bound to. This is a quick lookup that does not wait for a reconnect.
+
+**Data flow**: The input is a conversation id. The transport reads its stored state and returns the terminal’s workspace information, or returns nothing if there is no known terminal.
+
+**Call relations**: This is part of the shared transport contract. The in-process implementation is `Terminals.workspace`; code that needs a wait-for-arrival behavior uses `arrived` instead.
+
+
+##### `TerminalTransport.arrived`  (lines 262–262)
+
+```
+async def arrived(self, conversation_id: UUID, grace_s: float) -> TerminalWorkspace | None
+```
+
+**Purpose**: Defines the interface for waiting until a terminal is connected, up to a caller-chosen grace period. This matters because the client normally disconnects and reconnects around long holds.
+
+**Data flow**: The caller supplies a conversation id and a number of seconds to wait. The transport either returns workspace information when a terminal appears, or returns nothing when the grace time runs out.
+
+**Call relations**: `TerminalCarrier.create` and `TerminalCarrier.attach` use this behavior to find the bound terminal. `Terminals.send` also uses it before trying to deliver an operation.
+
+
+##### `TerminalTransport.send`  (lines 264–273)
+
+```
+async def send(self, conversation_id: UUID, kind: str, timeout_s: int, name: str='', arg: str='', params: str='', body: bytes | None=None) -> bytes
+```
+
+**Purpose**: Defines the interface for asking the terminal to perform one operation and waiting for its reply. This is the core request-and-answer path for terminal-backed commands and file work.
+
+**Data flow**: The caller gives a conversation id, operation kind, timeout, optional operation name, argument, JSON parameters, and optional bytes to stage. The transport delivers that operation to the terminal and returns the reply bytes, or raises an error if the terminal disappears or reports failure.
+
+**Call relations**: `TerminalCarrier` methods use this for exec, read, write, file operations, and skill loading. `Terminals.send` is the local implementation that coordinates with `next_op` and `resolve`.
+
+
+##### `TerminalTransport.next_op`  (lines 275–277)
+
+```
+async def next_op(self, conversation_id: UUID, exclude_op_id: str | None=None) -> TerminalOp
+```
+
+**Purpose**: Defines the interface the connected terminal uses to ask, “What should I do next?” It waits until the server has placed an operation for that conversation.
+
+**Data flow**: The terminal provides a conversation id and may name an operation it just answered so it will not receive it again. The transport returns the next `TerminalOp` to run.
+
+**Call relations**: The surface side of the terminal connection calls this while holding the client stream. In the local implementation, it pairs with `Terminals.send`.
+
+
+##### `TerminalTransport.staged`  (lines 279–281)
+
+```
+async def staged(self, conversation_id: UUID, op_id: str, member_id: UUID | None=None) -> bytes | None
+```
+
+**Purpose**: Defines the interface for fetching bytes attached to an in-flight operation, such as the content for a file write. The bytes are kept out of the small directive message.
+
+**Data flow**: The caller gives a conversation id, operation id, and optional member id. The transport returns the staged bytes only if that exact operation is still current and the member is allowed to read them.
+
+**Call relations**: Terminal-side routes call this when the terminal needs the body for a write-like operation. `Terminals.staged` provides the in-memory version.
+
+
+##### `TerminalTransport.resolve`  (lines 283–290)
+
+```
+def resolve(self, conversation_id: UUID, op_id: str, reply: bytes, failed: str | None=None, member_id: UUID | None=None) -> bool
+```
+
+**Purpose**: Defines the interface for answering an operation that the terminal has completed. It records either a successful reply body or a terminal-side failure message.
+
+**Data flow**: The caller provides the conversation id, operation id, reply bytes, optional failure text, and optional member id. The transport wakes the waiting sender if the answer matches the current operation, and returns whether the answer was accepted.
+
+**Call relations**: Terminal reply routes use this after the client finishes an operation. `Terminals.resolve` is the local implementation, and it wakes `Terminals.send`.
+
+
+##### `TerminalTransport.in_flight`  (lines 292–292)
+
+```
+def in_flight(self, conversation_id: UUID) -> TerminalOp | None
+```
+
+**Purpose**: Defines a way to inspect the operation currently waiting for a terminal reply. This is mainly useful for tests or operator visibility.
+
+**Data flow**: The caller gives a conversation id. The transport returns the active `TerminalOp`, or nothing if no operation is waiting.
+
+**Call relations**: This belongs to the transport interface so different backends can expose the same view. `Terminals.in_flight` implements it for the in-process state.
+
+
+##### `_wake`  (lines 295–304)
+
+```
+def _wake(waiter: _Waiter, answer: object) -> None
+```
+
+**Purpose**: Safely wakes a waiting asynchronous task from another thread. It is needed because the terminal side and workflow side may run on different event loops.
+
+**Data flow**: It receives a saved future and the event loop that owns it, plus the answer to deliver. It schedules a tiny setter function on that original loop, so the future is completed in the safe place.
+
+**Call relations**: `Terminals.connect` uses it to wake tasks waiting for a terminal to arrive. `Terminals.send` uses it to wake a terminal stream waiting for work or queued senders waiting their turn. `Terminals.resolve` uses it to wake the sender waiting for the terminal’s answer.
+
+*Call graph*: called by 3 (connect, resolve, send).
+
+
+##### `_wake._set`  (lines 300–302)
+
+```
+def _set() -> None
+```
+
+**Purpose**: Completes the waiting future if it has not already been completed. This small inner function performs the actual wake-up on the future’s own event loop.
+
+**Data flow**: It reads the future captured by `_wake`. If the future is still pending, it stores the answer as the future’s result; otherwise it leaves it alone.
+
+**Call relations**: `_wake` schedules this function with the event loop’s thread-safe callback mechanism. It is not called directly by the rest of the file.
+
+
+##### `Terminals.connect`  (lines 320–342)
+
+```
+def connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None, runtime_id: str | None=None) -> None
+```
+
+**Purpose**: Records that a terminal connection is present for a conversation. It also wakes anyone who was waiting for the terminal to reconnect.
+
+**Data flow**: It receives the conversation id, current directory, member id, and optional runtime id. Under a lock, it creates or updates the conversation slot, increments the connection count, and collects arrival waiters. After releasing the lock, it wakes those waiters.
+
+**Call relations**: This is the concrete in-process version of `TerminalTransport.connect`. It calls `_wake` because waiting workflows may live on a different event loop.
+
+*Call graph*: calls 1 internal fn (_wake); 1 external calls (__init__).
+
+
+##### `Terminals.disconnect`  (lines 344–351)
+
+```
+def disconnect(self, conversation_id: UUID) -> None
+```
+
+**Purpose**: Marks one terminal connection as closed and removes idle state when nothing is waiting. This prevents old terminal bindings from lingering forever.
+
+**Data flow**: It receives a conversation id, finds the stored slot, and lowers the connection count. If no connection remains and no operation is waiting for a reply, it deletes the slot. It returns nothing.
+
+**Call relations**: This is the in-process version of `TerminalTransport.disconnect`. It is used by the surface side when the held terminal stream ends.
+
+
+##### `Terminals.workspace`  (lines 353–360)
+
+```
+def workspace(self, conversation_id: UUID) -> TerminalWorkspace | None
+```
+
+**Purpose**: Returns the currently known terminal workspace for a conversation without waiting. It is a snapshot of where the connected terminal says it is standing.
+
+**Data flow**: It receives a conversation id and reads the slot under the lock. If a slot exists, it returns a `TerminalWorkspace` with the directory, member id, and runtime id; otherwise it returns nothing.
+
+**Call relations**: This implements the quick lookup promised by `TerminalTransport.workspace`. Code that needs to tolerate reconnect gaps uses `Terminals.arrived` instead.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `Terminals.arrived`  (lines 362–386)
+
+```
+async def arrived(self, conversation_id: UUID, grace_s: float) -> TerminalWorkspace | None
+```
+
+**Purpose**: Waits for a terminal to be connected, but only for a limited grace period. This avoids failing normal reconnect gaps while still giving up when the terminal is truly absent.
+
+**Data flow**: It takes a conversation id and wait duration. It repeatedly checks for a slot; if none exists, it registers a future to be woken by `connect` and waits until either a connection arrives or time runs out. It returns workspace information or nothing.
+
+**Call relations**: `Terminals.send` calls this before sending an operation. If the wait times out, it calls `_drop_arrival` to remove its own waiter from the arrival list.
+
+*Call graph*: calls 1 internal fn (_drop_arrival); called by 1 (send); 3 external calls (__init__, get_running_loop, wait_for).
+
+
+##### `Terminals._drop_arrival`  (lines 388–393)
+
+```
+def _drop_arrival(self, conversation_id: UUID, waiter: asyncio.Future[object]) -> None
+```
+
+**Purpose**: Removes a timed-out arrival waiter from the waiting list. This keeps abandoned waits from building up in memory.
+
+**Data flow**: It receives a conversation id and the specific future that stopped waiting. Under the lock, it filters that future out of the stored waiters and deletes the list if it becomes empty.
+
+**Call relations**: `Terminals.arrived` calls this when its grace period expires. It is an internal cleanup helper for arrival waits.
+
+*Call graph*: called by 1 (arrived).
+
+
+##### `Terminals.send`  (lines 395–470)
+
+```
+async def send(self, conversation_id: UUID, kind: str, timeout_s: int, name: str='', arg: str='', params: str='', body: bytes | None=None) -> bytes
+```
+
+**Purpose**: Places one operation for the terminal to run and waits for the terminal’s reply. It serializes operations so the terminal only receives one at a time.
+
+**Data flow**: It receives operation details and optional staged bytes. It first waits for the terminal to be present, then takes the conversation’s single operation turn, stores a new `TerminalOp` in the slot, wakes any terminal watcher, and waits for `resolve` to provide bytes or failure. In all exit paths it clears the operation state and wakes queued senders.
+
+**Call relations**: This is the core server-to-terminal path. `TerminalCarrier` methods call it to run commands and file work; it uses `arrived`, `_take_turn`, and `_wake`, and it is completed by `Terminals.resolve`.
+
+*Call graph*: calls 3 internal fn (_take_turn, arrived, _wake); 6 external calls (__init__, __init__, __init__, get_running_loop, wait_for, uuid4).
+
+
+##### `Terminals._take_turn`  (lines 472–503)
+
+```
+async def _take_turn(self, conversation_id: UUID, loop: asyncio.AbstractEventLoop, timeout_s: int) -> None
+```
+
+**Purpose**: Waits until the caller owns the conversation’s single operation slot. This prevents two commands from being sent to the same terminal at once.
+
+**Data flow**: It receives the conversation id, the caller’s event loop, and the operation timeout. If the slot is free, it marks it busy and returns. If another operation is running, it queues a future and waits up to the allowed time; on timeout it removes its ticket and raises an error.
+
+**Call relations**: `Terminals.send` calls this before installing an operation. When a send finishes, it wakes queued waiters so they can compete for the next turn.
+
+*Call graph*: called by 1 (send); 6 external calls (__init__, __init__, create_future, time, wait_for, deque).
+
+
+##### `Terminals.next_op`  (lines 505–530)
+
+```
+async def next_op(self, conversation_id: UUID, exclude_op_id: str | None=None) -> TerminalOp
+```
+
+**Purpose**: Lets the connected terminal wait for the next operation it should perform. It also avoids redelivering an operation that the same request just answered.
+
+**Data flow**: It receives a conversation id and optionally an operation id to exclude. If an undelivered operation is already waiting, it marks it delivered and returns it. Otherwise it records the caller as the current watcher and waits until `send` wakes it with a new operation.
+
+**Call relations**: The terminal-facing route calls this while keeping the client connection open. It pairs with `Terminals.send`, which either finds this watcher and wakes it or leaves an operation for a later watcher.
+
+*Call graph*: 2 external calls (__init__, get_running_loop).
+
+
+##### `Terminals.staged`  (lines 532–544)
+
+```
+async def staged(self, conversation_id: UUID, op_id: str, member_id: UUID | None=None) -> bytes | None
+```
+
+**Purpose**: Returns the staged byte body for the current operation, such as file content being copied into the terminal. It only serves bytes for the exact operation that is in flight.
+
+**Data flow**: It receives a conversation id, operation id, and optional member id. Under the lock, it checks that the slot and operation match and that the member is allowed. It returns the body bytes or nothing.
+
+**Call relations**: Terminal-side routes use this after receiving an operation that needs a separate body. It is the in-memory implementation of `TerminalTransport.staged`.
+
+
+##### `Terminals.in_flight`  (lines 546–551)
+
+```
+def in_flight(self, conversation_id: UUID) -> TerminalOp | None
+```
+
+**Purpose**: Reports the operation currently waiting for a reply, if there is one. This gives tests or diagnostics a way to see what the terminal is being asked to do.
+
+**Data flow**: It receives a conversation id, reads the slot under the lock, and returns the stored operation or nothing. It does not change state.
+
+**Call relations**: This implements `TerminalTransport.in_flight` for the local transport. It sits beside the main send/next/resolve flow as an inspection hook.
+
+
+##### `Terminals.resolve`  (lines 553–582)
+
+```
+def resolve(self, conversation_id: UUID, op_id: str, reply: bytes, failed: str | None=None, member_id: UUID | None=None) -> bool
+```
+
+**Purpose**: Accepts the terminal’s answer to the current operation and wakes the sender waiting for it. It rejects stale, duplicate, or unauthorized answers.
+
+**Data flow**: It receives the conversation id, operation id, reply bytes, optional failure text, and optional member id. Under the lock, it verifies that the answer matches the active operation and has not already been resolved. Then it wakes the stored sender with either reply bytes or a `TerminalOpFailed` value, and returns true. If anything does not match, it returns false.
+
+**Call relations**: Terminal reply routes call this after performing an operation. It uses `_wake` to resume `Terminals.send` on the sender’s own event loop.
+
+*Call graph*: calls 1 internal fn (_wake); 1 external calls (__init__).
+
+
+##### `TerminalCarrier.create`  (lines 598–644)
+
+```
+async def create(self, spec: SandboxSpec) -> SandboxHandle
+```
+
+**Purpose**: Creates a sandbox handle for a terminal-bound workspace. It checks that the connected terminal is in the expected directory and prepares proxy environment variables for later commands.
+
+**Data flow**: It receives a sandbox specification, waits briefly for the terminal to appear, compares the terminal directory with the requested workspace, builds a proxy URL containing the run token, and returns a `SandboxHandle`. If the terminal is absent or in the wrong directory, it raises an error.
+
+**Call relations**: This is called when a turn wants to open the terminal-backed sandbox. Later methods such as `exec`, `read`, and `write` use the returned handle.
+
+*Call graph*: 4 external calls (__init__, __init__, __init__, urlsplit).
+
+
+##### `TerminalCarrier.attach`  (lines 646–660)
+
+```
+async def attach(self, spec: SandboxSpec) -> SandboxHandle | None
+```
+
+**Purpose**: Reattaches to an already-bound terminal for off-turn work, such as file browsing or background writes. It does not wait through a reconnect gap.
+
+**Data flow**: It receives a sandbox specification, asks the transport whether the terminal is currently present, and checks that the bound directory matches the resume id. If it matches, it returns a lightweight `SandboxHandle`; otherwise it returns nothing.
+
+**Call relations**: This supports work outside the main turn. It uses the transport’s arrival lookup so a shared backend can find a terminal even if this process did not hold the connection.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `TerminalCarrier.exec`  (lines 662–676)
+
+```
+async def exec(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> ExecResult
+```
+
+**Purpose**: Runs a command on the member’s machine through the terminal. It first rewrites logical workspace paths to the real directory on that machine.
+
+**Data flow**: It receives a sandbox handle, command arguments, and a timeout. It finds the real workspace root, converts the arguments with `host_argv`, then delegates to `_exec`. The output is an `ExecResult` with stdout, stderr, exit code, and possible timeout information.
+
+**Call relations**: Higher-level sandbox users call this as they would on any sandbox carrier. It calls `_root` and then hands the resolved command to `TerminalCarrier._exec`.
+
+*Call graph*: calls 2 internal fn (_exec, _root); 1 external calls (host_argv).
+
+
+##### `TerminalCarrier.load_skills`  (lines 678–689)
+
+```
+async def load_skills(self, handle: SandboxHandle, payload: Mapping[str, object]) -> ExecResult
+```
+
+**Purpose**: Asks the running client to load skill data under the terminal’s UFO home directory. Skills are sent as structured JSON rather than shell code.
+
+**Data flow**: It receives a handle and a payload mapping. It serializes the payload to JSON, sends an `OP_SKILLS` request through the terminal transport, and returns an `ExecResult` whose stdout is the client’s reply. If the terminal reports failure, it raises a runtime error.
+
+**Call relations**: This is another operation built on `TerminalTransport.send`. It fits beside command execution but uses a dedicated operation kind.
+
+*Call graph*: 2 external calls (__init__, dumps).
+
+
+##### `TerminalCarrier._exec`  (lines 691–726)
+
+```
+async def _exec(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> ExecResult
+```
+
+**Purpose**: Runs command arguments that already use the member machine’s real paths. It is the lower-level executor used when paths must not be rewritten again.
+
+**Data flow**: It receives a handle, finalized arguments, and a timeout. It sends an exec operation with arguments and environment, parses the JSON reply, decodes base64 stdout and stderr, normalizes timeout reporting to a standard exit code, and returns an `ExecResult`.
+
+**Call relations**: `TerminalCarrier.exec` calls this after path rewriting. `TerminalCarrier._enumerate` also calls it for shell snippets that list files before a file operation.
+
+*Call graph*: calls 2 internal fn (_reply_object, _reply_stream); called by 2 (_enumerate, exec); 2 external calls (__init__, dumps).
+
+
+##### `TerminalCarrier.write`  (lines 728–741)
+
+```
+async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None
+```
+
+**Purpose**: Writes bytes into a file in the terminal workspace. The bytes are staged separately so large file content is not squeezed into the operation directive.
+
+**Data flow**: It receives a handle, logical path, and content bytes. It rewrites the path to the real terminal path, sends a write operation with the bytes as staged body, and returns nothing on success. Terminal-reported failures become operating-system-style errors.
+
+**Call relations**: Higher-level sandbox code uses this as the copy-in operation. It calls `_client_path` before sending through the transport.
+
+*Call graph*: calls 1 internal fn (_client_path).
+
+
+##### `TerminalCarrier.read`  (lines 743–759)
+
+```
+async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Reads a file from the terminal workspace and yields it in chunks. Missing files are reported consistently as `FileNotFoundError`.
+
+**Data flow**: It receives a handle and logical path. It rewrites the path, sends a read operation, receives the full reply bytes, and yields them in fixed-size pieces. If the terminal reports a missing path, it raises `FileNotFoundError`; other failures become `OSError`.
+
+**Call relations**: Sandbox file readers call this to copy data out. It uses `_client_path` and the terminal transport’s send-and-reply path.
+
+*Call graph*: calls 1 internal fn (_client_path).
+
+
+##### `TerminalCarrier.file_op`  (lines 761–849)
+
+```
+async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
+```
+
+**Purpose**: Runs one higher-level file-system operation, such as read, grep, glob, or changes, on the member’s machine. It rewrites workspace paths and sometimes prepares a file listing first so the server, not the client, decides exactly what is scanned.
+
+**Data flow**: It receives a handle, operation name, and parameter dictionary. It maps known path parameters from `/workspace` to the real root, optionally reads and renders office documents, optionally runs an enumeration command for walking or change scans, then sends a file operation to the terminal. It parses the JSON reply and returns it, or raises a clear error if the reply reports failure.
+
+**Call relations**: This is the main bridge from `ufo fs` style operations to the terminal client. It calls `_root`, `_under_root`, `_enumerate`, and `_reply_object`, and uses the transport for the final terminal operation.
+
+*Call graph*: calls 4 internal fn (_enumerate, _reply_object, _root, _under_root); 2 external calls (dumps, PurePosixPath).
+
+
+##### `TerminalCarrier._enumerate`  (lines 851–872)
+
+```
+async def _enumerate(self, handle: SandboxHandle, op: str, walk_root: str, program: str, arguments: tuple[str, ...]=()) -> None
+```
+
+**Purpose**: Runs a shell program that prepares a deterministic listing for file operations that need to walk or inspect the workspace. This keeps scanning rules consistent with the server’s expectations.
+
+**Data flow**: It receives a handle, operation name, walk root, shell program text, and optional arguments. It builds a small `sh -c` command with the walk root in the environment, executes it through `_exec`, and checks the exit code. A bad listing command becomes a value error with useful text.
+
+**Call relations**: `TerminalCarrier.file_op` calls this before grep, glob, or changes operations. It delegates the actual command run to `TerminalCarrier._exec`.
+
+*Call graph*: calls 1 internal fn (_exec); called by 1 (file_op); 1 external calls (quote).
+
+
+##### `TerminalCarrier.dial`  (lines 874–878)
+
+```
+async def dial(self, handle: SandboxHandle, port: int) -> DialTarget
+```
+
+**Purpose**: Rejects attempts to expose or dial a port on a terminal-bound sandbox. A member’s local terminal does not provide the same external per-port host that remote sandboxes do.
+
+**Data flow**: It receives a sandbox handle and a port number, but does not use them to create a connection target. It always raises `SandboxUnreachable` with an explanation.
+
+**Call relations**: Sandbox users may call `dial` uniformly across carriers. This implementation makes the terminal carrier’s limitation explicit instead of pretending a network endpoint exists.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `_reply_stream`  (lines 881–889)
+
+```
+def _reply_stream(result: dict[str, object], name: str) -> bytes
+```
+
+**Purpose**: Extracts and decodes one captured command stream, such as stdout or stderr, from an exec reply. It treats a missing stream field as a malformed reply, not as empty output.
+
+**Data flow**: It receives the parsed reply dictionary and a stream name. It looks for a matching base64 field, decodes it into bytes, and returns those bytes. If the field is absent or invalid, it raises an error.
+
+**Call relations**: `TerminalCarrier._exec` calls this for stdout and stderr after parsing the terminal’s JSON reply.
+
+*Call graph*: called by 1 (_exec); 1 external calls (b64decode).
+
+
+##### `_reply_object`  (lines 892–899)
+
+```
+def _reply_object(reply: bytes, op: str) -> dict[str, object]
+```
+
+**Purpose**: Parses a terminal reply as a JSON object. It protects callers from silently accepting replies in the wrong shape.
+
+**Data flow**: It receives raw reply bytes and the operation name for error messages. It decodes the bytes as UTF-8, parses JSON, verifies that the result is a dictionary-like object, and returns it. Invalid JSON or a non-object reply raises a runtime error.
+
+**Call relations**: `TerminalCarrier._exec` uses this for command replies. `TerminalCarrier.file_op` uses it for file-operation replies.
+
+*Call graph*: called by 2 (_exec, file_op); 1 external calls (loads).
+
+
+##### `_root`  (lines 902–905)
+
+```
+def _root(handle: SandboxHandle) -> str
+```
+
+**Purpose**: Returns the real host directory that backs `/workspace` for a terminal sandbox. It raises if that directory is unexpectedly missing from the handle.
+
+**Data flow**: It receives a sandbox handle. If the handle has a workspace host path, it returns that string; otherwise it raises an error explaining that a terminal sandbox must be bound to a directory.
+
+**Call relations**: `TerminalCarrier.exec`, `TerminalCarrier.file_op`, and `_client_path` call this before rewriting paths.
+
+*Call graph*: called by 3 (exec, file_op, _client_path).
+
+
+##### `_client_path`  (lines 908–914)
+
+```
+def _client_path(handle: SandboxHandle, path: str) -> str
+```
+
+**Purpose**: Converts a logical `/workspace/...` path into the member machine’s real workspace path. It strips only the leading workspace prefix, avoiding accidental replacement elsewhere in the path.
+
+**Data flow**: It receives a handle and a path string. It gets the real root with `_root`, passes the root and path to `_under_root`, and returns the rewritten path.
+
+**Call relations**: `TerminalCarrier.write` and `TerminalCarrier.read` use this before sending paths to the terminal client.
+
+*Call graph*: calls 2 internal fn (_root, _under_root); called by 2 (read, write).
+
+
+##### `_under_root`  (lines 917–922)
+
+```
+def _under_root(root: str, path: str) -> str
+```
+
+**Purpose**: Maps paths under `/workspace` to the real bound root while leaving other paths unchanged. This is the small path-rule helper used by terminal file operations.
+
+**Data flow**: It receives the real root and a path. If the path is not under `/workspace`, it returns the original path. If it is exactly `/workspace`, it returns the root; otherwise it appends the relative part to the root and returns the result.
+
+**Call relations**: `_client_path` uses this for read and write paths. `TerminalCarrier.file_op` uses it for selected file-operation parameters that represent workspace paths.
+
+*Call graph*: called by 2 (file_op, _client_path); 1 external calls (PurePosixPath).
+
+
+### Local carrier selection
+The host-directory sandbox provides the simplest carrier, while the selector chooses and preserves configured backends.
+
+### `core/src/ufo/sandbox/local.py`
+
+`io_transport` · `cross-cutting`
+
+This file is the lightweight version of the sandbox system. Instead of starting Docker or a cloud sandbox, it treats the conversation’s workspace as a real folder on the same machine and runs requested commands there. That makes development simple and fast, but it is not a security wall: a local subprocess is still a host process, so safety mostly comes from carefully checking paths before reading or writing files.
+
+The file builds a small private runtime area. Think of it like a temporary tool belt: it contains a private home directory, a copy of the `ufo` command-line helper, skill files, and certificate material needed for network traffic. Commands get a deliberately built environment rather than inheriting the server’s environment, because the server may contain secrets. Network egress is still routed through the project’s proxy, so model keys, metering, and certificate handling behave like they would in a container.
+
+`LocalCarrier` is the main piece. It can create or attach to a workspace, run commands, copy files in and out safely, load skills, run file operations through `ufo fs`, and translate an in-sandbox port to localhost. The important theme is “same behavior, less isolation”: useful for local development, but not a replacement for Docker or E2B when strong separation is needed.
+
+#### Function details
+
+##### `_provision_scratch`  (lines 71–95)
+
+```
+def _provision_scratch() -> Path
+```
+
+**Purpose**: Creates one temporary local runtime area for this Python process. It prepares a private home directory and, when available, copies in the `ufo` helper program so later commands can use it.
+
+**Data flow**: It starts with no input other than the current process environment. It makes a temporary directory, adds `home` and `bin` folders, tries to find the client binary, copies it into `bin`, and marks it executable. It returns the path to this scratch area; if the binary is missing, it warns and still returns the scratch area.
+
+**Call relations**: This is used as the default factory for `LocalCarrier._scratch`, so it runs when a local carrier is first built. Later methods rely on the returned directory for `HOME`, `UFO_HOME`, `PATH`, certificates, and skill storage.
+
+*Call graph*: 4 external calls (Path, mkdtemp, warn, client_binary).
+
+
+##### `LocalCarrier.ufo_home`  (lines 103–105)
+
+```
+def ufo_home(self) -> Path
+```
+
+**Purpose**: Gives the local carrier’s private `UFO_HOME` directory. This is where the local runtime stores UFO-specific files such as skills and per-conversation runtime data.
+
+**Data flow**: It reads the carrier’s scratch directory and appends `home/.ufo`. It returns that path without creating or changing anything itself.
+
+**Call relations**: Other methods use this property when seeding skills, loading skills, creating runtime directories, and attaching to existing conversations. It keeps all UFO-local state under the private scratch home instead of the real user’s home.
+
+
+##### `LocalCarrier.seed_system_skills`  (lines 107–135)
+
+```
+def seed_system_skills(self, archive: bytes) -> None
+```
+
+**Purpose**: Installs built-in system skills from a zip archive into the local UFO home. It replaces old versions of those skills safely and records the manifest that describes them.
+
+**Data flow**: It receives zip archive bytes. It opens the archive, reads `manifest.json`, validates that the manifest and skill names look correct, removes old top-level skill folders that are being replaced, writes each archive file under the skills directory, and finally writes the new system manifest. The result is changed files on disk; it returns nothing.
+
+**Call relations**: This prepares skill files before they are requested by `LocalCarrier.load_skills`. It relies on `_system_manifest` to compare against the old manifest and on containment helpers so archive paths cannot write outside the skills directory.
+
+*Call graph*: calls 1 internal fn (_system_manifest); 7 external calls (BytesIO, loads, Path, contained_file, contained_relative, contained_remove, ZipFile).
+
+
+##### `LocalCarrier.load_skills`  (lines 137–147)
+
+```
+async def load_skills(self, handle: SandboxHandle, payload: Mapping[str, object]) -> ExecResult
+```
+
+**Purpose**: Asynchronously resolves which system and user skills should be available for a sandbox run. It wraps the real disk work and returns a command-like result with either JSON output or an error.
+
+**Data flow**: It receives a sandbox handle and a payload describing requested system and user skills. It runs `_load_skills` in a worker thread, because file operations are blocking. On success it returns an `ExecResult` whose stdout is JSON containing skill root paths; on validation or disk errors it returns an `ExecResult` with exit code 1 and the error text.
+
+**Call relations**: The surrounding sandbox system can call this like a carrier operation. It hands the detailed validation and installation work to `_load_skills`, then packages the answer in the same style as command execution results.
+
+*Call graph*: 3 external calls (__init__, to_thread, dumps).
+
+
+##### `LocalCarrier._load_skills`  (lines 149–203)
+
+```
+def _load_skills(self, payload: Mapping[str, object]) -> dict[str, str]
+```
+
+**Purpose**: Does the detailed work of checking, verifying, and installing skills. It makes sure requested skills match their declared digests, so the runtime does not silently use tampered or mismatched content.
+
+**Data flow**: It receives a payload with `system` and `user` skill descriptions. It reads the current system manifest, checks requested system skills against that manifest, reads their files, recomputes their digest, and records valid roots. For user skills, it validates names, decodes base64 file contents, checks the digest, installs the files, and records their roots. It returns a dictionary from skill name to local directory path.
+
+**Call relations**: `LocalCarrier.load_skills` calls this in a background thread. This method coordinates `_system_manifest`, `_read_skill_files`, `_skill_digest`, `_validate_user_skill_name`, and `_install_user_skill` to turn a requested skill list into real directories.
+
+*Call graph*: calls 5 internal fn (_install_user_skill, _read_skill_files, _skill_digest, _system_manifest, _validate_user_skill_name); 2 external calls (urlsafe_b64decode, contained_relative).
+
+
+##### `LocalCarrier._system_manifest`  (lines 206–214)
+
+```
+def _system_manifest(root: Path) -> Mapping[str, object]
+```
+
+**Purpose**: Reads the saved manifest for installed system skills. If no manifest exists yet, it treats the system as having no installed skills.
+
+**Data flow**: It receives the skills root directory. It safely opens `.system-manifest.json` under that root; if it is absent, it returns `{"skills": {}}`. If present, it parses the JSON and checks that the result is a mapping-like object before returning it.
+
+**Call relations**: `seed_system_skills` uses this to know what old skills may need removal. `_load_skills` uses it to verify requested system skills against what has actually been installed.
+
+*Call graph*: called by 2 (_load_skills, seed_system_skills); 2 external calls (load, contained_file).
+
+
+##### `LocalCarrier._read_skill_files`  (lines 217–224)
+
+```
+def _read_skill_files(root: Path, name: str, files: list[str]) -> list[tuple[str, bytes]]
+```
+
+**Purpose**: Reads the files that belong to an installed system skill. It gathers their bytes so the code can verify the skill’s digest.
+
+**Data flow**: It receives the skills root, the skill name, and a list of file paths from the manifest. For each file, it builds a contained path under the skill directory, opens it safely, reads its bytes, and adds `(path, bytes)` to a list. It returns that list.
+
+**Call relations**: `_load_skills` calls this while checking a requested system skill. The returned contents are immediately passed into `_skill_digest` to confirm the installed files match the expected digest.
+
+*Call graph*: called by 1 (_load_skills); 2 external calls (contained_file, contained_relative).
+
+
+##### `LocalCarrier._install_user_skill`  (lines 227–233)
+
+```
+def _install_user_skill(root: Path, name: str, files: list[tuple[str, bytes]]) -> None
+```
+
+**Purpose**: Writes a verified user-provided skill into the local skills directory. It first removes any previous copy of that skill so the new version is clean.
+
+**Data flow**: It receives the skills root, the skill name, and a list of file paths with bytes. It removes the destination folder under the skills root, then writes each file safely, creating parent directories as needed. It changes the filesystem and returns nothing.
+
+**Call relations**: `_load_skills` calls this only after the user skill name and digest have been validated. It uses containment checks so user-supplied file paths cannot escape the skills area.
+
+*Call graph*: called by 1 (_load_skills); 3 external calls (contained_file, contained_relative, contained_remove).
+
+
+##### `LocalCarrier._validate_user_skill_name`  (lines 236–239)
+
+```
+def _validate_user_skill_name(name: str, root: Path) -> None
+```
+
+**Purpose**: Checks that a user skill name is safe and simple. It prevents names that would escape the skills directory, create nested top-level names, or hide as dot-prefixed entries.
+
+**Data flow**: It receives a proposed skill name and the skills root. It converts the name into a contained path, looks at the relative path parts, and raises an error if the name is not exactly one normal top-level directory. If the name is valid, it returns nothing.
+
+**Call relations**: `_load_skills` calls this before accepting a user skill. This is an early guard before decoding and writing user-provided files.
+
+*Call graph*: called by 1 (_load_skills); 2 external calls (Path, contained_relative).
+
+
+##### `LocalCarrier._skill_digest`  (lines 242–247)
+
+```
+def _skill_digest(files: list[tuple[str, bytes]]) -> str
+```
+
+**Purpose**: Computes the fingerprint used to prove a skill’s file list and contents are exactly what was declared. A digest is like a tamper-evident seal for the skill.
+
+**Data flow**: It receives a sorted list of `(path, bytes)` entries. For each entry, it hashes the path and the content and feeds both into one overall SHA-256 hash. It returns a string such as `sha256:...`.
+
+**Call relations**: `_load_skills` uses this for both system and user skills. A skill is accepted only when this computed digest matches the digest supplied by the manifest or payload.
+
+*Call graph*: called by 1 (_load_skills); 1 external calls (sha256).
+
+
+##### `LocalCarrier.create`  (lines 249–283)
+
+```
+async def create(self, spec: SandboxSpec) -> SandboxHandle
+```
+
+**Purpose**: Creates a local sandbox handle for a conversation. It prepares the workspace and runtime folders, writes the proxy certificate, and builds the environment commands should use.
+
+**Data flow**: It receives a `SandboxSpec` containing paths, conversation ID, proxy details, run token, and extra environment values. It creates the host workspace directory and per-conversation runtime directory, writes the proxy certificate into scratch space, builds proxy and model-key environment variables, and returns a `SandboxHandle` describing the ready local sandbox.
+
+**Call relations**: The larger sandbox system calls this when starting a local sandbox for a run. It uses `_base_env` as the safe foundation, then adds proxy, certificate, sentinel model-key, and spec-provided environment values.
+
+*Call graph*: calls 1 internal fn (_base_env); 3 external calls (__init__, to_thread, Path).
+
+
+##### `LocalCarrier._base_env`  (lines 285–308)
+
+```
+def _base_env(self) -> dict[str, str]
+```
+
+**Purpose**: Builds the minimal environment that every local command should receive. It avoids leaking the server’s secrets and disables host Git behaviors that could hang or prompt unexpectedly.
+
+**Data flow**: It reads only a small allow-list from the host environment, such as locale and temporary-directory settings. It then adds private `HOME`, `UFO_HOME`, a `PATH` containing the local `ufo` helper and Python directory, and Git settings that avoid system/global host config, credential prompts, and terminal prompts. It returns a fresh dictionary of environment variables.
+
+**Call relations**: `create` uses this as the base for command environments with proxy access. `attach` uses it for read-only access to an existing local workspace. All local subprocess behavior depends on this environment boundary.
+
+*Call graph*: called by 2 (attach, create); 1 external calls (Path).
+
+
+##### `LocalCarrier.attach`  (lines 310–324)
+
+```
+async def attach(self, spec: SandboxSpec) -> SandboxHandle | None
+```
+
+**Purpose**: Reconnects to an existing local workspace without creating it. This is useful for browsing or reading a conversation that may already have files.
+
+**Data flow**: It receives a `SandboxSpec`. It checks whether the workspace host path is an existing directory. If not, it returns `None`; if yes, it returns a `SandboxHandle` pointing at that directory with the local runtime path and base environment.
+
+**Call relations**: The sandbox system calls this when it wants to access an existing local sandbox rather than create one. It uses `_base_env`, but unlike `create` it does not create the workspace or add proxy credentials.
+
+*Call graph*: calls 1 internal fn (_base_env); 3 external calls (__init__, to_thread, Path).
+
+
+##### `LocalCarrier.exec`  (lines 326–375)
+
+```
+async def exec(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> ExecResult
+```
+
+**Purpose**: Runs one command as a subprocess in the local workspace. It translates logical `/workspace` arguments into real host paths and enforces a timeout.
+
+**Data flow**: It receives a sandbox handle, command arguments, and a timeout. It finds the workspace root, rewrites command arguments to host paths, starts the subprocess in the workspace with the handle’s environment, and collects stdout and stderr. If the command times out or the operation is cancelled, it kills the whole process group. It returns an `ExecResult` with output, error text, exit code, and timeout information when relevant.
+
+**Call relations**: This is the local carrier’s command runner. It relies on `_root` to find the host workspace, `host_argv` to rewrite paths, and `_kill_process_group` to clean up commands that do not finish normally.
+
+*Call graph*: calls 2 internal fn (_kill_process_group, _root); 4 external calls (__init__, create_subprocess_exec, wait_for, host_argv).
+
+
+##### `LocalCarrier.write`  (lines 377–400)
+
+```
+async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None
+```
+
+**Purpose**: Copies bytes into the sandbox workspace. It runs the actual disk write off the async event loop so the server can keep doing other work.
+
+**Data flow**: It receives a handle, a sandbox path, and bytes to write. It sends the blocking write operation to a worker thread by calling `_write_contained`. It returns nothing after the file has been written or raises an error if the path is unsafe or the write fails.
+
+**Call relations**: The broader system calls this when a file needs to be delivered into the local sandbox. `_write_contained` does the guarded filesystem work.
+
+*Call graph*: 1 external calls (to_thread).
+
+
+##### `LocalCarrier._write_contained`  (lines 402–405)
+
+```
+def _write_contained(self, handle: SandboxHandle, path: str, content: bytes) -> None
+```
+
+**Purpose**: Performs the safe, contained file write for `LocalCarrier.write`. It makes sure the target path belongs to an allowed sandbox root before replacing the file contents.
+
+**Data flow**: It receives a handle, path, and content bytes. It resolves the path through `_contained_name`, opens the target using containment checks, and replaces the file with the given bytes while preserving or applying the intended write mode. It changes the file on disk and returns nothing.
+
+**Call relations**: `LocalCarrier.write` calls this in a background thread. It depends on `_contained_name` to decide whether the path belongs to the workspace or runtime area, then delegates low-level safe writing to the containment helper.
+
+*Call graph*: calls 1 internal fn (_contained_name); 1 external calls (contained_file).
+
+
+##### `LocalCarrier.read`  (lines 407–418)
+
+```
+async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams bytes out of the local sandbox workspace. It reads in chunks so large files do not need to be loaded into memory all at once.
+
+**Data flow**: It receives a handle and a sandbox path. It opens a safe file source in a worker thread, repeatedly reads chunks up to the configured chunk size, yields each chunk to the caller, and closes the source at the end. Its output is an asynchronous stream of bytes.
+
+**Call relations**: The larger system calls this when it needs to copy a file out of the sandbox. It uses `_contained_source` to open the file safely before streaming begins.
+
+*Call graph*: 1 external calls (to_thread).
+
+
+##### `LocalCarrier._contained_source`  (lines 420–430)
+
+```
+def _contained_source(self, handle: SandboxHandle, path: str) -> BufferedReader
+```
+
+**Purpose**: Safely opens a file for reading from an allowed sandbox root. It refuses missing paths and paths that containment rules reject.
+
+**Data flow**: It receives a handle and path. It resolves the path with `_contained_name`, opens the target through the containment helper, checks that it exists, and returns a byte-reading file object. If containment reports a missing path, it turns that into a normal `FileNotFoundError`.
+
+**Call relations**: `LocalCarrier.read` calls this before streaming file contents. The returned open file is then read chunk by chunk outside this helper.
+
+*Call graph*: calls 1 internal fn (_contained_name); 1 external calls (contained_file).
+
+
+##### `LocalCarrier.file_op`  (lines 432–437)
+
+```
+async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
+```
+
+**Purpose**: Runs a higher-level file operation through the `ufo fs` helper command. This lets the local carrier support the same file-tool interface as other sandbox carriers.
+
+**Data flow**: It receives a handle, an operation name, and operation parameters. It passes those to `ufo_fs_file_op`, which invokes the file operation using the local carrier’s command path and workspace. It returns the resulting dictionary from that helper.
+
+**Call relations**: The sandbox file-tool layer calls this for operations beyond simple raw read and write. It hands the work to the shared `ufo_fs_file_op` helper so local behavior matches other carriers.
+
+*Call graph*: 1 external calls (ufo_fs_file_op).
+
+
+##### `LocalCarrier.dial`  (lines 439–445)
+
+```
+async def dial(self, handle: SandboxHandle, port: int) -> DialTarget
+```
+
+**Purpose**: Translates a sandbox port into a host address for the local carrier. Because local commands share the host network, the target is simply localhost on the same port.
+
+**Data flow**: It receives a handle and a port number. It builds and returns a `DialTarget` with host `127.0.0.1:<port>` and TLS disabled. It does not inspect or change the workspace.
+
+**Call relations**: The surrounding system calls this when it wants to connect to a server started inside the local sandbox. Unlike container carriers, there is no per-conversation network namespace here, so port conflicts can happen between conversations.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `_kill_process_group`  (lines 448–453)
+
+```
+async def _kill_process_group(process: asyncio.subprocess.Process) -> None
+```
+
+**Purpose**: Force-kills a command and its child processes. This prevents a timed-out or cancelled command from leaving runaway subprocesses behind.
+
+**Data flow**: It receives an asyncio subprocess object. It sends `SIGKILL` to the process group using the child process ID; if the process is already gone, it quietly returns. Otherwise it waits until the process has exited.
+
+**Call relations**: `LocalCarrier.exec` calls this when a command times out or the exec operation is interrupted. It is deliberately aimed at the whole process group, not just the direct child.
+
+*Call graph*: called by 1 (exec); 2 external calls (wait, killpg).
+
+
+##### `_root`  (lines 456–459)
+
+```
+def _root(handle: SandboxHandle) -> Path
+```
+
+**Purpose**: Returns the host directory that backs the sandbox workspace. It also catches the invalid case where a local sandbox has no host workspace path.
+
+**Data flow**: It receives a `SandboxHandle`. If `workspace_host_path` is missing, it raises an error explaining that the local carrier needs a host directory. Otherwise it converts the path string into a `Path` and returns it.
+
+**Call relations**: `LocalCarrier.exec` uses this to choose the subprocess working directory. `_contained_name` uses it when resolving paths under the logical workspace root.
+
+*Call graph*: called by 2 (exec, _contained_name); 1 external calls (Path).
+
+
+##### `_contained_name`  (lines 462–468)
+
+```
+def _contained_name(handle: SandboxHandle, path: str) -> tuple[PurePosixPath, Path]
+```
+
+**Purpose**: Decides whether a requested sandbox path is inside an allowed local root and converts it into a relative path plus the real host root. It is the path gatekeeper for local reads and writes.
+
+**Data flow**: It receives a handle and a path string. It treats the string as a POSIX-style path, then checks whether it is under `/workspace` or under the handle’s runtime root. If so, it returns the relative path and the matching host root. If not, it raises an error because the path is outside the sandbox roots.
+
+**Call relations**: `_write_contained` and `_contained_source` call this before touching the filesystem. It uses `_root` when a path belongs to the workspace, so all local file access is anchored to the handle’s host workspace directory.
+
+*Call graph*: calls 1 internal fn (_root); called by 2 (_contained_source, _write_contained); 2 external calls (Path, PurePosixPath).
+
+
+### `core/src/ufo/sandbox/select.py`
+
+`orchestration` · `startup / sandbox setup`
+
+A sandbox needs somewhere to run: locally, in Docker, in E2B, or in another backend supplied by an extension. This file is the place where those choices are turned from names in the configuration into real carrier objects the rest of the system can use. Think of it like assigning both the main parking garage for new cars and a list of older garages where already-parked cars may still need to be found.
+
+It starts with the built-in `local` carrier, then adds carriers advertised by extension manifests. If two carriers claim the same backend name, it stops immediately, because otherwise the same configuration name could mean two different things. It also checks the `resume_backends` list, which is for old backends that may still contain saved sandbox handles. A resume backend cannot repeat the current default backend, and the list cannot contain duplicates.
+
+For each selected backend, the file builds exactly one carrier instance and records its `CarrierSpec`, which describes where it came from and how to create it. Remote, off-cluster carriers get an extra safety check: they must have a public HTTPS proxy URL configured. Without that, a remote sandbox could not safely route outbound traffic through the system’s credential-injecting and metered proxy.
+
+#### Function details
+
+##### `select_carriers`  (lines 26–50)
+
+```
+def select_carriers(config: Config, manifests: tuple[Manifest, ...]) -> DeployCarriers
+```
+
+**Purpose**: Chooses all sandbox carriers needed for this deploy: the default carrier for new sandboxes and any extra carriers needed only to resume existing sandboxes. It also rejects ambiguous or unsafe configuration early, before the system starts using sandboxes.
+
+**Data flow**: It receives the main configuration and the extension manifests. It begins with the built-in `local` backend, adds every carrier declared by extensions, checks for duplicate names and invalid resume settings, then asks `_built` to create the default carrier and each resume carrier. It returns a `DeployCarriers` object containing the ready-to-use default carrier, its specification, and a mapping of resume backend names to their carrier/spec pairs.
+
+**Call relations**: This is the main selection routine. `select_carrier` calls it when only the default backend is needed. During its work, it calls `_built` for each configured backend name so that name lookup, construction, and remote-backend safety checks happen in one shared place.
+
+*Call graph*: calls 1 internal fn (_built); called by 1 (select_carrier); 2 external calls (__init__, __init__).
+
+
+##### `select_carrier`  (lines 53–56)
+
+```
+def select_carrier(config: Config, manifests: tuple[Manifest, ...]) -> tuple[Carrier, CarrierSpec]
+```
+
+**Purpose**: Provides a simpler interface for code that only cares about the default sandbox backend. It hides the resume-backend details and returns just the carrier used for new sandboxes plus its specification.
+
+**Data flow**: It receives the same configuration and manifests as `select_carriers`. It calls `select_carriers`, takes the default carrier and its spec from the returned bundle, and returns only those two values. It does not change the configuration or build anything directly itself.
+
+**Call relations**: This is a convenience wrapper around `select_carriers`. It depends on the full selection flow so the same validation rules apply even when a caller only asks for the default carrier.
+
+*Call graph*: calls 1 internal fn (select_carriers).
+
+
+##### `_built`  (lines 59–79)
+
+```
+def _built(specs: dict[str, CarrierSpec], config: Config, name: str) -> tuple[Carrier, CarrierSpec]
+```
+
+**Purpose**: Looks up one backend name, verifies it is allowed and safely configured, and creates the actual carrier object. It is the final gate before a configured backend becomes something the process can use.
+
+**Data flow**: It receives the dictionary of known carrier specs, the configuration, and one backend name. It finds the matching spec; if none exists, it raises a clear registration error. If the backend is remote, it reads `proxy_public_url` from the sandbox configuration and requires it to be a valid HTTPS URL. After those checks pass, it calls the carrier factory from the spec and returns the new carrier together with its spec.
+
+**Call relations**: `select_carriers` calls this once for the default backend and once for each resume backend. `_built` uses `urlparse` to inspect remote proxy URLs, and raises `NotRegisteredError` when the configured backend name does not match any built-in or extension-provided carrier.
+
+*Call graph*: called by 1 (select_carriers); 2 external calls (__init__, urlparse).
+
+
+### Isolated sandbox carriers
+Docker and E2B carriers provide containerized or cloud-hosted sandbox implementations with command, file, port, and lifecycle support.
+
+### `extensions/docker/ufo_ext_docker.py`
+
+`io_transport` · `sandbox startup, command execution, file access, idle reclaim`
+
+This file is the Docker version of UFO's sandbox “carrier,” meaning the piece that carries commands into an isolated workspace. Think of it like assigning each conversation its own workshop: the tools run inside that workshop, the project files are mounted at `/workspace`, and outside network access must pass through a guarded proxy. Without this file, a deployment configured for Docker sandboxes could not start containers, execute user tools safely inside them, or clean up Docker networks when conversations go quiet.
+
+The main class, `DockerCarrier`, creates or reconnects to a container named from the conversation ID. If the container was stopped to save memory and network space, it can be started again. Each command is run with fresh proxy settings for the current turn, so an old container never keeps an old access token. The proxy also keeps real API keys out of the container by replacing a harmless sentinel value only when traffic leaves through the proxy.
+
+The file also reads and writes files through `docker exec`, not by directly touching the host mount, so callers see the filesystem exactly as the sandbox sees it. It tracks recent activity and in-flight commands so idle containers can be stopped without interrupting active work. Stopping frees scarce Docker bridge networks, while leaving the workspace and container state available for later revival.
+
+#### Function details
+
+##### `_docker`  (lines 79–93)
+
+```
+async def _docker(*argv: str, stdin: bytes=b'', timeout_s: int=60) -> tuple[int, bytes, bytes]
+```
+
+**Purpose**: Runs the Docker command-line program asynchronously and returns its exit code plus captured output. It gives the rest of the file one consistent way to talk to Docker and to recognize Docker commands that exceeded a deadline.
+
+**Data flow**: It receives Docker arguments, optional bytes for standard input, and a timeout. It starts `docker ...`, feeds the input, waits for completion, and collects standard output and standard error. It returns a three-part result: numeric code, output bytes, and error bytes; if the timeout expires, it kills the process and returns a special timeout code.
+
+**Call relations**: Almost every Docker action in this file goes through this helper. Creation, inspection, network setup, command execution, certificate installation, and cleanup all call `_docker` so they do not each have to repeat subprocess and timeout logic.
+
+*Call graph*: called by 13 (_death_report, _ensure_network, _ensure_runtime_root, _exec_with, _held_id, _install_ca, _reclaim_idle, _release, _revive, _running_id (+3 more)); 2 external calls (create_subprocess_exec, wait_for).
+
+
+##### `DockerCarrier.create`  (lines 106–219)
+
+```
+async def create(self, spec: SandboxSpec) -> SandboxHandle
+```
+
+**Purpose**: Creates a Docker sandbox for a conversation, or reconnects to an existing one. It also prepares the per-command proxy environment that makes network use attributable to the current turn without storing secrets inside the container.
+
+**Data flow**: It receives a sandbox specification containing the conversation ID, image, workspace path, proxy details, run token, and environment variables. It first reclaims old idle containers, then looks for a running or stopped container with the conversation's deterministic name. It installs the proxy certificate, ensures the runtime directory exists, and returns a `SandboxHandle`; if no usable container exists, it creates the Docker network and starts a new long-lived container.
+
+**Call relations**: This is the main opening path used by the sandbox system when a conversation needs Docker. It calls the lookup helpers to find existing containers, `_revive` to restart stopped ones, `_ensure_network` before fresh creation, `_install_ca` so HTTPS through the proxy works, and `_ensure_runtime_root` so UFO runtime files have the right place inside the sandbox.
+
+*Call graph*: calls 9 internal fn (_ensure_network, _ensure_runtime_root, _install_ca, _network_name, _reclaim_idle, _revive, _running_id, _stopped_id, _docker); 2 external calls (__init__, sandbox_runtime_root).
+
+
+##### `DockerCarrier.attach`  (lines 221–250)
+
+```
+async def attach(self, spec: SandboxSpec) -> SandboxHandle | None
+```
+
+**Purpose**: Looks for an already-existing container for a conversation and returns a handle to it if possible. Unlike `create`, it does not make a new container; it is a quiet “can I reconnect?” operation.
+
+**Data flow**: It receives the same kind of sandbox specification used for creation. It checks whether the named container is running, tries to revive it if it is stopped, and verifies the runtime directory. It returns a `SandboxHandle` when the container is usable, or `None` when there is no usable existing sandbox.
+
+**Call relations**: This supports read or resume flows that should not create fresh sandboxes. It uses `_running_id` and `_stopped_id` to find the container, `_revive` if reclaim previously stopped it, and `_ensure_runtime_root` before handing the handle back.
+
+*Call graph*: calls 4 internal fn (_ensure_runtime_root, _revive, _running_id, _stopped_id); 2 external calls (__init__, sandbox_runtime_root).
+
+
+##### `DockerCarrier._reclaim_idle`  (lines 252–320)
+
+```
+async def _reclaim_idle(self, opening: UUID) -> None
+```
+
+**Purpose**: Stops containers and removes Docker networks for conversations that have been idle long enough. This saves memory and scarce Docker bridge network ranges while keeping the stopped container and workspace available for later restart.
+
+**Data flow**: It receives the conversation currently being opened and marks it as recently touched. It scans Docker for UFO containers and networks, records any that this process did not already know about, and chooses entries that are old and have no active command. For each stale conversation, it finds the held container ID, removes the touch record as a reservation, calls `_release`, and restores the record if cleanup failed.
+
+**Call relations**: `create` calls this before opening a sandbox, so cleanup happens opportunistically rather than on a timer. It asks Docker for live resources through `_docker`, uses `_held_id` to identify what must be stopped, and calls `_release` under a per-conversation lock so cleanup cannot collide with revival.
+
+*Call graph*: calls 3 internal fn (_held_id, _release, _docker); called by 1 (create); 1 external calls (UUID).
+
+
+##### `DockerCarrier.exec`  (lines 322–332)
+
+```
+async def exec(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> ExecResult
+```
+
+**Purpose**: Runs a normal command inside the sandbox with the current turn's egress proxy environment. This is how user-level tools execute while all outbound network traffic is routed through the policy-checking proxy.
+
+**Data flow**: It receives a sandbox handle, the command arguments, and a timeout. It turns the handle's proxy and API-sentinel environment into Docker `--env` options, then passes everything to `_exec_with`. It returns an `ExecResult` containing text output, text error output, exit code, and timeout information.
+
+**Call relations**: This is the public command-running path used by higher-level sandbox code. It is a thin wrapper around `_exec_with`, adding the environment needed for metered and filtered network access.
+
+*Call graph*: calls 1 internal fn (_exec_with).
+
+
+##### `DockerCarrier.exec_skill`  (lines 334–338)
+
+```
+async def exec_skill(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> ExecResult
+```
+
+**Purpose**: Runs a skill-related command inside the container as the root user. It is used for server-carried setup or synchronization tasks that need elevated permissions.
+
+**Data flow**: It receives a sandbox handle, command arguments, and a timeout. It adds Docker's root-user option and delegates the actual execution to `_exec_with`. The result is the same `ExecResult` shape used for normal commands.
+
+**Call relations**: This is the privileged sibling of `exec`. It shares the retry, timeout, and activity-tracking behavior in `_exec_with`, but supplies different Docker options because skill loading needs root access.
+
+*Call graph*: calls 1 internal fn (_exec_with).
+
+
+##### `DockerCarrier._exec_with`  (lines 340–379)
+
+```
+async def _exec_with(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int, options: tuple[str, ...]) -> ExecResult
+```
+
+**Purpose**: Performs the shared work of running a Docker `exec` command, including activity tracking, timeout conversion, and one retry if the container had been stopped. It protects active commands from idle reclaim by marking them in flight.
+
+**Data flow**: It receives a handle, command arguments, a timeout, and extra Docker options such as environment variables or user selection. It increments the in-flight count, marks the conversation as touched, runs `docker exec`, and if Docker says the container is not running, tries `_revive` and runs the command again. It returns an `ExecResult` and always decrements the in-flight count afterward.
+
+**Call relations**: Both `exec` and `exec_skill` call this helper. It relies on `_docker` for the actual Docker command and `_revive` for recovery when idle reclaim stopped the container just before use.
+
+*Call graph*: calls 2 internal fn (_revive, _docker); called by 2 (exec, exec_skill); 1 external calls (__init__).
+
+
+##### `DockerCarrier.write`  (lines 381–399)
+
+```
+async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None
+```
+
+**Purpose**: Copies bytes into a file inside the sandbox. It uses a guarded in-container copy program so untrusted paths cannot escape through unsafe shell behavior such as symlink tricks.
+
+**Data flow**: It receives a sandbox handle, destination path, and file content bytes. It marks the conversation active, starts the write through `_write_started`, and if Docker reports the container is stopped, revives it and retries. If the write still fails, it raises an `OSError`; otherwise it changes the file inside the container.
+
+**Call relations**: Higher-level file upload or attachment paths use this method to put content into the sandbox. It delegates the actual Docker invocation to `_write_started` and uses `_revive` for the same stopped-container recovery used by command execution.
+
+*Call graph*: calls 2 internal fn (_revive, _write_started).
+
+
+##### `DockerCarrier._write_started`  (lines 401–419)
+
+```
+async def _write_started(self, handle: SandboxHandle, path: str, content: bytes) -> tuple[int, bytes]
+```
+
+**Purpose**: Starts one concrete file-copy attempt inside the container. It sends file bytes through standard input instead of putting them on the command line, which is safer for arbitrary content.
+
+**Data flow**: It receives the handle, path, and bytes to write. It decides whether the destination should be rooted in the conversation runtime area or the normal workspace, then runs Python inside the container with UFO's copy-in program and streams the content as input. It returns Docker's exit code and error bytes for the caller to interpret.
+
+**Call relations**: `write` calls this for the first attempt and any retry after revival. It uses `_docker` to run the in-container Python helper and uses `sandbox_runtime_root` plus `PurePosixPath` to choose the correct safe root.
+
+*Call graph*: calls 1 internal fn (_docker); called by 1 (write); 2 external calls (PurePosixPath, sandbox_runtime_root).
+
+
+##### `DockerCarrier.read`  (lines 421–455)
+
+```
+async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: Streams a file out of the sandbox in chunks. It reads through the container, not directly from the host mount, so the caller sees exactly what sandbox processes would see.
+
+**Data flow**: It receives a handle and a path. It marks the conversation active, starts a `cat` stream through `_read_started`, yields chunks to the caller, and then checks whether the command failed. If the container was stopped before producing data, it revives and retries; filesystem errors become matching `OSError`s, while unusual command deaths become `RuntimeError`s with diagnostic detail.
+
+**Call relations**: This is the public file-read path for Docker sandboxes. It uses `_read_started` for the streaming subprocess, `_revive` for stopped-container recovery, and `_death_report` when `cat` dies without explaining why.
+
+*Call graph*: calls 3 internal fn (_death_report, _read_started, _revive).
+
+
+##### `DockerCarrier._read_started`  (lines 457–499)
+
+```
+def _read_started(self, handle: SandboxHandle, path: str) -> tuple[AsyncGenerator[bytes], list[tuple[int, str]]]
+```
+
+**Purpose**: Prepares one file-read attempt and a place to record whether that attempt failed. It separates one attempt from retry logic so `read` can safely start over after reviving a stopped container.
+
+**Data flow**: It receives a handle and path. It creates an empty failure list and returns an asynchronous byte generator plus that list. As the generator is consumed, the list remains empty on success or receives the exit code and error text after the stream ends unsuccessfully.
+
+**Call relations**: `read` calls this to begin a stream. The nested `stream` function does the actual Docker subprocess work, while `read` consumes the stream and interprets the failure list afterward.
+
+*Call graph*: called by 1 (read).
+
+
+##### `DockerCarrier._read_started.stream`  (lines 472–497)
+
+```
+async def stream() -> AsyncGenerator[bytes]
+```
+
+**Purpose**: Runs `docker exec cat <path>` and yields the file bytes as they arrive. It also makes sure an abandoned read does not leave a Docker exec process running in the background.
+
+**Data flow**: It starts a Docker exec process with pipes for standard output and standard error. It reads standard output in fixed-size chunks and yields each chunk. After output ends, it reads error text and waits for the process; if the exit code is non-zero it records the failure, and if the generator is closed early it kills and reaps the process.
+
+**Call relations**: This nested generator is returned by `_read_started` and consumed by `read`. It calls `asyncio.create_subprocess_exec` directly because streaming needs more careful pipe control than the simpler `_docker` helper provides.
+
+*Call graph*: 1 external calls (create_subprocess_exec).
+
+
+##### `DockerCarrier._death_report`  (lines 501–519)
+
+```
+async def _death_report(self, handle: SandboxHandle) -> str
+```
+
+**Purpose**: Collects Docker's view of a container when a read command dies without useful error text. This gives later debugging a factual clue, such as whether the container exited or was killed for memory use.
+
+**Data flow**: It receives a sandbox handle, runs `docker inspect` on the container, and asks for status, exit code, and out-of-memory information. It returns a short text fragment describing either the inspected container state or the fact that inspection itself failed.
+
+**Call relations**: `read` calls this only for confusing read failures where `cat` exited non-zero but gave no stderr. It uses `_docker` to ask Docker for the container state.
+
+*Call graph*: calls 1 internal fn (_docker); called by 1 (read).
+
+
+##### `DockerCarrier.file_op`  (lines 521–527)
+
+```
+async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
+```
+
+**Purpose**: Runs a structured UFO filesystem operation inside the Docker sandbox. This is used for higher-level file actions that are more than a raw byte read or write.
+
+**Data flow**: It receives a handle, an operation name, and operation parameters. It passes the carrier, handle, operation, and parameters to `ufo_fs_file_op`, which runs the appropriate in-sandbox `ufo fs` command. It returns the operation result as a dictionary.
+
+**Call relations**: This public method plugs Docker into the shared sandbox filesystem-operation helper. The helper can call back through this carrier's execution path, so file operations get the same pinning and revival behavior as normal commands.
+
+*Call graph*: 1 external calls (ufo_fs_file_op).
+
+
+##### `DockerCarrier.dial`  (lines 529–536)
+
+```
+async def dial(self, handle: SandboxHandle, port: int) -> DialTarget
+```
+
+**Purpose**: Explains that this Docker carrier cannot expose an in-sandbox port to the outside world. It fails deliberately instead of pretending there is a reachable address.
+
+**Data flow**: It receives a handle and a port number, but does not use them to open a connection. It raises `SandboxUnreachable` with a message telling the caller that Docker here has no external per-port route. Nothing is returned.
+
+**Call relations**: Higher-level code may ask carriers to dial services running inside a sandbox, such as browser debugging or a preview server. For this carrier, the answer is always a clear failure; deployments that need this should use a remote carrier that supports it.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `DockerCarrier._release`  (lines 538–552)
+
+```
+async def _release(self, conversation_id: UUID, container_id: str | None) -> bool
+```
+
+**Purpose**: Stops a conversation's container and removes its per-conversation Docker network. This is the actual cleanup step used by idle reclaim to free memory and Docker bridge subnet space.
+
+**Data flow**: It receives a conversation ID and possibly a container ID. If there is a container, it asks Docker to stop it; then it removes the conversation's network name. It returns `true` when cleanup succeeded or the network was already gone, and `false` when stopping or removal failed in a way that should be retried later.
+
+**Call relations**: `_reclaim_idle` calls this under the conversation's lifecycle lock. It uses `_network_name` to find the network and `_docker` to perform the stop and network removal.
+
+*Call graph*: calls 2 internal fn (_network_name, _docker); called by 1 (_reclaim_idle).
+
+
+##### `DockerCarrier._revive`  (lines 554–574)
+
+```
+async def _revive(self, conversation_id: UUID, container_id: str) -> bool
+```
+
+**Purpose**: Starts a previously stopped sandbox container and reconnects it to its per-conversation network. This lets an idle-reclaimed conversation continue later instead of losing its workspace.
+
+**Data flow**: It receives a conversation ID and container ID. Under the lifecycle lock, it marks the conversation as touched, ensures the network exists, connects the container to it, and starts the container. It returns `true` if the container is running again, `false` if Docker refused the connect or start in a recoverable way, and raises if network creation itself fails.
+
+**Call relations**: `create`, `attach`, `_exec_with`, `write`, and `read` all call this when they find or suspect a stopped container. It calls `_ensure_network`, `_network_name`, and `_docker`, and the lock keeps it from interleaving with `_release`.
+
+*Call graph*: calls 3 internal fn (_ensure_network, _network_name, _docker); called by 5 (_exec_with, attach, create, read, write).
+
+
+##### `DockerCarrier._held_id`  (lines 576–584)
+
+```
+async def _held_id(self, name: str) -> str | None
+```
+
+**Purpose**: Finds the Docker container ID for a given container name in any state, including running, paused, or exited. Idle cleanup needs this because even a non-running-looking container may still hold the name or need stopping.
+
+**Data flow**: It receives a Docker container name. It asks Docker for all matching containers and returns the found ID as text, or `None` if there is no match. If Docker itself fails, it raises a runtime error instead of treating that as absence.
+
+**Call relations**: `_reclaim_idle` calls this before releasing a stale conversation. It uses `_docker` to query Docker's container list.
+
+*Call graph*: calls 1 internal fn (_docker); called by 1 (_reclaim_idle).
+
+
+##### `DockerCarrier._stopped_id`  (lines 586–595)
+
+```
+async def _stopped_id(self, name: str) -> str | None
+```
+
+**Purpose**: Finds an exited container with the given name. This is how the carrier detects a sandbox that idle reclaim stopped and can potentially restart.
+
+**Data flow**: It receives a Docker container name. It asks Docker for matching containers whose status is exited, then returns the container ID or `None`. Docker command failures become runtime errors.
+
+**Call relations**: `create` and `attach` use this after checking for a running container. If it finds a stopped container, those callers may pass the ID to `_revive`.
+
+*Call graph*: calls 1 internal fn (_docker); called by 2 (attach, create).
+
+
+##### `DockerCarrier._running_id`  (lines 597–608)
+
+```
+async def _running_id(self, name: str) -> str | None
+```
+
+**Purpose**: Finds a currently running container with the given name. It carefully distinguishes “no such running container” from “Docker failed to answer.”
+
+**Data flow**: It receives a Docker container name. It asks Docker for a matching running container and returns its ID, or `None` when the command succeeds but finds nothing. If Docker returns an error, it raises a runtime error so callers do not mistakenly create a conflicting container.
+
+**Call relations**: `create` and `attach` call this first when reconnecting to a sandbox. It uses `_docker` to query Docker.
+
+*Call graph*: calls 1 internal fn (_docker); called by 2 (attach, create).
+
+
+##### `DockerCarrier._network_name`  (lines 610–611)
+
+```
+def _network_name(self, conversation_id: UUID) -> str
+```
+
+**Purpose**: Builds the deterministic Docker network name for a conversation. This keeps each conversation's network separate and easy to find later.
+
+**Data flow**: It receives a conversation UUID. It combines the carrier's base network name with the UUID in compact hexadecimal form. It returns that string and changes nothing.
+
+**Call relations**: `create`, `_revive`, and `_release` call this whenever they need the exact Docker network name for a conversation.
+
+*Call graph*: called by 3 (_release, _revive, create).
+
+
+##### `DockerCarrier._ensure_network`  (lines 613–624)
+
+```
+async def _ensure_network(self, network: str) -> None
+```
+
+**Purpose**: Makes sure a named Docker network exists. It is safe when two callers race: if another caller creates the network first, that already-existing result is treated as success.
+
+**Data flow**: It receives a network name. It asks Docker whether that network already exists; if so, it returns. Otherwise it asks Docker to create it, raising a runtime error only if creation fails for a reason other than the network already existing.
+
+**Call relations**: `create` calls this before starting a fresh container, and `_revive` calls it before reconnecting a stopped container. It uses `_docker` for both the lookup and creation.
+
+*Call graph*: calls 1 internal fn (_docker); called by 2 (_revive, create).
+
+
+##### `DockerCarrier._install_ca`  (lines 626–639)
+
+```
+async def _install_ca(self, container_id: str, ca_cert: str) -> None
+```
+
+**Purpose**: Installs the current proxy certificate authority inside a container. This lets HTTPS tools inside the sandbox trust the local proxy that inspects and controls outbound traffic.
+
+**Data flow**: It receives a container ID and certificate text. It runs a root shell command inside the container, writes the certificate into the system certificate directory through standard input, and refreshes the container's certificate store. If Docker or certificate installation fails, it raises a runtime error.
+
+**Call relations**: `create` calls this for both new and reused containers. That matters because the proxy certificate can change when the host process restarts, so an old container may need a fresh certificate before network requests work.
+
+*Call graph*: calls 1 internal fn (_docker); called by 1 (create).
+
+
+##### `DockerCarrier._ensure_runtime_root`  (lines 641–665)
+
+```
+async def _ensure_runtime_root(self, container_id: str, conversation_id: UUID) -> None
+```
+
+**Purpose**: Creates and fixes permissions for UFO's runtime directory inside the container. This gives the sandbox a safe place for per-conversation runtime files such as a session file.
+
+**Data flow**: It receives a container ID and conversation ID. It calculates the runtime path, then runs a root shell command inside the container to create parent directories, create or repair the session file, set ownership, and set restrictive permissions. It raises a runtime error if the Docker command fails.
+
+**Call relations**: `create` and `attach` call this before returning a usable `SandboxHandle`. It uses `sandbox_runtime_root` to choose the path and `_docker` to run the setup command.
+
+*Call graph*: calls 1 internal fn (_docker); called by 2 (attach, create); 2 external calls (PurePosixPath, sandbox_runtime_root).
+
+
+##### `manifest`  (lines 668–673)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Advertises this Docker carrier extension to UFO's plugin system. It tells the host system the carrier's name and which class to instantiate.
+
+**Data flow**: It takes no input. It builds a `Manifest` containing the Docker carrier name, version, and a `CarrierSpec` whose factory is `DockerCarrier`. It returns that manifest object.
+
+**Call relations**: The extension loader calls this when discovering available carriers. The returned manifest is what lets configuration such as a Docker sandbox backend resolve to `DockerCarrier`.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+### `extensions/e2b/ufo_ext_e2b.py`
+
+`io_transport` · `sandbox startup, command execution, file transfer, port dialing, and lease renewal`
+
+A UFO conversation needs a private machine-like workspace where commands can run and files can live. This file provides that machine using E2B, which is a remote sandbox provider. Without it, a deployment configured with the e2b sandbox backend would have no way to start or talk to its cloud sandboxes.
+
+The main class, E2BCarrier, is the adapter between UFO’s generic sandbox interface and E2B’s async software development kit, meaning calls wait on network I/O without blocking the whole process. It can open a fresh sandbox, reconnect to one saved from an earlier process, or reuse one this process already knows about. It also keeps short local “lease” records so the sandbox does not pause while work is happening, but can still pause when idle.
+
+Before user work runs, the carrier installs the UFO client binary, trusts the proxy certificate, makes sure /workspace exists, and limits workload memory and process count so user commands cannot starve the sandbox daemon itself. Commands are run as their own process groups so timeouts and cancellations can stop the whole tree of child processes. Files move through E2B’s filesystem API, and network ports are exposed through E2B’s traffic-token system. The file also registers this provider in UFO’s manifest system.
+
+#### Function details
+
+##### `E2BCommandHandle.wait`  (lines 179–179)
+
+```
+async def wait(self) -> E2BCommandResult
+```
+
+**Purpose**: This protocol method describes how to wait for a command that was started in the background. It exists so the rest of this file can talk about a running E2B command in a typed, predictable way.
+
+**Data flow**: It takes an already-started remote command handle, waits until that command finishes, and returns its standard output, standard error, and exit code. The actual work is done by E2B’s SDK object that matches this shape.
+
+**Call relations**: E2BCarrier._exec_with starts commands in the background so it can learn their process id, then calls this wait method to collect the final result when the command ends.
+
+
+##### `E2BCommands.run`  (lines 200–209)
+
+```
+async def run(self, cmd: str, *, cwd: str | None=None, envs: dict[str, str] | None=None, user: str | None=None, timeout: float | None=None, background: Literal[False]=False) -> E2BCommandResult
+```
+
+**Purpose**: This protocol method describes E2B’s command-running API. It can either run a command to completion or start it in the background and return a handle for later waiting.
+
+**Data flow**: It receives a shell command string plus optional working directory, environment variables, user name, timeout, and background flag. It sends that command into the sandbox and returns either the finished command result or a running command handle.
+
+**Call relations**: Most sandbox actions in this file eventually rely on this method: setup commands, workload commands, health probes, and cleanup signals all go through E2B’s command channel.
+
+
+##### `E2BFileStream.__aiter__`  (lines 216–216)
+
+```
+def __aiter__(self) -> AsyncIterator[bytes]
+```
+
+**Purpose**: This protocol method describes a streamed file reader that can be used in an async loop. It lets large files be read piece by piece instead of loaded into memory all at once.
+
+**Data flow**: It starts from an open file stream supplied by E2B and yields chunks of bytes over time. Nothing is transformed; the caller receives the file content in pieces.
+
+**Call relations**: E2BCarrier.read receives one of these streams from E2BFiles.read and iterates over it while sending chunks back to UFO’s caller.
+
+
+##### `E2BFileStream.aclose`  (lines 218–218)
+
+```
+async def aclose(self) -> None
+```
+
+**Purpose**: This protocol method closes an open streamed file connection. It matters because a half-read file still holds a network connection unless it is explicitly released.
+
+**Data flow**: It takes the open stream state and asks the underlying E2B connection to close. It returns no data, but frees the remote and local resources tied to the stream.
+
+**Call relations**: E2BCarrier.read calls this in a finally block, so the stream is closed whether the whole file is read or the caller stops early.
+
+
+##### `E2BFiles.write`  (lines 222–222)
+
+```
+async def write(self, path: str, data: str | bytes, *, user: str | None=None) -> object
+```
+
+**Purpose**: This protocol method describes writing content into a file inside the E2B sandbox. It is the safe path for bytes, because the command API only accepts shell text.
+
+**Data flow**: It receives a sandbox path, text or bytes, and optionally a user. It sends that data through E2B’s filesystem API so the file appears inside the sandbox.
+
+**Call relations**: E2BCarrier.write uses it for user file uploads, and setup code uses it to place the UFO client and certificate material into the sandbox.
+
+
+##### `E2BFiles.read`  (lines 224–224)
+
+```
+async def read(self, path: str, format: str) -> E2BFileStream
+```
+
+**Purpose**: This protocol method describes opening a file in the sandbox for reading. In this file it is used in streaming mode so large outputs can be transferred gradually.
+
+**Data flow**: It receives a path and a format name, asks E2B for that file, and returns a stream object that yields byte chunks. Missing files are reported by the SDK and later translated into normal Python file errors.
+
+**Call relations**: E2BCarrier.read calls this when UFO needs to download a produced file from the sandbox workspace.
+
+
+##### `E2BSandbox.get_host`  (lines 233–233)
+
+```
+def get_host(self, port: int) -> str
+```
+
+**Purpose**: This protocol method describes how to turn an in-sandbox port into an externally reachable host name. It is used when a service running inside the sandbox needs to be reached from outside.
+
+**Data flow**: It receives a port number and returns the provider-made host name for that port on this sandbox. It does not itself open a network connection.
+
+**Call relations**: E2BCarrier.dial calls this after making sure the sandbox lease is long enough for the external connection to be useful.
+
+
+##### `E2BSdk.create`  (lines 237–246)
+
+```
+async def create(self, *, template: str, timeout: int, metadata: dict[str, str], lifecycle: SandboxLifecycle, network: SandboxNetworkOpts, api_key: str) -> E2BSandbox
+```
+
+**Purpose**: This protocol method describes creating a brand-new E2B sandbox from a template. It is the provider call used when there is no existing sandbox to resume.
+
+**Data flow**: It receives a template, timeout span, metadata, lifecycle settings, network settings, and API key. E2B creates a remote sandbox and returns an object used for commands, files, and network addresses.
+
+**Call relations**: E2BCarrier._resume_or_open calls this only after it has decided there is no usable resume id. The returned sandbox is then prepared before being handed to the rest of UFO.
+
+
+##### `E2BSdk.connect`  (lines 248–254)
+
+```
+async def connect(self, sandbox_id: str, *, timeout: int, api_key: str) -> E2BSandbox
+```
+
+**Purpose**: This protocol method describes reconnecting to an existing E2B sandbox. In E2B, this also wakes a paused sandbox and extends its lease.
+
+**Data flow**: It receives a sandbox id, desired timeout span, and API key. If E2B still has that sandbox, it returns a live sandbox object; otherwise it raises a not-found error.
+
+**Call relations**: E2BCarrier._connected wraps this method with retries and a total timeout, and all reconnect and lease-renewal paths go through that wrapper.
+
+
+##### `E2BCarrier.create`  (lines 306–390)
+
+```
+async def create(self, spec: SandboxSpec) -> SandboxHandle
+```
+
+**Purpose**: This opens the sandbox for a conversation. It either resumes the saved sandbox, reuses this process’s current one, or creates a fresh remote sandbox and prepares it for work.
+
+**Data flow**: It receives a SandboxSpec containing the conversation id, possible resume id, sandbox size, proxy settings, run token, environment, and turn id. It chooses or opens an E2B sandbox, installs or rechecks required runtime pieces, records a lease, and returns a SandboxHandle that the rest of UFO can use.
+
+**Call relations**: This is the main sandbox startup path. It calls _leased to inspect the local cache, _resume_or_open to get the remote sandbox, then either _prepare_strictly or the lighter resumed-sandbox preparation path; on serious preparation failures it calls _drop and may raise SandboxUnreachable.
+
+*Call graph*: calls 6 internal fn (_drop, _ensure_client, _leased, _prepare_runtime, _prepare_strictly, _resume_or_open); 8 external calls (__init__, __init__, __init__, timeout, emit_metric, log, egress_proxy_env, sandbox_runtime_root).
+
+
+##### `E2BCarrier.attach`  (lines 392–417)
+
+```
+async def attach(self, spec: SandboxSpec) -> SandboxHandle | None
+```
+
+**Purpose**: This reconnects to an already-known sandbox without creating a new one. It is useful for read-only or follow-up operations where opening an empty replacement would be wrong.
+
+**Data flow**: It receives a SandboxSpec and looks only at spec.resume_id. If there is no id or E2B says the sandbox is gone, it returns None; otherwise it reconnects, records a fresh lease, and returns a SandboxHandle.
+
+**Call relations**: This uses _connected directly instead of the local cache, because it needs E2B’s current truth. It is a narrower sibling of create: attach never falls back to creating a new sandbox.
+
+*Call graph*: calls 1 internal fn (_connected); 3 external calls (__init__, __init__, sandbox_runtime_root).
+
+
+##### `E2BCarrier._resume_or_open`  (lines 419–459)
+
+```
+async def _resume_or_open(self, spec: SandboxSpec, resume_id: str | None) -> E2BSandbox
+```
+
+**Purpose**: This chooses between reconnecting to an existing sandbox and creating a new one. It hides the provider-specific details of E2B resume behavior from the public create method.
+
+**Data flow**: It receives the desired SandboxSpec and an optional resume id. If an id is present, it tries _connected; if E2B no longer has that sandbox, it logs the miss and creates a new sandbox from the configured template for the requested size.
+
+**Call relations**: E2BCarrier.create calls this as its first real provider step. This helper calls _connected for resumes and the SDK create method for new sandboxes, then create prepares whatever sandbox comes back.
+
+*Call graph*: calls 1 internal fn (_connected); called by 1 (create); 1 external calls (log).
+
+
+##### `E2BCarrier._prepare_strictly`  (lines 461–477)
+
+```
+async def _prepare_strictly(self, sandbox: E2BSandbox, spec: SandboxSpec) -> None
+```
+
+**Purpose**: This prepares a new or not-yet-trusted sandbox, retrying only the kind of network failure that might be temporary. It prevents UFO from publishing a sandbox handle before the box is actually usable.
+
+**Data flow**: It receives a sandbox and its spec. It runs _prepare; if the provider connection drops, it logs and waits before trying again, but if setup itself fails or retries run out, it drops the local lease and raises the error.
+
+**Call relations**: E2BCarrier.create calls this for fresh sandboxes and cached sandboxes that do not have durable proof of earlier preparation. It delegates setup to _prepare and uses _drop, logging, metrics, and sleep around retries.
+
+*Call graph*: calls 2 internal fn (_drop, _prepare); called by 1 (create); 3 external calls (sleep, emit_metric, log).
+
+
+##### `E2BCarrier._connected`  (lines 479–541)
+
+```
+async def _connected(self, conversation_id: UUID, sandbox_id: str, span: int) -> E2BSandbox
+```
+
+**Purpose**: This reconnects to an E2B sandbox with bounded retries. It turns a flaky provider control-plane call into one predictable operation with a clear maximum wait.
+
+**Data flow**: It receives the conversation id, sandbox id, and lease span to request. It calls the SDK connect method, retries transport errors with backoff, and either returns a live sandbox, lets a not-found response pass through, or raises the final transport error after timeout or retry exhaustion.
+
+**Call relations**: _resume_or_open, _sandbox, and attach all use this wrapper whenever they need E2B connect. It is the single place that standardizes resume retry behavior.
+
+*Call graph*: called by 3 (_resume_or_open, _sandbox, attach); 4 external calls (sleep, timeout, ReadTimeout, log).
+
+
+##### `E2BCarrier._prepare`  (lines 543–545)
+
+```
+async def _prepare(self, sandbox: E2BSandbox, ca_cert: str) -> None
+```
+
+**Purpose**: This performs the full sandbox preparation bundle. It ensures both the UFO client and the runtime environment are ready before user commands run.
+
+**Data flow**: It receives a sandbox and proxy certificate. It first calls _ensure_client, then _prepare_runtime; it returns nothing if both succeed, and lets setup errors surface if either fails.
+
+**Call relations**: _prepare_strictly calls this during strict setup. It is a small coordinator that hands off the actual work to _ensure_client and _prepare_runtime.
+
+*Call graph*: calls 2 internal fn (_ensure_client, _prepare_runtime); called by 1 (_prepare_strictly).
+
+
+##### `E2BCarrier._prepare_runtime`  (lines 547–552)
+
+```
+async def _prepare_runtime(self, sandbox: E2BSandbox, ca_cert: str) -> None
+```
+
+**Purpose**: This sets up the operating-system pieces UFO expects inside the sandbox. It installs trust for the proxy certificate, prepares /workspace, and limits workload resource use.
+
+**Data flow**: It receives a sandbox and a certificate string. It writes and installs the certificate, ensures the workspace directory exists and is owned correctly, then applies memory and process limits to workload cgroups.
+
+**Call relations**: It is called by _prepare for strict setup and directly by create during bounded resumed-sandbox rechecks. It delegates to _install_ca, _ensure_workspace, and _cap_workload.
+
+*Call graph*: calls 3 internal fn (_cap_workload, _ensure_workspace, _install_ca); called by 2 (_prepare, create).
+
+
+##### `E2BCarrier._ensure_client`  (lines 554–579)
+
+```
+async def _ensure_client(self, sandbox: E2BSandbox) -> None
+```
+
+**Purpose**: This makes sure the correct UFO client binary is installed inside the sandbox. That client is needed because workloads enter through the baked ufo run and ufo fs commands.
+
+**Data flow**: It receives a sandbox, computes the SHA-256 fingerprint of the local client binary, and checks the installed sandbox binary. If the fingerprint differs or the file is missing, it uploads a staged copy, verifies it, installs it atomically, and records the sandbox as ready.
+
+**Call relations**: create calls this for resumed sandboxes, and _prepare calls it during strict setup. It uses E2B command and file APIs underneath, and avoids repeated checks with the _client_ready set.
+
+*Call graph*: called by 2 (_prepare, create); 2 external calls (sha256, uuid4).
+
+
+##### `E2BCarrier._leased`  (lines 581–596)
+
+```
+def _leased(self, conversation_id: UUID) -> _Lease | None
+```
+
+**Purpose**: This looks up the local remembered lease for a conversation and clears expired entries. It keeps the process from remembering every sandbox it has ever touched.
+
+**Data flow**: It receives a conversation id, reads the _live lease map, removes all entries whose recorded expiry has passed, and returns the original conversation’s lease if one was present. Returning the original lease can still be useful because it names the sandbox to reconnect to.
+
+**Call relations**: create uses this to prefer a current in-process sandbox when no durable resume id is supplied. _sandbox uses it to decide whether a provider reconnect is needed before work starts.
+
+*Call graph*: called by 2 (_sandbox, create).
+
+
+##### `E2BCarrier._install_ca`  (lines 598–606)
+
+```
+async def _install_ca(self, sandbox: E2BSandbox, ca_cert: str) -> None
+```
+
+**Purpose**: This installs the proxy certificate authority inside the sandbox’s system trust store. That lets sandbox programs trust TLS connections routed through UFO’s proxy.
+
+**Data flow**: It receives a sandbox and certificate text. It writes the certificate to a staging path, runs the install command as root, and raises a clear RuntimeError if the sandbox command reports failure.
+
+**Call relations**: _prepare_runtime calls this as the first runtime setup step. It uses the sandbox file API to place the certificate and the command API to update trust.
+
+*Call graph*: called by 1 (_prepare_runtime).
+
+
+##### `E2BCarrier._ensure_workspace`  (lines 608–617)
+
+```
+async def _ensure_workspace(self, sandbox: E2BSandbox) -> None
+```
+
+**Purpose**: This makes sure /workspace exists and belongs to the normal sandbox user. That directory is the durable working area for the conversation’s files.
+
+**Data flow**: It receives a sandbox and runs a root command that creates the directory if needed and changes ownership. If the command fails, it raises an error with the sandbox’s own output.
+
+**Call relations**: _prepare_runtime calls this after certificate installation. Later command execution uses /workspace as the working directory.
+
+*Call graph*: called by 1 (_prepare_runtime).
+
+
+##### `E2BCarrier._cap_workload`  (lines 619–629)
+
+```
+async def _cap_workload(self, sandbox: E2BSandbox) -> None
+```
+
+**Purpose**: This applies safety limits to the parts of the sandbox where user workload processes run. The goal is to stop user code from exhausting memory or process slots so badly that the sandbox daemon cannot recover.
+
+**Data flow**: It receives a sandbox and runs a root command that calculates a memory ceiling, writes memory and process limits into workload cgroups, and raises a clear error if the command fails.
+
+**Call relations**: _prepare_runtime calls this as the final runtime setup step. The limits then protect later commands run by _exec_with.
+
+*Call graph*: called by 1 (_prepare_runtime).
+
+
+##### `E2BCarrier.exec`  (lines 631–679)
+
+```
+async def exec(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> ExecResult
+```
+
+**Purpose**: This runs a normal user command inside the sandbox. It applies the conversation’s proxy environment so network traffic goes through UFO’s metered and authenticated path.
+
+**Data flow**: It receives a SandboxHandle, command arguments, and timeout in seconds. It forwards them to _exec_with with no forced user, then returns an ExecResult containing output, exit code, and timeout information if applicable.
+
+**Call relations**: This is the public command path for regular sandbox work. It is a thin wrapper over _exec_with, which does the leasing, process tracking, timeout handling, and cleanup.
+
+*Call graph*: calls 1 internal fn (_exec_with).
+
+
+##### `E2BCarrier.exec_skill`  (lines 681–685)
+
+```
+async def exec_skill(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> ExecResult
+```
+
+**Purpose**: This runs a command as root for server-carried skill setup or synchronization. It is separated from normal exec so privileged maintenance work does not use the user’s egress environment.
+
+**Data flow**: It receives a SandboxHandle, command arguments, and timeout. It calls _exec_with with user set to root and returns the resulting ExecResult.
+
+**Call relations**: Like exec, this is a public command entry, but for trusted system-side work. It relies on the same _exec_with machinery.
+
+*Call graph*: calls 1 internal fn (_exec_with).
+
+
+##### `E2BCarrier._exec_with`  (lines 687–734)
+
+```
+async def _exec_with(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int, user: str | None) -> ExecResult
+```
+
+**Purpose**: This is the core command runner. It renews the sandbox lease, starts the command as its own process group, waits for completion, maps provider exceptions into normal command results, and records running groups for later cancellation.
+
+**Data flow**: It receives a handle, argument tuple, timeout, and optional user. It reconnects or reuses the sandbox through _sandbox, probes previously silent boxes with _still_there, quotes the command, starts it in the background, records its process id, waits for it, and returns an ExecResult. On timeouts it tries _stop_group; on cancellation or unknown failures it drops the lease.
+
+**Call relations**: exec and exec_skill both call this. It ties together _sandbox, _still_there, _stop_group, _mark_silent, _forget_group, and _drop to make remote command execution behave like a local command as much as possible.
+
+*Call graph*: calls 6 internal fn (_drop, _forget_group, _mark_silent, _sandbox, _still_there, _stop_group); called by 2 (exec, exec_skill); 3 external calls (__init__, join, emit_metric).
+
+
+##### `E2BCarrier.stop_commands`  (lines 736–758)
+
+```
+async def stop_commands(self, handle: SandboxHandle) -> None
+```
+
+**Purpose**: This stops commands that belong to a particular turn after UFO has decided the turn itself was cancelled. It avoids killing other turns or subagents that share the same sandbox.
+
+**Data flow**: It receives a SandboxHandle, removes the recorded process groups for that container and turn, and if any exist, reconnects to the sandbox and sends each group a kill signal. If nothing is recorded, it returns without touching E2B.
+
+**Call relations**: This complements _exec_with, which deliberately does not stop commands on a bare asyncio cancellation because the caller might be replaying work. It uses _sandbox and _stop_group once the higher layer knows this is a real stop.
+
+*Call graph*: calls 2 internal fn (_sandbox, _stop_group).
+
+
+##### `E2BCarrier._forget_group`  (lines 760–770)
+
+```
+def _forget_group(self, handle: SandboxHandle, pid: int) -> None
+```
+
+**Purpose**: This removes a process group from the carrier’s record once the command has ended or been stopped. It keeps cancellation bookkeeping from growing forever or targeting old process ids.
+
+**Data flow**: It receives a handle and process id. It looks up the group map for that container and turn, removes that pid if present, and deletes the turn entry if no groups remain.
+
+**Call relations**: _exec_with calls this in its cleanup path whenever a command is no longer intentionally left running.
+
+*Call graph*: called by 1 (_exec_with).
+
+
+##### `E2BCarrier._stop_group`  (lines 772–798)
+
+```
+async def _stop_group(self, sandbox: E2BSandbox, container_id: str, pid: int, user: str | None) -> None
+```
+
+**Purpose**: This sends a strong kill signal to an entire process group inside the sandbox. It is how timeouts and real turn cancellations try to stop not just the shell, but also child processes it started.
+
+**Data flow**: It receives a sandbox, container id, process id, and optional user. It runs kill -9 against the negative process id, which targets the group; if the sandbox does not answer, it marks the container as silent and emits a failure metric instead of replacing the caller’s original error.
+
+**Call relations**: _exec_with calls this after command timeouts. stop_commands calls it for groups left running by cancelled commands.
+
+*Call graph*: calls 1 internal fn (_mark_silent); called by 2 (_exec_with, stop_commands); 1 external calls (emit_metric).
+
+
+##### `E2BCarrier._mark_silent`  (lines 800–804)
+
+```
+def _mark_silent(self, container_id: str) -> None
+```
+
+**Purpose**: This remembers that a sandbox stopped answering command requests. The mark is temporary, because a heavily loaded sandbox may become responsive again.
+
+**Data flow**: It receives a container id and stores an expiry time in the _silent map based on the current clock plus the configured silent-mark span. It returns no data.
+
+**Call relations**: _exec_with uses this when a command launch times out before a process id is known. _stop_group uses it when even the cleanup signal does not get an answer.
+
+*Call graph*: called by 2 (_exec_with, _stop_group).
+
+
+##### `E2BCarrier._still_there`  (lines 806–836)
+
+```
+async def _still_there(self, sandbox: E2BSandbox, container_id: str) -> None
+```
+
+**Purpose**: This probes a sandbox that was recently marked silent before committing a full command timeout to it. It fails fast if the command channel still appears broken.
+
+**Data flow**: It receives a sandbox and container id. If the container is not marked silent, it returns. If the mark expired, it clears it. If still marked, it runs a tiny true command with a short timeout; success clears the mark, while failure raises SandboxUnreachable.
+
+**Call relations**: _exec_with calls this before launching a command. It uses the temporary marks created by _mark_silent and logs or emits metrics when marks expire or probes fail.
+
+*Call graph*: called by 1 (_exec_with); 3 external calls (__init__, emit_metric, log).
+
+
+##### `E2BCarrier.write`  (lines 838–849)
+
+```
+async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None
+```
+
+**Purpose**: This uploads bytes into a file inside the sandbox. It uses E2B’s filesystem API because shell commands are a poor and unsafe way to carry arbitrary bytes.
+
+**Data flow**: It receives a SandboxHandle, destination path, and byte content. It gets a leased sandbox through _sandbox and writes the content to the path; if the provider call fails, it drops the local lease and re-raises the error.
+
+**Call relations**: This is the public file-upload path. It depends on _sandbox for lease safety and _drop for recovery after failed provider calls.
+
+*Call graph*: calls 2 internal fn (_drop, _sandbox).
+
+
+##### `E2BCarrier.read`  (lines 851–871)
+
+```
+async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]
+```
+
+**Purpose**: This streams a file out of the sandbox. It lets large files be downloaded without holding the whole file in this process’s memory.
+
+**Data flow**: It receives a SandboxHandle and path. It leases the sandbox for the full autosuspend span, opens an E2B stream, yields chunks of bytes to the caller, translates E2B missing-file errors into FileNotFoundError, and always closes the stream afterward.
+
+**Call relations**: This is the public file-download path. It uses _sandbox for a long enough lease and _drop if opening the stream fails unexpectedly.
+
+*Call graph*: calls 2 internal fn (_drop, _sandbox).
+
+
+##### `E2BCarrier.file_op`  (lines 873–878)
+
+```
+async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
+```
+
+**Purpose**: This runs higher-level file operations through the UFO client inside the sandbox. It gives callers a structured file API without duplicating all file behavior in this provider.
+
+**Data flow**: It receives a handle, operation name, and parameter dictionary. It passes them to ufo_fs_file_op, which uses this carrier’s command execution path and returns a dictionary result.
+
+**Call relations**: This is a bridge from UFO’s generic file-operation interface to the common helper ufo_fs_file_op. That helper calls back into the carrier as needed.
+
+*Call graph*: 1 external calls (ufo_fs_file_op).
+
+
+##### `E2BCarrier.dial`  (lines 880–901)
+
+```
+async def dial(self, handle: SandboxHandle, port: int) -> DialTarget
+```
+
+**Purpose**: This returns the outside address for a service running on a port inside the sandbox. It is used for things like browser debugging ports or preview web servers.
+
+**Data flow**: It receives a SandboxHandle and port number. It renews the sandbox lease long enough for an external exchange, asks E2B for the host name, adds the traffic access token header if one exists, and returns a DialTarget with TLS enabled.
+
+**Call relations**: Callers use this when they need network access into the sandbox. It relies on _sandbox for reconnect and lease behavior, and maps missing sandboxes into SandboxUnreachable.
+
+*Call graph*: calls 1 internal fn (_sandbox); 2 external calls (__init__, __init__).
+
+
+##### `E2BCarrier._sandbox`  (lines 903–945)
+
+```
+async def _sandbox(self, handle: SandboxHandle, needed_seconds: int, span_floor: int=SANDBOX_LEASE_SECONDS) -> E2BSandbox
+```
+
+**Purpose**: This returns a live sandbox object whose lease covers the work about to happen. It avoids a provider reconnect before every operation while still preventing work from running past a known lease window.
+
+**Data flow**: It receives a handle, required seconds, and optional minimum lease span. It checks the local lease with _leased; if the lease names the right container and lasts long enough, it returns it. Otherwise it removes the old entry, reconnects through _connected with a sufficient span, records the new lease, logs the renewal, and returns the sandbox.
+
+**Call relations**: _exec_with, write, read, stop_commands, and dial all call this before touching E2B. It is the central lease-renewal gate for active sandbox operations.
+
+*Call graph*: calls 2 internal fn (_connected, _leased); called by 5 (_exec_with, dial, read, stop_commands, write); 2 external calls (__init__, log).
+
+
+##### `E2BCarrier._drop`  (lines 947–952)
+
+```
+def _drop(self, conversation_id: UUID, during: str) -> None
+```
+
+**Purpose**: This forgets the local lease for a conversation after a provider call fails. It forces the next operation to reconnect instead of trusting a possibly stale sandbox object.
+
+**Data flow**: It receives a conversation id and a short label for what was happening. It removes that conversation from the _live lease map and logs the drop.
+
+**Call relations**: create, _prepare_strictly, _exec_with, write, and read call this when failures make the cached lease untrustworthy.
+
+*Call graph*: called by 5 (_exec_with, _prepare_strictly, create, read, write); 1 external calls (log).
+
+
+##### `sandbox_templates`  (lines 955–972)
+
+```
+def sandbox_templates(value: str) -> dict[str, str]
+```
+
+**Purpose**: This parses the E2B template configuration from an environment-variable string. It makes sure every supported sandbox size has exactly one template reference.
+
+**Data flow**: It receives text like small=templateA,medium=templateB,large=templateC. It splits the entries into a dictionary and raises RuntimeError if any entry is malformed, missing a required size, or names an unexpected set of sizes.
+
+**Call relations**: build_e2b_carrier calls this during provider construction. Its output becomes the size-to-template map used by _resume_or_open when creating fresh sandboxes.
+
+*Call graph*: called by 1 (build_e2b_carrier).
+
+
+##### `build_e2b_carrier`  (lines 975–984)
+
+```
+def build_e2b_carrier() -> E2BCarrier
+```
+
+**Purpose**: This builds an E2BCarrier from deployment environment variables. It is the factory UFO uses when the e2b carrier is selected.
+
+**Data flow**: It reads E2B_API_KEY and E2B_TEMPLATES from the environment, validates that both exist, parses templates with sandbox_templates, reads the UFO client binary for the E2B Linux target, and returns an E2BCarrier configured with those values.
+
+**Call relations**: manifest registers this function as the carrier factory. When the sandbox system asks for the e2b backend, this is what creates the carrier instance.
+
+*Call graph*: calls 1 internal fn (sandbox_templates); 2 external calls (__init__, client_binary).
+
+
+##### `manifest`  (lines 987–999)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: This exposes the E2B sandbox provider to UFO’s extension system. It is the registration point that lets configuration name e2b without the core code depending directly on this file.
+
+**Data flow**: It takes no input. It returns a Manifest that names the extension, gives its version, and declares one CarrierSpec with the e2b factory, off-cluster flag, and supported sandbox sizes.
+
+**Call relations**: UFO’s manifest loader calls this when loading extensions. The returned carrier spec points back to build_e2b_carrier, completing the path from configuration to a working E2BCarrier.
+
+*Call graph*: 2 external calls (__init__, __init__).
