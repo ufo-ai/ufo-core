@@ -15,7 +15,7 @@ import { Table, Td, Th } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
 import { Sheet } from "@/components/ui/sheet";
-import { Header, PageSearch, PageToolbar } from "@/kernel/pane";
+import { Banded, Header, PageSearch, PageToolbar } from "@/kernel/pane";
 import type { SchemaProperty } from "@/lib/types";
 
 import { declaredFloor, json, opened } from "./harness";
@@ -479,6 +479,61 @@ test("the inset is the pinned band's, and nothing else's, and neither band draws
   expect(pinned.container.firstElementChild!.className).not.toContain("border-b");
 });
 
+/** A lane's band tops a column the track repeats, so every measure in it is the band's own and not
+ *  the call site's: one padding over one control-high row, which is the height every lane on the
+ *  track starts at; the name tight against the mark before it; and the acts a glyph's pitch apart.
+ *  A screen's band has the pane to itself and keeps the deeper padding the portal's chrome is set
+ *  in. */
+test("a lane's band takes the lane's measures, and a screen's takes the page's", () => {
+  const lane = render(
+    <Header
+      pinned
+      ruled
+      heading={2}
+      glyph={<svg aria-hidden />}
+      title="Meetings"
+      onClose={() => {}}
+    />,
+  );
+  const band = lane.container.firstElementChild!;
+  expect(band.className).toContain("px-2xl");
+  expect(band.className).toContain("py-sm");
+  expect(band.firstElementChild!.className).toContain("h-(--size-control)");
+
+  const named = screen.getByRole("heading", { level: 2, name: "Meetings" });
+  expect(named.className).toContain("tracking-(--tracking-ui)");
+  expect(named.parentElement!.className).toContain("gap-2xs");
+
+  const shut = screen.getByRole("button", { name: "Close" });
+  expect(shut.parentElement!.className).toContain("gap-md");
+  expect(shut.className).toContain("size-(--size-glyph)");
+  expect(shut.className).toContain("text-ink-soft");
+  expect(shut.querySelector("svg")!.getAttribute("stroke-width")).toBe("1.25");
+  lane.unmount();
+
+  const page = render(<Header pinned heading={2} title="Meetings" onClose={() => {}} />);
+  expect(page.container.firstElementChild!.className).toContain("py-lg");
+  const paged = screen.getByRole("heading", { level: 2, name: "Meetings" });
+  expect(paged.className).not.toContain("tracking-(--tracking-ui)");
+  expect(paged.parentElement!.className).toContain("gap-sm");
+  const quiet = screen.getByRole("button", { name: "Close" });
+  expect(quiet.parentElement!.className).toContain("gap-sm");
+  expect(quiet.className).toContain("size-(--size-control)");
+  expect(quiet.className).toContain("hover:bg-fill");
+});
+
+/** The band is the handle a lane is carried by, and the cursor is the whole of what says so. A
+ *  track moves along one axis, so the arrow states that axis rather than a free hand. */
+test("a band that can be carried takes the cursor of the axis it travels", () => {
+  const { container } = render(
+    <Header pinned ruled heading={2} title="Meetings" onLift={() => {}} />,
+  );
+
+  const band = container.firstElementChild!;
+  expect(band.getAttribute("draggable")).toBe("true");
+  expect(band.className).toContain("cursor-ew-resize");
+});
+
 /** One way out, in one place: the last thing on the line, past every act, on every surface that
  *  can be shut. A member who has learned the corner does not hunt for it again. */
 test("the way out is a glyph and stands last", async () => {
@@ -503,6 +558,78 @@ test("an icon act sizes its glyph by the glyph token", () => {
   expect(screen.getByRole("button", { name: "Close" }).className).toContain(
     "[&_svg]:size-(--size-glyph)",
   );
+});
+
+/** Under a band drawn outside it, a header is its acts and nothing else. The lane above it already
+ *  states the name, the trail it came by and the way out, so a second band under the first would say
+ *  all three twice and stand the page's own words at half the height every other lane's start at.
+ *  What that band cannot carry is the act this page offers, so that is what is left. */
+test("a header under a band is its acts, and states nothing the band already states", () => {
+  render(
+    <Banded value>
+      <Header
+        pinned
+        heading={1}
+        glyph={<svg aria-hidden />}
+        title="Automations"
+        note="Nightly"
+        lede="What this app is for."
+        bar={<button type="button">Table</button>}
+        acts={<button type="button">New</button>}
+      />
+    </Banded>,
+  );
+
+  const row = screen.getByRole("button", { name: "New" }).parentElement!;
+  expect(row.getAttribute("data-slot")).toBe("page-acts");
+  expect(screen.queryByRole("heading")).toBeNull();
+  expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
+  expect(screen.queryByText("Automations")).toBeNull();
+  expect(screen.queryByText("Nightly")).toBeNull();
+  expect(screen.queryByText("What this app is for.")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Table" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Close Automations" })).toBeNull();
+  expect(document.querySelector("[data-slot=header]")).toBeNull();
+});
+
+/** A page offering no act spends no height on the row. The row is drawn either way, because the act
+ *  slot is handed down as a `display: contents` host that stands empty until a view fills it — a
+ *  child the row has and a box it does not, which is why `:empty` cannot decide this and the row
+ *  asks for a descendant that draws. */
+test("a banded header with nothing to offer draws a row that hides itself", () => {
+  const { container, unmount } = render(
+    <Banded value>
+      <Header pinned heading={1} title="Automations" />
+    </Banded>,
+  );
+  const row = container.firstElementChild!;
+  expect(row.getAttribute("data-slot")).toBe("page-acts");
+  expect(row.className).toContain("not-has-[:not(.contents)]:hidden");
+  expect(row.querySelector("*:not(.contents)")).toBeNull();
+  unmount();
+
+  const hosted = render(
+    <Banded value>
+      <Header pinned heading={1} title="Automations" acts={<span className="contents" />} />
+    </Banded>,
+  );
+  expect(hosted.container.firstElementChild!.querySelector("*:not(.contents)")).toBeNull();
+});
+
+/** The rule reaches only what stands under a band. A header drawn under none — every screen the
+ *  portal heads itself — is the whole band it always was. */
+test("a header under no band is unchanged", () => {
+  render(
+    <Banded value={false}>
+      <Header pinned heading={1} title="Automations" acts={<button type="button">New</button>} />
+    </Banded>,
+  );
+
+  expect(screen.getByRole("heading", { level: 1, name: "Automations" })).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "New" }).closest("[data-slot=header]"),
+  ).not.toBeNull();
+  expect(document.querySelector("[data-slot=page-acts]")).toBeNull();
 });
 
 test("the table states a floor covering every track it declares", async () => {
@@ -953,3 +1080,27 @@ test("the keyboard opens a row on Enter and on Space", async () => {
 
   expect(opened).toEqual(["one", "one"]);
 });
+
+test("under a band, a header naming a step past it draws its crumb and its close", () => {
+  const shut = vi.fn();
+  render(
+    <Banded value>
+      <Header
+        pinned
+        heading={1}
+        crumb={{ label: "Radar" }}
+        title="morning-digest"
+        closes="morning-digest"
+        onClose={shut}
+      />
+    </Banded>,
+  );
+
+  expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
+    "Radar/morning-digest",
+  );
+  screen.getByRole("button", { name: "Close morning-digest" }).click();
+  expect(shut).toHaveBeenCalledOnce();
+  expect(document.querySelector("[data-slot=page-acts]")).toBeNull();
+});
+

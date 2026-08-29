@@ -23,6 +23,11 @@ export type AppInit = {
   member: { email: string; admin: boolean };
   agents?: Agent[];
   agentId: string;
+  /** Whether the frame stands under a lane band that already names the page and holds the way out.
+   *  Every header a banded page draws is the acts it carries and nothing more — no title, no crumb,
+   *  no bar, no way out — standing on the row the band would have put them on, so a lane shows one
+   *  header at the height every other lane's stands at and the page's own act is still reachable. */
+  banded: boolean;
   /** The place the pane opened the page at, whole: the same record a portal tab stands on, so a page
    *  reads its screen off the address the member arrived with rather than off one field of it. */
   place: WorkspacePlace;

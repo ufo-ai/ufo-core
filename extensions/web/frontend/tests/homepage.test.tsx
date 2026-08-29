@@ -3,9 +3,18 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { attachBridge } from "@/lib/bridge";
+import { MainAgentProvider } from "@/lib/mainAgent";
+import { homeHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
+import { HomepageFrame } from "@/views/HomepageFrame";
 
 import { AGENT, AGENT_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, useStreamFake, wire } from "./harness";
+
+vi.mock("@/lib/bridge", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/bridge")>();
+  return { ...actual, attachBridge: vi.fn(actual.attachBridge) };
+});
 
 const HOMEPAGE_URL = "/surface/sites/tok-abc/";
 
@@ -399,8 +408,120 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
   );
   const init = sent.find((message) => (message as { ufo?: string }).ufo === "init") as {
     place: { opens?: string[] };
+    banded: boolean;
   };
   expect(init.place.opens).toBeUndefined();
+  // The page is the screen here, so it heads itself.
+  expect(init.banded).toBe(false);
+});
+
+/** A home lane's band already names the page and holds the way out, so the frame it holds is told
+ *  in `init` to draw no band of its own — one header per lane. */
+test("a home lane's frame is told it stands under the lane band", async () => {
+  location.hash = homeHash({ opens: [AGENT_ID] });
+  wire({ "/homepage": () => json(SET) });
+  render(
+    <App
+      agents={[{ ...withHome(SET), main: false, app: "code" }, CHAT_APP]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
+  );
+
+  const frame = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;
+  const sent: unknown[] = [];
+  vi.spyOn(frame, "contentWindow", "get").mockReturnValue({
+    postMessage: (message: unknown) => void sent.push(message),
+  } as unknown as Window);
+  fireEvent(
+    window,
+    new MessageEvent("message", { data: { ufo: "ready" }, source: frame.contentWindow }),
+  );
+  const init = sent.find((message) => (message as { ufo?: string }).ufo === "init") as {
+    banded: boolean;
+  };
+  expect(init.banded).toBe(true);
+});
+
+/** The roster arrives as a new array on every re-read — the boot reload, a status poll — and home
+ *  mounts a frame per lane. A bridge rebound on it would abort every relay stream each page holds
+ *  open, all at once; so the bridge stays bound and answers the next `ready` with the roster as it
+ *  now stands. */
+test("a roster arriving as a new array leaves the frame's bridge bound", () => {
+  const attached = vi.mocked(attachBridge);
+  attached.mockClear();
+  const draw = (agents: Agent[], member: typeof MEMBER) => (
+    <MainAgentProvider agents={agents}>
+      <HomepageFrame
+        agent={AGENT}
+        member={member}
+        url={HOMEPAGE_URL}
+        generation={1}
+        place={{}}
+        banded
+        onFounded={() => {}}
+      />
+    </MainAgentProvider>
+  );
+  const view = render(draw([AGENT], MEMBER));
+  expect(attached).toHaveBeenCalledTimes(1);
+
+  const reread = [{ ...AGENT }, { ...AGENT, id: CONVO_ID, name: "metrics", main: false }];
+  view.rerender(draw(reread, { ...MEMBER }));
+  expect(attached).toHaveBeenCalledTimes(1);
+
+  const frame = screen.getByTitle("Assistant homepage") as HTMLIFrameElement;
+  const sent: unknown[] = [];
+  vi.spyOn(frame, "contentWindow", "get").mockReturnValue({
+    postMessage: (message: unknown) => void sent.push(message),
+  } as unknown as Window);
+  fireEvent(
+    window,
+    new MessageEvent("message", { data: { ufo: "ready" }, source: frame.contentWindow }),
+  );
+  const init = sent.find((message) => (message as { ufo?: string }).ufo === "init") as {
+    agents: Agent[];
+  };
+  expect(init.agents).toBe(reread);
+});
+
+/** A rename lands while the frame stands — the member changing the name, the boot read correcting
+ *  it. The page's own step of the trail is read when the page asks, so the next `init` names the app
+ *  the way the shell now does, and the bridge whose rebind would abort the page's streams stays
+ *  bound. */
+test("a renamed app reaches the standing frame's next init", () => {
+  const attached = vi.mocked(attachBridge);
+  attached.mockClear();
+  const draw = (agent: Agent) => (
+    <MainAgentProvider agents={[agent]}>
+      <HomepageFrame
+        agent={agent}
+        member={MEMBER}
+        url={HOMEPAGE_URL}
+        generation={1}
+        place={{}}
+        banded
+        onFounded={() => {}}
+      />
+    </MainAgentProvider>
+  );
+  const view = render(draw(AGENT));
+  view.rerender(draw({ ...AGENT, name: "weather watch" }));
+  expect(attached).toHaveBeenCalledTimes(1);
+
+  const frame = screen.getByTitle("Weather Watch homepage") as HTMLIFrameElement;
+  const sent: unknown[] = [];
+  vi.spyOn(frame, "contentWindow", "get").mockReturnValue({
+    postMessage: (message: unknown) => void sent.push(message),
+  } as unknown as Window);
+  fireEvent(
+    window,
+    new MessageEvent("message", { data: { ufo: "ready" }, source: frame.contentWindow }),
+  );
+  const init = sent.find((message) => (message as { ufo?: string }).ufo === "init") as {
+    crumb: { label: string };
+  };
+  expect(init.crumb.label).toBe("Weather Watch");
 });
 
 /** The chat app is the main agent, and its page is the conversation screen itself. So a chat the

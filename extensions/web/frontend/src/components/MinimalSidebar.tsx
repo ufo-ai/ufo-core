@@ -1,5 +1,11 @@
 import { type ReactElement, type ReactNode } from "react";
-import { IconCirclePlus, IconPlus, IconSettings } from "@tabler/icons-react";
+import {
+  IconCirclePlus,
+  IconPlus,
+  IconSettings,
+  IconVolume,
+  IconVolumeOff,
+} from "@tabler/icons-react";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { statusDot, useAppStatus } from "@/lib/appStatusStore";
@@ -7,14 +13,17 @@ import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
 import { openHome, placeWorkspace } from "@/lib/router";
+import { setMuted, useMuted } from "@/lib/sound";
 import { Spotlight } from "@/views/Spotlight";
 import type { Agent } from "@/lib/types";
+import { GLYPH_STROKE } from "@/lib/glyph";
 
 const HOME = "Home";
 const NEW_TAB = "New tab";
 const NEW_APP = "New app";
 const WORKSPACE = "Workspace";
-const GLYPH_STROKE = 1.25;
+const MUTE = "Mute sounds";
+const UNMUTE = "Unmute sounds";
 
 /** One mark's box on the rail. The column is the glyph's own width, so the mark is the whole of the
  *  control and the pointer answer is the ink it takes rather than a ground behind it. */
@@ -37,8 +46,9 @@ function RailTip({ label, children }: { label: string; children: ReactElement })
  *
  *  The tiles are the member's own row of open tabs, not the workspace's roster of apps: they stand
  *  in the order home draws them, each named by the app filling it, and an app held by two tabs
- *  stands twice — the lane is what a tile means, so the lane is what keys it. A press goes to the
- *  home the row stands on; it never opens an app the member has not opened.
+ *  stands twice — the lane is what a tile means, so the lane is what keys it. A press carries that
+ *  lane to the head of the row and lands home on it, the rest shifting right; it never opens an app
+ *  the member has not opened.
  *
  *  The tiles scroll and the two acts under them are reclaimed: a tab list that grew past the rail
  *  would push the way to a new tab, to an app, and to the workspace past the bottom edge.
@@ -60,10 +70,11 @@ export function MinimalSidebar({
    *  because at a desk width this rail is the whole shell and the way out has to stand on it. */
   account: ReactNode;
   onNewTab: () => void;
-  onLane: () => void;
+  onLane: (lane: string) => void;
   onBuild: () => void;
 }) {
   const { statuses } = useAppStatus();
+  const muted = useMuted();
   return (
     <nav
       aria-label="Tabs"
@@ -102,7 +113,7 @@ export function MinimalSidebar({
                 <button
                   type="button"
                   aria-label={agentName(agent.name)}
-                  onClick={onLane}
+                  onClick={() => onLane(lane)}
                   className={TILE}
                 >
                   {/* The dot the wide column's rows wear, and nothing else of theirs: the rail has
@@ -128,6 +139,24 @@ export function MinimalSidebar({
       <RailTip label={NEW_APP}>
         <button type="button" aria-label={NEW_APP} onClick={onBuild} className={TILE}>
           <IconCirclePlus className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />
+        </button>
+      </RailTip>
+      {/* The track speaks when a lane opens and when focus crosses to the one beside it, and this
+          is where a member takes that back. The word names the act, as every other tile's does, and
+          the glyph carries the state. */}
+      <RailTip label={muted ? UNMUTE : MUTE}>
+        <button
+          type="button"
+          aria-label={muted ? UNMUTE : MUTE}
+          aria-pressed={muted}
+          onClick={() => setMuted(!muted)}
+          className={TILE}
+        >
+          {muted ? (
+            <IconVolumeOff className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />
+          ) : (
+            <IconVolume className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />
+          )}
         </button>
       </RailTip>
       <RailTip label={WORKSPACE}>

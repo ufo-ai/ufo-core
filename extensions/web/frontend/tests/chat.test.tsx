@@ -2950,7 +2950,6 @@ test("switching conversations remounts the log so scroll state never leaks acros
 
   follow(chatHash(other.conversation_id));
   await screen.findByText("No messages in this conversation yet.");
-  expect(document.activeElement).toBe(screen.getByLabelText("Ask UFO"));
   const fresh = screen.getByTestId("log");
   expect(fresh).not.toBe(first);
 
@@ -3000,6 +2999,19 @@ test("a reader inside the tolerance band still counts as at the bottom", async (
   await screen.findByText(saying("nudged"));
   lands(log);
   await waitFor(() => expect(log.scrollTop).toBe(FOOT));
+});
+
+/** The box never takes the keys off the member on its own. Several conversations stand as lanes on
+ *  one screen, each with a box of its own, and a box that claimed focus as it mounted would leave
+ *  the last one to mount holding the keys — and drag the row to it, since focus scrolls the scroller
+ *  it lands in. What returns focus to the box is the member's own act: a send, or an answer. */
+test("the composer takes no focus as it mounts", async () => {
+  wire(transcript());
+  open();
+  await screen.findByText("No messages in this conversation yet.");
+
+  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
+  expect(document.activeElement).toBe(document.body);
 });
 
 test("sending returns focus to the composer instead of stranding it on the page", async () => {

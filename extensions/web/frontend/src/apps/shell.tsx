@@ -69,7 +69,19 @@ export function useAppLinks(claim: (route: Route) => boolean, portal: string): v
 /** One section screen standing as the whole page, its place in page state and seeded by the place the
  *  pane was opened at — the whole place, so the screen inside the frame stands where the address
  *  outside it says. A link back into the same section is a place change here, never a trip through
- *  the portal. */
+ *  the portal.
+ *
+ *  Under a band the page's place is its own: the address the member holds names the lane, not the
+ *  page's state. A lane hands the page no place to begin with, and a filter, a search, a page step
+ *  or a record opened beside the listing is a move inside the lane — reported to the portal it would
+ *  land the member on this page's own full screen, which is the track torn up to answer a press that
+ *  never asked to leave it. So a banded place change is `setPlace` and nothing else, and the record
+ *  lane it opens is drawn by the shell's own track inside the frame. Standing on its own screen the
+ *  page reports every such change, because there the address is what the member holds.
+ *
+ *  A link out of this section is not a place change either way: it names an app or a section this
+ *  page cannot draw, so it rides the bridge's navigate verb and the portal moves — banded too, where
+ *  the lane is what the member left. */
 export function SectionApp({
   tab,
   view,
@@ -85,9 +97,9 @@ export function SectionApp({
   const onPlace = useCallback(
     (_tab: string, next: WorkspacePlace, _step: PlaceStep) => {
       setPlace(next);
-      navigate(agentHash(init.agentId, next));
+      if (!init.banded) navigate(agentHash(init.agentId, next));
     },
-    [init.agentId],
+    [init.agentId, init.banded],
   );
   // The pane's own place changes are taken as they arrive, and one the page itself just reported is
   // not taken twice: the address is what says two places are the same place.
@@ -103,10 +115,10 @@ export function SectionApp({
       (route) => {
         if (route.kind !== "section" || route.section !== tab) return false;
         setPlace(route.place);
-        navigate(agentHash(init.agentId, route.place));
+        if (!init.banded) navigate(agentHash(init.agentId, route.place));
         return true;
       },
-      [tab, init.agentId],
+      [tab, init.agentId, init.banded],
     ),
     init.portal,
   );
@@ -125,6 +137,7 @@ export function SectionApp({
         tabs={[tab]}
         views={{ [tab]: view }}
         view={tab}
+        banded={init.banded}
         place={place}
         onPlace={onPlace}
       />

@@ -71,6 +71,7 @@ const INIT: AppInit = {
   member: { email: MEMBER.email, admin: true },
   agents: [AGENT],
   agentId: AGENT.id,
+  banded: false,
   place: {},
   portal: location.origin,
 };

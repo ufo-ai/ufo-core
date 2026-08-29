@@ -38,6 +38,7 @@ import {
 import type { FilterOption } from "@/components/ui/filter";
 import { ToggleGroupItem, ToggleGroupOne } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/cn";
+import { GLYPH_STROKE } from "@/lib/glyph";
 
 /** The one measure the portal is read at, centred in whatever width the shell leaves — a
  *  transcript, and a screen of records alike. A conversation needs it because prose has a line
@@ -89,21 +90,47 @@ export function PaneNote({ children }: { children: ReactNode }) {
   );
 }
 
+const BandedContext = createContext(false);
+
+/** What stands under this is beneath a band drawn outside it — a lane's, which already names the
+ *  page and holds the way out. Every `Header` inside is that band's acts and nothing else, so a lane
+ *  shows one header at the height every other lane's stands at, and every `Page` inside takes the
+ *  lane's own measures rather than the screen's. A header that names a step past the band — a
+ *  record pinned over the page, said by its crumb and shut by its own close — is the one thing the
+ *  band did not name, so it draws whole. A lane draws its own band, so what a lane opens stands
+ *  under none. */
+export function Banded({ value, children }: { value: boolean; children: ReactNode }) {
+  return <BandedContext.Provider value={value}>{children}</BandedContext.Provider>;
+}
+
 /** Every screen is this: one scrolling column, a gutter either side, and a stack of bands one gap
  *  apart. The page owns that rhythm rather than each band carrying its own margins — a band that
  *  spaced itself would add to the gap instead of sitting in it, so the distance between a title and
  *  its records would be a sum of whatever the two happened to declare. The measure is what the
  *  shell leaves rather than a fixed column, because the record opened beside a list is what decides
  *  how much width a list has, and a list that stayed narrow while its pane grew would leave the act
- *  on each row stranded in the middle of the screen. */
+ *  on each row stranded in the middle of the screen.
+ *
+ *  Under a band the gutter is the lane's, not the screen's: one padding all round, the same the
+ *  lane's own body and a transcript take, so the page's first line starts where the band's title
+ *  above it does. The screen's gutter is a measure for the width a screen has — a third of a
+ *  320-pixel lane on each side, and a page top deeper than the band heading it. The narrow
+ *  breakpoint cannot answer it either: it reads the viewport, and a lane is narrow inside a window
+ *  that is not.
+ *
+ *  The padding is stated all round rather than dropped at the top where the acts row stands, because
+ *  a page offering no act draws no row at all — the row hides itself — and only the page's own
+ *  padding holds every banded page clear of the band above it. */
 export function Page({ className, ...props }: ComponentProps<"div">) {
+  const banded = useContext(BandedContext);
   return (
     <div
+      data-slot="page"
       {...props}
       className={cn(
         BANDS,
         "min-h-0 min-w-0 flex-1 overflow-y-auto scrollbar-gutter-stable",
-        "px-(--size-page-gutter) py-(--size-page-top) max-narrow:px-2xl",
+        banded ? "p-2xl" : "px-(--size-page-gutter) py-(--size-page-top) max-narrow:px-2xl",
         className,
       )}
     />
@@ -120,7 +147,34 @@ export const BANDS = "flex flex-col gap-6xl";
 /** The measure the name is guaranteed. Above the narrow breakpoint the acts fold and wrap around
  *  it; a band whose acts cannot fit beside this much name is carrying more acts than a header
  *  holds, which is a fault at the call site and not something the band can absorb. */
-const NAME = "flex min-w-(--container-title) flex-1 items-center gap-sm max-narrow:min-w-0";
+const NAME = "flex min-w-(--container-title) flex-1 items-center max-narrow:min-w-0";
+
+
+/** The two sets of measures a band is drawn at, and the whole of what `ruled` decides. A lane's
+ *  band tops a column the track repeats, so it is the shorter of the two: the name sits tight
+ *  against the mark before it, the acts stand a glyph's own pitch apart, and the name takes the
+ *  tracking a 13-pixel label is set at. A screen's band has the pane to itself and takes the deeper
+ *  padding the portal's chrome is set in. Stating them as one pair each is what keeps every lane on
+ *  the track at one height — a measure picked at its own call site is a lane that stands a pixel
+ *  off the one beside it. */
+const LANE_BAND = {
+  pad: "px-2xl py-sm",
+  name: "gap-2xs",
+  title: "tracking-(--tracking-ui)",
+  acts: "gap-md",
+};
+const PAGE_BAND = { pad: "px-2xl py-lg", name: "gap-sm", title: "", acts: "gap-sm" };
+
+/** Where a banded header's acts stand: the row the band would have put them on, at the same padding
+ *  and the same right edge, so the acts inside a lane sit where the lane's own do.
+ *
+ *  It draws only where something in it draws, and `:empty` cannot say that: a shell hands its act
+ *  slot down as a `display: contents` host that stands empty until a view fills it, which is a child
+ *  the row has and a box it does not. The row asks instead for a descendant that is not one of those
+ *  hosts, so a page offering no act spends no height on the row. */
+const BAND_ACTS =
+  "flex shrink-0 flex-wrap items-center justify-end gap-sm px-2xl py-lg " +
+  "not-has-[:not(.contents)]:hidden";
 
 /** The band every surface is headed by: where the member is on the left, and on the right what
  *  they can do about the whole of it. A destination, a record opened beside it, a half of the
@@ -157,7 +211,12 @@ const NAME = "flex min-w-(--container-title) flex-1 items-center gap-sm max-narr
  *  `pinned` is where the band stands, and both the rule and the inset follow from it. A band that
  *  scrolls with its page is lined up by that page's own gutter and has no boundary under it to
  *  draw; a band held above a scroller has neither, so it states its own inset and the rule the
- *  content passes beneath. */
+ *  content passes beneath.
+ *
+ *  Under a band, a header is its acts: a lane already names the page and holds the way out, so the
+ *  name, the crumb, the mark, the note, the lede, the bar and the close would be a second header
+ *  saying what the first one said. What the band cannot carry is the act the page itself offers, so
+ *  that is what is left standing — a row at the top of the body, where the acts were. */
 export function Header({
   heading,
   crumb,
@@ -171,6 +230,7 @@ export function Header({
   closes,
   onLift,
   pinned = false,
+  ruled = false,
 }: {
   heading?: 1 | 2;
   /** The step above this surface, as the trail states it: the label the member reads, and the
@@ -204,10 +264,26 @@ export function Header({
   closes?: string;
   /** What the band does when it is taken hold of, where the surface under it can be reordered by
    *  hand. Given, the band is the handle: the member drags the line already reading as this
-   *  surface's name, rather than a grip drawn beside it that names nothing. */
+   *  surface's name, rather than a grip drawn beside it that names nothing. The cursor is what
+   *  says so, and it says which way the surface travels — a track of lanes moves along one axis,
+   *  so the arrow the pointer takes over the band is that axis and not a free hand. */
   onLift?: (event: DragEvent<HTMLDivElement>) => void;
   pinned?: boolean;
+  /** Whether the band is a lane's: it takes the lane's measures, draws a hairline over the body
+   *  under it — a body that scrolls clips its content at the band's edge, and a message cut there
+   *  with nothing between them reads as the body running up into the header — and its name yields
+   *  its guaranteed measure, because a lane at its floor cannot afford it and the acts at the
+   *  band's end must never leave the lane. */
+  ruled?: boolean;
 }) {
+  const banded = useContext(BandedContext);
+  if (banded && crumb === undefined && onClose === undefined)
+    return (
+      <div data-slot="page-acts" className={BAND_ACTS}>
+        {acts}
+      </div>
+    );
+  const band = ruled ? LANE_BAND : PAGE_BAND;
   const Name = heading === 1 ? "h1" : heading === 2 ? "h2" : "span";
   return (
     <div
@@ -216,8 +292,9 @@ export function Header({
       onDragStart={onLift}
       className={cn(
         "flex shrink-0 flex-col gap-sm",
-        pinned && "px-2xl py-lg",
-        onLift && "cursor-move",
+        pinned && band.pad,
+        ruled && "shadow-rule",
+        onLift && "cursor-ew-resize",
       )}
       style={
         pinned
@@ -234,11 +311,14 @@ export function Header({
         {crumb === undefined && title === undefined ? (
           <span className="flex-1 max-narrow:hidden" />
         ) : (
-          <div className={NAME}>
+          <div className={cn(NAME, band.name, ruled && "min-w-0")}>
             {glyph ? (
               <span
                 aria-hidden
-                className="flex shrink-0 text-ink-soft [&_svg]:size-(--size-glyph)"
+                className={cn(
+                  "flex shrink-0 [&_svg]:size-(--size-glyph)",
+                  ruled ? "text-ink" : "text-ink-soft",
+                )}
               >
                 {glyph}
               </span>
@@ -257,7 +337,7 @@ export function Header({
                   </BreadcrumbItem>
                   <BreadcrumbSeparator />
                   <BreadcrumbItem className="min-w-0">
-                    <Name className="m-0 flex min-w-0 text-label">
+                    <Name className={cn("m-0 flex min-w-0 text-label", band.title)}>
                       <BreadcrumbPage>{title}</BreadcrumbPage>
                     </Name>
                     {note}
@@ -266,7 +346,11 @@ export function Header({
               </Breadcrumb>
             ) : (
               <>
-                <Name className="m-0 min-w-0 flex-1 truncate text-label font-medium">{title}</Name>
+                <Name
+                  className={cn("m-0 min-w-0 flex-1 truncate text-label font-medium", band.title)}
+                >
+                  {title}
+                </Name>
                 {note}
               </>
             )}
@@ -275,19 +359,20 @@ export function Header({
         {acts || onClose ? (
           <div
             className={cn(
-              "flex shrink-0 items-center gap-sm",
+              "flex shrink-0 items-center",
+              band.acts,
               "max-narrow:w-full max-narrow:flex-wrap",
             )}
           >
             {acts}
             {onClose ? (
               <Button
-                variant="quiet"
-                size="icon"
+                variant={ruled ? "mark" : "quiet"}
+                size={ruled ? "glyph" : "icon"}
                 aria-label={closes ? "Close " + closes : "Close"}
                 onClick={onClose}
               >
-                <IconX aria-hidden />
+                <IconX aria-hidden stroke={ruled ? GLYPH_STROKE : undefined} />
               </Button>
             ) : null}
           </div>

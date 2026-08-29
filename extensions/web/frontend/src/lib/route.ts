@@ -72,11 +72,6 @@ export const COMPOSE = "compose";
  *  has been picked yet, which is what tells it from every other home lane. */
 export const HOME_NEW_LANE = "new";
 
-/** How many lanes home stands. A press that would stand one more does nothing instead: the row is
- *  what the member arranged, and shortening it from the head to make room would drop the lane they
- *  reached the rest through. */
-export const HOME_MAX_LANES = 4;
-
 /** What stands between an app and the instance of it a lane holds: an app opened twice is two lanes
  *  over one app, so the second lane names the app and the instance both. An app id is a uuid and
  *  carries none of this character, so a lane splits back into the parts it was minted from. */

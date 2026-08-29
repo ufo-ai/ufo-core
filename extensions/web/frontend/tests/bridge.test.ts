@@ -9,10 +9,12 @@ import {
 import { BASE } from "@/lib/api";
 import { framedNavigation } from "@/lib/route";
 import { heldRoute } from "@/lib/router";
+import type { Crumb } from "@/lib/title";
+import type { Agent, Member } from "@/lib/types";
 
 const MEMBER = { email: "member@example.com", admin: true };
 const AGENT_ID = "11111111-1111-1111-1111-111111111111";
-const AGENTS: BridgeConfig["agents"] = [
+const AGENTS: Agent[] = [
   { id: AGENT_ID, name: "Radar", model: "openai/gpt-5", main: false, icon: "radar" },
 ];
 const CONVERSATION_ID = "22222222-2222-2222-2222-222222222222";
@@ -41,8 +43,16 @@ function jsonResponse(body: unknown): Response {
 
 let bridge: BridgeHandle | null = null;
 
-function attachBridge(config: Omit<BridgeConfig, "agents">): BridgeHandle {
-  return attach({ ...config, agents: AGENTS });
+function attachBridge({
+  member,
+  crumb,
+  ...config
+}: Omit<BridgeConfig, "standing" | "banded"> & { member: Member; crumb?: Crumb }): BridgeHandle {
+  return attach({
+    ...config,
+    banded: false,
+    standing: () => ({ member, agents: AGENTS, crumb }),
+  });
 }
 
 afterEach(() => {
@@ -122,9 +132,48 @@ test("ready is answered with the member's own init payload", async () => {
     member: MEMBER,
     agents: AGENTS,
     agentId: AGENT_ID,
+    banded: false,
     place: {},
     portal: location.origin,
   });
+});
+
+/** A frame under a lane band is told so in `init`, and draws no band of its own. */
+test("init says whether the frame stands under a lane band", async () => {
+  const { iframe, posted } = fakeFrame();
+  bridge = attach({
+    iframe,
+    agentId: AGENT_ID,
+    banded: true,
+    standing: () => ({ member: MEMBER, agents: AGENTS }),
+  });
+  deliver({ ufo: "ready" }, iframe.contentWindow);
+  await vi.waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({ ufo: "init", banded: true });
+});
+
+/** Everything the page is told about the member, the roster and its own step is read when `ready`
+ *  is answered, so a re-read or a rename that lands while the frame stands reaches the page's next
+ *  `init` through the bridge already bound — never through a rebind. */
+test("ready is answered with the roster and crumb as they stand, not as they were at attach", async () => {
+  const { iframe, posted } = fakeFrame();
+  let agents = AGENTS;
+  let crumb = CRUMB;
+  bridge = attach({
+    iframe,
+    agentId: AGENT_ID,
+    banded: false,
+    standing: () => ({ member: MEMBER, agents, crumb }),
+  });
+  agents = [...AGENTS, { ...AGENTS[0], id: CONVERSATION_ID, name: "Metrics" }];
+  crumb = { ...CRUMB, label: "Weather" };
+  deliver({ ufo: "ready" }, iframe.contentWindow);
+  await vi.waitFor(() => expect(posted).toHaveLength(1));
+  expect((posted[0] as { agents: Agent[] }).agents.map((agent) => agent.name)).toEqual([
+    "Radar",
+    "Metrics",
+  ]);
+  expect((posted[0] as { crumb: Crumb }).crumb.label).toBe("Weather");
 });
 
 /** The page holds a place the way a portal tab does, so every key of it crosses the frame. A

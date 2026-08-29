@@ -251,6 +251,9 @@
   --opacity-muted-strong: 0.5;
   --opacity-muted-soft: 0.7;
   --opacity-muted-faint: 0.75;
+  /* How far a lane stands back while another holds the member's cursor. Under every muted step,
+     which is a thing still being read; a dimmed lane is one being read past. */
+  --opacity-dimmed: 0.4;
   --disabled: 0.4;
 
   --spacing-hair: 2px;
@@ -421,9 +424,11 @@
   --size-control: 32px;
   /* The floor a slot holds before the track scrolls sideways instead of dividing further. Under it
      a form's labels wrap off their fields and a table prints one word to a cell, so a member who
-     opens a sixth thing pushes the track past the pane's edge rather than making the five already
-     standing unreadable. */
-  --size-slot-min: 320px;
+     opens one more lane pushes the track past the pane's edge rather than making the ones already
+     standing unreadable. It is set so four lanes stand beside the rail on a 1280px laptop: four at
+     305px with three hairlines between them is 1223px against the 1240px the rail leaves, where
+     320px would already scroll. */
+  --size-slot-min: 305px;
   /* What a thin scrollbar reserves, so anything laid over the pane can stop short of it. */
   --size-scrollbar: 12px;
   /* The floor a control the member points at with a finger keeps, which is taller than the
@@ -894,6 +899,25 @@
     var(--color-ink) calc(100% - var(--spacing-sm)),
     transparent
   );
+}
+
+/* The hairline a band draws over the body that scrolls under it, inside its own box so the band
+   stands the same height with or without it. Written as a plain box-shadow: Tailwind's shadow
+   utilities bring the ring machinery with them, and its offset colour is a white the palette does
+   not own. */
+@utility shadow-rule {
+  box-shadow: inset 0 -1px 0 var(--color-edge);
+}
+
+/* The share of its row a lane takes where the track is handed the whole pane. `--lane-share` is how
+   many lanes fit across the row, written on the row itself, and the pixel each one gives back is the
+   hairline the gap draws between it and the next — so the lanes on screen and the lines between them
+   come to exactly the row's width and none of them stands cut off at the right edge. A row holding
+   more lanes than fit carries the rest on a transform the track writes, which is why the lane holds
+   this width whether it stands on the screen or waits off it. */
+@utility lane-share {
+  flex: 0 0 calc((100% - (var(--lane-share) - 1) * 1px) / var(--lane-share));
+  min-width: 0;
 }
 
 /* The scrollbar is stated globally as a thumb that scrolling draws; these name the exceptions a

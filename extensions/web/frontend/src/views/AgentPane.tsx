@@ -46,6 +46,7 @@ import {
 import { navigate } from "@/lib/router";
 import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";
 import type { Agent, Conversation, Member } from "@/lib/types";
+import { GLYPH_STROKE } from "@/lib/glyph";
 
 /** What the half is called before a conversation exists to name it, and the act that starts one.
  *  The act stands with the acts at the far end of the band, where every act on the whole surface
@@ -82,9 +83,6 @@ export const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
   scheduled: "Scheduled",
 };
 
-/** The weight the menu's glyphs are drawn at: light enough beside 13px type that a row reads as its
- *  word with a mark beside it, rather than as an icon with a caption. */
-const GLYPH_STROKE = 1.25;
 
 /** The glyph each read is drawn with. The menu takes its names and its order from the tabs
  *  themselves, so a member picks the same word here that heads the panel they land on. */
@@ -519,23 +517,23 @@ export function AgentPane({
     acts: (
       <>
         <Button
-          variant="quiet"
-          size="icon"
+          variant="mark"
+          size="glyph"
           aria-label={NEW_CONVERSATION + " with " + agentName(agent.name)}
           disabled={held === FRESH}
           onClick={start}
         >
-          <IconPlus aria-hidden />
+          <IconPlus stroke={GLYPH_STROKE} aria-hidden />
         </Button>
         <Button
-          variant="quiet"
-          size="icon"
+          variant="mark"
+          size="glyph"
           aria-label={HISTORY + " for " + agentName(agent.name)}
           aria-pressed={history}
-          className={cn(history && "bg-fill")}
+          className={cn(history && "text-ink")}
           onClick={() => setListing(history ? null : lane)}
         >
-          <IconHistory aria-hidden />
+          <IconHistory stroke={GLYPH_STROKE} aria-hidden />
         </Button>
       </>
     ),
@@ -628,6 +626,7 @@ export function AgentPane({
             url={url}
             generation={generation}
             place={framed}
+            banded={false}
             onFounded={(speaking, conversationId, title) => {
               onFounded(speaking, conversationId, title);
               setSettles((count) => count + 1);

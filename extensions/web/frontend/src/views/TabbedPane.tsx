@@ -3,7 +3,17 @@ import { useEffect, useState } from "react";
 import { Search } from "@/components/ui/field";
 import type { Placement } from "@/kernel/pager";
 import { Segmented } from "@/components/ui/filter";
-import { BANDS, COLUMN, Header, Page, PageActs, PageHead, PageSearch, Pane } from "@/kernel/pane";
+import {
+  BANDS,
+  Banded,
+  COLUMN,
+  Header,
+  Page,
+  PageActs,
+  PageHead,
+  PageSearch,
+  Pane,
+} from "@/kernel/pane";
 import { usePlaceRecorder } from "@/kernel/place";
 import { cn } from "@/lib/cn";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
@@ -30,13 +40,19 @@ import type { PaneView } from "@/views/registry";
  *
  *  The band names the view, so the crumb over it is the landmark that holds the view — the same step
  *  the tab title puts after the name, handed down rather than written here, so the two say one
- *  thing. A destination that is its own landmark passes none. */
+ *  thing. A destination that is its own landmark passes none.
+ *
+ *  `banded` is the shell standing under a lane band that already names the view and holds the way
+ *  out. It is stated once, here, and every header under it — the shell's own, and the band a view
+ *  that names itself hands up — is that band's acts and nothing more. So a lane draws no second
+ *  name and no second way out, and the act the page offers is still on the screen. */
 export function TabbedPane<Tab extends string>({
   group,
   views,
   tabs,
   view,
   crumb,
+  banded = false,
   place,
   onPlace,
 }: {
@@ -45,6 +61,7 @@ export function TabbedPane<Tab extends string>({
   views: Record<Tab, PaneView>;
   view: Tab;
   crumb?: Crumb;
+  banded?: boolean;
   place: WorkspacePlace;
   onPlace: (view: Tab, place: WorkspacePlace, step: PlaceStep) => void;
 }) {
@@ -59,49 +76,51 @@ export function TabbedPane<Tab extends string>({
   const search = views[view].search;
   const headed = views[view].ownsHeader === true;
   return (
-    <Pane opens={merged.opens ?? []} onMove={(opens) => record({ opens })}>
-      {headed ? (
-        <div ref={setHead} className="contents" />
-      ) : (
-        <Header
-          pinned
-          heading={1}
-          crumb={crumb}
-          title={views[view].label}
-          acts={<span ref={setAct} className="contents" />}
-          bar={
-            tabs.length > 1 ? (
-              <Segmented
-                label={group}
-                segments={tabs.map((name) => ({ label: views[name].label, value: name }))}
-                value={view}
-                onPick={(name) => onPlace(name as Tab, {}, "push")}
-              />
-            ) : null
-          }
-        />
-      )}
-      <Page>
-        <div className={cn(headed ? BANDS : cn(COLUMN, BANDS))}>
-          <div className={BANDS} data-testid={group}>
-            <PageSearch node={search ? (
-              <PaneSearch
-                key={view}
-                label={search}
-                query={place.q ?? ""}
-                onSearch={(q) => record({ q: q || undefined, after: undefined })}
-              />
-            ) : null}>
-            <PageHead host={head}>
-              <PageActs host={act}>
-                <Registered key={key} view={view} views={views} place={merged} onPlace={record} />
-              </PageActs>
-            </PageHead>
-            </PageSearch>
+    <Banded value={banded}>
+      <Pane opens={merged.opens ?? []} onMove={(opens) => record({ opens })}>
+        {headed ? (
+          <div ref={setHead} className="contents" />
+        ) : (
+          <Header
+            pinned
+            heading={1}
+            crumb={crumb}
+            title={views[view].label}
+            acts={<span ref={setAct} className="contents" />}
+            bar={
+              tabs.length > 1 ? (
+                <Segmented
+                  label={group}
+                  segments={tabs.map((name) => ({ label: views[name].label, value: name }))}
+                  value={view}
+                  onPick={(name) => onPlace(name as Tab, {}, "push")}
+                />
+              ) : null
+            }
+          />
+        )}
+        <Page>
+          <div className={cn(headed ? BANDS : cn(COLUMN, BANDS))}>
+            <div className={BANDS} data-testid={group}>
+              <PageSearch node={search ? (
+                <PaneSearch
+                  key={view}
+                  label={search}
+                  query={place.q ?? ""}
+                  onSearch={(q) => record({ q: q || undefined, after: undefined })}
+                />
+              ) : null}>
+              <PageHead host={head}>
+                <PageActs host={act}>
+                  <Registered key={key} view={view} views={views} place={merged} onPlace={record} />
+                </PageActs>
+              </PageHead>
+              </PageSearch>
+            </div>
           </div>
-        </div>
-      </Page>
-    </Pane>
+        </Page>
+      </Pane>
+    </Banded>
   );
 }
 

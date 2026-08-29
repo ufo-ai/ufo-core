@@ -138,20 +138,29 @@ function carriedHeaders(stated: unknown): Record<string, string> {
 
 export type BridgeConfig = {
   iframe: HTMLIFrameElement;
-  member: Member;
-  agents: Agent[];
+  /** The member, the workspace's agents, and the page's own step of the trail as they stand when
+   *  the page asks: read when `ready` is answered rather than held from attach, so a roster the
+   *  shell re-reads or a name a rename corrects while the frame stands reaches the page's next
+   *  `init` without the bridge being rebound — a rebind aborts every stream the page holds open. */
+  standing: () => {
+    member: Member;
+    agents: Agent[];
+    /** Where the page itself stands in the portal, as the trail names it. The page draws it as the
+     *  crumb over its own band whenever that band names something the shell never read — a report,
+     *  a member's page — because the shell's trail ends at the page and the band stands one step
+     *  past it. It rides `init` and no further: the frame that outlives a place change does not
+     *  outlive the screen this crumb names. */
+    crumb?: Crumb;
+  };
   agentId: string;
+  /** Whether the frame stands under a lane band that already names the page and holds the way out.
+   *  Rides `init` so every header inside the page is the acts it carries: one header per lane. */
+  banded: boolean;
   /** The place the page stands at, handed to it in `init` so a sidebar or search landing opens the
    *  tile it named. It is the whole record the address carries, not one field of it: a page holds a
    *  place the way a portal tab does, and a frame handed one key of it could only stand the screen
    *  the member asked for by guessing the rest. */
   place?: WorkspacePlace;
-  /** Where the page itself stands in the portal, as the trail names it. The page draws it as the
-   *  crumb over its own band whenever that band names something the shell never read — a report, a
-   *  member's page — because the shell's trail ends at the page and the band stands one step past
-   *  it. It rides `init` and no further: the frame that outlives a place change does not outlive the
-   *  screen this crumb names. */
-  crumb?: Crumb;
   /** A conversation the page's own send founded, told to the shell so the rail carries the row
    *  without waiting for its next read. The page could only have founded it through this bridge's
    *  own chat call, so the report claims nothing the shell did not broker. */
@@ -239,17 +248,16 @@ function bodyFault(endpoint: Endpoint, body: unknown): string | null {
  *  forever; only a message with no usable `id` has nothing to correlate a reply to. */
 export function attachBridge({
   iframe,
-  member,
-  agents,
+  standing,
   agentId,
+  banded,
   place,
-  crumb,
   onCreated,
   onSessionEnded,
   chatSurface = false,
 }: BridgeConfig): BridgeHandle {
   const streams = new Map<string, AbortController>();
-  let standing: WorkspacePlace = place ?? {};
+  let placed: WorkspacePlace = place ?? {};
   let page: MessageEventSource | null = null;
 
   /** Relay one server-sent-event response as `frame` messages, then one `end`. A minimal SSE
@@ -307,13 +315,15 @@ export function attachBridge({
       case "site-session-ended":
         onSessionEnded?.();
         return;
-      case "ready":
+      case "ready": {
+        const { member, agents, crumb } = standing();
         reply({
           ufo: "init",
           member: { email: member.email, admin: member.admin },
           agents,
           agentId,
-          place: standing,
+          banded,
+          place: placed,
           crumb:
             crumb?.at && framedNavigation(crumb.at)
               ? { ...crumb, at: new URL(crumb.at, location.origin + BASE).href }
@@ -321,6 +331,7 @@ export function attachBridge({
           portal: location.origin,
         });
         return;
+      }
       case "call": {
         if (typeof message.id !== "string" || !message.id) return;
         const refuse = (error: string) => reply({ ufo: "data", id: message.id, ok: false, error });
@@ -507,7 +518,7 @@ export function attachBridge({
       page = null;
     },
     place: (next: WorkspacePlace) => {
-      standing = next;
+      placed = next;
       page?.postMessage({ ufo: "place", place: next }, { targetOrigin: "*" });
     },
   };

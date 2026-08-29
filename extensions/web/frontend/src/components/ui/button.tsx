@@ -24,6 +24,7 @@ export const buttonVariants = cva(
           "border border-edge bg-transparent text-inherit px-lg py-xs hover:bg-fill",
         row: "border border-edge bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill",
         quiet: "border border-transparent bg-transparent text-inherit px-lg py-xs hover:bg-fill",
+        mark: "border-0 bg-transparent p-0 text-ink-soft hover:text-ink",
         option: cn(
           "border border-edge-strong bg-transparent text-inherit px-lg py-xs",
           "hover:bg-fill",
@@ -39,6 +40,9 @@ export const buttonVariants = cva(
            the search's lens — instead of at whatever register the surface around it happens to be
            set in. */
         icon: "size-(--size-control) rounded-full p-0 [&_svg]:size-(--size-glyph)",
+        /* The mark's own box: the glyph and nothing around it, so a row of acts is a row of marks
+           at the glyph's own pitch rather than a row of boxes with a glyph inside each. */
+        glyph: "size-(--size-glyph) rounded-control p-0 [&_svg]:size-(--size-glyph)",
       },
     },
     defaultVariants: { variant: "outline", size: "default" },
@@ -54,6 +58,11 @@ export type ButtonProps = ComponentProps<"button"> &
  *  `size="bar"` is the same height drawn as a pill: the acts standing in a page's header or a
  *  section's bar are the height and the shape of the search and the filter beside them, so a band
  *  of controls reads as one row rather than as a tall act with chrome tucked under it.
+ *
+ *  `variant="mark"` with `size="glyph"` is the act drawn as the mark alone: no box, no ground, the
+ *  tone of the marks around it, and the ink of the surface under the pointer. A band whose acts are
+ *  16-pixel glyphs a fixed pitch apart cannot draw them in 32-pixel boxes — the boxes would set the
+ *  spacing and the pressed one would fill a square the row has no room for.
  *
  *  `busy` marks an act already in flight. The button keeps its place in the accessibility tree —
  *  `disabled` would drop the focused element out of it mid-submit — and swallows the activation

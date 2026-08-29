@@ -33,6 +33,7 @@ import { MinimalSidebar } from "@/components/MinimalSidebar";
 import { FirstRun } from "@/views/FirstRun";
 import { Home } from "@/views/Home";
 import { SignIn } from "@/views/SignIn";
+import { Shortcuts } from "@/views/Shortcuts";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
@@ -88,10 +89,10 @@ import {
   startRouter,
   useRoute,
 } from "@/lib/router";
+import type { Seek } from "@/kernel/slots";
 import {
   COMPOSE,
   COMPOSING,
-  HOME_MAX_LANES,
   HOME_NEW_LANE,
   WORKSPACE_TABS,
   homeLaneAgent,
@@ -102,9 +103,10 @@ import {
   type WorkspacePlace,
   type WorkspaceTab,
 } from "@/lib/route";
-import { heldTrack } from "@/lib/tracks";
+import { TRACK_MAX_SLOTS, heldTrack } from "@/lib/tracks";
 import { ALL_SURFACES, SurfacesProvider, useSurfaces } from "@/lib/surfaces";
 import type { Agent, ArchivedApp, Member, OwnedConversation, Surfaces } from "@/lib/types";
+import { useNarrow } from "@/lib/narrow";
 
 export type AppProps = {
   agents: Agent[];
@@ -133,7 +135,7 @@ function inSetup(route: Route, agents: Agent[]): boolean {
  *  rightward, so the lane a member has read longest is the one that goes. */
 function newTab(opens: string[]): string[] {
   if (opens.includes(HOME_NEW_LANE)) return opens;
-  if (opens.length < HOME_MAX_LANES) return [HOME_NEW_LANE, ...opens];
+  if (opens.length < TRACK_MAX_SLOTS) return [HOME_NEW_LANE, ...opens];
   return [HOME_NEW_LANE, ...opens.slice(0, -1)];
 }
 
@@ -188,7 +190,7 @@ export function App({
    *  cannot name is a row nobody can read. */
   const homePlace: WorkspacePlace = route.kind === "home" ? route.place : {};
   const homeOpens = useMemo(
-    () => (homePlace.opens ?? heldTrack("home")).slice(0, HOME_MAX_LANES),
+    () => homePlace.opens ?? heldTrack("home"),
     [homePlace.opens, route],
   );
   const homeLanes = useMemo(
@@ -207,6 +209,13 @@ export function App({
         .filter((row): row is { lane: string; agent: Agent } => row !== null),
     [homeOpens, rail.rows, agents],
   );
+  /** The lane the rail was last pressed for. The press places home and home brings the lane into
+   *  view; a member who leaves home afterwards has been answered, so the seek does not outlive the
+   *  screen and land again the next time home mounts. */
+  const [seeking, setSeeking] = useState<Seek | undefined>(undefined);
+  useEffect(() => {
+    if (route.kind !== "home") setSeeking(undefined);
+  }, [route.kind]);
 
   /** The router owns the address: it states the boot address in the bar, lands the arrival on the
    *  track the screen was left holding, and follows the browser from there. It starts here rather
@@ -301,6 +310,7 @@ export function App({
         <SurfacesProvider surfaces={surfaces}>
           <MainAgentProvider agents={agents}>
             <TooltipProvider>
+            <Shortcuts />
             <DrawerHost hosted={narrow && shell} shut={shutMenu}>
               <div
                 className={cn(
@@ -333,7 +343,15 @@ export function App({
                     agents={listed}
                     account={<AccountMenu member={member} />}
                     onNewTab={() => placeHome({ ...homePlace, opens: newTab(homeOpens) })}
-                    onLane={() => placeHome({ ...homePlace, opens: homeOpens })}
+                    onLane={(lane) => {
+                      const at = homeOpens.indexOf(lane);
+                      if (at < 0) return;
+                      setSeeking({ id: lane });
+                      placeHome({
+                        ...homePlace,
+                        opens: [...homeOpens.slice(at), ...homeOpens.slice(0, at)],
+                      });
+                    }}
                     onBuild={startBuild}
                   />
                 ) : null}
@@ -343,6 +361,7 @@ export function App({
                     agents={agents}
                     member={member}
                     mainAgent={mainAgent}
+                    seeking={seeking}
                     onAgents={onAgents}
                     onExitBuilder={exitBuild}
                     onForwardAgents={forwardBuild}
@@ -822,6 +841,7 @@ function RoutedPane({
   agents,
   member,
   mainAgent,
+  seeking,
   onAgents,
   onExitBuilder,
   onForwardAgents,
@@ -831,6 +851,7 @@ function RoutedPane({
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
+  seeking: Seek | undefined;
   onAgents: () => void;
   onExitBuilder: () => void;
   onForwardAgents: () => void;
@@ -1031,6 +1052,7 @@ function RoutedPane({
           agents={agents}
           member={member}
           mainAgent={mainAgent}
+          seeking={seeking}
           onFounded={founded}
           onActivity={railActivity}
           onAgents={onAgents}
@@ -1146,21 +1168,6 @@ function LinkedPane({
 
 function NotShared() {
   return <PaneNote>This conversation is not shared with this account.</PaneNote>;
-}
-
-export const NARROW = "(width < 720px)";
-
-/** Whether the shell is drawing its phone layout, where the hamburger stands on the bar and the
- *  drawer it opens holds the selected section's own list. */
-function useNarrow(): boolean {
-  const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
-  useEffect(() => {
-    const query = window.matchMedia(NARROW);
-    const answer = () => setNarrow(query.matches);
-    query.addEventListener("change", answer);
-    return () => query.removeEventListener("change", answer);
-  }, []);
-  return narrow;
 }
 
 export const SCROLL_MARK = "data-scrolling";

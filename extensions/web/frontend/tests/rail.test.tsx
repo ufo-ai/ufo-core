@@ -796,3 +796,32 @@ test("the sidebar marks the destination the member is in and leaves the others o
   expect(index.getByRole("button", { name: "Assistant" })).toBeTruthy();
   expect(index.getByRole("button", { name: "Second" })).toBeTruthy();
 });
+
+/** The sounds the track makes belong to the browser, not to a screen, so the mark states the act a
+ *  press does and the pick outlives the page that took it. */
+test("the rail's sound mark names the act it does, and this browser holds the pick", async () => {
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = within(await screen.findByRole("navigation", { name: "Tabs" }));
+  const mark = rail.getByRole("button", { name: "Mute sounds" });
+  expect(mark.getAttribute("aria-pressed")).toBe("false");
+
+  await userEvent.click(mark);
+
+  const silenced = rail.getByRole("button", { name: "Unmute sounds" });
+  expect(silenced.getAttribute("aria-pressed")).toBe("true");
+  expect(localStorage.getItem("ufo.sound-muted")).toBe("muted");
+});
+
+test("a browser that was muted opens on the mark that unmutes it", async () => {
+  localStorage.setItem("ufo.sound-muted", "muted");
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = within(await screen.findByRole("navigation", { name: "Tabs" }));
+  expect(rail.getByRole("button", { name: "Unmute sounds" }).getAttribute("aria-pressed")).toBe(
+    "true",
+  );
+  expect(rail.queryByRole("button", { name: "Mute sounds" })).toBeNull();
+});

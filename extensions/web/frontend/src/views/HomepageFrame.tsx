@@ -54,13 +54,22 @@ export function useHomepage(agent: Agent, settles: number = 0): Homepage {
  *  talks to exactly one listener. The place rides `init` on a fresh frame and the bridge's own
  *  `place` message while the frame stands, because an arrival can land on a page that already
  *  booted. `onFounded` is a conversation the page's own send founded, with the agent it ran under
- *  — the page chats across agents, so the frame's own agent cannot stand in. */
+ *  — the page chats across agents, so the frame's own agent cannot stand in. `banded` is whether
+ *  the frame stands under a lane band that already names the page and holds the way out; it rides
+ *  `init`, so every header inside the page is the acts it carries and nothing more.
+ *
+ *  The bridge is rebound on the frame's identity alone. What the page is told about the member, the
+ *  roster and its own step of the trail is read through a ref when it asks, because a re-read while
+ *  the frame stands — the boot reload, a status poll, a rename the read corrects — arrives as new
+ *  values, and a rebind on them would abort every stream the page holds open, across every frame
+ *  home mounts at once. */
 export function HomepageFrame({
   agent,
   member,
   url,
   generation,
   place,
+  banded,
   onFounded,
 }: {
   agent: Agent;
@@ -68,9 +77,13 @@ export function HomepageFrame({
   url: string;
   generation: number;
   place: WorkspacePlace;
+  banded: boolean;
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
 }) {
   const agents = useAgents();
+  const standing = { member, agents, crumb: agentCrumb(agent) };
+  const standingRef = useRef(standing);
+  standingRef.current = standing;
   const [frameRefresh, setFrameRefresh] = useState(0);
   const sessionEnded = useRef(false);
   const refreshEndedSession = useCallback(() => {
@@ -127,11 +140,10 @@ export function HomepageFrame({
     if (!frame) return;
     const handle = attachBridge({
       iframe: frame,
-      member,
-      agents,
+      standing: () => standingRef.current,
       agentId: agent.id,
+      banded,
       place: placeRef.current,
-      crumb: agentCrumb(agent),
       chatSurface: agent.app === CHAT_SURFACE,
       onCreated: (agentId, conversationId, title) =>
         foundedRef.current(agentId, conversationId, title),
@@ -145,7 +157,7 @@ export function HomepageFrame({
       bridgeRef.current = null;
       handle.detach();
     };
-  }, [member, agents, agent.id, agent.app, url, generation, frameRefresh, refreshEndedSession]);
+  }, [agent.id, agent.app, url, generation, frameRefresh, banded, refreshEndedSession]);
   useEffect(() => {
     bridgeRef.current?.place(placeRef.current);
   }, [placedAt]);

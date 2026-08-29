@@ -728,10 +728,6 @@ function Composer({
     send([]);
   }, [disabled, text]);
 
-  useEffect(() => {
-    input.current?.focus();
-  }, [input]);
-
   useEffect(() => installDraftFlush(), []);
 
   async function stop(turnId: string) {

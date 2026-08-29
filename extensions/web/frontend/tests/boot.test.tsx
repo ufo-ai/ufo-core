@@ -196,9 +196,9 @@ test("an admin is offered administration, which reads the admin projection", asy
 });
 
 /** The shell at a desk width is the rail on the left: the mark that leads home, the act that opens a
- *  tab, search, one tile per tab home stands, the act that builds an app, and the workspace at its
- *  foot. The column is a glyph's own width, so every tile is a mark alone and the word it stands for
- *  is held at the pointer. */
+ *  tab, search, one tile per tab home stands, the act that builds an app, the act that silences the
+ *  track, and the workspace at its foot. The column is a glyph's own width, so every tile is a mark
+ *  alone and the word it stands for is held at the pointer. */
 test("the desk shell is a rail of marks, each holding its name at the pointer", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -215,6 +215,7 @@ test("the desk shell is a rail of marks, each holding its name at the pointer", 
       "Search",
       agentName(AGENT.name),
       "New app",
+      "Mute sounds",
       "Workspace",
       MEMBER.email,
     ]),

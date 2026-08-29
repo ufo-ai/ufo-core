@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import type { AppInit } from "@/apps/kit";
+import type { AppInit, Placement } from "@/apps/kit";
 
 import { objectIndex, wire, AGENT, MEMBER, TASK_KIND, TURN_ID } from "./harness";
 
@@ -33,6 +33,7 @@ const INIT = {
   member: { email: MEMBER.email, admin: true },
   agents: [AGENT],
   agentId: AGENT.id,
+  banded: false,
   place: {},
   portal: location.origin,
 };
@@ -312,6 +313,7 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
             member: { email: MEMBER.email, admin: true },
             agents: [AGENT],
             agentId: AGENT.id,
+            banded: false,
             place: {},
             portal: location.origin,
           }}
@@ -332,6 +334,273 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
     </Viewer.Provider>,
   );
   expect(await screen.findByRole("heading", { name: "Wiki" })).toBeTruthy();
+});
+
+/** Under a lane band the shell draws no band of its own — the lane's is the one header — and what
+ *  the band would have carried on its right, the act the view offers, stands as a row over the body.
+ *  Unbanded, the same view is headed by the shell's band with the act on it. */
+test("a banded section app draws no band and keeps the view's act as a row over the body", async () => {
+  vi.resetModules();
+  const { SectionApp } = await import("@/apps/shell");
+  const { usePageAct } = await import("@/kernel/pane");
+  function Acted() {
+    const act = usePageAct(<button type="button">Rebuild entries</button>);
+    return (
+      <>
+        {act}
+        <p>Entries</p>
+      </>
+    );
+  }
+  const app = (banded: boolean) => (
+    <SectionApp
+      tab="radar"
+      init={{ ...INIT, banded }}
+      view={{ label: "Radar", remountOnPlace: false, render: () => <Acted /> }}
+    />
+  );
+
+  const view = render(app(true));
+  expect(await screen.findByText("Entries")).toBeTruthy();
+  expect(screen.queryByRole("heading")).toBeNull();
+  expect(document.querySelector("[data-slot=header]")).toBeNull();
+  const row = screen.getByRole("button", { name: "Rebuild entries" }).closest("[data-slot=page-acts]");
+  expect(row).not.toBeNull();
+  expect(document.querySelectorAll("[data-slot=page-acts]")).toHaveLength(1);
+
+  view.rerender(app(false));
+  expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "Rebuild entries" }).closest("[data-slot=header]"),
+  ).not.toBeNull();
+  expect(document.querySelector("[data-slot=page-acts]")).toBeNull();
+});
+
+/** A view that heads its own page hands its band up through the one mechanism it always uses, and
+ *  under a lane band that band is its acts: the name the lane already states is not said twice, and
+ *  the act the page offers is still reachable. The shell draws no band over such a view either way,
+ *  so a lane holds exactly one row of acts. */
+test("a banded section app keeps an owning view's band acts and draws no name", async () => {
+  vi.resetModules();
+  const { SectionApp } = await import("@/apps/shell");
+  const { Header, usePageHead } = await import("@/kernel/pane");
+  function Headed() {
+    const band = usePageHead(
+      <Header pinned heading={1} title="Radar" acts={<button type="button">Rebuild entries</button>} />,
+    );
+    return (
+      <>
+        {band}
+        <p>Entries</p>
+      </>
+    );
+  }
+  const app = (banded: boolean) => (
+    <SectionApp
+      tab="radar"
+      init={{ ...INIT, banded }}
+      view={{ label: "Radar", remountOnPlace: false, ownsHeader: true, render: () => <Headed /> }}
+    />
+  );
+
+  const view = render(app(true));
+  expect(await screen.findByText("Entries")).toBeTruthy();
+  expect(screen.queryByRole("heading")).toBeNull();
+  expect(document.querySelector("[data-slot=header]")).toBeNull();
+  const row = screen.getByRole("button", { name: "Rebuild entries" }).closest("[data-slot=page-acts]");
+  expect(row).not.toBeNull();
+  expect(document.querySelectorAll("[data-slot=page-acts]")).toHaveLength(1);
+
+  view.rerender(app(false));
+  expect(await screen.findByRole("heading", { level: 1, name: "Radar" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Rebuild entries" })).toBeTruthy();
+  expect(document.querySelector("[data-slot=page-acts]")).toBeNull();
+});
+
+/** A page with no act of its own spends no height on the row: the shell's act slot is a host that
+ *  stands empty until a view fills it, so the row is drawn and hidden rather than absent. */
+test("a banded page offering no act hides the row it would have stood on", async () => {
+  vi.resetModules();
+  const { SectionApp } = await import("@/apps/shell");
+  render(
+    <SectionApp
+      tab="radar"
+      init={{ ...INIT, banded: true }}
+      view={{ label: "Radar", remountOnPlace: false, render: () => <p>Entries</p> }}
+    />,
+  );
+  expect(await screen.findByText("Entries")).toBeTruthy();
+  const row = document.querySelector("[data-slot=page-acts]")!;
+  expect(row.className).toContain("not-has-[:not(.contents)]:hidden");
+  expect(row.querySelector("*:not(.contents)")).toBeNull();
+});
+
+/** A lane the page opens beside itself draws its own band whole. It is a surface of its own, so the
+ *  name it states and the way out of it are the lane's own and not the page's — the rule that
+ *  collapses a header under a band stops at the lane that band heads. */
+test("a lane opened inside a banded page keeps its own band", async () => {
+  vi.resetModules();
+  const { SectionApp } = await import("@/apps/shell");
+  const { useSlot } = await import("@/kernel/slots");
+  function Opening() {
+    const lane = useSlot(<p>One report</p>, { id: "report", title: "Report", onClose: () => {} });
+    return (
+      <>
+        {lane}
+        <p>Entries</p>
+      </>
+    );
+  }
+  render(
+    <SectionApp
+      tab="radar"
+      init={{ ...INIT, banded: true, place: { opens: ["report"] } }}
+      view={{ label: "Radar", remountOnPlace: false, render: () => <Opening /> }}
+    />,
+  );
+
+  expect(await screen.findByText("One report")).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 2, name: "Report" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Close Report" })).toBeTruthy();
+});
+
+/** Every `navigate` the page has posted over the bridge, in order. `settled` is what makes "nothing
+ *  was posted" a fact rather than a race: `postMessage` delivers in order, so a message queued by a
+ *  press has already arrived once the sentinel queued after it has. */
+function navigations(): { posted: string[]; settled: () => Promise<void> } {
+  const posted: string[] = [];
+  let arrive = () => {};
+  const listener = (event: MessageEvent) => {
+    const message = event.data as { ufo?: string; to?: string } | null;
+    if (message?.ufo === "navigate") posted.push(message.to as string);
+    if (message?.ufo === "sentinel") arrive();
+  };
+  window.addEventListener("message", listener);
+  cleanups.push(() => window.removeEventListener("message", listener));
+  return {
+    posted,
+    settled: () =>
+      new Promise<void>((resolve) => {
+        arrive = resolve;
+        window.postMessage({ ufo: "sentinel" }, "*");
+      }),
+  };
+}
+
+/** Under a band the page's place is its own. A filter picked inside a lane is a move within that
+ *  lane, so the page redraws at the new place and asks the portal for nothing — reported, the
+ *  portal would answer by standing the member on this page's own full screen, which is the whole
+ *  track torn up to answer a press that never left it. Standing on its own screen the same press is
+ *  the address changing, and the page says so. */
+test("a filter inside a banded page moves the page alone; unbanded it moves the portal", async () => {
+  vi.resetModules();
+  const { SectionApp } = await import("@/apps/shell");
+  const bridge = navigations();
+  const app = (banded: boolean) => (
+    <SectionApp
+      tab="artifacts"
+      init={{ ...INIT, banded }}
+      view={{
+        label: "Artifacts",
+        remountOnPlace: false,
+        render: (place, onPlace) => (
+          <>
+            <button type="button" onClick={() => onPlace({ kind: "image" })}>
+              Images
+            </button>
+            <button type="button" onClick={() => onPlace({ kind: "file" })}>
+              Files
+            </button>
+            <p>Showing {place.kind ?? "everything"}</p>
+          </>
+        ),
+      }}
+    />
+  );
+
+  const view = render(app(true));
+  fireEvent.click(await screen.findByRole("button", { name: "Images" }));
+  expect(await screen.findByText("Showing image")).toBeTruthy();
+  await bridge.settled();
+  expect(bridge.posted).toEqual([]);
+
+  view.rerender(app(false));
+  fireEvent.click(screen.getByRole("button", { name: "Files" }));
+  expect(await screen.findByText("Showing file")).toBeTruthy();
+  await bridge.settled();
+  expect(bridge.posted).toHaveLength(1);
+  expect(bridge.posted[0]).toContain("kind=file");
+});
+
+/** A record opened beside the listing is a place change like any other, so under a band it is the
+ *  page's own: the lane stands in the frame's own track, beside the listing that raised it, and the
+ *  portal is not asked to move. */
+test("a record opened inside a banded page stands in the page's own track", async () => {
+  vi.resetModules();
+  const { SectionApp } = await import("@/apps/shell");
+  const { closed, opened, useSlot } = await import("@/kernel/slots");
+  const bridge = navigations();
+  function Listing({ place, onPlace }: { place: Placement; onPlace: (place: Placement) => void }) {
+    const opens = place.opens ?? [];
+    const lane = useSlot(opens.includes("report") ? <p>One report</p> : null, {
+      id: "report",
+      title: "Report",
+      onClose: () => onPlace({ opens: closed(opens, "report") }),
+    });
+    return (
+      <>
+        {lane}
+        <button type="button" onClick={() => onPlace({ opens: opened(opens, "report") })}>
+          Open report
+        </button>
+      </>
+    );
+  }
+  render(
+    <SectionApp
+      tab="artifacts"
+      init={{ ...INIT, banded: true }}
+      view={{
+        label: "Artifacts",
+        remountOnPlace: false,
+        render: (place, onPlace) => <Listing place={place} onPlace={onPlace} />,
+      }}
+    />,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Open report" }));
+  expect(await screen.findByText("One report")).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 2, name: "Report" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Open report" })).toBeTruthy();
+  await bridge.settled();
+  expect(bridge.posted).toEqual([]);
+});
+
+/** A lane is 320 pixels wide, so the page inside one takes the lane's own gutter — the same padding
+ *  its body and a transcript take, all round — rather than the screen's, whose 88-pixel gutter would
+ *  spend more than half the lane on margins and whose page top is deeper than the band above it. */
+test("a banded page takes the lane's gutter and an unbanded one the screen's", async () => {
+  vi.resetModules();
+  const { SectionApp } = await import("@/apps/shell");
+  const app = (banded: boolean) => (
+    <SectionApp
+      tab="artifacts"
+      init={{ ...INIT, banded }}
+      view={{ label: "Artifacts", remountOnPlace: false, render: () => <p>Entries</p> }}
+    />
+  );
+
+  const view = render(app(true));
+  expect(await screen.findByText("Entries")).toBeTruthy();
+  const banded = document.querySelector("[data-slot=page]")!;
+  expect(banded.className).toContain("p-2xl");
+  expect(banded.className).not.toContain("--size-page-top");
+  expect(banded.className).not.toContain("--size-page-gutter");
+
+  view.rerender(app(false));
+  const plain = document.querySelector("[data-slot=page]")!;
+  expect(plain.className).toContain("px-(--size-page-gutter)");
+  expect(plain.className).toContain("py-(--size-page-top)");
 });
 
 test("a page mounted through the kit alone greets the shell, reads over the bridge, and takes a frame", async () => {
@@ -426,6 +695,7 @@ test("a page remounted across a deploy reads its audience when its standing shel
       {
         member: INIT.member,
         agentId: INIT.agentId,
+        banded: false,
         place: INIT.place,
         portal: INIT.portal,
       },

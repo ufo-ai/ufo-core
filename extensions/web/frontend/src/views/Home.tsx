@@ -1,10 +1,10 @@
-import { IconChevronRight, IconGripVertical, IconHistory } from "@tabler/icons-react";
+import { IconChevronRight, IconHistory, IconPlus } from "@tabler/icons-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { PressRow } from "@/components/ui/pressrow";
 import { Empty, Waiting } from "@/kernel/panel";
-import { SlotTrack, useSlot } from "@/kernel/slots";
+import { SlotTrack, useSlot, type Seek } from "@/kernel/slots";
 import { isPortalChat, surfaceWord } from "@/lib/audience";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
@@ -16,7 +16,6 @@ import type { ChatRow } from "@/lib/rail";
 import { seekChat, useRail } from "@/lib/railStore";
 import { placeHome } from "@/lib/router";
 import {
-  HOME_MAX_LANES,
   HOME_NEW_LANE,
   homeConversationLane,
   homeLaneAgent,
@@ -28,6 +27,7 @@ import { AgentSetup } from "@/views/AgentSetup";
 import { Chat } from "@/views/Chat";
 import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";
 import type { Agent, Member } from "@/lib/types";
+import { GLYPH_STROKE } from "@/lib/glyph";
 
 const NEW_TAB = "New tab";
 const HISTORY = "History";
@@ -58,7 +58,6 @@ const HOME_DEFAULT_APPS = ["metrics", "meetings", "code"] as const;
  *  than an empty record minted per render. */
 const LANE_PLACE: WorkspacePlace = {};
 
-const GRIP = "size-(--size-glyph) shrink-0 text-ink-faint";
 
 /** One of the picker's two lists. Each takes half the lane and keeps it: a short roster of apps
  *  hands its half to nothing, so the conversations stand where the member last read them however
@@ -93,7 +92,7 @@ function defaultLanes(agents: Agent[], chatAgent: Agent | null): string[] {
 /** The home screen: a track of open app instances, one lane each, in the order the address states
  *  them. Every lane holds what the app's own screen would show — its setup screen while the
  *  workspace is still wiring it, its page once built, its conversation where the app is the chat
- *  app — under the app's name, the way to its own screen, and the grip the row is reordered by.
+ *  app — under the app's name, the way to its own screen, and the band the row is reordered by.
  *  An app may stand in more than one lane: each is its own instance, so two chat lanes hold two
  *  conversations.
  *
@@ -105,12 +104,16 @@ function defaultLanes(agents: Agent[], chatAgent: Agent | null): string[] {
  *  Standing here with no track in the address is a member arriving from somewhere else: the router
  *  hands back the row home was left holding, and where it held none the default set is written in
  *  the same place. It is written rather than merely drawn, because the address is what the rail
- *  reads the open lanes off, what a reorder writes back, and what closing a lane cuts from. */
+ *  reads the open lanes off, what a reorder writes back, and what closing a lane cuts from.
+ *
+ *  `seeking` is the lane the rail was last pressed for, brought into view by the track: the row may
+ *  be wider than the screen, and the tile is how the member reaches a lane that scrolled off it. */
 export function Home({
   place,
   agents,
   member,
   mainAgent,
+  seeking,
   onFounded,
   onActivity,
   onAgents,
@@ -119,6 +122,7 @@ export function Home({
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
+  seeking?: Seek;
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
   onAgents: () => void;
@@ -129,9 +133,7 @@ export function Home({
     if (opens?.length) return;
     placeHome({ ...place, opens: defaultLanes(agents, chatAgent) }, "replace");
   }, [opens, place, agents, chatAgent]);
-  /* An address naming more lanes than home stands is one nothing here minted. The lanes past the
-     cap are not drawn, and every act writes the row that is. */
-  const standing = useMemo(() => (opens ?? []).slice(0, HOME_MAX_LANES), [opens]);
+  const standing = useMemo(() => opens ?? [], [opens]);
   /* Home always stands a lane. A track of nothing is a screen with no act on it, and the address
      cannot state one either — an empty track writes no key, which is the same address a member
      arrives on, so the row the last close left would come back as the default set on the next
@@ -143,7 +145,7 @@ export function Home({
   );
   return (
     <main className="relative flex min-h-0 min-w-0 flex-col">
-      <SlotTrack over opens={standing} onMove={move}>
+      <SlotTrack over opens={standing} onMove={move} seek={seeking}>
         {standing.map((lane) => (
           <HomeLane
             key={lane}
@@ -236,14 +238,13 @@ function HomeLane({
  *  where it stands, the store holds the row for the tab's life, and the band is the handle a
  *  reorder is carried by.
  *
- *  The grip states that handle and stands only where a drag can land somewhere — the track makes
- *  no band a handle while one lane stands alone. It is a mark and not a control: the whole band is
- *  what the browser drags, and a button here would be a second thing to press that moved nothing.
- *  The acts beside it refuse a drag of their own, so the grip is the one place in the band that
- *  both says "carry me" and does.
+ *  Nothing is drawn to say so. A grip beside the name would be a mark that names nothing and a
+ *  second thing to press that moves nothing, standing in the row of acts where every other glyph
+ *  is a verb; the band already reads as this lane and the cursor over it already says which way it
+ *  travels.
  *
  *  Closing writes the shortened row through the router, the way every other act on this screen
- *  does, and the slot answers Escape with the same verb. The picker standing alone draws no way
+ *  does; the band's close control is the one way to shut a lane. The picker standing alone draws no way
  *  out: closing it would put it straight back, since home stands a lane whatever the member
  *  shuts. */
 function Lane({
@@ -267,21 +268,13 @@ function Lane({
   node: ReactNode;
   onOpens: (opens: string[]) => void;
 }): ReactNode {
-  const grip =
-    !fixed && opens.length > 1 ? <IconGripVertical className={GRIP} aria-hidden /> : null;
   return useSlot(node, {
     id: lane,
     title,
     glyph,
     tone,
     fixed,
-    acts:
-      grip || acts ? (
-        <>
-          {grip}
-          {acts}
-        </>
-      ) : undefined,
+    acts,
     onClose:
       opens.length > 1 || lane !== HOME_NEW_LANE
         ? () => onOpens(opens.filter((held) => held !== lane))
@@ -306,7 +299,9 @@ function taken(opens: string[], lane: string, id: string): string[] {
 }
 
 /** The act a chat-shaped lane turns its own history with: pressed, the lane reads as the list of
- *  this app's conversations, and a row picked off it takes the lane over. */
+ *  this app's conversations, and a row picked off it takes the lane over. Held, it darkens to the
+ *  page's own ink rather than taking a filled box: the band's acts are marks a glyph apart, and a
+ *  square drawn behind one of them is wider than the space between them. */
 function HistoryAct({
   agent,
   pressed,
@@ -318,14 +313,14 @@ function HistoryAct({
 }) {
   return (
     <Button
-      variant="quiet"
-      size="icon"
+      variant="mark"
+      size="glyph"
       aria-label={HISTORY + " for " + agentName(agent.name)}
       aria-pressed={pressed}
-      className={cn(pressed && "bg-fill")}
+      className={cn(pressed && "text-ink")}
       onClick={onPress}
     >
-      <IconHistory aria-hidden />
+      <IconHistory aria-hidden stroke={GLYPH_STROKE} />
     </Button>
   );
 }
@@ -423,6 +418,7 @@ function AppLane({
             url={home.url}
             generation={home.deploy_generation ?? 0}
             place={LANE_PLACE}
+            banded
             onFounded={(speaking, conversationId, title) => {
               onFounded(speaking, conversationId, title);
               setSettles((count) => count + 1);
@@ -606,7 +602,7 @@ function PickerLane({
       lane={lane}
       opens={opens}
       title={NEW_TAB}
-      glyph={null}
+      glyph={<IconPlus aria-hidden />}
       tone="bg-fill"
       fixed
       onOpens={onOpens}

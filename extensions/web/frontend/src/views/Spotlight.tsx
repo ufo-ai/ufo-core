@@ -44,7 +44,7 @@ const WORKING = "Searching…";
 
 /** The chord that opens the palette from anywhere, and closes it again. Meta holds it alone:
  *  `ctrl+k` is kill-line in every readline-shaped field, so it is not a chord to take away. */
-const CHORD = "k";
+export const CHORD = "k";
 
 const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
   connectors: IconPlug,

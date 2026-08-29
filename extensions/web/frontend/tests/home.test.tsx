@@ -1,6 +1,6 @@
 import { act, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import {
@@ -11,7 +11,14 @@ import {
   useAppStatus,
   type AgentStatus,
 } from "@/lib/appStatusStore";
-import { HOME_NEW_LANE, homeConversationLane, homeHash, mintHomeLane } from "@/lib/route";
+import {
+  HOME_NEW_LANE,
+  homeConversationLane,
+  homeHash,
+  homeLaneAgent,
+  mintHomeLane,
+} from "@/lib/route";
+import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 
 import {
   AGENT,
@@ -31,8 +38,15 @@ const OTHER_CONVO_ID = "66666666-6666-4666-8666-666666666666";
 const PRIVATE_CONVO_ID = "77777777-7777-4777-8777-777777777777";
 
 const AGENT_INSTANCE = mintHomeLane(AGENT_ID, [AGENT_ID]);
-const SECOND_INSTANCE = mintHomeLane(SECOND_ID, [SECOND_ID]);
 const CONVERSATION_LANE = homeConversationLane(CONVO_ID);
+
+/** A row at the cap, the two apps standing turn and turn about, each lane its own instance. */
+const FULL_ROW = Array.from({ length: TRACK_MAX_SLOTS }).reduce<string[]>(
+  (row, _, at) => [...row, mintHomeLane(at % 2 ? SECOND_ID : AGENT_ID, row)],
+  [],
+);
+
+const laneName = (lane: string): string => (homeLaneAgent(lane) === AGENT_ID ? "Assistant" : "Second");
 
 const standingLanes = (): HTMLElement[] =>
   Array.from(document.querySelectorAll<HTMLElement>("[data-slot=slot-track] > div > section"));
@@ -133,15 +147,71 @@ test("the rail's new tab enters the picker at the left while the row is under th
 
 test("the rail's new tab at the cap drops the lane standing at the right end", async () => {
   wire(chatsOnWire([CHAT_ROW]));
-  drawHome([AGENT_ID, SECOND_ID, AGENT_INSTANCE, SECOND_INSTANCE]);
+  drawHome(FULL_ROW);
 
-  await waitFor(() => expect(laneNames()).toHaveLength(4));
+  await waitFor(() => expect(laneNames()).toHaveLength(TRACK_MAX_SLOTS));
   await openPicker();
 
-  expect(location.hash).toBe(
-    homeHash({ opens: [HOME_NEW_LANE, AGENT_ID, SECOND_ID, AGENT_INSTANCE] }),
-  );
-  expect(laneNames()).toEqual(["New tab", "Assistant", "Second", "Assistant"]);
+  const kept = FULL_ROW.slice(0, -1);
+  expect(location.hash).toBe(homeHash({ opens: [HOME_NEW_LANE, ...kept] }));
+  expect(laneNames()).toEqual(["New tab", ...kept.map(laneName)]);
+});
+
+/** The row may be wider than the screen, and the rail's tile is how a lane that scrolled off it is
+ *  reached: the press carries that lane to the head of the row, the rest shifting right, and brings
+ *  it into view. Two presses are two asks — the member scrolled away between them. */
+test("the rail's tile carries its lane to the head of the row and brings it into view", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  const scrolled: string[] = [];
+  const scrolls = vi
+    .spyOn(Element.prototype, "scrollIntoView")
+    .mockImplementation(function (this: Element) {
+      scrolled.push(this.getAttribute("aria-label") ?? "");
+    });
+  try {
+    drawHome([AGENT_ID, SECOND_ID]);
+    await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Second"]));
+    expect(scrolled).toEqual([]);
+    const rail = screen.getByRole("navigation", { name: "Tabs" });
+
+    await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
+
+    expect(scrolled).toEqual(["Second"]);
+    expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
+    await waitFor(() => expect(laneNames()).toEqual(["Second", "Assistant"]));
+
+    await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
+
+    expect(scrolled).toEqual(["Second", "Second"]);
+    expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
+  } finally {
+    scrolls.mockRestore();
+  }
+});
+
+test("the rail's tile from another screen lands home with that lane in view", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  const scrolled: string[] = [];
+  const scrolls = vi
+    .spyOn(Element.prototype, "scrollIntoView")
+    .mockImplementation(function (this: Element) {
+      scrolled.push(this.getAttribute("aria-label") ?? "");
+    });
+  try {
+    drawHome([AGENT_ID, SECOND_ID]);
+    await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Second"]));
+    await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
+    await waitFor(() => expect(laneNames()).toEqual([]));
+    const rail = screen.getByRole("navigation", { name: "Tabs" });
+
+    await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
+
+    expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
+    await waitFor(() => expect(laneNames()).toEqual(["Second", "Assistant"]));
+    expect(scrolled).toEqual(["Second"]);
+  } finally {
+    scrolls.mockRestore();
+  }
 });
 
 test("the rail's new tab stands the picker at most once", async () => {
@@ -337,4 +407,53 @@ test("a founding lane's hold moves to the conversation the send opened", () => {
   act(() => releaseTurn(CONVO_ID));
   expect(view.result.current.statuses[AGENT_ID]).toBeUndefined();
   expect(view.result.current.working).toBe(false);
+});
+
+/** Every other lane's band indents its name after a glyph; the picker's carries the mark of the
+ *  rail's New tab tile, so its name lines up with the rest instead of standing flush left. */
+test("the picker lane's band carries the New tab glyph", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([AGENT_ID]);
+
+  const picker = await openPicker();
+  expect(picker.querySelector("[data-slot=header] svg.tabler-icon-plus")).not.toBeNull();
+});
+
+/** Every act on a lane's band is a mark and nothing else: the glyph, the muted tone the marks
+ *  around it take, and no box. A 32-pixel control among them would set the row's spacing from its
+ *  own width, and the row would no longer read at the pitch the band is drawn at. Nothing stands
+ *  there to state the handle either — the band itself is what a reorder is carried by. */
+test("a lane band's acts are marks in the muted tone, and no grip stands among them", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([AGENT_ID, SECOND_ID]);
+
+  const lane = await screen.findByRole("region", { name: "Assistant" });
+  const band = lane.querySelector("[data-slot=header]")!;
+  const marks = Array.from(band.querySelectorAll("button"));
+  expect(marks.map((mark) => mark.getAttribute("aria-label"))).toEqual([
+    "History for Assistant",
+    "Close Assistant",
+  ]);
+  for (const mark of marks) {
+    expect(mark.className).toContain("size-(--size-glyph)");
+    expect(mark.className).toContain("text-ink-soft");
+    expect(mark.querySelector("svg")!.getAttribute("stroke-width")).toBe("1.25");
+  }
+  expect(band.querySelector("svg.tabler-icon-grip-vertical")).toBeNull();
+});
+
+/** Held, the act darkens to the page's own ink. A filled box behind a 16-pixel mark is wider than
+ *  the gap between it and the mark beside it, so the pressed state has to be the ink itself. */
+test("a lane's history act states its hold in ink rather than in a filled box", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([AGENT_ID]);
+
+  const act = await screen.findByRole("button", { name: "History for Assistant" });
+  expect(act.getAttribute("aria-pressed")).toBe("false");
+
+  await userEvent.click(act);
+
+  expect(act.getAttribute("aria-pressed")).toBe("true");
+  expect(act.className).toContain("text-ink");
+  expect(act.className).not.toContain("bg-fill");
 });

@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { expect, vi } from "vitest";
 
-import { NARROW } from "@/App";
+import { NARROW } from "@/lib/narrow";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
