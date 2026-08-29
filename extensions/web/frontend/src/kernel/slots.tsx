@@ -289,11 +289,15 @@ const SLOT = "relative flex min-h-0 flex-col bg-surface";
  *  lane is sized by what it holds instead, and pages one to a screen at the narrow width. */
 const SPREAD = "lane-share will-change-transform " + PAGED;
 
-/** What a lane wears while another lane holds the member's cursor. The fade is on every lane, so it
- *  reads the same going quiet as coming back, and it takes nothing away: a dimmed lane is pressed,
- *  scrolled and typed into like any other. */
-const HUSH = "transition-opacity duration-200 ease-control";
-const HUSHED = "opacity-(--opacity-dimmed)";
+/** What a lane wears while it holds the member's cursor: the palette's focus stroke, drawn inside
+ *  the lane's own edge so the row says which lane the words are going into. The stroke is on every
+ *  lane, so it reads the same arriving as leaving, and it takes nothing from the lanes beside it —
+ *  each of them stands at full strength and is read, scrolled and typed into as before. The clear
+ *  stroke stands back where the lane itself is focus-visible, so a lane the keyboard walks to with
+ *  `[` or `]` draws the palette's stroke rather than painting it away. */
+const LIT =
+  "outline-2 -outline-offset-2 outline-transparent focus-visible:outline-ring transition-colors duration-200 ease-control";
+const LIT_ON = "outline-ring";
 
 const BODY = "flex min-h-0 flex-col bg-surface " + WIDTHS.reading + " " + PAGED;
 
@@ -398,13 +402,12 @@ function inOrder(entries: Entry[], opens: string[]): Entry[] {
  *  is the whole cost of the rule. A track nothing can observe, jsdom's, draws every body, and so
  *  does a row no layout has given a width.
  *
- *  While one lane holds the member's cursor, the others dim. A row is several open things at once by
- *  design, and the moment a member starts putting words into one of them the rest are what they are
- *  reading past — so the lane with the cursor in it stays lit and every other fades under it. The dim
- *  takes nothing away: a faded lane scrolls, answers a press and takes the cursor like any other, and
- *  a press into a second lane's field simply moves the dim there. What ends it is what ended the
- *  typing — Escape out of the field, or focus landing anywhere that is not one, on this row or off
- *  it. It is the cursor that is read, not the press: a lane focused at a button dims nothing.
+ *  The lane holding the member's cursor draws the focus stroke. A row is several open things at once
+ *  by design, so the lane the words are going into says so on its own edge; nothing is taken from the
+ *  lanes beside it, which stand at full strength and are read, scrolled and typed into as before. A
+ *  press into a second lane's field moves the stroke there. What ends it is what ended the typing —
+ *  Escape out of the field, or focus landing anywhere that is not one, on this row or off it. It is
+ *  the cursor that is read, not the press: a lane focused at a button draws no stroke.
  *
  *  `seek` brings one lane into view: the endless row rotates until that lane stands at its head, and
  *  a row beside a body scrolls to it — a lane not yet standing waits and is brought in as it lands.
@@ -1057,7 +1060,7 @@ export function useSlot(
   if (!hosted) return node;
   if (!host) return null;
   const Glyph = GLYPHS[kind];
-  const dimmed = typing !== undefined && typing !== id;
+  const lit = typing === id;
   const hidden = expanded !== undefined && expanded !== id;
   const expandedHere = expanded === id;
   const expandAct = expandable ? (
@@ -1100,12 +1103,12 @@ export function useSlot(
               move(event.dataTransfer.getData(LIFTED), id);
             })
           }
-          data-dimmed={dimmed ? "" : undefined}
+          data-lit={lit ? "" : undefined}
           className={cn(
             SLOT,
             over ? SPREAD : [WIDTHS[kind], PAGED],
-            HUSH,
-            dimmed && HUSHED,
+            LIT,
+            lit && LIT_ON,
             hidden && "hidden",
             tone,
           )}

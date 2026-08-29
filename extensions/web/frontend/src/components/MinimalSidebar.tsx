@@ -46,9 +46,9 @@ function RailTip({ label, children }: { label: string; children: ReactElement })
  *
  *  The tiles are the member's own row of open tabs, not the workspace's roster of apps: they stand
  *  in the order home draws them, each named by the app filling it, and an app held by two tabs
- *  stands twice — the lane is what a tile means, so the lane is what keys it. A press carries that
- *  lane to the head of the row and lands home on it, the rest shifting right; it never opens an app
- *  the member has not opened.
+ *  stands twice — the lane is what a tile means, so the lane is what keys it. A press lands home and
+ *  brings that lane into view, leaving the row in the order the member arranged it; it never opens an
+ *  app the member has not opened.
  *
  *  The tiles scroll and the two acts under them are reclaimed: a tab list that grew past the rail
  *  would push the way to a new tab, to an app, and to the workspace past the bottom edge.

@@ -92,6 +92,11 @@ export type ChatProps = {
    *  founds on a key of its own, so its opening send and the chat screen's new-conversation buffer
    *  can never hold each other busy. */
   foundingKey?: string;
+  /** What the pane draws over the box while the chat is still unsaid — the chat lane's own history of
+   *  conversations. Where a caller hands one in, the box keeps the shape it takes under a transcript:
+   *  the screen is no longer empty, and the words the start screen says over an empty pane would
+   *  stand between the history and the box. */
+  unsaid?: ReactNode;
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string) => void;
   onSettled?: () => void;
@@ -102,6 +107,7 @@ export function Chat({
   member,
   conversationId,
   foundingKey,
+  unsaid,
   onCreated,
   onActivity,
   onSettled,
@@ -162,6 +168,9 @@ export function Chat({
    *  message still loading counts as unsaid, or the first paint would draw the log's layout and the
    *  composer would jump on the frame after it. */
   const starting = conversationId === null && settled && !messages?.length;
+  /** Whether the pane opens on the start screen's own words. A caller that hands in what an unsaid
+   *  chat draws instead has given the pane something to read, and the box holds the foot under it. */
+  const bare = starting && unsaid === undefined;
   const showEmpty = messages !== null && !messages.length && settled;
   const stalled = messages === null ? state.fault : null;
   const credentials = state.handoffs.credentials;
@@ -169,6 +178,7 @@ export function Chat({
 
   return (
     <TranscriptScroll>
+      {starting && !bare ? <TranscriptPane className="flex-1">{unsaid}</TranscriptPane> : null}
       {starting ? null : (
         <TranscriptPane className="flex-1">
           <MessageLog
@@ -229,7 +239,7 @@ export function Chat({
         target={target}
         draftKey={draftKey}
         input={composer}
-        starting={starting}
+        starting={bare}
         /* The band names the app a message addresses, which qualifies the words where the app is
            not the surface — a directive chat with Radar reads as Radar's. The chat app is the
            surface, so naming it there states the screen the member is already looking at. */

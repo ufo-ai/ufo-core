@@ -77,6 +77,9 @@ const status = (held: Partial<AgentStatus>): AgentStatus => ({
 });
 
 beforeEach(() => {
+  // The history's ladder and Show set are held in this browser, so one test's picks must not open
+  // the next one's lanes.
+  localStorage.clear();
   useStreamFake();
 });
 
@@ -257,9 +260,9 @@ test("the rail's new tab at the cap drops the lane standing at the right end", a
 });
 
 /** The row may be wider than the screen, and the rail's tile is how a lane that scrolled off it is
- *  reached: the press carries that lane to the head of the row, the rest shifting right, and brings
- *  it into view. Two presses are two asks — the member scrolled away between them. */
-test("the rail's tile carries its lane to the head of the row and brings it into view", async () => {
+ *  reached: the press brings that lane into view and leaves the row in the order the member arranged
+ *  it. Two presses are two asks — the member scrolled away between them. */
+test("the rail's tile brings its lane into view and leaves the row where it stood", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   const scrolled: string[] = [];
   const scrolls = vi
@@ -276,13 +279,13 @@ test("the rail's tile carries its lane to the head of the row and brings it into
     await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
 
     expect(scrolled).toEqual(["Second"]);
-    expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
-    await waitFor(() => expect(laneNames()).toEqual(["Second", "Assistant"]));
+    expect(location.hash).toBe(homeHash({ opens: [AGENT_ID, SECOND_ID] }));
+    expect(laneNames()).toEqual(["Assistant", "Second"]);
 
     await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
 
     expect(scrolled).toEqual(["Second", "Second"]);
-    expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
+    expect(location.hash).toBe(homeHash({ opens: [AGENT_ID, SECOND_ID] }));
   } finally {
     scrolls.mockRestore();
   }
@@ -305,8 +308,8 @@ test("the rail's tile from another screen lands home with that lane in view", as
 
     await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
 
-    expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
-    await waitFor(() => expect(laneNames()).toEqual(["Second", "Assistant"]));
+    expect(location.hash).toBe(homeHash({ opens: [AGENT_ID, SECOND_ID] }));
+    await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Second"]));
     expect(scrolled).toEqual(["Second"]);
   } finally {
     scrolls.mockRestore();
@@ -324,7 +327,9 @@ test("the rail's new tab stands the picker at most once", async () => {
   expect(laneNames()).toEqual(["New tab", "Assistant"]);
 });
 
-test("the picker lane offers the workspace's apps and the member's history under one head", async () => {
+/** The picker offers the apps and nothing else. The member's history is read in the chat lane, where
+ *  it stands over the entry the next conversation starts in, so the picker never lists it twice. */
+test("the picker lane offers the workspace's apps under one head", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID]);
 
@@ -332,17 +337,105 @@ test("the picker lane offers the workspace's apps and the member's history under
   expect(laneMark(picker)).toBeNull();
 
   const apps = within(picker).getByRole("heading", { name: "Apps", level: 3 });
-  const history = within(picker).getByRole("heading", { name: "History", level: 3 });
   expect(
     within(apps.parentElement!)
       .getAllByRole("button")
       .map((row) => row.textContent),
   ).toEqual(["Assistant", "Second"]);
+  expect(within(picker).queryByRole("heading", { name: "History" })).toBeNull();
+  expect(within(picker).queryByText(CHAT_ROW.title)).toBeNull();
+});
+
+/** The chat lane opens on the member's own history: the conversations stand over the entry the next
+ *  one starts in, each named by its source where it came in somewhere else, and the runs are the day
+ *  each one last moved. */
+test("the chat lane's unsaid state stands the member's history over the new chat entry", async () => {
+  const terminal = {
+    ...CHAT_ROW,
+    conversation_id: OTHER_CONVO_ID,
+    title: "Ship the ledger",
+    surface: "ufo",
+    last_at: new Date().toISOString(),
+  };
+  wire(chatsOnWire([{ ...CHAT_ROW, last_at: new Date().toISOString() }, terminal]));
+  drawHome([AGENT_ID]);
+
+  const lane = await screen.findByRole("region", { name: "Assistant" });
+  await within(lane).findByRole("heading", { name: "History", level: 3 });
+  expect(within(lane).getByRole("heading", { name: "Today", level: 4 })).toBeTruthy();
+  const rows = within(lane)
+    .getAllByRole("button")
+    .map((row) => row.textContent ?? "");
+  expect(rows.some((row) => row.includes(CHAT_ROW.title))).toBe(true);
+  expect(rows.some((row) => row.includes(terminal.title) && row.includes("Terminal"))).toBe(true);
+  // A portal chat states no source: the history is read in the portal.
+  expect(rows.filter((row) => row.includes("Terminal"))).toHaveLength(1);
+});
+
+/** The ladder and the surfaces the member keeps are the history's own narrowings, held in this
+ *  browser: a member who asked to see their terminal sessions asked about their own history. */
+test("the history runs the rows in the ladder the member picks and drops the surfaces they put away", async () => {
+  const terminal = {
+    ...CHAT_ROW,
+    conversation_id: OTHER_CONVO_ID,
+    title: "Ship the ledger",
+    surface: "ufo",
+    agent_name: "second",
+    agent_id: SECOND_ID,
+  };
+  wire(chatsOnWire([CHAT_ROW, terminal]));
+  drawHome([AGENT_ID]);
+
+  const lane = await screen.findByRole("region", { name: "Assistant" });
+  await within(lane).findByRole("heading", { name: "History", level: 3 });
+
+  await userEvent.click(within(lane).getByRole("button", { name: "History options" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "App" }));
+
+  expect(within(lane).getByRole("heading", { name: "Assistant", level: 4 })).toBeTruthy();
+  expect(within(lane).getByRole("heading", { name: "Second", level: 4 })).toBeTruthy();
+  expect(localStorage.getItem("chat-ladder")).toBe("app");
+
+  await userEvent.click(within(lane).getByRole("button", { name: "History options" }));
+  await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Terminal" }));
+
+  await waitFor(() => expect(within(lane).queryByText(/Ship the ledger/)).toBeNull());
+  expect(localStorage.getItem("chat-hidden")).toBe("ufo");
+  expect(within(lane).getByText(new RegExp(CHAT_ROW.title))).toBeTruthy();
+});
+
+/** The two narrowings are the browser's, not one list's: a member who puts a surface away in the lane
+ *  they are reading has put it away in their history, and the lane beside it says so where it stands
+ *  rather than on the next visit. */
+test("a narrowing taken in one lane's history stands in the lane beside it", async () => {
+  const terminal = {
+    ...CHAT_ROW,
+    conversation_id: OTHER_CONVO_ID,
+    title: "Ship the ledger",
+    surface: "ufo",
+    agent_name: "second",
+    agent_id: SECOND_ID,
+  };
+  wire(chatsOnWire([CHAT_ROW, terminal]));
+  drawHome([AGENT_ID, AGENT_INSTANCE]);
+
+  await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Assistant"]));
+  const [first, second] = standingLanes();
+  await within(second).findByRole("heading", { name: "History", level: 3 });
+  expect(within(second).getByText(/Ship the ledger/)).toBeTruthy();
+
+  await userEvent.click(within(first).getByRole("button", { name: "History options" }));
+  await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Terminal" }));
+
+  await waitFor(() => expect(within(second).queryByText(/Ship the ledger/)).toBeNull());
+  await userEvent.keyboard("{Escape}");
+
+  // And the menu the other lane opens ticks what the member took, rather than what that lane
+  // mounted holding.
+  await userEvent.click(within(second).getByRole("button", { name: "History options" }));
   expect(
-    within(history.parentElement!)
-      .getAllByRole("button")
-      .map((row) => row.textContent),
-  ).toEqual([CHAT_ROW.title]);
+    (await screen.findByRole("menuitemcheckbox", { name: "Terminal" })).getAttribute("aria-checked"),
+  ).toBe("false");
 });
 
 test("a chat lane's history lists the member's own conversations and groups colleagues' under one heading", async () => {
@@ -418,31 +511,31 @@ test("picking an app already standing mints a second instance in the picker lane
   expect(laneNames()).toEqual(["Assistant", "Assistant"]);
 });
 
-test("picking a conversation off the picker's history opens it as its own lane", async () => {
+test("picking a conversation off the chat lane's history takes that lane over", async () => {
   wire(chatsOnWire([CHAT_ROW]));
-  drawHome([AGENT_ID]);
+  drawHome([AGENT_ID, SECOND_ID]);
 
-  const picker = await openPicker();
-  await userEvent.click(within(picker).getByRole("button", { name: CHAT_ROW.title }));
+  const lane = await screen.findByRole("region", { name: "Assistant" });
+  await within(lane).findByRole("heading", { name: "History", level: 3 });
+  await userEvent.click(within(lane).getByRole("button", { name: new RegExp(CHAT_ROW.title) }));
 
   await waitFor(() =>
-    expect(location.hash).toBe(homeHash({ opens: [CONVERSATION_LANE, AGENT_ID] })),
+    expect(location.hash).toBe(homeHash({ opens: [CONVERSATION_LANE, SECOND_ID] })),
   );
-  expect(laneNames()).toEqual([CHAT_ROW.title, "Assistant"]);
+  expect(laneNames()).toEqual([CHAT_ROW.title, "Second"]);
 });
 
-test("picking a conversation already standing closes the picker instead of doubling it", async () => {
+test("picking a conversation already standing closes the picking lane instead of doubling it", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID, CONVERSATION_LANE]);
 
+  const lane = await screen.findByRole("region", { name: "Assistant" });
   await screen.findByRole("region", { name: CHAT_ROW.title });
-  const picker = await openPicker();
-  await userEvent.click(within(picker).getByRole("button", { name: CHAT_ROW.title }));
+  await within(lane).findByRole("heading", { name: "History", level: 3 });
+  await userEvent.click(within(lane).getByRole("button", { name: new RegExp(CHAT_ROW.title) }));
 
-  await waitFor(() =>
-    expect(location.hash).toBe(homeHash({ opens: [AGENT_ID, CONVERSATION_LANE] })),
-  );
-  expect(laneNames()).toEqual(["Assistant", CHAT_ROW.title]);
+  await waitFor(() => expect(location.hash).toBe(homeHash({ opens: [CONVERSATION_LANE] })));
+  expect(laneNames()).toEqual([CHAT_ROW.title]);
 });
 
 test("the dot is live while an app works, blocked while it waits on the member, and nothing at rest", () => {

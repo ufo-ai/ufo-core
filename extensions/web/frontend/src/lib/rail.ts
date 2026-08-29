@@ -1,3 +1,7 @@
+import { useSyncExternalStore } from "react";
+
+import { agentName } from "@/lib/agentName";
+import { IMESSAGE_SURFACE, SLACK_SURFACE, UFO_SURFACE, isPortalChat } from "@/lib/audience";
 import type { Agent, OwnedConversation } from "@/lib/types";
 
 export type ChatRow = {
@@ -46,6 +50,167 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
   }));
 }
 
+/** The surfaces the member can put away. A Slack thread, a terminal session and an iMessage exchange
+ *  are conversations they had somewhere else, and they are still their conversations — so the history
+ *  holds every one of them until it is asked not to. */
+export const CHAT_SHOWN_OPTIONS: { surface: string; label: string }[] = [
+  { surface: UFO_SURFACE, label: "Terminal" },
+  { surface: SLACK_SURFACE, label: "Slack" },
+  { surface: IMESSAGE_SURFACE, label: "iMessage" },
+];
+
+/** Which ladder the history runs its rows in. Recency is the one it opens on. */
+export type ChatLadder = "recency" | "app";
+
+export const CHAT_LADDERS: { value: ChatLadder; label: string }[] = [
+  { value: "recency", label: "Recency" },
+  { value: "app", label: "App" },
+];
+
+const HELD_LADDER = "chat-ladder";
+const HELD_HIDDEN = "chat-hidden";
+
+/** The ladder and the put-away surfaces are standing choices rather than places: a member who asked
+ *  to see their terminal sessions asked about their own history, and a list that forgot on the way to
+ *  another screen and back would ask them again every visit.
+ *
+ *  A browser holding nothing has put nothing away, which is every surface drawn.
+ *
+ *  Both picks belong to the browser rather than to one list drawn on it, so every history standing on
+ *  the screen reads the one answer and is told the moment it changes: a member who narrows the
+ *  history in one lane has narrowed their history, and the lane beside it says so unopened. */
+export function heldChatLadder(): ChatLadder {
+  return localStorage.getItem(HELD_LADDER) === "app" ? "app" : "recency";
+}
+
+export function holdChatLadder(ladder: ChatLadder): void {
+  localStorage.setItem(HELD_LADDER, ladder);
+  told();
+}
+
+let heldWord = "";
+let heldSurfaces: string[] = [];
+
+/** The surfaces put away, as one array per stored word: a store hands the same snapshot back until
+ *  the pick itself changes, and a fresh array on every read is a change to a reader. */
+export function heldChatHidden(): string[] {
+  const word = localStorage.getItem(HELD_HIDDEN) ?? "";
+  if (word !== heldWord) {
+    heldWord = word;
+    heldSurfaces = word.split(",").filter(Boolean);
+  }
+  return heldSurfaces;
+}
+
+export function holdChatHidden(hidden: string[]): void {
+  localStorage.setItem(HELD_HIDDEN, hidden.join(","));
+  told();
+}
+
+const listeners = new Set<() => void>();
+
+function told(): void {
+  for (const listener of listeners) listener();
+}
+
+/** Another tab of the portal writes the same browser store, and it says so with a `storage` event
+ *  rather than through this page's own writes, so the listener stands while anything is reading. */
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  if (listeners.size === 1) globalThis.addEventListener("storage", told);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) globalThis.removeEventListener("storage", told);
+  };
+}
+
+/** Which ladder this browser runs the history in. */
+export function useChatLadder(): ChatLadder {
+  return useSyncExternalStore(subscribe, heldChatLadder);
+}
+
+/** The surfaces this browser has put away. */
+export function useChatHidden(): string[] {
+  return useSyncExternalStore(subscribe, heldChatHidden);
+}
+
+/** Whether a row's surface is drawn. Everything is, bar the surfaces the member has put away. A
+ *  portal chat is never put away: the history is the portal's own. */
+export function chatShown(row: ChatRow, hidden: string[]): boolean {
+  return isPortalChat(row.surface) || !hidden.includes(row.surface);
+}
+
+const DAY_MS = 86_400_000;
+
+export const CHAT_DATE_RUNS = [
+  "Today",
+  "Yesterday",
+  "Previous 7 days",
+  "Previous 30 days",
+  "Older",
+];
+
+/** Which calendar day a stamp fell on, in UTC as it was sent — the same UTC every other stamp on
+ *  this surface reads in, so no reader's zone moves a conversation across midnight. */
+function dayOf(at: Date): number {
+  return Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()) / DAY_MS;
+}
+
+/** Which day-run a stamp falls in, counted in whole calendar days rather than in elapsed hours: a
+ *  conversation at one this morning and one at eleven last night are two days apart to a reader and
+ *  two hours apart to a clock, and it is the reader the headings are for. Today and Yesterday are
+ *  carved out first, so the runs below them hold the days they have left. A stamp ahead of now — a
+ *  clock askew between two machines — reads as today rather than as a run of its own. */
+export function chatDateRun(raw: string, now: Date): string {
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return "Older";
+  const days = dayOf(now) - dayOf(at);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return "Previous 7 days";
+  if (days < 30) return "Previous 30 days";
+  return "Older";
+}
+
+/** One run of rows the history draws together, under the heading its ladder named. */
+export type ChatRun = { label: string; rows: ChatRow[] };
+
+export const OTHER_MEMBERS = "Other members";
+
+/** The runs the history draws, in order. The member's own conversations take the ladder — a date run
+ *  or the app each ran under — and the readable ones their colleagues are in follow as one run at the
+ *  foot, never subdivided and by recency under either ladder: a colleague's thread is read for what
+ *  happened lately in it. A run is drawn only where it holds a row, and the rows inside one keep the
+ *  recency the read handed them.
+ *
+ *  The date runs are named in a fixed order rather than the order their rows arrive in, so a week with
+ *  nothing in it does not reorder the list. The app ladder takes the order its first row appeared in,
+ *  which under a recency read is the app that spoke last. */
+export function chatRuns(
+  rows: ChatRow[],
+  ladder: ChatLadder,
+  hidden: string[],
+  now: Date,
+): ChatRun[] {
+  const shown = rows.filter((row) => chatShown(row, hidden));
+  const own = shown.filter((row) => row.mine);
+  const theirs = shown.filter((row) => !row.mine);
+  const grouped = own.length ? bucketed(own, ladder, now) : [];
+  return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
+}
+
+function bucketed(rows: ChatRow[], ladder: ChatLadder, now: Date): ChatRun[] {
+  const named = (row: ChatRow) =>
+    ladder === "app" ? agentName(row.agent_name) : chatDateRun(row.last_at, now);
+  const buckets = new Map<string, ChatRow[]>();
+  for (const row of rows) {
+    const label = named(row);
+    buckets.set(label, (buckets.get(label) ?? []).concat(row));
+  }
+  const order =
+    ladder === "recency" ? CHAT_DATE_RUNS.filter((run) => buckets.has(run)) : [...buckets.keys()];
+  return order.map((run) => ({ label: run, rows: buckets.get(run) ?? [] }));
+}
 
 const HELD_PINNED = "pinned-rows";
 

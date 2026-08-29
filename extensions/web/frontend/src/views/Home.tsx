@@ -1,18 +1,39 @@
-import { IconChevronRight, IconHistory, IconPlus } from "@tabler/icons-react";
+import { IconChevronRight, IconFilter2, IconHistory, IconPlus } from "@tabler/icons-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { PressRow } from "@/components/ui/pressrow";
 import { Empty, Waiting } from "@/kernel/panel";
 import { SlotTrack, useSlot, type Seek } from "@/kernel/slots";
-import { isPortalChat, surfaceWord } from "@/lib/audience";
+import { isPortalChat, origin, surfaceWord } from "@/lib/audience";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
 import { clearChat, useChat } from "@/lib/chatStore";
 import { CHAT_SURFACE } from "@/lib/mainAgent";
 import { day } from "@/lib/moments";
-import type { ChatRow } from "@/lib/rail";
+import {
+  CHAT_LADDERS,
+  CHAT_SHOWN_OPTIONS,
+  OTHER_MEMBERS,
+  chatRuns,
+  holdChatHidden,
+  holdChatLadder,
+  useChatHidden,
+  useChatLadder,
+  type ChatLadder,
+  type ChatRow,
+} from "@/lib/rail";
 import { seekChat, useRail } from "@/lib/railStore";
 import { placeHome } from "@/lib/router";
 import {
@@ -33,19 +54,19 @@ const NEW_TAB = "New tab";
 const HISTORY = "History";
 const NO_HISTORY = "No conversations yet.";
 
-/** The heading the readable conversations a member's colleagues are in stand under, here and on the
- *  chat app's own screen: they are listed rather than hidden, and never mixed in with the member's
- *  own. */
-const OTHER_MEMBERS = "Other members";
 const NO_APP = "No such app";
 const NO_APPS = "This workspace has no apps to open.";
-const NO_CHATS = "No conversations to open.";
 const NO_CONVERSATION = "This conversation is not available.";
 const CONVERSATION = "Conversation";
 
-/** The picker's two lists: the apps named the way the workspace column names them, and the
- *  conversations named as what they are here — the member's history. */
+/** The picker's one list: the apps, named the way the workspace column names them. */
 const APPS = "Apps";
+
+/** The words on the menu the history is narrowed by — a ladder to run the rows in, and the surfaces
+ *  the member keeps. */
+const HISTORY_OPTIONS = "History options";
+const SORT_BY = "Sort by";
+const SHOW = "Show";
 
 /** The apps home stands on for a member who has arranged nothing, each named by the slug its
  *  extension ships it under rather than by its name — provisioning may suffix a name on a
@@ -59,12 +80,9 @@ const HOME_DEFAULT_APPS = ["metrics", "meetings", "code"] as const;
 const LANE_PLACE: WorkspacePlace = {};
 
 
-/** One of the picker's two lists. Each takes half the lane and keeps it: a short roster of apps
- *  hands its half to nothing, so the conversations stand where the member last read them however
- *  many apps the workspace ships, and neither list has to be scrolled past to reach the other. Only
- *  the rows move — a heading that scrolled away would leave the member reading a list with no name
- *  on it. */
-const PICK_SECTION = "flex min-h-0 basis-1/2 flex-col";
+/** The picker's one list. It takes the lane whole, and only the rows move — a heading that scrolled
+ *  away would leave the member reading a list with no name on it. */
+const PICK_SECTION = "flex min-h-0 flex-1 flex-col";
 
 const PICK_LABEL =
   "m-0 flex h-(--size-row) shrink-0 items-center px-lg font-sans text-label font-medium text-ink-soft";
@@ -378,6 +396,109 @@ function PastList({
   );
 }
 
+/** The member's own history, drawn in the chat lane where a transcript would be until the chat holds
+ *  a word: the conversations they have had stand over the entry the next one starts in, so opening a
+ *  chat tab is both the way back to what they were doing and the way into what they say next.
+ *
+ *  The rows come off the rail — the one member-scoped listing every screen reads them from — and a
+ *  press takes the lane over as that conversation's lane, so the member reads it where they were
+ *  going to write.
+ *
+ *  The runs and the menu are the chat app's own: a ladder the rows run in, the surfaces the member
+ *  keeps, and the source each row came in on beside its name. Both choices are held in this browser
+ *  rather than in the address — a member who asked to see their terminal sessions asked about their
+ *  own history, and a lane that forgot would ask them again on every tab they open. */
+function History({
+  lane,
+  opens,
+  onOpens,
+}: {
+  lane: string;
+  opens: string[];
+  onOpens: (opens: string[]) => void;
+}) {
+  const rail = useRail();
+  const ladder = useChatLadder();
+  const hidden = useChatHidden();
+  const runs = chatRuns(rail.rows, ladder, hidden, new Date());
+  const narrowed = ladder !== "recency" || hidden.length > 0;
+  const show = (surface: string, shown: boolean) =>
+    holdChatHidden(shown ? hidden.filter((name) => name !== surface) : [...hidden, surface]);
+  return (
+    <div className="flex min-h-0 flex-1 flex-col py-md">
+      <div className="flex shrink-0 items-center justify-between px-lg">
+        <h3 className={cn(PICK_LABEL, "px-0")}>{HISTORY}</h3>
+        {/* The narrowings behind one glyph, the way every other listing in the portal draws them. A
+            ladder is a pick between orders and shuts the menu; a surface is a choice turned on and
+            off and leaves it standing, so a member names both in one visit. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="mark"
+              size="glyph"
+              aria-label={HISTORY_OPTIONS}
+              className={cn(narrowed && "text-ink")}
+            >
+              <IconFilter2 aria-hidden stroke={GLYPH_STROKE} />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuLabel>{SORT_BY}</DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={ladder}
+              onValueChange={(next) => holdChatLadder(next as ChatLadder)}
+            >
+              {CHAT_LADDERS.map((entry) => (
+                <DropdownMenuRadioItem key={entry.value} value={entry.value}>
+                  {entry.label}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>{SHOW}</DropdownMenuLabel>
+            {CHAT_SHOWN_OPTIONS.map((option) => (
+              <DropdownMenuCheckboxItem
+                key={option.surface}
+                checked={!hidden.includes(option.surface)}
+                onCheckedChange={(next) => show(option.surface, next)}
+              >
+                {option.label}
+              </DropdownMenuCheckboxItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {runs.length ? (
+        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable">
+          {runs.map((run) => (
+            <section key={run.label} className="flex flex-col">
+              <h4 className={PICK_LABEL}>{run.label}</h4>
+              {run.rows.map((row) => (
+                <PressRow
+                  key={row.conversation_id}
+                  line={row.title || agentName(row.agent_name)}
+                  /* Where the conversation came in — the room the surface named, else the member's
+                     word for the surface. A portal chat states none: the history is read in the
+                     portal, so a source on every row would name where the member already is. */
+                  note={isPortalChat(row.surface) ? undefined : origin(row)}
+                  when={day(row.last_at) ?? undefined}
+                  onPress={() =>
+                    onOpens(taken(opens, lane, homeConversationLane(row.conversation_id)))
+                  }
+                />
+              ))}
+            </section>
+          ))}
+        </div>
+      ) : rail.phase === "loading" ? (
+        <Waiting />
+      ) : (
+        <Empty>{NO_HISTORY}</Empty>
+      )}
+    </div>
+  );
+}
+
 /** An app's lane: its setup screen while the workspace is still wiring it, its page once one is
  *  built, and the surface that page will fill until then. */
 function AppLane({
@@ -481,6 +602,7 @@ function ChatLane({
               member={member}
               conversationId={founded?.conversationId ?? null}
               foundingKey={lane}
+              unsaid={<History lane={lane} opens={opens} onOpens={onOpens} />}
               onCreated={(conversationId, title) => onFounded(agent, conversationId, title)}
               onActivity={onActivity}
             />
@@ -573,10 +695,10 @@ function ConversationLane({
   );
 }
 
-/** The lane a member opened to pick what stands here, standing where the pick will. It holds the
- *  two lists a workspace is opened from: every app it draws, each by its mark, its name and what it
- *  is for; and under them the conversations the member has had, in the order the rail holds them —
- *  one list, one order, wherever they are read.
+/** The lane a member opened to pick what stands here, standing where the pick will. It holds the one
+ *  list a workspace is opened from: every app it draws, each by its mark, its name and what it is
+ *  for. The conversations the member has had are read where they are written — the chat app's own
+ *  lane — rather than a second time here.
  *
  *  Picking takes this lane's place in the row rather than opening a fifth beside it, so the pick
  *  lands where the member asked for it and the cap is not reached by a lane that names nothing. A
@@ -593,9 +715,7 @@ function PickerLane({
   agents: Agent[];
   onOpens: (opens: string[]) => void;
 }) {
-  const rail = useRail();
   const offered = agents.filter((agent) => !agent.hidden);
-  const chats = rail.rows;
   const pick = (id: string) => onOpens(taken(opens, lane, id));
   return (
     <Lane
@@ -645,36 +765,6 @@ function PickerLane({
             ) : (
               <div className={PICK_EMPTY}>
                 <Empty>{NO_APPS}</Empty>
-              </div>
-            )}
-          </section>
-          <section className={PICK_SECTION}>
-            <h3 className={PICK_LABEL}>{HISTORY}</h3>
-            {chats.length ? (
-              <div className={cn(PICK_ROWS, "px-lg")}>
-                <ul className="m-0 flex list-none flex-col gap-sm p-0">
-                  {chats.map((row) => (
-                    <li key={row.conversation_id}>
-                      <button
-                        type="button"
-                        onClick={() => pick(homeConversationLane(row.conversation_id))}
-                        className="group flex w-full items-center gap-2xl border-0 bg-transparent p-0 py-sm text-left text-inherit"
-                      >
-                        <span className="[text-box:trim-both_cap_alphabetic] min-w-0 flex-1 truncate text-label font-medium tracking-(--tracking-ui) text-ink">
-                          {row.title || agentName(row.agent_name)}
-                        </span>
-                        <IconChevronRight
-                          className="size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100 ease-control group-hover:opacity-100 group-focus-visible:opacity-100"
-                          aria-hidden
-                        />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : (
-              <div className={PICK_EMPTY}>
-                <Empty>{rail.phase === "loading" ? <Waiting /> : NO_CHATS}</Empty>
               </div>
             )}
           </section>

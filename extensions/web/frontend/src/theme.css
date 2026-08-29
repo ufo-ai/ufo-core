@@ -251,9 +251,6 @@
   --opacity-muted-strong: 0.5;
   --opacity-muted-soft: 0.7;
   --opacity-muted-faint: 0.75;
-  /* How far a lane stands back while another holds the member's cursor. Under every muted step,
-     which is a thing still being read; a dimmed lane is one being read past. */
-  --opacity-dimmed: 0.4;
   --disabled: 0.4;
 
   --spacing-hair: 2px;

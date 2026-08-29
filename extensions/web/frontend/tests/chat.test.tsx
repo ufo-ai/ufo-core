@@ -3151,7 +3151,7 @@ test("a new conversation's composer offers no way to switch app", async () => {
     ...transcript(),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Ask UFO");
@@ -3191,7 +3191,7 @@ test("a route that renames the start screen's agent reads that agent's own draft
 
 test("the start screen's empty space is the box's: a press in it lands the cursor in the words", async () => {
   wire({ ...transcript() });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const box = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
@@ -3220,7 +3220,7 @@ test("a starter says its sentence on the press, and leaves with the start screen
       return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" });
     },
   });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Ask UFO");
@@ -3231,7 +3231,7 @@ test("a starter says its sentence on the press, and leaves with the start screen
     "I want an application that tracks the competitors I name and writes up what changed, with a source for each claim.",
   ]);
   expect((screen.getByLabelText("Ask UFO") as HTMLTextAreaElement).value).toBe("");
-  expect(document.activeElement).toBe(screen.getByLabelText("Ask UFO"));
+  expect(location.hash).toBe(chatHash(CONVO_ID));
   expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
 });
 
@@ -3314,7 +3314,7 @@ test("a workspace with nothing ranked reads the rows the screen ships with", asy
     ...transcript(),
     "/workspace/starters": () => json({ starters: [], unlock: null }),
   });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByRole("button", { name: /competitors you name/ });
@@ -3328,7 +3328,7 @@ test("a workspace with nothing ranked reads the rows the screen ships with", asy
 
 test("a ranked slate replaces every row the screen ships with", async () => {
   wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByRole("button", { name: /months of runway left/ });
@@ -3364,7 +3364,7 @@ function measureLines(scroll: number, client: number): () => void {
  *  square a connector tile takes. */
 test("a spare unlock stands in an app's slot and wears the brand of what it needs", async () => {
   wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const row = await screen.findByRole("button", { name: /accounts each deal is still waiting on/ });
@@ -3383,7 +3383,7 @@ test("a sentence the row cannot hold is stated in full on hover", async () => {
   const restore = measureLines(600, 200);
   try {
     wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
-    location.hash = "#/";
+    location.hash = newChatHash(AGENT_ID);
     render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
     const row = await screen.findByRole("button", { name: /months of runway left/ });
@@ -3400,7 +3400,7 @@ test("a sentence the row holds whole is never said a second time", async () => {
   const restore = measureLines(200, 200);
   try {
     wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
-    location.hash = "#/";
+    location.hash = newChatHash(AGENT_ID);
     render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
     const row = await screen.findByRole("button", { name: /months of runway left/ });
@@ -3427,7 +3427,7 @@ test("a ranked starter says its own sentence, and a check-in asks after work", a
       });
     },
   });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(
@@ -3470,7 +3470,7 @@ test("a default-app starter opens that app and says the ranked ask there", async
       return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" });
     },
   });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByRole("button", { name: /each issue to its owner/ })).toBeTruthy();
@@ -3497,7 +3497,7 @@ test("an unlock is an ask, not a departure: it names its accounts and says the b
       });
     },
   });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const row = await screen.findByRole("button", { name: /one-page brief per account/ });
@@ -3571,7 +3571,7 @@ test("the starters close on a link to the connectors screen, which the press rea
     "/connections": () => json({ connections: [] }),
     "/workspace/first-run": () => json({ providers: [], connectors: [] }),
   });
-  location.hash = "#/";
+  location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Ask UFO");

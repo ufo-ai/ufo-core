@@ -347,13 +347,9 @@ export function App({
                       placeHome({ ...homePlace, opens: newTab(homeOpens) });
                     }}
                     onLane={(lane) => {
-                      const at = homeOpens.indexOf(lane);
-                      if (at < 0) return;
+                      if (!homeOpens.includes(lane)) return;
                       setSeeking({ id: lane, expansion: "switch" });
-                      placeHome({
-                        ...homePlace,
-                        opens: [...homeOpens.slice(at), ...homeOpens.slice(0, at)],
-                      });
+                      placeHome({ ...homePlace, opens: homeOpens });
                     }}
                     onBuild={startBuild}
                   />

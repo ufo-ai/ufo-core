@@ -1308,47 +1308,53 @@ function Fields({ names }: { names: string[] }) {
   );
 }
 
-const dimmed = () =>
+const lit = () =>
   screen
     .queryAllByRole("region")
-    .filter((slot) => slot.hasAttribute("data-dimmed"))
+    .filter((slot) => slot.hasAttribute("data-lit"))
     .map((slot) => slot.getAttribute("aria-label"));
 
 const lands = (on: HTMLElement) => act(() => on.focus());
 
-/** A row is several open things at once, and the moment a member starts putting words into one of
- *  them the rest are what they are reading past. The lane with the cursor in it stays lit and every
- *  other fades under it; a press into a second lane's field moves the fade rather than adding one.
- *  It is the cursor that is read and not the press, so a lane focused at a button dims nothing, and
- *  Escape out of the field ends it along with the typing. */
-test("the lanes beside the one being typed in dim, and clear when the typing ends", async () => {
+/** A row is several open things at once, and the lane the words are going into says so on its own
+ *  edge: the palette's focus stroke, on that lane alone. Nothing is taken from the lanes beside it. A
+ *  press into a second lane's field moves the stroke rather than adding one. It is the cursor that is
+ *  read and not the press, so a lane focused at a button draws no stroke, and Escape out of the field
+ *  ends it along with the typing. */
+test("the lane being typed in draws the focus stroke, and clears when the typing ends", async () => {
   render(<Fields names={["A", "B", "C"]} />);
 
-  expect(dimmed()).toEqual([]);
+  expect(lit()).toEqual([]);
 
   lands(screen.getByRole("textbox", { name: "A composer" }));
-  expect(dimmed()).toEqual(["B", "C"]);
-  expect(slotFor("A").className).not.toContain("opacity-");
-  expect(slotFor("B").className).toContain("opacity-(--opacity-dimmed)");
+  expect(lit()).toEqual(["A"]);
+  const worn = (name: string) => slotFor(name).className.split(" ");
+  expect(worn("A")).toContain("outline-ring");
+  expect(worn("B")).not.toContain("outline-ring");
+  expect(slotFor("B").className).not.toContain("opacity-");
+  // The clear stroke a quiet lane wears stands back where the lane itself is focus-visible, so a
+  // lane the keyboard walks to draws the palette's stroke instead of painting it away.
+  expect(worn("B")).toContain("outline-transparent");
+  expect(worn("B")).toContain("focus-visible:outline-ring");
 
   lands(screen.getByRole("textbox", { name: "B composer" }));
-  expect(dimmed()).toEqual(["A", "C"]);
+  expect(lit()).toEqual(["B"]);
 
   await userEvent.keyboard("{Escape}");
   expect(document.activeElement).toBe(slotFor("B"));
-  expect(dimmed()).toEqual([]);
+  expect(lit()).toEqual([]);
 
   lands(screen.getByRole("button", { name: "A act" }));
-  expect(dimmed()).toEqual([]);
+  expect(lit()).toEqual([]);
 });
 
-/** A dimmed lane is faded, never taken away: it answers a press like any other, and the press that
- *  lands in its own field is what moves the fade off it. */
-test("a dimmed lane is pressed and typed into like any other", async () => {
+/** The lanes beside the marked one are drawn at full strength: each answers a press like any other,
+ *  and the press that lands in its own field is what carries the stroke to it. */
+test("a lane beside the marked one is pressed and typed into like any other", async () => {
   render(<Fields names={["A", "B"]} />);
 
   lands(screen.getByRole("textbox", { name: "A composer" }));
-  expect(dimmed()).toEqual(["B"]);
+  expect(lit()).toEqual(["A"]);
 
   await userEvent.click(screen.getByRole("textbox", { name: "B composer" }));
   await userEvent.keyboard("hello");
@@ -1356,7 +1362,7 @@ test("a dimmed lane is pressed and typed into like any other", async () => {
   expect((screen.getByRole("textbox", { name: "B composer" }) as HTMLTextAreaElement).value).toBe(
     "hello",
   );
-  expect(dimmed()).toEqual(["A"]);
+  expect(lit()).toEqual(["B"]);
 });
 
 /** Every place the track takes focus has already scrolled the lane to where it wants it. A browser
