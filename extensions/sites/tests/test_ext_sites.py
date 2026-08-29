@@ -76,6 +76,7 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_DESIGN_RELEASE_CLAIM,
     APPLICATION_FIXED_CALL_CLAIM,
     APPLICATION_INDEX,
+    APPLICATION_KIT_COMPONENTS,
     APPLICATION_PLACEHOLDER,
     APPLICATION_PREVIEW_FILENAME,
     APPLICATION_PREVIEW_SCAFFOLD,
@@ -3911,8 +3912,8 @@ async def test_write_application_design_recovers_each_partial_pair_and_passes_qa
         ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN)
     )
     source = (
-        'import { mountApp } from "ufo/kit";\n'
-        'mountApp(document.getElementById("root")!, () => <main>Queue</main>);'
+        'import { Group, mountApp } from "ufo/kit";\n'
+        'mountApp(document.getElementById("root")!, () => <Group>Queue</Group>);'
     )
     await write_application_source(ctx, WriteApplicationSourceInput(content=source))
     qa = await qa_ufo_application(ctx, QaUfoApplicationInput())
@@ -5251,9 +5252,9 @@ async def test_application_builder_write_tool_writes_only_the_contract_source(
     )
 
     source = (
-        'import { mountApp } from "ufo/kit";\nmountApp(document.getElementById("root")!, '
-        '() => <main style={{ backgroundColor: "var(--color-ink)", '
-        'color: "var(--color-surface)" }} />);'
+        'import { Group, mountApp } from "ufo/kit";\nmountApp(document.getElementById("root")!, '
+        '() => <Group><main style={{ backgroundColor: "var(--color-ink)", '
+        'color: "var(--color-surface)" }} /></Group>);'
     )
     assert WriteApplicationSourceInput.model_fields["content"].description == (
         "Complete app.tsx source. Use named ufo/kit imports and no export declarations."
@@ -5338,8 +5339,9 @@ async def test_application_builder_write_tool_allows_apostrophes_in_jsx_text(
         ),
     )
     source = (
-        'import { mountApp } from "ufo/kit";\n'
-        "function App() { return <main>What's next</main>; }\n"
+        'import { Card, mountApp } from "ufo/kit";\n'
+        "function App() { return <main><h1>Today's queue</h1>"
+        "<Card>Draft the brief</Card><p>Nothing's overdue</p></main>; }\n"
         'mountApp(document.getElementById("root")!, () => <App />);'
     )
 
@@ -5353,11 +5355,11 @@ async def test_application_builder_write_tool_allows_apostrophes_in_jsx_text(
 
 def test_application_source_rejects_literal_white_on_scheme_ink() -> None:
     source = (
-        'import { mountApp } from "ufo/kit";\n'
-        "function App() { return <button style={{\n"
+        'import { Group, mountApp } from "ufo/kit";\n'
+        "function App() { return <Group><button style={{\n"
         '  backgroundColor: active ? "var(--color-ink)" : "var(--color-field)",\n'
         '  color: active ? "#FFFFFF" : "var(--color-ink)",\n'
-        "}}>Review</button>; }\n"
+        "}}>Review</button></Group>; }\n"
         'mountApp(document.getElementById("root")!, () => <App />);'
     )
 
@@ -5369,10 +5371,109 @@ def test_application_source_rejects_literal_white_on_scheme_ink() -> None:
 
 def _page(body: str) -> str:
     return (
-        'import { mountApp } from "ufo/kit";\n'
-        f"function App() {{ return {body}; }}\n"
+        'import { Group, mountApp } from "ufo/kit";\n'
+        f"function App() {{ return <Group>{body}</Group>; }}\n"
         'mountApp(document.getElementById("root")!, () => <App />);'
     )
+
+
+def test_application_source_kit_contract_matches_three_app_evidence() -> None:
+    root = Path(__file__).parents[3]
+    kit = (root / "extensions/web/frontend/src/apps/kit.ts").read_text()
+    exports = set(re.findall(r"(?m)^  ([A-Z][A-Za-z0-9]*),$", kit.rsplit("export {", 1)[1]))
+    assert APPLICATION_KIT_COMPONENTS <= exports
+    meeting_tasks = (
+        root / "extensions/app_meetings/ufo_ext_app_meetings/skills/app-meetings-home/app.tsx"
+    )
+    _validate_application_source(meeting_tasks.read_text())
+
+    for name in ("issue-owner", "pre-meeting-briefs"):
+        source = root / f"evals/fixtures/ufo_app_qa_replay/{name}/app.tsx"
+        with pytest.raises(ValueError, match="render at least one UI component"):
+            _validate_application_source(source.read_text())
+
+
+@pytest.mark.parametrize(
+    "imports",
+    [
+        "{ mountApp, useState }",
+        "type { Card }",
+        "{ mountApp, Card }",
+        "{ mountApp, Card as MeetingCard }",
+    ],
+)
+def test_application_source_rejects_kit_imports_without_a_rendered_component(
+    imports: str,
+) -> None:
+    mount = 'mountApp(document.getElementById("root")!, () => <main />);'
+    runtime = 'import { mountApp } from "ufo/kit";\n' if "mountApp" not in imports else ""
+    source = f'import {imports} from "ufo/kit";\n{runtime}{mount}'
+
+    with pytest.raises(ValueError, match="render at least one UI component"):
+        _validate_application_source(source)
+
+
+def test_application_source_accepts_a_rendered_aliased_kit_component_and_hooks() -> None:
+    _validate_application_source(
+        'import { Card as MeetingCard, mountApp, useState } from "ufo/kit";\n'
+        "function App() { const [open] = useState(true); "
+        "return open ? <MeetingCard>Ready</MeetingCard> : null; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+
+
+def test_application_source_rejects_namespace_and_local_look_alike_components() -> None:
+    namespace = (
+        'import * as Kit from "ufo/kit";\n'
+        'import { mountApp } from "ufo/kit";\n'
+        'mountApp(document.getElementById("root")!, () => <Kit.Card />);'
+    )
+    with pytest.raises(ValueError, match="use named imports"):
+        _validate_application_source(namespace)
+
+    look_alike = (
+        'import { mountApp, useState } from "ufo/kit";\n'
+        "function Card({ children }: { children: unknown }) { return <div>{children}</div>; }\n"
+        "function App() { useState(false); return <Card>Ready</Card>; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+    with pytest.raises(ValueError, match="render at least one UI component"):
+        _validate_application_source(look_alike)
+
+    shadowed_alias = (
+        'import { Card as KitCard, mountApp } from "ufo/kit";\n'
+        "function App() { function KitCard() { return <main />; } return <KitCard />; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+    with pytest.raises(ValueError, match="render at least one UI component"):
+        _validate_application_source(shadowed_alias)
+
+    parameter_alias = (
+        'import { Card as KitCard, mountApp } from "ufo/kit";\n'
+        "const LocalCard = () => <main />;\n"
+        "function App(KitCard = LocalCard) { return <KitCard />; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+    with pytest.raises(ValueError, match="render at least one UI component"):
+        _validate_application_source(parameter_alias)
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        'const unused = Card; const example = "<Card />";',
+        "const unused = Card; /* <Card /> */",
+    ],
+)
+def test_application_source_does_not_count_non_jsx_component_evidence(evidence: str) -> None:
+    source = (
+        'import { Card, mountApp } from "ufo/kit";\n'
+        f"{evidence}\n"
+        'mountApp(document.getElementById("root")!, () => <main />);'
+    )
+
+    with pytest.raises(ValueError, match="render at least one UI component"):
+        _validate_application_source(source)
 
 
 @pytest.mark.parametrize(
@@ -5693,9 +5794,13 @@ async def test_application_builder_edit_tool_applies_one_bounded_repair(tmp_path
         scaffold_path="/workspace/application",
         source_path="/workspace/application/app.tsx",
     )
-    source = 'import { mountApp } from "ufo/kit";\nmountApp(App);'
+    source = (
+        'import { Group, mountApp } from "ufo/kit";\n'
+        "function App() { return <Group />; }\n"
+        "mountApp(App);"
+    )
     replacement = 'mountApp(document.getElementById("root")!, () => <App />);'
-    corrected = f'import {{ mountApp }} from "ufo/kit";\n{replacement}'
+    corrected = source.replace("mountApp(App);", replacement)
     sandbox = FakeSandbox(claim=ExecResult(stdout=source, stderr="", exit_code=0))
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
@@ -5741,8 +5846,8 @@ async def test_application_builder_edit_tool_rejects_structural_damage(tmp_path:
         source_path="/workspace/application/app.tsx",
     )
     source = (
-        'import { mountApp } from "ufo/kit";\n'
-        "function App() { return <main><section>Old</section></main>; }\n"
+        'import { Group, mountApp } from "ufo/kit";\n'
+        "function App() { return <Group><main><section>Old</section></main></Group>; }\n"
         'mountApp(document.getElementById("root")!, () => <App />);'
     )
     sandbox = FakeSandbox(

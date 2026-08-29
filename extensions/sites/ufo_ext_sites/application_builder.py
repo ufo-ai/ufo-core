@@ -466,6 +466,125 @@ IMPORT_DECLARATION = re.compile(r"(?m)^[ \t]*import\b")
 EXPORT_DECLARATION = re.compile(r"(?m)^[ \t]*export\b")
 IMPORT_MODULE = re.compile(r"\bfrom\s*['\"]([^'\"]+)['\"]|\bimport\s*\(\s*['\"]([^'\"]+)['\"]")
 SIDE_EFFECT_IMPORT = re.compile(r"(?m)^[ \t]*import\s*['\"]")
+NON_NAMED_IMPORT = re.compile(r"(?m)^[ \t]*import\s+(?!type\s*\{|\{)")
+NAMED_KIT_IMPORT = re.compile(
+    r"(?ms)^[ \t]*import\s+(?P<type>type\s+)?\{(?P<names>[^{}]*)\}"
+    r"\s*from\s*['\"]ufo/kit['\"]\s*;?"
+)
+KIT_IMPORT_NAME = re.compile(
+    r"(?:(?P<type>type)\s+)?(?P<export>[A-Za-z_$][\w$]*)"
+    r"(?:\s+as\s+(?P<local>[A-Za-z_$][\w$]*))?"
+)
+SOURCE_LITERAL_OR_COMMENT = re.compile(
+    r"//[^\n]*|/\*.*?\*/|(?<![\w$])'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`",
+    re.DOTALL,
+)
+JSX_COMPONENT = re.compile(r"<\s*([A-Z][A-Za-z0-9_$]*)\b")
+LOCAL_NAMED_DECLARATION = re.compile(r"\b(?:class|function|const|let|var)\s+([A-Za-z_$][\w$]*)")
+FUNCTION_PARAMETERS = re.compile(
+    r"\bfunction\b[^()]*\((?P<function>[^()]*)\)"
+    r"|\((?P<arrow>[^()]*)\)\s*=>"
+    r"|(?P<single>\b[A-Za-z_$][\w$]*)\s*=>",
+    re.DOTALL,
+)
+APPLICATION_KIT_COMPONENTS = frozenset(
+    {
+        "AgentIcon",
+        "AppConversations",
+        "ApplicationAction",
+        "ArtifactText",
+        "Avatar",
+        "AvatarFallback",
+        "AvatarStack",
+        "Badge",
+        "BrandMark",
+        "Breakdown",
+        "BreakdownHeader",
+        "BreakdownLabel",
+        "BreakdownMark",
+        "BreakdownName",
+        "BreakdownRow",
+        "BreakdownRows",
+        "BreakdownValue",
+        "Button",
+        "Card",
+        "CardAction",
+        "CardContent",
+        "CardDescription",
+        "CardFooter",
+        "CardGrid",
+        "CardHeader",
+        "CardTitle",
+        "Chart",
+        "ChartBars",
+        "ChatPane",
+        "ConversationDetail",
+        "DataTable",
+        "Detail",
+        "Dialog",
+        "DialogTrigger",
+        "DropdownMenu",
+        "DropdownMenuCheckboxItem",
+        "DropdownMenuContent",
+        "DropdownMenuItem",
+        "DropdownMenuLabel",
+        "DropdownMenuRadioGroup",
+        "DropdownMenuRadioItem",
+        "DropdownMenuSeparator",
+        "DropdownMenuTrigger",
+        "Empty",
+        "Facts",
+        "FacetMenu",
+        "FileSheet",
+        "FoundingChat",
+        "Group",
+        "Header",
+        "IconChevronDown",
+        "IconChevronUp",
+        "IconDots",
+        "IconFilter2",
+        "IconWorldWww",
+        "IconX",
+        "Lede",
+        "Legend",
+        "LegendItem",
+        "Markdown",
+        "MediaIcon",
+        "Meter",
+        "Moment",
+        "ObjectDetail",
+        "ObjectPane",
+        "Page",
+        "PageToolbar",
+        "Pager",
+        "Pane",
+        "PaneNote",
+        "Panel",
+        "PanelBlank",
+        "PanelEmpty",
+        "PressRow",
+        "RebuildDialog",
+        "RowLines",
+        "Section",
+        "SectionApp",
+        "Segmented",
+        "Separator",
+        "Sheet",
+        "Stat",
+        "StatDelta",
+        "StatDescription",
+        "StatHeader",
+        "StatLabel",
+        "StatMedia",
+        "StatValue",
+        "SurfaceGlyph",
+        "Td",
+        "TdFact",
+        "ToolbarRule",
+        "ViewSwitch",
+        "Waiting",
+    }
+)
 ROOT_MOUNT = re.compile(
     r"\bmountApp\s*\(\s*document\.getElementById\(\s*['\"]root['\"]\s*\)\s*!?\s*,"
 )
@@ -790,12 +909,44 @@ def _validate_application_source(source: str) -> None:
         raise ValueError("app.tsx must import its runtime and components from ufo/kit")
     if SIDE_EFFECT_IMPORT.search(source) or any(module != "ufo/kit" for module in modules):
         raise ValueError("app.tsx may import only from ufo/kit")
+    if NON_NAMED_IMPORT.search(source):
+        raise ValueError("app.tsx must use named imports from ufo/kit")
     if EXPORT_DECLARATION.search(source):
         raise ValueError("app.tsx must not export declarations")
     if "UfoAppKit" in source:
         raise ValueError("app.tsx must import from ufo/kit instead of using UfoAppKit")
     if ROOT_MOUNT.search(source) is None:
         raise ValueError("mountApp must receive the root element and a render callback")
+    imported_components: set[str] = set()
+    for declaration in NAMED_KIT_IMPORT.finditer(source):
+        if declaration.group("type"):
+            continue
+        for value in declaration.group("names").split(","):
+            imported = KIT_IMPORT_NAME.fullmatch(value.strip())
+            if (
+                imported is not None
+                and imported.group("type") is None
+                and imported.group("export") in APPLICATION_KIT_COMPONENTS
+            ):
+                imported_components.add(imported.group("local") or imported.group("export"))
+    code = SOURCE_LITERAL_OR_COMMENT.sub("", source)
+    local_declarations = set(LOCAL_NAMED_DECLARATION.findall(code))
+    for parameters in FUNCTION_PARAMETERS.finditer(code):
+        single = parameters.group("single")
+        if single:
+            local_declarations.add(single)
+            continue
+        values = parameters.group("function") or parameters.group("arrow") or ""
+        local_declarations.update(
+            re.findall(
+                r"(?:^|,)\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)\s*(?=[:,?=]|$)",
+                values,
+            )
+        )
+        local_declarations.update(re.findall(r"(?:\{|,|:\s)([A-Za-z_$][\w$]*)\s*(?=[,}=])", values))
+    rendered_components = set(JSX_COMPONENT.findall(code)) - local_declarations
+    if imported_components.isdisjoint(rendered_components):
+        raise ValueError("app.tsx must render at least one UI component imported from ufo/kit")
     if LITERAL_WHITE_ON_SCHEME_INK.search(source):
         raise ValueError(
             "a --color-ink background must use --color-surface text in both colour schemes"

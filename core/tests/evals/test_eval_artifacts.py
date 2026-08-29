@@ -127,6 +127,7 @@ from evals.suites.ufo_app_bench import (
     _design_region_scorer,
     _interaction_screen,
     _json_contains,
+    _kit_component_scorer,
     _measured_screen,
     _missing_setup_terms,
     _qa_efficiency_scorer,
@@ -1367,6 +1368,91 @@ async def test_app_copy_probe_returns_the_browser_rendered_dom_and_text(tmp_path
     )
 
 
+async def test_app_bench_probe_retains_the_final_application_source(tmp_path: Path) -> None:
+    class Probe:
+        async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
+            assert "ufo-app-bench-audit.cjs" in command
+            assert timeout_s == 120
+            directory = tmp_path / ".eval-output" / "meeting-tasks"
+            directory.mkdir(parents=True)
+            for suffix in (
+                "design.html",
+                "design.svg",
+                "design-evidence.json",
+                "interactive.html",
+                "static.html",
+                "audit.json",
+                "light.png",
+                "dark.png",
+            ):
+                (directory / f"meeting-tasks-{suffix}").write_bytes(suffix.encode())
+            return ProbeCommandResult(0, "", "")
+
+    source = (
+        b'import { Card, mountApp } from "ufo/kit";\n'
+        b"const App = () => <Card>Queue</Card>;\n"
+        b'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+    source_path = tmp_path / "ufo-app" / "app.tsx"
+    source_path.parent.mkdir()
+    source_path.write_bytes(source)
+
+    result = await _AppBenchProbe("meeting-tasks")(
+        CapabilityOutput("", (), workspace_dir=tmp_path), Probe()
+    )
+
+    assert result.error == ""
+    assert result.artifacts[-1] == SharedArtifact("meeting-tasks-source.tsx", source)
+
+
+async def test_app_bench_kit_component_scorer_requires_an_import_used_as_jsx() -> None:
+    scorer = _kit_component_scorer()
+    real = await scorer(
+        _output(
+            "meeting-tasks-source.tsx",
+            b'import { Card, mountApp } from "ufo/kit";\n'
+            b"const App = () => <Card>Queue</Card>;\n"
+            b'mountApp(document.getElementById("root")!, () => <App />);',
+        )
+    )
+    mount_only = await scorer(
+        _output(
+            "meeting-tasks-source.tsx",
+            b'import { mountApp } from "ufo/kit";\n'
+            b'mountApp(document.getElementById("root")!, () => <main>Queue</main>);',
+        )
+    )
+    lookalike = await scorer(
+        _output(
+            "meeting-tasks-source.tsx",
+            b'import { mountApp } from "ufo/kit";\n'
+            b"const Card = ({ children }: any) => <div>{children}</div>;\n"
+            b"const App = () => <Card>Queue</Card>;\n"
+            b'mountApp(document.getElementById("root")!, () => <App />);',
+        )
+    )
+    unused = await scorer(
+        _output(
+            "meeting-tasks-source.tsx",
+            b'import { Card, mountApp } from "ufo/kit";\n'
+            b'mountApp(document.getElementById("root")!, () => <main>Queue</main>);',
+        )
+    )
+
+    assert real.passed, real.reason
+    assert real.evidence == {
+        "appKitPassed": 1,
+        "appKitTotal": 1,
+        "appKitComponents": ["Card"],
+    }
+    assert not mount_only.passed
+    assert not lookalike.passed
+    assert not unused.passed
+    assert mount_only.evidence["appKitPassed"] == 0
+    assert lookalike.evidence["appKitComponents"] == []
+    assert "no imported Kit component is used as JSX" in unused.reason
+
+
 def _output(name: str, content: bytes) -> CapabilityOutput:
     return CapabilityOutput(
         "",
@@ -1910,7 +1996,15 @@ def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
     return CapabilityOutput(
         "Built the app.",
         (*own_calls, *worker_calls),
-        artifacts=tuple(SharedArtifact(name, content) for name, content in files.items()),
+        artifacts=(
+            *(SharedArtifact(name, content) for name, content in files.items()),
+            SharedArtifact(
+                "built-source.tsx",
+                b'import { Card, mountApp } from "ufo/kit";\n'
+                b"const App = () => <Card>Queue</Card>;\n"
+                b'mountApp(document.getElementById("root")!, () => <App />);',
+            ),
+        ),
         own_calls=own_calls,
         own_tools=tuple(call.name for call in own_calls),
     )
@@ -2357,6 +2451,8 @@ def test_ufo_app_bench_report_keeps_binary_verdict_and_adds_continuous_layers() 
                         "appPageTotal": 4,
                         "appInteractionPassed": 1,
                         "appInteractionTotal": 1,
+                        "appKitPassed": 1,
+                        "appKitTotal": 1,
                         "processSkillPassed": 1,
                         "processSkillTotal": 1,
                         "processBuilderPassed": 1,
@@ -2390,6 +2486,7 @@ def test_ufo_app_bench_report_keeps_binary_verdict_and_adds_continuous_layers() 
         "visual": 0.5,
     }
     assert result.evidence["appScore"] == pytest.approx(6.75 / 8)
+    assert result.evidence["kitUse"] == 1.0
     assert result.evidence["processScore"] == pytest.approx(2 / 3)
     assert {metric.name: metric.value for metric in scored.metrics} == {
         "app_score": pytest.approx(6.75 / 8),
@@ -2402,6 +2499,7 @@ def test_ufo_app_bench_report_keeps_binary_verdict_and_adds_continuous_layers() 
         "action_score": 1.0,
         "visual_score": 0.5,
         "process_score": pytest.approx(2 / 3),
+        "kit_use_score": 1.0,
     }
 
 

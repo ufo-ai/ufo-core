@@ -206,6 +206,13 @@ SOURCE_COPY_WINDOW_PARTS = 3
 SOURCE_COPY_MIN_WORDS = 6
 SOURCE_COPY_MIN_SHARED_WORDS = 5
 SOURCE_COPY_SHARE_LIMIT = 0.70
+KIT_NAMED_IMPORT = re.compile(
+    r"\bimport\s*\{(?P<bindings>[^{}]+)\}\s*from\s*['\"]ufo/kit['\"]", re.DOTALL
+)
+KIT_IMPORT_BINDING = re.compile(
+    r"(?:type\s+)?(?P<imported>[A-Za-z_$][\w$]*)(?:\s+as\s+(?P<local>[A-Za-z_$][\w$]*))?"
+)
+KIT_NON_UI_EXPORTS = frozenset({"Fragment", "React", "StrictMode", "Suspense"})
 BROWSER_PROBE_LOCK = Path(tempfile.gettempdir()) / "ufo-app-browser-probe.lock"
 BROWSER_PROBE_LOCK_POLL_SECONDS = 0.05
 _BROWSER_PROBE_TASK_LOCK = asyncio.Lock()
@@ -1191,14 +1198,23 @@ class _AppBenchProbe:
             directory / f"{self.name}-audit.json",
             *(directory / f"{self.name}-{scheme}.png" for scheme in SCHEMES),
         )
+        source_path = (
+            output.workspace_dir / APP_WORKSPACE_ROOT.removeprefix("/workspace/") / "app.tsx"
+        )
         missing = [path.name for path in paths if not path.is_file()]
+        if not source_path.is_file():
+            missing.append(source_path.name)
         if missing:
             return ArtifactProbeResult(error=f"app probe produced no {', '.join(missing)}")
         contents = await asyncio.gather(*(asyncio.to_thread(path.read_bytes) for path in paths))
+        source = await asyncio.to_thread(source_path.read_bytes)
         return ArtifactProbeResult(
-            artifacts=tuple(
-                SharedArtifact(path.name, content)
-                for path, content in zip(paths, contents, strict=True)
+            artifacts=(
+                *(
+                    SharedArtifact(path.name, content)
+                    for path, content in zip(paths, contents, strict=True)
+                ),
+                SharedArtifact(f"{self.name}-source.tsx", source),
             )
         )
 
@@ -1744,6 +1760,59 @@ def _page_scorer() -> Grader:
     )
 
 
+def _kit_component_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        artifacts = tuple(
+            artifact for artifact in output.artifacts if artifact.name.endswith("-source.tsx")
+        )
+        if len(artifacts) != 1:
+            return CapabilityVerdict(
+                False,
+                f"captured {len(artifacts)} final app.tsx source artifact(s)",
+                {**_score_evidence("appKit", 0, 1), "appKitComponents": []},
+            )
+        try:
+            source = artifacts[0].content.decode()
+        except UnicodeDecodeError:
+            return CapabilityVerdict(
+                False,
+                "final app.tsx source is not UTF-8",
+                {**_score_evidence("appKit", 0, 1), "appKitComponents": []},
+            )
+        imported = set()
+        for declaration in KIT_NAMED_IMPORT.finditer(source):
+            for raw_binding in declaration.group("bindings").split(","):
+                binding = KIT_IMPORT_BINDING.fullmatch(raw_binding.strip())
+                if binding is None:
+                    continue
+                local = binding.group("local") or binding.group("imported")
+                if local[0].isupper() and local not in KIT_NON_UI_EXPORTS:
+                    imported.add(local)
+        rendered = sorted(
+            name for name in imported if re.search(rf"<\s*{re.escape(name)}(?=[\s/>])", source)
+        )
+        evidence = {
+            **_score_evidence("appKit", 1 if rendered else 0, 1),
+            "appKitComponents": rendered,
+        }
+        if not rendered:
+            return CapabilityVerdict(
+                False,
+                "no imported Kit component is used as JSX in final app.tsx",
+                evidence,
+            )
+        return CapabilityVerdict(
+            True,
+            f"final app.tsx renders imported Kit component(s): {', '.join(rendered)}",
+            evidence,
+        )
+
+    return DescribedGrader(
+        "final app.tsx imports and renders at least one shipped ufo/kit UI component",
+        grade,
+    )
+
+
 def _application_builder_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         failed = _score_evidence("processBuilder", 0, 1)
@@ -2060,6 +2129,7 @@ def _score_app_report(report: EvalReport) -> EvalReport:
         "visual": [],
     }
     process_values = []
+    kit_values = []
     app_values = []
     for case in report.cases:
         selected = case.evidence.get("selectedAttempt")
@@ -2117,10 +2187,12 @@ def _score_app_report(report: EvalReport) -> EvalReport:
         }
         app_score = sum(layers.values()) / len(layers)
         process_score = sum(process_layers.values()) / len(process_layers)
+        kit_use = _fraction(scored, "appKit")
         evidence = {
             **case.evidence,
             "appScore": app_score,
             "appScoreLayers": layers,
+            "kitUse": kit_use,
             "processScore": process_score,
             "processScoreLayers": process_layers,
         }
@@ -2128,6 +2200,7 @@ def _score_app_report(report: EvalReport) -> EvalReport:
         if case.excluded:
             continue
         app_values.append(app_score)
+        kit_values.append(kit_use)
         process_values.append(process_score)
         for name, value in layers.items():
             layer_values[name].append(value)
@@ -2139,6 +2212,7 @@ def _score_app_report(report: EvalReport) -> EvalReport:
                 for name, values in layer_values.items()
             ),
             EvalMetric(name="process_score", value=sum(process_values) / len(process_values)),
+            EvalMetric(name="kit_use_score", value=sum(kit_values) / len(kit_values)),
         )
         if app_values
         else ()
@@ -2194,6 +2268,7 @@ def _screen(
             _delivery_scorer(),
             _application_builder_scorer(),
             _qa_efficiency_scorer(),
+            _kit_component_scorer(),
             _page_scorer(),
             _interaction_scorer(name),
             _design_region_scorer(),
@@ -2211,7 +2286,7 @@ def _screen(
         judge_on_deterministic_failure=True,
         digest_tag=(
             f"ufo-app-bench:{name}:interactive-homepage:actions:qa-bounded-product:"
-            f"audit-{AUDIT_DIGEST[:12]}:wait-{WORKFLOW_WAIT_SECONDS:g}{data_digest}"
+            f"kit-source-use:audit-{AUDIT_DIGEST[:12]}:wait-{WORKFLOW_WAIT_SECONDS:g}{data_digest}"
         ),
         artifact_probe=(
             _AppBenchProbe(name)
