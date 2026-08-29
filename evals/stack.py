@@ -53,7 +53,8 @@ DEFAULT_OUT = Path("eval-reports")
 STACK_OWNER_EMAIL = "evals@localhost"
 APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy", "ufo-app-qa-replay"})
 CREATION_SUITES = frozenset({"new_application"})
-APP_PAGE_SUITES = APP_SUITES | CREATION_SUITES
+HOMEPAGE_SUITES = frozenset({"app_home_change"})
+APP_PAGE_SUITES = APP_SUITES | CREATION_SUITES | HOMEPAGE_SUITES
 CREATION_DISABLED_JOBS = ("web:seed_homepages",)
 ISOLATED_EXTERNAL_BILLING_JOBS = (
     "metronome:usage_shipper",

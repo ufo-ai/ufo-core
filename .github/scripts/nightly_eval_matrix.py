@@ -22,7 +22,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from evals.harness.registry import EvalTask
 from evals.registry import TASKS
-from evals.stack import APP_PAGE_SUITES, APP_SUITES, CREATION_SUITES, DOCKER_BACKEND
+from evals.stack import (
+    APP_PAGE_SUITES,
+    APP_SUITES,
+    CREATION_SUITES,
+    DOCKER_BACKEND,
+    HOMEPAGE_SUITES,
+)
 from ufo.config import DEFAULT_AUTO_MODEL
 from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
 
@@ -107,8 +113,14 @@ def plan(smoke: bool) -> tuple[Shard, ...]:
                 stem += f"-{_label_token(agent)}"
             app_tasks = tuple(task for task in carried if task.name in APP_SUITES)
             creation_tasks = tuple(task for task in carried if task.name in CREATION_SUITES)
+            homepage_tasks = tuple(task for task in carried if task.name in HOMEPAGE_SUITES)
             other_tasks = tuple(task for task in carried if task.name not in APP_PAGE_SUITES)
-            groups = (*_balance(app_tasks), *_balance(creation_tasks), *_balance(other_tasks))
+            groups = (
+                *_balance(app_tasks),
+                *_balance(creation_tasks),
+                *_balance(homepage_tasks),
+                *_balance(other_tasks),
+            )
             for index, group in enumerate(groups, start=1):
                 label = stem if len(groups) == 1 else f"{stem}-{index}"
                 shards.append(Shard(label, arm.pack, agent, tuple(task.name for task in group)))

@@ -306,6 +306,36 @@ def test_an_app_page_shard_runs_its_suites_on_the_docker_sandbox_backend(
                 assert backend in UFO_APP_BENCH_BACKENDS
 
 
+def test_every_suite_that_builds_a_page_runs_on_docker(planner, tmp_path: Path) -> None:
+    """A graded page build runs `vite build` inside the sandbox, and only the eval sandbox image
+    carries vite — the local carrier takes it from the host PATH, where the sweep installs none.
+
+    The names are the claim: each of these suites fails without a real build. `app_home_change`
+    grades `dist/` under the workspace and refuses a hand-run build (evals/suites/app_home_change.py
+    248, 335), and `new_application` grades a `deployed` build status
+    (evals/suites/new_application.py:1033). Reading the expectation off `APP_PAGE_SUITES` instead
+    would pass whatever that set happened to hold.
+    """
+    builders = {
+        "ufo-app-bench",
+        "ufo-app-copy",
+        "ufo-app-qa-replay",
+        "new_application",
+        "app_home_change",
+    }
+    shards = planner.plan(smoke=False)
+    assert builders <= {suite for shard in shards for suite in shard.suites}
+
+    for shard in shards:
+        if builders.isdisjoint(shard.suites):
+            continue
+        directory = tmp_path / shard.label
+        planner.write(shard, directory, "claude-opus-5", DEFAULT_REASONING_EFFORT)
+        config = tomllib.loads((directory / "ufo.toml").read_text())
+
+        assert config.get("sandbox") == {"backend": DOCKER_BACKEND}, shard.label
+
+
 def test_every_sweep_shard_receives_the_built_page_kit(planner, workflow) -> None:
     """The kit is build output no checkout carries, and `evals.stack` refuses an app or creation
     suite without it, so the sweep builds one and hands it to every shard."""
