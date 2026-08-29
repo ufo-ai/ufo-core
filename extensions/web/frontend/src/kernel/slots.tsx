@@ -1,4 +1,9 @@
-import { IconArticle, IconList } from "@tabler/icons-react";
+import {
+  IconArrowsDiagonal,
+  IconArrowsDiagonalMinimize2,
+  IconArticle,
+  IconList,
+} from "@tabler/icons-react";
 import {
   animate,
   motionValue,
@@ -22,8 +27,10 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { Button } from "@/components/ui/button";
 import { Banded, Header } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
+import { GLYPH_STROKE } from "@/lib/glyph";
 import { soundMoved, soundOpened } from "@/lib/sound";
 import type { Crumb } from "@/lib/title";
 import { TRACK_MAX_SLOTS } from "@/lib/tracks";
@@ -118,6 +125,9 @@ type Track = {
   watch: (id: string, panel: HTMLElement | null) => void;
   near: (id: string) => boolean;
   shows: (id: string) => void;
+  expandable: boolean;
+  expanded: string | undefined;
+  expand: (id: string | undefined) => void;
 };
 
 const TrackContext = createContext<Track>({
@@ -133,12 +143,16 @@ const TrackContext = createContext<Track>({
   watch: () => {},
   near: () => true,
   shows: () => {},
+  expandable: false,
+  expanded: undefined,
+  expand: () => {},
 });
 
-/** A press that asks for one lane to be brought into view. It is a value per press rather than the
- *  lane's id, because two presses on the same tile are two asks — the member scrolled away between
- *  them — and a track keyed on the id alone would answer the second with nothing. */
-export type Seek = { id: string };
+/** A press that asks for one lane to be brought into view and says what an expanded row does. It is
+ *  a value per press rather than the lane's id, because two presses on the same tile are two asks —
+ *  the member scrolled away between them — and a track keyed on the id alone would answer the
+ *  second with nothing. */
+export type Seek = { id: string; expansion: "switch" | "restore" };
 
 const NEAREST: ScrollIntoViewOptions = { block: "nearest", inline: "nearest" };
 
@@ -478,6 +492,8 @@ export function SlotTrack({
           },
     [opens, onMove],
   );
+  const [expanded, setExpanded] = useState<string | undefined>(undefined);
+  const expand = useCallback((id: string | undefined) => setExpanded(id), []);
   const hold = useCallback(
     (id: string, host: HTMLElement | null) =>
       setHosts((held) => {
@@ -713,13 +729,29 @@ export function SlotTrack({
     },
     [glide],
   );
+  const standing = opens === undefined ? entries : inOrder(entries, opens);
+  const ids = standing.map((entry) => entry.id);
+  /* The one lane the row is standing expanded: the raw ask read against the row it asks about, as
+     an expansion the row no longer holds — its lane taken over by a pick, or a row down to a single
+     lane — is no expansion at all. It stands before everything that answers about a lane, because
+     every one of those answers must be this same answer: a `near` reading the raw ask while the
+     lanes read this one empties every body in the commit that ends an expansion. */
+  const focused =
+    expanded !== undefined && ids.length > 1 && ids.includes(expanded) ? expanded : undefined;
   const near = useCallback(
     (id: string) =>
-      over && rolling.current.wraps ? ticking.has(id) : !culls || nearby.has(id),
-    [over, ticking, culls, nearby, narrow, fit],
+      focused !== undefined
+        ? id === focused
+        : over && rolling.current.wraps
+          ? ticking.has(id)
+          : !culls || nearby.has(id),
+    [focused, over, ticking, culls, nearby, narrow, fit],
   );
   useEffect(() => {
     if (!seek) return;
+    setExpanded((held) =>
+      seek.expansion === "restore" || held === undefined ? undefined : seek.id,
+    );
     if (!panels.current.has(seek.id)) {
       sought.current.add(seek.id);
       return;
@@ -787,6 +819,9 @@ export function SlotTrack({
       clearTimeout(quiet);
     };
   }, [row, over, offset, glide]);
+  useEffect(() => {
+    if (expanded !== undefined && focused === undefined) setExpanded(undefined);
+  }, [expanded, focused]);
   const track = useMemo(
     () => ({
       hosted: true,
@@ -794,18 +829,19 @@ export function SlotTrack({
       hosts,
       place,
       drop,
-      move,
+      move: focused === undefined ? move : undefined,
       arrivals,
       sought,
       typing,
       watch,
       near,
       shows,
+      expandable: over && ids.length > 1,
+      expanded: focused,
+      expand,
     }),
-    [over, hosts, place, drop, move, typing, watch, near, shows],
+    [over, hosts, place, drop, move, typing, watch, near, shows, ids.length, focused, expand],
   );
-  const standing = opens === undefined ? entries : inOrder(entries, opens);
-  const ids = standing.map((entry) => entry.id);
   if (prior.current !== null && (prior.current.size > 0 || ids.length === 1)) {
     for (const id of ids) if (!prior.current.has(id)) arrivals.current.add(id);
   }
@@ -813,13 +849,16 @@ export function SlotTrack({
     prior.current = new Set(ids);
     order.current = ids;
   });
-  const wraps = over && !narrow && fit !== null && ids.length > fit.lanes;
-  const share = Math.max(1, fit === null ? ids.length : Math.min(ids.length, fit.lanes));
+  const wraps = focused === undefined && over && !narrow && fit !== null && ids.length > fit.lanes;
+  const share =
+    focused === undefined
+      ? Math.max(1, fit === null ? ids.length : Math.min(ids.length, fit.lanes))
+      : 1;
   rolling.current = {
     wraps,
     step: fit === null ? 0 : (fit.width - (share - 1) * HAIRLINE) / share + HAIRLINE,
     lanes: fit?.lanes ?? 0,
-    ids,
+    ids: focused === undefined ? ids : [focused],
     still: still === true,
   };
   const shown = standing.length > 0;
@@ -936,8 +975,23 @@ export function useSlot(
     onClose?: () => void;
   },
 ): ReactNode {
-  const { hosted, over, hosts, place, drop, move, arrivals, sought, typing, watch, near, shows } =
-    useContext(TrackContext);
+  const {
+    hosted,
+    over,
+    hosts,
+    place,
+    drop,
+    move,
+    arrivals,
+    sought,
+    typing,
+    watch,
+    near,
+    shows,
+    expandable,
+    expanded,
+    expand,
+  } = useContext(TrackContext);
   const here = useContext(HereContext);
   const {
     id,
@@ -1004,6 +1058,22 @@ export function useSlot(
   if (!host) return null;
   const Glyph = GLYPHS[kind];
   const dimmed = typing !== undefined && typing !== id;
+  const hidden = expanded !== undefined && expanded !== id;
+  const expandedHere = expanded === id;
+  const expandAct = expandable ? (
+    <Button
+      variant="mark"
+      size="glyph"
+      aria-label={expandedHere ? "Show all lanes" : "Expand " + (title ?? "lane")}
+      onClick={() => expand(expandedHere ? undefined : id)}
+    >
+      {expandedHere ? (
+        <IconArrowsDiagonalMinimize2 aria-hidden stroke={GLYPH_STROKE} />
+      ) : (
+        <IconArrowsDiagonal aria-hidden stroke={GLYPH_STROKE} />
+      )}
+    </Button>
+  ) : null;
   return createPortal(
     <Banded value={false}>
       <HereContext.Provider value={id}>
@@ -1011,6 +1081,7 @@ export function useSlot(
           ref={land}
           aria-label={title}
           aria-describedby={describes}
+          hidden={hidden}
           tabIndex={-1}
           onKeyDown={(event) => {
             if (event.key !== "Escape" || event.defaultPrevented) return;
@@ -1030,7 +1101,14 @@ export function useSlot(
             })
           }
           data-dimmed={dimmed ? "" : undefined}
-          className={cn(SLOT, over ? SPREAD : [WIDTHS[kind], PAGED], HUSH, dimmed && HUSHED, tone)}
+          className={cn(
+            SLOT,
+            over ? SPREAD : [WIDTHS[kind], PAGED],
+            HUSH,
+            dimmed && HUSHED,
+            hidden && "hidden",
+            tone,
+          )}
           style={{ "--pane-acts-inset": "0px" } as CSSProperties}
         >
           <Header
@@ -1041,7 +1119,7 @@ export function useSlot(
             crumb={crumb}
             title={title}
             acts={
-              acts === undefined ? undefined : (
+              acts === undefined && expandAct === null ? undefined : (
                 <span
                   className="contents"
                   onDragStart={(event) => {
@@ -1050,13 +1128,23 @@ export function useSlot(
                   }}
                 >
                   {acts}
+                  {expandAct}
                 </span>
               )
             }
-            onClose={onClose}
+            onClose={expandedHere ? undefined : onClose}
             closes={title}
             onLift={
               move && !fixed ? (event) => event.dataTransfer.setData(LIFTED, id) : undefined
+            }
+            onDoubleClick={
+              expandable
+                ? (event) => {
+                    const target = event.target;
+                    if (target instanceof Element && target.closest("button,a")) return;
+                    expand(expandedHere ? undefined : id);
+                  }
+                : undefined
             }
           />
           {near(id) ? (

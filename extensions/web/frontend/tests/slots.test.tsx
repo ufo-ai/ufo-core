@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { expect, test, vi } from "vitest";
 
 import {
@@ -1113,6 +1113,98 @@ test("a track nothing can observe draws every body", () => {
   expect(screen.getByText("Two body")).toBeTruthy();
 });
 
+/** A screen where a press inside a lane takes that lane over: the id picked stands where the lane
+ *  stood and the lane's own id leaves the row, which is what home's history rows and its picker
+ *  both do. */
+function Taking({
+  opening,
+  coming,
+  drawn,
+}: {
+  opening: string[];
+  coming: string;
+  drawn: string[];
+}) {
+  const [opens, setOpens] = useState(opening);
+  return (
+    <SlotTrack over opens={opens} onMove={setOpens}>
+      {opens.map((name) => (
+        <Taken
+          key={name}
+          name={name}
+          opens={opens}
+          coming={coming}
+          drawn={drawn}
+          onOpens={setOpens}
+        />
+      ))}
+    </SlotTrack>
+  );
+}
+
+/** A lane that writes down what the row decided about it on every commit: whether the row showed
+ *  it, and whether it held its body there. It is read per commit rather than at rest, because a
+ *  body torn down and built again inside one press leaves the DOM a body that never moved leaves. */
+function Taken({
+  name,
+  opens,
+  coming,
+  drawn,
+  onOpens,
+}: {
+  name: string;
+  opens: string[];
+  coming: string;
+  drawn: string[];
+  onOpens: (opens: string[]) => void;
+}) {
+  const lane = useSlot(
+    <>
+      <p>{name} body</p>
+      <button
+        type="button"
+        onClick={() => onOpens(opens.map((held) => (held === name ? coming : held)))}
+      >
+        Pick in {name}
+      </button>
+    </>,
+    { id: name, kind: "reading", title: name },
+  );
+  useLayoutEffect(() => {
+    const stood = document.querySelector<HTMLElement>('section[aria-label="' + name + '"]');
+    if (stood === null) return;
+    const holds = (stood.textContent ?? "").includes(name + " body");
+    drawn.push(name + ":" + (stood.hidden ? "hidden" : holds ? "body" : "empty"));
+  });
+  return lane;
+}
+
+/** A pick inside an expanded lane takes that lane over, so the expansion names a lane the row no
+ *  longer holds and the row is a row again — in the very commit the pick lands in. Every lane the
+ *  row shows there holds its body: one value says what the row is standing expanded, and the bodies
+ *  read the same one the lanes are drawn from. A track answering from the raw ask instead calls no
+ *  lane near, so it tears down every transcript and every app frame standing in the row and builds
+ *  them all again on the commit after. */
+test("a pick that takes the expanded lane over leaves the lanes beside it drawn", async () => {
+  const drawn: string[] = [];
+  render(<Taking opening={["One", "Two", "Three"]} coming="Four" drawn={drawn} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Expand One" }));
+
+  expect(standing()).toEqual(["One"]);
+  expect(drawn).toContain("One:body");
+  expect(drawn).toContain("Two:hidden");
+  drawn.length = 0;
+
+  await userEvent.click(screen.getByRole("button", { name: "Pick in One" }));
+
+  expect(drawn.filter((said) => said === "Two:empty" || said === "Three:empty")).toEqual([]);
+  expect(drawn).toContain("Two:body");
+  expect(standing()).toEqual(["Four", "Two", "Three"]);
+  expect(screen.getByText("Four body")).toBeTruthy();
+  expect(screen.getByText("Two body")).toBeTruthy();
+});
+
 /** A screen whose track is sought from outside it — the rail's tile naming a lane. */
 function Seeking({
   names,
@@ -1125,12 +1217,16 @@ function Seeking({
 }) {
   const [opens, setOpens] = useState(opening);
   const [seek, setSeek] = useState<Seek | undefined>(
-    seeking === undefined ? undefined : { id: seeking },
+    seeking === undefined ? undefined : { id: seeking, expansion: "switch" },
   );
   return (
     <SlotTrack opens={opens} onMove={setOpens} seek={seek}>
       {names.map((name) => (
-        <button key={name} type="button" onClick={() => setSeek({ id: name })}>
+        <button
+          key={name}
+          type="button"
+          onClick={() => setSeek({ id: name, expansion: "switch" })}
+        >
           Seek {name}
         </button>
       ))}
@@ -1766,4 +1862,3 @@ test("a phone's row mounts the lane the finger reaches", () => {
     vi.unstubAllGlobals();
   }
 });
-

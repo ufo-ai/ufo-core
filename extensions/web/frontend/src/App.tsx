@@ -342,11 +342,14 @@ export function App({
                     lanes={homeLanes}
                     agents={listed}
                     account={<AccountMenu member={member} />}
-                    onNewTab={() => placeHome({ ...homePlace, opens: newTab(homeOpens) })}
+                    onNewTab={() => {
+                      setSeeking({ id: HOME_NEW_LANE, expansion: "restore" });
+                      placeHome({ ...homePlace, opens: newTab(homeOpens) });
+                    }}
                     onLane={(lane) => {
                       const at = homeOpens.indexOf(lane);
                       if (at < 0) return;
-                      setSeeking({ id: lane });
+                      setSeeking({ id: lane, expansion: "switch" });
                       placeHome({
                         ...homePlace,
                         opens: [...homeOpens.slice(at), ...homeOpens.slice(0, at)],

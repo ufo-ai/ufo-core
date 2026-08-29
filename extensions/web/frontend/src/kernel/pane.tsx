@@ -229,6 +229,7 @@ export function Header({
   onClose,
   closes,
   onLift,
+  onDoubleClick,
   pinned = false,
   ruled = false,
 }: {
@@ -268,6 +269,7 @@ export function Header({
    *  says so, and it says which way the surface travels — a track of lanes moves along one axis,
    *  so the arrow the pointer takes over the band is that axis and not a free hand. */
   onLift?: (event: DragEvent<HTMLDivElement>) => void;
+  onDoubleClick?: ComponentProps<"div">["onDoubleClick"];
   pinned?: boolean;
   /** Whether the band is a lane's: it takes the lane's measures, draws a hairline over the body
    *  under it — a body that scrolls clips its content at the band's edge, and a message cut there
@@ -290,6 +292,7 @@ export function Header({
       data-slot="header"
       draggable={onLift ? true : undefined}
       onDragStart={onLift}
+      onDoubleClick={onDoubleClick}
       className={cn(
         "flex shrink-0 flex-col gap-sm",
         pinned && band.pad,

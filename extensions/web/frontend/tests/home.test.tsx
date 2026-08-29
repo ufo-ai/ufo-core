@@ -103,6 +103,105 @@ test("closing a lane cuts it from the address and leaves the rest standing", asy
   expect(laneNames()).toEqual(["Assistant"]);
 });
 
+test("expanding a lane hides its siblings until its return act restores the row", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([SECOND_ID, AGENT_ID]);
+
+  await screen.findByRole("region", { name: "Assistant" });
+  const expand = screen.getByRole("button", { name: "Expand Assistant" });
+  expect(expand.querySelector(".tabler-icon-arrows-diagonal")).toBeTruthy();
+  await userEvent.click(expand);
+
+  expect(screen.queryByRole("region", { name: "Second" })).toBeNull();
+  expect(screen.getByRole("region", { name: "Assistant" })).toBeTruthy();
+  expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
+  expect(
+    document
+      .querySelector<HTMLElement>("[data-slot=slot-track]")
+      ?.style.getPropertyValue("--lane-share"),
+  ).toBe("1");
+
+  const showAll = screen.getByRole("button", { name: "Show all lanes" });
+  expect(showAll.querySelector(".tabler-icon-arrows-diagonal-minimize-2")).toBeTruthy();
+  expect(showAll.querySelector(".tabler-icon-x")).toBeNull();
+  await userEvent.click(showAll);
+
+  expect(laneNames()).toEqual(["Second", "Assistant"]);
+  expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
+});
+
+test("double-clicking a lane band expands it and restores the row", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([SECOND_ID, AGENT_ID]);
+
+  const assistant = await screen.findByRole("region", { name: "Assistant" });
+  await userEvent.dblClick(assistant.querySelector("[data-slot=header]")!);
+
+  expect(screen.queryByRole("region", { name: "Second" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Show all lanes" })).toBeTruthy();
+
+  await userEvent.dblClick(
+    screen.getByRole("region", { name: "Assistant" }).querySelector("[data-slot=header]")!,
+  );
+
+  expect(laneNames()).toEqual(["Second", "Assistant"]);
+  expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
+});
+
+test("the rail's new tab leaves an expanded lane and opens the picker", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([SECOND_ID, AGENT_ID]);
+
+  await screen.findByRole("region", { name: "Assistant" });
+  await userEvent.click(screen.getByRole("button", { name: "Expand Assistant" }));
+  await openPicker();
+
+  expect(screen.queryByRole("button", { name: "Show all lanes" })).toBeNull();
+  expect(location.hash).toBe(homeHash({ opens: [HOME_NEW_LANE, SECOND_ID, AGENT_ID] }));
+  expect(laneNames()).toEqual(["New tab", "Second", "Assistant"]);
+});
+
+test("a rail app switches the expanded lane and keeps it expanded", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([SECOND_ID, AGENT_ID]);
+
+  await screen.findByRole("region", { name: "Assistant" });
+  await userEvent.click(screen.getByRole("button", { name: "Expand Assistant" }));
+  await userEvent.click(
+    within(screen.getByRole("navigation", { name: "Tabs" })).getByRole("button", {
+      name: "Second",
+    }),
+  );
+
+  expect(screen.queryByRole("region", { name: "Assistant" })).toBeNull();
+  expect(screen.getByRole("region", { name: "Second" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Show all lanes" })).toBeTruthy();
+  expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
+});
+
+/** A pick made inside an expanded lane opens what it picked in that lane's place, so the expansion
+ *  is left naming a lane the row no longer holds. The row stands whole again there, with every lane
+ *  shown: what one lane's expansion hides, the end of it gives back. */
+test("a conversation picked inside an expanded lane opens it and stands the row again", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([SECOND_ID, AGENT_ID]);
+
+  await screen.findByRole("region", { name: "Assistant" });
+  await userEvent.click(screen.getByRole("button", { name: "Expand Assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "History for Assistant" }));
+  const history = await screen.findByRole("region", { name: "History" });
+  await userEvent.click(
+    within(history).getByRole("button", { name: new RegExp("^" + CHAT_ROW.title) }),
+  );
+
+  await waitFor(() =>
+    expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, CONVERSATION_LANE] })),
+  );
+  expect(laneNames()).toEqual(["Second", CHAT_ROW.title]);
+  expect(standingLanes().map((lane) => lane.hidden)).toEqual([false, false]);
+  expect(screen.queryByRole("button", { name: "Show all lanes" })).toBeNull();
+});
+
 test("an address arriving with a picker lands without it", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   drawHome([AGENT_ID, HOME_NEW_LANE]);
@@ -432,6 +531,7 @@ test("a lane band's acts are marks in the muted tone, and no grip stands among t
   const marks = Array.from(band.querySelectorAll("button"));
   expect(marks.map((mark) => mark.getAttribute("aria-label"))).toEqual([
     "History for Assistant",
+    "Expand Assistant",
     "Close Assistant",
   ]);
   for (const mark of marks) {
