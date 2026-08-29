@@ -33,6 +33,16 @@ on:
         description: Evaluated agent model
         type: string
         default: claude-opus-5
+      reasoning:
+        description: Evaluated agent reasoning effort
+        type: choice
+        options:
+          - auto
+          - "off"
+          - low
+          - medium
+          - high
+        default: auto
   pull_request:
     paths:
       - .github/workflows/evals-nightly.yml
@@ -55,6 +65,7 @@ env:
   SWEEP_MODE: >-
     ${{ (github.event_name == 'pull_request' || inputs.smoke) && 'smoke' || 'sweep' }}
   EVAL_MODEL: ${{ inputs.model || 'claude-opus-5' }}
+  EVAL_REASONING: ${{ inputs.reasoning || 'auto' }}
   AWS_REGION: us-east-1
   ARCHIVE_ROLE_ARN: arn:aws:iam::899147036157:role/github-deploy
   # The testing platform's blob bucket: versioned, encrypted, `prevent_destroy`
@@ -177,7 +188,8 @@ jobs:
       - name: Write the shard's stack input
         run: |
           uv run python .github/scripts/nightly_eval_matrix.py "$SWEEP_SMOKE" \
-            --model "$EVAL_MODEL" --write "$MATRIX_LABEL" --dir "$RUNNER_TEMP/shard"
+            --model "$EVAL_MODEL" --reasoning "$EVAL_REASONING" \
+            --write "$MATRIX_LABEL" --dir "$RUNNER_TEMP/shard"
           cat "$RUNNER_TEMP/shard/ufo.toml" "$RUNNER_TEMP/shard/matrix.toml"
         env:
           MATRIX_LABEL: ${{ matrix.label }}

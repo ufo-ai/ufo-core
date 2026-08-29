@@ -126,13 +126,14 @@ def test_the_smoke_subset_boots_every_arm_it_can_reach(planner) -> None:
 def test_a_written_shard_is_input_the_stack_accepts(planner, tmp_path: Path) -> None:
     for shard in (*planner.plan(smoke=False), *planner.plan(smoke=True)):
         directory = tmp_path / shard.label
-        planner.write(shard, directory, "z-ai/glm-5.3")
+        planner.write(shard, directory, "z-ai/glm-5.3", "auto")
         matrix = Matrix.model_validate(tomllib.loads((directory / "matrix.toml").read_text()))
         config = tomllib.loads((directory / "ufo.toml").read_text())
 
         assert config["pack"]["name"] == shard.pack
         assert config["models"]["auto_model"] == "z-ai/glm-5.3"
         assert [spec.label for spec in matrix.run] == [shard.label]
+        assert matrix.run[0].reasoning is None
         assert matrix.run[0].args[-len(shard.suites) :] == shard.suites
         if shard.agent is not None:
             assert matrix.run[0].args[:4] == (
@@ -141,6 +142,28 @@ def test_a_written_shard_is_input_the_stack_accepts(planner, tmp_path: Path) -> 
                 "--agent",
                 shard.agent,
             )
+
+
+def test_a_written_smoke_shard_accepts_a_reasoning_override(planner, tmp_path: Path) -> None:
+    shard = planner.plan(smoke=True)[0]
+
+    planner.write(shard, tmp_path, "z-ai/glm-5.3-flash", "low")
+    matrix = Matrix.model_validate(tomllib.loads((tmp_path / "matrix.toml").read_text()))
+
+    assert matrix.run[0].reasoning == "low"
+
+
+def test_an_application_shard_keeps_its_profile_reasoning(planner, tmp_path: Path) -> None:
+    shard = next(
+        shard
+        for shard in planner.plan(smoke=False)
+        if not planner.APP_SUITES.isdisjoint(shard.suites)
+    )
+
+    planner.write(shard, tmp_path, "z-ai/glm-5.3-flash", "low")
+    matrix = Matrix.model_validate(tomllib.loads((tmp_path / "matrix.toml").read_text()))
+
+    assert matrix.run[0].reasoning is None
 
 
 def test_the_workflow_fans_out_over_the_planned_shards(workflow) -> None:
@@ -153,7 +176,7 @@ def test_the_workflow_fans_out_over_the_planned_shards(workflow) -> None:
     assert '--plan "$SWEEP_SMOKE"' in plan["steps"][-1]["run"]
 
 
-def test_the_dispatch_model_sets_the_sweep_auto_model(workflow) -> None:
+def test_the_dispatch_sets_the_sweep_model_and_reasoning(workflow) -> None:
     trigger = workflow.get("on", workflow[True])
     write = next(
         step
@@ -167,7 +190,15 @@ def test_the_dispatch_model_sets_the_sweep_auto_model(workflow) -> None:
         "default": "claude-opus-5",
     }
     assert workflow["env"]["EVAL_MODEL"] == "${{ inputs.model || 'claude-opus-5' }}"
+    assert trigger["workflow_dispatch"]["inputs"]["reasoning"] == {
+        "description": "Evaluated agent reasoning effort",
+        "type": "choice",
+        "options": ["auto", "off", "low", "medium", "high"],
+        "default": "auto",
+    }
+    assert workflow["env"]["EVAL_REASONING"] == "${{ inputs.reasoning || 'auto' }}"
     assert '--model "$EVAL_MODEL"' in write["run"]
+    assert '--reasoning "$EVAL_REASONING"' in write["run"]
     assert workflow["jobs"]["sweep"]["env"]["OPENROUTER_API_KEY"] == (
         "${{ secrets.OPENROUTER_API_KEY }}"
     )

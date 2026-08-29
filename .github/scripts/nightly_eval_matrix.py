@@ -22,7 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from evals.harness.registry import EvalTask
 from evals.registry import TASKS
+from evals.stack import APP_SUITES
 from ufo.config import DEFAULT_AUTO_MODEL
+from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
 
 CONCURRENCY = 4
 # A weight unit measured at roughly a minute of wall clock, so a shard of 45 runs under an
@@ -34,7 +36,6 @@ DATABASE_URL = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 PUBLIC_BASE_URL = "http://evals.invalid"
 SMOKE_PROBE = "basics"
 SMOKE_SUITES = (SMOKE_PROBE, "semantic_quality", "scenario_smoke", "ab_reversal")
-APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy"})
 UNSAFE_LABEL_CHARS = re.compile(r"[^A-Za-z0-9.-]+")
 
 
@@ -136,8 +137,13 @@ def _balance(tasks: tuple[EvalTask, ...]) -> tuple[tuple[EvalTask, ...], ...]:
     )
 
 
-def write(shard: Shard, directory: Path, model: str) -> None:
+def write(shard: Shard, directory: Path, model: str, reasoning: ReasoningEffort) -> None:
     arm = next(arm for arm in ARMS if arm.pack == shard.pack)
+    reasoning_override = (
+        None
+        if reasoning == DEFAULT_REASONING_EFFORT or not APP_SUITES.isdisjoint(shard.suites)
+        else reasoning
+    )
     directory.mkdir(parents=True, exist_ok=True)
     config = directory / "ufo.toml"
     config.write_text(
@@ -159,6 +165,7 @@ def write(shard: Shard, directory: Path, model: str) -> None:
                     {
                         "label": shard.label,
                         "config": str(config),
+                        **({} if reasoning_override is None else {"reasoning": reasoning_override}),
                         "args": [
                             "--concurrency",
                             str(CONCURRENCY),
@@ -185,6 +192,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--model", default=DEFAULT_AUTO_MODEL, help="concrete model that agents named auto use"
     )
+    parser.add_argument(
+        "--reasoning",
+        choices=("auto", "off", "low", "medium", "high"),
+        default=DEFAULT_REASONING_EFFORT,
+        help="reasoning effort for the evaluated agent",
+    )
     parser.add_argument("--write", metavar="LABEL", help="write one shard's stack input")
     parser.add_argument("--dir", type=Path, help="directory the shard's input is written to")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
@@ -197,7 +210,7 @@ def main(argv: list[str] | None = None) -> None:
     named = next((shard for shard in shards if shard.label == args.write), None)
     if named is None:
         parser.error(f"no shard is labelled {args.write!r}")
-    write(named, args.dir, args.model)
+    write(named, args.dir, args.model, args.reasoning)
 
 
 if __name__ == "__main__":
