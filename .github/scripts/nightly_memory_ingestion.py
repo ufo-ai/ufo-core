@@ -12,6 +12,8 @@ from evals.harness.viewer import load_runs
 from evals.memory_100.build import SELECTION_FILE, Selection
 from evals.memory_ingestion.build import LOCOMO_CATEGORIES, LOCOMO_COUNTS, MemoryIngestionBuilder
 from evals.memory_ingestion.materialize import DERIVATION_MODEL, IngestionReadiness
+from ufo.config import DEFAULT_AUTO_MODEL
+from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
 
 LABEL = "memory-ingestion"
 DATABASE_URL = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
@@ -47,7 +49,12 @@ SMOKE_REPORT_CASES = {
 }
 
 
-def write_inputs(root: Path, snapshot: Path) -> None:
+def write_inputs(
+    root: Path,
+    snapshot: Path,
+    model: str,
+    reasoning: ReasoningEffort,
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
     config = root / "ufo.toml"
     config.write_text(
@@ -55,7 +62,10 @@ def write_inputs(root: Path, snapshot: Path) -> None:
             {
                 "database": {"url": DATABASE_URL},
                 "blob": {"backend": "filesystem", "root": "./blobs"},
-                "models": {"background_jobs_model": DERIVATION_MODEL},
+                "models": {
+                    "auto_model": model,
+                    "background_jobs_model": DERIVATION_MODEL,
+                },
                 "pack": {"name": "assistant"},
                 "research": {"search_provider": "perplexity"},
                 "o11y": {"otlp_endpoint": "http://127.0.0.1:4318"},
@@ -70,6 +80,11 @@ def write_inputs(root: Path, snapshot: Path) -> None:
                         "label": LABEL,
                         "config": str(config.resolve()),
                         "memory_ingestion": str(snapshot.resolve()),
+                        **(
+                            {}
+                            if reasoning == DEFAULT_REASONING_EFFORT
+                            else {"reasoning": reasoning}
+                        ),
                     }
                 ]
             }
@@ -77,16 +92,35 @@ def write_inputs(root: Path, snapshot: Path) -> None:
     )
 
 
-def prepare(longmem: Path, locomo: Path, root: Path, smoke: bool) -> None:
+def prepare(
+    longmem: Path,
+    locomo: Path,
+    root: Path,
+    smoke: bool,
+    model: str,
+    reasoning: ReasoningEffort,
+) -> None:
     snapshot = root / "snapshot"
     MemoryIngestionBuilder(longmem, locomo, snapshot).run(SMOKE_CASES if smoke else ())
-    write_inputs(root, snapshot)
+    write_inputs(root, snapshot, model, reasoning)
 
 
-def verify(reports: Path, runs_root: Path, state_output: Path, smoke: bool) -> None:
+def verify(
+    reports: Path,
+    runs_root: Path,
+    state_output: Path,
+    smoke: bool,
+    model: str,
+) -> None:
     runs = load_runs(reports)
     if len(runs) != 1 or runs[0].label != LABEL:
         raise RuntimeError(f"expected one {LABEL!r} run, found {[run.label for run in runs]}")
+    target_models = {report.target_model for report in runs[0].reports}
+    if target_models != {model}:
+        raise RuntimeError(
+            f"memory ingestion recall used {sorted(str(item) for item in target_models)}, "
+            f"expected {model!r}"
+        )
     expected = SMOKE_REPORT_CASES if smoke else FULL_REPORT_CASES
     found = {report.name: len(report.cases) for report in runs[0].reports}
     if found != expected:
@@ -116,16 +150,23 @@ def main(argv: list[str] | None = None) -> None:
     prepare_parser.add_argument("--locomo", type=Path, required=True)
     prepare_parser.add_argument("--dir", type=Path, required=True)
     prepare_parser.add_argument("--smoke", action=argparse.BooleanOptionalAction, default=False)
+    prepare_parser.add_argument("--model", default=DEFAULT_AUTO_MODEL)
+    prepare_parser.add_argument(
+        "--reasoning",
+        choices=("auto", "off", "low", "medium", "high"),
+        default=DEFAULT_REASONING_EFFORT,
+    )
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("--reports", type=Path, required=True)
     verify_parser.add_argument("--runs-root", type=Path, required=True)
     verify_parser.add_argument("--state-output", type=Path, required=True)
     verify_parser.add_argument("--smoke", action=argparse.BooleanOptionalAction, default=False)
+    verify_parser.add_argument("--model", default=DEFAULT_AUTO_MODEL)
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        prepare(args.longmem, args.locomo, args.dir, args.smoke)
+        prepare(args.longmem, args.locomo, args.dir, args.smoke, args.model, args.reasoning)
         return
-    verify(args.reports, args.runs_root, args.state_output, args.smoke)
+    verify(args.reports, args.runs_root, args.state_output, args.smoke, args.model)
 
 
 if __name__ == "__main__":

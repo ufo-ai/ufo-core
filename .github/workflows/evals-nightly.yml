@@ -75,6 +75,32 @@ env:
   ARCHIVE_PREFIX: eval-reports/runs
 
 jobs:
+  credentials:
+    name: eval credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+      TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+    steps:
+      - name: Require eval credentials
+        run: |
+          missing=false
+          for name in ANTHROPIC_API_KEY AWS_BEARER_TOKEN_BEDROCK DD_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY PERPLEXITY_API_KEY TURBOPUFFER_API_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required"
+              missing=true
+            fi
+          done
+          if [ "$missing" = true ]; then
+            exit 1
+          fi
+
   plan:
     name: plan
     runs-on: ubuntu-latest
@@ -96,6 +122,7 @@ jobs:
 
   sandbox-client:
     name: sandbox client
+    needs: credentials
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -104,21 +131,53 @@ jobs:
         with:
           target: x86_64-unknown-linux-musl
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: client
+          key: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - working-directory: client
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
       - uses: actions/upload-artifact@v4
         with:
           name: sandbox-client
-          path: client/target/release/ufo
+          path: client/target/x86_64-unknown-linux-musl/release/ufo
+          if-no-files-found: error
+          retention-days: 1
+
+  # One frontend build for the sweep, the shape `ci.yaml`'s `web-build` gives the pytest shards:
+  # the shards read a built tree from an artifact, so none of them installs pnpm and none waits on
+  # a build inside its own job. The kit is the only tree uploaded — the portal's own and the app
+  # pages have no reader here.
+  web-build:
+    name: web build
+    needs: credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: extensions/web/frontend/pnpm-lock.yaml
+      - run: pnpm -C extensions/web/frontend install --frozen-lockfile
+      - run: pnpm -C extensions/web/frontend run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sites-page-kit
+          path: extensions/sites/ufo_ext_sites/page/kit
           if-no-files-found: error
           retention-days: 1
 
   sweep:
     name: ${{ matrix.label }}
-    needs: [plan, sandbox-client]
+    needs: [plan, sandbox-client, web-build]
     # The org-hosted larger runner `integration.yaml` already uses: 4 vCPU, 16 GB, ~87 GB free
     # disk. GitHub stops any job at six hours; the step deadline below fires first, so a shard that
     # overruns still uploads what it recorded.
@@ -147,6 +206,7 @@ jobs:
     env:
       # Process keys the target, the judges, and the simulator read directly.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       # Every shard's workspace is created fresh by `ufoctl init` and holds no BYOK credential row,
@@ -172,10 +232,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: sandbox-client
-          path: client/target/release
+          path: client/target/x86_64-unknown-linux-musl/release
       - run: |
-          chmod +x client/target/release/ufo
-          echo "$GITHUB_WORKSPACE/client/target/release" >> "$GITHUB_PATH"
+          chmod +x client/target/x86_64-unknown-linux-musl/release/ufo
+          echo "$GITHUB_WORKSPACE/client/target/x86_64-unknown-linux-musl/release" >> "$GITHUB_PATH"
+
+      # The kit an app page is built against. It is build output, so a checkout carries none and
+      # `evals.stack` refuses the app and creation suites the sweep shards carry without it.
+      - uses: actions/download-artifact@v4
+        with:
+          name: sites-page-kit
+          path: extensions/sites/ufo_ext_sites/page/kit
 
       # The stack boots `ufo-egress` beside its serve so an in-sandbox fetch has a proxy to reach.
       # It locates the built binary and fails loud without it.
@@ -224,6 +291,7 @@ jobs:
 
   memory-ingestion:
     name: memory ingestion
+    needs: credentials
     runs-on: linux-4-core
     timeout-minutes: 90
     services:
@@ -242,7 +310,9 @@ jobs:
           --health-retries 15
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
     steps:
       - uses: actions/checkout@v4
@@ -286,7 +356,8 @@ jobs:
           uv run python .github/scripts/nightly_memory_ingestion.py prepare \
             --longmem "$ASSETS/longmemeval_s_cleaned.json" \
             --locomo "$ASSETS/locomo10.json" \
-            --dir "$RUNNER_TEMP/memory-ingestion" "$SWEEP_SMOKE"
+            --dir "$RUNNER_TEMP/memory-ingestion" "$SWEEP_SMOKE" \
+            --model "$EVAL_MODEL" --reasoning "$EVAL_REASONING"
           cat "$RUNNER_TEMP/memory-ingestion/ufo.toml" \
             "$RUNNER_TEMP/memory-ingestion/matrix.toml"
 
@@ -300,7 +371,8 @@ jobs:
           echo "eval stack exit $stack_status; verifying the complete score record"
           uv run python .github/scripts/nightly_memory_ingestion.py verify \
             --reports eval-reports --runs-root .local/evals \
-            --state-output memory-ingestion-state/readiness.json "$SWEEP_SMOKE"
+            --state-output memory-ingestion-state/readiness.json "$SWEEP_SMOKE" \
+            --model "$EVAL_MODEL"
           # `verify` reads the record's shape, never `case.passed`, so a failing case reaches the
           # job status only through the stack's own code — carried here so `verify` still runs.
           exit "$stack_status"
@@ -405,6 +477,11 @@ jobs:
           aws s3 cp eval-reports \
             "s3://$ARCHIVE_BUCKET/$ARCHIVE_PREFIX/$(date -u +%F)/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --recursive --no-progress
+
+      - name: Require a comparable cohort
+        run: |
+          uv run python .github/scripts/eval_sweep_summary.py eval-reports "$SWEEP_SMOKE" \
+            --memory-ingestion --require-comparable
 
       # The trend, last: a point Datadog holds for years must not outlive the records that
       # substantiate it, so nothing is submitted until the durable archive above has landed. One

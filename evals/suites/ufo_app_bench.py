@@ -104,6 +104,7 @@ from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.sandbox.session import SANDBOX_GID, SANDBOX_UID
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.sdk.context import ScopedStore
@@ -186,6 +187,7 @@ PROBE_OUTPUT = ".eval-output"
 PROBE_PORT = 8137
 PROBE_TIMEOUT_SECONDS = 120
 DOCKER_INSPECT_TIMEOUT_SECONDS = 10
+DOCKER_OWNERSHIP_TIMEOUT_SECONDS = 30
 DESKTOP_HEIGHT = 900
 NARROW_WIDTH = APPLICATION_NARROW_WIDTH
 NARROW_HEIGHT = 844
@@ -1058,6 +1060,42 @@ class AppBenchWorkspaceProbe(WorkspaceProbe):
                         return ProbeCommandResult(1, "", "replay probe has no workspace driver")
                     probe_container = f"ufo-qa-probe-{self.conversation_id}"
                     workspace = self.driver.workspace_path(self.conversation_id, "").resolve()
+                    ownership = await asyncio.create_subprocess_exec(
+                        "docker",
+                        "run",
+                        "--rm",
+                        "--entrypoint",
+                        "chown",
+                        "--user",
+                        "0:0",
+                        "-v",
+                        f"{workspace}:/workspace",
+                        self.ephemeral_image_ref,
+                        "-R",
+                        f"{SANDBOX_UID}:{SANDBOX_GID}",
+                        "/workspace",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    try:
+                        owner_stdout, owner_stderr = await asyncio.wait_for(
+                            ownership.communicate(), DOCKER_OWNERSHIP_TIMEOUT_SECONDS
+                        )
+                    except TimeoutError:
+                        ownership.kill()
+                        await ownership.wait()
+                        return ProbeCommandResult(
+                            124,
+                            "",
+                            "workspace ownership timed out",
+                            DOCKER_OWNERSHIP_TIMEOUT_SECONDS,
+                        )
+                    if ownership.returncode != 0:
+                        return ProbeCommandResult(
+                            ownership.returncode or 1,
+                            owner_stdout.decode(errors="replace"),
+                            owner_stderr.decode(errors="replace"),
+                        )
                     process = await asyncio.create_subprocess_exec(
                         "docker",
                         "run",

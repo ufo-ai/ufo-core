@@ -19,8 +19,15 @@ from nightly_eval_matrix import plan
 from nightly_memory_ingestion import FULL_REPORT_CASES, SMOKE_REPORT_CASES
 
 from evals.harness.viewer import load_runs, write_viewer
+from evals.registry import TASKS
 
 REASON_LIMIT = 240
+EXPECTED_FULL_EXCLUSIONS = frozenset(
+    {
+        ("skill_loading_member", "bias-ach-explainer-block-off"),
+        ("skill_loading_member", "bias-deploy-pdf-merge-block-off"),
+    }
+)
 
 
 def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
@@ -71,6 +78,65 @@ def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
     return "\n".join(lines) + "\n"
 
 
+def require_comparable(root: Path, smoke: bool, memory_ingestion: bool = False) -> None:
+    """Require one complete fixed case cohort before the sweep becomes a trend point."""
+    planned_pairs = tuple((shard.label, suite) for shard in plan(smoke) for suite in shard.suites)
+    planned = tuple(suite for _, suite in planned_pairs)
+    expected_counts = {task.name: len(task.cases) for task in TASKS if task.name in set(planned)}
+    if memory_ingestion:
+        memory_counts = SMOKE_REPORT_CASES if smoke else FULL_REPORT_CASES
+        planned += tuple(memory_counts)
+        planned_pairs += tuple(("memory-ingestion", name) for name in memory_counts)
+        expected_counts.update(memory_counts)
+    labelled_reports = tuple(
+        (run.label, report) for run in load_runs(root) for report in run.reports
+    )
+    reports = tuple(report for _, report in labelled_reports)
+    recorded_pairs = [(label, report.name) for label, report in labelled_reports]
+    missing = sorted(set(planned_pairs) - set(recorded_pairs))
+    unexpected = sorted(set(recorded_pairs) - set(planned_pairs))
+    repeated = sorted(pair for pair in set(recorded_pairs) if recorded_pairs.count(pair) != 1)
+    wrong_counts = sorted(
+        f"{report.name} {len(report.cases)}/{expected_counts[report.name]}"
+        for report in reports
+        if report.name in expected_counts and len(report.cases) != expected_counts[report.name]
+    )
+    excluded = {
+        (report.name, case.name) for report in reports for case in report.cases if case.excluded
+    }
+    expected_exclusions = set() if smoke else set(EXPECTED_FULL_EXCLUSIONS)
+    expected_exclusions = {item for item in expected_exclusions if item[0] in expected_counts}
+    unexpected_exclusions = sorted(excluded - expected_exclusions)
+    absent_exclusions = sorted(expected_exclusions - excluded)
+    errors = []
+    if missing:
+        errors.append(
+            "missing reports: " + ", ".join(f"{label}/{suite}" for label, suite in missing)
+        )
+    if unexpected:
+        errors.append(
+            "unexpected reports: " + ", ".join(f"{label}/{suite}" for label, suite in unexpected)
+        )
+    if repeated:
+        errors.append(
+            "repeated reports: " + ", ".join(f"{label}/{suite}" for label, suite in repeated)
+        )
+    if wrong_counts:
+        errors.append(f"wrong case counts: {', '.join(wrong_counts)}")
+    if unexpected_exclusions:
+        errors.append(
+            "unexpected exclusions: "
+            + ", ".join(f"{suite}/{case}" for suite, case in unexpected_exclusions)
+        )
+    if absent_exclusions:
+        errors.append(
+            "expected exclusions absent: "
+            + ", ".join(f"{suite}/{case}" for suite, case in absent_exclusions)
+        )
+    if errors:
+        raise RuntimeError("incomparable sweep — " + "; ".join(errors))
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="eval_sweep_summary.py")
     parser.add_argument("root", type=Path, help="the eval-reports archive the sweep wrote")
@@ -81,7 +147,11 @@ def main(argv: list[str] | None = None) -> None:
         help="the sweep ran the proving subset",
     )
     parser.add_argument("--memory-ingestion", action="store_true")
+    parser.add_argument("--require-comparable", action="store_true")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.require_comparable:
+        require_comparable(args.root, args.smoke, args.memory_ingestion)
+        return
     sys.stdout.write(render(args.root, args.smoke, args.memory_ingestion))
     write_viewer(args.root, load_runs(args.root))
 

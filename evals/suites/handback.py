@@ -12,6 +12,7 @@ which turns exist and what caused them."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -68,7 +69,8 @@ async def _seed_late_file_watch(
 
 
 async def _land_late_file(workspace_dir: Path) -> None:
-    (workspace_dir / LATE_FILE).write_text(f"{HEARTBEAT_NONCE}\n")
+    await asyncio.to_thread(workspace_dir.mkdir, parents=True, exist_ok=True)
+    await asyncio.to_thread((workspace_dir / LATE_FILE).write_text, f"{HEARTBEAT_NONCE}\n")
 
 
 async def _grade_heartbeat_wake(observation: ArcObservation) -> ArcVerdict:

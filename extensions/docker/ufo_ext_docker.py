@@ -141,7 +141,7 @@ class DockerCarrier:
         running = await self._running_id(name)
         if running is not None:
             await self._install_ca(running, spec.proxy.ca_cert)
-            await self._ensure_runtime_root(running, spec.conversation_id)
+            await self._prepare_mounts(running, spec.conversation_id)
             return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=running,
@@ -153,7 +153,7 @@ class DockerCarrier:
         stopped = await self._stopped_id(name)
         if stopped is not None and await self._revive(spec.conversation_id, stopped):
             await self._install_ca(stopped, spec.proxy.ca_cert)
-            await self._ensure_runtime_root(stopped, spec.conversation_id)
+            await self._prepare_mounts(stopped, spec.conversation_id)
             return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=stopped,
@@ -191,7 +191,7 @@ class DockerCarrier:
                     winner = await self._running_id(name)
                     if winner is not None:
                         await self._install_ca(winner, spec.proxy.ca_cert)
-                        await self._ensure_runtime_root(winner, spec.conversation_id)
+                        await self._prepare_mounts(winner, spec.conversation_id)
                         return SandboxHandle(
                             conversation_id=spec.conversation_id,
                             container_id=winner,
@@ -203,7 +203,7 @@ class DockerCarrier:
                 raise RuntimeError(f"docker run failed: {detail}")
             container_id = stdout.decode().strip()
             await self._install_ca(container_id, spec.proxy.ca_cert)
-            await self._ensure_runtime_root(container_id, spec.conversation_id)
+            await self._prepare_mounts(container_id, spec.conversation_id)
             return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=container_id,
@@ -238,7 +238,7 @@ class DockerCarrier:
                 return None
             running = stopped
         try:
-            await self._ensure_runtime_root(running, spec.conversation_id)
+            await self._prepare_mounts(running, spec.conversation_id)
         except RuntimeError:
             return None
         return SandboxHandle(
@@ -638,7 +638,7 @@ class DockerCarrier:
         if write[0] != 0:
             raise RuntimeError(f"CA install failed: {write[2].decode().strip()}")
 
-    async def _ensure_runtime_root(self, container_id: str, conversation_id: UUID) -> None:
+    async def _prepare_mounts(self, container_id: str, conversation_id: UUID) -> None:
         runtime_root = sandbox_runtime_root(conversation_id)
         home_root = str(PurePosixPath(runtime_root).parents[1])
         code, _, stderr = await _docker(
@@ -648,6 +648,8 @@ class DockerCarrier:
             container_id,
             "sh",
             "-c",
+            'if [ "$(stat -c %u:%g "$5")" != "$3:$4" ]; then '
+            'chown -R -h "$3:$4" "$5"; fi && '
             'install -d -o 0 -g 0 -m 0755 "$1" && '
             'if [ -f "$1/session" ] && [ ! -L "$1/session" ]; then '
             'chown "$3:$4" "$1/session" && chmod 0600 "$1/session"; '
@@ -659,10 +661,11 @@ class DockerCarrier:
             runtime_root,
             str(SANDBOX_UID),
             str(SANDBOX_GID),
+            WORKSPACE_DIR,
             timeout_s=RUNTIME_ROOT_TIMEOUT_SECONDS,
         )
         if code != 0:
-            raise RuntimeError(f"runtime root creation failed: {stderr.decode().strip()}")
+            raise RuntimeError(f"sandbox mount preparation failed: {stderr.decode().strip()}")
 
 
 def manifest() -> Manifest:

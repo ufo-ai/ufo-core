@@ -299,6 +299,7 @@ async def test_materializer_runs_luna_derivation_and_indexes_only_derived_memory
         manifests=(sources_manifest.manifest(), memory_manifest.manifest()),
         registry=_registry(client),
         background_model=DERIVATION_MODEL,
+        agent_reasoning="medium",
         run_budget=run_budget,
     )
 
@@ -312,9 +313,13 @@ async def test_materializer_runs_luna_derivation_and_indexes_only_derived_memory
     assert client.observed_budget
     assert {request.model for request in client.requests} == {DERIVATION_MODEL}
     async with workspace_tx() as connection:
+        agent_reasoning = (
+            await connection.execute(sa.select(tables.agent.c.reasoning))
+        ).scalar_one()
         owners = (
             await connection.execute(sa.text("select distinct owner_kind from chunk"))
         ).scalars()
+        assert agent_reasoning == "medium"
         assert set(owners) == {"memory_item"}
 
 

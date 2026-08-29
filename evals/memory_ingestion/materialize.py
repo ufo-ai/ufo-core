@@ -41,7 +41,11 @@ from ufo.sandbox.containment import (
     is_contained_regular,
 )
 from ufo.schema import tables
-from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.schema.records import (
+    DEFAULT_AGENT_NAME,
+    DEFAULT_REASONING_EFFORT,
+    ReasoningEffort,
+)
 from ufo.sources.sync import (
     FOLDER_BACKEND,
     SOURCE_BLOB_PREFIX,
@@ -290,6 +294,7 @@ class MemoryIngestionMaterializer:
     manifests: tuple[Manifest, ...]
     registry: ModelRegistry
     background_model: str
+    agent_reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
     postgres: bool = False
     run_budget: EvalRunBudget | None = None
 
@@ -305,6 +310,7 @@ class MemoryIngestionMaterializer:
         manifests: tuple[Manifest, ...],
         registry: ModelRegistry,
         background_model: str,
+        agent_reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT,
         postgres: bool = False,
         run_budget: EvalRunBudget | None = None,
     ) -> "MemoryIngestionMaterializer":
@@ -320,6 +326,7 @@ class MemoryIngestionMaterializer:
             manifests,
             registry,
             background_model,
+            agent_reasoning,
             postgres,
             run_budget,
         )
@@ -388,6 +395,7 @@ class MemoryIngestionMaterializer:
                     name=DEFAULT_AGENT_NAME,
                     prompt=DEFAULT_AGENT_PROMPT,
                     model=DEFAULT_AGENT_MODEL,
+                    reasoning=self.agent_reasoning,
                     is_main=True,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
@@ -521,6 +529,7 @@ async def _run(
     snapshot: Path,
     state_root: Path,
     run_budget: EvalRunBudget | None,
+    agent_reasoning: ReasoningEffort,
 ) -> IngestionReadiness:
     if config.models.background_jobs_model != DERIVATION_MODEL:
         raise ValueError(
@@ -544,6 +553,7 @@ async def _run(
             manifests=manifests,
             registry=registry,
             background_model=config.models.background_jobs_model,
+            agent_reasoning=agent_reasoning,
             postgres=config.database.url.startswith("postgresql"),
             run_budget=run_budget,
         ).run()
@@ -558,11 +568,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--run-id", type=UUID)
     parser.add_argument("--budget-micro-usd", type=int)
+    parser.add_argument(
+        "--agent-reasoning",
+        choices=("auto", "off", "low", "medium", "high"),
+        default=DEFAULT_REASONING_EFFORT,
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if (args.run_id is None) != (args.budget_micro_usd is None):
         parser.error("--run-id and --budget-micro-usd must be provided together")
     run_budget = None if args.run_id is None else EvalRunBudget(args.run_id, args.budget_micro_usd)
-    readiness = asyncio.run(_run(load_config(), args.snapshot, args.state, run_budget))
+    readiness = asyncio.run(
+        _run(load_config(), args.snapshot, args.state, run_budget, args.agent_reasoning)
+    )
     output = args.state / readiness.snapshot_digest.removeprefix("sha256:") / "readiness.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(

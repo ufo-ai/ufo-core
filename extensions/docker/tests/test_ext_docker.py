@@ -98,9 +98,7 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     assert run_argv[run_argv.index("-v") + 1] == f"/tmp/ws:{WORKSPACE_DIR}"
     assert run_argv[run_argv.index("--network") + 1] == (f"ufo-sandbox-{spec.conversation_id.hex}")
     assert run_argv[run_argv.index("--cap-drop") + 1] == "NET_RAW"
-    runtime_call = next(
-        argv for argv in calls if len(argv) > 6 and argv[6].startswith("install -d")
-    )
+    runtime_call = next(argv for argv in calls if len(argv) > 6 and "chown -R -h" in argv[6])
     runtime_root = sandbox_runtime_root(spec.conversation_id)
     assert runtime_call == (
         "exec",
@@ -109,6 +107,8 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
         "cid1",
         "sh",
         "-c",
+        'if [ "$(stat -c %u:%g "$5")" != "$3:$4" ]; then '
+        'chown -R -h "$3:$4" "$5"; fi && '
         'install -d -o 0 -g 0 -m 0755 "$1" && '
         'if [ -f "$1/session" ] && [ ! -L "$1/session" ]; then '
         'chown "$3:$4" "$1/session" && chmod 0600 "$1/session"; '
@@ -120,6 +120,7 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
         runtime_root,
         str(SANDBOX_UID),
         str(SANDBOX_GID),
+        WORKSPACE_DIR,
     )
 
     await carrier.exec(handle, ("bash", "-lc", "gh api user"), 30)

@@ -18,8 +18,10 @@ from evals.suites.handback import (
     ASSIGNMENT_NONCE,
     CASES,
     HEARTBEAT_NONCE,
+    LATE_FILE,
     _grade_completion_handback,
     _grade_heartbeat_wake,
+    _land_late_file,
 )
 
 
@@ -87,6 +89,14 @@ async def test_heartbeat_wake_passes_on_a_scheduled_turn_carrying_the_value(
     )
     verdict = await _grade_heartbeat_wake(observation(tmp_path, turns))
     assert verdict.passed
+
+
+async def test_the_late_file_creates_an_unstaged_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "not-created"
+
+    await _land_late_file(workspace)
+
+    assert (workspace / LATE_FILE).read_text() == f"{HEARTBEAT_NONCE}\n"
 
 
 async def test_completion_handback_rejects_a_turn_held_open(tmp_path: Path) -> None:

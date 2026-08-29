@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import pytest
 import yaml
 
+from evals.__main__ import UFO_APP_BENCH_BACKENDS
 from evals.memory_ingestion.assets import LOCOMO, LONGMEM_CLEANED
 from evals.memory_ingestion.materialize import (
     DERIVATION_MODEL,
@@ -16,7 +17,18 @@ from evals.memory_ingestion.materialize import (
     IngestionReadiness,
 )
 from evals.registry import TASKS
-from evals.stack import Matrix
+from evals.stack import (
+    APP_PAGE_SUITES,
+    APP_SUITES,
+    APPLICATION_BUILD_PRODUCTS,
+    CREATION_SUITES,
+    DOCKER_BACKEND,
+    Matrix,
+)
+from sandbox.build_template import SANDBOX_CLIENT_TARGET
+from ufo.config import Config
+from ufo.sandbox.client_binary import CLIENT_BINARY_NAME
+from ufo.schema.records import DEFAULT_REASONING_EFFORT
 
 ROOT = Path(__file__).parents[3]
 WORKFLOW = ROOT / ".github" / "workflows" / "evals-nightly.yml"
@@ -97,6 +109,12 @@ def test_application_suites_do_not_share_a_shard_with_other_suites(planner) -> N
         assert not app_suites or set(shard.suites) <= planner.APP_SUITES
 
 
+def test_creation_suites_do_not_share_a_shard_with_other_suites(planner) -> None:
+    for shard in planner.plan(smoke=False):
+        creation_suites = planner.CREATION_SUITES.intersection(shard.suites)
+        assert not creation_suites or set(shard.suites) <= planner.CREATION_SUITES
+
+
 def test_a_suite_bound_to_no_planned_pack_fails_the_plan(planner, monkeypatch) -> None:
     stranded = tuple(
         dataclasses.replace(task, packs=("no_such_pack",)) if task.name == "basics" else task
@@ -125,8 +143,9 @@ def test_the_smoke_subset_boots_every_arm_it_can_reach(planner) -> None:
     carries a case — the hosted arm's browser and index knobs are named nowhere else."""
     shards = planner.plan(smoke=True)
 
-    assert [shard.pack for shard in shards] == [arm.pack for arm in planner.ARMS]
-    assert all(planner.SMOKE_PROBE in shard.suites for shard in shards)
+    assert {shard.pack for shard in shards} == {arm.pack for arm in planner.ARMS}
+    assert all(planner.SMOKE_PROBE in shard.suites for shard in shards if shard.agent is None)
+    assert any("ufo-app-qa-replay" in shard.suites for shard in shards)
     assert sum(len(shard.suites) for shard in shards) < len(TASKS)
 
 
@@ -177,7 +196,7 @@ def test_the_workflow_fans_out_over_the_planned_shards(workflow) -> None:
     sweep = workflow["jobs"]["sweep"]
     plan = workflow["jobs"]["plan"]
 
-    assert sweep["needs"] == ["plan", "sandbox-client"]
+    assert sweep["needs"] == ["plan", "sandbox-client", "web-build"]
     assert sweep["strategy"]["fail-fast"] is False
     assert sweep["strategy"]["matrix"]["label"] == "${{ fromJSON(needs.plan.outputs.shards) }}"
     assert '--plan "$SWEEP_SMOKE"' in plan["steps"][-1]["run"]
@@ -209,20 +228,47 @@ def test_the_dispatch_sets_the_sweep_model_and_reasoning(workflow) -> None:
     assert workflow["jobs"]["sweep"]["env"]["OPENROUTER_API_KEY"] == (
         "${{ secrets.OPENROUTER_API_KEY }}"
     )
+    assert workflow["jobs"]["sweep"]["env"]["AWS_BEARER_TOKEN_BEDROCK"] == (
+        "${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}"
+    )
+
+
+def test_required_eval_credentials_fail_before_the_sweep_starts(workflow) -> None:
+    credentials = workflow["jobs"]["credentials"]
+    required = {
+        "ANTHROPIC_API_KEY",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "DD_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "TURBOPUFFER_API_KEY",
+    }
+    check = credentials["steps"][0]["run"]
+
+    assert set(credentials["env"]) == required
+    assert all(f"secrets.{name}" in credentials["env"][name] for name in required)
+    assert all(name in check for name in required)
+    assert workflow["jobs"]["sandbox-client"]["needs"] == "credentials"
+    assert workflow["jobs"]["web-build"]["needs"] == "credentials"
+    assert workflow["jobs"]["memory-ingestion"]["needs"] == "credentials"
 
 
 def test_every_sweep_shard_receives_one_shared_sandbox_client(workflow) -> None:
     producer = workflow["jobs"]["sandbox-client"]
+    build = next(step for step in producer["steps"] if "cargo build" in step.get("run", ""))
     upload = next(
         step for step in producer["steps"] if step.get("uses", "").startswith("actions/upload")
     )
+    staged = Path("client/target") / SANDBOX_CLIENT_TARGET / "release"
 
     assert upload["with"] == {
         "name": "sandbox-client",
-        "path": "client/target/release/ufo",
+        "path": str(staged / CLIENT_BINARY_NAME),
         "if-no-files-found": "error",
         "retention-days": 1,
     }
+    assert f"--target {SANDBOX_CLIENT_TARGET}" in build["run"]
     sweep = workflow["jobs"]["sweep"]
     download = next(
         step
@@ -233,10 +279,64 @@ def test_every_sweep_shard_receives_one_shared_sandbox_client(workflow) -> None:
     install = sweep["steps"][sweep["steps"].index(download) + 1]
 
     assert "sandbox-client" in sweep["needs"]
-    assert download["with"]["path"] == "client/target/release"
-    assert "chmod +x client/target/release/ufo" in install["run"]
-    assert 'client/target/release" >> "$GITHUB_PATH"' in install["run"]
-    assert "needs" not in workflow["jobs"]["memory-ingestion"]
+    assert Path(download["with"]["path"]) == staged
+    assert f"chmod +x {staged / CLIENT_BINARY_NAME}" in install["run"]
+    assert f'{staged}" >> "$GITHUB_PATH"' in install["run"]
+    memory = workflow["jobs"]["memory-ingestion"]
+    assert memory["needs"] == "credentials"
+    assert memory["env"]["OPENROUTER_API_KEY"] == "${{ secrets.OPENROUTER_API_KEY }}"
+    assert memory["env"]["AWS_BEARER_TOKEN_BEDROCK"] == ("${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}")
+
+
+def test_an_app_page_shard_runs_its_suites_on_the_docker_sandbox_backend(
+    planner, tmp_path: Path
+) -> None:
+    for shard in planner.plan(smoke=False):
+        directory = tmp_path / shard.label
+        planner.write(shard, directory, "claude-opus-5", DEFAULT_REASONING_EFFORT)
+        config = tomllib.loads((directory / "ufo.toml").read_text())
+        sandbox = config.get("sandbox", {})
+
+        if APP_PAGE_SUITES.isdisjoint(shard.suites):
+            assert "sandbox" not in config, shard.label
+        else:
+            backend = Config.model_validate(config).sandbox.backend
+            assert sandbox == {"backend": DOCKER_BACKEND}, shard.label
+            if not APP_SUITES.isdisjoint(shard.suites):
+                assert backend in UFO_APP_BENCH_BACKENDS
+
+
+def test_every_sweep_shard_receives_the_built_page_kit(planner, workflow) -> None:
+    """The kit is build output no checkout carries, and `evals.stack` refuses an app or creation
+    suite without it, so the sweep builds one and hands it to every shard."""
+    gated = APP_SUITES | CREATION_SUITES
+    assert any(gated.intersection(shard.suites) for shard in planner.plan(smoke=False))
+
+    producer = workflow["jobs"]["web-build"]
+    build = next(step for step in producer["steps"] if "run build" in step.get("run", ""))
+    upload = next(
+        step for step in producer["steps"] if step.get("uses", "").startswith("actions/upload")
+    )
+
+    assert build["run"].strip() == "pnpm -C extensions/web/frontend run build"
+    assert upload["with"] == {
+        "name": "sites-page-kit",
+        "path": "extensions/sites/ufo_ext_sites/page/kit",
+        "if-no-files-found": "error",
+        "retention-days": 1,
+    }
+    sweep = workflow["jobs"]["sweep"]
+    download = next(
+        step
+        for step in sweep["steps"]
+        if step.get("uses", "").startswith("actions/download-artifact")
+        and step["with"].get("name") == "sites-page-kit"
+    )
+
+    assert "web-build" in sweep["needs"]
+    assert all(
+        Path(download["with"]["path"]) == product.parent for product in APPLICATION_BUILD_PRODUCTS
+    )
 
 
 def test_every_shard_archives_its_own_records_and_the_archive_merges_them(workflow) -> None:
@@ -275,6 +375,30 @@ def test_the_summary_names_a_planned_suite_that_produced_no_report(planner, tmp_
     assert all(suite in rendered for suite in planner.SMOKE_SUITES)
 
 
+def test_only_a_complete_fixed_case_cohort_is_comparable(planner, tmp_path: Path) -> None:
+    summary = _script("eval_sweep_summary")
+    tasks = {task.name: task for task in TASKS}
+    for shard in planner.plan(smoke=True):
+        for suite in shard.suites:
+            _archive(
+                tmp_path,
+                shard.label,
+                suite,
+                passed=len(tasks[suite].cases),
+                scored=len(tasks[suite].cases),
+                digest=f"sha256:{suite}",
+            )
+
+    summary.require_comparable(tmp_path, smoke=True)
+
+    record = next((tmp_path / "runs").glob("*.json"))
+    payload = json.loads(record.read_text())
+    payload["reports"][0]["cases"][0]["excluded"] = True
+    record.write_text(json.dumps(payload))
+    with pytest.raises(RuntimeError, match="unexpected exclusions"):
+        summary.require_comparable(tmp_path, smoke=True)
+
+
 def test_the_summary_requires_every_memory_ingestion_report(memory_nightly, tmp_path: Path) -> None:
     summary = _script("eval_sweep_summary")
     (tmp_path / "runs").mkdir()
@@ -288,14 +412,16 @@ def test_memory_ingestion_inputs_pin_luna_and_the_corpus(memory_nightly, tmp_pat
     root = tmp_path / "input"
     snapshot = tmp_path / "snapshot"
 
-    memory_nightly.write_inputs(root, snapshot)
+    memory_nightly.write_inputs(root, snapshot, "z-ai/glm-5.3-flash", "medium")
 
     config = tomllib.loads((root / "ufo.toml").read_text())
     matrix = Matrix.model_validate(tomllib.loads((root / "matrix.toml").read_text()))
+    assert config["models"]["auto_model"] == "z-ai/glm-5.3-flash"
     assert config["models"]["background_jobs_model"] == DERIVATION_MODEL
     assert config["pack"]["name"] == "assistant"
     assert matrix.run[0].label == "memory-ingestion"
     assert matrix.run[0].memory_ingestion == snapshot.resolve()
+    assert matrix.run[0].reasoning == "medium"
 
 
 def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly) -> None:
@@ -315,6 +441,9 @@ def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly
     assert fetch["env"]["LONGMEM_URL"] == LONGMEM_CLEANED.url
     assert fetch["env"]["LOCOMO_URL"] == LOCOMO.url
     assert '"$SWEEP_SMOKE"' in prepare["run"] and '"$SWEEP_SMOKE"' in run["run"]
+    assert '--model "$EVAL_MODEL"' in prepare["run"]
+    assert '--reasoning "$EVAL_REASONING"' in prepare["run"]
+    assert '--model "$EVAL_MODEL"' in run["run"]
     assert "nightly_memory_ingestion.py verify" in run["run"]
     assert uploads == [
         "eval-run-records-memory-ingestion",
@@ -349,6 +478,7 @@ def test_memory_ingestion_verification_accepts_scores_and_rejects_missing_cases(
                 "name": name,
                 "suite": "capability",
                 "digest": f"sha256:{name}",
+                "target_model": "z-ai/glm-5.3",
                 "cases": [
                     {
                         "name": f"{name}-{index}",
@@ -389,13 +519,19 @@ def test_memory_ingestion_verification_accepts_scores_and_rejects_missing_cases(
     state.write_text(readiness.model_dump_json())
     output = tmp_path / "state" / "readiness.json"
 
-    memory_nightly.verify(reports, runs_root, output, smoke=True)
+    memory_nightly.verify(reports, runs_root, output, smoke=True, model="z-ai/glm-5.3")
     assert output.read_text() == state.read_text()
+
+    report_rows[0]["target_model"] = "claude-opus-5"
+    (reports / "runs" / "run.json").write_text(json.dumps(run))
+    with pytest.raises(RuntimeError, match="memory ingestion recall used"):
+        memory_nightly.verify(reports, runs_root, output, smoke=True, model="z-ai/glm-5.3")
+    report_rows[0]["target_model"] = "z-ai/glm-5.3"
 
     report_rows[0]["cases"].pop()
     (reports / "runs" / "run.json").write_text(json.dumps(run))
     with pytest.raises(RuntimeError, match="report cases differ"):
-        memory_nightly.verify(reports, runs_root, output, smoke=True)
+        memory_nightly.verify(reports, runs_root, output, smoke=True, model="z-ai/glm-5.3")
 
 
 def test_the_archive_survives_a_memory_ingestion_job_that_wrote_no_state(workflow) -> None:
@@ -579,6 +715,8 @@ def test_the_trend_point_lands_after_the_archive_it_refers_to(workflow) -> None:
     ]
 
     assert named.index("Upload the sweep archive") < named.index("Archive the sweep")
+    assert named.index("Archive the sweep") < named.index("Require a comparable cohort")
+    assert named.index("Require a comparable cohort") < named.index("Report the scores to Datadog")
     assert named.index("Archive the sweep") < named.index("Report the scores to Datadog")
 
 

@@ -1,7 +1,9 @@
 """Replay retained app source through one bounded Gemini repair and live product audits."""
 
 import asyncio
+import base64
 import json
+import shlex
 import shutil
 from dataclasses import dataclass, replace
 from hashlib import sha256
@@ -52,6 +54,7 @@ PREVIEW_PATH = f"{APP_ROOT}/preview.svg"
 OUTPUT_ROOT = "/workspace/.eval-output/ufo-app-qa-replay"
 PROBE_TIMEOUT_SECONDS = APPLICATION_BUILD_TIMEOUT_SECONDS + APPLICATION_AUDIT_TIMEOUT_SECONDS
 PROBE_ERROR_DETAIL_CHARS = 500
+PROBE_WRITE_TIMEOUT_SECONDS = 30
 WORKFLOW_WAIT_SECONDS = 300.0
 REPAIR_AGENT = "app-qa-repair"
 ALLOWED_TOOLS = frozenset({"read", "edit"})
@@ -207,7 +210,20 @@ class AppQaReplayProbe:
         )
         evidence_bytes = evidence.model_dump_json(by_alias=True).encode()
         evidence_path = directory / f"{name}-evidence.json"
-        await asyncio.to_thread(evidence_path.write_bytes, evidence_bytes)
+        sandbox_evidence_path = (
+            f"{OUTPUT_ROOT}/{self.fixture.name}/{self.phase}/{evidence_path.name}"
+        )
+        encoded_evidence = base64.b64encode(evidence_bytes).decode()
+        written = await probe.run(
+            f"printf %s {shlex.quote(encoded_evidence)} | base64 -d > "
+            f"{shlex.quote(sandbox_evidence_path)}",
+            PROBE_WRITE_TIMEOUT_SECONDS,
+        )
+        if written.exit_code != 0:
+            detail = written.stderr.strip() or written.stdout.strip() or "no command output"
+            return ArtifactProbeResult(
+                error=f"app QA replay evidence write failed: {detail[:PROBE_ERROR_DETAIL_CHARS]}"
+            )
         prior_evidence: tuple[SharedArtifact, ...] = ()
         if self.phase == "final":
             initial_name = f"{self.fixture.name}-initial-evidence.json"

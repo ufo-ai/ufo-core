@@ -1,4 +1,6 @@
+import base64
 import json
+import shlex
 import shutil
 from dataclasses import replace
 from hashlib import sha256
@@ -219,6 +221,11 @@ async def test_final_probe_is_a_self_contained_artifact_set(tmp_path: Path) -> N
 
     class Probe:
         async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
+            if command.startswith("printf %s "):
+                argv = shlex.split(command)
+                evidence_path = tmp_path / argv[-1].removeprefix("/workspace/")
+                evidence_path.write_bytes(base64.b64decode(argv[2]))
+                return ProbeCommandResult(0, "", "")
             phase = "final" if "/final" in command else "initial"
             name = f"{fixture.name}-{phase}"
             directory = tmp_path / ".eval-output" / "ufo-app-qa-replay" / fixture.name / phase

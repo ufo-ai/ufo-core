@@ -523,8 +523,9 @@ def test_app_eval_uses_the_template_parent_agent_and_rejects_matrix_model_knobs(
         )
 
 
-def test_docker_app_eval_pins_the_current_sandbox_image_before_admission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("suite", ("ufo-app-bench", "new_application"))
+def test_docker_app_page_eval_pins_the_current_sandbox_image_before_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suite: str
 ) -> None:
     template = tmp_path / "template.toml"
     template.write_text(DOCKER_TEMPLATE)
@@ -536,7 +537,7 @@ def test_docker_app_eval_pins_the_current_sandbox_image_before_admission(
     monkeypatch.setattr(eval_stack, "sandbox_image_plan", lambda *_: plan)
 
     stack = EvalStack.provision(
-        RunSpec(label="app-image", config=template, args=("--only", "ufo-app-bench")),
+        RunSpec(label="app-image", config=template, args=("--only", suite)),
         root=tmp_path / "app-image",
         out=tmp_path / "archive",
         repo_root=tmp_path,
@@ -639,6 +640,22 @@ def test_memory_100_spec_requires_postgres_and_a_collector_endpoint(
         RunSpec(label="memory", config=postgres_template, memory_100=snapshot, model="claude")
     with pytest.raises(ValidationError, match="materialization owns the agent"):
         RunSpec(label="memory", config=postgres_template, memory_100=snapshot, reasoning="high")
+    with pytest.raises(ValidationError, match=r"models\.auto_model owns the recall model"):
+        RunSpec(
+            label="ingestion",
+            config=postgres_template,
+            memory_ingestion=snapshot,
+            model="claude",
+        )
+    assert (
+        RunSpec(
+            label="ingestion",
+            config=postgres_template,
+            memory_ingestion=snapshot,
+            reasoning="medium",
+        ).reasoning
+        == "medium"
+    )
     assert not (tmp_path / "a").exists()
     assert not (tmp_path / "b").exists()
 
@@ -1144,13 +1161,14 @@ async def test_cleanup_failures_preserve_the_child_outcome_and_release_later_san
     ]
 
 
-async def test_app_stack_rejects_missing_build_products_before_seed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("suite", ("ufo-app-bench", "new_application"))
+async def test_app_page_stack_rejects_missing_build_products_before_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suite: str
 ) -> None:
     template = tmp_path / "template.toml"
     template.write_text(SQLITE_TEMPLATE)
     stack = EvalStack.provision(
-        RunSpec(label="app-products", config=template, args=("--only", "ufo-app-bench")),
+        RunSpec(label="app-products", config=template, args=("--only", suite)),
         root=tmp_path / "app-products",
         out=tmp_path / "archive",
         repo_root=tmp_path,
@@ -1291,7 +1309,12 @@ def test_memory_ingestion_seeds_and_passes_snapshot_and_readiness(
     template.write_text(POSTGRES_TEMPLATE + '\n[o11y]\notlp_endpoint = "http://127.0.0.1:4318"\n')
     snapshot = tmp_path / "snapshot"
     stack = EvalStack.provision(
-        RunSpec(label="ingestion", config=template, memory_ingestion=snapshot),
+        RunSpec(
+            label="ingestion",
+            config=template,
+            memory_ingestion=snapshot,
+            reasoning="medium",
+        ),
         root=tmp_path / "run",
         out=tmp_path / "archive",
         repo_root=tmp_path,
@@ -1324,6 +1347,8 @@ def test_memory_ingestion_seeds_and_passes_snapshot_and_readiness(
     assert materialized == [
         (
             "evals.memory_ingestion.materialize",
+            "--agent-reasoning",
+            "medium",
             "--snapshot",
             str(snapshot.resolve()),
         )

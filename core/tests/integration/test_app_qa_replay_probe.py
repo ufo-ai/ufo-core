@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -19,8 +20,20 @@ from evals.suites.ufo_app_qa_replay import (
     _prepare_kit,
     _repair_followup,
 )
+from ufo.sandbox.session import SANDBOX_GID, SANDBOX_UID
 
 pytestmark = pytest.mark.docker
+
+
+async def _docker(*argv: str) -> tuple[int, str, str]:
+    process = await asyncio.create_subprocess_exec(
+        "docker",
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    return process.returncode or 0, stdout.decode(), stderr.decode()
 
 
 @pytest.mark.parametrize("fixture_index", range(len(FIXTURES)))
@@ -29,13 +42,10 @@ async def test_real_followup_probe_captures_initial_evidence_artifact(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace_root.chmod(0o777)
     conversation_id = uuid4()
     workspace = workspace_root / str(conversation_id)
     app = workspace / "ufo-app"
     app.mkdir(parents=True)
-    workspace.chmod(0o777)
-    app.chmod(0o777)
     fixture = FIXTURES[fixture_index]
     (app / "index.html").write_bytes(APPLICATION_INDEX)
     (app / "preview.html").write_bytes(APPLICATION_PREVIEW_SCAFFOLD)
@@ -43,6 +53,21 @@ async def test_real_followup_probe_captures_initial_evidence_artifact(
     (app / "preview.svg").write_bytes(fixture.preview)
     (app / "vite.config.ts").write_bytes(PROJECT_CONFIG_BYTES)
     await _prepare_kit(UUID(int=0), workspace)
+    ownership = await _docker(
+        "run",
+        "--rm",
+        "--entrypoint",
+        "chown",
+        "--user",
+        "0:0",
+        "-v",
+        f"{workspace}:/workspace",
+        sandbox_image,
+        "-R",
+        "1001:1001",
+        "/workspace",
+    )
+    assert ownership[0] == 0, ownership[2]
 
     class ProbeDriver:
         def workspace_path(self, identifier: UUID, rel: str) -> Path:
@@ -54,10 +79,8 @@ async def test_real_followup_probe_captures_initial_evidence_artifact(
     )
     output = CapabilityOutput(response="READY", calls=(), workspace_dir=workspace)
 
-    captured = await AppQaReplayProbe(fixture, "initial")(
-        output,
-        AppBenchWorkspaceProbe(conversation_id, driver, sandbox_image),
-    )
+    probe = AppBenchWorkspaceProbe(conversation_id, driver, sandbox_image)
+    captured = await AppQaReplayProbe(fixture, "initial")(output, probe)
 
     assert captured.error == ""
     evidence = tuple(
@@ -69,6 +92,41 @@ async def test_real_followup_probe_captures_initial_evidence_artifact(
     replay = ReplayEvidence.model_validate_json(evidence[0].content)
     assert replay.phase == "initial"
     assert replay.feedback_sha256 == fixture.expected.sha256
+    owner = await _docker(
+        "run",
+        "--rm",
+        "--entrypoint",
+        "stat",
+        "-v",
+        f"{workspace}:/workspace",
+        sandbox_image,
+        "-c",
+        "%u:%g",
+        "/workspace",
+    )
+    assert owner[0] == 0, owner[2]
+    assert owner[1].strip() == f"{SANDBOX_UID}:{SANDBOX_GID}"
+    editable = await _docker(
+        "run",
+        "--rm",
+        "--entrypoint",
+        "sh",
+        "-v",
+        f"{workspace}:/workspace",
+        sandbox_image,
+        "-c",
+        "printf '\\n' >> /workspace/ufo-app/app.tsx",
+    )
+    assert editable[0] == 0, editable[2]
+
+    final = await AppQaReplayProbe(fixture, "final")(output, probe)
+    assert final.error == ""
+    assert {
+        artifact.name for artifact in final.artifacts if artifact.name.endswith("-evidence.json")
+    } >= {
+        f"{fixture.name}-initial-evidence.json",
+        f"{fixture.name}-final-evidence.json",
+    }
 
     failed = await AppQaReplayProbe(fixture, "initial")(
         output,

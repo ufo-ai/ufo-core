@@ -53,6 +53,7 @@ DEFAULT_OUT = Path("eval-reports")
 STACK_OWNER_EMAIL = "evals@localhost"
 APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy", "ufo-app-qa-replay"})
 CREATION_SUITES = frozenset({"new_application"})
+APP_PAGE_SUITES = APP_SUITES | CREATION_SUITES
 CREATION_DISABLED_JOBS = ("web:seed_homepages",)
 ISOLATED_EXTERNAL_BILLING_JOBS = (
     "metronome:usage_shipper",
@@ -172,12 +173,15 @@ class RunSpec(BaseModel):
                 f"run {self.label!r}: app suites use the template parent agent; "
                 "vary the application-builder profile"
             )
-        if (self.memory_100 is not None or self.memory_ingestion is not None) and (
-            self.model is not None or self.reasoning is not None
-        ):
+        if self.memory_100 is not None and (self.model is not None or self.reasoning is not None):
             raise ValueError(
                 f"run {self.label!r} sets model or reasoning with a memory corpus — "
                 "materialization owns the agent"
+            )
+        if self.memory_ingestion is not None and self.model is not None:
+            raise ValueError(
+                f"run {self.label!r} sets a model with memory ingestion — "
+                "models.auto_model owns the recall model"
             )
         corpora = sum(
             (
@@ -306,7 +310,10 @@ class EvalStack:
             update={"serve": config.serve.model_copy(update={"disabled_jobs": disabled_jobs})}
         )
         sandbox_image = None
-        if not APP_SUITES.isdisjoint(selected_suites) and config.sandbox.backend == DOCKER_BACKEND:
+        if (
+            not APP_PAGE_SUITES.isdisjoint(selected_suites)
+            and config.sandbox.backend == DOCKER_BACKEND
+        ):
             sandbox_image = sandbox_image_plan(repo_root, root / "sandbox.Dockerfile")
             config = config.model_copy(
                 update={
@@ -426,7 +433,7 @@ class EvalStack:
         selected = argparse.ArgumentParser(add_help=False)
         selected.add_argument("--only", nargs="*", default=())
         parsed, _ = selected.parse_known_args(self.spec.args)
-        if APP_SUITES.isdisjoint(parsed.only) and CREATION_SUITES.isdisjoint(parsed.only):
+        if APP_PAGE_SUITES.isdisjoint(parsed.only):
             return
         missing = tuple(
             path for path in APPLICATION_BUILD_PRODUCTS if not (self.repo_root / path).is_file()
@@ -462,8 +469,12 @@ class EvalStack:
             )
         if self.spec.memory_ingestion is not None:
             await self._checked(await self._ufoctl("migrate", log=self.seed_log), "seed")
+            reasoning_args = (
+                () if self.spec.reasoning is None else ("--agent-reasoning", self.spec.reasoning)
+            )
             return await self._materialize(
                 "evals.memory_ingestion.materialize",
+                *reasoning_args,
                 "--snapshot",
                 str(self.spec.memory_ingestion.resolve()),
             )

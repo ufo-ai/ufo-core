@@ -44,6 +44,7 @@ from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, ArtifactClaims, verify_a
 from ufo.models.interface import ModelEvent, ModelRequest, ToolResultBlock, ToolUseBlock
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
+    WORKSPACE_DIR,
     ProxyEndpoint,
     SandboxHandle,
     SandboxSession,
@@ -82,7 +83,7 @@ OVER_INMEMORY_BYTES = 25 * 1024 * 1024
 ARTIFACT_SECRET = "file-tools-secret"
 
 
-async def test_docker_runtime_root_allows_the_default_user_to_start_commands(
+async def test_docker_mount_preparation_makes_workspace_and_runtime_writable(
     sandbox_container: tuple[str, Path],
 ) -> None:
     container, workspace = sandbox_container
@@ -110,7 +111,13 @@ async def test_docker_runtime_root_allows_the_default_user_to_start_commands(
         30,
     )
     assert seeded.exit_code == 0
-    await carrier._ensure_runtime_root(container, conversation_id)
+    rooted = await carrier.exec_skill(handle, ("chown", "-R", "0:0", WORKSPACE_DIR), 30)
+    assert rooted.exit_code == 0
+    refused = await carrier.exec(handle, ("mkdir", f"{WORKSPACE_DIR}/.eval-output"), 30)
+    assert refused.exit_code != 0
+    await carrier._prepare_mounts(container, conversation_id)
+    writable = await carrier.exec(handle, ("mkdir", f"{WORKSPACE_DIR}/.eval-output"), 30)
+    assert writable.exit_code == 0
 
     direct = await carrier.exec(handle, ("ufo", "run", "--", "true"), 30)
     assert direct.exit_code == 0
@@ -135,7 +142,7 @@ async def test_docker_runtime_root_allows_the_default_user_to_start_commands(
         "0:0 755",
     ]
     session_id = await carrier.exec(handle, ("cat", "/home/user/.ufo/session"), 30)
-    await carrier._ensure_runtime_root(container, conversation_id)
+    await carrier._prepare_mounts(container, conversation_id)
     assert await carrier.exec(handle, ("cat", "/home/user/.ufo/session"), 30) == session_id
     rename = await carrier.exec(
         handle,

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from evals.harness.registry import EvalTask
 from evals.registry import TASKS
-from evals.stack import APP_SUITES
+from evals.stack import APP_PAGE_SUITES, APP_SUITES, CREATION_SUITES, DOCKER_BACKEND
 from ufo.config import DEFAULT_AUTO_MODEL
 from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
 
@@ -35,7 +35,13 @@ SHARD_WEIGHT = 45
 DATABASE_URL = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 PUBLIC_BASE_URL = "http://evals.invalid"
 SMOKE_PROBE = "basics"
-SMOKE_SUITES = (SMOKE_PROBE, "semantic_quality", "scenario_smoke", "ab_reversal")
+SMOKE_SUITES = (
+    SMOKE_PROBE,
+    "semantic_quality",
+    "scenario_smoke",
+    "ab_reversal",
+    "ufo-app-qa-replay",
+)
 UNSAFE_LABEL_CHARS = re.compile(r"[^A-Za-z0-9.-]+")
 
 
@@ -100,8 +106,9 @@ def plan(smoke: bool) -> tuple[Shard, ...]:
             if agent is not None:
                 stem += f"-{_label_token(agent)}"
             app_tasks = tuple(task for task in carried if task.name in APP_SUITES)
-            other_tasks = tuple(task for task in carried if task.name not in APP_SUITES)
-            groups = (*_balance(app_tasks), *_balance(other_tasks))
+            creation_tasks = tuple(task for task in carried if task.name in CREATION_SUITES)
+            other_tasks = tuple(task for task in carried if task.name not in APP_PAGE_SUITES)
+            groups = (*_balance(app_tasks), *_balance(creation_tasks), *_balance(other_tasks))
             for index, group in enumerate(groups, start=1):
                 label = stem if len(groups) == 1 else f"{stem}-{index}"
                 shards.append(Shard(label, arm.pack, agent, tuple(task.name for task in group)))
@@ -139,10 +146,10 @@ def _balance(tasks: tuple[EvalTask, ...]) -> tuple[tuple[EvalTask, ...], ...]:
 
 def write(shard: Shard, directory: Path, model: str, reasoning: ReasoningEffort) -> None:
     arm = next(arm for arm in ARMS if arm.pack == shard.pack)
+    app_suite_shard = not APP_SUITES.isdisjoint(shard.suites)
+    app_page_shard = not APP_PAGE_SUITES.isdisjoint(shard.suites)
     reasoning_override = (
-        None
-        if reasoning == DEFAULT_REASONING_EFFORT or not APP_SUITES.isdisjoint(shard.suites)
-        else reasoning
+        None if reasoning == DEFAULT_REASONING_EFFORT or app_suite_shard else reasoning
     )
     directory.mkdir(parents=True, exist_ok=True)
     config = directory / "ufo.toml"
@@ -154,6 +161,7 @@ def write(shard: Shard, directory: Path, model: str, reasoning: ReasoningEffort)
                 "connect": {"public_base_url": PUBLIC_BASE_URL},
                 "models": {"auto_model": model},
                 "pack": {"name": shard.pack},
+                **({"sandbox": {"backend": DOCKER_BACKEND}} if app_page_shard else {}),
                 **arm.knobs,
             }
         )
