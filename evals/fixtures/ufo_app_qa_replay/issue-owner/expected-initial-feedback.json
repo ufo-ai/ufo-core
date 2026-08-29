@@ -1,9 +1,14 @@
 {
-  "sha256": "45f9ec060fc58a95245beea2e51074423ccd8b1dec9e231c35dbf045f6bf7cbe",
+  "sha256": "c1460559ebd5680d1603a8f34d75e512ea53b5ec655c2999994989154120dac1",
   "issues": [
     {
       "code": "contrast",
       "message": "Fix text contrast: light 1440px \"Needs Triage: 2 issues\" at div color(srgb 0.729412 0.313333 0.0305882) on rgb(244, 243, 242) is 4.47:1; needs 4.5:1; light 1440px \"urgent\" at span color(srgb 0.729412 0.313333 0.0305882) on rgb(251, 227, 210) is 4.02:1; needs 4.5:1; light 1440px \"alex\" at strong rgb(0, 149, 255) on rgb(244, 243, 242) is 2.81:1; needs 4.5:1; light 1440px \"priya\" at strong rgb(0, 149, 255) on rgb(250, 249, 247) is 2.96:1; needs 4.5:1.",
+      "terms": []
+    },
+    {
+      "code": "overflow",
+      "message": "Fix horizontal overflow: light 305px document is 329px; dark 305px document is 329px.",
       "terms": []
     }
   ]

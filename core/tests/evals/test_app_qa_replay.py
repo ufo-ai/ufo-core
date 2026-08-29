@@ -43,17 +43,17 @@ from evals.suites.ufo_app_qa_replay import (
 EXPECTED = {
     "pre-meeting-briefs": {
         "source": "5e9a1d31c455dd02cb386a42f4cdc7f30954eab1f46c6d66a32efcf4d6041d90",
-        "preview": "1c188cfdb40102ef0bbc46d2067117679743a438aef8504ec1a74905ff52e9b6",
+        "preview": "7bc284fd06f65b9ba88bc1000bb4fc780310f668c0b0eca1cc06b180d32228c3",
         "contract": "815aad6b3053593c800cf0f9a207f65be1a741bbde87d0a02cf3ffd166f4c0eb",
         "repair": (1, 2_854, 3_287),
-        "codes": ("contrast", "clipping", "above_fold"),
+        "codes": ("contrast", "overflow", "clipping", "above_fold"),
     },
     "issue-owner": {
         "source": "81416464d8211dd0e360d7f3efb84653ff6d45c507d657cc13a7fc89430050a4",
-        "preview": "0bab22bbfb70654f4d3f0c14fbec7698ee876dfc3fb774b9554ec7edf895defc",
+        "preview": "80047f7ccc306b1528d96037d987bc5e9f830ac7f4c622e26bc4926fcdeb19be",
         "contract": "fe725407d047d1d755ccbaa858018c60e55b6138579445ac823917b1ae99d595",
         "repair": (1, 2_357, 2_008),
-        "codes": ("contrast",),
+        "codes": ("contrast", "overflow"),
     },
 }
 

@@ -1,5 +1,5 @@
 {
-  "sha256": "84092d0549952c885b2ee2f485af12ff64500e651eab2ca024ed53bcf59ac6a8",
+  "sha256": "a997c70779131d4a5ed0939a105b1f7fddccd9127fe8e48619c4a265594c06b5",
   "issues": [
     {
       "code": "contrast",
@@ -7,8 +7,13 @@
       "terms": []
     },
     {
+      "code": "overflow",
+      "message": "Fix horizontal overflow: light 305px document is 328px; dark 305px document is 328px.",
+      "terms": []
+    },
+    {
       "code": "clipping",
-      "message": "Fix clipped content: light 390px div: Attendees: maya@northstar.example, jorda; dark 390px div: Attendees: maya@northstar.example, jorda.",
+      "message": "Fix clipped content: light 305px div: Attendees: maya@northstar.example, jorda; light 305px div: Attendees: dana@evalco.test, priya@evalc; dark 305px div: Attendees: maya@northstar.example, jorda; dark 305px div: Attendees: dana@evalco.test, priya@evalc.",
       "terms": []
     },
     {

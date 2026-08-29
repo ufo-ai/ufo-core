@@ -28,7 +28,10 @@ const AA_FLOOR = 4.5;
 const DESIGN_ALPHA_FLOOR = 0.15;
 const DESIGN_REGION_MAX = 6;
 const DESIGN_VISIBLE_TEXT_MAX_CHARS = 72;
-const DESIGN_VIEWPORT = { width: 1280, height: 800 };
+const DESIGN_INITIAL_VIEWPORT = { width: 305, height: 844 };
+const DESIGN_INITIAL_FOLD = 844;
+const DESIGN_NATIVE_DIMENSION_MAX = 4096;
+const DESIGN_DRAWING_ELEMENTS = 'circle,ellipse,image,line,path,polygon,polyline,rect,text,use';
 const DESIGN_ELEMENT_MAX = 4096;
 const DESIGN_PROPERTY_MAX = 96;
 const DESIGN_DECLARATION_MAX = DESIGN_ELEMENT_MAX * DESIGN_PROPERTY_MAX;
@@ -54,8 +57,8 @@ const SVG_PRESENTATION_PROPERTIES = new Set(
 const VIEWS = [
   { scheme: 'light', width: 1440, height: 900, shoot: true },
   { scheme: 'dark', width: 1440, height: 900, shoot: true },
-  { scheme: 'light', width: 390, height: 844, shoot: false },
-  { scheme: 'dark', width: 390, height: 844, shoot: false },
+  { scheme: 'light', width: 305, height: 844, shoot: false },
+  { scheme: 'dark', width: 305, height: 844, shoot: false },
 ];
 const MIME_TYPES = new Map([
   ['.avif', 'image/avif'],
@@ -644,6 +647,7 @@ async function measure(floor) {
     viewportWidth: window.innerWidth,
     documentHeight: document.documentElement.scrollHeight,
     viewportHeight: window.innerHeight,
+    pageHeight,
     textChecked: checked,
     textUnderFloor: underFloor,
     text,
@@ -880,14 +884,16 @@ async function waitForApplicationInteraction(
   throw new ApplicationLifecycleError('application lifecycle did not become ready', last);
 }
 
-async function renderedDesignRegions(page) {
+async function renderedDesignRegions(page, viewport) {
   return page.evaluate(async ({
     alphaFloor,
     animatedAttributeByteMax,
     animatedPointMax,
     cloneByteMax,
     declarationMax,
+    drawingElements,
     elementMax,
+    initialFold,
     outputByteMax,
     presentationProperties,
     propertyMax,
@@ -904,6 +910,17 @@ async function renderedDesignRegions(page) {
       animation.currentTime = 0;
     });
     await document.fonts.ready;
+    const sourceElements = [root, ...root.querySelectorAll('*')];
+    if (sourceElements.length > elementMax) {
+      throw new Error('application design has too many SVG elements');
+    }
+    const sourceIds = new Set();
+    for (const element of sourceElements) {
+      const id = element.getAttribute?.('id')?.trim();
+      if (!id) continue;
+      if (sourceIds.has(id)) throw new Error('application design SVG ids must be unique');
+      sourceIds.add(id);
+    }
     async function visibleRegionText(regions, alphaFloor, visibleTextMaxChars) {
       const paintHasAlpha = (value) => {
         const paint = (value || '').trim().toLowerCase();
@@ -1054,6 +1071,68 @@ async function renderedDesignRegions(page) {
           .slice(0, visibleTextMaxChars).join('')
       );
     }
+    const evidence = [];
+    for (const element of root.querySelectorAll(drawingElements)) {
+      if (element.closest('defs,symbol,clipPath,mask,marker,pattern')) continue;
+      let visible = true;
+      for (let current = element; current && current !== root.parentElement;
+        current = current.parentElement) {
+        const style = getComputedStyle(current);
+        if ((style.clipPath || 'none') !== 'none' || (style.maskImage || 'none') !== 'none' ||
+            (style.filter || 'none') !== 'none') {
+          throw new Error(
+            'application design native bounds do not support clip, mask, or filter effects'
+          );
+        }
+        if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) ||
+            parseFloat(style.opacity) === 0) {
+          visible = false;
+          break;
+        }
+      }
+      if (!visible) continue;
+      const style = getComputedStyle(element);
+      const fillVisible = style.fill !== 'none' && parseFloat(style.fillOpacity) > 0;
+      const strokeVisible = style.stroke !== 'none' && parseFloat(style.strokeOpacity) > 0 &&
+        parseFloat(style.strokeWidth) > 0;
+      if (!fillVisible && !strokeVisible && element.localName !== 'image') continue;
+      const box = element.getBBox();
+      const matrix = element.getCTM();
+      if (!matrix || (box.width === 0 && box.height === 0)) continue;
+      const points = [
+        new DOMPoint(box.x, box.y),
+        new DOMPoint(box.x + box.width, box.y),
+        new DOMPoint(box.x, box.y + box.height),
+        new DOMPoint(box.x + box.width, box.y + box.height),
+      ].map((point) => point.matrixTransform(matrix));
+      const bounds = {
+        left: Math.min(...points.map((point) => point.x)),
+        top: Math.min(...points.map((point) => point.y)),
+        right: Math.max(...points.map((point) => point.x)),
+        bottom: Math.max(...points.map((point) => point.y)),
+      };
+      const overrun = [
+        ['left', Math.max(0, -bounds.left)],
+        ['top', Math.max(0, -bounds.top)],
+        ['right', Math.max(0, bounds.right - viewport.width)],
+        ['bottom', Math.max(0, bounds.bottom - viewport.height)],
+      ];
+      const region = element.closest('[data-app-region]')?.getAttribute('data-app-region') || '-';
+      const excerpt = element.localName === 'text'
+        ? ` text=${JSON.stringify((element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40))}`
+        : '';
+      for (const [edge, amount] of overrun) {
+        if (amount <= 0.01 || evidence.length >= 4) continue;
+        evidence.push(
+          `region=${region} tag=${element.localName}${excerpt} edge=${edge} ` +
+          `overflow=${Math.ceil(amount - 0.001)}px`
+        );
+      }
+    }
+    if (evidence.length) {
+      throw new Error(`application design extends outside its viewBox: ${evidence.join('; ')}`);
+    }
+
     const namedRegions = Array.from(root.querySelectorAll('[data-app-region]'))
       .map((element) => ({
         element,
@@ -1355,7 +1434,7 @@ async function renderedDesignRegions(page) {
         top: top / viewport.height,
         width: (right + 1 - left) / viewport.width,
         height: (bottom + 1 - top) / viewport.height,
-        aboveFold: true,
+        aboveFold: top < Math.min(initialFold, viewport.height),
         visibleText: visibleTextByName.get(name) || '',
       });
     }
@@ -1378,14 +1457,58 @@ async function renderedDesignRegions(page) {
     propertyMax: DESIGN_PROPERTY_MAX,
     regionMax: DESIGN_REGION_MAX,
     visibleTextMaxChars: DESIGN_VISIBLE_TEXT_MAX_CHARS,
-    viewport: DESIGN_VIEWPORT,
+    drawingElements: DESIGN_DRAWING_ELEMENTS,
+    initialFold: DESIGN_INITIAL_FOLD,
+    viewport,
   });
+}
+
+async function nativeDesignGeometry(page) {
+  const geometry = await page.evaluate(({ initialFold, maximum, width }) => {
+    const root = document.documentElement;
+    const box = root.viewBox?.baseVal;
+    const values = box ? [box.x, box.y, box.width, box.height] : [];
+    if (values.length !== 4 || !values.every(Number.isFinite) || box.x !== 0 || box.y !== 0 ||
+        box.width !== width || !Number.isInteger(box.height) || box.height < initialFold ||
+        box.height > maximum || root.getAttribute('width') !== String(width) ||
+        root.getAttribute('height') !== String(box.height)) {
+      throw new Error(
+        'application design must use viewBox="0 0 305 H", width="305", and a matching ' +
+        'integer height H from 844 through 4096'
+      );
+    }
+    return { width: box.width, height: box.height };
+  }, {
+    initialFold: DESIGN_INITIAL_FOLD,
+    maximum: DESIGN_NATIVE_DIMENSION_MAX,
+    width: DESIGN_INITIAL_VIEWPORT.width,
+  });
+  await page.setViewportSize(geometry);
+  return geometry;
+}
+
+async function acceptedDesignHeight(browser, svgPath) {
+  const context = await browser.newContext({
+    viewport: DESIGN_INITIAL_VIEWPORT,
+    deviceScaleFactor: 1,
+    reducedMotion: 'reduce',
+    serviceWorkers: 'block',
+  });
+  await context.route(/^https?:/, (route) => route.abort());
+  try {
+    const page = await context.newPage();
+    const source = fs.readFileSync(svgPath).toString('base64');
+    await page.goto(`data:image/svg+xml;base64,${source}`, { waitUntil: 'load' });
+    return (await nativeDesignGeometry(page)).height;
+  } finally {
+    await context.close();
+  }
 }
 
 async function designOnly(svgPath) {
   const browser = await chromium.launch();
   const context = await browser.newContext({
-    viewport: DESIGN_VIEWPORT,
+    viewport: DESIGN_INITIAL_VIEWPORT,
     deviceScaleFactor: 1,
     reducedMotion: 'reduce',
     serviceWorkers: 'block',
@@ -1399,7 +1522,8 @@ async function designOnly(svgPath) {
   try {
     const source = fs.readFileSync(svgPath).toString('base64');
     await page.goto(`data:image/svg+xml;base64,${source}`, { waitUntil: 'load' });
-    const regions = await renderedDesignRegions(page);
+    const geometry = await nativeDesignGeometry(page);
+    const regions = await renderedDesignRegions(page, geometry);
     if (blockedRequests) throw new Error('application design must not contain active or external content');
     process.stdout.write(JSON.stringify(regions));
   } finally {
@@ -1617,6 +1741,7 @@ async function main() {
   let browser = null;
   try {
     browser = await chromium.launch();
+    const designHeight = await acceptedDesignHeight(browser, acceptedDesignPath);
     const views = await Promise.all(VIEWS.map(async (view) => {
       const context = await browser.newContext({
         viewport: { width: view.width, height: view.height },
@@ -1690,7 +1815,7 @@ async function main() {
       }
     }));
     const interaction = await interactionAudit(browser, url);
-    const report = { url, floor: AA_FLOOR, designRegions, views, interaction };
+    const report = { url, floor: AA_FLOOR, designHeight, designRegions, views, interaction };
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
     for (const view of views) {
       console.log(

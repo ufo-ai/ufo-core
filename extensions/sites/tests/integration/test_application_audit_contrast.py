@@ -283,7 +283,7 @@ def test_real_kit_quiet_labels_pass_but_author_quiet_prose_fails(measured: dict)
                         "aboveFoldText": measured["aboveFoldText"],
                         "regions": regions,
                     }
-                    for width in (1440, 390)
+                    for width in (1440, 305)
                     for scheme in ("light", "dark")
                 ],
                 "interaction": {
@@ -364,7 +364,7 @@ def test_painted_text_reconstructs_inline_and_block_facts(tmp_path: Path) -> Non
                     "aboveFoldText": measured["aboveFoldText"],
                     "regions": regions,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {

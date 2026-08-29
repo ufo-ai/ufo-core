@@ -6,7 +6,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DESKTOP_WIDTH = 1440
-NARROW_WIDTH = 390
+NARROW_WIDTH = 305
+APPLICATION_DESIGN_FOLD = 844
+APPLICATION_DESIGN_MAX_HEIGHT = 4_096
 SCHEMES: tuple[Literal["light", "dark"], ...] = ("light", "dark")
 MEASURED_VIEWS = tuple(
     (scheme, width) for width in (DESKTOP_WIDTH, NARROW_WIDTH) for scheme in SCHEMES
@@ -120,7 +122,10 @@ class AcceptedApplicationDesignEvidence(BaseModel):
 
 
 class ApplicationAuditView(BaseModel):
-    """The browser measurements for one colour scheme and viewport width."""
+    """The browser measurements for one colour scheme and viewport width.
+
+    `page_height` is the scrolled page height this view's region fractions divide by.
+    """
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
@@ -129,6 +134,7 @@ class ApplicationAuditView(BaseModel):
     text_checked: int = Field(alias="textChecked", ge=0)
     text: tuple[ApplicationAuditText, ...]
     document_width: int = Field(alias="documentWidth", ge=0)
+    page_height: int = Field(default=APPLICATION_DESIGN_FOLD, alias="pageHeight", ge=1)
     clipped: tuple[str, ...]
     console: tuple[str, ...]
     above_fold_text: str = Field(alias="aboveFoldText")
@@ -162,6 +168,12 @@ class ApplicationAuditReport(BaseModel):
 
     url: str = ""
     floor: float = AA_BODY
+    design_height: int = Field(
+        default=APPLICATION_DESIGN_FOLD,
+        alias="designHeight",
+        ge=APPLICATION_DESIGN_FOLD,
+        le=APPLICATION_DESIGN_MAX_HEIGHT,
+    )
     design_regions: tuple[ApplicationAuditRegion, ...] = Field(
         default=(), alias="designRegions", max_length=20
     )
@@ -262,15 +274,34 @@ def _issue(
     )
 
 
+def application_first_screen_scale(page_height: int) -> float:
+    """Return the fraction of one measured page that spans its first 844 px screen.
+
+    A region's top and height are fractions of the whole page, so every vertical threshold is
+    written against the 844 px first screen and shrinks by this factor on a taller page. One
+    threshold then holds one pixel size at every page height the design gate accepts. Horizontal
+    thresholds stay unscaled because the page width is fixed: 305 px for the design lane and one
+    measured viewport width for an application view.
+    """
+
+    return APPLICATION_DESIGN_FOLD / page_height
+
+
 def application_region_relation(
     first: ApplicationAuditRegion,
     second: ApplicationAuditRegion,
+    page_height: int = APPLICATION_DESIGN_FOLD,
 ) -> tuple[Literal["horizontal", "vertical"], int] | None:
-    """Return the rendered separation axis and order for two regions."""
+    """Return the rendered separation axis and order for two regions of one measured page.
 
-    if first.top + first.height <= second.top + DESIGN_REGION_SEPARATION_SLOP:
+    Pass the height of the page the two regions were normalized against, so the near-touch
+    allowance stays one pixel gap instead of growing with the page.
+    """
+
+    vertical_slop = DESIGN_REGION_SEPARATION_SLOP * application_first_screen_scale(page_height)
+    if first.top + first.height <= second.top + vertical_slop:
         return ("vertical", -1)
-    if second.top + second.height <= first.top + DESIGN_REGION_SEPARATION_SLOP:
+    if second.top + second.height <= first.top + vertical_slop:
         return ("vertical", 1)
     if first.left + first.width <= second.left + DESIGN_REGION_SEPARATION_SLOP:
         return ("horizontal", -1)
@@ -281,14 +312,20 @@ def application_region_relation(
 
 def application_design_region_size_failure(
     regions: tuple[ApplicationAuditRegion, ...],
+    page_height: int = APPLICATION_DESIGN_FOLD,
 ) -> str | None:
-    """Return the first accepted design region that is too small to be a useful screen region."""
+    """Return the first accepted design region that is too small to be a useful screen region.
 
+    Region sizes are fractions of the whole design page, so the height and area floors are first
+    screen fractions that hold one pixel size at every accepted page height.
+    """
+
+    first_screen = application_first_screen_scale(page_height)
     for region in regions:
         if (
             region.width < APPLICATION_REGION_MIN_WIDTH
-            or region.height < APPLICATION_REGION_MIN_HEIGHT
-            or region.width * region.height < APPLICATION_REGION_MIN_AREA
+            or region.height < APPLICATION_REGION_MIN_HEIGHT * first_screen
+            or region.width * region.height < APPLICATION_REGION_MIN_AREA * first_screen
         ):
             return f"design region {region.name} is too small"
     return None
@@ -312,12 +349,16 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
     total = 1
     failures = []
     design_by_name = {region.name: region for region in design}
-    if size_failure := application_design_region_size_failure(design):
+    if size_failure := application_design_region_size_failure(design, report.design_height):
         return ApplicationDesignFidelity(passed=0, total=1, failures=(size_failure,))
     for first_index, first_name in enumerate(design_names):
         for second_name in design_names[first_index + 1 :]:
             if (
-                application_region_relation(design_by_name[first_name], design_by_name[second_name])
+                application_region_relation(
+                    design_by_name[first_name],
+                    design_by_name[second_name],
+                    report.design_height,
+                )
                 is None
             ):
                 return ApplicationDesignFidelity(
@@ -345,14 +386,17 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
         else:
             failures.append(f"{scheme} desktop region names differ")
         for name in design_names:
-            if (region := app_by_name.get(name)) is not None and region.above_fold:
+            region = app_by_name.get(name)
+            if region is not None and (not design_by_name[name].above_fold or region.above_fold):
                 passed += 1
             else:
                 failures.append(f"{scheme} desktop lacks visible {name}")
         for first_index, first_name in enumerate(design_names):
             for second_name in design_names[first_index + 1 :]:
                 expected = application_region_relation(
-                    design_by_name[first_name], design_by_name[second_name]
+                    design_by_name[first_name],
+                    design_by_name[second_name],
+                    report.design_height,
                 )
                 if expected is None:
                     continue
@@ -362,7 +406,7 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
                 if (
                     first is not None
                     and second is not None
-                    and application_region_relation(first, second) == expected
+                    and application_region_relation(first, second, view.page_height) == expected
                 ):
                     passed += 1
                 else:

@@ -36,6 +36,8 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    APPLICATION_DESIGN_FOLD,
+    APPLICATION_DESIGN_MAX_HEIGHT,
     DESIGN_REGION_MAX,
     DESIGN_REGION_MIN,
     AcceptedApplicationDesignEvidence,
@@ -102,8 +104,16 @@ APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS = 15
 APPLICATION_DESIGN_AUDIT_MAX_BYTES = 4_096
 APPLICATION_DESIGN_EVIDENCE_MAX_CHARS = 8_192
 APPLICATION_DESIGN_MAX_CHARS = 128_000
+APPLICATION_DESIGN_WIDTH = 305
 APPLICATION_SOURCE_MAX_CHARS = 256_000
 APPLICATION_SOURCE_EXCERPT_MAX_CHARS = 5_000
+APPLICATION_DESIGN_EFFECT_ERROR = (
+    "application design native bounds do not support clip, mask, or filter effects"
+)
+APPLICATION_DESIGN_EFFECT_STYLE = re.compile(
+    r"(?:^|[;{])\s*(?:-(?:moz|webkit)-)?(?:clip-path|filter|mask(?:-image)?)\s*:\s*([^;}]+)",
+    re.IGNORECASE,
+)
 SVG_DRAWING_ELEMENTS = frozenset(
     {"circle", "ellipse", "image", "line", "path", "polygon", "polyline", "rect", "text", "use"}
 )
@@ -716,9 +726,17 @@ class WriteApplicationSourceInput(BaseModel):
 
 
 class WriteApplicationDesignInput(BaseModel):
-    """One SVG visual contract for the application first screen."""
+    """One full-page SVG visual contract for the 305 px application lane."""
 
-    content: str = Field(min_length=1, max_length=APPLICATION_DESIGN_MAX_CHARS)
+    content: str = Field(
+        min_length=1,
+        max_length=APPLICATION_DESIGN_MAX_CHARS,
+        description=(
+            'Full-page SVG with viewBox="0 0 305 H", width="305", matching finite '
+            "content-driven height H, and the primary task and required facts above y=844. "
+            "Keep every visible drawing and text bound inside the viewBox."
+        ),
+    )
 
 
 class ReadApplicationSourceInput(BaseModel):
@@ -810,7 +828,7 @@ def _validate_application_source(source: str) -> None:
             )
 
 
-def _validate_application_design(source: str) -> tuple[str, ...]:
+def _validate_application_design(source: str) -> tuple[tuple[str, ...], int]:
     if "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
         raise ValueError("application design must not declare XML entities")
     try:
@@ -828,18 +846,39 @@ def _validate_application_design(source: str) -> tuple[str, ...]:
     if (
         len(view_box) != 4
         or not all(isfinite(value) for value in view_box)
-        or view_box[2] <= 0
-        or view_box[3] <= 0
+        or view_box[:3] != (0, 0, APPLICATION_DESIGN_WIDTH)
+        or not view_box[3].is_integer()
+        or not APPLICATION_DESIGN_FOLD <= view_box[3] <= APPLICATION_DESIGN_MAX_HEIGHT
+        or root.attrib.get("width") != str(APPLICATION_DESIGN_WIDTH)
+        or root.attrib.get("height") != str(round(view_box[3]))
     ):
-        raise ValueError("application design svg requires a viewBox")
+        raise ValueError(
+            'application design must use viewBox="0 0 305 H", width="305", and a matching '
+            "integer height H from 844 through 4096"
+        )
     regions = []
     ids = set()
     drawing_elements = 0
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1]
+        if tag.casefold() in {"clippath", "filter", "mask"}:
+            raise ValueError(APPLICATION_DESIGN_EFFECT_ERROR)
         attributes = {
             name.rsplit("}", 1)[-1]: value.strip() for name, value in element.attrib.items()
         }
+        if any(
+            name.casefold() in {"clip-path", "filter", "mask", "mask-image"}
+            and value.casefold() not in {"", "none"}
+            for name, value in attributes.items()
+        ) or any(
+            match.group(1).strip().casefold() != "none"
+            for value in (
+                attributes.get("style", ""),
+                "".join(element.itertext()) if tag == "style" else "",
+            )
+            for match in APPLICATION_DESIGN_EFFECT_STYLE.finditer(value)
+        ):
+            raise ValueError(APPLICATION_DESIGN_EFFECT_ERROR)
         match tag:
             case "circle":
                 visible = attributes.get("r", "") not in {"", "0", "0.0"}
@@ -902,7 +941,7 @@ def _validate_application_design(source: str) -> tuple[str, ...]:
         for descendant in region.iter()
     ):
         raise ValueError("application design regions must not be nested")
-    return names
+    return names, int(view_box[3])
 
 
 async def _build_application_project(
@@ -988,7 +1027,7 @@ async def _source_candidate_path(
 
 
 async def _render_application_design(
-    ctx: ToolContext, candidate_path: str, names: tuple[str, ...]
+    ctx: ToolContext, candidate_path: str, names: tuple[str, ...], page_height: int
 ) -> tuple[ApplicationAuditRegion, ...]:
     script_relative = f"tool-output/application-builder/{ctx.turn.id}/audit-application.cjs"
     script_path = await ctx.sandbox.runtime_path(script_relative)
@@ -1003,6 +1042,12 @@ async def _render_application_design(
         detail = (rendered.stderr or rendered.stdout or "audit returned no error").strip()[:400]
         if "application design must not contain active or external content" in detail:
             raise ValueError("application design must not contain active or external content")
+        overrun = re.search(
+            r"application design extends outside its viewBox: [^\n]+",
+            detail,
+        )
+        if overrun is not None:
+            raise ValueError(overrun.group(0))
         raise RuntimeError(f"Run the browser audit successfully: {detail}")
     if len(rendered.stdout.encode()) > APPLICATION_DESIGN_AUDIT_MAX_BYTES:
         raise RuntimeError("application design audit returned malformed output")
@@ -1019,7 +1064,7 @@ async def _render_application_design(
         raise ValueError(f"design has {len(regions)} unique visible named regions")
     for first_index, first in enumerate(regions):
         for second in regions[first_index + 1 :]:
-            if application_region_relation(first, second) is None:
+            if application_region_relation(first, second, page_height) is None:
                 raise ValueError(f"design regions {first.name} and {second.name} overlap")
     return regions
 
@@ -1069,7 +1114,7 @@ async def write_application_design(
     if ctx.idempotency_key is None:
         raise RuntimeError("write_application_design requires an idempotency key")
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
-    names = _validate_application_design(args.content)
+    names, page_height = _validate_application_design(args.content)
     design_path = _design_path(task)
     content = args.content.encode()
     content_sha256 = sha256(content).hexdigest()
@@ -1082,8 +1127,8 @@ async def write_application_design(
         application_design_acceptance_relative(design_path, ctx.turn.id)
     )
     await ctx.sandbox.write_runtime_path(candidate_path, content)
-    rendered_regions = await _render_application_design(ctx, candidate_path, names)
-    if size_failure := application_design_region_size_failure(rendered_regions):
+    rendered_regions = await _render_application_design(ctx, candidate_path, names, page_height)
+    if size_failure := application_design_region_size_failure(rendered_regions, page_height):
         raise ValueError(size_failure)
     evidence = AcceptedApplicationDesignEvidence(
         design_sha256=content_sha256,
@@ -1185,6 +1230,7 @@ async def write_application_design(
                         "path": design_path,
                         "design_digest": sha256(content).hexdigest(),
                         "size_bytes": len(content),
+                        "page_height": page_height,
                         "rendered_regions": [
                             {
                                 key: value
@@ -1748,9 +1794,11 @@ APPLICATION_PREVIEW = ToolDef(
 APPLICATION_BUILDER_DESIGN = ToolDef(
     name=APPLICATION_BUILDER_DESIGN_TOOL,
     description=(
-        "Write one complete SVG visual contract for the first laptop screen before app.tsx. "
-        "The SVG fixes information order, layout, component shapes, labels, and action placement; "
-        "it is not embedded in the application."
+        "Write one full-page SVG visual contract for a 305 px-wide app lane before app.tsx. "
+        'Use viewBox="0 0 305 H", width="305", and a matching finite content-driven height H. '
+        "Keep the primary task and required facts above y=844 and every visible bound inside the "
+        "viewBox. Do not design a laptop or desktop layout. The SVG fixes information order, "
+        "layout, component shapes, labels, and action placement; it is not embedded in the app."
     ),
     input_model=WriteApplicationDesignInput,
     handler=write_application_design,

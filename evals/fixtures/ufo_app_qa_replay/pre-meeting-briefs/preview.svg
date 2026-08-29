@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" width="1440" height="900">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" width="305" height="844">
   <defs>
     <style>
       .bg { fill: #fcfcfc; }
@@ -20,6 +20,8 @@
       .tag-fresh-text { fill: #2e7d32; font-family: Inter, system-ui, sans-serif; font-size: 11px; font-weight: 600; }
     </style>
   </defs>
+
+  <g transform="scale(0.21180555555555556 0.9377777777777778)">
 
   <!-- Background -->
   <rect width="1440" height="900" class="bg" />
@@ -148,5 +150,6 @@
     <!-- Note -->
     <text x="742" y="836" class="text-body-soft">Select any meeting tab to update context, points to raise, live issues, and copy tools.</text>
     <text x="742" y="854" class="text-code">Sources: Calendar • Gmail • Drive • GitHub</text>
+  </g>
   </g>
 </svg>

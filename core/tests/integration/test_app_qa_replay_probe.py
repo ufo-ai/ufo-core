@@ -23,8 +23,9 @@ from evals.suites.ufo_app_qa_replay import (
 pytestmark = pytest.mark.docker
 
 
-async def test_real_followup_probe_captures_one_initial_evidence_artifact(
-    tmp_path: Path, sandbox_image: str
+@pytest.mark.parametrize("fixture_index", range(len(FIXTURES)))
+async def test_real_followup_probe_captures_initial_evidence_artifact(
+    tmp_path: Path, sandbox_image: str, fixture_index: int
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
@@ -35,7 +36,7 @@ async def test_real_followup_probe_captures_one_initial_evidence_artifact(
     app.mkdir(parents=True)
     workspace.chmod(0o777)
     app.chmod(0o777)
-    fixture = FIXTURES[1]
+    fixture = FIXTURES[fixture_index]
     (app / "index.html").write_bytes(APPLICATION_INDEX)
     (app / "preview.html").write_bytes(APPLICATION_PREVIEW_SCAFFOLD)
     (app / "app.tsx").write_bytes(fixture.source)
@@ -62,7 +63,7 @@ async def test_real_followup_probe_captures_one_initial_evidence_artifact(
     evidence = tuple(
         artifact
         for artifact in captured.artifacts
-        if artifact.name == "issue-owner-initial-evidence.json"
+        if artifact.name == f"{fixture.name}-initial-evidence.json"
     )
     assert len(evidence) == 1
     replay = ReplayEvidence.model_validate_json(evidence[0].content)
@@ -75,7 +76,7 @@ async def test_real_followup_probe_captures_one_initial_evidence_artifact(
     )
     failed_output = replace(output, artifact_error=failed.error)
     followup = await _repair_followup(fixture)(failed_output)
-    verdict = await CASES[1].grader(failed_output)
+    verdict = await CASES[fixture_index].grader(failed_output)
 
     assert "No such container" in failed.error
     assert len(failed.error) <= len("app QA replay probe failed: ") + PROBE_ERROR_DETAIL_CHARS

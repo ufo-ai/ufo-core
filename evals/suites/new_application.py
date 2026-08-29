@@ -30,7 +30,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from ufo_ext_sites.application_audit import ApplicationAuditRegion, application_region_relation
+from ufo_ext_sites.application_audit import (
+    APPLICATION_DESIGN_FOLD,
+    APPLICATION_DESIGN_MAX_HEIGHT,
+    ApplicationAuditRegion,
+    application_region_relation,
+)
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DELEGATION,
     APPLICATION_BUILDER_DELEGATION_TOOL,
@@ -866,6 +871,9 @@ def _built_design_failure(
 
     try:
         payload = json.loads(design.result)
+        page_height = int(payload.get("page_height", APPLICATION_DESIGN_FOLD))
+        if not APPLICATION_DESIGN_FOLD <= page_height <= APPLICATION_DESIGN_MAX_HEIGHT:
+            raise ValueError("the design page height is outside the accepted range")
         rendered = tuple(
             ApplicationAuditRegion.model_validate(region) for region in payload["rendered_regions"]
         )
@@ -949,9 +957,11 @@ def _built_design_failure(
     )
     for first_index, first_region in enumerate(rendered):
         for second_index in range(first_index + 1, count):
-            actual_relation = application_region_relation(first_region, rendered[second_index])
+            actual_relation = application_region_relation(
+                first_region, rendered[second_index], page_height
+            )
             expected_relation = application_region_relation(
-                expected[first_index], expected[second_index]
+                expected[first_index], expected[second_index], APPLICATION_DESIGN_FOLD
             )
             if actual_relation != expected_relation:
                 return (

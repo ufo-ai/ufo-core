@@ -504,6 +504,78 @@ def test_style_divergence_regression_materializes_one_wording_difference(
     assert spec.reasoning is reference.reasoning is None
 
 
+def test_svg_geometry_wording_materializes_only_the_builder_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = Path(__file__).parents[3]
+    reference = load_experiment(repo / "evals/app-builder-secondary-text-contrast.toml")
+    spec = load_experiment(repo / "evals/app-builder-svg-geometry-wording.toml")
+    builder_path = "extensions/sites/ufo_ext_sites/application_builder.py"
+    prompt_path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
+    paths = (builder_path, prompt_path)
+    source = {path: (repo / path).read_text() for path in paths}
+    base = subprocess.run(
+        ("git", "-C", str(repo), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    arms = (
+        ArmSpec.model_construct(name="control", files={}, replacements=()),
+        spec.arm[0],
+    )
+    monkeypatch.setattr(Ablation, "_sync", lambda self, root: None)
+    _stub_egress_binary_copy(monkeypatch, repo)
+    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
+    roots: list[Path] = []
+    materialized: dict[str, dict[str, str]] = {}
+
+    try:
+        for arm in arms:
+            root = tmp_path / arm.name
+            roots.append(root)
+            ablation._materialize(arm, base, root, None)
+            changed = subprocess.run(
+                ("git", "-C", str(root), "diff", "--name-only"),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+            assert changed == ([] if arm.name == "control" else [prompt_path])
+            materialized[arm.name] = {path: (root / path).read_text() for path in paths}
+    finally:
+        for root in roots:
+            ablation._remove_worktree(root)
+
+    control = materialized["control"]
+    treatment = materialized["redundant-wording"]
+    assert control == source
+    assert treatment[builder_path] == control[builder_path]
+    assert treatment[prompt_path] != control[prompt_path]
+    replacement = spec.arm[0].replacements[0]
+    assert replacement.path == prompt_path
+    assert treatment[prompt_path].replace(replacement.new, replacement.old) == control[prompt_path]
+    for text in (
+        'viewBox="0 0 305 H"',
+        'width="305"',
+        "primary task and required facts above y=844",
+        "every visible drawing and text bound inside the viewBox",
+    ):
+        assert text in control[builder_path]
+    assert 'viewBox="0 0 305 H"' not in control[prompt_path]
+    assert 'viewBox="0 0 305 H"' in treatment[prompt_path]
+    assert "make at most one corrected design call" in control[prompt_path]
+    assert "make at most one corrected design call" in treatment[prompt_path]
+    assert spec.cases == reference.cases
+    assert spec.suites == reference.suites
+    assert spec.repeats == reference.repeats == 1
+    assert spec.concurrency == reference.concurrency == 3
+    assert spec.max_stacks == len(arms) == 2
+    assert spec.template == reference.template
+    assert spec.model is reference.model is None
+    assert spec.reasoning is reference.reasoning is None
+
+
 READER_REWRITES = {
     "pre-meeting-briefs": "Confirm the SSO date before the renewal call.",
     "meeting-tasks": "Create the agreed tasks and confirm their owners and dates.",
@@ -650,7 +722,11 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     assert "acceptedDesignUrl" not in source
     assert "document.querySelectorAll('[data-app-region]')" in source
     assert "}).slice(0, 20);" in source
-    assert "const report = { url, floor: AA_FLOOR, designRegions, views, interaction };" in source
+    assert (
+        "const report = { url, floor: AA_FLOOR, designHeight, designRegions, views, interaction };"
+        in source
+    )
+    assert "const designHeight = await acceptedDesignHeight(browser, acceptedDesignPath);" in source
     assert "acceptedDesignRegions(acceptedDesignPath, acceptedEvidencePath)" in source
     assert "fs.writeFileSync(staticPath, await frame.content())" in source
     assert "window.__ufoCalls || []" in source
@@ -885,7 +961,18 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         )
 
     def native(svg: bytes) -> bytes:
-        return svg.replace(b"<svg ", b'<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+        if b'viewBox="0 0 305 ' in svg:
+            return svg.replace(b"<svg ", b'<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+        opening_end = svg.index(b">")
+        nested = (
+            svg[:opening_end].replace(b"<svg ", b'<svg x="0" y="0" width="305" height="844" ', 1)
+            + b' preserveAspectRatio="none"'
+            + svg[opening_end:]
+        )
+        return (
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" '
+            b'width="305" height="844">' + nested + b"</svg>"
+        )
 
     def render(svg: bytes) -> list[dict[str, object]]:
         result = invoke(native(svg))
@@ -893,6 +980,35 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         value = loads(result.stdout)
         assert isinstance(value, list)
         return value
+
+    native_lane = render(
+        b'<svg viewBox="0 0 305 844" width="305" height="844">'
+        b'<g data-app-region="queue"><rect width="305" height="420" /></g>'
+        b'<g data-app-region="detail"><rect y="424" width="305" height="420" /></g></svg>'
+    )
+    assert [region["name"] for region in native_lane] == ["queue", "detail"]
+
+    right_overrun = invoke(
+        native(
+            b'<svg viewBox="0 0 305 844" width="305" height="844">'
+            b'<g data-app-region="queue"><text x="300" y="40">Queue overflow</text></g>'
+            b'<g data-app-region="detail"><rect y="80" width="305" height="764" /></g></svg>'
+        )
+    )
+    assert right_overrun.returncode != 0
+    assert (
+        'region=queue tag=text text="Queue overflow" edge=right overflow=' in right_overrun.stderr
+    )
+
+    bottom_overrun = invoke(
+        native(
+            b'<svg viewBox="0 0 305 844" width="305" height="844">'
+            b'<g data-app-region="queue"><rect width="305" height="800" /></g>'
+            b'<g data-app-region="detail"><rect y="820" width="305" height="40" /></g></svg>'
+        )
+    )
+    assert bottom_overrun.returncode != 0
+    assert "region=detail tag=rect edge=bottom overflow=16px" in bottom_overrun.stderr
 
     transformed = render(
         b'<svg viewBox="0 0 1280 800">'
@@ -1621,16 +1737,16 @@ async def test_measured_screen_scorer_fails_an_unmeasured_view_and_a_wide_docume
     grader = shared_artifact_scorer(".json", _measured_screen)
 
     partial = loads(_measured())
-    partial["views"] = [view for view in partial["views"] if view["width"] != 390]
+    partial["views"] = [view for view in partial["views"] if view["width"] != 305]
     short = await grader(_output("audit.json", dumps(partial).encode()))
     assert not short.passed
-    assert "measures no light at 390px, dark at 390px" in short.reason
+    assert "measures no light at 305px, dark at 305px" in short.reason
 
     narrow = loads(_measured())
     narrow["views"][2]["documentWidth"] = 402
     overflowing = await grader(_output("audit.json", dumps(narrow).encode()))
     assert not overflowing.passed
-    assert "390px document is 402px" in overflowing.reason
+    assert "305px document is 402px" in overflowing.reason
 
     tall = loads(_measured())
     tall["views"][0]["documentHeight"] = DESKTOP_HEIGHT + 500
@@ -1875,6 +1991,111 @@ async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
     certified = await _application_builder_scorer()(self_certified)
     assert not certified.passed
     assert "certify its own homepage" in certified.reason
+
+
+def _design_index(output: CapabilityOutput) -> int:
+    return next(
+        index
+        for index, call in enumerate(output.calls)
+        if call.name == APPLICATION_BUILDER_DESIGN_TOOL
+    )
+
+
+def _rejected_design_call() -> ToolInvocation:
+    return ToolInvocation(
+        APPLICATION_BUILDER_DESIGN_TOOL,
+        {"content": "<svg viewBox='0 0 1440 900' />"},
+        "design viewBox must be '0 0 305 H'",
+        has_result=True,
+        is_error=True,
+    )
+
+
+async def test_ufo_app_bench_accepts_a_corrected_design_after_a_rejection() -> None:
+    base = _built_screen({})
+    design = _design_index(base)
+    corrected = replace(
+        base,
+        calls=(*base.calls[:design], _rejected_design_call(), *base.calls[design:]),
+    )
+
+    verdict = await _application_builder_scorer()(corrected)
+
+    assert verdict.passed, verdict.reason
+
+
+async def test_ufo_app_bench_rejects_more_than_one_design_correction() -> None:
+    base = _built_screen({})
+    design = _design_index(base)
+    repeated = replace(
+        base,
+        calls=(
+            *base.calls[:design],
+            _rejected_design_call(),
+            _rejected_design_call(),
+            *base.calls[design:],
+        ),
+    )
+
+    verdict = await _application_builder_scorer()(repeated)
+
+    assert not verdict.passed
+    assert verdict.reason == "the worker must write one accepted SVG design before app.tsx"
+
+
+async def test_ufo_app_bench_rejects_a_design_call_after_acceptance() -> None:
+    base = _built_screen({})
+    design = _design_index(base)
+    repeated = replace(
+        base,
+        calls=(
+            *base.calls[: design + 1],
+            _rejected_design_call(),
+            *base.calls[design + 1 :],
+        ),
+    )
+
+    verdict = await _application_builder_scorer()(repeated)
+
+    assert not verdict.passed
+    assert verdict.reason == "the worker must write one accepted SVG design before app.tsx"
+
+
+async def test_ufo_app_bench_requires_one_accepted_design_before_the_app_source() -> None:
+    base = _built_screen({})
+    design = _design_index(base)
+    unaccepted = replace(
+        base,
+        calls=(
+            *base.calls[:design],
+            replace(base.calls[design], result="design height must be finite", is_error=True),
+            *base.calls[design + 1 :],
+        ),
+    )
+    source_first = replace(
+        base,
+        calls=(
+            *base.calls[:design],
+            base.calls[design + 1],
+            base.calls[design],
+            *base.calls[design + 2 :],
+        ),
+    )
+    redesigned = replace(
+        base,
+        calls=(*base.calls[: design + 1], base.calls[design], *base.calls[design + 1 :]),
+    )
+
+    refused = await _application_builder_scorer()(unaccepted)
+    reordered = await _application_builder_scorer()(source_first)
+    repeated = await _application_builder_scorer()(redesigned)
+
+    assert not refused.passed
+    assert APPLICATION_BUILDER_DESIGN_TOOL in refused.reason
+    assert not reordered.passed
+    assert reordered.reason == "the worker must write one accepted SVG design before app.tsx"
+    assert not repeated.passed
+    assert repeated.reason == "the worker must write one accepted SVG design before app.tsx"
 
 
 async def test_ufo_app_bench_rejects_parent_user_input() -> None:

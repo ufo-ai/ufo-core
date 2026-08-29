@@ -26,12 +26,14 @@ def test_dense_cjk_design_text_is_bounded_in_six_real_regions(
     dense = "会議準備顧客情報" * 20
     rows = "".join(
         f'<g data-app-region="region-{index}">'
-        f'<text x="8" y="{80 + index * 120}" font-size="32">{dense}</text>'
+        f'<text x="8" y="{80 + index * 120}" font-size="32" '
+        f'textLength="289" lengthAdjust="spacingAndGlyphs">{dense}</text>'
         "</g>"
         for index in range(6)
     )
     (tmp_path / "design.svg").write_text(
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800">{rows}</svg>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" '
+        f'width="305" height="844">{rows}</svg>'
     )
     tmp_path.chmod(CONTAINER_FIXTURE_MODE)
 

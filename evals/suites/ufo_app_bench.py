@@ -1825,6 +1825,7 @@ def _application_builder_scorer() -> Grader:
             for index, call in enumerate(output.calls)
             if call.name == APPLICATION_BUILDER_DESIGN_TOOL
         )
+        accepted_designs = tuple(index for index in design_calls if output.calls[index].succeeded)
         source_writes = tuple(
             index
             for index, call in enumerate(output.calls)
@@ -1836,10 +1837,15 @@ def _application_builder_scorer() -> Grader:
                 f"the worker did not call {APPLICATION_BUILDER_WRITE_TOOL}",
                 failed,
             )
-        if len(design_calls) != 1 or design_calls[0] > source_writes[0]:
+        if (
+            len(design_calls) not in {1, 2}
+            or len(accepted_designs) != 1
+            or accepted_designs[0] != design_calls[-1]
+            or accepted_designs[0] >= source_writes[0]
+        ):
             return CapabilityVerdict(
                 False,
-                "the worker must write one SVG design before app.tsx",
+                "the worker must write one accepted SVG design before app.tsx",
                 failed,
             )
         if any(call.call == HOMEPAGE_ACTION for call in output.calls):

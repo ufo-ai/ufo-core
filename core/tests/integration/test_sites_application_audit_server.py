@@ -237,9 +237,9 @@ def test_root_cli_writes_ordered_outputs_and_closes_on_success_and_failure(
     (app / "app.webmanifest").write_text('{"name":"Audit fixture"}')
     (dist / "assets" / "app.css").write_text("body{color:#111;background:#fff}")
     design = (
-        b'<svg viewBox="0 0 1280 800">'
-        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
-        b'<g data-app-region="detail"><rect x="680" width="600" height="800" /></g>'
+        b'<svg viewBox="0 0 305 844" width="305" height="844">'
+        b'<g data-app-region="queue"><rect width="145" height="844" /></g>'
+        b'<g data-app-region="detail"><rect x="160" width="145" height="844" /></g>'
         b"</svg>"
     )
     (tmp_path / "accepted-design.svg").write_bytes(design)
@@ -247,12 +247,12 @@ def test_root_cli_writes_ordered_outputs_and_closes_on_success_and_failure(
         "version": 1,
         "design_sha256": hashlib.sha256(design).hexdigest(),
         "regions": [
-            {"name": "queue", "left": 0, "top": 0, "width": 0.46875, "height": 1},
+            {"name": "queue", "left": 0, "top": 0, "width": 145 / 305, "height": 1},
             {
                 "name": "detail",
-                "left": 0.53125,
+                "left": 160 / 305,
                 "top": 0,
-                "width": 0.46875,
+                "width": 145 / 305,
                 "height": 1,
             },
         ],
@@ -346,8 +346,8 @@ fi
     assert [(view["scheme"], view["width"]) for view in report["views"]] == [
         ("light", 1440),
         ("dark", 1440),
-        ("light", 390),
-        ("dark", 390),
+        ("light", 305),
+        ("dark", 305),
     ]
     assert report["designRegions"] == evidence["regions"]
     assert [control["name"] for control in report["interaction"]["controls"]] == [

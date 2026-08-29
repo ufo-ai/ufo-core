@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" width="1440" height="900">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" width="305" height="844">
   <defs>
     <style>
       .bg { fill: #f9f9f9; }
@@ -20,6 +20,8 @@
       .btn-text-dark { font-family: Inter, sans-serif; font-size: 13px; font-weight: 500; fill: #1f2937; text-anchor: middle; }
     </style>
   </defs>
+
+  <g transform="scale(0.21180555555555556 0.9377777777777778)">
 
   <!-- Background -->
   <rect class="bg" width="1440" height="900"/>
@@ -129,5 +131,6 @@
       <text class="text-muted" x="180" y="165">Areas: frontend, design systems</text>
       <text class="text-body" font-weight="600" x="420" y="165">6 issues</text>
     </g>
+  </g>
   </g>
 </svg>

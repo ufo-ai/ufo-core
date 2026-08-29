@@ -28,12 +28,15 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    APPLICATION_DESIGN_FOLD,
+    APPLICATION_DESIGN_MAX_HEIGHT,
     APPLICATION_REGION_MIN_AREA,
     APPLICATION_REGION_MIN_HEIGHT,
     APPLICATION_REGION_MIN_WIDTH,
     DESIGN_VISIBLE_TEXT_MAX_CHARS,
     KIT_QUIET_TEXT_MIN,
     MAX_PRODUCT_QA_CONTROLS,
+    NARROW_WIDTH,
     AcceptedApplicationDesignEvidence,
     ApplicationAuditContract,
     ApplicationAuditFact,
@@ -43,6 +46,7 @@ from ufo_ext_sites.application_audit import (
     ApplicationDesignFidelity,
     ApplicationQaProof,
     application_design_fidelity,
+    application_design_region_size_failure,
     application_region_relation,
     audit_application,
 )
@@ -225,9 +229,9 @@ HOUSE_STYLE = "ufo-style"
 HOUSE_STYLE_TOKENS = "references/tokens.css"
 PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
 APPLICATION_QA_GUIDANCE = "shared/13-ufo-application-qa.md"
-APPLICATION_DESIGN = """<svg viewBox="0 0 1440 900">
-<g data-app-region="queue"><rect width="900" height="900" /></g>
-<g data-app-region="detail"><rect x="900" width="540" height="900" /></g>
+APPLICATION_DESIGN = """<svg viewBox="0 0 305 844" width="305" height="844">
+<g data-app-region="queue"><rect width="183" height="844" /></g>
+<g data-app-region="detail"><rect x="183" width="122" height="844" /></g>
 </svg>"""
 AUDIT_DESIGN_REGIONS = (
     {
@@ -907,7 +911,7 @@ def test_application_audit_accepts_measured_interactive_facts() -> None:
                     "aboveFoldText": "Acme renewal Aug 27 #2042",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -1043,7 +1047,7 @@ def test_application_design_fidelity_compares_only_the_separating_axis() -> None
                     "aboveFoldText": "Queue",
                     "regions": app_regions,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {"controls": [], "successes": [], "console": []},
@@ -1054,6 +1058,64 @@ def test_application_design_fidelity_compares_only_the_separating_axis() -> None
 
     assert fidelity.failures == ()
     assert fidelity.passed == fidelity.total
+
+
+def test_application_design_fidelity_preserves_design_fold_placement() -> None:
+    design_regions = (
+        {
+            "name": "summary",
+            "left": 0.05,
+            "top": 0.05,
+            "width": 0.9,
+            "height": 0.4,
+            "aboveFold": True,
+        },
+        {
+            "name": "details",
+            "left": 0.05,
+            "top": 0.55,
+            "width": 0.9,
+            "height": 0.4,
+            "aboveFold": False,
+        },
+    )
+
+    def report(summary_above_fold: bool) -> ApplicationAuditReport:
+        app_regions = (
+            {**design_regions[0], "aboveFold": summary_above_fold},
+            design_regions[1],
+        )
+        return ApplicationAuditReport.model_validate(
+            {
+                "designRegions": design_regions,
+                "views": [
+                    {
+                        "scheme": scheme,
+                        "width": width,
+                        "textChecked": 1,
+                        "text": [],
+                        "documentWidth": width,
+                        "clipped": [],
+                        "console": [],
+                        "aboveFoldText": "Summary",
+                        "regions": app_regions,
+                    }
+                    for width in (1440, 305)
+                    for scheme in ("light", "dark")
+                ],
+                "interaction": {"controls": [], "successes": [], "console": []},
+            }
+        )
+
+    accepted = application_design_fidelity(report(summary_above_fold=True))
+    rejected = application_design_fidelity(report(summary_above_fold=False))
+
+    assert accepted.failures == ()
+    assert accepted.passed == accepted.total
+    assert rejected.failures == (
+        "light desktop lacks visible summary",
+        "dark desktop lacks visible summary",
+    )
 
 
 def test_application_design_fidelity_rejects_overlapping_regions() -> None:
@@ -1090,7 +1152,7 @@ def test_application_design_fidelity_rejects_overlapping_regions() -> None:
                     "aboveFoldText": "Queue",
                     "regions": regions,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {"controls": [], "successes": [], "console": []},
@@ -1232,6 +1294,161 @@ def test_application_design_fidelity_does_not_size_dom_regions() -> None:
     assert fidelity.passed == fidelity.total
 
 
+def test_application_design_fidelity_sizes_regions_against_the_design_page() -> None:
+    design_regions = (
+        {
+            "name": "queue",
+            "left": 0.05,
+            "top": 0.0,
+            "width": 0.9,
+            "height": 80 / APPLICATION_DESIGN_MAX_HEIGHT,
+        },
+        {"name": "detail", "left": 0.05, "top": 0.1, "width": 0.9, "height": 0.8},
+    )
+    report = ApplicationAuditReport.model_validate(
+        {
+            "designHeight": APPLICATION_DESIGN_MAX_HEIGHT,
+            "designRegions": design_regions,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": 1440,
+                    "textChecked": 1,
+                    "text": [],
+                    "documentWidth": 1440,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Queue",
+                    "regions": design_regions,
+                }
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {"controls": [], "successes": [], "console": []},
+        }
+    )
+
+    assert application_design_fidelity(report).failures == ()
+
+
+def test_application_design_region_floors_hold_one_pixel_size_at_every_page_height() -> None:
+    def band(page_height: int, pixels: int) -> ApplicationAuditRegion:
+        return ApplicationAuditRegion(
+            name="queue", left=0.05, top=0.0, width=0.9, height=pixels / page_height
+        )
+
+    assert application_design_region_size_failure((band(APPLICATION_DESIGN_FOLD, 80),)) is None
+    assert (
+        application_design_region_size_failure(
+            (band(APPLICATION_DESIGN_MAX_HEIGHT, 80),), APPLICATION_DESIGN_MAX_HEIGHT
+        )
+        is None
+    )
+    assert (
+        application_design_region_size_failure((band(APPLICATION_DESIGN_FOLD, 20),))
+        == "design region queue is too small"
+    )
+    assert (
+        application_design_region_size_failure(
+            (band(APPLICATION_DESIGN_MAX_HEIGHT, 20),), APPLICATION_DESIGN_MAX_HEIGHT
+        )
+        == "design region queue is too small"
+    )
+
+
+def _side_by_side_bands(page_height: int) -> tuple[dict[str, object], ...]:
+    """Two 60 px bands 100 px down one page, side by side in the 305 px lane."""
+    return tuple(
+        {
+            "name": name,
+            "left": left,
+            "top": 100 / page_height,
+            "width": 0.4,
+            "height": 60 / page_height,
+            "aboveFold": True,
+        }
+        for name, left in (("stats", 0.05), ("filters", 0.55))
+    )
+
+
+def _side_by_side_report(design_height: int, application_height: int) -> ApplicationAuditReport:
+    return ApplicationAuditReport.model_validate(
+        {
+            "designHeight": design_height,
+            "designRegions": _side_by_side_bands(design_height),
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 4,
+                    "text": [],
+                    "documentWidth": width,
+                    "pageHeight": application_height,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Stats",
+                    "regions": _side_by_side_bands(application_height),
+                }
+                for width in (1440, 305)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {
+                "controls": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "successes": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "states": [["Stats"]],
+                "console": [],
+            },
+        }
+    )
+
+
+def test_application_design_keeps_side_by_side_bands_horizontal_on_a_tall_design_page() -> None:
+    tall_page = 3_000
+    stats, filters = (
+        ApplicationAuditRegion.model_validate(region) for region in _side_by_side_bands(tall_page)
+    )
+
+    assert application_region_relation(stats, filters, tall_page) == ("horizontal", -1)
+    report = _side_by_side_report(tall_page, 900)
+    fidelity = application_design_fidelity(report)
+    assert fidelity.failures == ()
+    assert fidelity.passed == fidelity.total
+    assert "design" not in {issue.code for issue in audit_application(report).issues}
+
+
+def test_application_design_keeps_side_by_side_bands_horizontal_on_a_tall_application_page() -> (
+    None
+):
+    tall_page = 3_000
+    stats, filters = (
+        ApplicationAuditRegion.model_validate(region) for region in _side_by_side_bands(tall_page)
+    )
+
+    assert application_region_relation(stats, filters, tall_page) == ("horizontal", -1)
+    report = _side_by_side_report(APPLICATION_DESIGN_FOLD, tall_page)
+    assert report.views[0].page_height == tall_page
+    fidelity = application_design_fidelity(report)
+    assert fidelity.failures == ()
+    assert fidelity.passed == fidelity.total
+    assert "design" not in {issue.code for issue in audit_application(report).issues}
+
+
+def test_application_audit_reports_the_page_height_regions_divide_by() -> None:
+    source = APPLICATION_AUDIT_SCRIPT.decode()
+
+    assert "const pageHeight = Math.max(document.documentElement.scrollHeight, " in source
+    assert (
+        "    const top = Math.max(0, Math.min(1, (box.top + window.scrollY) / pageHeight));"
+        in source
+    )
+    assert "    viewportHeight: window.innerHeight,\n    pageHeight,\n" in source
+
+
 def test_application_audit_runs_views_in_parallel_in_declared_order() -> None:
     source = APPLICATION_AUDIT_SCRIPT.decode()
 
@@ -1278,7 +1495,7 @@ def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
                     "aboveFoldText": "Acme renewal",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -1341,7 +1558,7 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
                         "aboveFoldText": "#2042",
                         "regions": AUDIT_DESIGN_REGIONS,
                     }
-                    for width in (1440, 390)
+                    for width in (1440, 305)
                     for scheme in ("light", "dark")
                 ],
                 "designRegions": AUDIT_DESIGN_REGIONS,
@@ -1397,9 +1614,9 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
         'Fix text contrast: light 1440px "Needs review" at span.muted '
         "rgb(120, 120, 120) on rgb(255, 255, 255) is 3.2:1; needs 4.5:1; "
         'dark 1440px "Needs review" at span.muted rgb(120, 120, 120) on '
-        'rgb(255, 255, 255) is 3.2:1; needs 4.5:1; light 390px "Needs review" '
+        'rgb(255, 255, 255) is 3.2:1; needs 4.5:1; light 305px "Needs review" '
         "at span.muted rgb(120, 120, 120) on rgb(255, 255, 255) is 3.2:1; needs 4.5:1; "
-        'dark 390px "Needs review" at span.muted rgb(120, 120, 120) on '
+        'dark 305px "Needs review" at span.muted rgb(120, 120, 120) on '
         "rgb(255, 255, 255) is 3.2:1; needs 4.5:1."
     )
     assert store.values[key] == 1
@@ -2742,7 +2959,10 @@ def test_application_product_audit_has_no_design_http_pass() -> None:
     assert "acceptedDesignUrl" not in source
     assert "acceptedDesignRegions(acceptedDesignPath, acceptedEvidencePath)" in source
     assert "design-url" not in source
-    assert "const report = { url, floor: AA_FLOOR, designRegions, views, interaction };" in source
+    assert (
+        "const report = { url, floor: AA_FLOOR, designHeight, designRegions, views, interaction };"
+        in source
+    )
 
 
 def test_application_page_builds_with_relative_asset_urls() -> None:
@@ -2947,7 +3167,7 @@ async def test_application_product_qa_owns_the_fixed_root_and_records_passed_pro
                     "aboveFoldText": "#2042",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -3000,7 +3220,7 @@ async def test_application_product_qa_owns_the_fixed_root_and_records_passed_pro
     payload = json.loads(result.content[0].text)
     assert payload == {
         "status": "passed",
-        "views_checked": ["light 1440px", "dark 1440px", "light 390px", "dark 390px"],
+        "views_checked": ["light 1440px", "dark 1440px", "light 305px", "dark 305px"],
         "controls_checked": ["First", "Second"],
         "interactions_verified": ["First", "Second"],
     }
@@ -3050,7 +3270,7 @@ async def test_application_product_qa_bounds_dense_control_evidence_before_proof
                     "aboveFoldText": "Dense controls",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -3259,6 +3479,7 @@ async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) 
         "path": "/workspace/application/application-design.svg",
         "design_digest": sha256(APPLICATION_DESIGN.encode()).hexdigest(),
         "size_bytes": len(APPLICATION_DESIGN.encode()),
+        "page_height": APPLICATION_DESIGN_FOLD,
         "rendered_regions": list(AUDIT_DESIGN_REGIONS),
     }
     assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
@@ -3276,7 +3497,8 @@ async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) 
         await write_application_design(
             ctx,
             WriteApplicationDesignInput(
-                content='<svg viewBox="0 0 1 1"><script>fetch("https://bad")</script></svg>',
+                content='<svg viewBox="0 0 305 844" width="305" height="844">'
+                '<script>fetch("https://bad")</script></svg>',
             ),
         )
     for invalid in (
@@ -3299,7 +3521,8 @@ async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) 
         await write_application_design(
             ctx,
             WriteApplicationDesignInput(
-                content='<svg viewBox="0 0 1 1"><rect width="1" height="1" /></svg>',
+                content='<svg viewBox="0 0 305 844" width="305" height="844">'
+                '<rect width="305" height="844" /></svg>',
             ),
         )
 
@@ -3492,7 +3715,7 @@ async def test_write_application_design_recovers_each_partial_pair_and_passes_qa
                     "aboveFoldText": "Queue",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -4163,7 +4386,7 @@ async def test_application_builder_rejects_overlap_before_fixing_design(tmp_path
         ),
     )
     ctx = _application_design_context(ctx)
-    overlap = APPLICATION_DESIGN.replace('x="900"', 'x="800"')
+    overlap = APPLICATION_DESIGN.replace('x="183"', 'x="170"')
     corrected = APPLICATION_DESIGN
     sandbox.design_audit = ExecResult(
         json.dumps(
@@ -4206,7 +4429,7 @@ async def test_application_builder_rejects_overlap_before_fixing_design(tmp_path
                     "aboveFoldText": "Queue",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -4299,6 +4522,66 @@ async def test_application_builder_rejects_small_region_before_acceptance(tmp_pa
     assert sandbox.programs == []
 
 
+async def test_application_builder_accepts_a_compact_band_on_a_tall_page(tmp_path: Path) -> None:
+    page_height = APPLICATION_DESIGN_MAX_HEIGHT
+    band_height = 80
+    design = (
+        f'<svg viewBox="0 0 305 {page_height}" width="305" height="{page_height}">'
+        f'<g data-app-region="queue"><rect width="305" height="{band_height}" /></g>'
+        f'<g data-app-region="detail"><rect y="{band_height + 16}" width="305" '
+        f'height="{page_height - band_height - 16}" /></g>'
+        "</svg>"
+    )
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = _application_design_context(
+        replace(
+            base,
+            turn=base.turn.model_copy(
+                update={
+                    "inbound": task.model_dump_json(),
+                    "subagent_profile": APPLICATION_BUILDER_NAME,
+                }
+            ),
+        )
+    )
+    sandbox.design_audit = ExecResult(
+        json.dumps(
+            (
+                {
+                    "name": "queue",
+                    "left": 0.0,
+                    "top": 0.0,
+                    "width": 1.0,
+                    "height": band_height / page_height,
+                    "aboveFold": True,
+                },
+                {
+                    "name": "detail",
+                    "left": 0.0,
+                    "top": (band_height + 16) / page_height,
+                    "width": 1.0,
+                    "height": (page_height - band_height - 16) / page_height,
+                    "aboveFold": True,
+                },
+            )
+        ),
+        "",
+        0,
+    )
+
+    result = await write_application_design(ctx, WriteApplicationDesignInput(content=design))
+
+    payload = json.loads(result.content[0].text)
+    assert payload["design_digest"] == sha256(design.encode()).hexdigest()
+    assert sandbox.writes[payload["path"]] == design.encode()
+
+
 @pytest.mark.parametrize(
     ("failed_audit", "error_type", "message"),
     (
@@ -4360,13 +4643,117 @@ async def test_application_builder_design_audit_failure_leaves_design_repairable
     assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
 
 
+async def test_application_builder_accepts_one_corrected_native_design(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    sandbox = FakeSandbox(
+        design_audit=ExecResult(
+            "",
+            "Error: application design extends outside its viewBox: region=queue tag=text "
+            'text="Queue" edge=right overflow=12px',
+            1,
+        ),
+        track_design_claim=True,
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = _application_design_context(
+        replace(
+            base,
+            turn=base.turn.model_copy(
+                update={
+                    "inbound": task.model_dump_json(),
+                    "subagent_profile": APPLICATION_BUILDER_NAME,
+                }
+            ),
+        )
+    )
+
+    with pytest.raises(ValueError, match=r"region=queue.*edge=right.*overflow=12px"):
+        await write_application_design(
+            ctx,
+            WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+        )
+
+    sandbox.design_audit = ExecResult(json.dumps(AUDIT_DESIGN_REGIONS), "", 0)
+    corrected = replace(
+        ctx,
+        idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-2",
+    )
+    result = await write_application_design(
+        corrected,
+        WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert payload["design_digest"] == sha256(APPLICATION_DESIGN.encode()).hexdigest()
+    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+
+
+@pytest.mark.parametrize(
+    "effect",
+    (
+        '<clipPath id="crop"><rect width="20" height="20" /></clipPath>',
+        '<mask id="fade"><rect width="20" height="20" /></mask>',
+        '<filter id="blur"><feGaussianBlur stdDeviation="2" /></filter>',
+        "<style>.queue { clip-path: inset(1px); }</style>",
+    ),
+)
+async def test_application_builder_rejects_svg_effect_before_one_correction(
+    tmp_path: Path, effect: str
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = _application_design_context(
+        replace(
+            base,
+            turn=base.turn.model_copy(
+                update={
+                    "inbound": task.model_dump_json(),
+                    "subagent_profile": APPLICATION_BUILDER_NAME,
+                }
+            ),
+        )
+    )
+    design = APPLICATION_DESIGN.replace("</svg>", f"{effect}</svg>")
+
+    with pytest.raises(
+        ValueError,
+        match="native bounds do not support clip, mask, or filter effects",
+    ):
+        await write_application_design(ctx, WriteApplicationDesignInput(content=design))
+
+    assert sandbox.shells == []
+    assert sandbox.programs == []
+    assert sandbox.workspace_writes == []
+    corrected = replace(
+        ctx,
+        idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-2",
+    )
+    result = await write_application_design(
+        corrected,
+        WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert payload["design_digest"] == sha256(APPLICATION_DESIGN.encode()).hexdigest()
+    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+
+
 def test_application_builder_design_uses_rendered_region_contract() -> None:
-    names = _validate_application_design(
-        '<svg viewBox="0 0 1280 800">'
-        '<g transform="translate(680 0)"><g data-app-region="detail">'
+    names, page_height = _validate_application_design(
+        '<svg viewBox="0 0 305 844" width="305" height="844">'
+        '<g transform="translate(183 0)"><g data-app-region="detail">'
         '<text y="100">Detail</text></g></g>'
         '<g data-app-region="queue"><use href="#card" /></g>'
-        '<defs><symbol id="card"><path d="M0 0H600V800H0Z" /></symbol></defs>'
+        '<defs><symbol id="card"><path d="M0 0H122V844H0Z" /></symbol></defs>'
         "</svg>"
     )
     first = ApplicationAuditRegion(name="queue", left=0, top=0, width=0.6, height=1, aboveFold=True)
@@ -4376,18 +4763,38 @@ def test_application_builder_design_uses_rendered_region_contract() -> None:
     beyond_slop = within_slop.model_copy(update={"left": 0.579})
 
     assert names == ("detail", "queue")
+    assert page_height == APPLICATION_DESIGN_FOLD
     assert application_region_relation(first, within_slop) == ("horizontal", -1)
     assert application_region_relation(first, beyond_slop) is None
     with pytest.raises(ValueError, match="active or external content"):
         _validate_application_design(
-            '<svg viewBox="0 0 1280 800">'
+            '<svg viewBox="0 0 305 844" width="305" height="844">'
             '<g data-app-region="queue"><image href="https://example.com/a.png" '
-            'width="600" height="800" /></g>'
-            '<g data-app-region="detail"><rect x="680" width="600" height="800" /></g>'
+            'width="183" height="844" /></g>'
+            '<g data-app-region="detail"><rect x="183" width="122" height="844" /></g>'
             "</svg>"
         )
     source = APPLICATION_AUDIT_SCRIPT.decode()
     assert "await context.route(/^https?:/" in source
+
+
+def test_application_builder_design_requires_the_native_lane() -> None:
+    with pytest.raises(ValueError, match='viewBox="0 0 305 H"'):
+        _validate_application_design(
+            '<svg viewBox="0 0 1280 800" width="1280" height="800">'
+            '<g data-app-region="queue"><rect width="640" height="800" /></g>'
+            '<g data-app-region="detail"><rect x="640" width="640" height="800" /></g>'
+            "</svg>"
+        )
+
+    assert _validate_application_design(APPLICATION_DESIGN) == (("queue", "detail"), 844)
+
+
+def test_ufo_style_uses_the_application_audit_narrow_width() -> None:
+    skill = (Path(__file__).parents[3] / "core/src/ufo/skills/ufo-style/SKILL.md").read_text()
+
+    assert f"narrow width checked at {NARROW_WIDTH}px" in skill
+    assert "narrow width checked at 390px" not in skill
 
 
 async def test_application_builder_design_is_isolated_per_build_turn(tmp_path: Path) -> None:
@@ -4421,13 +4828,13 @@ async def test_application_builder_design_is_isolated_per_build_turn(tmp_path: P
     await write_application_design(
         second,
         WriteApplicationDesignInput(
-            content=APPLICATION_DESIGN.replace("900", "800"),
+            content=APPLICATION_DESIGN.replace("183", "170"),
         ),
     )
 
     claims = [args[4] for program, args in sandbox.programs if program == APPLICATION_DESIGN_ACCEPT]
     assert len(set(claims)) == 2
-    assert b"800" in sandbox.writes["/workspace/application/application-design.svg"]
+    assert b"170" in sandbox.writes["/workspace/application/application-design.svg"]
 
 
 async def test_application_builder_same_turn_accepts_the_candidate_it_audited(
@@ -4439,7 +4846,7 @@ async def test_application_builder_same_turn_accepts_the_candidate_it_audited(
         source_path="/workspace/application/app.tsx",
     )
     first_design = APPLICATION_DESIGN
-    second_design = APPLICATION_DESIGN.replace("900", "800")
+    second_design = APPLICATION_DESIGN.replace("183", "170")
     sandbox = FakeSandbox(
         track_design_claim=True,
         design_audit_barrier=asyncio.Barrier(2),
@@ -4496,7 +4903,7 @@ async def test_application_audit_uses_durable_turn_evidence_without_requesting_t
         source_path=f"{APPLICATION_SCAFFOLD_PATH}/app.tsx",
     )
     first_design = APPLICATION_DESIGN
-    second_design = APPLICATION_DESIGN.replace("900", "800")
+    second_design = APPLICATION_DESIGN.replace("183", "170")
     first_regions = tuple(
         ApplicationAuditRegion.model_validate(region) for region in AUDIT_DESIGN_REGIONS
     )
@@ -4515,7 +4922,7 @@ async def test_application_audit_uses_durable_turn_evidence_without_requesting_t
                     "aboveFoldText": "Queue",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 390)
+                for width in (1440, 305)
                 for scheme in ("light", "dark")
             ],
             "interaction": {

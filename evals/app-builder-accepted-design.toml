@@ -48,7 +48,8 @@ name = "generic-region-marks"
 
 [[arm.replacements]]
 path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
-old = '''Mark one region per accepted region, in the accepted display order, with unique
+old = '''Mark one
+region per accepted region, in the accepted display order, with unique
 `data-app-region` values on SVG `<g>` elements — 2–6 of them, major and non-overlapping. Where the
 instructions carry no accepted design, the regions are yours to settle. Use the same values on the
 semantic app containers that implement those regions.'''
