@@ -6,11 +6,16 @@ again as the payload — reached nobody through that payload. That output is lar
 delegation rather than the work, and it is the number a change to the subagent contract has to move.
 
 Largely, not wholly: a child asked for an artifact writes it in one of those rounds, and those
-tokens are the deliverable. So the delivered side is reported beside the token count — the payload
-and the bytes the child wrote to files — and a change that cuts tokens by writing a thinner report
-shows up as both numbers falling together rather than as a reduction. The prose the child wrote
-between tool calls and left standing is reported too, exactly, because that is the part a contract
-can remove without touching the work.
+tokens are the deliverable. So the delivered side is reported beside the token count, split in two
+— the payload the parent read, and the bytes left in files — and a change that cuts tokens by
+writing a thinner report shows up as the file count falling rather than as a reduction. The prose
+the child wrote between tool calls and left standing is reported too, exactly, because that is the
+part a contract can remove without touching the work.
+
+Every one of those is a size. Nothing here compares two texts for similarity: a child that
+re-derives its findings in the payload rather than copying them shares almost no word shingles with
+what it already wrote, so an overlap check reads it as compliant while it pays for every word.
+Prose written at length before the handover is the failure, whatever it says.
 
 It is read over the archive rather than gated inside a case verdict, for the reason
 `coding_repo.handoff` is: a case whose child generated twice what it delivered still answers the
@@ -36,10 +41,13 @@ from evals.harness.harness import EvalCaseResult, Json
 from evals.harness.timing import CaseTiming, TurnTiming
 from evals.harness.viewer import EvalRun
 from evals.suites.response_register import DELEGATED_TASK
+from ufo.turns.delivery_register import SUBAGENT_RESULT_MAX_WORDS
 
 RUNS_DIR = Path("eval-reports/runs")
 METRIC_NAME = "delegated_intermediate_tokens"
-DELIVERED_METRIC_NAME = "delegated_delivered_chars"
+PAYLOAD_METRIC_NAME = "delegated_payload_chars"
+FORCED_METRIC_NAME = "delegated_forced_finish"
+DOCUMENT_METRIC_NAME = "delegated_document_chars"
 CHILD_ROLE = "child"
 
 
@@ -67,6 +75,13 @@ class CaseGeneration:
         return sum(turn.rounds for turn in self.turns)
 
     @property
+    def forced_finishes(self) -> int:
+        """Child turns that stopped on prose and made the engine buy a round to get the payload.
+        The prose reached nobody and the round would not have happened had the child called
+        `finish` itself, so this counts a failure of the finish contract rather than a size."""
+        return sum(turn.forced_finish for turn in self.turns)
+
+    @property
     def output_tokens(self) -> int:
         return sum(turn.output_tokens or 0 for turn in self.turns)
 
@@ -81,12 +96,21 @@ class CaseGeneration:
         return sum(handoff.interim_chars + handoff.closing_chars for handoff in self.handoffs)
 
     @property
-    def delivered_chars(self) -> int:
-        """The payload the parent read plus the bytes the child left in files it can read. A
-        candidate whose token count falls because this fell wrote a thinner deliverable."""
+    def payload_chars(self) -> int:
+        """The `finish` payload the parent read — the one field the register bounds. Its size is
+        the whole test: prose that says anything at length before the handover is a failure
+        whatever it says, so no similarity check is needed to see it. Word-shingle overlap misses
+        this class outright, because a child that re-derives its findings rather than copying them
+        scores near zero while paying for every word."""
+        return sum(handoff.result_chars for handoff in self.handoffs)
+
+    @property
+    def document_chars(self) -> int:
+        """The bytes the child left in files its parent can read. This is the deliverable, not the
+        price of handing it over: a candidate whose token count falls because this fell wrote a
+        thinner report."""
         return sum(
-            handoff.result_chars + sum(document.chars for document in handoff.documents)
-            for handoff in self.handoffs
+            sum(document.chars for document in handoff.documents) for handoff in self.handoffs
         )
 
 
@@ -183,7 +207,8 @@ def main(argv: list[str] | None = None) -> None:
             f"  {case.case:48} {case.run[:8]} children={len(case.turns)} "
             f"rounds={case.rounds:3} output={case.output_tokens:7} "
             f"intermediate={case.intermediate_output_tokens:7} "
-            f"prose={case.prose_chars:6} delivered={case.delivered_chars:7}{mark}"
+            f"prose={case.prose_chars:6} payload={case.payload_chars:6} "
+            f"files={case.document_chars:7} forced={case.forced_finishes}{mark}"
         )
     measured = tuple(case for case in cases if case.measured)
     unmeasured = len(cases) - len(measured)
@@ -197,20 +222,27 @@ def main(argv: list[str] | None = None) -> None:
     output = sum(case.output_tokens for case in measured)
     intermediate = sum(case.intermediate_output_tokens for case in measured)
     prose = sum(case.prose_chars for case in measured)
-    delivered = sum(case.delivered_chars for case in measured)
+    payload = sum(case.payload_chars for case in measured)
+    files = sum(case.document_chars for case in measured)
+    forced = sum(case.forced_finishes for case in measured)
     share = intermediate / output if output else 0.0
     print(
         f"{children} child turn(s) over {len(measured)} attempt(s) generated {output} output "
         f"tokens; {intermediate} of them ({share:.0%}) did not carry the payload"
     )
     print(
-        f"{prose} chars of prose reached nobody; {delivered} chars were delivered as the payload "
-        "or as files"
+        f"{prose} chars of prose reached nobody; {payload} chars crossed as the payload against a "
+        f"{SUBAGENT_RESULT_MAX_WORDS}-word register; {files} chars were left in files"
+    )
+    print(
+        f"{forced} of {children} child turn(s) stopped on prose and were forced to finish, "
+        "paying one round to deliver nothing"
     )
     if unmeasured:
         print(f"{unmeasured} attempt(s) excluded for missing output usage")
     per_child = intermediate / children
-    delivered_per_child = delivered / children
+    payload_per_child = payload / children
+    files_per_child = files / children
     if args.json is not None:
         args.json.write_text(
             json.dumps(
@@ -222,9 +254,13 @@ def main(argv: list[str] | None = None) -> None:
                     "outputTokens": output,
                     "intermediateOutputTokens": intermediate,
                     "proseChars": prose,
-                    "deliveredChars": delivered,
+                    "payloadChars": payload,
+                    "documentChars": files,
                     "intermediatePerChildTurn": per_child,
-                    "deliveredPerChildTurn": delivered_per_child,
+                    "payloadPerChildTurn": payload_per_child,
+                    "documentPerChildTurn": files_per_child,
+                    "forcedFinishes": forced,
+                    "forcedFinishShare": forced / children,
                 },
                 indent=2,
             )
@@ -232,7 +268,9 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.metric_stdout:
         print(f"{METRIC_NAME}: {per_child:.1f}")
-        print(f"{DELIVERED_METRIC_NAME}: {delivered_per_child:.1f}")
+        print(f"{PAYLOAD_METRIC_NAME}: {payload_per_child:.1f}")
+        print(f"{DOCUMENT_METRIC_NAME}: {files_per_child:.1f}")
+        print(f"{FORCED_METRIC_NAME}: {forced / children:.4f}")
 
 
 if __name__ == "__main__":

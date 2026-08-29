@@ -10,7 +10,13 @@ from uuid import uuid4
 
 import pytest
 
-from evals.delegated_generation import DELIVERED_METRIC_NAME, METRIC_NAME, generation_in
+from evals.delegated_generation import (
+    DOCUMENT_METRIC_NAME,
+    FORCED_METRIC_NAME,
+    METRIC_NAME,
+    PAYLOAD_METRIC_NAME,
+    generation_in,
+)
 from evals.delegated_generation import main as generation_main
 from evals.harness.handoff import handoff_record
 from evals.harness.harness import EvalCaseResult, EvalReport, Json
@@ -30,9 +36,12 @@ CASE = DELEGATED_CASES[0].name
 PARENT = uuid4()
 
 
-def child_timing(*output_tokens: int | None, status: TurnStatus = "done") -> Json:
+def child_timing(
+    *output_tokens: int | None, status: TurnStatus = "done", forced: bool = False
+) -> Json:
     """One child turn that worked for a few rounds and closed on the last one, timed exactly as the
-    harness times it."""
+    harness times it. `forced` appends a second model round with no dispatch between, which is the
+    shape a child that stopped on prose leaves behind."""
     steps = tuple(
         TurnStep(
             function_name=f"ufo.loop.engine.Engine.{MODEL_ROUND_STEP}",
@@ -50,11 +59,22 @@ def child_timing(*output_tokens: int | None, status: TurnStatus = "done") -> Jso
             call_id="c1",
         ),
     )
+    ordered = (*steps[:-1], *working, steps[-1]) if steps else working
+    if forced:
+        ordered = (
+            *ordered,
+            TurnStep(
+                function_name=f"ufo.loop.engine.Engine.{MODEL_ROUND_STEP}",
+                started_at_epoch_ms=9_000,
+                completed_at_epoch_ms=9_500,
+                output_tokens=50,
+            ),
+        )
     return case_timing(
         9_000,
         (
             turn_timing(PARENT, "evaluated", (), {}),
-            turn_timing(uuid4(), "child", steps + working, {"c1": "read"}, status=status),
+            turn_timing(uuid4(), "child", ordered, {"c1": "read"}, status=status),
         ),
     ).model_dump(mode="json")
 
@@ -125,8 +145,9 @@ def test_the_delivered_side_separates_a_thinner_report_from_less_waste(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A child asked for an artifact writes it in an intermediate round, so those tokens are the
-    deliverable rather than waste. The payload and the bytes it left in files are reported beside
-    the token count: a candidate that cut tokens by writing less shows both numbers falling."""
+    deliverable rather than waste. The payload and the file bytes are reported apart from each
+    other and from the token count: the payload is the field the register bounds, and a candidate
+    that cut tokens by writing a thinner report shows the file count falling instead."""
     handoff = handoff_record(
         uuid4(),
         (
@@ -148,11 +169,14 @@ def test_the_delivered_side_separates_a_thinner_report_from_less_waste(
     (case,) = generation_in(archive(tmp_path, attempts=attempts))
     assert case.intermediate_output_tokens == 2_400
     assert case.prose_chars == len("Reading both files.")
-    assert case.delivered_chars == 6_000 + len(
+    assert case.document_chars == 6_000
+    assert case.payload_chars == len(
         "Note contradicts the code. Evidence in /workspace/evidence.md."
     )
     generation_main(["--runs", str(tmp_path), "--metric-stdout"])
-    assert f"{DELIVERED_METRIC_NAME}: 6062.0" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert f"{DOCUMENT_METRIC_NAME}: 6000.0" in printed
+    assert f"{PAYLOAD_METRIC_NAME}: 62.0" in printed
 
 
 def test_an_attempt_that_delegated_nothing_records_no_handoff(tmp_path: Path) -> None:
@@ -161,7 +185,8 @@ def test_an_attempt_that_delegated_nothing_records_no_handoff(tmp_path: Path) ->
     (case,) = generation_in(archive(tmp_path, attempts=attempts))
     assert case.handoffs == ()
     assert case.prose_chars == 0
-    assert case.delivered_chars == 0
+    assert case.payload_chars == 0
+    assert case.document_chars == 0
 
 
 def test_a_renamed_handoff_field_stops_the_reader(tmp_path: Path) -> None:
@@ -210,9 +235,13 @@ def test_the_metric_is_the_mean_over_child_turns_across_every_archive(
         "outputTokens": 1_200,
         "intermediateOutputTokens": 900,
         "proseChars": 0,
-        "deliveredChars": 0,
+        "payloadChars": 0,
+        "documentChars": 0,
         "intermediatePerChildTurn": 300.0,
-        "deliveredPerChildTurn": 0.0,
+        "payloadPerChildTurn": 0.0,
+        "documentPerChildTurn": 0.0,
+        "forcedFinishes": 0,
+        "forcedFinishShare": 0.0,
     }
 
 
@@ -238,3 +267,30 @@ def test_a_run_with_no_measured_child_turn_refuses_a_metric(
         generation_main(["--runs", str(tmp_path), "--metric-stdout"])
     assert exit_info.value.code == 3
     assert METRIC_NAME not in capsys.readouterr().out
+
+
+def test_a_child_that_stopped_on_prose_is_counted_as_a_forced_finish(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two model rounds meeting at the end with no dispatch between them is the engine buying a
+    round because the child narrated instead of calling finish. That round delivered nothing, so
+    it is counted as a contract failure rather than as a size."""
+    archive(tmp_path, child_timing(400, 100, forced=True), name="run-1")
+    (case,) = generation_in(tmp_path / "run-1.json")
+    assert case.forced_finishes == 1
+    generation_main(["--runs", str(tmp_path), "--metric-stdout"])
+    printed = capsys.readouterr().out
+    assert "1 of 1 child turn(s) stopped on prose" in printed
+    assert f"{FORCED_METRIC_NAME}: 1.0000" in printed
+
+
+def test_a_child_that_called_finish_itself_is_not_a_forced_finish(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The closing round carries the finish call, so a tool dispatch separates it from the round
+    before — the shape every compliant child leaves."""
+    archive(tmp_path, child_timing(400, 100), name="run-1")
+    (case,) = generation_in(tmp_path / "run-1.json")
+    assert case.forced_finishes == 0
+    generation_main(["--runs", str(tmp_path), "--metric-stdout"])
+    assert f"{FORCED_METRIC_NAME}: 0.0000" in capsys.readouterr().out

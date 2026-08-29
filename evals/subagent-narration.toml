@@ -1,0 +1,70 @@
+name = "subagent-narration"
+base = "HEAD"
+suites = ["delegated_response_register"]
+repeats = 8
+concurrency = 3
+max_stacks = 4
+budget_usd = 70.0
+est_usd_per_case = 0.35
+
+# A child that finishes its work and then writes a summary it will not deliver spends a round that
+# delivers nothing: the engine appends its own finish prompt and buys another round to get the
+# payload. Production rates for that, read off the durable step log over seven days —
+# deep_research 2/4, browser 5/21, research 3/104, coding 62/4,389.
+#
+# The block already forbids it three times over, and each time the ban is on writing *the result*
+# as prose. The child that narrates does not believe it is writing the result; it believes it is
+# saying what it did. This arm names that act instead, and adds the one fact the child cannot
+# observe: that stopping on prose costs it a round. It replaces rather than appends, because three
+# earlier rounds showed that adding a sentence to this block inflates the child's inline delivery
+# and costs unrelated cases their word budget.
+#
+# Read `delegated_forced_finish` over each arm's records; the pass counts are the quality guard.
+#
+# Run at eight repeats: REJECTED, and the suite is the wrong instrument. The control produced zero
+# forced finishes over 47 child turns, so the behavior the arm targets never fired and the arm
+# could not be shown to help. It cost quality: 19/48 against the control's 22/48, with
+# delegated-pushback-artifact-self-description at 1/8 against 3/8. Intermediate output moved 1,707
+# -> 1,625 tokens per child turn and documents 3,706 -> 3,340 characters, both inside the +/-25%
+# this suite's control swings between runs.
+#
+# A case built to elicit the narration ran with it and elicited none in 47 turns, and browser_nav's
+# children produced none either. Both were removed rather than shipped as cases that cannot fail.
+#
+# The zero is the contract working, not a blind instrument. `<parent_handoff>` landed 2026-08-27
+# (#2584), and the fleet's step log split on that date says it already did this job:
+#
+#   browser   5/19  26.3%  ->  0/8     0%
+#   research 12/177  6.8%  ->  1/45  2.2%
+#   coding   75/6462 1.16% ->  8/1112 0.72%
+#
+# The trajectory that prompted this arm is from 08-26 — its child ran before the block existed and
+# never had the instruction at all. So the arm rewrites a sentence that is already carrying its
+# weight, and every eval child since has the contract and does not narrate.
+#
+# This is observational, not controlled: the later windows are small outside coding, and other
+# changes shipped that day. It is enough to stop here. Read the same split again before reopening
+# this, and treat a lane that climbs back as the signal that the wording, not the instrument, is
+# what needs work.
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5561/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "finish-not-an-account"
+[[arm.replacements]]
+path = "core/src/ufo/loop/prompts/subagent_shell.md"
+old = """
+result's register from <register> and keep it within 20 words. When the result is settled, call
+`finish` directly; never write the result as assistant prose first or alongside the call. For a
+"""
+new = """
+result's register from <register> and keep it within 20 words. When the work is done, emit the
+`finish` call itself — not an account of what you did, and not a summary of the file you just
+wrote. A round that ends without a tool call delivers nothing and buys another round. For a
+"""

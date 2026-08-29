@@ -94,10 +94,16 @@ the `finish` call. Everything outside `finish` is working text and reaches nobod
 # the word that licenses the restatement ("the full report") rather than adding to the block. A
 # child answering inline never reads it as an instruction about its own prose.
 #
-# 1378 vs 1264 (+9%, 9/30 -> 19/30, three cases improved and none regressed), and prose reaching
-# nobody fell 1,155 -> 389 characters. It does not reduce generation, which is what this experiment
-# asks; it is kept here because it is the only arm that moved the suite and it has not been run
-# against coding_repo_deliverables or coding_repo_answers, which its blast radius requires.
+# 1378 vs 1264 (+9%, 9/30 -> 19/30, three cases improved and none regressed) at six repeats, and
+# prose reaching nobody fell 1,155 -> 389 characters. It did not reduce generation, which is what
+# this experiment asks, so it was set aside as the one arm that had moved the suite.
+#
+# REJECTED. Replicated at eight repeats on later main: 15/40 against the control's 16/40, with
+# delegated-jsonl-result-only 3/8 against 5/8 and delegated-latency-result-only 2/8 against 4/8,
+# both called regressed. The six-repeat result was noise. Every case here swings run to run, and
+# this suite's own control has moved 9/30, 16/40 and 22/48 across three runs of the same text, so
+# thirty samples cannot separate a two-case gap from nothing. Do not read a verdict off this suite
+# under forty samples an arm.
 
 [[arm]]
 name = "report-says-it-once"

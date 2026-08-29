@@ -79,13 +79,20 @@ class TurnTiming(BaseModel):
 
     `output_tokens` sums completed model rounds. For a done turn, `intermediate_output_tokens`
     excludes the final completed round. For a failed or cancelled turn, it includes every round.
-    Both are `None` when no model round completed or any round lacks usage."""
+    Both are `None` when no model round completed or any round lacks usage.
+
+    `forced_finish` says the turn ended on a round the engine had to buy. A child that calls
+    `finish` itself closes on the round that carried the call, so its last two model rounds have a
+    tool call between them. A child that stopped on prose instead leaves two model rounds back to
+    back at the end: its own, which delivered nothing, and the one `_force_finish` paid for. The
+    prose round is the waste and the forced round is its price, so one flag names both."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     turn_id: UUID
     role: TurnRole
     status: TurnStatus = "done"
+    forced_finish: bool = False
     span_ms: int = Field(ge=0)
     model_round_ms: int = Field(ge=0)
     tool_call_ms: int = Field(ge=0)
@@ -241,6 +248,7 @@ def turn_timing(
         turn_id=turn_id,
         role=role,
         status=status,
+        forced_finish=_forced_finish(steps),
         span_ms=max(span, 0),
         model_round_ms=model_ms,
         tool_call_ms=tool_ms,
@@ -253,6 +261,20 @@ def turn_timing(
         cost_micro_usd=cost_micro_usd,
         steps=tuple(entries),
     )
+
+
+def _forced_finish(steps: tuple[TurnStep, ...]) -> bool:
+    """Whether the turn's last model round was one the engine had to buy. A round that dispatched
+    tool calls is followed by their steps, so two model rounds meeting at the end with nothing
+    between them is a child that stopped on prose and a `_force_finish` that paid to get the
+    payload. Read from the step sequence rather than a flag, because the sequence is what the
+    engine already commits."""
+    tail = tuple(
+        step.function_name
+        for step in steps
+        if step.function_name.endswith((MODEL_ROUND_STEP, TOOL_CALL_STEP))
+    )
+    return len(tail) >= 2 and all(name.endswith(MODEL_ROUND_STEP) for name in tail[-2:])
 
 
 def _occupied(steps: tuple[TurnStep, ...], step_name: str) -> int:

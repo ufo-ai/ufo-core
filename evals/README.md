@@ -96,9 +96,27 @@ uv run python -m evals.delegated_generation --metric-stdout \
 ```
 
 `delegated_intermediate_tokens: <mean>` is the output tokens per child turn that reached no parent —
-the number a change to the subagent contract has to move. It is per child turn, so an arm that
-delegated less often does not read as a reduction. An attempt whose child rounds carry no usage is
-excluded and named; a run with none refuses a metric and exits non-zero.
+the number a change to the subagent contract has to move. `delegated_payload_chars` is the `finish`
+payload, the one field the register bounds; `delegated_document_chars` is what the child left in
+files, which is the deliverable rather than the price of handing it over. Each is per child turn,
+so an arm that delegated less often does not read as a reduction. An attempt whose child rounds
+carry no usage is excluded and named; a run with none refuses a metric and exits non-zero.
+
+Every figure is a size. Nothing compares two texts for similarity: a child that re-derives its
+findings in the payload instead of copying them shares almost no word shingles with what it already
+wrote, so an overlap check reads it as compliant while it pays for every word. Prose written at
+length before the handover is the failure, whatever it says.
+
+`delegated_forced_finish: <share>` is the one figure that is not a size — the share of child turns
+that ended on prose and made the engine buy a round to get the payload. It is read from the step
+sequence: a child that calls `finish` itself has a tool dispatch between its last two model rounds,
+and one that narrated instead leaves two model rounds back to back.
+
+No case elicits it: 47 control child turns over eight repeats produced none, and `browser_nav`'s
+children none either. That is the finish contract working — the same signature over the fleet's
+step log fell in every lane when `<parent_handoff>` landed, browser 26.3% to 0% and research 6.8%
+to 2.2% across 1,100 coding children. Read it over the fleet rather than here, and treat a lane
+that climbs back as the reason to reopen the wording.
 
 ## Run many suites: evals.stack
 
