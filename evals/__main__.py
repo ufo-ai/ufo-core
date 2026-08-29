@@ -1033,6 +1033,7 @@ async def _run(
                 agent_prompt,
                 agent_model,
                 agent_reasoning,
+                agent_sandbox_size,
             ) = resolved_agent
             if budget_micro_usd is not None and not fresh_workspace:
                 await EvalRunBudget(recorder.id, budget_micro_usd).install(workspace_id)
@@ -1182,6 +1183,12 @@ async def _run(
                     stamp happens here rather than after the whole run, so the report on disk is the
                     final one from the moment its suite ends."""
                     task = tasks[index]
+                    runtime_attestation = None
+                    if remote_client is not None:
+                        runtime_attestation = remote_client.runtime.verify(
+                            resolved_agent_model, agent_reasoning
+                        )
+                        recorder.runtime = runtime_attestation
                     digest = report.digest
                     if task.pin_runtime:
                         digest = digest_payload(
@@ -1194,6 +1201,7 @@ async def _run(
                                 ],
                                 "agentPromptDigest": prompt_digest(agent_prompt),
                                 "agentModel": resolved_agent_model,
+                                "agentSandboxSize": agent_sandbox_size,
                                 **(
                                     {
                                         "judgeModel": task.judge_model,
@@ -1215,6 +1223,11 @@ async def _run(
                                 "reasoning": agent_reasoning,
                                 "searchProvider": config.research.search_provider,
                                 "cdpProvider": config.browser.cdp_provider,
+                                **(
+                                    {"remoteRuntime": runtime_attestation.model_dump(mode="json")}
+                                    if runtime_attestation is not None
+                                    else {}
+                                ),
                             }
                         )
                     completed[index] = report.model_copy(

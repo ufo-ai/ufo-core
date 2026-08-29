@@ -16,6 +16,9 @@ uv run python -m evals --share <current-run> <baseline-run>
 `--remote` admits each case through `ufo --remote --json` at the configured serve URL. The current
 `ufo` must be on `PATH`, and `UFO_TOKEN_SECRET` must match the running serve process. Remote cases
 use the private member audience of the terminal surface; shared-audience cases fail before admission.
+The server attests its config, sandbox templates, model, and reasoning; a packaged deploy also
+attests its immutable image and revision. The runner refuses a missing or mixed identity before it
+records any score and binds the identity into every runtime-pinned suite digest.
 `profile:<name>` is an explicit profile target for suites that pin it. The member turn is a proxy
 that must foreground-spawn that qualified production profile with the case objective unchanged;
 the grader reads the child's validated result and ignores the proxy's answer. A durable agent with

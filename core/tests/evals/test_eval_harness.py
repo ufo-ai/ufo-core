@@ -59,6 +59,7 @@ from evals.compaction.target import CompactionTarget
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
     RemoteClient,
+    RemoteRuntimeLog,
     RemoteWorkspaceProvisioner,
     WorkspaceDriver,
     resolve_workspace_and_agent,
@@ -268,11 +269,14 @@ from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef, validate_object_name
 from ufo.schema import tables
 from ufo.schema.records import (
+    DEFAULT_SANDBOX_SIZE,
     DELIVERY_DELIVERED,
     DELIVERY_PENDING,
     NON_TERMINAL_STATUSES,
     SPAWN_RESULT_KEY_PREFIX,
     AgentChange,
+    RuntimeAttestation,
+    RuntimeIdentity,
     ToolIntent,
     TurnContext,
     TurnStatus,
@@ -1843,11 +1847,13 @@ async def test_seed_candidate_agent_arms_a_pending_proposals_prompt(db: None) ->
         scratch_prompt,
         scratch_model,
         scratch_reasoning,
+        scratch_sandbox_size,
     ) = await resolve_workspace_and_agent(name, workspace_id)
     assert scratch_id != base_agent
     assert scratch_prompt == candidate_prompt
     assert scratch_model == MODEL
     assert scratch_reasoning == AGENT_REASONING
+    assert scratch_sandbox_size == DEFAULT_SANDBOX_SIZE
 
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1876,6 +1882,7 @@ async def test_seed_candidate_agent_arms_a_pending_proposals_prompt(db: None) ->
         PROMPT,
         MODEL,
         AGENT_REASONING,
+        DEFAULT_SANDBOX_SIZE,
     )
 
 
@@ -8211,6 +8218,20 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
                         "arrival_id": "arrival-1",
                     }
                 ),
+                dumps(
+                    {
+                        "type": "runtime",
+                        "runtime": {
+                            "revision": "abc12345",
+                            "image_digest": f"sha256:{'a' * 64}",
+                            "config_digest": f"sha256:{'b' * 64}",
+                            "sandbox_backend": "e2b",
+                            "sandbox_digest": f"sha256:{'c' * 64}",
+                        },
+                        "model": MODEL,
+                        "reasoning": AGENT_REASONING,
+                    }
+                ),
                 dumps({"type": "turn_end"}),
             )
         )
@@ -8252,6 +8273,17 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
     assert row.queue_key == f"{OWNER_EMAIL}:{conversation_id}"
     assert row.member_id == owner_id
     assert admitted == turn_id
+    assert remote.runtime.verify(MODEL, AGENT_REASONING) == RuntimeAttestation(
+        runtime=RuntimeIdentity(
+            revision="abc12345",
+            image_digest=f"sha256:{'a' * 64}",
+            config_digest=f"sha256:{'b' * 64}",
+            sandbox_backend="e2b",
+            sandbox_digest=f"sha256:{'c' * 64}",
+        ),
+        model=MODEL,
+        reasoning=AGENT_REASONING,
+    )
     assert calls == [
         {
             "args": [
@@ -8267,6 +8299,31 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
         }
     ]
     assert not (tmp_path / "ufo-home" / str(conversation_id)).exists()
+
+
+def test_remote_runtime_log_accepts_model_less_failures_and_rejects_runtime_drift() -> None:
+    runtime = RuntimeIdentity(
+        revision="abc12345",
+        image_digest=f"sha256:{'a' * 64}",
+        config_digest=f"sha256:{'b' * 64}",
+        sandbox_backend="e2b",
+        sandbox_digest=f"sha256:{'c' * 64}",
+    )
+    log = RemoteRuntimeLog()
+    with pytest.raises(RuntimeError, match="no runtime attestation"):
+        log.verify(MODEL, AGENT_REASONING)
+
+    log.record(RuntimeAttestation(runtime=runtime))
+    assert log.verify(MODEL, AGENT_REASONING) == RuntimeAttestation(runtime=runtime)
+
+    log.record(RuntimeAttestation(runtime=runtime, model=MODEL, reasoning=AGENT_REASONING))
+    with pytest.raises(RuntimeError, match="expected model"):
+        log.verify("another-model", AGENT_REASONING)
+
+    changed = runtime.model_copy(update={"sandbox_digest": f"sha256:{'d' * 64}"})
+    log.record(RuntimeAttestation(runtime=changed, model=MODEL, reasoning=AGENT_REASONING))
+    with pytest.raises(RuntimeError, match="crossed runtime identities"):
+        log.verify(MODEL, AGENT_REASONING)
 
 
 async def test_remote_workspace_driver_deadline_stops_the_client_and_cancels_the_turn(
@@ -8979,7 +9036,14 @@ async def test_resolve_workspace_and_agent_accepts_an_explicit_workspace(db: Non
 
     resolved = await resolve_workspace_and_agent("assistant", workspace_id)
 
-    assert resolved == (workspace_id, agent_id, PROMPT, MODEL, AGENT_REASONING)
+    assert resolved == (
+        workspace_id,
+        agent_id,
+        PROMPT,
+        MODEL,
+        AGENT_REASONING,
+        DEFAULT_SANDBOX_SIZE,
+    )
 
 
 def _debug_evidence(response: str, tools: tuple[str, ...] = ()) -> dict[str, object]:
@@ -9977,7 +10041,7 @@ async def test_eval_run_installs_credentials_pins_model_and_closes_blob_client(
     driver_models: list[str] = []
 
     async def resolve(*_args):
-        return workspace_id, agent_id, "prompt", "auto", "auto"
+        return workspace_id, agent_id, "prompt", "auto", "auto", DEFAULT_SANDBOX_SIZE
 
     def workspace_driver(*args, **_kwargs):
         driver_models.append(args[6])
@@ -10093,7 +10157,7 @@ async def test_fresh_workspace_is_provisioned_before_agent_resolution(
     async def resolve(agent_name: str, selected: UUID | None):
         assert agent_name == "assistant"
         assert selected == workspace_id
-        return workspace_id, agent_id, "prompt", "auto", "auto"
+        return workspace_id, agent_id, "prompt", "auto", "auto", DEFAULT_SANDBOX_SIZE
 
     async def dispose() -> None:
         return None
@@ -10150,7 +10214,14 @@ async def test_profile_target_uses_the_main_agent_as_an_explicit_spawn_proxy(
         resolutions.append(agent_name)
         assert agent_name == "chat"
         assert selected == workspace_id
-        return workspace_id, agent_id, "main prompt", MODEL, AGENT_REASONING
+        return (
+            workspace_id,
+            agent_id,
+            "main prompt",
+            MODEL,
+            AGENT_REASONING,
+            DEFAULT_SANDBOX_SIZE,
+        )
 
     async def dispose() -> None:
         return None
@@ -10195,7 +10266,7 @@ async def test_run_builds_the_compaction_client_inside_the_workspace_scope(
     seen: dict[str, object] = {}
 
     async def resolve(*_args):
-        return workspace_id, agent_id, "prompt", MODEL, "auto"
+        return workspace_id, agent_id, "prompt", MODEL, "auto", DEFAULT_SANDBOX_SIZE
 
     async def run(target, _slots) -> EvalReport:
         seen["compaction"] = target.compaction

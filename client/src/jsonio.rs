@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::toolrender::OpView;
-use crate::wire::{Directive, OpRequest};
+use crate::wire::{Directive, OpRequest, RuntimeAttestation};
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -58,6 +58,10 @@ pub enum Event {
         name: String,
         size: String,
         url: String,
+    },
+    Runtime {
+        #[serde(flatten)]
+        attestation: Box<RuntimeAttestation>,
     },
     InputRequest {
         id: u64,
@@ -163,6 +167,9 @@ impl Driver {
                 name: name.clone(),
                 size: size.clone(),
                 url: url.clone(),
+            }],
+            Directive::Runtime(attestation) => vec![Event::Runtime {
+                attestation: Box::new(attestation.clone()),
             }],
             Directive::Ask(prompt) => vec![self.raise_input(prompt.clone(), Vec::new())],
             Directive::Choose { prompt, options } => {
@@ -325,6 +332,7 @@ pub fn emit(event: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::RuntimeIdentity;
 
     fn op() -> OpRequest {
         OpRequest {
@@ -381,6 +389,32 @@ mod tests {
                 name: "report.pdf".into(),
                 size: "123".into(),
                 url: "https://x".into(),
+            }]
+        );
+        assert_eq!(
+            driver.on_directive(&Directive::Runtime(RuntimeAttestation {
+                runtime: RuntimeIdentity {
+                    revision: Some("abc12345".into()),
+                    image_digest: Some(format!("sha256:{}", "a".repeat(64))),
+                    config_digest: format!("sha256:{}", "b".repeat(64)),
+                    sandbox_backend: "e2b".into(),
+                    sandbox_digest: format!("sha256:{}", "c".repeat(64)),
+                },
+                model: "glm-5.3-flash".into(),
+                reasoning: Some("high".into()),
+            })),
+            vec![Event::Runtime {
+                attestation: Box::new(RuntimeAttestation {
+                    runtime: RuntimeIdentity {
+                        revision: Some("abc12345".into()),
+                        image_digest: Some(format!("sha256:{}", "a".repeat(64))),
+                        config_digest: format!("sha256:{}", "b".repeat(64)),
+                        sandbox_backend: "e2b".into(),
+                        sandbox_digest: format!("sha256:{}", "c".repeat(64)),
+                    },
+                    model: "glm-5.3-flash".into(),
+                    reasoning: Some("high".into()),
+                }),
             }]
         );
         assert_eq!(

@@ -414,6 +414,34 @@ class TerminalFrame(BaseModel):
     decides which kinds it draws and what it draws them as."""
 
 
+class RuntimeIdentity(BaseModel):
+    """The service and sandbox runtime one remote turn ran against."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    revision: str | None = Field(default=None, min_length=1)
+    image_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    config_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    sandbox_backend: str = Field(min_length=1)
+    sandbox_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _artifact_pair(self) -> "RuntimeIdentity":
+        if (self.revision is None) != (self.image_digest is None):
+            raise ValueError("runtime revision and image digest must be set together")
+        return self
+
+
+class RuntimeAttestation(BaseModel):
+    """A turn-ending frame's actual model settings bound to its running service identity."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    runtime: RuntimeIdentity
+    model: str = ""
+    reasoning: ReasoningEffort | None = None
+
+
 class Agent(BaseModel):
     prompt: str
     model: str

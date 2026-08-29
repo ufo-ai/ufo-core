@@ -117,6 +117,7 @@ from ufo.schema.records import (
     WRITEBACK_PENDING,
     AgentVisibility,
     ReasoningEffort,
+    RuntimeIdentity,
     SandboxSize,
     TablerIcon,
     TerminalFrame,
@@ -1708,6 +1709,7 @@ class SurfaceContext:
     _declared_slots: tuple[DeclaredSlot, ...]
     _ambient_reply: AmbientReplyClassifier
     _connectors: ConnectorRegistry
+    _runtime: RuntimeIdentity | None = None
     _system_skill_bundle: SystemSkillBundle = field(
         default_factory=lambda: SystemSkillBundle.from_skills(())
     )
@@ -1754,6 +1756,11 @@ class SurfaceContext:
         """The deploy's installed extensions — the administration view's deploy-status read,
         fixed at boot from the manifest set the process loaded."""
         return self._deploy_extensions
+
+    @property
+    def runtime(self) -> RuntimeIdentity | None:
+        """The service and sandbox identity supplied by the composition root."""
+        return self._runtime
 
     @property
     def deploy_sandbox_internet(self) -> bool:

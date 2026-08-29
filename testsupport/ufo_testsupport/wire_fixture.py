@@ -30,6 +30,7 @@ WORKSPACE_WIRE = frozenset(
         "ask",
         "exit",
         "file",
+        "runtime",
         "secret",
         "since",
         "poll",
@@ -55,6 +56,22 @@ WORKSPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "ask": (">",),
     "exit": ("0",),
     "file": ("quarterly report.pdf", "2048", "https://ws.example/artifacts/a?exp=1&sig=2"),
+    "runtime": (
+        json.dumps(
+            {
+                "runtime": {
+                    "revision": "abc12345",
+                    "image_digest": f"sha256:{'a' * 64}",
+                    "config_digest": f"sha256:{'b' * 64}",
+                    "sandbox_backend": "e2b",
+                    "sandbox_digest": f"sha256:{'c' * 64}",
+                },
+                "model": "glm-5.3-flash",
+                "reasoning": "high",
+            },
+            separators=(",", ":"),
+        ),
+    ),
     "secret": ("sealed-blob", "perplexity_api_key", "Paste your Perplexity key"),
     "since": ("turn-1", "cursor-9"),
     "poll": ("1",),

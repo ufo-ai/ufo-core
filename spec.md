@@ -327,6 +327,9 @@ deploy builds and serves, held to the server's op contracts by the client's own 
 client is told to update the moment the server sees its version. `ufo --remote` sends no terminal
 binding, so the conversation opens on the deploy's configured carrier exactly as web and Slack do;
 `--json` changes only the client event framing and composes with either carrier choice.
+A packaged deploy's terminal end attests its revision, immutable image, config and sandbox digests,
+and the terminal frame's selected model and reasoning. Remote evals bind that identity into their
+runtime digest and refuse missing, mixed, or unexpected attestations before recording scores.
 
 **The sandbox proxy is core, not an extension** — it is the enforcement point for three core
 invariants: **sentinel swap** (processes inside see placeholder credentials; the proxy swaps real

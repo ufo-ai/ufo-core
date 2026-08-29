@@ -199,6 +199,12 @@ from ufo.schema.records import (
     QuestionOption as QuestionOption,
 )
 from ufo.schema.records import (
+    RuntimeAttestation as RuntimeAttestation,
+)
+from ufo.schema.records import (
+    RuntimeIdentity as RuntimeIdentity,
+)
+from ufo.schema.records import (
     TerminalFrame as TerminalFrame,
 )
 from ufo.schema.records import (

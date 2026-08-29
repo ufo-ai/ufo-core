@@ -70,6 +70,7 @@ from ufo_ext_e2b import (
     WORKSPACE_ENSURE_TIMEOUT_SECONDS,
     E2BCarrier,
     build_e2b_carrier,
+    e2b_runtime_digest,
 )
 
 from ufo import o11y
@@ -2152,6 +2153,20 @@ def test_build_e2b_carrier_reads_the_templates_and_key_from_the_environment(
         "medium": "ufo-sbx-medium:build-2",
         "large": "ufo-sbx-large:build-3",
     }
+
+
+def test_runtime_digest_canonicalizes_the_published_template_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(E2B_TEMPLATES_ENV, TEMPLATES_ENV_VALUE)
+    first = e2b_runtime_digest()
+    monkeypatch.setenv(
+        E2B_TEMPLATES_ENV,
+        ",".join(reversed(TEMPLATES_ENV_VALUE.split(","))),
+    )
+
+    assert e2b_runtime_digest() == first
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", first)
 
 
 @pytest.mark.parametrize(

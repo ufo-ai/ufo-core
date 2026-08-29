@@ -27,10 +27,11 @@ from ufo.config import (
     SandboxConfig,
 )
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.ext.manifest import CredentialSlot, InjectionTarget, Manifest
+from ufo.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget, Manifest
 from ufo.ext.surface import SurfaceSpec
 from ufo.models.catalog import CORE_PRICING
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
+from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import EGRESS_CA_CERT_ENV, RunTokenCodec
 
 CA_PEM = "-----BEGIN CERTIFICATE-----\nshared\n-----END CERTIFICATE-----\n"
@@ -45,6 +46,8 @@ def _run_token_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "serve-test-run-token-secret")
     monkeypatch.delenv("UFO_ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("UFO_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(serve.RUNTIME_REVISION_ENV, raising=False)
+    monkeypatch.delenv(serve.RUNTIME_IMAGE_ENV, raising=False)
 
 
 class ShutdownProbe:
@@ -92,6 +95,56 @@ def _local_config() -> Config:
 
 def _blob() -> FilesystemBlobStore:
     return FilesystemBlobStore(root=Path("/tmp/blobs"))
+
+
+def test_runtime_identity_of_an_unpackaged_process_carries_no_image() -> None:
+    config = _hosted_config()
+    identity = serve._runtime_identity(config, CarrierSpec(name="local", factory=LocalCarrier))
+
+    assert identity.revision is None
+    assert identity.image_digest is None
+    assert identity.config_digest == serve._payload_digest(config.model_dump(mode="json"))
+    assert identity.sandbox_backend == "local"
+
+
+def test_runtime_identity_binds_deployed_image_config_and_carrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(serve.RUNTIME_REVISION_ENV, "abc12345")
+    monkeypatch.setenv(
+        serve.RUNTIME_IMAGE_ENV,
+        f"registry.test/ufo@sha256:{'a' * 64}",
+    )
+    config = _hosted_config()
+    identity = serve._runtime_identity(
+        config,
+        CarrierSpec(
+            name="local",
+            factory=LocalCarrier,
+            runtime_digest=lambda: f"sha256:{'b' * 64}",
+        ),
+    )
+
+    assert identity is not None
+    assert identity.revision == "abc12345"
+    assert identity.image_digest == f"sha256:{'a' * 64}"
+    assert identity.config_digest == serve._payload_digest(config.model_dump(mode="json"))
+    assert identity.sandbox_backend == "local"
+    assert identity.sandbox_digest == serve._payload_digest(
+        {
+            "config": config.sandbox.model_dump(mode="json"),
+            "carrier": f"sha256:{'b' * 64}",
+        }
+    )
+
+
+def test_runtime_identity_requires_revision_and_image_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(serve.RUNTIME_REVISION_ENV, "abc12345")
+
+    with pytest.raises(RuntimeError, match="must be set together"):
+        serve._runtime_identity(_hosted_config(), CarrierSpec(name="local", factory=LocalCarrier))
 
 
 def test_one_shot_closes_the_throwaway_loops_connections(database_url: str, tmp_path: Path) -> None:

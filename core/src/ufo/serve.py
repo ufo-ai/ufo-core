@@ -1,6 +1,7 @@
 """Composition root: one process — surfaces, DBOS workers, shared channels."""
 
 import asyncio
+import json
 import os
 import secrets
 import threading
@@ -8,6 +9,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mappi
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -95,6 +97,7 @@ from ufo.ext.loader import (
 )
 from ufo.ext.manifest import (
     AuthProxySpec,
+    CarrierSpec,
     CdpProviderSpec,
     FlagProviderSpec,
     Manifest,
@@ -170,7 +173,12 @@ from ufo.sandbox.session import (
     RunTokenCodec,
 )
 from ufo.sandbox.terminal import Terminals, TerminalTransport
-from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
+from ufo.schema.records import (
+    DBOS_APP_NAME,
+    DBOS_APP_VERSION,
+    DBOS_MAX_EXECUTOR_THREADS,
+    RuntimeIdentity,
+)
 from ufo.search import SearchProvider
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
 from ufo.sources.sync import (
@@ -197,6 +205,34 @@ from ufo.turns.ambient_reply import AMBIENT_REPLY_JOB, AmbientReplyClassifier
 from ufo.workspace import init_workspace_credentials, ws
 
 RESERVED_HOST_PREFIXES = (LOGIN_PATH, LOGOUT_PATH, JOIN_PATH, "/v1/onboard", "/ufo")
+RUNTIME_REVISION_ENV = "UFO_RUNTIME_REVISION"
+RUNTIME_IMAGE_ENV = "UFO_RUNTIME_IMAGE"
+
+
+def _payload_digest(payload: object) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return f"sha256:{sha256(encoded).hexdigest()}"
+
+
+def _runtime_identity(config: Config, carrier: CarrierSpec) -> RuntimeIdentity:
+    revision = os.environ.get(RUNTIME_REVISION_ENV, "").strip()
+    image = os.environ.get(RUNTIME_IMAGE_ENV, "").strip()
+    if bool(revision) != bool(image):
+        raise RuntimeError(f"{RUNTIME_REVISION_ENV} and {RUNTIME_IMAGE_ENV} must be set together")
+    image_digest = (image.rpartition("@")[2] if "@" in image else image) or None
+    carrier_digest = None if carrier.runtime_digest is None else carrier.runtime_digest()
+    return RuntimeIdentity(
+        revision=revision or None,
+        image_digest=image_digest,
+        config_digest=_payload_digest(config.model_dump(mode="json")),
+        sandbox_backend=config.sandbox.backend,
+        sandbox_digest=_payload_digest(
+            {
+                "config": config.sandbox.model_dump(mode="json"),
+                "carrier": carrier_digest,
+            }
+        ),
+    )
 
 
 def _assert_no_reserved_routes(app: FastAPI) -> None:
@@ -257,6 +293,7 @@ def run() -> None:
     dbos_client = replay_safe_client(config.database.system_url)
     carriers = select_carriers(config, manifests)
     carrier, carrier_spec = carriers.carrier, carriers.spec
+    runtime_identity = _runtime_identity(config, carrier_spec)
     registry = model_registry(config, manifests)
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, credentials)
@@ -425,6 +462,7 @@ def run() -> None:
         config.connect.public_base_url,
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
+        runtime_identity=runtime_identity,
         connectors=connectors,
         key_slot_for=registry.key_slot_for,
         ambient_reply=AmbientReplyClassifier(
@@ -1040,6 +1078,7 @@ def _mount_shared_surfaces(
     ingress_public_url: str | None,
     models: tuple[str, ...],
     *,
+    runtime_identity: RuntimeIdentity | None = None,
     connectors: ConnectorRegistry | None = None,
     ambient_reply: AmbientReplyClassifier,
     skills: SkillRegistry,
@@ -1146,6 +1185,7 @@ def _mount_shared_surfaces(
             _declared_slots=slots,
             _ambient_reply=ambient_reply,
             _connectors=connectors,
+            _runtime=runtime_identity,
             _object_schemas=kind_schemas,
             _memory=memory,
             _model=None if surface_model is None else surface_model(surface),

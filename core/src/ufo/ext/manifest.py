@@ -209,6 +209,9 @@ class CarrierSpec:
     """The sandbox sizes this backend provisions (`SANDBOX_SIZES` for one template per size, empty
     for a single-shape backend) — what decides whether a portal offers the agent's `sandbox_size`
     setting on this deploy."""
+    runtime_digest: Callable[[], str] | None = None
+    """A digest of carrier-owned runtime inputs absent from core config, such as a remote
+    provider's published template references."""
 
 
 @dataclass(frozen=True)

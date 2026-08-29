@@ -8,6 +8,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 /// Maximum time one connection attempt and one reconnect window may take.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -30,6 +32,22 @@ pub struct OpRequest {
     pub timeout_s: u64,
     pub arg: String,
     pub params: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeIdentity {
+    pub revision: Option<String>,
+    pub image_digest: Option<String>,
+    pub config_digest: String,
+    pub sandbox_backend: String,
+    pub sandbox_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeAttestation {
+    pub runtime: RuntimeIdentity,
+    pub model: String,
+    pub reasoning: Option<String>,
 }
 
 /// One parsed directive line. Unknown verbs parse to `Unknown` and are dropped by the renderer.
@@ -72,6 +90,7 @@ pub enum Directive {
         size: String,
         url: String,
     },
+    Runtime(RuntimeAttestation),
     Exit(i32),
     Unknown,
 }
@@ -159,6 +178,9 @@ pub fn parse_line(line: &str) -> Directive {
             size: fields[1].clone(),
             url: field(&fields, 2),
         },
+        "runtime" if fields.len() == 1 => serde_json::from_str(&fields[0])
+            .map(Directive::Runtime)
+            .unwrap_or(Directive::Unknown),
         "exit" => Directive::Exit(field(&fields, 0).parse().unwrap_or(0)),
         _ => Directive::Unknown,
     }
@@ -796,6 +818,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_runtime_attestation() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let payload = serde_json::json!({
+            "runtime": {
+                "revision": "abc12345",
+                "image_digest": digest,
+                "config_digest": format!("sha256:{}", "b".repeat(64)),
+                "sandbox_backend": "e2b",
+                "sandbox_digest": format!("sha256:{}", "c".repeat(64)),
+            },
+            "model": "glm-5.3-flash",
+            "reasoning": "high",
+        });
+        let Directive::Runtime(attestation) = parse_line(&format!("runtime\t{payload}")) else {
+            panic!("runtime directive did not parse");
+        };
+        assert_eq!(attestation.runtime.revision.as_deref(), Some("abc12345"));
+        assert_eq!(
+            attestation.runtime.image_digest.as_deref(),
+            Some(digest.as_str())
+        );
+        assert_eq!(attestation.runtime.sandbox_backend, "e2b");
+        assert_eq!(attestation.model, "glm-5.3-flash");
+        assert_eq!(attestation.reasoning.as_deref(), Some("high"));
+        assert_eq!(parse_line("runtime\t{}"), Directive::Unknown);
+    }
+
+    #[test]
     fn drops_unknown_verbs() {
         assert_eq!(parse_line("debugger\thttps://d"), Directive::Unknown);
         assert_eq!(parse_line("slack\tConnect Slack"), Directive::Unknown);
@@ -873,6 +923,10 @@ mod tests {
                 ],
             )),
             Directive::Absorbed(arrival_ids) => Some(("absorbed", arrival_ids.clone())),
+            Directive::Runtime(attestation) => Some((
+                "runtime",
+                vec![serde_json::to_string(attestation).expect("runtime attestation serializes")],
+            )),
             Directive::Unknown => None,
         }
     }

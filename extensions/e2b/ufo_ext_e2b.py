@@ -41,6 +41,7 @@ every lease decision below turns on it:
 
 import asyncio
 import hashlib
+import json
 import os
 import shlex
 import time
@@ -972,6 +973,17 @@ def sandbox_templates(value: str) -> dict[str, str]:
     return entries
 
 
+def e2b_runtime_digest() -> str:
+    """Digest the published template map selected by this process."""
+    templates = os.environ.get(E2B_TEMPLATES_ENV)
+    if not templates:
+        raise RuntimeError(f"e2b carrier selected but {E2B_TEMPLATES_ENV} is not set")
+    payload = json.dumps(
+        sandbox_templates(templates), sort_keys=True, separators=(",", ":")
+    ).encode()
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
 def build_e2b_carrier() -> E2BCarrier:
     key = os.environ.get(E2B_API_KEY_ENV)
     if not key:
@@ -994,6 +1006,7 @@ def manifest() -> Manifest:
                 factory=build_e2b_carrier,
                 off_cluster=True,
                 sizes=SANDBOX_SIZES,
+                runtime_digest=e2b_runtime_digest,
             ),
         ),
     )

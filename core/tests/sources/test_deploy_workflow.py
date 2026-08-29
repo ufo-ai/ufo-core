@@ -2044,6 +2044,18 @@ def test_hosted_runtime_receives_the_selected_sandbox_template() -> None:
         assert 'condition     = var.e2b_templates != ""' in variables
 
 
+def test_hosted_serve_attests_the_deployed_bundle() -> None:
+    template = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+    deployment = next(
+        document
+        for document in template.split("\n---\n")
+        if re.search(r"^kind: Deployment\nmetadata:\n  name: ufo-serve$", document, re.MULTILINE)
+    )
+
+    assert '- {name: UFO_RUNTIME_REVISION, value: "${image_tag}"}' in deployment
+    assert '- {name: UFO_RUNTIME_IMAGE, value: "${bundle_image}"}' in deployment
+
+
 @pytest.mark.parametrize(
     ("workflow", "job_name", "plan_name", "step_name", "working_directory"),
     [

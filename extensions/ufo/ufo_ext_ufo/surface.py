@@ -64,6 +64,8 @@ from ufo.sdk.surfaces import (
     Conversation,
     CredentialPrompt,
     CredentialRequestInvalid,
+    RuntimeAttestation,
+    RuntimeIdentity,
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
@@ -247,6 +249,7 @@ def directives_for(
     connect_message: str | None = None,
     files: tuple[SharedFile, ...] = (),
     exits: bool = True,
+    runtime: RuntimeIdentity | None = None,
 ) -> tuple[bytes, ...]:
     """The directive lines one live frame renders to. Token deltas stream as `txt`; tool-run
     activity is a retained `note` carrying its activity kind, while the running cost meter is a
@@ -271,9 +274,19 @@ def directives_for(
             cost = frame.cost_micro_usd / MICRO_USD_PER_USD
             return (directive("status", f"{frame.tokens} tok - ${cost:.6f}"),)
         case Terminal():
-            return _answer(frame, streamed, collect, connect_message, files, exits)
+            return _answer(frame, streamed, collect, connect_message, files, exits, runtime)
         case Parked():
-            return (directive("say", frame.message), directive("ask", PROMPT))
+            attestation = (
+                ()
+                if runtime is None
+                else (
+                    directive(
+                        "runtime",
+                        RuntimeAttestation(runtime=runtime).model_dump_json(),
+                    ),
+                )
+            )
+            return (*attestation, directive("say", frame.message), directive("ask", PROMPT))
         case Absorbed():
             arrivals = tuple(str(arrival) for arrival in frame.arrivals)
             return (directive("absorbed", *arrivals),) if arrivals else ()
@@ -300,6 +313,7 @@ def _answer(
     connect_message: str | None = None,
     files: tuple[SharedFile, ...] = (),
     exits: bool = True,
+    runtime: RuntimeIdentity | None = None,
 ) -> tuple[bytes, ...]:
     """Cap a turn. A done turn prompts (`ask`) after its answer — already streamed as `txt`, else
     said now, followed by one `file` line per file the turn shared and one `secret` line per
@@ -318,6 +332,20 @@ def _answer(
     reached its end, so a turn that shared a file and then failed or was cancelled still owes the
     member the link — which is the whole of the silent drop this repairs."""
     frame = terminal.frame
+    attestation = (
+        ()
+        if runtime is None
+        else (
+            directive(
+                "runtime",
+                RuntimeAttestation(
+                    runtime=runtime,
+                    model=frame.model,
+                    reasoning=frame.reasoning,
+                ).model_dump_json(),
+            ),
+        )
+    )
     shared = tuple(
         directive("file", file.filename, str(file.size_bytes), file.url) for file in files
     )
@@ -329,7 +357,7 @@ def _answer(
                 directive("secret", sealed, prompt.slot, prompt.prompt) for prompt in collect
             )
             connect = () if connect_message is None else (directive("say", connect_message),)
-            return (*said, *shared, *secrets, *connect, directive("ask", PROMPT))
+            return (*attestation, *said, *shared, *secrets, *connect, directive("ask", PROMPT))
         case "failed":
             safe_error = (
                 frame.error_message
@@ -337,6 +365,7 @@ def _answer(
                 else None
             )
             return (
+                *attestation,
                 *_say_lines(safe_error or TURN_FAILED_MESSAGE),
                 *shared,
                 directive("ask", PROMPT),
@@ -344,8 +373,8 @@ def _answer(
         case "cancelled":
             if frame.text:
                 closing = directive("exit", "0") if exits else directive("ask", PROMPT)
-                return (*_say_lines(frame.text), *shared, closing)
-            return (directive("say", "cancelled"), *shared, directive("ask", PROMPT))
+                return (*attestation, *_say_lines(frame.text), *shared, closing)
+            return (*attestation, directive("say", "cancelled"), *shared, directive("ask", PROMPT))
     raise ValueError(f"unmapped terminal status {frame.status!r}")
 
 
@@ -365,6 +394,7 @@ async def stream_directives(
     since: str = "",
     moved_on: Callable[[], Awaitable[bool]] | None = None,
     exits: bool = True,
+    runtime: RuntimeIdentity | None = None,
 ) -> AsyncIterator[bytes]:
     """Render a turn's live frames as directives, holding at most `hold_seconds`. A terminal or
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
@@ -481,7 +511,13 @@ async def stream_directives(
                 if isinstance(frame, Terminal) and files is not None:
                     shared = await files()
                 lines = directives_for(
-                    frame, streamed, collect, connect_message, shared, exits=exits
+                    frame,
+                    streamed,
+                    collect,
+                    connect_message,
+                    shared,
+                    exits=exits,
+                    runtime=runtime,
                 )
                 if lines and isinstance(frame, TextDelta):
                     streamed = True
@@ -703,6 +739,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         since=since,
         moved_on=moved_on,
         exits=not marked,
+        runtime=ctx.runtime,
     )
 
     async def bound() -> AsyncIterator[bytes]:

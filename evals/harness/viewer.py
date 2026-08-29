@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from evals.harness.capability import recorded_evidence_missing
 from evals.harness.harness import EvalReport
+from ufo.schema.records import RuntimeAttestation
 
 RUNS_DIR = "runs"
 VIEWER_FILENAME = "index.html"
@@ -40,6 +41,7 @@ class EvalRun(BaseModel):
     agent: str
     agent_prompt: str = ""
     workspace_id: UUID | None = None
+    runtime: RuntimeAttestation | None = None
     ufo_version: str
     revision: str
     reports: tuple[EvalReport, ...]
@@ -103,6 +105,7 @@ class RunRecorder:
     revision: str
     agent_prompt: str = ""
     workspace_id: UUID | None = None
+    runtime: RuntimeAttestation | None = None
     reports: dict[int, EvalReport] = field(default_factory=dict)
 
     def record(self, index: int, report: EvalReport) -> Path:
@@ -119,6 +122,7 @@ class RunRecorder:
             agent=self.agent,
             agent_prompt=self.agent_prompt,
             workspace_id=self.workspace_id,
+            runtime=self.runtime,
             ufo_version=self.ufo_version,
             revision=self.revision,
             reports=tuple(self.reports[index] for index in sorted(self.reports)),

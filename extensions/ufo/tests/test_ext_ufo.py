@@ -78,7 +78,13 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.sandbox.terminal import TerminalOpFailed
 from ufo.schema import tables
-from ufo.schema.records import CredentialPrompt, CredentialRequest, TerminalFrame, Usage
+from ufo.schema.records import (
+    CredentialPrompt,
+    CredentialRequest,
+    RuntimeIdentity,
+    TerminalFrame,
+    Usage,
+)
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth
 from ufo.serve import _mount_shared_surfaces
@@ -206,6 +212,37 @@ def test_terminal_frame_maps_by_status_and_streamed() -> None:
         b"ask\t>\n",
     )
     assert directives_for(Parked(message="over cap"), False) == (b"say\tover cap\n", b"ask\t>\n")
+
+
+def test_turn_ending_frames_carry_the_deployed_runtime_and_selected_model() -> None:
+    runtime = RuntimeIdentity(
+        revision="abc12345",
+        image_digest=f"sha256:{'a' * 64}",
+        config_digest=f"sha256:{'b' * 64}",
+        sandbox_backend="e2b",
+        sandbox_digest=f"sha256:{'c' * 64}",
+    )
+    terminal = Terminal(
+        frame=TerminalFrame(status="done", text="done", model="glm-5.3-flash", reasoning="high")
+    )
+
+    lines = directives_for(terminal, streamed=True, runtime=runtime)
+
+    assert json.loads(lines[0].decode().removeprefix("runtime\t")) == {
+        "runtime": runtime.model_dump(mode="json"),
+        "model": "glm-5.3-flash",
+        "reasoning": "high",
+    }
+    assert lines[1:] == (b"ask\t>\n",)
+
+    parked_lines = directives_for(Parked(message="over cap"), streamed=False, runtime=runtime)
+
+    assert json.loads(parked_lines[0].decode().removeprefix("runtime\t")) == {
+        "runtime": runtime.model_dump(mode="json"),
+        "model": "",
+        "reasoning": None,
+    }
+    assert parked_lines[1:] == (b"say\tover cap\n", b"ask\t>\n")
 
 
 def test_a_cancel_divides_on_whether_it_carries_words() -> None:

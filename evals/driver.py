@@ -14,7 +14,7 @@ import asyncio
 import json
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -47,6 +47,9 @@ from ufo.schema.records import (
     DELIVERY_PENDING,
     PENDING,
     ReasoningEffort,
+    RuntimeAttestation,
+    RuntimeIdentity,
+    SandboxSize,
     TerminalFrame,
     ToolIntent,
     TurnContext,
@@ -83,6 +86,47 @@ class RemoteTurnTimeout(Exception):
     def __init__(self, turn_id: UUID | None) -> None:
         super().__init__("ufo remote session exceeded the workflow wait")
         self.turn_id = turn_id
+
+
+@dataclass
+class RemoteRuntimeLog:
+    runtime: RuntimeIdentity | None = None
+    models: set[str] = field(default_factory=set)
+    reasoning: set[ReasoningEffort | None] = field(default_factory=set)
+    error: str = ""
+
+    def record(self, attestation: RuntimeAttestation) -> None:
+        if self.runtime is None:
+            self.runtime = attestation.runtime
+        elif self.runtime != attestation.runtime:
+            self.error = "remote eval crossed runtime identities"
+        if attestation.model:
+            self.models.add(attestation.model)
+            self.reasoning.add(attestation.reasoning)
+
+    def reject(self, reason: str) -> None:
+        self.error = reason
+
+    def verify(self, model: str, reasoning: ReasoningEffort) -> RuntimeAttestation:
+        if self.error:
+            raise RuntimeError(self.error)
+        if self.runtime is None:
+            raise RuntimeError("remote eval received no runtime attestation")
+        if self.models and self.models != {model}:
+            raise RuntimeError(
+                f"remote eval expected model {model!r}, terminal frames reported "
+                f"{sorted(self.models)!r}"
+            )
+        if self.reasoning and self.reasoning != {reasoning}:
+            raise RuntimeError(
+                f"remote eval expected reasoning {reasoning!r}, terminal frames reported "
+                f"{sorted(value or '' for value in self.reasoning)!r}"
+            )
+        return RuntimeAttestation(
+            runtime=self.runtime,
+            model=next(iter(self.models), ""),
+            reasoning=next(iter(self.reasoning), None),
+        )
 
 
 @dataclass(frozen=True)
@@ -133,6 +177,7 @@ class RemoteClient:
     workspace_url: str
     token_secret: str
     home_root: Path
+    runtime: RemoteRuntimeLog = field(default_factory=RemoteRuntimeLog)
 
     async def validate(self) -> None:
         """Fail unless the selected client implements the remote JSON transport."""
@@ -206,6 +251,21 @@ class RemoteClient:
         event_types = tuple(event.get("type") for event in events)
         if event_types[0] != "session_start" or "turn_end" not in event_types:
             raise RuntimeError(f"ufo remote session returned incomplete JSON events: {event_types}")
+        runtime_events = tuple(event for event in events if event.get("type") == "runtime")
+        if not runtime_events:
+            self.runtime.reject("remote eval terminal reported no runtime attestation")
+        for event in runtime_events:
+            try:
+                self.runtime.record(
+                    RuntimeAttestation.model_validate(
+                        {key: value for key, value in event.items() if key != "type"}
+                    )
+                )
+            except ValidationError as error:
+                self.runtime.reject("remote eval terminal reported an invalid runtime attestation")
+                raise RuntimeError(
+                    "ufo remote session returned an invalid runtime attestation"
+                ) from error
         if len(admitted) != 1:
             detail = (stderr or stdout).decode("utf-8", "replace").strip()[-1000:]
             raise RuntimeError(f"ufo remote session admitted {len(admitted)} turns: {detail}")
@@ -252,7 +312,7 @@ class RemoteClient:
 
 async def resolve_workspace_and_agent(
     agent_name: str, workspace_id: UUID | None = None
-) -> tuple[UUID, UUID, str, str, ReasoningEffort]:
+) -> tuple[UUID, UUID, str, str, ReasoningEffort, SandboxSize]:
     """Resolve the named target agent in an explicit workspace or the dedicated workspace."""
     if workspace_id is None:
         async with workspace_tx() as connection:
@@ -266,13 +326,21 @@ async def resolve_workspace_and_agent(
                         tables.agent.c.prompt,
                         tables.agent.c.model,
                         tables.agent.c.reasoning,
+                        tables.agent.c.sandbox_size,
                     ).where(
                         tables.agent.c.workspace_id == workspace_id,
                         tables.agent.c.name == agent_name,
                     )
                 )
             ).one()
-    return workspace_id, agent.id, agent.prompt, agent.model, agent.reasoning
+    return (
+        workspace_id,
+        agent.id,
+        agent.prompt,
+        agent.model,
+        agent.reasoning,
+        agent.sandbox_size,
+    )
 
 
 async def seed_candidate_agent(
@@ -313,7 +381,11 @@ async def seed_candidate_agent(
                 raise ValueError(f"proposal {proposal_id} carries no prompt body")
             base = (
                 await connection.execute(
-                    sa.select(tables.agent.c.model, tables.agent.c.reasoning).where(
+                    sa.select(
+                        tables.agent.c.model,
+                        tables.agent.c.reasoning,
+                        tables.agent.c.sandbox_size,
+                    ).where(
                         tables.agent.c.workspace_id == workspace_id,
                         tables.agent.c.id == proposal.agent_id,
                     )
@@ -336,6 +408,7 @@ async def seed_candidate_agent(
                         prompt=prompt,
                         model=base.model,
                         reasoning=base.reasoning,
+                        sandbox_size=base.sandbox_size,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -347,6 +420,7 @@ async def seed_candidate_agent(
                         prompt=prompt,
                         model=base.model,
                         reasoning=base.reasoning,
+                        sandbox_size=base.sandbox_size,
                         updated_at=sa.func.now(),
                     )
                     .where(tables.agent.c.id == existing)
