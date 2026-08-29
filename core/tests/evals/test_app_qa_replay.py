@@ -43,7 +43,7 @@ from evals.suites.ufo_app_qa_replay import (
 EXPECTED = {
     "pre-meeting-briefs": {
         "source": "5e9a1d31c455dd02cb386a42f4cdc7f30954eab1f46c6d66a32efcf4d6041d90",
-        "preview": "7bc284fd06f65b9ba88bc1000bb4fc780310f668c0b0eca1cc06b180d32228c3",
+        "preview": "4629e4b2681e8e584507dfb9de7dd2aa87cc370556772cf67dabc3ec72d4938a",
         "contract": "815aad6b3053593c800cf0f9a207f65be1a741bbde87d0a02cf3ffd166f4c0eb",
         "repair": (1, 2_854, 3_287),
         "codes": ("contrast", "overflow", "clipping", "above_fold"),

@@ -1000,6 +1000,41 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         'region=queue tag=text text="Queue overflow" edge=right overflow=' in right_overrun.stderr
     )
 
+    internal_collision = invoke(
+        native(
+            b'<svg viewBox="0 0 305 920" width="305" height="920" '
+            b'style="font-family:-apple-system,BlinkMacSystemFont,Inter,sans-serif">'
+            b'<g data-app-region="meeting-investor" transform="translate(12,622)">'
+            b'<rect width="281" height="250" rx="8" />'
+            b'<rect width="281" height="32" rx="8" />'
+            b'<text x="10" y="20" font-size="12" font-weight="700">'
+            b"Investor Update Review</text>"
+            b'<text x="271" y="20" font-size="10" font-weight="600" text-anchor="end">'
+            b"21:00 - 21:30 UTC</text>"
+            b'<text x="10" y="48" font-size="10" font-weight="600">'
+            b"Attendees: investor@transpose</text>"
+            b'<rect x="180" y="38" width="91" height="16" rx="3" />'
+            b'<text x="225" y="49" font-size="9" text-anchor="middle">'
+            b"Doc: None - Email: 4d</text></g></svg>"
+        )
+    )
+    assert internal_collision.returncode != 0
+    assert (
+        'text="Investor Update Review" overlaps text="21:00 - 21:30 UTC"'
+        in internal_collision.stderr
+    )
+    assert 'text="Attendees: investor@transpose" crosses rect' in internal_collision.stderr
+
+    ordinary_lines_and_avatar_stack = render(
+        b'<svg viewBox="0 0 305 844" width="305" height="844">'
+        b'<g data-app-region="queue"><rect x="8" y="8" width="289" height="120" />'
+        b'<text x="16" y="28">Queue</text><text x="16" y="48">Next line</text>'
+        b'<g data-slot="avatar-stack"><text x="16" y="80">AL</text>'
+        b'<text x="16" y="80">SR</text></g></g>'
+        b'<g data-app-region="detail"><rect x="8" y="136" width="289" height="700" />'
+        b'<text x="16" y="160">Detail</text></g></svg>'
+    )
+    assert [region["name"] for region in ordinary_lines_and_avatar_stack] == ["queue", "detail"]
     bottom_overrun = invoke(
         native(
             b'<svg viewBox="0 0 305 844" width="305" height="844">'
@@ -1662,6 +1697,8 @@ def _measured(**overrides: object) -> bytes:
             "aboveFoldText": "",
             "pastViewport": [],
             "clipped": [],
+            "overhangs": [],
+            "overlaps": [],
             "console": [],
             "regions": AUDIT_DESIGN_REGIONS,
         }
@@ -1743,10 +1780,10 @@ async def test_measured_screen_scorer_fails_an_unmeasured_view_and_a_wide_docume
     assert "measures no light at 305px, dark at 305px" in short.reason
 
     narrow = loads(_measured())
-    narrow["views"][2]["documentWidth"] = 402
+    narrow["views"][2]["documentWidth"] = 306
     overflowing = await grader(_output("audit.json", dumps(narrow).encode()))
     assert not overflowing.passed
-    assert "305px document is 402px" in overflowing.reason
+    assert "305px document is 306px" in overflowing.reason
 
     tall = loads(_measured())
     tall["views"][0]["documentHeight"] = DESKTOP_HEIGHT + 500
@@ -1763,6 +1800,37 @@ async def test_measured_screen_scorer_fails_an_unmeasured_view_and_a_wide_docume
     assert "read no text" in empty.reason
 
     assert not (await grader(_output("audit.json", b"{"))).passed
+
+
+async def test_measured_screen_scorer_fails_bounded_accidental_overlap_evidence() -> None:
+    grader = shared_artifact_scorer(".json", _measured_screen)
+    report = loads(_measured())
+    report["views"][0]["overlaps"] = [
+        {
+            "first": 'button "Review"',
+            "second": 'button "Assign"',
+            "width": 24,
+            "height": 32,
+        }
+    ]
+
+    verdict = await grader(_output("audit.json", dumps(report).encode()))
+
+    assert not verdict.passed
+    assert 'button "Review" overlaps button "Assign" by 24x32px' in verdict.reason
+
+
+async def test_measured_screen_scorer_fails_bounded_overhang_evidence() -> None:
+    grader = shared_artifact_scorer(".json", _measured_screen)
+    report = loads(_measured())
+    report["views"][0]["overhangs"] = [
+        "div.wide extends 24px past div[data-slot=card-content] right"
+    ]
+
+    verdict = await grader(_output("audit.json", dumps(report).encode()))
+
+    assert not verdict.passed
+    assert "extends 24px past div[data-slot=card-content] right" in verdict.reason
 
 
 async def test_interaction_screen_requires_two_accessible_visible_state_changes() -> None:
@@ -3245,6 +3313,7 @@ def test_ufo_app_bench_rubric_asks_only_for_visible_design_judgments() -> None:
     )
     assert all("Green, red, or purple status" not in criterion for criterion in HOUSE_CRITERIA)
     assert all("consistent near-square corners" not in criterion for criterion in HOUSE_CRITERIA)
+    assert all("accidental overlap" not in criterion for criterion in HOUSE_CRITERIA)
 
 
 def test_kit_rubric_alignment_ablation_changes_only_the_two_kit_rules(

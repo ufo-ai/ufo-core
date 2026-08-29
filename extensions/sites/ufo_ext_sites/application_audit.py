@@ -45,6 +45,7 @@ AuditIssueCode = Literal[
     "contrast",
     "overflow",
     "clipping",
+    "overlap",
     "design",
     "console",
     "controls",
@@ -84,6 +85,17 @@ class ApplicationAuditText(BaseModel):
     colour: str = ""
     background: str = ""
     slot: KitQuietTextSlot | None = None
+
+
+class ApplicationAuditOverlap(BaseModel):
+    """One accidental intersection between independent visible content."""
+
+    model_config = ConfigDict(frozen=True)
+
+    first: str = Field(min_length=1, max_length=160)
+    second: str = Field(min_length=1, max_length=160)
+    width: float = Field(gt=0, le=10000)
+    height: float = Field(gt=0, le=10000)
 
 
 class ApplicationAuditRegion(BaseModel):
@@ -136,6 +148,8 @@ class ApplicationAuditView(BaseModel):
     document_width: int = Field(alias="documentWidth", ge=0)
     page_height: int = Field(default=APPLICATION_DESIGN_FOLD, alias="pageHeight", ge=1)
     clipped: tuple[str, ...]
+    overhangs: tuple[AuditTerm, ...] = Field(default=(), max_length=8)
+    overlaps: tuple[ApplicationAuditOverlap, ...] = Field(max_length=8)
     console: tuple[str, ...]
     above_fold_text: str = Field(alias="aboveFoldText")
     regions: tuple[ApplicationAuditRegion, ...] = Field(default=(), max_length=20)
@@ -451,17 +465,36 @@ def audit_application(
     if contrast:
         issues.append(_issue("contrast", f"Fix text contrast: {'; '.join(contrast[:4])}."))
     overflow = tuple(
-        f"{view.scheme} {view.width}px document is {view.document_width}px"
-        for view in measured
-        if view.document_width > view.width
+        (
+            *(
+                f"{view.scheme} {view.width}px document is {view.document_width}px"
+                for view in measured
+                if view.document_width > view.width
+            ),
+            *(
+                f"{view.scheme} {view.width}px {item}"
+                for view in measured
+                for item in view.overhangs
+            ),
+        )
     )
     if overflow:
-        issues.append(_issue("overflow", f"Fix horizontal overflow: {'; '.join(overflow[:4])}."))
+        issues.append(
+            _issue("overflow", f"Fix horizontal overflow or overhang: {'; '.join(overflow[:4])}.")
+        )
     clipped = tuple(
         f"{view.scheme} {view.width}px {item}" for view in measured for item in view.clipped
     )
     if clipped:
         issues.append(_issue("clipping", f"Fix clipped content: {'; '.join(clipped[:4])}."))
+    overlaps = tuple(
+        f"{view.scheme} {view.width}px {item.first} overlaps {item.second} by "
+        f"{item.width:g}x{item.height:g}px"
+        for view in measured
+        for item in view.overlaps
+    )
+    if overlaps:
+        issues.append(_issue("overlap", f"Fix accidental overlap: {'; '.join(overlaps[:4])}."))
     fidelity = application_design_fidelity(report)
     if fidelity.failures:
         issues.append(

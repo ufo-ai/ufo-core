@@ -39,6 +39,8 @@ const DESIGN_CLONE_BYTE_MAX = 2 * 1024 * 1024;
 const DESIGN_OUTPUT_BYTE_MAX = 4096;
 const DESIGN_ANIMATED_POINT_MAX = 4096;
 const DESIGN_ANIMATED_ATTRIBUTE_BYTE_MAX = 128 * 1024;
+const DESIGN_INTERNAL_OVERLAP_MAX = 4;
+const DESIGN_INTERNAL_OVERLAP_SLOP = 1;
 const APPLICATION_LIFECYCLE_TIMEOUT_MS = 15000;
 const APPLICATION_INTERACTION_TIMEOUT_MS = 300;
 const APPLICATION_LIFECYCLE_DIAGNOSTIC_SUFFIX = '.lifecycle.json';
@@ -623,7 +625,97 @@ async function measure(floor) {
     }];
   }).slice(0, 20);
 
+  const overlapLabel = (element, textValue = '') => {
+    const slot = element.getAttribute('data-slot');
+    const role = element.getAttribute('role');
+    const name = element.tagName.toLowerCase() +
+      (slot ? `[data-slot=${slot}]` : role ? `[role=${role}]` : '');
+    const text = (textValue || element.getAttribute('aria-label') || element.textContent || '')
+      .trim().replace(/\s+/g, ' ').slice(0, 64);
+    return (text ? `${name} "${text}"` : name).slice(0, 160);
+  };
+  const intentionalComposition = (element) => element.closest(
+    '[data-slot="avatar-stack"], [data-slot="attachment"], [data-slot="chart"], ' +
+    '[data-slot="meter"], [data-slot="segmented"], [data-slot="switch"], ' +
+    '[data-slot="checkbox"], [data-slot="lightbox-stage"], [data-slot="reveal"]'
+  );
+  const overlayComposition = (element) => element.closest(
+    '[data-slot="dialog-content"], [data-slot="dropdown-menu-content"], ' +
+    '[data-slot="select-content"], [data-slot="sheet-content"], [data-slot="toast"], ' +
+    '[data-slot="toast-stand"], [data-slot="lightbox-stage"]'
+  );
+  const controlComposition = (element) => element.closest(
+    'button, a[href], input, select, textarea, [role="button"], [role="tab"], ' +
+    '[role="checkbox"], [role="switch"]'
+  );
+  const overlapCandidates = renderedNodes.flatMap(({ element, value, rects }) => {
+    if (controlComposition(element)) return [];
+    return rects.map((rect) => ({
+      element,
+      box: rect,
+      label: overlapLabel(element, value),
+      intentional: intentionalComposition(element),
+      overlay: overlayComposition(element),
+      control: null,
+    }));
+  });
+  for (const element of document.querySelectorAll(
+    'button, a[href], input, select, textarea, [role="button"], [role="tab"], ' +
+    '[role="checkbox"], [role="switch"], img, canvas, video, svg, [data-app-region], ' +
+    '[data-slot="card"], [data-slot="item"], [data-slot="stat"], ' +
+    '[data-slot="table-container"]'
+  )) {
+    const box = element.getBoundingClientRect();
+    if (!visible(element, box)) continue;
+    overlapCandidates.push({
+      element,
+      box,
+      label: overlapLabel(element),
+      intentional: intentionalComposition(element),
+      overlay: overlayComposition(element),
+      control: controlComposition(element),
+    });
+  }
+  const accidentalOverlaps = [];
+  for (let firstIndex = 0; firstIndex < overlapCandidates.length; firstIndex += 1) {
+    const first = overlapCandidates[firstIndex];
+    for (let secondIndex = firstIndex + 1;
+      secondIndex < overlapCandidates.length; secondIndex += 1) {
+      const second = overlapCandidates[secondIndex];
+      if (first.element === second.element || first.element.contains(second.element) ||
+          second.element.contains(first.element)) continue;
+      if (first.control && first.control === second.control) continue;
+      if (first.intentional && first.intentional === second.intentional) continue;
+      if (first.overlay !== second.overlay && (first.overlay || second.overlay)) continue;
+      const width = Math.min(first.box.right, second.box.right) -
+        Math.max(first.box.left, second.box.left);
+      const height = Math.min(first.box.bottom, second.box.bottom) -
+        Math.max(first.box.top, second.box.top);
+      if (width <= 1 || height <= 1) continue;
+      accidentalOverlaps.push({
+        first: first.label,
+        second: second.label,
+        width: Math.round(width * 10) / 10,
+        height: Math.round(height * 10) / 10,
+      });
+      if (accidentalOverlaps.length === 8) break;
+    }
+    if (accidentalOverlaps.length === 8) break;
+  }
+
   const wider = [];
+  const overhangs = [];
+  const overhangKeys = new Set();
+  const addOverhang = (key, evidence) => {
+    if (overhangs.length === 8 || overhangKeys.has(key)) return;
+    overhangKeys.add(key);
+    overhangs.push(evidence.slice(0, 200));
+  };
+  const containerSelector = [
+    'main', 'section', 'article', 'aside', 'nav', '[data-app-region]',
+    '[data-slot="card"]', '[data-slot="card-content"]', '[data-slot="item"]',
+    '[data-slot="stat"]', '[data-slot="table-container"]',
+  ].join(', ');
   const clipped = [];
   for (const element of document.querySelectorAll('*')) {
     const box = element.getBoundingClientRect();
@@ -633,7 +725,31 @@ async function measure(floor) {
     const name =
       element.tagName.toLowerCase() +
       (element.className ? '.' + String(element.className).trim().split(/\s+/)[0] : '');
-    if (box.right > window.innerWidth + 1 || box.left < -1) wider.push(name);
+    const viewportLeft = Math.max(0, -box.left);
+    const viewportRight = Math.max(0, box.right - window.innerWidth);
+    if (viewportLeft > 1 || viewportRight > 1) {
+      wider.push(name);
+      const edge = viewportLeft > viewportRight ? 'left' : 'right';
+      const pixels = Math.round(Math.max(viewportLeft, viewportRight) * 10) / 10;
+      addOverhang(`viewport|${name}|${edge}`, `${name} extends ${pixels}px past viewport ${edge}`);
+    }
+    const container = element.parentElement?.closest(containerSelector);
+    const containerOverflowX = container ? getComputedStyle(container).overflowX : null;
+    if (container && !intentionalComposition(element) && !overlayComposition(element) &&
+        style.position !== 'fixed' && !['auto', 'scroll'].includes(containerOverflowX)) {
+      const containerBox = container.getBoundingClientRect();
+      const containerLeft = Math.max(0, containerBox.left - box.left);
+      const containerRight = Math.max(0, box.right - containerBox.right);
+      if (containerLeft > 1 || containerRight > 1) {
+        const edge = containerLeft > containerRight ? 'left' : 'right';
+        const pixels = Math.round(Math.max(containerLeft, containerRight) * 10) / 10;
+        const containerName = overlapLabel(container);
+        addOverhang(
+          `container|${name}|${containerName}|${edge}`,
+          `${name} extends ${pixels}px past ${containerName} ${edge}`
+        );
+      }
+    }
     if (element.children.length) continue;
     if (
       element.scrollWidth > element.clientWidth + 2 &&
@@ -657,6 +773,8 @@ async function measure(floor) {
     regions,
     pastViewport: wider.slice(0, 12),
     clipped: clipped.slice(0, 8),
+    overhangs,
+    overlaps: accidentalOverlaps,
   };
 }
 
@@ -894,6 +1012,8 @@ async function renderedDesignRegions(page, viewport) {
     drawingElements,
     elementMax,
     initialFold,
+    internalOverlapMax,
+    internalOverlapSlop,
     outputByteMax,
     presentationProperties,
     propertyMax,
@@ -1072,6 +1192,7 @@ async function renderedDesignRegions(page, viewport) {
       );
     }
     const evidence = [];
+    const drawings = [];
     for (const element of root.querySelectorAll(drawingElements)) {
       if (element.closest('defs,symbol,clipPath,mask,marker,pattern')) continue;
       let visible = true;
@@ -1121,6 +1242,7 @@ async function renderedDesignRegions(page, viewport) {
       const excerpt = element.localName === 'text'
         ? ` text=${JSON.stringify((element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40))}`
         : '';
+      drawings.push({ element, bounds, region, excerpt });
       for (const [edge, amount] of overrun) {
         if (amount <= 0.01 || evidence.length >= 4) continue;
         evidence.push(
@@ -1133,6 +1255,60 @@ async function renderedDesignRegions(page, viewport) {
       throw new Error(`application design extends outside its viewBox: ${evidence.join('; ')}`);
     }
 
+    const intentionalComposition = (element) => element.closest(
+      '[data-slot="avatar-stack"], [data-slot="chart"], [data-slot="meter"], ' +
+      '[data-slot="segmented"], [data-slot="switch"], [data-slot="checkbox"]'
+    );
+    const overlapSize = (first, second) => ({
+      width: Math.min(first.right, second.right) - Math.max(first.left, second.left),
+      height: Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top),
+    });
+    const collisionEvidence = [];
+    const texts = drawings.filter(({ element }) => element.localName === 'text');
+    const rectangles = drawings.filter(({ element }) => element.localName === 'rect');
+    for (let firstIndex = 0; firstIndex < texts.length; firstIndex += 1) {
+      const first = texts[firstIndex];
+      for (let secondIndex = firstIndex + 1; secondIndex < texts.length; secondIndex += 1) {
+        const second = texts[secondIndex];
+        if (first.region !== second.region) continue;
+        const intentional = intentionalComposition(first.element);
+        if (intentional && intentional === intentionalComposition(second.element)) continue;
+        const overlap = overlapSize(first.bounds, second.bounds);
+        if (overlap.width <= internalOverlapSlop || overlap.height <= internalOverlapSlop) continue;
+        const width = Math.round(overlap.width * 10) / 10;
+        const height = Math.round(overlap.height * 10) / 10;
+        collisionEvidence.push(
+          `region=${first.region}${first.excerpt} overlaps${second.excerpt} by ${width}x${height}px`
+        );
+        if (collisionEvidence.length === internalOverlapMax) break;
+      }
+      if (collisionEvidence.length === internalOverlapMax) break;
+    }
+    for (const text of texts) {
+      if (collisionEvidence.length === internalOverlapMax) break;
+      if (intentionalComposition(text.element)) continue;
+      for (const rectangle of rectangles) {
+        if (text.region !== rectangle.region) continue;
+        const overlap = overlapSize(text.bounds, rectangle.bounds);
+        if (overlap.width <= internalOverlapSlop || overlap.height <= internalOverlapSlop) continue;
+        const contained = text.bounds.left >= rectangle.bounds.left - internalOverlapSlop &&
+          text.bounds.right <= rectangle.bounds.right + internalOverlapSlop &&
+          text.bounds.top >= rectangle.bounds.top - internalOverlapSlop &&
+          text.bounds.bottom <= rectangle.bounds.bottom + internalOverlapSlop;
+        if (contained) continue;
+        const width = Math.round(overlap.width * 10) / 10;
+        const height = Math.round(overlap.height * 10) / 10;
+        collisionEvidence.push(
+          `region=${text.region}${text.excerpt} crosses tag=rect by ${width}x${height}px`
+        );
+        if (collisionEvidence.length === internalOverlapMax) break;
+      }
+    }
+    if (collisionEvidence.length) {
+      throw new Error(
+        `application design has accidental internal overlap: ${collisionEvidence.join('; ')}`
+      );
+    }
     const namedRegions = Array.from(root.querySelectorAll('[data-app-region]'))
       .map((element) => ({
         element,
@@ -1459,6 +1635,8 @@ async function renderedDesignRegions(page, viewport) {
     visibleTextMaxChars: DESIGN_VISIBLE_TEXT_MAX_CHARS,
     drawingElements: DESIGN_DRAWING_ELEMENTS,
     initialFold: DESIGN_INITIAL_FOLD,
+    internalOverlapMax: DESIGN_INTERNAL_OVERLAP_MAX,
+    internalOverlapSlop: DESIGN_INTERNAL_OVERLAP_SLOP,
     viewport,
   });
 }

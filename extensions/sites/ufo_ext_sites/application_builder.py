@@ -1048,6 +1048,12 @@ async def _render_application_design(
         )
         if overrun is not None:
             raise ValueError(overrun.group(0))
+        overlap = re.search(
+            r"application design has accidental internal overlap: [^\n]+",
+            detail,
+        )
+        if overlap is not None:
+            raise ValueError(overlap.group(0))
         raise RuntimeError(f"Run the browser audit successfully: {detail}")
     if len(rendered.stdout.encode()) > APPLICATION_DESIGN_AUDIT_MAX_BYTES:
         raise RuntimeError("application design audit returned malformed output")

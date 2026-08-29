@@ -907,6 +907,7 @@ def test_application_audit_accepts_measured_interactive_facts() -> None:
                     "text": [],
                     "documentWidth": width,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Acme renewal Aug 27 #2042",
                     "regions": AUDIT_DESIGN_REGIONS,
@@ -956,11 +957,12 @@ def test_application_audit_uses_the_quiet_floor_only_for_exact_kit_slots() -> No
                         "text": [text],
                         "documentWidth": width,
                         "clipped": [],
+                        "overlaps": [],
                         "console": [],
                         "aboveFoldText": "Open issues 42",
                         "regions": AUDIT_DESIGN_REGIONS,
                     }
-                    for width in (1440, 390)
+                    for width in (1440, 305)
                     for scheme in ("light", "dark")
                 ],
                 "interaction": {
@@ -1043,6 +1045,7 @@ def test_application_design_fidelity_compares_only_the_separating_axis() -> None
                     "text": [],
                     "documentWidth": width,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Queue",
                     "regions": app_regions,
@@ -1096,6 +1099,7 @@ def test_application_design_fidelity_preserves_design_fold_placement() -> None:
                         "text": [],
                         "documentWidth": width,
                         "clipped": [],
+                        "overlaps": [],
                         "console": [],
                         "aboveFoldText": "Summary",
                         "regions": app_regions,
@@ -1148,6 +1152,7 @@ def test_application_design_fidelity_rejects_overlapping_regions() -> None:
                     "text": [],
                     "documentWidth": width,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Queue",
                     "regions": regions,
@@ -1247,6 +1252,7 @@ def test_application_design_fidelity_region_size_boundaries(
                     "text": [],
                     "documentWidth": 1440,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Queue",
                     "regions": design_regions,
@@ -1278,6 +1284,7 @@ def test_application_design_fidelity_does_not_size_dom_regions() -> None:
                     "text": [],
                     "documentWidth": 1440,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Queue",
                     "regions": application_regions,
@@ -1317,6 +1324,7 @@ def test_application_design_fidelity_sizes_regions_against_the_design_page() -> 
                     "text": [],
                     "documentWidth": 1440,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Queue",
                     "regions": design_regions,
@@ -1384,6 +1392,7 @@ def _side_by_side_report(design_height: int, application_height: int) -> Applica
                     "documentWidth": width,
                     "pageHeight": application_height,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Stats",
                     "regions": _side_by_side_bands(application_height),
@@ -1491,6 +1500,7 @@ def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
                     ],
                     "documentWidth": width + 12,
                     "clipped": ["td.owner: Alexandra"],
+                    "overlaps": [],
                     "console": ["pageerror: broken"],
                     "aboveFoldText": "Acme renewal",
                     "regions": AUDIT_DESIGN_REGIONS,
@@ -1554,6 +1564,7 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
                         ),
                         "documentWidth": width,
                         "clipped": [],
+                        "overlaps": [],
                         "console": [],
                         "aboveFoldText": "#2042",
                         "regions": AUDIT_DESIGN_REGIONS,
@@ -3163,6 +3174,7 @@ async def test_application_product_qa_owns_the_fixed_root_and_records_passed_pro
                     "text": [],
                     "documentWidth": width,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "#2042",
                     "regions": AUDIT_DESIGN_REGIONS,
@@ -3266,6 +3278,7 @@ async def test_application_product_qa_bounds_dense_control_evidence_before_proof
                     "text": [],
                     "documentWidth": width,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Dense controls",
                     "regions": AUDIT_DESIGN_REGIONS,
@@ -3711,6 +3724,7 @@ async def test_write_application_design_recovers_each_partial_pair_and_passes_qa
                     "text": [],
                     "documentWidth": width,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Queue",
                     "regions": AUDIT_DESIGN_REGIONS,
@@ -4425,6 +4439,7 @@ async def test_application_builder_rejects_overlap_before_fixing_design(tmp_path
                     "text": [],
                     "documentWidth": width,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Queue",
                     "regions": AUDIT_DESIGN_REGIONS,
@@ -4677,6 +4692,63 @@ async def test_application_builder_accepts_one_corrected_native_design(tmp_path:
             WriteApplicationDesignInput(content=APPLICATION_DESIGN),
         )
 
+    assert sandbox.programs == []
+    assert sandbox.workspace_writes == []
+    assert not sandbox.design_claimed
+    sandbox.design_audit = ExecResult(json.dumps(AUDIT_DESIGN_REGIONS), "", 0)
+    corrected = replace(
+        ctx,
+        idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-2",
+    )
+    result = await write_application_design(
+        corrected,
+        WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert payload["design_digest"] == sha256(APPLICATION_DESIGN.encode()).hexdigest()
+    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+
+
+async def test_application_builder_accepts_one_corrected_internal_overlap_design(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    sandbox = FakeSandbox(
+        design_audit=ExecResult(
+            "",
+            "Error: application design has accidental internal overlap: "
+            'region=queue text="Suggested owner:" overlaps text="alex" by 6.5x13px',
+            1,
+        ),
+        track_design_claim=True,
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = _application_design_context(
+        replace(
+            base,
+            turn=base.turn.model_copy(
+                update={
+                    "inbound": task.model_dump_json(),
+                    "subagent_profile": APPLICATION_BUILDER_NAME,
+                }
+            ),
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"application design has accidental internal overlap:.*Suggested owner:.*6.5x13px",
+    ):
+        await write_application_design(
+            ctx,
+            WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+        )
+
     sandbox.design_audit = ExecResult(json.dumps(AUDIT_DESIGN_REGIONS), "", 0)
     corrected = replace(
         ctx,
@@ -4918,6 +4990,7 @@ async def test_application_audit_uses_durable_turn_evidence_without_requesting_t
                     "text": [],
                     "documentWidth": width,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": "Queue",
                     "regions": AUDIT_DESIGN_REGIONS,

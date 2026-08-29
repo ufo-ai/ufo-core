@@ -22,6 +22,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from typing import ClassVar
 
 import pytest
 from ufo_ext_sites.application_audit import (
@@ -138,16 +139,101 @@ mountApp(document.getElementById("root"), () =>
 """
 
 
+def _kit_overlap_page(broken: bool) -> str:
+    body = (
+        "h('main', { style: { minWidth: 1500 } },"
+        "h(Button, { style: { position: 'absolute', left: 40, top: 40 } }, 'Review'),"
+        "h(Button, { style: { position: 'absolute', left: 70, top: 40 } }, 'Assign'),"
+        "h('p', { style: { position: 'absolute', left: 40, top: 100 } }, 'Owner Ada'),"
+        "h('p', { style: { position: 'absolute', left: 40, top: 100 } }, 'Due Friday'),"
+        "h(Card, { style: { position: 'absolute', left: 350, top: 160, width: 180 } },"
+        "h(CardContent, null, h('div', { style: { width: 240 } }, 'Container overhang'))))"
+        if broken
+        else """h('main', { style: { padding: 32 } },
+  h(Card, null,
+    h(CardHeader, null, h(CardTitle, null, 'Account review')),
+    h(CardContent, null,
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 16 } },
+        h(AvatarStack, { people: [
+          { name: 'Ada Lowe' }, { name: 'Sam Reed' },
+          { name: 'Noor Shah' }, { name: 'Priya Jain' },
+        ] }),
+        h(Button, null, 'Review'),
+        h(Button, { variant: 'outline' }, 'Assign')))),
+  h(Card, { style: { width: 440 } },
+    h(CardHeader, null, h(CardTitle, null, 'Issue queue')),
+    h(CardContent, null,
+      h(DataTable, {
+        columns: ['Issue', { label: 'Owner', fact: true }, { label: 'Age', fact: true }],
+        rows: [{ id: 'ISS-42', issue: 'Retry failed deployments', owner: 'Ada', age: '3 days' }],
+        rowKey: (row) => row.id,
+        empty: 'No issues.',
+        children: (row) => [
+          h(Td, { key: 'issue' }, row.issue),
+          h(Td, { key: 'owner' }, row.owner),
+          h(Td, { key: 'age' }, row.age),
+        ],
+      }))))"""
+    )
+    return f"""<!doctype html>
+<link rel="stylesheet" href="./kit/kit.css">
+<div id="root"></div><pre id="out"></pre>
+<script>
+{_measure_source()}
+window.addEventListener('message', (event) => {{
+  if (event.data?.ufo !== 'ready') return;
+  event.source.postMessage({{
+    ufo: 'init', member: {{ email: 'member@example.com', admin: true }}, agents: [],
+    agentId: 'agent-1', place: {{}}, portal: location.origin,
+  }}, '*');
+}});
+</script>
+<script type="module">
+import {{
+  AvatarStack, Button, Card, CardContent, CardHeader, CardTitle, DataTable, React, Td, mountApp,
+}} from './kit/kit.js';
+const h = React.createElement;
+mountApp(document.getElementById('root'), () => {body});
+while (!window.__ufoApplicationLifecycle?.snapshot().mounted) {{
+  await new Promise(requestAnimationFrame);
+}}
+await window.__ufoApplicationLifecycle.afterPaint();
+await document.fonts.ready;
+const avatars = Array.from(document.querySelectorAll(
+  '[data-slot="avatar-stack"] [data-slot="avatar"]'
+)).map((avatar) => {{
+  const box = avatar.getBoundingClientRect();
+  return {{ left: box.left, right: box.right }};
+}});
+const tableContainer = document.querySelector('[data-slot="table-container"]');
+const tableScroll = tableContainer ? {{
+  clientWidth: tableContainer.clientWidth,
+  scrollWidth: tableContainer.scrollWidth,
+  overflowX: getComputedStyle(tableContainer).overflowX,
+}} : null;
+const measured = await measure({STRICT_FLOOR});
+document.getElementById('out').textContent =
+  'BEGIN' + JSON.stringify({{ avatars, tableScroll, measured }}) + 'END';
+</script>"""
+
+
 def _browser_output(page: Path) -> str:
+    class Handler(SimpleHTTPRequestHandler):
+        extensions_map: ClassVar[dict[str, str]] = {
+            **SimpleHTTPRequestHandler.extensions_map,
+            ".html": "text/html; charset=utf-8",
+        }
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
     profile = page.parent / "chrome-profile"
     log_path = page.parent / "chrome.log"
     server = None
     server_thread = None
     url = page.as_uri()
     if (page.parent / "kit").is_dir():
-        server = ThreadingHTTPServer(
-            ("127.0.0.1", 0), partial(SimpleHTTPRequestHandler, directory=page.parent)
-        )
+        server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=str(page.parent)))
         server_thread = Thread(target=server.serve_forever)
         server_thread.start()
         url = f"http://127.0.0.1:{server.server_port}/{page.name}"
@@ -176,9 +262,15 @@ def _browser_output(page: Path) -> str:
                     time.sleep(0.05)
             if port is None:
                 raise RuntimeError(log_path.read_text(errors="replace")[-2000:])
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list") as response:
-                targets = json.loads(response.read())
-            target = next(item for item in targets if item["type"] == "page")
+            target = None
+            while target is None and time.monotonic() < deadline:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list") as response:
+                    targets = json.loads(response.read())
+                target = next((item for item in targets if item["type"] == "page"), None)
+                if target is None:
+                    time.sleep(0.05)
+            if target is None:
+                raise RuntimeError("Chrome opened no page target")
             with connect(target["webSocketDebuggerUrl"], open_timeout=5) as socket:
                 call_id = 0
 
@@ -279,6 +371,7 @@ def test_real_kit_quiet_labels_pass_but_author_quiet_prose_fails(measured: dict)
                         "text": text,
                         "documentWidth": width,
                         "clipped": [],
+                        "overlaps": [],
                         "console": [],
                         "aboveFoldText": measured["aboveFoldText"],
                         "regions": regions,
@@ -306,6 +399,36 @@ def test_real_kit_quiet_labels_pass_but_author_quiet_prose_fails(measured: dict)
 
 def test_every_visible_leaf_is_counted(measured: dict) -> None:
     assert measured["textChecked"] >= 2
+
+
+@pytest.mark.parametrize("broken", (False, True))
+def test_real_kit_overlap_contract(tmp_path: Path, broken: bool) -> None:
+    shutil.copytree(KIT_DIR, tmp_path / "kit")
+    page = tmp_path / "kit-overlap.html"
+    page.write_text(_kit_overlap_page(broken))
+
+    output = _browser_output(page)
+    result = json.loads(output.removeprefix("BEGIN").removesuffix("END"))
+    measured = result["measured"]
+
+    if not broken:
+        boxes = result["avatars"]
+        assert len(boxes) == 4
+        assert all(boxes[index]["left"] < boxes[index - 1]["right"] for index in range(1, 4))
+        assert result["tableScroll"]["overflowX"] == "auto"
+        assert result["tableScroll"]["scrollWidth"] > result["tableScroll"]["clientWidth"]
+        assert measured["overlaps"] == []
+        assert measured["overhangs"] == []
+        return
+    assert 1 <= len(measured["overlaps"]) <= 8
+    evidence = " ".join(f"{item['first']} {item['second']}" for item in measured["overlaps"])
+    assert "Review" in evidence
+    assert "Assign" in evidence
+    assert "Owner Ada" in evidence
+    assert "Due Friday" in evidence
+    assert measured["pastViewport"]
+    assert any("viewport right" in item for item in measured["overhangs"])
+    assert any("card-content" in item for item in measured["overhangs"])
 
 
 def test_painted_text_reconstructs_inline_and_block_facts(tmp_path: Path) -> None:
@@ -360,6 +483,7 @@ def test_painted_text_reconstructs_inline_and_block_facts(tmp_path: Path) -> Non
                     "text": measured["text"],
                     "documentWidth": width,
                     "clipped": [],
+                    "overlaps": [],
                     "console": [],
                     "aboveFoldText": measured["aboveFoldText"],
                     "regions": regions,

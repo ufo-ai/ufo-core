@@ -1,5 +1,5 @@
 {
-  "sha256": "c1460559ebd5680d1603a8f34d75e512ea53b5ec655c2999994989154120dac1",
+  "sha256": "2d1252f3242307e7d117ff38af948deaf38e98047d2bd5b209fcc861ccd0b430",
   "issues": [
     {
       "code": "contrast",
@@ -8,7 +8,7 @@
     },
     {
       "code": "overflow",
-      "message": "Fix horizontal overflow: light 305px document is 329px; dark 305px document is 329px.",
+      "message": "Fix horizontal overflow or overhang: light 305px document is 329px; dark 305px document is 329px; light 305px div extends 24px past viewport right; light 305px div extends 48px past section \"Prepared Assignment ReviewAssignments are made in chatActive Pro\" right.",
       "terms": []
     }
   ]

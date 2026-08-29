@@ -1542,7 +1542,8 @@ TASTE_CRITERIA = (
 def _measured_screen(content: bytes) -> ArtifactCheck:
     """The measured half: every view `app-audit.cjs` shot, with contrast reported first because it
     is the check a first bench run showed a static token check cannot make. Contrast fails the
-    screen, then a document wider than its viewport, then clipped text, then a console error."""
+    screen, then a document wider than its viewport, clipped or overlapping content, then a
+    console error."""
     try:
         report = ApplicationAuditReport.model_validate_json(content)
     except (UnicodeDecodeError, TypeError, ValueError) as error:
@@ -1557,6 +1558,7 @@ def _measured_screen(content: bytes) -> ArtifactCheck:
             "contrast",
             "overflow",
             "clipping",
+            "overlap",
             "console",
         }
     )
@@ -1565,7 +1567,7 @@ def _measured_screen(content: bytes) -> ArtifactCheck:
     return ArtifactCheck(
         True,
         "body text clears AA in both schemes, Kit quiet labels clear their role floor, and nothing "
-        "clips or overflows horizontally",
+        "clips, overlaps, or overflows horizontally",
     )
 
 

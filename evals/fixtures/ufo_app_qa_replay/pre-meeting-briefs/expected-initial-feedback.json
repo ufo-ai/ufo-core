@@ -1,5 +1,5 @@
 {
-  "sha256": "a997c70779131d4a5ed0939a105b1f7fddccd9127fe8e48619c4a265594c06b5",
+  "sha256": "08a5f6fa4853b9cfc7d6acfb6a623d9a1b8403924197c4444cdbcdb9de2d6c60",
   "issues": [
     {
       "code": "contrast",
@@ -8,7 +8,7 @@
     },
     {
       "code": "overflow",
-      "message": "Fix horizontal overflow: light 305px document is 328px; dark 305px document is 328px.",
+      "message": "Fix horizontal overflow or overhang: light 305px document is 328px; dark 305px document is 328px; light 305px div extends 23px past viewport right; dark 305px div extends 23px past viewport right.",
       "terms": []
     },
     {
