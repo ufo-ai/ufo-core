@@ -306,11 +306,13 @@ def stage_client_binary() -> Path:
 @cache
 def system_skill_bundle() -> SystemSkillBundle:
     paths = sorted(
-        {
+        path
+        for path in {
             *ROOT.glob("core/src/ufo/skills/**/SKILL.md"),
             *ROOT.glob("extensions/**/skills/**/SKILL.md"),
             *ROOT.glob("packs/**/skills/**/SKILL.md"),
         }
+        if "node_modules" not in path.parts
     )
     directories = {path.parent for path in paths}
     roots = sorted(

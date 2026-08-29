@@ -287,6 +287,35 @@ def test_system_skills_are_baked_into_each_sandbox_image() -> None:
     assert f'test -f "{SYSTEM_SKILLS_ROOT}/.system-manifest.json"' in SANDBOX_TEMPLATE_READY_COMMAND
 
 
+def test_system_skill_bundle_excludes_dependency_skills(monkeypatch, tmp_path) -> None:
+    skill = tmp_path / "extensions" / "sample" / "skills" / "expected"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: expected\ndescription: Load when the sample is required.\n---\n\nUse it.\n"
+    )
+    dependency = (
+        tmp_path
+        / "extensions"
+        / "web"
+        / "frontend"
+        / "node_modules"
+        / "package"
+        / "skills"
+        / "dependency"
+    )
+    dependency.mkdir(parents=True)
+    (dependency / "SKILL.md").write_text(
+        "---\nname: package/dependency\ndescription: Load when dependency text is required.\n---\n"
+    )
+    monkeypatch.setattr(build_template, "ROOT", tmp_path)
+    system_skill_bundle.cache_clear()
+    try:
+        manifest = json.loads(system_skill_bundle().manifest)
+    finally:
+        system_skill_bundle.cache_clear()
+    assert tuple(manifest["skills"]) == ("expected",)
+
+
 def test_the_baked_client_moves_the_drift_digest_with_its_source(monkeypatch, tmp_path) -> None:
     """A live template baked from older client source must fail --check rather than keep serving
     file ops from a binary the host no longer ships. The binary's own bytes are not hashed — a
