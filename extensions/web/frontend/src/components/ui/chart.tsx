@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState, type ComponentProps } from "react";
-import type { Area as AreaMark, AreaChart as AreaPlot, ResponsiveContainer as Box } from "recharts";
+import type {
+  Area as AreaMark,
+  AreaChart as AreaPlot,
+  ResponsiveContainer as Box,
+  Tooltip as Readout,
+} from "recharts";
 
 import { cn } from "@/lib/cn";
 
@@ -14,9 +19,14 @@ const HAIRLINE = 2;
 const WASH = 0.12;
 const AIR = { top: HAIRLINE, right: 0, bottom: 0, left: 0 };
 
-const plotted = (points: readonly number[]) => points.map((value) => ({ value }));
+const plotted = (points: readonly number[]) => points.map((value, at) => ({ at, value }));
 
-type Cartesian = { Area: typeof AreaMark; AreaChart: typeof AreaPlot; ResponsiveContainer: typeof Box };
+type Cartesian = {
+  Area: typeof AreaMark;
+  AreaChart: typeof AreaPlot;
+  ResponsiveContainer: typeof Box;
+  Tooltip: typeof Readout;
+};
 
 /** The plotting library, fetched the first time a page draws a curve and shared by every curve after
  *  it. It is the heaviest thing the kit can reach and most screens never draw one, so it is not in
@@ -35,6 +45,7 @@ function useCartesian(): Cartesian | null {
         Area: mark.Area,
         AreaChart: mark.AreaChart,
         ResponsiveContainer: mark.ResponsiveContainer,
+        Tooltip: mark.Tooltip,
       }))
       .catch((refusal) => {
         loading = null;
@@ -53,14 +64,19 @@ function useCartesian(): Cartesian | null {
 }
 
 /** A measure's shape over the period it was measured, drawn as one series and the wash beneath it:
- *  no axes, no gridlines, no legend, no tooltip. A trend is read for its direction, and every mark
- *  that is not the trend is ink the reader looks past to find it. The panel is a `Card` and what
+ *  no axes, no gridlines, no legend. A trend is read for its direction, and every mark that is not
+ *  the trend is ink the reader looks past to find it. The panel is a `Card` and what
  *  the series counts is the `Stat` above it, so the plot draws no ground, no corner, no title and
  *  no figure of its own: it is the frame's content, and a fill inside a box that already carries a
  *  border is the one pairing the four ways to divide rules out (`extensions/web/AGENTS.md`,
  *  "Layout: the grid, the rhythm, and the four ways to divide"). A plot standing on no card is that
  *  table's **Fill** — something a member reads into rather than across — and the ground is then the
  *  caller's to draw around it.
+ *
+ *  `hover` is what one point says when the pointer reaches it. A plot that states a direction alone
+ *  answers "is it rising"; a page whose reader also asks "how much on that day" states the point
+ *  itself, and the caller words it because the caller owns the units and the period. A plot given no
+ *  `hover` draws no readout and no cursor, which is every plot read for its shape alone.
  *
  *  `label` is what the series plots, said once: the plot answers as one graphic rather than as a
  *  hundred unnamed points, and a member reading by ear hears the measure instead of the markup. It
@@ -80,9 +96,14 @@ function useCartesian(): Cartesian | null {
 export function Chart({
   label,
   points,
+  hover,
   className,
   ...props
-}: ComponentProps<"div"> & { label: string; points: readonly number[] }) {
+}: ComponentProps<"div"> & {
+  label: string;
+  points: readonly number[];
+  hover?: (at: number) => string;
+}) {
   const data = useMemo(() => plotted(points), [points]);
   const cartesian = useCartesian();
   return (
@@ -104,9 +125,23 @@ export function Chart({
             fill={SERIES}
             fillOpacity={WASH}
             dot={false}
-            activeDot={false}
+            activeDot={hover === undefined ? false : { fill: SERIES, r: HAIRLINE }}
             isAnimationActive={false}
           />
+          {hover === undefined ? null : (
+            <cartesian.Tooltip
+              isAnimationActive={false}
+              cursor={{ stroke: SERIES, strokeWidth: HAIRLINE }}
+              content={({ active, payload }) => {
+                const point = active ? payload?.[0]?.payload : undefined;
+                return point == null ? null : (
+                  <span className="rounded-full bg-ink px-2xl py-sm text-small font-medium text-surface">
+                    {hover(Number(point.at))}
+                  </span>
+                );
+              }}
+            />
+          )}
         </cartesian.AreaChart>
       </cartesian.ResponsiveContainer>
       )}

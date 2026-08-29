@@ -3962,6 +3962,17 @@ async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollu
         )
     ).json()
     assert windowed["window_seconds"] == 3_600
+    assert web_surface.USAGE_RANGES["1d"] == 86_400
+    for name, seconds in web_surface.USAGE_RANGES.items():
+        ranged = await client.get(
+            f"{path}?range={name}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+        )
+        assert ranged.status_code == 200
+        assert ranged.json()["window_seconds"] == seconds
+    unnamed = await client.get(
+        f"{path}?range=2d", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    )
+    assert unnamed.status_code == 400
     for bad in ("abc", "-5", "0", str(web_surface.MAX_USAGE_WINDOW_SECONDS + 1)):
         refused = await client.get(
             f"{path}?window_seconds={bad}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}

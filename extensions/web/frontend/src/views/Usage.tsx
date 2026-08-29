@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Chart } from "@/components/ui/chart";
 import { Table, Td, Th, tableFloor } from "@/components/ui/table";
 import type { Placement } from "@/kernel/pager";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
@@ -6,9 +7,22 @@ import { agentName } from "@/lib/agentName";
 import { money } from "@/lib/money";
 
 const HOUR_SECONDS = 3600;
-const RANGES = ["7d", "30d", "90d", "all"] as const;
+const DAY_SECONDS = 86_400;
+const RANGES = ["1d", "7d", "30d", "90d", "all"] as const;
+const DEFAULT_RANGE = "30d";
 
 type Range = (typeof RANGES)[number];
+
+/** What each range is called on its own control: the period alone, because the row of them is
+ *  already named as the range. The note under a figure says the same period as a span — `rangeLabel`
+ *  — so one range is never two words on one screen. */
+const RANGE_PERIODS: Record<Range, string> = {
+  "1d": "24 hours",
+  "7d": "7 days",
+  "30d": "30 days",
+  "90d": "90 days",
+  all: "All time",
+};
 
 const METERED: Record<string, string> = {
   tokens: "Model tokens",
@@ -84,7 +98,7 @@ export type WorkspaceUsageReport = UsageReport & {
 /** The range the screen stands at, which is the place's own `range` key. A range the codec does not
  *  carry — an older link, a hand-typed address — reads as the default rather than as no screen. */
 function rangeOf(place: Placement): Range {
-  return RANGES.find((range) => range === place.range) ?? "30d";
+  return RANGES.find((range) => range === place.range) ?? DEFAULT_RANGE;
 }
 
 function hours(seconds: number): string {
@@ -92,8 +106,7 @@ function hours(seconds: number): string {
 }
 
 function rangeLabel(range: Range): string {
-  if (range === "all") return "All time";
-  return "Last " + Number.parseInt(range) + " days";
+  return range === "all" ? RANGE_PERIODS.all : "Last " + RANGE_PERIODS[range];
 }
 
 function dateLabel(value: string): string {
@@ -102,8 +115,29 @@ function dateLabel(value: string): string {
   );
 }
 
+/** A daily bucket's own date. The rollup states a day as a plain date, which reads in the reader's
+ *  own zone unless it is anchored — a day off is a day of usage on the wrong line. */
+function dayLabel(day: string): string {
+  return dateLabel(day + "T00:00:00Z");
+}
+
+/** The days the chosen period covers, which is what a daily average is an average over. The history
+ *  holds a bucket per calendar date the window reaches, and a rolling window reaches one date more
+ *  than it lasts — a 24-hour window stands on two dates — so the buckets are never the count to
+ *  divide by. All time has no window and its period is the history itself. */
+function periodDays(details: UsageDetails, windowSeconds: number | null): number {
+  if (windowSeconds === null) return Math.max(details.daily.length, 1);
+  return Math.max(Math.round(windowSeconds / DAY_SECONDS), 1);
+}
+
 function tokenCount(value: number): string {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+/** A metered amount that is not tokens — requests, images, videos — which are counted whole rather
+ *  than compacted: the figures are small and a member reconciles them against their own bill. */
+function count(value: number): string {
+  return new Intl.NumberFormat("en").format(value);
 }
 
 function percent(value: number, total: number): string {
@@ -118,25 +152,6 @@ function blended(tokens: number, microUsd: number): string {
 
 function otherDimensions(lines: DimensionLine[]): DimensionLine[] {
   return lines.filter((line) => line.dimension !== "tokens" && line.dimension !== "sandbox_tokens");
-}
-
-function delegation(lines: BreakdownLine[]): BreakdownLine[] {
-  return [
-    {
-      label: "Apps",
-      tokens: lines.filter((line) => !line.label).reduce((sum, line) => sum + line.tokens, 0),
-      priced_micro_usd: lines
-        .filter((line) => !line.label)
-        .reduce((sum, line) => sum + line.priced_micro_usd, 0),
-    },
-    {
-      label: "Subagents",
-      tokens: lines.filter((line) => line.label).reduce((sum, line) => sum + line.tokens, 0),
-      priced_micro_usd: lines
-        .filter((line) => line.label)
-        .reduce((sum, line) => sum + line.priced_micro_usd, 0),
-    },
-  ].filter((line) => line.tokens);
 }
 
 function changeNote(details: UsageDetails, range: Range): string {
@@ -158,22 +173,33 @@ function RangeControl({ range, onRange }: { range: Range; onRange: (range: Range
           aria-pressed={range === entry}
           onClick={() => onRange(entry)}
         >
-          {entry === "all" ? "All time" : entry.replace("d", " days")}
+          {RANGE_PERIODS[entry]}
         </Button>
       ))}
     </div>
   );
 }
 
-function Figures({ details, range }: { details: UsageDetails; range: Range }) {
+function Figures({
+  details,
+  range,
+  windowSeconds,
+}: {
+  details: UsageDetails;
+  range: Range;
+  windowSeconds: number | null;
+}) {
   const first = details.first_used_at ? "Since " + dateLabel(details.first_used_at) : "No usage";
-  const activeDays = details.daily.filter((day) => day.tokens).length;
+  const days = periodDays(details, windowSeconds);
+  // A period holds no more active days than it holds days: the dates at its two ends are each a part
+  // of a day, and the usage on both of them belongs to the one period.
+  const activeDays = Math.min(details.daily.filter((day) => day.tokens).length, days);
   const items = [
     { label: "Tokens", value: tokenCount(details.selected.tokens), note: changeNote(details, range) },
     { label: "All-time tokens", value: tokenCount(details.all_time.tokens), note: first },
     {
       label: "Daily average",
-      value: tokenCount(details.selected.tokens / Math.max(details.daily.length, 1)),
+      value: tokenCount(details.selected.tokens / days),
       note: activeDays + (activeDays === 1 ? " active day" : " active days"),
     },
     {
@@ -195,35 +221,39 @@ function Figures({ details, range }: { details: UsageDetails; range: Range }) {
   );
 }
 
+/** The range's tokens a day at a time, drawn by the kit's plot rather than by a polyline of this
+ *  screen's own: one series, the wash under it, and the value of the day the pointer is on. The two
+ *  ends of the period stand under it, because the plot itself draws no axis. */
 function DailyHistory({ rows }: { rows: DailyLine[] }) {
   if (!rows.length) return <PanelBlank body="No tokens were used in this range." />;
-  const top = Math.max(...rows.map((row) => row.tokens), 1);
-  const points = rows
-    .map((row, index) => {
-      const x = rows.length === 1 ? 50 : (100 * index) / (rows.length - 1);
-      return x + "," + (29 - (26 * row.tokens) / top);
-    })
-    .join(" ");
   const total = rows.reduce((sum, row) => sum + row.tokens, 0);
   return (
     <div className="rounded-panel border border-edge bg-surface p-xl">
-      <svg
-        viewBox="0 0 100 32"
-        preserveAspectRatio="none"
-        /* The stroke does not scale, so it is centred on the point rather than drawn inside the
-           box: the first and last day would each lose half their line at the plot's own edge. */
-        className="h-(--size-usage-chart) w-full overflow-visible"
-        role="img"
-        aria-label={tokenCount(total) + " tokens across " + rows.length + " daily buckets"}
-      >
-        <path d="M0 29 H100" fill="none" stroke="currentColor" opacity="0.2" />
-        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
-      </svg>
+      <Chart
+        className="aspect-auto h-(--size-usage-chart)"
+        label={tokenCount(total) + " tokens across " + rows.length + " daily buckets"}
+        points={rows.map((row) => row.tokens)}
+        hover={(at) => dayLabel(rows[at].day) + " · " + tokenCount(rows[at].tokens) + " tokens"}
+      />
       <div className="flex justify-between text-small text-ink-soft">
-        <span>{dateLabel(rows[0].day + "T00:00:00Z")}</span>
-        <span>{dateLabel(rows[rows.length - 1].day + "T00:00:00Z")}</span>
+        <span>{dayLabel(rows[0].day)}</span>
+        <span>{dayLabel(rows[rows.length - 1].day)}</span>
       </div>
     </div>
+  );
+}
+
+/** The head row every table on the page draws, written once: three tables state their columns and a
+ *  head spelled beside each of them is the same markup three times. */
+function Heads({ columns }: { columns: string[] }) {
+  return (
+    <thead>
+      <tr>
+        {columns.map((column) => (
+          <Th key={column}>{column}</Th>
+        ))}
+      </tr>
+    </thead>
   );
 }
 
@@ -231,16 +261,12 @@ function Dimensions({ lines, empty }: { lines: DimensionLine[]; empty: string })
   if (!lines.length) return <PanelBlank body={empty} />;
   return (
     <Table columns={DIMENSION_COLUMNS} floor={tableFloor({ prose: 1, fact: 2 })}>
-      <thead>
-        <tr>
-          {DIMENSION_COLUMNS.map((column) => <Th key={column}>{column}</Th>)}
-        </tr>
-      </thead>
+      <Heads columns={DIMENSION_COLUMNS} />
       <tbody>
         {lines.map((line) => (
           <tr key={line.dimension}>
             <Td className="w-full">{METERED[line.dimension] ?? line.dimension}</Td>
-            <Td className="whitespace-nowrap">{line.amount.toLocaleString()}</Td>
+            <Td className="whitespace-nowrap">{count(line.amount)}</Td>
             <Td className="whitespace-nowrap">{money(line.priced_micro_usd)}</Td>
           </tr>
         ))}
@@ -264,13 +290,7 @@ function Breakdown({
   const columns = [heading, ...BREAKDOWN_COLUMNS];
   return (
     <Table columns={columns} floor={tableFloor({ prose: 1, fact: 4 })}>
-      <thead>
-        <tr>
-          {columns.map((column) => (
-            <Th key={column}>{column}</Th>
-          ))}
-        </tr>
-      </thead>
+      <Heads columns={columns} />
       <tbody>
         {rows.map((row) => (
           <tr key={row.id ?? row.label}>
@@ -297,9 +317,7 @@ function Caps({ caps, empty }: { caps: Cap[]; empty: string }) {
   if (!caps.length) return <PanelBlank body={empty} />;
   return (
     <Table columns={CAP_COLUMNS} floor={tableFloor({ prose: 1, fact: 2 })}>
-      <thead>
-        <tr>{CAP_COLUMNS.map((column) => <Th key={column}>{column}</Th>)}</tr>
-      </thead>
+      <Heads columns={CAP_COLUMNS} />
       <tbody>
         {caps.map((cap, index) => (
           <tr key={index}>
@@ -320,7 +338,11 @@ function named(line: BreakdownLine): BreakdownLine {
   return line.id ? { ...line, label: agentName(line.label) } : line;
 }
 
-
+/** The workspace's usage screen: what the reader picked as a range, the figures for it, and the
+ *  breakdowns under them. An admin's read carries the workspace rollup and the screen then reports
+ *  the workspace — by app, by member, by origin — where a member's own read reports themselves. The
+ *  bands every reader gets are drawn once, whichever report they come from, so the two audiences
+ *  read one page rather than two spellings of it. */
 export function WorkspaceUsage({
   place,
   onPlace,
@@ -333,43 +355,42 @@ export function WorkspaceUsage({
   return (
     <Panel state={state}>
       {(payload) => {
-        const report = payload.workspace?.usage ?? payload.usage;
+        const rollup = payload.workspace;
+        const report = rollup?.usage ?? payload.usage;
         return (
           <>
             <Section title="Usage">
               <RangeControl range={range} onRange={(next) => onPlace({ range: next })} />
-              <Figures details={report} range={range} />
+              <Figures details={report} range={range} windowSeconds={payload.window_seconds} />
             </Section>
-            <Section title="Daily usage"><DailyHistory rows={report.daily} /></Section>
-            {payload.workspace ? (
+            <Section title="Daily tokens">
+              <DailyHistory rows={report.daily} />
+            </Section>
+            {rollup ? (
               <>
                 <Section title="Apps">
-                  <Breakdown heading="App" rows={payload.workspace.by_agent.map(named)} empty="No app used model tokens in this range." />
-                </Section>
-                <Section title="Delegation">
-                  <Breakdown heading="Execution" rows={delegation(report.by_execution)} empty="No model tokens were used in this range." />
+                  <Breakdown heading="App" rows={rollup.by_agent.map(named)} empty="No app used model tokens in this range." />
                 </Section>
                 <Section title="Members">
-                  <Breakdown heading="Member" rows={payload.workspace.by_member} empty="No member used model tokens in this range." />
+                  <Breakdown heading="Member" rows={rollup.by_member} empty="No member used model tokens in this range." />
                 </Section>
                 <Section title="Origins">
-                  <Breakdown heading="Origin" rows={payload.workspace.by_origin} empty="Nothing in this workspace used model tokens in this range." />
-                </Section>
-                <Section title="Models">
-                  <Breakdown heading="Model" rows={report.by_model} empty="No models were used in this range." />
-                </Section>
-                <Section title="Other usage">
-                  <Dimensions lines={otherDimensions(payload.workspace.by_dimension)} empty="Nothing else in this workspace carried a price in this range." />
+                  <Breakdown heading="Origin" rows={rollup.by_origin} empty="No origin used model tokens in this range." />
                 </Section>
               </>
-            ) : (
-              <>
-                <Section title="Execution"><Breakdown heading="Execution" rows={report.by_execution} empty="No model tokens were used in this range." /></Section>
-                <Section title="Models"><Breakdown heading="Model" rows={report.by_model} empty="No models were used in this range." /></Section>
-                <Section title="Other usage"><Dimensions lines={otherDimensions(payload.by_dimension)} empty="Nothing else you ran in this range carried a price." /></Section>
-              </>
-            )}
-            <Section title="Caps"><Caps caps={payload.caps} empty="No spend cap is set on you." /></Section>
+            ) : null}
+            <Section title="Delegation">
+              <Breakdown heading="Execution" rows={report.by_execution} empty="No model tokens were used in this range." />
+            </Section>
+            <Section title="Models">
+              <Breakdown heading="Model" rows={report.by_model} empty="No model was used in this range." />
+            </Section>
+            <Section title="Other usage">
+              <Dimensions lines={otherDimensions((rollup ?? payload).by_dimension)} empty="Nothing else carried a price in this range." />
+            </Section>
+            <Section title="Spend caps">
+              <Caps caps={payload.caps} empty="No spend cap is set on you." />
+            </Section>
           </>
         );
       }}

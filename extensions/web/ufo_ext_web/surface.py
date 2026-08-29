@@ -229,7 +229,13 @@ NEW_CONVERSATION = "new"
 MAX_CHAT_TITLE_CHARS = 60
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400
 MAX_USAGE_WINDOW_SECONDS = 31_536_000
-USAGE_RANGES = {"7d": 604_800, "30d": 2_592_000, "90d": 7_776_000, "all": None}
+USAGE_RANGES = {
+    "1d": 86_400,
+    "7d": 604_800,
+    "30d": 2_592_000,
+    "90d": 7_776_000,
+    "all": None,
+}
 PORTAL_PATH = "/surface/web"
 CHAT_TARGET_PARAM = "c"
 PORTAL_BUILD = "make build"
@@ -2571,7 +2577,7 @@ def _window_param(request: Request) -> int | None | Response:
     named = request.query_params.get("range")
     if named is not None:
         if named not in USAGE_RANGES:
-            return Response("range must be 7d, 30d, 90d, or all", status_code=400)
+            return Response("range must be one of " + ", ".join(USAGE_RANGES), status_code=400)
         return USAGE_RANGES[named]
     raw = request.query_params.get("window_seconds", str(SPEND_WINDOW_DEFAULT_SECONDS))
     try:

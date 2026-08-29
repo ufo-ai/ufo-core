@@ -815,6 +815,77 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   expect(screen.getByRole("button", { name: "90 days" }).getAttribute("aria-pressed")).toBe("true");
 });
 
+test("the usage range offers the last 24 hours, and the day history is the kit's plot", async () => {
+  const usageWire = wire({
+    "/workspace/usage": () =>
+      json({
+        window_seconds: 86400,
+        total_micro_usd: 1_500_000,
+        by_dimension: [{ dimension: "tokens", amount: 1200, priced_micro_usd: 1_500_000 }],
+        caps: [],
+        usage: usageDetails(1_500_000),
+        workspace: null,
+      }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedWorkspace view="usage" />
+    </MainAgentProvider>,
+  );
+
+  // The plot is the kit's chart rather than this screen's own polyline, so the point under the
+  // pointer can state its own value.
+  const plot = await screen.findByRole("img", { name: "1.2K tokens across 1 daily buckets" });
+  expect(plot.getAttribute("data-slot")).toBe("chart");
+
+  await userEvent.click(screen.getByRole("button", { name: "24 hours" }));
+  await waitFor(() => expect(usageWire.calls.some((url) => url.includes("range=1d"))).toBe(true));
+  expect(screen.getByRole("button", { name: "24 hours" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByText("Last 24 hours")).toBeTruthy();
+});
+
+test("the daily average is an average over the chosen period, not over the dates it touches", async () => {
+  const spread = {
+    ...usageDetails(1_500_000),
+    daily: [
+      { day: "2026-08-12", tokens: 600, token_micro_usd: 750_000, total_micro_usd: 750_000 },
+      { day: "2026-08-13", tokens: 600, token_micro_usd: 750_000, total_micro_usd: 750_000 },
+    ],
+  };
+  const usageWire = wire({
+    "/workspace/usage": (url) =>
+      json({
+        window_seconds: url.includes("range=1d") ? 86_400 : 2_592_000,
+        total_micro_usd: 1_500_000,
+        by_dimension: [{ dimension: "tokens", amount: 1200, priced_micro_usd: 1_500_000 }],
+        caps: [],
+        usage: spread,
+        workspace: null,
+      }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedWorkspace view="usage" />
+    </MainAgentProvider>,
+  );
+
+  const average = (value: string, note: string) =>
+    waitFor(() => {
+      const tile = screen.getByText("Daily average").parentElement!;
+      expect(within(tile).getByText(value)).toBeTruthy();
+      expect(within(tile).getByText(note)).toBeTruthy();
+    });
+
+  // A 30-day range divides its tokens by its 30 days, not by the two dates the history drew.
+  await average("40", "2 active days");
+
+  // A 24-hour range stands on two calendar dates and is still one day: the tile states the tokens the
+  // same screen states as the period's total, and its note names one day.
+  await userEvent.click(screen.getByRole("button", { name: "24 hours" }));
+  await waitFor(() => expect(usageWire.calls.some((url) => url.includes("range=1d"))).toBe(true));
+  await average("1.2K", "1 active day");
+});
+
 test("a member with no rollup sees only their own figure and no workspace section", async () => {
   wire({
     "/workspace/usage": () =>
