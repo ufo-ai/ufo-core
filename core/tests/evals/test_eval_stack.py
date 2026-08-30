@@ -456,6 +456,7 @@ def test_provision_writes_the_derived_config_and_owns_the_child_argv(
     assert ("--out", str(tmp_path / "archive")) == args[4:6]
     assert ("--label", "boundary") == args[6:8]
     assert args[8:] == ("--jobbench-submissions", str(root.resolve() / "submissions"))
+    assert "--model" not in args
     assert stack._seed_args() == (
         "init",
         "--email",
@@ -464,6 +465,33 @@ def test_provision_writes_the_derived_config_and_owns_the_child_argv(
         "claude-haiku-4-5",
         "--reasoning",
         "high",
+    )
+
+
+def test_remote_child_args_carry_the_model_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(
+            label="remote-model",
+            config=template,
+            args=("--remote", "--only", "basics"),
+            model="z-ai/glm-5.3-flash",
+        ),
+        root=tmp_path / "stack",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+
+    args = stack._child_args()
+    _close(stack)
+
+    assert args[args.index("--model") : args.index("--model") + 2] == (
+        "--model",
+        "z-ai/glm-5.3-flash",
     )
 
 

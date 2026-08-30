@@ -708,10 +708,12 @@ class EvalStack:
 
     def _child_args(self, readiness: Path | None = None) -> tuple[str, ...]:
         argv = list(self.spec.args)
+        flags = {token.partition("=")[0] for token in argv}
+        if "--remote" in flags and self.spec.model is not None:
+            argv += ["--model", self.spec.model]
         argv += ["--out", str(self.out)]
         if self.run_budget is not None:
             argv += ["--run-id", str(self.run_budget.run_id)]
-        flags = {token.partition("=")[0] for token in argv}
         if "--label" not in flags:
             argv += ["--label", self.spec.label]
         if "--jobbench" in flags and "--jobbench-submissions" not in flags:
