@@ -859,10 +859,10 @@ through no form and no lane of its own: the act opens a conversation with the ma
 screen's own pane, the `create-application` skill interviews the member, and the agent lands the
 app with its own `object_apply` create — the same gate, which admits a create from any speaking
 member and stamps them the owner, so the screen offers the act to every member it draws for. The
-run's own todo board is the only progress signal the pane reads. A guided build's design phase settles the
-app's homepage — the page every agent builds and binds through its own homepage turn — and the
-drafted prompt carries that design, so the page the Apps screen frames is the one the member
-confirmed. An admin
+  run's own todo board is the only progress signal the pane reads. The application builder's design
+  phase shares one SVG wireframe before the create. The member accepts that artifact or requests one
+  revision. The same builder receives the accepted SVG in the app's first homepage turn, implements
+  it, and binds the page. An admin
 replaces any existing prompt or setting from the agent page's prepared intent. In chat, only the
 main agent may replace an agent prompt, including its own; a child agent may replace none. The
 agent kind writes the complete row directly, and the turn is the audit record. The

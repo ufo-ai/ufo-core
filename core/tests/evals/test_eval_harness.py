@@ -34,12 +34,12 @@ from httpx import AsyncClient, MockTransport, Request, Response
 from ufo_ext_coding.manifest import CODING_PROFILE
 from ufo_ext_coding.manifest import manifest as coding_manifest
 from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
     APPLICATION_BUILDER_DEPLOY_TOOL,
     APPLICATION_BUILDER_DESIGN_TOOL,
     APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_WRITE_TOOL,
-    RenderApplicationPreviewInput,
-    homepage_design_block,
+    ApplicationWireframeResult,
 )
 
 import evals.harness.capability as harness_capability
@@ -181,9 +181,8 @@ from evals.suites.closing_message import (
 from evals.suites.document_visual import WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WAIT_SECONDS
 from evals.suites.first_run import FIRST_RUN_PACKS, FIRST_RUN_SKILL
 from evals.suites.new_application import (
-    _accepted_contract_failure,
     _accepted_design,
-    _AcceptedApplicationDesign,
+    _accepted_name_failure,
     _application_repair_tool_failure,
     _application_worker_tool_failure,
     _built_design_failure,
@@ -511,476 +510,126 @@ def test_the_interview_is_the_succeeded_ask_before_the_create() -> None:
     assert _interviews(CapabilityOutput("", (asked,))) == ()
 
 
-def test_design_proof_requires_each_preview_before_its_choice_on_both_ways_in() -> None:
+def test_design_proof_requires_each_builder_svg_before_its_choice() -> None:
     manifest = "kind: agent\nname: helper\nspec:\n  prompt: p\n"
     apply = ToolInvocation(name="object_apply", input={"manifest": manifest}, has_result=True)
     asked = ToolInvocation(name="ask_user", input={}, has_result=True)
-    contract = {
-        "purpose": "Review support requests.",
-        "first_screen_priority": "Unassigned requests",
-        "regions": ["Unassigned", "Assigned", "Recent activity"],
-        "layout": "queue-detail",
-        "design_direction": "House style",
-    }
-    revised_contract = {
-        **contract,
-        "first_screen_priority": "Overdue queue",
-        "regions": ["Overdue", "Unassigned", "Recent activity"],
-    }
-    preview = ToolInvocation(name="object_action", input=_preview_call(contract), has_result=True)
-    revised = ToolInvocation(
-        name="object_action", input=_preview_call(revised_contract), has_result=True
+    contract = {"application_name": "helper", "application_prompt": "p"}
+    result = ApplicationWireframeResult(
+        status="ready",
+        shared_filename="helper-wireframe-aaaaaaaaaaaa.svg",
+        design_digest="a" * 64,
+    ).model_dump_json()
+    preview = ToolInvocation(
+        name="object_action",
+        input=_preview_call(contract),
+        result=result,
+        has_result=True,
     )
-    one_preview = CapabilityOutput("", (asked, asked, preview, asked, apply))
-    two_previews = CapabilityOutput("", (asked, asked, preview, asked, revised, asked, apply))
-    clarified_revision = CapabilityOutput(
-        "", (asked, asked, preview, asked, asked, revised, asked, apply)
-    )
-
-    assert _design_pass_failure(one_preview, 1, opening_asks=1) is None
-    assert _design_pass_failure(two_previews, 2, opening_asks=1) is None
-    assert _design_pass_failure(clarified_revision, 2, opening_asks=1) is None
-
-    # The member who named the job runs the same pass with nothing opening it: the form, the
-    # picture, and the choice it asks for. The proposal's ask is a round that never happened, so a
-    # run holding one is a round this path did not owe the member.
-    named = CapabilityOutput("", (asked, preview, asked, apply))
-    assert _design_pass_failure(named, 1, opening_asks=0) is None
-    over_asked = CapabilityOutput("", (asked, asked, asked, preview, asked, apply))
-    assert "used 4 asks before create, expected 2 or 3" in str(
-        _design_pass_failure(over_asked, 1, opening_asks=0)
-    )
-    assert "no later design choice" in str(
-        _design_pass_failure(
-            CapabilityOutput("", (asked, asked, preview, apply)), 1, opening_asks=0
-        )
-    )
-    natural_revision = replace(
-        revised,
-        input=_preview_call(
-            {
-                **contract,
-                "first_screen_priority": "Overdue issues, oldest first",
-                "regions": ["Overdue issues", "Unassigned", "Recent activity"],
-            }
-        ),
-    )
-    assert (
-        _design_pass_failure(
-            CapabilityOutput("", (asked, asked, preview, asked, natural_revision, asked, apply)),
-            2,
-            opening_asks=1,
-        )
-        is None
-    )
-    retained_revision = replace(
-        revised,
-        input=_preview_call(
-            {
-                **contract,
-                "first_screen_priority": "The queue of overdue items waiting on you",
-                "regions": ["Waiting on you", "This week's draft", "Published notes"],
-            }
-        ),
-    )
-    assert (
-        _design_pass_failure(
-            CapabilityOutput("", (asked, asked, preview, asked, retained_revision, asked, apply)),
-            2,
-            opening_asks=1,
-        )
-        is None
-    )
-    missing_overdue = replace(
-        retained_revision,
-        input=_preview_call(
-            {
-                **retained_revision.arguments,
-                "first_screen_priority": "Items waiting on you",
-            }
-        ),
-    )
-    assert "overdue queue first" in str(
-        _design_pass_failure(
-            CapabilityOutput("", (asked, asked, preview, asked, missing_overdue, asked, apply)),
-            2,
-            opening_asks=1,
-        )
-    )
-    summary_first = replace(
-        retained_revision,
-        input=_preview_call(
-            {
-                **retained_revision.arguments,
-                "regions": ["Waiting on your weekly summary", "Overdue queue", "Published notes"],
-            }
-        ),
-    )
-    assert "overdue queue first" in str(
-        _design_pass_failure(
-            CapabilityOutput("", (asked, asked, preview, asked, summary_first, asked, apply)),
-            2,
-            opening_asks=1,
-        )
-    )
-    summary_with_label = replace(
-        retained_revision,
-        input=_preview_call(
-            {
-                **retained_revision.arguments,
-                "regions": ["Weekly summary waiting on you", "Overdue queue", "Published notes"],
-            }
-        ),
-    )
-    assert "overdue queue first" in str(
-        _design_pass_failure(
-            CapabilityOutput("", (asked, asked, preview, asked, summary_with_label, asked, apply)),
-            2,
-            opening_asks=1,
-        )
-    )
-    one_of_two = CapabilityOutput("", (asked, asked, preview, asked, asked, apply))
-    assert "rendered 1 previews" in str(_design_pass_failure(one_of_two, 2, opening_asks=1))
-    assert "has no later design choice" in str(
-        _design_pass_failure(
-            CapabilityOutput("", (asked, asked, asked, preview, apply)), 1, opening_asks=1
-        )
-    )
-    direct = CapabilityOutput(
-        "", (asked, asked, ToolInvocation("write", {}, has_result=True), asked, apply)
-    )
-    assert "parent ran preview build tools" in str(_design_pass_failure(direct, 1, opening_asks=1))
-    delegated = CapabilityOutput(
+    one_preview = CapabilityOutput(
         "",
         (
             asked,
             asked,
-            ToolInvocation("build_application_preview", {}, has_result=True),
+            preview,
+            ToolInvocation("bash", {}, has_result=True),
             asked,
             apply,
         ),
     )
-    assert "used a model worker" in str(_design_pass_failure(delegated, 1, opening_asks=1))
+
+    assert _design_pass_failure(one_preview, 1, opening_asks=1) is None
+
+    revised = replace(
+        preview,
+        input=_preview_call({**contract, "revision": "Put the overdue queue first."}),
+        result=ApplicationWireframeResult(
+            status="ready",
+            shared_filename="helper-wireframe-bbbbbbbbbbbb.svg",
+            design_digest="b" * 64,
+        ).model_dump_json(),
+    )
+    two_previews = CapabilityOutput("", (asked, asked, preview, asked, revised, asked, apply))
+    assert _design_pass_failure(two_previews, 2, opening_asks=1) is None
+
+    missing_revision = replace(revised, input=_preview_call(contract))
+    assert "overdue-queue change" in str(
+        _design_pass_failure(
+            CapabilityOutput("", (asked, asked, preview, asked, missing_revision, asked, apply)),
+            2,
+            opening_asks=1,
+        )
+    )
 
 
-def test_application_journey_graders_require_the_fixed_worker_tools() -> None:
+def test_application_journey_graders_require_build_without_a_second_design() -> None:
     worker_calls = tuple(
         ToolInvocation(name, {}, has_result=True)
         for name in (
-            APPLICATION_BUILDER_DESIGN_TOOL,
+            APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
             APPLICATION_BUILDER_WRITE_TOOL,
             APPLICATION_BUILDER_QA_TOOL,
             APPLICATION_BUILDER_DEPLOY_TOOL,
         )
     )
     assert _application_worker_tool_failure(worker_calls) is None
-    old_worker_calls = (
-        *(
-            ToolInvocation(name, {}, has_result=True)
-            for name in (APPLICATION_BUILDER_WRITE_TOOL, "start_server", "js_repl")
-        ),
-        ToolInvocation("object_action", _deploy_call({}), has_result=True),
+    repeated_design = (
+        ToolInvocation(APPLICATION_BUILDER_DESIGN_TOOL, {}, has_result=True),
+        *worker_calls,
     )
-    assert APPLICATION_BUILDER_DESIGN_TOOL in str(
-        _application_worker_tool_failure(old_worker_calls)
-    )
+    assert "replaced the wireframe" in str(_application_worker_tool_failure(repeated_design))
 
     failed = CapabilityOutput("", (worker_calls[1],))
     repaired = CapabilityOutput("", (worker_calls[-1],))
     assert _application_repair_tool_failure(failed, repaired) is None
-    old_repair = CapabilityOutput(
-        "", (ToolInvocation("object_action", _deploy_call({}), has_result=True),)
+
+
+def test_the_built_design_must_be_the_exact_svg_the_member_accepted() -> None:
+    contract = {"application_name": "helper", "application_prompt": "p"}
+    svg = (
+        b'<svg viewBox="0 0 305 844"><g data-app-region="queue" '
+        b'data-kit-component="Card"><rect width="100" height="100"/></g></svg>'
     )
-    assert _application_repair_tool_failure(failed, old_repair) == (
-        "the repair attempt deployed no site"
+    digest = sha256(svg).hexdigest()
+    preview = ToolInvocation(
+        "object_action",
+        _preview_call(contract),
+        result=ApplicationWireframeResult(
+            status="ready",
+            shared_filename=f"helper-wireframe-{digest[:12]}.svg",
+            design_digest=digest,
+        ).model_dump_json(),
+        has_result=True,
     )
-
-
-def test_the_built_design_must_carry_the_regions_the_member_accepted() -> None:
-    def design(
-        regions: tuple[str, ...],
-        boxes: tuple[tuple[float, float, float, float], ...],
-        *,
-        first_text: str = "Calls today for the next call",
-        visible_texts: tuple[str, ...] | None = None,
-    ) -> ToolInvocation:
-        texts = visible_texts or (first_text, *regions[1:])
-        marks = "".join(
-            f'<g data-app-region="{region}"><rect width="8" height="8"/>'
-            f"<text>{texts[index]}</text>"
-            "</g>"
-            for index, region in enumerate(regions)
-        )
-        rendered = [
-            {
-                "name": region,
-                "left": left,
-                "top": top,
-                "width": width,
-                "height": height,
-                "aboveFold": True,
-                "visibleText": texts[index],
-            }
-            for index, (region, (left, top, width, height)) in enumerate(
-                zip(regions, boxes, strict=True)
-            )
-        ]
-        return ToolInvocation(
-            APPLICATION_BUILDER_DESIGN_TOOL,
-            {"content": f'<svg viewBox="0 0 8 8">{marks}</svg>'},
-            result=dumps({"rendered_regions": rendered}),
-            has_result=True,
-        )
-
-    accepted = RenderApplicationPreviewInput(
-        purpose="Prepare for the next customer call.",
-        first_screen_priority="Show urgent customer follow-ups first",
-        regions=("Today's queue", "Action items"),
-        layout="summary-detail",
-        design_direction="House style",
+    apply = ToolInvocation(
+        "object_apply",
+        {"manifest": "kind: agent\nname: helper\nspec:\n  prompt: p\n"},
+        result=dumps({"kind": "agent", "name": "helper", "result": "created"}),
+        has_result=True,
     )
+    accepted, failure = _accepted_design(CapabilityOutput("", (preview, apply)))
+    assert failure is None
+    assert accepted is not None
 
-    def failure(
-        calls: tuple[ToolInvocation, ...], contract: RenderApplicationPreviewInput = accepted
-    ) -> str | None:
-        return _built_design_failure(calls, contract)
-
-    horizontal = ((0.0, 0.0, 0.48, 1.0), (0.52, 0.0, 0.48, 1.0))
     assert (
-        failure(
-            (
-                design(
-                    ("todays-queue", "next-actions"),
-                    horizontal,
-                    first_text="3 calls need an owner",
-                ),
-            )
+        _built_design_failure(
+            CapabilityOutput("", (), artifacts=(SharedArtifact("homepage-design.svg", svg),)),
+            accepted,
         )
         is None
     )
-    assert (
-        failure(
-            (
-                design(
-                    ("today-s-queue", "next-actions"),
-                    horizontal,
-                    first_text="3 calls need an owner",
-                ),
-            )
-        )
-        is None
-    )
-    waiting = accepted.model_copy(update={"regions": ("Waiting on you", "Recent activity")})
-    assert (
-        failure(
-            (
-                design(
-                    ("waiting", "recent-activity"),
-                    horizontal,
-                    first_text="3 calls need an owner",
-                ),
+    assert "differs" in str(
+        _built_design_failure(
+            CapabilityOutput(
+                "", (), artifacts=(SharedArtifact("homepage-design.svg", svg + b" "),)
             ),
-            waiting,
+            accepted,
         )
-        is None
-    )
-    assert (
-        failure(
-            (
-                design(
-                    ("region-one", "region-two"),
-                    horizontal,
-                    visible_texts=("Today's queue", "Action items"),
-                ),
-            )
-        )
-        is None
-    )
-    overlapping = accepted.model_copy(update={"regions": ("Open issues", "Issue detail")})
-    assert (
-        failure(
-            (
-                design(
-                    ("open-issues", "issue-detail"),
-                    horizontal,
-                    visible_texts=("Open issues", "Issue detail"),
-                ),
-            ),
-            overlapping,
-        )
-        is None
-    )
-    assert "semantic region order differs" in str(
-        failure(
-            (
-                design(
-                    ("issue-detail", "open-issues"),
-                    horizontal,
-                    visible_texts=("Issue detail", "Open issues"),
-                ),
-            ),
-            overlapping,
-        )
-    )
-    assert "semantically ambiguous" in str(
-        failure(
-            (
-                design(
-                    ("region-one", "region-two"),
-                    horizontal,
-                    visible_texts=("Issue count", "Issue notes"),
-                ),
-            ),
-            overlapping,
-        )
-    )
-    assert "accepted no design" in str(failure(()))
-    assert "rendered 1 regions for the 2" in str(
-        failure((design(("calls-today",), ((0.0, 0.0, 1.0, 1.0),)),))
-    )
-    assert "rendered 3 regions for the 2" in str(
-        failure(
-            (
-                design(
-                    ("calls-today", "action-items", "notes"),
-                    ((0.0, 0.0, 0.3, 1.0), (0.35, 0.0, 0.3, 1.0), (0.7, 0.0, 0.3, 1.0)),
-                ),
-            )
-        )
-    )
-    assert "duplicate region identities" in str(failure((design(("queue", "queue"), horizontal),)))
-    assert "no rendered region measurements" in str(
-        failure((design(("", "next-actions"), horizontal),))
-    )
-    assert "empty region identity" in str(failure((design((" ", "next-actions"), horizontal),)))
-    assert f"does not carry accepted identity {accepted.regions[0]!r}: region-one" in str(
-        failure(
-            (
-                design(
-                    ("region-one", "region-two"),
-                    horizontal,
-                    visible_texts=("Revenue", "Notes"),
-                ),
-            )
-        )
-    )
-    assert f"does not carry accepted identity {accepted.regions[0]!r}: action-items" in str(
-        failure(
-            (
-                design(
-                    ("action-items", "todays-queue"),
-                    horizontal,
-                    visible_texts=("Action items", "Today's queue"),
-                ),
-            )
-        )
-    )
-    assert "does not carry accepted identity 'Action items'" in str(
-        failure(
-            (
-                design(
-                    ("todays-queue", "region-two"),
-                    horizontal,
-                    visible_texts=("Today's queue", "Notes"),
-                ),
-            )
-        )
-    )
-    reversed_horizontal = ((0.52, 0.0, 0.48, 1.0), (0.0, 0.0, 0.48, 1.0))
-    assert "summary-detail layout changes" in str(
-        failure((design(("todays-queue", "next-actions"), reversed_horizontal),))
-    )
-    assert "no material visible content" in str(
-        failure(
-            (
-                design(
-                    ("todays-queue", "next-actions"),
-                    horizontal,
-                    first_text="",
-                ),
-            ),
-        )
-    )
-    assert "no material visible content" in str(
-        failure(
-            (
-                design(
-                    ("todays-queue", "next-actions"),
-                    horizontal,
-                    first_text="—",
-                ),
-            ),
-        )
-    )
-    vertical = ((0.0, 0.0, 1.0, 0.48), (0.0, 0.52, 1.0, 0.48))
-    assert "summary-detail layout changes" in str(
-        failure((design(("todays-queue", "next-actions"), vertical),))
-    )
-
-    queue = accepted.model_copy(
-        update={
-            "first_screen_priority": "Overdue queue",
-            "regions": ("Overdue queue", "Issue detail"),
-            "layout": "queue-detail",
-        }
-    )
-    queue_regions = ("overdue-queue", "issue-detail")
-    queue_boxes = ((0.0, 0.0, 0.6, 1.0), (0.64, 0.0, 0.36, 1.0))
-    assert failure((design(queue_regions, queue_boxes, first_text="Overdue queue"),), queue) is None
-    equal_columns = ((0.0, 0.0, 0.48, 1.0), (0.52, 0.0, 0.48, 1.0))
-    assert "queue-detail first region is not wider" in str(
-        failure((design(queue_regions, equal_columns, first_text="Overdue queue"),), queue)
-    )
-
-    timeline = accepted.model_copy(
-        update={
-            "first_screen_priority": "Latest event",
-            "regions": ("Latest event", "Earlier event"),
-            "layout": "timeline",
-        }
-    )
-    assert (
-        failure(
-            (
-                design(
-                    ("latest-event", "earlier-event"),
-                    ((0.0, 0.0, 1.0, 0.48), (0.0, 0.52, 1.0, 0.48)),
-                    first_text="Latest event",
-                ),
-            ),
-            timeline,
-        )
-        is None
-    )
-
-    metrics = accepted.model_copy(
-        update={
-            "first_screen_priority": "Revenue",
-            "regions": ("Revenue", "Churn", "Runway"),
-            "layout": "metrics",
-        }
-    )
-    assert (
-        failure(
-            (
-                design(
-                    ("revenue", "churn", "runway"),
-                    (
-                        (0.0, 0.0, 0.31, 1.0),
-                        (0.345, 0.0, 0.31, 1.0),
-                        (0.69, 0.0, 0.31, 1.0),
-                    ),
-                    first_text="Revenue",
-                ),
-            ),
-            metrics,
-        )
-        is None
     )
 
 
 def _preview_call(contract: dict[str, object]) -> dict[str, object]:
-    return {"kind": "site", "action": "render_application_preview", "input": contract}
+    return {"kind": "site", "action": "design_ufo_application", "input": contract}
 
 
 def _deploy_call(arguments: dict[str, object]) -> dict[str, object]:
@@ -1006,18 +655,16 @@ async def test_a_dispatched_action_reads_as_its_canonical_id_and_its_own_argumen
     assert not (await restraint_scorer(("action:site:deploy_website",))(output)).passed
 
 
-def test_the_accepted_design_block_must_reach_the_application_prompt() -> None:
-    """The renderer returns the block and the skill copies it, so the prompt either carries those
-    words or does not. A paraphrase is the failure this grades: the worker implements the
-    `Homepage design` it reads, and a reworded one is a page the member never accepted."""
-    contract = {
-        "purpose": "Review support requests.",
-        "first_screen_priority": "Overdue queue",
-        "regions": ["Overdue", "Unassigned", "Recent activity"],
-        "layout": "queue-detail",
-        "design_direction": "House style",
-    }
-    preview = ToolInvocation("object_action", _preview_call(contract), has_result=True)
+def test_the_accepted_svg_names_the_application_created_after_it() -> None:
+    contract = {"application_name": "helper", "application_prompt": "p"}
+    result = ApplicationWireframeResult(
+        status="ready",
+        shared_filename="helper-wireframe-aaaaaaaaaaaa.svg",
+        design_digest="a" * 64,
+    ).model_dump_json()
+    preview = ToolInvocation(
+        "object_action", _preview_call(contract), result=result, has_result=True
+    )
     apply = ToolInvocation(
         "object_apply",
         {"manifest": "kind: agent\nname: helper\nspec:\n  prompt: p\n"},
@@ -1025,91 +672,19 @@ def test_the_accepted_design_block_must_reach_the_application_prompt() -> None:
         has_result=True,
     )
 
-    def accepted(calls: tuple[ToolInvocation, ...]) -> _AcceptedApplicationDesign:
-        design, failure = _accepted_design(CapabilityOutput("", calls))
-        assert failure is None
-        assert design is not None
-        return design
+    selected, failure = _accepted_design(CapabilityOutput("", (preview, apply)))
+    assert failure is None
+    assert selected is not None
+    assert _accepted_name_failure(selected) is None
 
-    selected = accepted((preview, apply))
-    block = homepage_design_block(RenderApplicationPreviewInput.model_validate(contract))
-    prompt = f"You answer support requests for the team.\n\n{block}\n\nAsk before replying.\n"
-
-    assert _accepted_contract_failure(selected, prompt) is None
-    assert (
-        _accepted_contract_failure(
-            selected,
-            prompt.replace("Regions in order: Overdue,", "Regions in order:\n  Overdue,"),
-        )
-        is None
+    wrong_name = replace(
+        preview,
+        input=_preview_call({"application_name": "other", "application_prompt": "p"}),
     )
-    assert "omits the accepted design block" in str(
-        _accepted_contract_failure(selected, prompt.replace("Overdue queue", "Summary"))
-    )
-    assert "omits the accepted design block" in str(
-        _accepted_contract_failure(selected, prompt.replace("Review support requests", "Read mail"))
-    )
-    assert "omits the accepted design block" in str(
-        _accepted_contract_failure(selected, prompt.replace("Layout: queue-detail", "queue-detail"))
-    )
-
-    revised = {**contract, "first_screen_priority": "Paid this month"}
-    revised_render = ToolInvocation("object_action", _preview_call(revised), has_result=True)
-    revised_block = homepage_design_block(RenderApplicationPreviewInput.model_validate(revised))
-    revised_selected = accepted((preview, revised_render, apply))
-    assert "omits the accepted design block" in str(
-        _accepted_contract_failure(revised_selected, f"You answer support requests.\n\n{block}\n")
-    )
-    assert (
-        _accepted_contract_failure(
-            revised_selected, f"You answer support requests.\n\n{revised_block}\n"
-        )
-        is None
-    )
-
-    unaccepted = {
-        **contract,
-        "first_screen_priority": "Revenue",
-        "regions": ["Revenue", "Churn", "Runway"],
-        "layout": "metrics",
-    }
-    unaccepted_render = ToolInvocation("object_action", _preview_call(unaccepted), has_result=True)
-    later_design = ToolInvocation(
-        APPLICATION_BUILDER_DESIGN_TOOL,
-        {"content": "<svg/>"},
-        has_result=True,
-    )
-    settled = accepted((preview, apply, unaccepted_render, later_design))
-    assert _accepted_contract_failure(settled, prompt) is None
-    rendered_regions = tuple(
-        {
-            "name": name,
-            "left": left,
-            "top": top,
-            "width": width,
-            "height": height,
-            "aboveFold": True,
-            "visibleText": name,
-        }
-        for name, (left, top, width, height) in zip(
-            ("overdue", "unassigned", "recent-activity"),
-            ((0.0, 0.0, 0.62, 1.0), (0.64, 0.0, 0.36, 0.48), (0.64, 0.52, 0.36, 0.48)),
-            strict=True,
-        )
-    )
-    accepted_design = ToolInvocation(
-        APPLICATION_BUILDER_DESIGN_TOOL,
-        {"content": "<svg/>"},
-        result=dumps({"rendered_regions": rendered_regions}),
-        has_result=True,
-    )
-    assert _built_design_failure((accepted_design,), settled.contract) is None
-    missing, missing_failure = _accepted_design(CapabilityOutput("", (apply, revised_render)))
-    assert missing is None
-    assert "no valid accepted preview" in str(missing_failure)
-    ambiguous, ambiguous_failure = _accepted_design(CapabilityOutput("", (preview, apply, apply)))
-    assert ambiguous is None
-    assert "more than one application was created" in str(ambiguous_failure)
+    mismatched, mismatch_failure = _accepted_design(CapabilityOutput("", (wrong_name, apply)))
+    assert mismatch_failure is None
+    assert mismatched is not None
+    assert "different application" in str(_accepted_name_failure(mismatched))
 
 
 def test_internal_turn_messages_start_at_the_last_matching_inbound() -> None:

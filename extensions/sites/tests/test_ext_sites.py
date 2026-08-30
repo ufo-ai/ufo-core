@@ -4,20 +4,17 @@ import re
 import shlex
 import subprocess
 import sys
-import threading
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
-from io import BytesIO
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from PIL import Image
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
@@ -33,6 +30,7 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_REGION_MIN_AREA,
     APPLICATION_REGION_MIN_HEIGHT,
     APPLICATION_REGION_MIN_WIDTH,
+    DESIGN_REGION_FOLD_SLOP,
     DESIGN_VISIBLE_TEXT_MAX_CHARS,
     KIT_QUIET_TEXT_MIN,
     MAX_PRODUCT_QA_CONTROLS,
@@ -46,11 +44,13 @@ from ufo_ext_sites.application_audit import (
     ApplicationDesignFidelity,
     ApplicationQaProof,
     application_design_fidelity,
+    application_design_region_fold_failure,
     application_design_region_size_failure,
     application_region_relation,
     audit_application,
 )
 from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
     APPLICATION_BUILDER_DELEGATION_TOOL,
     APPLICATION_BUILDER_DEPLOY_GUARD_REASON,
     APPLICATION_BUILDER_DEPLOY_TOOL,
@@ -67,6 +67,7 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_REPAIR_READ_LIMIT,
     APPLICATION_BUILDER_REPAIR_READ_REASON,
     APPLICATION_BUILDER_SKILL,
+    APPLICATION_BUILDER_WIREFRAME_TOOL,
     APPLICATION_BUILDER_WRITE_TOOL,
     APPLICATION_DESIGN_ACCEPT,
     APPLICATION_DESIGN_AUDIT_MAX_BYTES,
@@ -78,35 +79,36 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_INDEX,
     APPLICATION_KIT_COMPONENTS,
     APPLICATION_PLACEHOLDER,
-    APPLICATION_PREVIEW_FILENAME,
     APPLICATION_PREVIEW_SCAFFOLD,
-    APPLICATION_PREVIEW_TOOL,
     APPLICATION_SCAFFOLD_PATH,
     APPLICATION_SOURCE_CLAIM,
     APPLICATION_SOURCE_PATH,
     APPLICATION_SOURCE_READ,
     APPLICATION_SOURCE_REQUIRE_CLAIM,
+    AcceptApplicationWireframeInput,
+    AcceptedApplicationWireframe,
     ApplicationBuildAcceptance,
     ApplicationBuilderResult,
     ApplicationBuilderTask,
-    ApplicationPreviewResult,
     ApplicationSourceEdit,
+    ApplicationWireframeResult,
     BuildUfoApplicationInput,
+    DesignUfoApplicationInput,
     EditApplicationSourceInput,
     ReadApplicationSourceInput,
-    RenderApplicationPreviewInput,
     WriteApplicationDesignInput,
     WriteApplicationSourceInput,
     _validate_application_design,
     _validate_application_source,
+    accept_application_wireframe,
     application_design_acceptance_relative,
     application_design_evidence_relative,
     build_ufo_application,
+    design_ufo_application,
     edit_application_source,
-    homepage_design_block,
+    enforce_application_builder_phase,
     limit_application_builder_repair_reads,
     read_application_source,
-    render_application_preview,
     require_application_builder_qa,
     write_application_design,
     write_application_source,
@@ -524,6 +526,9 @@ class FakeHookStore:
     async def put(self, key: str, value: object) -> None:
         self.values[key] = value
 
+    async def delete(self, key: str) -> None:
+        self.values.pop(key, None)
+
 
 @dataclass
 class FakeHookExt:
@@ -616,6 +621,7 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
         "start_server",
         "deploy_website",
         APPLICATION_BUILDER_DEPLOY_TOOL,
+        APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
         "publish_website",
         "set_homepage",
         "build_website",
@@ -625,7 +631,7 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
         APPLICATION_BUILDER_READ_TOOL,
         APPLICATION_BUILDER_QA_TOOL,
         APPLICATION_BUILDER_WRITE_TOOL,
-        APPLICATION_PREVIEW_TOOL,
+        APPLICATION_BUILDER_WIREFRAME_TOOL,
     }
     deploy = next(tool for tool in manifest.tools if tool.name == "deploy_website")
     assert deploy.description.startswith("Serve a website folder and host it")
@@ -653,6 +659,22 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     assert [(hook.event, hook.tools) for hook in manifest.hooks] == [
         (
             "pre_tool_use",
+            (
+                "list_external_tools",
+                "describe_external_tools",
+                "search_connector_tools",
+                "call_external_tool",
+                APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
+                APPLICATION_BUILDER_DESIGN_TOOL,
+                APPLICATION_BUILDER_READ_TOOL,
+                APPLICATION_BUILDER_EDIT_TOOL,
+                APPLICATION_BUILDER_WRITE_TOOL,
+                APPLICATION_BUILDER_QA_TOOL,
+                APPLICATION_BUILDER_DEPLOY_TOOL,
+            ),
+        ),
+        (
+            "pre_tool_use",
             (APPLICATION_BUILDER_READ_TOOL, APPLICATION_BUILDER_EDIT_TOOL),
         ),
         ("pre_tool_use", (APPLICATION_BUILDER_DEPLOY_TOOL,)),
@@ -678,7 +700,7 @@ def test_site_actions_bind_to_their_objects_and_the_runtime_stays_global() -> No
         "publish_website",
         "build_website",
         APPLICATION_BUILDER_DELEGATION_TOOL,
-        APPLICATION_PREVIEW_TOOL,
+        APPLICATION_BUILDER_WIREFRAME_TOOL,
     ):
         assert tools[name].bound == collection
         assert tools[name].canonical_id == f"action:site:{name}"
@@ -690,6 +712,7 @@ def test_site_actions_bind_to_their_objects_and_the_runtime_stays_global() -> No
         APPLICATION_BUILDER_QA_TOOL,
         APPLICATION_BUILDER_DEPLOY_TOOL,
         APPLICATION_BUILDER_DESIGN_TOOL,
+        APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
         APPLICATION_BUILDER_READ_TOOL,
         APPLICATION_BUILDER_EDIT_TOOL,
         APPLICATION_BUILDER_WRITE_TOOL,
@@ -712,12 +735,10 @@ def test_site_actions_bind_to_their_objects_and_the_runtime_stays_global() -> No
         (BuildWebsiteInput, {"objective": "build a page"}),
         (BuildUfoApplicationInput, {}),
         (
-            RenderApplicationPreviewInput,
+            DesignUfoApplicationInput,
             {
-                "purpose": "p",
-                "first_screen_priority": "f",
-                "regions": ("queue", "detail"),
-                "layout": "queue-detail",
+                "application_name": "support-desk",
+                "application_prompt": "You handle support requests.",
             },
         ),
     ],
@@ -1367,6 +1388,96 @@ def test_application_design_region_floors_hold_one_pixel_size_at_every_page_heig
     )
 
 
+def test_application_design_regions_do_not_cross_the_first_screen_boundary() -> None:
+    page_height = 1050
+    fold = APPLICATION_DESIGN_FOLD / page_height
+    above = ApplicationAuditRegion(
+        name="above", left=0, top=0, width=1, height=fold, aboveFold=True
+    )
+    below = ApplicationAuditRegion(
+        name="below", left=0, top=fold, width=1, height=1 - fold, aboveFold=False
+    )
+    crossing = ApplicationAuditRegion(
+        name="crossing", left=0, top=fold - 0.01, width=1, height=0.02, aboveFold=True
+    )
+    spanning = ApplicationAuditRegion(
+        name="spanning", left=0, top=0.5, width=1, height=0.4, aboveFold=True
+    )
+
+    assert application_design_region_fold_failure((above, below), page_height) is None
+    assert application_design_region_fold_failure((crossing,), page_height) == (
+        "design region crossing crosses the first-screen boundary"
+    )
+    assert application_design_region_fold_failure((spanning,), page_height) == (
+        "design region spanning crosses the first-screen boundary"
+    )
+
+
+def test_application_design_region_ending_on_the_fold_row_holds_at_every_page_height() -> None:
+    def band(page_height: int, top_row: int, rows: int) -> ApplicationAuditRegion:
+        return ApplicationAuditRegion(
+            name="queue",
+            left=0.0,
+            top=top_row / page_height,
+            width=1.0,
+            height=rows / page_height,
+        )
+
+    allowed_rows = APPLICATION_DESIGN_FOLD + DESIGN_REGION_FOLD_SLOP + 1
+    assert application_design_region_fold_failure((band(846, 32, 812),), 846) is None
+    assert application_design_region_fold_failure((band(846, 32, 813),), 846) is None
+    assert application_design_region_fold_failure((band(848, 32, 815),), 848) is None
+    assert application_design_region_fold_failure((band(848, 32, 816),), 848) == (
+        "design region queue crosses the first-screen boundary"
+    )
+
+    swept = 0
+    rounded = 0
+    for page_height in range(APPLICATION_DESIGN_FOLD + 1, APPLICATION_DESIGN_MAX_HEIGHT + 1):
+        fold = APPLICATION_DESIGN_FOLD / page_height
+        for top_row in range(0, APPLICATION_DESIGN_FOLD, 8):
+            swept += 1
+            ends_on_fold = band(page_height, top_row, APPLICATION_DESIGN_FOLD - top_row)
+            if ends_on_fold.top + ends_on_fold.height <= fold:
+                continue
+            rounded += 1
+            assert application_design_region_fold_failure((ends_on_fold,), page_height) is None
+            painted = band(page_height, top_row, APPLICATION_DESIGN_FOLD + 1 - top_row)
+            assert application_design_region_fold_failure((painted,), page_height) is None
+            if page_height <= allowed_rows:
+                continue
+            allowance = band(page_height, top_row, allowed_rows - top_row)
+            assert application_design_region_fold_failure((allowance,), page_height) is None
+            crosses = band(page_height, top_row, allowed_rows + 1 - top_row)
+            assert application_design_region_fold_failure((crosses,), page_height) == (
+                "design region queue crosses the first-screen boundary"
+            )
+
+    assert rounded > swept // 10
+
+
+def test_application_design_region_stroked_on_the_fold_row_holds() -> None:
+    def rows(page_height: int, painted_rows: int) -> ApplicationAuditRegion:
+        return ApplicationAuditRegion(
+            name="queue",
+            left=0.0,
+            top=0.0,
+            width=1.0,
+            height=painted_rows / page_height,
+            aboveFold=True,
+        )
+
+    for page_height in (848, 1050, APPLICATION_DESIGN_MAX_HEIGHT):
+        stroked = rows(page_height, APPLICATION_DESIGN_FOLD + 1)
+        assert application_design_region_fold_failure((stroked,), page_height) is None
+        allowance = rows(page_height, APPLICATION_DESIGN_FOLD + DESIGN_REGION_FOLD_SLOP + 1)
+        assert application_design_region_fold_failure((allowance,), page_height) is None
+        past = rows(page_height, APPLICATION_DESIGN_FOLD + DESIGN_REGION_FOLD_SLOP + 2)
+        assert application_design_region_fold_failure((past,), page_height) == (
+            "design region queue crosses the first-screen boundary"
+        )
+
+
 def _side_by_side_bands(page_height: int) -> tuple[dict[str, object], ...]:
     """Two 60 px bands 100 px down one page, side by side in the 305 px lane."""
     return tuple(
@@ -1963,6 +2074,8 @@ async def test_build_ufo_application_uses_the_fixed_worker_contract(tmp_path: Pa
             ),
             "scaffold_path": "/workspace/ufo-app",
             "source_path": "/workspace/ufo-app/app.tsx",
+            "phase": "build",
+            "accepted_design_digest": "",
             "preload_skills": ("ufo-style",),
         },
         "dedup_key": "turn-1/build_ufo_application/call-2",
@@ -2015,6 +2128,127 @@ async def test_build_ufo_application_creates_the_product_scaffold(tmp_path: Path
         "/workspace/ufo-app/app.tsx": APPLICATION_PLACEHOLDER,
         "/workspace/ufo-app/preview.html": APPLICATION_PREVIEW_SCAFFOLD,
     }
+
+
+async def test_build_ufo_application_keeps_the_wireframe_after_the_prompt_changes(
+    tmp_path: Path,
+) -> None:
+    prompt = "You now review and assign support requests."
+    design = APPLICATION_DESIGN.encode()
+    digest = sha256(design).hexdigest()
+    captured: dict[str, object] = {}
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        captured["profile"] = profile
+        captured["payload"] = payload
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path=APPLICATION_SOURCE_PATH,
+                browser_batches=0,
+                blocker="Stop after contract capture.",
+            ),
+        )
+
+    store = FakeHookStore(
+        values={
+            "application-wireframe/support-desk": AcceptedApplicationWireframe(
+                design_digest=digest,
+                content=APPLICATION_DESIGN,
+            ).model_dump(mode="json")
+        }
+    )
+    sandbox = FakeSandbox(track_design_claim=True)
+    ctx = replace(
+        _application_context(sandbox, tmp_path),
+        agent=Agent(prompt=prompt, model="claude-opus-4-8", name="support-desk"),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+
+    await build_ufo_application(ctx, BuildUfoApplicationInput())
+
+    assert sandbox.writes[APPLICATION_DESIGN_PATH] == design
+    payload = cast(dict[str, object], captured["payload"])
+    assert payload["phase"] == "build"
+    assert payload["accepted_design_digest"] == digest
+
+
+async def test_build_ufo_application_frees_the_wireframe_once_it_binds_the_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = sha256(APPLICATION_DESIGN.encode()).hexdigest()
+    blocked = ApplicationBuilderResult(
+        status="blocked",
+        source_path=APPLICATION_SOURCE_PATH,
+        browser_batches=0,
+        blocker="The connector is unavailable.",
+    )
+    deployed = ApplicationBuilderResult(
+        status="deployed",
+        source_path=APPLICATION_SOURCE_PATH,
+        site_name="support-desk-homepage",
+        site_url="https://ufo.example.test/support-desk-homepage",
+        browser_batches=2,
+    )
+    worker = blocked
+    handed: list[str] = []
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        handed.append(str(payload["accepted_design_digest"]))
+        return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=worker)
+
+    async def _accept(
+        _acceptance: ApplicationBuildAcceptance, result: ApplicationBuilderResult
+    ) -> ApplicationBuilderResult:
+        return result
+
+    monkeypatch.setattr(ApplicationBuildAcceptance, "accept", _accept)
+    store = FakeHookStore(
+        values={
+            "application-wireframe/support-desk": AcceptedApplicationWireframe(
+                design_digest=digest,
+                content=APPLICATION_DESIGN,
+            ).model_dump(mode="json")
+        }
+    )
+    ctx = replace(
+        _application_context(FakeSandbox(track_design_claim=True), tmp_path),
+        agent=Agent(
+            prompt="You triage support requests.",
+            model="claude-opus-4-8",
+            name="support-desk",
+        ),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+
+    await build_ufo_application(ctx, BuildUfoApplicationInput())
+    assert "application-wireframe/support-desk" in store.values
+
+    worker = deployed
+    later = ctx.turn.model_copy(update={"id": uuid4()})
+    ctx = replace(ctx, turn=later, idempotency_key=f"{later.id}/build_ufo_application/call-1")
+    await build_ufo_application(ctx, BuildUfoApplicationInput())
+    assert "application-wireframe/support-desk" not in store.values
+
+    reshape = ctx.turn.model_copy(update={"id": uuid4()})
+    ctx = replace(ctx, turn=reshape, idempotency_key=f"{reshape.id}/build_ufo_application/call-1")
+    await build_ufo_application(ctx, BuildUfoApplicationInput())
+
+    assert handed == [digest, digest, ""]
 
 
 async def test_concurrent_application_requests_bind_their_own_audit_contracts(
@@ -2716,114 +2950,139 @@ async def test_application_build_acceptance_blocks_missing_qa(tmp_path: Path) ->
     assert accepted.blocker == "The worker returned no passed product QA proof."
 
 
-async def test_application_preview_is_one_fixed_product_render(
+async def test_application_wireframe_shares_and_stores_the_builder_svg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sandbox = FakeSandbox()
     shared: list[tuple[str, bytes, str | None]] = []
+    design = APPLICATION_DESIGN.encode()
+    digest = sha256(design).hexdigest()
+    captured: dict[str, object] = {}
 
     async def _share(
         _ctx: ToolContext, filename: str, data: bytes, subject: str | None = None
     ) -> None:
         shared.append((filename, data, subject))
 
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        captured["profile"] = profile
+        captured["payload"] = payload
+        captured["dedup_key"] = dedup_key
+        sandbox.writes[APPLICATION_DESIGN_PATH] = design
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="wireframe",
+                design_path=APPLICATION_DESIGN_PATH,
+                design_digest=digest,
+                browser_batches=0,
+            ),
+        )
+
     monkeypatch.setattr(ToolContext, "share_artifact", _share)
-    args = RenderApplicationPreviewInput(
-        purpose="Review support requests before assignment.",
-        first_screen_priority="Overdue queue",
-        regions=("Overdue", "Unassigned", "Recent activity"),
-        layout="queue-detail",
-        design_direction="Compact and factual.",
+    store = FakeHookStore()
+    ctx = replace(
+        _application_context(sandbox, tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+        idempotency_key="turn-1/design_ufo_application/call-1",
+    )
+    args = DesignUfoApplicationInput(
+        application_name="support-desk",
+        application_prompt="You review support requests before assignment.",
     )
 
-    result = await render_application_preview(_context(sandbox, tmp_path), args)
+    result = await design_ufo_application(ctx, args)
 
-    rendered = ApplicationPreviewResult.model_validate_json(result.content[0].text)
-    assert rendered.shared_filename == APPLICATION_PREVIEW_FILENAME
-    assert len(rendered.design_digest) == 64
-    assert rendered.homepage_design == (
-        "## Homepage design\n"
-        "Purpose: Review support requests before assignment.\n"
-        "First screen: Overdue queue\n"
-        "Regions in order: Overdue, Unassigned, Recent activity\n"
-        "Layout: queue-detail\n"
-        "Direction: Compact and factual."
-    )
-    assert sandbox.writes == {}
-    assert [(filename, subject) for filename, _, subject in shared] == [
-        (APPLICATION_PREVIEW_FILENAME, "Application preview")
+    rendered = ApplicationWireframeResult.model_validate_json(result.content[0].text)
+    assert rendered.status == "ready"
+    assert rendered.shared_filename == f"support-desk-wireframe-{digest[:12]}.svg"
+    assert rendered.design_digest == digest
+    assert captured == {
+        "profile": "profile:ufo_application_builder",
+        "payload": {
+            "objective": (
+                "Application instructions:\nYou review support requests before assignment."
+            ),
+            "scaffold_path": APPLICATION_SCAFFOLD_PATH,
+            "source_path": APPLICATION_SOURCE_PATH,
+            "phase": "wireframe",
+            "accepted_design_digest": "",
+            "preload_skills": ("ufo-style",),
+        },
+        "dedup_key": "turn-1/design_ufo_application/call-1",
+    }
+    assert shared == [
+        (rendered.shared_filename, design, "Application wireframe"),
     ]
-    image = Image.open(BytesIO(shared[0][1]))
-    assert image.size == (1280, 800)
-    assert image.mode == "RGB"
+    stored = AcceptedApplicationWireframe.model_validate(
+        store.values["application-wireframe/support-desk"]
+    )
+    assert stored.design_digest == digest
+    assert stored.content == APPLICATION_DESIGN
 
 
-async def test_application_preview_does_not_block_the_event_loop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_wireframe_revision_replaces_the_stored_svg_only_after_share(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    started = threading.Event()
-    release = threading.Event()
+    prior = AcceptedApplicationWireframe(
+        design_digest=sha256(APPLICATION_DESIGN.encode()).hexdigest(),
+        content=APPLICATION_DESIGN,
+    ).model_dump(mode="json")
+    revised = APPLICATION_DESIGN.replace("<svg ", '<svg data-revision="2" ', 1).encode()
+    revised_digest = sha256(revised).hexdigest()
 
-    def _slow_preview(_args: RenderApplicationPreviewInput) -> bytes:
-        started.set()
-        assert release.wait(1)
-        return b"preview"
-
-    async def _share(
-        _ctx: ToolContext, _filename: str, _data: bytes, _subject: str | None = None
+    async def _refuse_share(
+        _ctx: ToolContext, filename: str, data: bytes, subject: str | None = None
     ) -> None:
-        return None
+        raise RuntimeError("share failed")
 
-    monkeypatch.setattr(
-        "ufo_ext_sites.application_builder._PillowApplicationPreview.render", _slow_preview
-    )
-    monkeypatch.setattr(ToolContext, "share_artifact", _share)
-    args = RenderApplicationPreviewInput(
-        purpose="Review support requests before assignment.",
-        first_screen_priority="Overdue queue",
-        regions=("Overdue", "Unassigned"),
-        layout="queue-detail",
-        design_direction="Compact and factual.",
-    )
-
-    task = asyncio.create_task(render_application_preview(_context(FakeSandbox(), tmp_path), args))
-    assert await asyncio.to_thread(started.wait, 1)
-    release.set()
-    await task
-
-
-def test_the_design_block_names_the_house_style_the_preview_draws() -> None:
-    """A member who named no direction gets `House style` drawn on the picture, so the block the
-    application carries has to say the same thing the member was shown."""
-    block = homepage_design_block(
-        RenderApplicationPreviewInput(
-            purpose="Review support requests.",
-            first_screen_priority="Overdue queue",
-            regions=("Overdue", "Unassigned"),
-            layout="queue-detail",
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        sandbox.writes[APPLICATION_DESIGN_PATH] = revised
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="wireframe",
+                design_path=APPLICATION_DESIGN_PATH,
+                design_digest=revised_digest,
+                browser_batches=0,
+            ),
         )
+
+    monkeypatch.setattr(ToolContext, "share_artifact", _refuse_share)
+    store = FakeHookStore(values={"application-wireframe/support-desk": prior})
+    sandbox = FakeSandbox()
+    ctx = replace(
+        _application_context(sandbox, tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+        idempotency_key="turn-1/design_ufo_application/call-2",
     )
 
-    assert block.endswith("\nDirection: House style")
-    assert block.startswith("## Homepage design\n")
-
-
-def test_application_preview_contract_has_bounded_regions() -> None:
-    valid = RenderApplicationPreviewInput(
-        purpose="Review support requests.",
-        first_screen_priority="Overdue queue",
-        regions=("Overdue", "Unassigned", "Recent activity"),
-        layout="queue-detail",
-    )
-
-    assert valid.regions == ("Overdue", "Unassigned", "Recent activity")
-    with pytest.raises(ValidationError):
-        RenderApplicationPreviewInput(
-            purpose="Review support requests.",
-            first_screen_priority="Overdue queue",
-            regions=("Only one",),
-            layout="queue-detail",
+    with pytest.raises(RuntimeError, match="share failed"):
+        await design_ufo_application(
+            ctx,
+            DesignUfoApplicationInput(
+                application_name="support-desk",
+                application_prompt="You review support requests before assignment.",
+                revision="Put overdue requests first.",
+            ),
         )
+
+    assert store.values["application-wireframe/support-desk"] == prior
 
 
 def test_application_preview_scaffold_answers_the_app_bridge() -> None:
@@ -3049,6 +3308,7 @@ def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
         "search_connector_tools",
         "call_external_tool",
         "read",
+        APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
         APPLICATION_BUILDER_DESIGN_TOOL,
         APPLICATION_BUILDER_QA_TOOL,
         APPLICATION_BUILDER_EDIT_TOOL,
@@ -3138,6 +3398,8 @@ def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
         "objective",
         "scaffold_path",
         "source_path",
+        "phase",
+        "accepted_design_digest",
         "preload_skills",
     }
     deployed = ApplicationBuilderResult(
@@ -3405,6 +3667,53 @@ async def test_application_builder_deployment_requires_passed_product_qa(
     assert await require_application_builder_qa(deployment) is None
 
 
+async def test_application_builder_wireframe_phase_refuses_build_work(tmp_path: Path) -> None:
+    base = _context(FakeSandbox(), tmp_path)
+    task = ApplicationBuilderTask(
+        objective="Design the support desk.",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+        phase="wireframe",
+    )
+    turn = base.turn.model_copy(
+        update={
+            "inbound": task.model_dump_json(),
+            "subagent_profile": APPLICATION_BUILDER_NAME,
+        }
+    )
+    ext = cast(ExtensionContext, FakeHookExt(FakeHookStore()))
+
+    def phase_hook(tool_name: str) -> HookContext:
+        return HookContext(
+            ext=ext,
+            payload=PreToolUse(tool_name=tool_name, tool_input=BuildUfoApplicationInput()),
+            turn=turn,
+        )
+
+    assert (
+        await enforce_application_builder_phase(phase_hook(APPLICATION_BUILDER_DESIGN_TOOL)) is None
+    )
+    for tool_name in (
+        "list_external_tools",
+        APPLICATION_BUILDER_WRITE_TOOL,
+        APPLICATION_BUILDER_QA_TOOL,
+        APPLICATION_BUILDER_DEPLOY_TOOL,
+    ):
+        refused = await enforce_application_builder_phase(phase_hook(tool_name))
+        assert isinstance(refused, Deny)
+
+
+def test_application_builder_prompt_states_the_wireframe_phase_contract() -> None:
+    wireframe, build = APPLICATION_BUILDER_PROFILE.prompt.split("For `build`", 1)
+
+    assert f"call `{APPLICATION_BUILDER_DESIGN_TOOL}`" in wireframe
+    assert "`status: wireframe`" in wireframe
+    assert "`design_path` and `design_digest`" in wireframe
+    assert "do not inspect connectors or write application source" in wireframe
+    assert "list_external_tools" not in wireframe
+    assert "Inspect the needed connected sources" in build
+
+
 async def test_application_deploy_accepts_only_the_exact_qa_source(tmp_path: Path) -> None:
     source = "import { mountApp } from 'ufo/kit';\n"
     sandbox = FakeSandbox()
@@ -3542,6 +3851,38 @@ async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) 
                 '<rect width="305" height="844" /></svg>',
             ),
         )
+
+
+async def test_application_builder_seals_the_exact_member_wireframe(tmp_path: Path) -> None:
+    digest = sha256(APPLICATION_DESIGN.encode()).hexdigest()
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+        accepted_design_digest=digest,
+    )
+    sandbox = FakeSandbox()
+    sandbox.writes[APPLICATION_DESIGN_PATH] = APPLICATION_DESIGN.encode()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+        idempotency_key=f"{base.turn.id}/{APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL}/call-1",
+    )
+
+    result = await accept_application_wireframe(ctx, AcceptApplicationWireframeInput())
+
+    assert json.loads(result.content[0].text)["design_digest"] == digest
+    accepted = (
+        f"{RUNTIME_ROOT}/"
+        f"{application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)}"
+    )
+    assert sandbox.writes[accepted] == APPLICATION_DESIGN.encode()
 
 
 async def test_application_builder_design_dispatch_gets_stable_call_key(
@@ -4549,8 +4890,8 @@ async def test_application_builder_accepts_a_compact_band_on_a_tall_page(tmp_pat
         f'<svg viewBox="0 0 305 {page_height}" width="305" height="{page_height}">'
         f'<g data-app-region="queue" data-kit-component="Card">'
         f'<rect width="305" height="{band_height}" /></g>'
-        f'<g data-app-region="detail"><rect y="{band_height + 16}" width="305" '
-        f'height="{page_height - band_height - 16}" /></g>'
+        f'<g data-app-region="detail"><rect y="{APPLICATION_DESIGN_FOLD}" width="305" '
+        f'height="{page_height - APPLICATION_DESIGN_FOLD}" /></g>'
         "</svg>"
     )
     task = ApplicationBuilderTask(
@@ -4585,10 +4926,10 @@ async def test_application_builder_accepts_a_compact_band_on_a_tall_page(tmp_pat
                 {
                     "name": "detail",
                     "left": 0.0,
-                    "top": (band_height + 16) / page_height,
+                    "top": APPLICATION_DESIGN_FOLD / page_height,
                     "width": 1.0,
-                    "height": (page_height - band_height - 16) / page_height,
-                    "aboveFold": True,
+                    "height": (page_height - APPLICATION_DESIGN_FOLD) / page_height,
+                    "aboveFold": False,
                 },
             )
         ),
@@ -4601,6 +4942,102 @@ async def test_application_builder_accepts_a_compact_band_on_a_tall_page(tmp_pat
     payload = json.loads(result.content[0].text)
     assert payload["design_digest"] == sha256(design.encode()).hexdigest()
     assert sandbox.writes[payload["path"]] == design.encode()
+
+
+async def test_application_builder_states_the_region_fold_rule_the_design_gate_enforces(
+    tmp_path: Path,
+) -> None:
+    rule = (
+        f"Keep the primary task and the required facts above y={APPLICATION_DESIGN_FOLD}, and do "
+        f"not draw one region as a band across y={APPLICATION_DESIGN_FOLD}."
+    )
+    design_paragraph = next(
+        block
+        for block in APPLICATION_BUILDER_PROFILE.prompt.split("\n\n")
+        if "data-app-region" in block
+    )
+    design_tool = next(
+        tool
+        for tool in sites_manifest.manifest().tools
+        if tool.name == APPLICATION_BUILDER_DESIGN_TOOL
+    )
+    for stated in (design_paragraph, design_tool.description):
+        assert rule in " ".join(stated.split())
+
+    page_height = 1050
+    band_height = 240
+    gap = 16
+
+    def design(detail_top: int) -> str:
+        return (
+            f'<svg viewBox="0 0 305 {page_height}" width="305" height="{page_height}">'
+            f'<g data-app-region="queue" data-kit-component="Card">'
+            f'<rect width="305" height="{band_height}" /></g>'
+            f'<g data-app-region="detail"><rect y="{detail_top}" width="305" '
+            f'height="{page_height - detail_top}" /></g>'
+            "</svg>"
+        )
+
+    def measured(detail_top: int) -> ExecResult:
+        return ExecResult(
+            json.dumps(
+                (
+                    {
+                        "name": "queue",
+                        "left": 0.0,
+                        "top": 0.0,
+                        "width": 1.0,
+                        "height": band_height / page_height,
+                        "aboveFold": True,
+                    },
+                    {
+                        "name": "detail",
+                        "left": 0.0,
+                        "top": detail_top / page_height,
+                        "width": 1.0,
+                        "height": (page_height - detail_top) / page_height,
+                        "aboveFold": detail_top < APPLICATION_DESIGN_FOLD,
+                    },
+                )
+            ),
+            "",
+            0,
+        )
+
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = _application_design_context(
+        replace(
+            base,
+            turn=base.turn.model_copy(
+                update={
+                    "inbound": task.model_dump_json(),
+                    "subagent_profile": APPLICATION_BUILDER_NAME,
+                }
+            ),
+        )
+    )
+    sandbox.design_audit = measured(band_height + gap)
+
+    with pytest.raises(ValueError, match="design region detail crosses the first-screen boundary"):
+        await write_application_design(
+            ctx, WriteApplicationDesignInput(content=design(band_height + gap))
+        )
+
+    assert sandbox.workspace_writes == []
+    obedient = design(APPLICATION_DESIGN_FOLD)
+    sandbox.design_audit = measured(APPLICATION_DESIGN_FOLD)
+
+    result = await write_application_design(ctx, WriteApplicationDesignInput(content=obedient))
+
+    payload = json.loads(result.content[0].text)
+    assert payload["design_digest"] == sha256(obedient.encode()).hexdigest()
+    assert sandbox.writes[payload["path"]] == obedient.encode()
 
 
 @pytest.mark.parametrize(

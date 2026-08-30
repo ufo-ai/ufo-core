@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DELEGATION_TOOL,
-    APPLICATION_PREVIEW_TOOL,
+    APPLICATION_BUILDER_WIREFRAME_TOOL,
 )
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
@@ -57,8 +57,8 @@ SITE_ACTIONS = (
     APPLICATION_BUILDER_DELEGATION_TOOL,
     "build_website",
     "deploy_website",
+    APPLICATION_BUILDER_WIREFRAME_TOOL,
     "publish_website",
-    APPLICATION_PREVIEW_TOOL,
 )
 SITE_ACTION_IDS = frozenset(f"action:{SITE_KIND}:{name}" for name in SITE_ACTIONS)
 SET_HOMEPAGE_ID = f"action:{AGENT_KIND}:set_homepage"

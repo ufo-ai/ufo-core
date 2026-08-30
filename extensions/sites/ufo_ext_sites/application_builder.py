@@ -3,17 +3,14 @@
 import asyncio
 import json
 import re
-import textwrap
 from dataclasses import dataclass
 from hashlib import sha256
-from io import BytesIO
 from math import isfinite
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 from uuid import UUID
 from xml.etree import ElementTree
 
-from PIL import Image, ImageDraw, ImageFont
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -43,6 +40,7 @@ from ufo_ext_sites.application_audit import (
     AcceptedApplicationDesignEvidence,
     ApplicationAuditRegion,
     ApplicationQaProof,
+    application_design_region_fold_failure,
     application_design_region_size_failure,
     application_region_relation,
 )
@@ -61,7 +59,8 @@ APPLICATION_BUILDER_MODEL = "google/gemini-3.7-flash"
 APPLICATION_BUILDER_REASONING: Literal["medium"] = "medium"
 APPLICATION_BUILDER_MAX_ROUNDS = 35
 APPLICATION_BUILDER_DELEGATION_TOOL = "build_ufo_application"
-APPLICATION_PREVIEW_TOOL = "render_application_preview"
+APPLICATION_BUILDER_WIREFRAME_TOOL = "design_ufo_application"
+APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL = "accept_application_wireframe"
 APPLICATION_BUILDER_DESIGN_TOOL = "write_application_design"
 APPLICATION_BUILDER_EDIT_TOOL = "edit_application_source"
 APPLICATION_BUILDER_READ_TOOL = "read_application_source"
@@ -81,20 +80,8 @@ APPLICATION_BUILDER_DEPLOY_GUARD_REASON = "Run and pass product QA before deploy
 APPLICATION_SCAFFOLD_PATH = "/workspace/ufo-app"
 APPLICATION_SOURCE_PATH = f"{APPLICATION_SCAFFOLD_PATH}/app.tsx"
 APPLICATION_DESIGN_PATH = f"{APPLICATION_SCAFFOLD_PATH}/application-design.svg"
-APPLICATION_PREVIEW_FILENAME: Literal["application-preview.png"] = "application-preview.png"
-APPLICATION_PREVIEW_WIDTH = 1280
-APPLICATION_PREVIEW_HEIGHT = 800
-APPLICATION_PREVIEW_BACKGROUND = "#FAF9F7"
-APPLICATION_PREVIEW_FIELD = "#F4F3F2"
-APPLICATION_PREVIEW_BORDER = "#EBEAE9"
-APPLICATION_PREVIEW_INK = "#191A1A"
-APPLICATION_PREVIEW_SOFT_INK = "#616161"
-APPLICATION_PREVIEW_ACCENT = "#0095FF"
-APPLICATION_PREVIEW_MARGIN = 32
-APPLICATION_PREVIEW_RADIUS = 4
-APPLICATION_PREVIEW_HEADER_HEIGHT = 72
-APPLICATION_PREVIEW_REGION_GAP = 16
-APPLICATION_PREVIEW_DEFAULT_DIRECTION = "House style"
+APPLICATION_WIREFRAME_KEY = "application-wireframe/{name}"
+APPLICATION_WIREFRAME_FILENAME = "{name}-wireframe-{digest}.svg"
 APPLICATION_BUILDER_PROMPT = (
     Path(__file__).parent / "prompts" / "subagent_ufo_application_builder.md"
 ).read_text()
@@ -656,8 +643,7 @@ WORKSPACE_ROOT = PurePosixPath("/workspace")
 BoundedSourceTerm = Annotated[str, Field(min_length=1, max_length=200)]
 BoundedOldSource = Annotated[str, Field(min_length=1, max_length=20_000)]
 BoundedNewSource = Annotated[str, Field(max_length=128_000)]
-ApplicationRegion = Annotated[str, Field(min_length=1, max_length=80)]
-ApplicationLayout = Literal["summary-detail", "queue-detail", "timeline", "metrics"]
+ApplicationName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$")]
 
 
 class ApplicationBuilderTask(BaseModel):
@@ -666,6 +652,8 @@ class ApplicationBuilderTask(BaseModel):
     objective: str = Field(min_length=1, max_length=20_000)
     scaffold_path: str
     source_path: str
+    phase: Literal["wireframe", "build"] = "build"
+    accepted_design_digest: str = Field(default="", pattern=r"^(?:[0-9a-f]{64})?$")
     preload_skills: tuple[Literal["ufo-style"]] = (APPLICATION_BUILDER_SKILL,)
 
     @model_validator(mode="after")
@@ -690,32 +678,50 @@ class BuildUfoApplicationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class RenderApplicationPreviewInput(BaseModel):
-    """The complete small design contract for one application preview."""
+class DesignUfoApplicationInput(BaseModel):
+    """The proposed application and optional member revision for one builder wireframe."""
 
     model_config = ConfigDict(extra="forbid")
-    purpose: str = Field(min_length=1, max_length=240)
-    first_screen_priority: str = Field(min_length=1, max_length=160)
-    regions: tuple[ApplicationRegion, ...] = Field(min_length=2, max_length=6)
-    layout: ApplicationLayout
-    design_direction: str = Field(default="", max_length=200)
+    application_name: ApplicationName
+    application_prompt: str = Field(min_length=1, max_length=16_000)
+    revision: str = Field(default="", max_length=2_000)
 
 
-class ApplicationPreviewResult(BaseModel):
-    """The image, the contract digest, and the accepted design as the block the application prompt
-    carries — composed here so the conversation copies one string instead of retyping five fields
-    the worker then has to recognise."""
+class AcceptedApplicationWireframe(BaseModel):
+    """The exact builder SVG held until the named application starts its build."""
 
-    shared_filename: Literal["application-preview.png"] = APPLICATION_PREVIEW_FILENAME
     design_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    homepage_design: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=APPLICATION_DESIGN_MAX_CHARS)
+
+
+class ApplicationWireframeResult(BaseModel):
+    """The exact SVG shared by one completed builder wireframe phase."""
+
+    status: Literal["ready", "blocked"]
+    shared_filename: str = ""
+    design_digest: str = Field(default="", pattern=r"^(?:[0-9a-f]{64})?$")
+    blocker: str = Field(default="", max_length=4_000)
+
+    @model_validator(mode="after")
+    def result_matches_status(self) -> "ApplicationWireframeResult":
+        if self.status == "ready" and (not self.shared_filename or not self.design_digest):
+            raise ValueError("a ready wireframe requires a shared filename and design digest")
+        if self.status == "ready" and self.blocker:
+            raise ValueError("a ready wireframe cannot include a blocker")
+        if self.status == "blocked" and not self.blocker:
+            raise ValueError("a blocked wireframe requires a blocker")
+        if self.status == "blocked" and (self.shared_filename or self.design_digest):
+            raise ValueError("a blocked wireframe cannot include shared design evidence")
+        return self
 
 
 class ApplicationBuilderResult(BaseModel):
-    """The deployment evidence returned to the parent after one complete application build."""
+    """The evidence returned after one wireframe phase or one complete application build."""
 
-    status: Literal["deployed", "blocked"]
-    source_path: str
+    status: Literal["wireframe", "deployed", "blocked"]
+    source_path: str = ""
+    design_path: str = ""
+    design_digest: str = Field(default="", pattern=r"^(?:[0-9a-f]{64})?$")
     site_name: str = ""
     site_url: str = ""
     browser_batches: int = Field(ge=0, le=4)
@@ -725,13 +731,23 @@ class ApplicationBuilderResult(BaseModel):
 
     @model_validator(mode="after")
     def result_matches_status(self) -> "ApplicationBuilderResult":
+        if self.status == "wireframe" and (not self.design_path or not self.design_digest):
+            raise ValueError("a wireframe result requires its path and digest")
+        if self.status == "wireframe" and (
+            self.source_path or self.site_name or self.site_url or self.blocker
+        ):
+            raise ValueError("a wireframe result cannot include build output")
         if self.status == "deployed" and (not self.site_name or not self.site_url):
             raise ValueError("a deployed application requires site_name and site_url")
+        if self.status == "deployed" and not self.source_path:
+            raise ValueError("a deployed application requires its source path")
         if self.status == "deployed" and self.blocker:
             raise ValueError("a deployed application cannot include a blocker")
         if self.status == "blocked" and not self.blocker:
             raise ValueError("a blocked application requires a blocker")
-        if self.status == "blocked" and (self.site_name or self.site_url):
+        if self.status == "blocked" and (
+            self.site_name or self.site_url or self.design_path or self.design_digest
+        ):
             raise ValueError("a blocked application cannot include site identity")
         return self
 
@@ -744,6 +760,8 @@ class ApplicationBuildAcceptance:
     child_turn_id: UUID
 
     async def accept(self, result: ApplicationBuilderResult) -> ApplicationBuilderResult:
+        if result.status == "wireframe":
+            return self._blocked(result, "The worker returned a wireframe instead of a build.", 0)
         if result.status == "blocked":
             return result
         if self.ctx.ext is None:
@@ -884,6 +902,12 @@ class WriteApplicationDesignInput(BaseModel):
             "Keep every visible drawing and text bound inside the viewBox."
         ),
     )
+
+
+class AcceptApplicationWireframeInput(BaseModel):
+    """Seal the exact member-accepted SVG already staged for this build turn."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class ReadApplicationSourceInput(BaseModel):
@@ -1321,6 +1345,11 @@ async def _require_application_design(
     result = await ctx.sandbox.python(APPLICATION_SOURCE_READ, _design_path(task), WORKSPACE_DIR)
     if result.exit_code != 0 or not result.stdout:
         raise ValueError("write_application_design must complete before write_application_source")
+    if (
+        task.accepted_design_digest
+        and sha256(result.stdout.encode()).hexdigest() != task.accepted_design_digest
+    ):
+        raise ValueError("the accepted application wireframe digest does not match")
     _, kit_components, _ = _validate_application_design(result.stdout)
     return kit_components
 
@@ -1333,6 +1362,10 @@ async def write_application_design(
     if ctx.idempotency_key is None:
         raise RuntimeError("write_application_design requires an idempotency key")
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
+    if task.accepted_design_digest and sha256(args.content.encode()).hexdigest() != (
+        task.accepted_design_digest
+    ):
+        raise ValueError("the application wireframe differs from the member-accepted SVG")
     names, kit_components, page_height = _validate_application_design(args.content)
     design_path = _design_path(task)
     content = args.content.encode()
@@ -1349,6 +1382,8 @@ async def write_application_design(
     rendered_regions = await _render_application_design(ctx, candidate_path, names, page_height)
     if size_failure := application_design_region_size_failure(rendered_regions, page_height):
         raise ValueError(size_failure)
+    if fold_failure := application_design_region_fold_failure(rendered_regions, page_height):
+        raise ValueError(fold_failure)
     evidence = AcceptedApplicationDesignEvidence(
         design_sha256=content_sha256,
         kit_components=kit_components,
@@ -1466,6 +1501,20 @@ async def write_application_design(
             ),
         )
     )
+
+
+async def accept_application_wireframe(
+    ctx: ToolContext, _args: AcceptApplicationWireframeInput
+) -> ToolResult:
+    """Seal the staged member-approved SVG as this build turn's design evidence."""
+
+    task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
+    if not task.accepted_design_digest:
+        raise ValueError("this application build has no member-accepted wireframe")
+    result = await ctx.sandbox.python(APPLICATION_SOURCE_READ, _design_path(task), WORKSPACE_DIR)
+    if result.exit_code != 0 or not result.stdout:
+        raise ValueError("the accepted application wireframe is missing")
+    return await write_application_design(ctx, WriteApplicationDesignInput(content=result.stdout))
 
 
 async def _complete_application_design_cleanup(
@@ -1643,208 +1692,59 @@ async def write_application_source(
     )
 
 
-def _preview_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    return ImageFont.load_default(size=size)
+async def design_ufo_application(ctx: ToolContext, args: DesignUfoApplicationInput) -> ToolResult:
+    """Run the application builder's wireframe phase and share its exact accepted SVG."""
 
-
-def _preview_text(value: str, width: int, lines: int) -> str:
-    parts = textwrap.wrap(value.strip(), width=width)[:lines]
-    if not parts:
-        return ""
-    if len(parts) == lines and len(" ".join(parts)) < len(value.strip()):
-        parts[-1] = parts[-1].rstrip(" .") + "…"
-    return "\n".join(parts)
-
-
-def _preview_card(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    title: str,
-    detail: str,
-) -> None:
-    draw.rounded_rectangle(
-        box,
-        radius=APPLICATION_PREVIEW_RADIUS,
-        fill=APPLICATION_PREVIEW_BACKGROUND,
-        outline=APPLICATION_PREVIEW_BORDER,
-        width=2,
+    if ctx.ext is None:
+        raise RuntimeError("the application builder dispatched without its extension context")
+    if ctx.idempotency_key is None:
+        raise RuntimeError("design_ufo_application requires an idempotency key")
+    await _ensure_application_scaffold(ctx)
+    revision = f"\n\nMember revision:\n{args.revision}" if args.revision else ""
+    result = await ctx.spawn(
+        f"profile:{APPLICATION_BUILDER_NAME}",
+        ApplicationBuilderTask(
+            objective=f"Application instructions:\n{args.application_prompt}{revision}",
+            scaffold_path=APPLICATION_SCAFFOLD_PATH,
+            source_path=APPLICATION_SOURCE_PATH,
+            phase="wireframe",
+        ).model_dump(),
+        dedup_key=ctx.idempotency_key,
     )
-    left, top, right, bottom = box
-    draw.text(
-        (left + 20, top + 18),
-        _preview_text(title, 34, 2),
-        font=_preview_font(18),
-        fill=APPLICATION_PREVIEW_INK,
-    )
-    line_y = min(top + 74, bottom - 32)
-    draw.line(
-        (left + 20, line_y, right - 20, line_y),
-        fill=APPLICATION_PREVIEW_BORDER,
-        width=2,
-    )
-    if bottom - line_y > 50:
-        draw.text(
-            (left + 20, line_y + 16),
-            _preview_text(detail, 46, 3),
-            font=_preview_font(15),
-            fill=APPLICATION_PREVIEW_SOFT_INK,
-            spacing=6,
+    if result.output is None:
+        blocked = ApplicationWireframeResult(
+            status="blocked", blocker="The application builder returned no wireframe."
         )
-
-
-def _preview_boxes(layout: ApplicationLayout, count: int) -> tuple[tuple[int, int, int, int], ...]:
-    left = APPLICATION_PREVIEW_MARGIN
-    right = APPLICATION_PREVIEW_WIDTH - APPLICATION_PREVIEW_MARGIN
-    top = 344
-    bottom = APPLICATION_PREVIEW_HEIGHT - 58
-    gap = APPLICATION_PREVIEW_REGION_GAP
-    if layout == "timeline":
-        height = (bottom - top - gap * (count - 1)) // count
-        return tuple(
-            (
-                left,
-                top + index * (height + gap),
-                right,
-                top + index * (height + gap) + height,
-            )
-            for index in range(count)
-        )
-    if layout == "queue-detail" and count > 1:
-        split = left + round((right - left - gap) * 0.62)
-        side_height = (bottom - top - gap * (count - 2)) // (count - 1)
-        return (
-            (left, top, split, bottom),
-            *tuple(
-                (
-                    split + gap,
-                    top + index * (side_height + gap),
-                    right,
-                    top + index * (side_height + gap) + side_height,
-                )
-                for index in range(count - 1)
-            ),
-        )
-    columns = 3 if layout == "metrics" else 2
-    rows = (count + columns - 1) // columns
-    width = (right - left - gap * (columns - 1)) // columns
-    height = (bottom - top - gap * (rows - 1)) // rows
-    return tuple(
-        (
-            left + (index % columns) * (width + gap),
-            top + (index // columns) * (height + gap),
-            left + (index % columns) * (width + gap) + width,
-            top + (index // columns) * (height + gap) + height,
-        )
-        for index in range(count)
+        return ToolResult(content=(TextContent(text=blocked.model_dump_json()),))
+    worker = ApplicationBuilderResult.model_validate(result.output)
+    if worker.status == "blocked":
+        blocked = ApplicationWireframeResult(status="blocked", blocker=worker.blocker)
+        return ToolResult(content=(TextContent(text=blocked.model_dump_json()),))
+    if worker.status != "wireframe" or worker.design_path != APPLICATION_DESIGN_PATH:
+        raise RuntimeError("the application builder returned no accepted wireframe")
+    rendered = await ctx.sandbox.python(
+        APPLICATION_SOURCE_READ, APPLICATION_DESIGN_PATH, WORKSPACE_DIR
     )
-
-
-def _application_preview(args: RenderApplicationPreviewInput) -> bytes:
-    image = Image.new(
-        "RGB",
-        (APPLICATION_PREVIEW_WIDTH, APPLICATION_PREVIEW_HEIGHT),
-        APPLICATION_PREVIEW_BACKGROUND,
+    if rendered.exit_code != 0 or not rendered.stdout:
+        raise RuntimeError("the application builder wireframe is missing")
+    _validate_application_design(rendered.stdout)
+    content = rendered.stdout.encode()
+    digest = sha256(content).hexdigest()
+    if worker.design_digest != digest:
+        raise RuntimeError("the application builder wireframe digest does not match")
+    filename = APPLICATION_WIREFRAME_FILENAME.format(name=args.application_name, digest=digest[:12])
+    await ctx.share_artifact(filename, content, "Application wireframe")
+    await ctx.ext.store.put(
+        APPLICATION_WIREFRAME_KEY.format(name=args.application_name),
+        AcceptedApplicationWireframe(
+            design_digest=digest,
+            content=rendered.stdout,
+        ).model_dump(mode="json"),
     )
-    draw = ImageDraw.Draw(image)
-    draw.line(
-        (
-            0,
-            APPLICATION_PREVIEW_HEADER_HEIGHT,
-            APPLICATION_PREVIEW_WIDTH,
-            APPLICATION_PREVIEW_HEADER_HEIGHT,
-        ),
-        fill=APPLICATION_PREVIEW_BORDER,
-        width=2,
+    ready = ApplicationWireframeResult(
+        status="ready", shared_filename=filename, design_digest=digest
     )
-    draw.ellipse((32, 27, 42, 37), fill=APPLICATION_PREVIEW_ACCENT)
-    draw.text(
-        (54, 23),
-        "Application preview",
-        font=_preview_font(18),
-        fill=APPLICATION_PREVIEW_INK,
-    )
-    draw.text(
-        (1090, 24),
-        args.layout.replace("-", " ").title(),
-        font=_preview_font(15),
-        fill=APPLICATION_PREVIEW_SOFT_INK,
-    )
-    draw.text(
-        (32, 104),
-        _preview_text(args.purpose, 70, 2),
-        font=_preview_font(34),
-        fill=APPLICATION_PREVIEW_INK,
-        spacing=8,
-    )
-    draw.rounded_rectangle(
-        (32, 214, 1248, 320),
-        radius=APPLICATION_PREVIEW_RADIUS,
-        fill=APPLICATION_PREVIEW_FIELD,
-    )
-    draw.text(
-        (52, 234),
-        "First on the page",
-        font=_preview_font(14),
-        fill=APPLICATION_PREVIEW_SOFT_INK,
-    )
-    draw.text(
-        (52, 266),
-        _preview_text(args.first_screen_priority, 72, 2),
-        font=_preview_font(24),
-        fill=APPLICATION_PREVIEW_INK,
-    )
-    for region, box in zip(
-        args.regions, _preview_boxes(args.layout, len(args.regions)), strict=True
-    ):
-        _preview_card(draw, box, region, f"{region} content and controls appear here.")
-    direction = args.design_direction.strip() or APPLICATION_PREVIEW_DEFAULT_DIRECTION
-    draw.text(
-        (32, 770),
-        _preview_text(direction, 110, 1),
-        font=_preview_font(13),
-        fill=APPLICATION_PREVIEW_SOFT_INK,
-    )
-    body = BytesIO()
-    image.save(body, format="PNG")
-    return body.getvalue()
-
-
-class _PillowApplicationPreview:
-    @staticmethod
-    def render(args: RenderApplicationPreviewInput) -> bytes:
-        return _application_preview(args)
-
-
-def homepage_design_block(contract: RenderApplicationPreviewInput) -> str:
-    """The accepted design as the exact lines the application prompt carries, so the worker reads
-    the regions, order, and layout the member was shown rather than a recomposition of them."""
-    direction = contract.design_direction.strip() or APPLICATION_PREVIEW_DEFAULT_DIRECTION
-    return "\n".join(
-        (
-            "## Homepage design",
-            f"Purpose: {contract.purpose}",
-            f"First screen: {contract.first_screen_priority}",
-            f"Regions in order: {', '.join(contract.regions)}",
-            f"Layout: {contract.layout}",
-            f"Direction: {direction}",
-        )
-    )
-
-
-async def render_application_preview(
-    ctx: ToolContext, args: RenderApplicationPreviewInput
-) -> ToolResult:
-    """Render and share one stateless product-owned application preview."""
-    body = await asyncio.to_thread(_PillowApplicationPreview.render, args)
-    await ctx.share_artifact(APPLICATION_PREVIEW_FILENAME, body, "Application preview")
-    contract = args.model_dump(mode="json")
-    digest = sha256(
-        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    result = ApplicationPreviewResult(
-        design_digest=digest, homepage_design=homepage_design_block(args)
-    )
-    return ToolResult(content=(TextContent(text=result.model_dump_json()),))
+    return ToolResult(content=(TextContent(text=ready.model_dump_json()),))
 
 
 async def _ensure_application_scaffold(ctx: ToolContext) -> None:
@@ -1895,6 +1795,19 @@ async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInpu
             request_contract,
         )
     await _ensure_application_scaffold(ctx)
+    accepted_design_digest = ""
+    wireframe_key = APPLICATION_WIREFRAME_KEY.format(name=ctx.agent.name)
+    stored_wireframe = await ctx.ext.store.get(wireframe_key)
+    if stored_wireframe is not None:
+        try:
+            wireframe = AcceptedApplicationWireframe.model_validate(stored_wireframe)
+        except ValueError as error:
+            raise RuntimeError("the stored application wireframe is invalid") from error
+        _validate_application_design(wireframe.content)
+        if sha256(wireframe.content.encode()).hexdigest() != wireframe.design_digest:
+            raise RuntimeError("the stored application wireframe digest does not match")
+        await ctx.sandbox.write_file(APPLICATION_DESIGN_PATH, wireframe.content.encode())
+        accepted_design_digest = wireframe.design_digest
     objective = (
         f"Application instructions:\n{ctx.agent.prompt}\n\nCurrent request:\n{ctx.turn.inbound}"
     )
@@ -1905,6 +1818,7 @@ async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInpu
                 objective=objective,
                 scaffold_path=APPLICATION_SCAFFOLD_PATH,
                 source_path=APPLICATION_SOURCE_PATH,
+                accepted_design_digest=accepted_design_digest,
             ).model_dump(),
             dedup_key=ctx.idempotency_key,
         )
@@ -1926,6 +1840,11 @@ async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInpu
         else:
             worker = ApplicationBuilderResult.model_validate(result.output)
             accepted = await ApplicationBuildAcceptance(ctx, result.turn_id).accept(worker)
+    if accepted_design_digest and accepted.status == "deployed":
+        # The accepted wireframe is spent once the page it describes is bound: a later request to
+        # reshape that page reaches a build free to design again, while a build that never bound
+        # the page keeps the SVG the member accepted for its next attempt.
+        await ctx.ext.store.delete(wireframe_key)
     return ToolResult(content=(TextContent(text=accepted.model_dump_json()),))
 
 
@@ -1967,6 +1886,24 @@ async def limit_application_builder_repair_reads(ctx: HookContext) -> Deny | Non
     return None
 
 
+async def enforce_application_builder_phase(ctx: HookContext) -> Deny | None:
+    """Keep the wireframe phase out of source, connector, QA, and deployment work."""
+
+    if ctx.turn is None or ctx.turn.subagent_profile != APPLICATION_BUILDER_NAME:
+        return None
+    match ctx.payload:
+        case PreToolUse():
+            pass
+        case _:
+            return None
+    task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
+    if task.phase == "wireframe" and ctx.payload.tool_name != APPLICATION_BUILDER_DESIGN_TOOL:
+        return Deny(reason="The wireframe phase can only read style and write its SVG design.")
+    if task.accepted_design_digest and ctx.payload.tool_name == APPLICATION_BUILDER_DESIGN_TOOL:
+        return Deny(reason="The member already accepted the application wireframe.")
+    return None
+
+
 async def require_application_builder_qa(ctx: HookContext) -> Deny | None:
     """Refuse application deployment until deterministic product QA passes."""
 
@@ -1998,17 +1935,30 @@ APPLICATION_BUILDER_DELEGATION = ToolDef(
 )
 
 
-APPLICATION_PREVIEW = ToolDef(
-    name=APPLICATION_PREVIEW_TOOL,
+APPLICATION_BUILDER_WIREFRAME = ToolDef(
+    name=APPLICATION_BUILDER_WIREFRAME_TOOL,
     description=(
-        "Render one application design from a small typed contract. This fixed product renderer "
-        "shares one preview PNG. It runs no model, file or browser tool, deployment, or "
-        "member-state change. Ask the member to build or revise the shared design."
+        "Run the ufo application builder's wireframe phase for the proposed name and complete "
+        "application prompt. It shares the exact accepted SVG and stores it for that application's "
+        "build. Pass the member's requested change in revision when replacing a prior wireframe."
     ),
-    input_model=RenderApplicationPreviewInput,
-    handler=render_application_preview,
+    input_model=DesignUfoApplicationInput,
+    handler=design_ufo_application,
     side_effecting=True,
     bound=ObjectBinding(kind=SITE_KIND, binding="collection"),
+)
+
+
+APPLICATION_BUILDER_ACCEPT_DESIGN = ToolDef(
+    name=APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
+    description=(
+        "Accept the exact member-approved application-design.svg already staged for this build "
+        "turn. It validates and seals the SVG without generating or changing it."
+    ),
+    input_model=AcceptApplicationWireframeInput,
+    handler=accept_application_wireframe,
+    side_effecting=True,
+    profile_only=True,
 )
 
 
@@ -2017,9 +1967,11 @@ APPLICATION_BUILDER_DESIGN = ToolDef(
     description=(
         "Write one full-page SVG visual contract for a 305 px-wide app lane before app.tsx. "
         'Use viewBox="0 0 305 H", width="305", and a matching finite content-driven height H. '
-        "Keep the primary task and required facts above y=844 and every visible bound inside the "
-        "viewBox. Do not design a laptop or desktop layout. The SVG fixes information order, "
-        "layout, component shapes, labels, and action placement; it is not embedded in the app."
+        "Keep every visible bound inside the viewBox. Keep the primary task and the required "
+        "facts above y=844, and do not draw one region as a band across y=844. Do not design a "
+        "laptop or desktop layout. "
+        "The SVG fixes information order, layout, component shapes, labels, and action placement; "
+        "it is not embedded in the app."
     ),
     input_model=WriteApplicationDesignInput,
     handler=write_application_design,
@@ -2067,6 +2019,7 @@ APPLICATION_BUILDER_PROFILE = SubagentProfile(
         "search_connector_tools",
         "call_external_tool",
         "read",
+        APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
         APPLICATION_BUILDER_DESIGN_TOOL,
         APPLICATION_BUILDER_QA_TOOL,
         APPLICATION_BUILDER_READ_TOOL,

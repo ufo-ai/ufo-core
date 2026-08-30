@@ -1,0 +1,38 @@
+name = "app-builder-accepted-wireframe"
+base = "dcd1102b900d4fdc6da681b0abc1da1bcc389bd2"
+suites = ["new_application"]
+cases = ["A08-guided-homepage-journey"]
+repeats = 1
+concurrency = 1
+max_stacks = 1
+budget_usd = 60.0
+est_usd_per_case = 18.0
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+sandbox = { backend = "docker" }
+research = { search_provider = "perplexity" }
+
+[[arm]]
+name = "no-accept-steps"
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
+old = '''When
+`accepted_design_digest` is set, call `accept_application_wireframe`, read the existing
+`application-design.svg`, do not call `write_application_design`, and implement that exact accepted
+wireframe. When it is empty, create the design before source work as described below.'''
+new = '''Create the design before source work as described below.'''
+
+[[arm]]
+name = "no-skill-call"
+
+[[arm.replacements]]
+path = "core/src/ufo/skills/create-application/SKILL.md"
+old = '''Finish the name and complete application prompt,
+then call the `site` collection's `design_ufo_application` action with that exact
+`application_name` and `application_prompt`. Omit `revision` on the first call.'''
+new = '''Finish the name and complete application prompt, then ask the member to approve the design.'''

@@ -91,27 +91,20 @@ line: what the application settles itself, what it brings to a person.
 
 Every application builds a homepage: the page members open on the Apps screen, where it states
 what it is for, what it watches, its recent work, and what it needs. The design pass settles what
-this app's page reports and how it is laid out. Settle one small contract and call the `site`
-collection's `render_application_preview` action (`object_action` with kind `site`):
+this app's page reports and how it is laid out. Finish the name and complete application prompt,
+then call the `site` collection's `design_ufo_application` action with that exact
+`application_name` and `application_prompt`. Omit `revision` on the first call.
 
-| Field | Value |
-|---|---|
-| `purpose` | One sentence naming what the page helps the member do. |
-| `first_screen_priority` | The one region the first screen leads with. |
-| `regions` | Two to six short region names in display order. |
-| `layout` | `summary-detail`, `queue-detail`, `timeline`, or `metrics`. |
-| `design_direction` | The member's own direction, or `House style`. |
+The ufo application builder draws one SVG wireframe in the house style. The action shares that
+exact SVG in the conversation and holds it for the named application's build. Do not load a design
+skill, inspect the SVG, or share it again. After the action returns `ready`, end with `ask_user`:
+`Build it`, `Change the design`.
 
-The product renderer owns the components and tokens. It shares one PNG in the conversation and
-runs no model, file or browser tool, deployment, or member-state change. Do not load a design skill,
-inspect the PNG, or share it again. After the renderer returns, end with `ask_user`: `Build it`,
-`Change the design`.
-
-On `Change the design`, replace the whole contract and call the renderer once. Put the member's
-revision in the exact contract field it changes. One page and at most two previews are the whole
-design pass. The renderer returns the accepted design as a `homepage_design` block: copy that block
-into the application prompt exactly as returned, rather than writing the fields out yourself. The
-application builds and binds its live homepage on its first homepage turn.
+On `Change the design`, call the same action once for the same name. Use the current complete prompt
+and put the member's requested change in `revision`. A successful revision shares its new SVG before
+it replaces the stored design. One page and at most two wireframes are the whole design pass. Create
+the application under the accepted wireframe's name. Its first homepage gives the app builder that
+SVG and digest to implement before QA, deployment, and binding.
 
 ## Create it
 

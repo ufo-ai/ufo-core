@@ -23,15 +23,18 @@ from pathlib import Path
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import HookSpec, Manifest, PromptSection, SkillSpec
 from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_ACCEPT_DESIGN,
     APPLICATION_BUILDER_DELEGATION,
     APPLICATION_BUILDER_DEPLOY_TOOL,
     APPLICATION_BUILDER_DESIGN,
     APPLICATION_BUILDER_EDIT,
     APPLICATION_BUILDER_PROFILE,
+    APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_READ,
     APPLICATION_BUILDER_READ_TOOL,
+    APPLICATION_BUILDER_WIREFRAME,
     APPLICATION_BUILDER_WRITE,
-    APPLICATION_PREVIEW,
+    enforce_application_builder_phase,
     limit_application_builder_repair_reads,
     require_application_builder_qa,
 )
@@ -66,10 +69,11 @@ def manifest() -> Manifest:
             *DELEGATION_TOOLS,
             APPLICATION_BUILDER_DELEGATION,
             APPLICATION_BUILDER_DESIGN,
+            APPLICATION_BUILDER_ACCEPT_DESIGN,
             APPLICATION_BUILDER_EDIT,
             APPLICATION_BUILDER_READ,
             APPLICATION_BUILDER_WRITE,
-            APPLICATION_PREVIEW,
+            APPLICATION_BUILDER_WIREFRAME,
         ),
         objects=(SITE_OBJECT,),
         subagents=(WEBSITE_BUILDING_PROFILE, APPLICATION_BUILDER_PROFILE),
@@ -77,6 +81,23 @@ def manifest() -> Manifest:
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         skills=(SkillSpec(path=SKILLS_ROOT / SKILL_NAME),),
         hooks=(
+            HookSpec(
+                event="pre_tool_use",
+                handler=enforce_application_builder_phase,
+                tools=(
+                    "list_external_tools",
+                    "describe_external_tools",
+                    "search_connector_tools",
+                    "call_external_tool",
+                    APPLICATION_BUILDER_ACCEPT_DESIGN.name,
+                    APPLICATION_BUILDER_DESIGN.name,
+                    APPLICATION_BUILDER_READ.name,
+                    APPLICATION_BUILDER_EDIT.name,
+                    APPLICATION_BUILDER_WRITE.name,
+                    APPLICATION_BUILDER_QA_TOOL,
+                    APPLICATION_BUILDER_DEPLOY_TOOL,
+                ),
+            ),
             HookSpec(
                 event="pre_tool_use",
                 handler=limit_application_builder_repair_reads,

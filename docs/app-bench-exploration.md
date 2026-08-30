@@ -1124,16 +1124,29 @@ Gemini preview worker reduces cost but passes only one of four cases and takes 1
 per child. A bounded worker improves deterministic ownership and passes three of four cases for
 $4.03 instead of $9.12, but its first previews still take 139 to 149 seconds, against 137 to 153
 seconds for the direct path. Its remaining failure also drops the member's accepted overdue-queue
-revision from the durable application prompt. Both worker variants are removed. The next screen
-uses a typed design contract and a fixed product renderer before one final Gemini build.
+revision from the durable application prompt. Both worker variants are removed. That screen tested
+a typed design contract and a fixed product renderer before one final Gemini build.
 
 Returning the fixed PNG by path still causes Opus to read it before sharing. The renderer now uses
 the public in-process artifact seam and delivers the PNG in its own call. The final matched screen
 passes both guided journeys. Cost falls from $5.10 to $1.86, and case wall time falls from 342 to
 464 seconds to 167 to 183 seconds. Render-and-share itself takes 20 to 380 milliseconds. No model
 child, source tool, browser tool, second share, hosted site, or member-state change enters the
-preview phase. The accepted typed contract reaches the created application's prompt. Keep this
-boundary and start the four full journeys with one Gemini production build after approval.
+preview phase. The accepted typed contract reaches the created application's prompt. This is the
+result of that experiment.
+
+The product path uses the application builder for both phases. Its first phase writes one typed SVG,
+and the product shares those exact bytes. Approval stores the SVG digest. The same builder receives
+that SVG and digest for the build phase, cannot write another design, and must implement the accepted
+artifact before QA and deployment. The trajectory gate rejects source, connector, QA, or deployment
+work before the create. The artifact gate rejects a final `homepage-design.svg` with another digest.
+
+The accepted-wireframe screen passes control 1/1. Removing the worker's accepted-design steps
+regresses to 0/1; removing the Skill's first action call passes 1/1 but later produces a zero-preview
+counterexample, so the explicit call stays. The passing control's accepted, deployed, and retained
+SVG share one digest. The focused prompt-contract screen passes 1/1 in both arms after prompt
+equality is replaced by the app-name and SVG-digest contract. Two full-journey wording screens are
+inconclusive because both matched arms miss preview cardinality before the build.
 
 The complete journey screen removes routine Opus build work. A normal homepage parent calls one
 fixed build tool and gives one final response. Gemini owns connector inspection, one full source
@@ -1219,7 +1232,7 @@ Only then compare worker models, reasoning settings, and component inputs.
 | 9 | Run the model and reasoning screens with the selected blank kit input. | Done | Gemini 3.7 Flash at medium keeps the best complete portfolio. GPT and GLM fail the no-regression gate. |
 | 10 | Add connected prepared-action cases. | Done | Both matched arms pass all three browser, prepared-turn, durable-state, refusal, idempotency, and scope checks. |
 | 11 | Add connector setup and notification status. | Done | All three pages show the fixed state, open the exact new-chat path, and make no direct setup write. |
-| 12 | Add guided creation and preview-revision screens. | Done | Both cases create only after the accepted design. The accepted revision reaches the durable application prompt. |
+| 12 | Add guided creation and preview-revision screens. | Done | Both cases create only after the accepted design. The accepted revision reaches the build by its SVG digest. |
 | 13 | Remove Opus-owned preview source and browser work. | Done | Both Gemini preview-worker arms are rejected and removed. They lower cost but do not lower preview latency. |
 | 14 | Add the deterministic application-design renderer. | Done | The atomic renderer passes 2/2, cuts matched cost 64%, cuts wall time 51%–61%, and performs no model or browser work. |
 | 15 | Run the four complete creation journeys. | Done | The isolated A07–A10 reports pass 4/4. A10 retains one blocked attempt, then deploys through one later Gemini attempt with no extra parent or worker. |

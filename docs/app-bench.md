@@ -682,7 +682,7 @@ Goal: separate model work, deterministic acceptance, and publication behind owne
 | Owner | Work |
 |---|---|
 | Opus parent | Make one delegation from the member request and give one final response. |
-| Gemini builder | Inspect connector data, write `app.tsx`, run bounded QA, repair, and deploy. |
+| Gemini builder | Draw the approval SVG, then implement that SVG, inspect connector data, run bounded QA, repair, and deploy. |
 | Deterministic harness | Compile, check the exact source digest, audit interactions and facts, and reject invalid source. |
 | Opus escalation | Run only for an ambiguous request or a deterministic failure class that has no product rule. |
 
@@ -691,10 +691,11 @@ bind as the homepage. One failed audit can return one bounded diagnostic batch t
 A second failure ends the build as `blocked`. The parent does not read source, browser output, or
 repair diagnostics in the normal path.
 
-The application design is a typed artifact. A fixed renderer produces its preview in milliseconds.
-The accepted contract becomes builder input. The source candidate is the next artifact. The compiler
-and browser audit produce the final proof against its digest. Deployment uses that proof and does
-not repeat the audit.
+The application design is a typed SVG artifact from the Gemini builder. The product shares the exact
+SVG before approval and stores its digest. The same builder receives that SVG and digest after the
+create. It must accept that file before source work, and it cannot write a second design. The source
+candidate is the next artifact. The compiler and browser audit produce the final proof against its
+digest. Deployment uses that proof and does not repeat the audit.
 
 [The exploration campaign](app-bench-exploration.md) records the rejected multi-model and
 parent-supervised paths. The accepted A07–A10 path passes all four complete journeys. Corrected
@@ -716,11 +717,13 @@ Sequence:
 
 1. The Apps screen admits `Build me a new app.` as a chat turn.
 2. `create-application` opens the fixed phase board and interviews the member.
-3. The parent renders the typed design and waits for approval or a named revision.
-4. One Gemini worker builds the accepted design.
-5. Deterministic acceptance checks the exact deployed source before homepage binding.
-6. The approved application, site, homepage, and access rules become durable together.
-7. The member opens the application and completes its benchmark task.
+3. The application builder draws one SVG wireframe, and the product shares that exact file.
+4. The parent waits for approval or one named revision from the same builder.
+5. The application is created only after approval.
+6. The same builder implements the accepted SVG.
+7. Deterministic acceptance checks the accepted SVG and exact deployed source before homepage binding.
+8. The approved application, site, homepage, and access rules become durable together.
+9. The member opens the application and completes its benchmark task.
 
 The guided and revision screens pass. The complete A07–A10 journeys pass 4/4. A10 proves the
 failure path: one build ends as `blocked`, keeps its evidence, and creates no partial publication.
@@ -729,6 +732,8 @@ One later approved attempt deploys through one parent and one Gemini worker.
 Gate:
 
 - The opening and interview trajectory cases pass.
+- The member receives the builder SVG before the approval ask and before the application create.
+- The final `homepage-design.svg` has the accepted SVG digest.
 - No application object, site, grant, or publication act occurs before the member approves it in
   chat.
 - A realistic request produces durable application and site records.

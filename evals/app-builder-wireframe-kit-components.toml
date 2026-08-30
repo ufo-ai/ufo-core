@@ -21,8 +21,8 @@ name = "no-kit-annotations"
 
 [[arm.replacements]]
 path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
-old = '''semantic app containers that implement those regions. Mark each intended
+old = '''regions. Mark each intended
 Kit primitive on an SVG `<g>` with `data-kit-component` and its exact exported component name, for
 example `<g data-kit-component="Card">`. Render those same named components directly in `app.tsx`.
 The SVG is a visual contract'''
-new = '''semantic app containers that implement those regions. The SVG is a visual contract'''
+new = '''regions. The SVG is a visual contract'''

@@ -78,7 +78,7 @@ MOVED_CANDIDATES = frozenset(
         "publish_website",
         "build_website",
         "build_ufo_application",
-        "render_application_preview",
+        "design_ufo_application",
         "set_homepage",
         "generate_image",
         "generate_video",

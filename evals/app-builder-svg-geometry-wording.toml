@@ -21,11 +21,12 @@ name = "redundant-wording"
 
 [[arm.replacements]]
 path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
-old = '''Before source work, call `write_application_design` with one full-page SVG. Use the real facts,
-information order, component shapes, labels, and action placement you will implement.'''
-new = '''Before source work, call `write_application_design` with one full-page SVG for a 305 px-wide app
-lane. Use `viewBox="0 0 305 H"`, `width="305"`, and a matching finite content-driven height `H`
-from 844 through 4096. The initial fold is y=844: keep the primary task and required facts above
-it. Keep every visible drawing and text bound inside the viewBox. Do not design a laptop or desktop
-layout. Use the real facts, information order, component shapes, labels, and action placement you
-will implement.'''
+old = '''Before source work when no accepted design is present, call `write_application_design` with one
+full-page SVG. Use the real facts, information order, component shapes, labels, and action placement
+you will implement.'''
+new = '''Before source work when no accepted design is present, call `write_application_design` with one
+full-page SVG for a 305 px-wide app lane. Use `viewBox="0 0 305 H"`, `width="305"`, and a matching
+finite content-driven height `H` from 844 through 4096. The initial fold is y=844: keep the primary
+task and required facts above it. Keep every visible drawing and text bound inside the viewBox. Do
+not design a laptop or desktop layout. Use the real facts, information order, component shapes,
+labels, and action placement you will implement.'''

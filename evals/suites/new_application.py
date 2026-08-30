@@ -14,13 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import stat
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from itertools import permutations
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
@@ -30,25 +28,21 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from ufo_ext_sites.application_audit import (
-    APPLICATION_DESIGN_FOLD,
-    APPLICATION_DESIGN_MAX_HEIGHT,
-    ApplicationAuditRegion,
-    application_region_relation,
-)
 from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
     APPLICATION_BUILDER_DELEGATION,
     APPLICATION_BUILDER_DELEGATION_TOOL,
     APPLICATION_BUILDER_DEPLOY_TOOL,
     APPLICATION_BUILDER_DESIGN_TOOL,
     APPLICATION_BUILDER_NAME,
     APPLICATION_BUILDER_QA_TOOL,
+    APPLICATION_BUILDER_WIREFRAME_TOOL,
     APPLICATION_BUILDER_WRITE_TOOL,
     APPLICATION_SOURCE_PATH,
     ApplicationBuilderResult,
     ApplicationBuilderTask,
-    RenderApplicationPreviewInput,
-    homepage_design_block,
+    ApplicationWireframeResult,
+    DesignUfoApplicationInput,
 )
 from ufo_ext_sites.store import hosted_site
 from ufo_ext_web.surface import SEED_PROMPT
@@ -78,7 +72,7 @@ from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws_current
 
 SKILL = "create-application"
-PREVIEW_TOOL = "action:site:render_application_preview"
+PREVIEW_TOOL = f"action:site:{APPLICATION_BUILDER_WIREFRAME_TOOL}"
 BUILD_ACTION = f"action:site:{APPLICATION_BUILDER_DELEGATION_TOOL}"
 HOMEPAGE_ACTION = "action:agent:set_homepage"
 WEB_EXTENSION = "web"
@@ -93,9 +87,6 @@ APPLICATION_ARTIFACT_TIMEOUT_SECONDS = 120
 APPLICATION_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
 APPLICATION_BUNDLE_MAX_BYTES = 2 * 1024 * 1024
 APPLICATION_BUNDLE_MAX_FILES = 1_000
-REGION_IDENTITY_CONNECTIVES = frozenset(
-    {"a", "an", "and", "for", "of", "on", "the", "to", "with", "you", "your"}
-)
 EXISTING_APPLICATION = "invoice-intake"
 EXISTING_PROMPT = "You file invoices for the finance team. Ask before paying anything."
 SATISFIED_INSTRUCTION = (
@@ -138,7 +129,8 @@ class _AcceptedApplicationDesign:
     application: _ApplicationIdentity
     preview_index: int
     preview: ToolInvocation
-    contract: RenderApplicationPreviewInput
+    contract: DesignUfoApplicationInput
+    result: ApplicationWireframeResult
 
 
 @dataclass(frozen=True)
@@ -553,9 +545,9 @@ def _design_pass_failure(
 ) -> str | None:
     """What is wrong with the design pass every create stands behind, or None. Both ways in run it,
     so `opening_asks` is what stands in front of it: a guided build's proposal, or nothing for a
-    member who named the job. The rest is the same either way — the product renderer alone draws
-    the page, each picture is followed by the choice it is asking for, and the create comes after
-    the last of them."""
+    member who named the job. The rest is the same either way: the application builder draws each
+    SVG, the product shares it, each picture is followed by the choice it is asking for, and the
+    create comes after the last of them."""
     applies = _agent_applies(output)
     if not applies:
         return "no application create follows the design"
@@ -566,18 +558,6 @@ def _design_pass_failure(
         for index, call in enumerate(output.calls)
         if index < create and call.call == PREVIEW_TOOL and call.succeeded
     )
-    delegated_previews = tuple(
-        index
-        for index, call in enumerate(output.calls)
-        if index < create and call.name == "build_application_preview" and call.succeeded
-    )
-    parent_build_calls = tuple(
-        call.name
-        for index, call in enumerate(output.calls)
-        if index < create
-        and call.succeeded
-        and call.name in {"bash", "read", "write", "edit", "start_server", "js_repl"}
-    )
     parent_website_skill = any(
         index < create
         and call.name == "load_skill"
@@ -585,12 +565,8 @@ def _design_pass_failure(
         and call.input.get("name") == "website-building"
         for index, call in enumerate(output.calls)
     )
-    if parent_build_calls:
-        return f"the parent ran preview build tools: {', '.join(parent_build_calls)}"
     if parent_website_skill:
         return "the parent loaded website-building for preview work"
-    if delegated_previews:
-        return "the design preview used a model worker"
     if any(
         index < create and call.name == "share_file" and call.succeeded
         for index, call in enumerate(output.calls)
@@ -618,23 +594,19 @@ def _design_pass_failure(
             return f"preview {position + 1} was not built after the prior design choice"
     for position, (_, call) in enumerate(preview_calls):
         contract = call.arguments
-        required = {
-            "purpose",
-            "first_screen_priority",
-            "regions",
-            "layout",
-            "design_direction",
-        }
+        required = {"application_name", "application_prompt"}
         if missing := sorted(required - contract.keys()):
             return f"preview {position + 1} contract omits {', '.join(missing)}"
+        try:
+            result = ApplicationWireframeResult.model_validate_json(call.result)
+        except ValueError:
+            return f"preview {position + 1} returned no wireframe evidence"
+        if result.status != "ready" or not result.shared_filename.endswith(".svg"):
+            return f"preview {position + 1} did not share an SVG wireframe"
     if previews > 1:
-        contract = preview_calls[-1][1].arguments
-        regions = contract.get("regions", [])
-        priority = str(contract.get("first_screen_priority", "")).casefold()
-        first_region = str(regions[0]).casefold() if isinstance(regions, list) and regions else ""
-        waiting_on_member = first_region.strip() == "waiting on you"
-        if "overdue" not in priority or ("overdue" not in first_region and not waiting_on_member):
-            return "the revised preview contract does not put the overdue queue first"
+        revision = str(preview_calls[-1][1].arguments.get("revision", "")).casefold()
+        if "overdue" not in revision:
+            return "the revised wireframe omitted the member's overdue-queue change"
     return None
 
 
@@ -645,30 +617,30 @@ def _accepted_design(
     application, failure = _created_application_identity(output)
     if application is None:
         return None, failure
-    previews: list[tuple[int, ToolInvocation, RenderApplicationPreviewInput]] = []
+    previews: list[
+        tuple[int, ToolInvocation, DesignUfoApplicationInput, ApplicationWireframeResult]
+    ] = []
     for index, call in enumerate(output.calls[: application.create_index]):
         if call.call != PREVIEW_TOOL or not call.succeeded:
             continue
         try:
-            contract = RenderApplicationPreviewInput.model_validate(call.arguments)
+            contract = DesignUfoApplicationInput.model_validate(call.arguments)
+            result = ApplicationWireframeResult.model_validate_json(call.result)
         except ValueError:
             continue
-        previews.append((index, call, contract))
+        if result.status == "ready":
+            previews.append((index, call, contract, result))
     if not previews:
         return None, "the application has no valid accepted preview before its create"
-    preview_index, preview, contract = previews[-1]
-    return _AcceptedApplicationDesign(application, preview_index, preview, contract), None
+    preview_index, preview, contract, result = previews[-1]
+    return _AcceptedApplicationDesign(application, preview_index, preview, contract, result), None
 
 
-def _accepted_contract_failure(accepted: _AcceptedApplicationDesign, prompt: str) -> str | None:
-    """Whether the design block the renderer returned reaches the application prompt. The renderer
-    composes the block from the accepted contract and the skill places it, so this grader recomposes
-    nothing: it renders the same block from the same contract and reads it back out of the durable
-    prompt. Only the run of whitespace between words is free, because a block copied into a YAML
-    scalar is free to wrap where the line ends."""
-    block = " ".join(homepage_design_block(accepted.contract).split())
-    if block not in " ".join(prompt.split()):
-        return f"the application prompt omits the accepted design block: {block}"
+def _accepted_name_failure(accepted: _AcceptedApplicationDesign) -> str | None:
+    """Whether the accepted SVG belongs to the application created after it."""
+
+    if accepted.contract.application_name != accepted.application.name:
+        return "the accepted wireframe names a different application"
     return None
 
 
@@ -845,163 +817,26 @@ async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityT
 
 
 def _built_design_failure(
-    calls: tuple[ToolInvocation, ...],
-    accepted: RenderApplicationPreviewInput,
+    output: CapabilityOutput,
+    accepted: _AcceptedApplicationDesign,
 ) -> str | None:
-    """Whether the rendered worker design keeps the accepted region identities, display order,
-    first-screen priority, and layout."""
+    """Whether the final build kept the exact SVG that the member accepted."""
     designs = tuple(
-        call for call in calls if call.name == APPLICATION_BUILDER_DESIGN_TOOL and call.succeeded
+        artifact for artifact in output.artifacts if artifact.name == "homepage-design.svg"
     )
-    if not designs:
-        return "the worker accepted no design"
-    design = designs[-1]
-
-    def terms(value: str) -> frozenset[str]:
-        words = "".join(
-            character if character.isalnum() else " " for character in value.casefold()
-        ).split()
-        variants = set(words) - {"s"}
-        for word in words:
-            if len(word) > 3 and word.endswith("ies"):
-                variants.add(f"{word[:-3]}y")
-            elif len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
-                variants.add(word[:-1])
-        return frozenset(variants)
-
-    try:
-        payload = json.loads(design.result)
-        page_height = int(payload.get("page_height", APPLICATION_DESIGN_FOLD))
-        if not APPLICATION_DESIGN_FOLD <= page_height <= APPLICATION_DESIGN_MAX_HEIGHT:
-            raise ValueError("the design page height is outside the accepted range")
-        rendered = tuple(
-            ApplicationAuditRegion.model_validate(region) for region in payload["rendered_regions"]
-        )
-    except (KeyError, TypeError, ValueError):
-        return "the worker design has no rendered region measurements"
-    rendered_names = tuple(region.name for region in rendered)
-    if len(rendered_names) != len(accepted.regions):
-        return (
-            f"the worker rendered {len(rendered_names)} regions for the "
-            f"{len(accepted.regions)} the member accepted: {', '.join(rendered_names)}"
-        )
-    if any(not name.strip() for name in rendered_names):
-        return "the worker rendered an empty region identity"
-    if len(rendered_names) != len(set(rendered_names)):
-        return "the worker rendered duplicate region identities"
-    count = len(rendered)
-    accepted_identity_terms = []
-    for name in accepted.regions:
-        name_terms = terms(name)
-        accepted_identity_terms.append(name_terms - REGION_IDENTITY_CONNECTIVES or name_terms)
-    rendered_identity_terms = tuple(
-        terms(f"{region.name} {region.visible_text}") for region in rendered
-    )
-    overlap_scores = tuple(
-        tuple(len(accepted_terms & rendered_terms) for rendered_terms in rendered_identity_terms)
-        for accepted_terms in accepted_identity_terms
-    )
-    diagonal_scores = tuple(overlap_scores[index][index] for index in range(count))
-    if 0 in diagonal_scores:
-        index = diagonal_scores.index(0)
-        return (
-            f"rendered region {index + 1} does not carry accepted identity "
-            f"{accepted.regions[index]!r}: {rendered[index].name}"
-        )
-    identity_score = sum(diagonal_scores)
-    assignment_scores = tuple(
-        sum(
-            overlap_scores[index][rendered_index] for index, rendered_index in enumerate(assignment)
-        )
-        for assignment in permutations(range(count))
-    )
-    best_score = max(assignment_scores)
-    if identity_score < best_score:
-        return "the rendered semantic region order differs from the accepted design"
-    if assignment_scores.count(best_score) != 1:
-        return "the rendered region identities are semantically ambiguous"
-    if not any(character.isalnum() for character in rendered[0].visible_text):
-        return "the first rendered region has no material visible content"
-    match accepted.layout:
-        case "timeline":
-            expected_boxes = tuple((0.0, index / count, 1.0, 1.0 / count) for index in range(count))
-        case "queue-detail":
-            side_count = count - 1
-            expected_boxes = (
-                (0.0, 0.0, 0.6, 1.0),
-                *tuple(
-                    (0.6, index / side_count, 0.4, 1.0 / side_count) for index in range(side_count)
-                ),
-            )
-        case "metrics" | "summary-detail":
-            columns = 3 if accepted.layout == "metrics" else 2
-            rows = (count + columns - 1) // columns
-            expected_boxes = tuple(
-                (
-                    (index % columns) / columns,
-                    (index // columns) / rows,
-                    1.0 / columns,
-                    1.0 / rows,
-                )
-                for index in range(count)
-            )
-    expected = tuple(
-        ApplicationAuditRegion(
-            name=name,
-            left=box[0],
-            top=box[1],
-            width=box[2],
-            height=box[3],
-        )
-        for name, box in zip(rendered_names, expected_boxes, strict=True)
-    )
-    for first_index, first_region in enumerate(rendered):
-        for second_index in range(first_index + 1, count):
-            actual_relation = application_region_relation(
-                first_region, rendered[second_index], page_height
-            )
-            expected_relation = application_region_relation(
-                expected[first_index], expected[second_index], APPLICATION_DESIGN_FOLD
-            )
-            if actual_relation != expected_relation:
-                return (
-                    f"the rendered {accepted.layout} layout changes the accepted relation for "
-                    f"{first_region.name} and {rendered[second_index].name}"
-                )
-    widths = tuple(region.width for region in rendered)
-    heights = tuple(region.height for region in rendered)
-    match accepted.layout:
-        case "queue-detail":
-            side = rendered[1:]
-            if rendered[0].width < max(region.width for region in side) * 1.25:
-                return "the rendered queue-detail first region is not wider than its detail column"
-            if min(region.width for region in side) < max(region.width for region in side) * 0.7:
-                return "the rendered queue-detail detail regions have inconsistent widths"
-            first_bottom = rendered[0].top + rendered[0].height
-            side_bottom = max(region.top + region.height for region in side)
-            if (
-                rendered[0].top > min(region.top for region in side) + 0.02
-                or first_bottom + 0.02 < side_bottom
-            ):
-                return "the rendered queue-detail first region does not span its detail column"
-        case "timeline":
-            if min(widths) < max(widths) * 0.7:
-                return "the rendered timeline regions have inconsistent widths"
-            if min(heights) < max(heights) * 0.6:
-                return "the rendered timeline regions have inconsistent heights"
-        case "metrics" | "summary-detail":
-            if min(widths) < max(widths) * 0.7:
-                return f"the rendered {accepted.layout} regions have inconsistent widths"
-            if min(heights) < max(heights) * 0.6:
-                return f"the rendered {accepted.layout} regions have inconsistent heights"
+    if len(designs) != 1:
+        return f"the final build retained {len(designs)} accepted design SVGs"
+    digest = sha256(designs[0].content).hexdigest()
+    if digest != accepted.result.design_digest:
+        return "the final application design differs from the wireframe the member accepted"
     return None
 
 
 def _application_worker_tool_failure(calls: tuple[ToolInvocation, ...]) -> str | None:
     completed = frozenset(call.name for call in calls if call.succeeded)
     required = {
+        APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
         APPLICATION_BUILDER_DEPLOY_TOOL,
-        APPLICATION_BUILDER_DESIGN_TOOL,
         APPLICATION_BUILDER_QA_TOOL,
     }
     if missing := sorted(required - completed):
@@ -1012,6 +847,8 @@ def _application_worker_tool_failure(calls: tuple[ToolInvocation, ...]) -> str |
         return "the Gemini worker completed no product QA batch"
     if any(call.call == HOMEPAGE_ACTION for call in calls):
         return "the Gemini worker tried to certify its own homepage"
+    if any(call.name == APPLICATION_BUILDER_DESIGN_TOOL for call in calls):
+        return "the Gemini worker replaced the wireframe the member accepted"
     return None
 
 
@@ -1096,16 +933,17 @@ async def _homepage_journey_failure(
     task = ApplicationBuilderTask.model_validate_json(children[0].inbound)
     if application.prompt not in task.objective:
         return "the Gemini task omitted the created application's instructions"
-    return _built_design_failure(followup.calls, accepted.contract)
+    if task.accepted_design_digest != accepted.result.design_digest:
+        return "the Gemini task did not receive the accepted wireframe digest"
+    return _built_design_failure(outcome.output, accepted)
 
 
 async def _named_design_failure(
     outcome: ScenarioOutcome,
 ) -> tuple[str | None, _AcceptedApplicationDesign | None]:
     """The design pass on the path that opens with the member's own words: one preview and the
-    choice it asks for stand between the answered form and the create, and the contract they agreed
-    to is in the application's prompt. Nothing opens this run, so the interview and the design are
-    the whole of what is asked."""
+    choice it asks for stand between the answered form and the create. Nothing opens this run, so
+    the interview and the design are the whole of what is asked."""
     design_failure = _design_pass_failure(outcome.output, 1, opening_asks=0)
     if design_failure is not None:
         return design_failure, None
@@ -1116,7 +954,7 @@ async def _named_design_failure(
     accepted, failure = _accepted_design(outcome.output)
     if accepted is None:
         return failure or "the application has no accepted design", None
-    return _accepted_contract_failure(accepted, row.prompt), accepted
+    return _accepted_name_failure(accepted), accepted
 
 
 async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -1136,14 +974,23 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
     ):
         return CapabilityVerdict(False, f"never loaded {SKILL!r}")
     previews = tuple(
-        index for index, call in enumerate(calls) if call.call == PREVIEW_TOOL and call.succeeded
+        (index, call)
+        for index, call in enumerate(calls)
+        if call.call == PREVIEW_TOOL and call.succeeded
     )
     if not previews:
-        return CapabilityVerdict(False, "rendered no design, so the member saw nothing")
+        return CapabilityVerdict(False, "generated no wireframe, so the member saw nothing")
+    for position, (_, preview) in enumerate(previews):
+        try:
+            result = ApplicationWireframeResult.model_validate_json(preview.result)
+        except ValueError:
+            return CapabilityVerdict(False, f"wireframe {position + 1} returned no share evidence")
+        if result.status != "ready" or not result.shared_filename.endswith(".svg"):
+            return CapabilityVerdict(False, f"wireframe {position + 1} was not shared as SVG")
     applies = _agent_applies(outcome.output)
-    if applies and previews[0] > applies[0][0]:
+    if applies and previews[0][0] > applies[0][0]:
         return CapabilityVerdict(False, "created the application before showing a design")
-    if not any(index > previews[-1] for index in _asks(outcome.output)):
+    if not any(index > previews[-1][0] for index in _asks(outcome.output)):
         return CapabilityVerdict(False, "showed the design and asked the member nothing")
     return CapabilityVerdict(
         True,
@@ -1152,14 +999,7 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
 
 
 async def _graded_carries_the_design(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    """The accepted design reaching the application, and nothing else: the renderer composed a
-    block, and the durable prompt carries it.
-
-    The worker implements the `Homepage design` it reads in the application's own instructions, so
-    a design that is accepted and then not carried is a page the member never chose. Whether it
-    was carried is a fact about the contract and the row — no judge and no rubric decide it. The
-    creating graders above measure the whole product, so a miss anywhere in a reply takes their
-    sample down; that says nothing about whether the accepted design survived the create."""
+    """The accepted design reaches the correctly named application before its build."""
     applies = _agent_applies(outcome.output)
     if not applies:
         return CapabilityVerdict(False, "no successful object_apply carried an agent manifest")
@@ -1170,10 +1010,10 @@ async def _graded_carries_the_design(outcome: ScenarioOutcome) -> CapabilityVerd
     accepted, failure = _accepted_design(outcome.output)
     if accepted is None:
         return CapabilityVerdict(False, failure or "the application has no accepted design")
-    failure = _accepted_contract_failure(accepted, row.prompt)
+    failure = _accepted_name_failure(accepted)
     if failure is not None:
         return CapabilityVerdict(False, failure)
-    return CapabilityVerdict(True, f"{name} carries the design block the member accepted")
+    return CapabilityVerdict(True, f"{name} keeps the SVG digest the member accepted")
 
 
 async def _graded_support_desk(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -1257,18 +1097,10 @@ async def _guided_design_grade(
             CapabilityVerdict(False, accepted_failure or "the application has no accepted design"),
             None,
         )
-    contract_failure = _accepted_contract_failure(accepted, row.prompt)
+    contract_failure = _accepted_name_failure(accepted)
     if contract_failure is not None:
         return CapabilityVerdict(False, contract_failure), None
     if revisions:
-        prompt = row.prompt.casefold()
-        if "overdue" not in prompt or "queue" not in prompt:
-            return (
-                CapabilityVerdict(
-                    False, "the accepted overdue-queue revision is absent from prompt"
-                ),
-                None,
-            )
         reason = "the second preview and its accepted revision precede create"
     else:
         reason = "one proposal, interview, and preview precede the create"
@@ -1700,7 +1532,7 @@ SCENARIOS = (
             task_instructions=SATISFIED_INSTRUCTION,
         ),
         DescribedGrader(
-            "the design block the member accepted reaches the created application's instructions",
+            "the accepted SVG belongs to the created application and reaches its build by digest",
             _graded_carries_the_design,
         ),
         seed=_seeded(),

@@ -26,6 +26,7 @@ DESIGN_REGION_MIN = 2
 DESIGN_REGION_MAX = 6
 DESIGN_VISIBLE_TEXT_MAX_CHARS = 72
 DESIGN_REGION_SEPARATION_SLOP = 0.02
+DESIGN_REGION_FOLD_SLOP = 2
 APPLICATION_REGION_MIN_WIDTH = 0.04
 APPLICATION_REGION_MIN_HEIGHT = 0.03
 APPLICATION_REGION_MIN_AREA = 0.008
@@ -345,6 +346,31 @@ def application_design_region_size_failure(
             or region.width * region.height < APPLICATION_REGION_MIN_AREA * first_screen
         ):
             return f"design region {region.name} is too small"
+    return None
+
+
+def application_design_region_fold_failure(
+    regions: tuple[ApplicationAuditRegion, ...],
+    page_height: int = APPLICATION_DESIGN_FOLD,
+) -> str | None:
+    """Return the first accepted design region that paints a band across the first-screen boundary.
+
+    A region that meets the fold row from either side is on one side of it, and the design rule asks
+    the builder for that layout. The audit measures a region as the painted pixel rows of the page
+    divided by its height, so a rule, a stroke or an antialiased edge near the fold row paints rows
+    on both sides of it. Recover those rows from the fractions and allow `DESIGN_REGION_FOLD_SLOP`
+    design pixels either side, the width of the hair the design guidance draws with: a region is
+    refused only when it paints past that allowance both above and below the fold.
+    """
+
+    for region in regions:
+        first_row = round(region.top * page_height)
+        last_row = round((region.top + region.height) * page_height) - 1
+        if (
+            first_row < APPLICATION_DESIGN_FOLD - DESIGN_REGION_FOLD_SLOP
+            and last_row > APPLICATION_DESIGN_FOLD + DESIGN_REGION_FOLD_SLOP
+        ):
+            return f"design region {region.name} crosses the first-screen boundary"
     return None
 
 

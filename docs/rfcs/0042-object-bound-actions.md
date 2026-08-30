@@ -570,7 +570,7 @@ the locality; renaming is not needed to achieve it.
 | `report` | collection | `rebuild_report_digest` | Rebuilds derived entries over the current report window. |
 | `memory` | collection | `record_correction`, `record_first_run` | The portal's correction and first-run memory: presented actions with member-shaped inputs, writing what the model's global `memory_update` writes. `memory_search` and `memory_update` stay global tools on every round. |
 | `monitor` | collection | `monitor` | Arms a monitor after probing; the existing monitor kind lists and deletes armed rows. |
-| `site` | collection | `deploy_website`, `publish_website`, `build_website`, `build_ufo_application`, `render_application_preview` | These create, publish, build, or preview site/application output rather than update an existing site spec. |
+| `site` | collection | `deploy_website`, `publish_website`, `build_website`, `build_ufo_application`, `design_ufo_application` | These create, publish, build, or design site/application output rather than update an existing site spec. |
 | `agent/<name>` | instance | `set_homepage` | The homepage is the agent's property; the site is plain input. The speakerless seed turn targets its own agent row, and the handler's deployed-this-turn carve-out is unchanged. |
 | `artifact` | collection | `generate_image`, `generate_video` | Generation writes media into the workspace for `share_file` to turn into an artifact; the artifact collection is the durable destination without inventing a media-job kind. |
 

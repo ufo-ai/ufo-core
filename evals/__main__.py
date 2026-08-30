@@ -204,7 +204,7 @@ MCP_ATLAS_JOB = "evals:mcp_atlas"
 MCP_ATLAS_URL_ENV = "MCP_ATLAS_URL"
 MCP_ATLAS_EXTERNAL_URL_ENV = "MCP_ATLAS_EXTERNAL_URL"
 MCP_ATLAS_TIMEOUT_SECONDS = 1_800.0
-UFO_APP_TASKS = ("ufo-app-bench", "ufo-app-copy", "ufo-app-qa-replay")
+UFO_APP_TASKS = ("ufo-app-bench", "ufo-app-copy", "ufo-app-qa-replay", "new_application")
 TERMINAL_BENCH_TOKEN_TTL = timedelta(days=1)
 
 
