@@ -22,6 +22,19 @@ test("an ask meant for one composer is not taken by another founding one", () =>
   });
 });
 
+/** Every setter that passes no `meant` routes to the agent's new chat screen, so null names that
+ *  screen's own key: a founding composer a lane stands for the same agent must leave the ask for
+ *  the screen the member is being handed to. */
+test("an ask keyed to the agent alone is meant for the new chat screen, not a lane's own key", () => {
+  setPendingAsk("agent-1", "Build it.", false);
+  expect(takePendingAsk("agent-1", "history:lane-1")).toBe(null);
+  expect(takePendingAsk("agent-1", "new:agent-1")).toEqual({
+    text: "Build it.",
+    send: false,
+    meant: null,
+  });
+});
+
 test("a pending ask is taken once, so a later chat opens on the member's own draft", () => {
   setPendingAsk("agent-1", "set yourself up", false);
   expect(takePendingAsk("agent-1", "new:agent-1")).toEqual({

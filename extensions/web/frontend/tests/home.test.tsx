@@ -11,12 +11,16 @@ import {
   useAppStatus,
   type AgentStatus,
 } from "@/lib/appStatusStore";
+import { readDraft } from "@/lib/drafts";
+import { setPendingAsk } from "@/lib/pendingAsk";
 import {
+  chatHash,
   HOME_NEW_LANE,
   homeConversationLane,
   homeHash,
   homeLaneAgent,
   mintHomeLane,
+  newChatHash,
 } from "@/lib/route";
 import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 
@@ -30,12 +34,14 @@ import {
   MEMBER,
   SECOND,
   SECOND_ID,
+  TURN_ID,
   useStreamFake,
   wire,
 } from "./harness";
 
 const OTHER_CONVO_ID = "66666666-6666-4666-8666-666666666666";
 const PRIVATE_CONVO_ID = "77777777-7777-4777-8777-777777777777";
+const FOUNDED_CONVO_ID = "99999999-9999-4999-8999-999999999999";
 
 const AGENT_INSTANCE = mintHomeLane(AGENT_ID, [AGENT_ID]);
 const CONVERSATION_LANE = homeConversationLane(CONVO_ID);
@@ -45,6 +51,10 @@ const FULL_ROW = Array.from({ length: TRACK_MAX_SLOTS }).reduce<string[]>(
   (row, _, at) => [...row, mintHomeLane(at % 2 ? SECOND_ID : AGENT_ID, row)],
   [],
 );
+
+/** The sends that founded a conversation, off the wire's own record of what was asked. */
+const foundingSends = (calls: string[]): string[] =>
+  calls.filter((url) => url.includes("/chat?conversation=new"));
 
 const laneName = (lane: string): string => (homeLaneAgent(lane) === AGENT_ID ? "Assistant" : "Second");
 
@@ -452,6 +462,257 @@ test("a narrowing taken in one lane's history stands in the lane beside it", asy
   ).toBe("false");
 });
 
+/** The act on a lane's band opens the very list the chat lane opens on: the same heading, the same
+ *  narrowings behind their glyph, the same day runs, and the entry the next conversation starts in
+ *  holding the foot. */
+test("the history a lane's band opens is the one the chat lane opens on, over a new chat entry", async () => {
+  const terminal = {
+    ...CHAT_ROW,
+    conversation_id: OTHER_CONVO_ID,
+    title: "Ship the ledger",
+    surface: "ufo",
+    last_at: new Date().toISOString(),
+  };
+  wire(chatsOnWire([{ ...CHAT_ROW, last_at: new Date().toISOString() }, terminal]));
+  drawHome([CONVERSATION_LANE]);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+  const lane = await screen.findByRole("region", { name: "History" });
+
+  expect(within(lane).getByRole("heading", { name: "History", level: 3 })).toBeTruthy();
+  expect(within(lane).getByRole("button", { name: "History options" })).toBeTruthy();
+  expect(within(lane).getByRole("heading", { name: "Today", level: 4 })).toBeTruthy();
+  expect(within(lane).getByText(new RegExp(terminal.title))).toBeTruthy();
+  expect((within(lane).getByLabelText("Ask UFO") as HTMLTextAreaElement).placeholder).toBe(
+    "Start new chat…",
+  );
+});
+
+/** Two lanes of one app are two conversations, and the entry under a history is that lane's own. The
+ *  send that founds one leaves the lane beside it exactly as it stood: its box still sends, and the
+ *  words the member typed there are still there to send. On one key between them the founding send
+ *  leaves that key holding the forwarding record, so the second box has nothing to send into, and it
+ *  clears the draft the member left in it. */
+test("founding under one lane's history leaves the lane beside it sending, with its own words", async () => {
+  let answered = 0;
+  const { calls } = wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/slots": () => json({ slots: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/chat": () => {
+      answered += 1;
+      return json({
+        turn_id: TURN_ID,
+        conversation_id: answered === 1 ? OTHER_CONVO_ID : FOUNDED_CONVO_ID,
+        title: "Ship the ledger",
+      });
+    },
+  });
+  drawHome([AGENT_ID, AGENT_INSTANCE]);
+
+  await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Assistant"]));
+  const [first, second] = standingLanes();
+  await userEvent.click(within(first).getByRole("button", { name: "History for Assistant" }));
+  await userEvent.click(within(second).getByRole("button", { name: "History for Assistant" }));
+
+  await userEvent.type(within(second).getByLabelText("Ask UFO"), "words for the lane beside it");
+  await userEvent.type(within(first).getByLabelText("Ask UFO"), "found this one");
+  await userEvent.click(within(first).getByRole("button", { name: "Send" }));
+
+  await waitFor(() =>
+    expect(location.hash).toBe(
+      homeHash({ opens: [homeConversationLane(OTHER_CONVO_ID), AGENT_INSTANCE] }),
+    ),
+  );
+  const beside = await screen.findByRole("region", { name: "History" });
+  expect(readDraft(MEMBER.id + "/history:" + AGENT_INSTANCE)).toBe("words for the lane beside it");
+
+  const send = within(beside).getByRole("button", { name: "Send" }) as HTMLButtonElement;
+  expect(send.disabled).toBe(false);
+  await userEvent.click(send);
+
+  await waitFor(() => expect(foundingSends(calls)).toHaveLength(2));
+});
+
+/** The palette's ask names the one composer it is for, and a lane turned to its history is why: it
+ *  stands a founding box for the same agent, and on the chat screen's own key it would take the ask
+ *  the palette set on its way to that screen — the words said into a screen the member has left, and
+ *  the conversation they open standing in no lane. The lane's box founds on its own key, so the ask
+ *  is left standing until the chat screen reads it. */
+test("an ask the palette means for the chat screen is left standing by a lane's history", async () => {
+  const { calls } = wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/slots": () => json({ slots: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: OTHER_CONVO_ID, title: "deploys" }),
+  });
+  drawHome([AGENT_ID]);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+  const lane = await screen.findByRole("region", { name: "History" });
+  act(() => setPendingAsk(AGENT_ID, "deploy the ledger", true, "new:" + AGENT_ID));
+
+  expect((within(lane).getByLabelText("Ask UFO") as HTMLTextAreaElement).value).toBe("");
+  expect(foundingSends(calls)).toHaveLength(0);
+
+  location.hash = newChatHash(AGENT_ID);
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+  await waitFor(() => expect(location.hash).toBe(chatHash(OTHER_CONVO_ID)));
+  expect(foundingSends(calls)).toHaveLength(1);
+  expect(foundingSends(calls)[0]).toContain("/agents/" + AGENT_ID + "/chat");
+});
+
+/** An ask keyed to the agent alone — the setup screen's acts and a page's compose both hand one to
+ *  the agent's new chat and route there — is meant for that screen's own composer. A lane's history
+ *  stands a founding box for the same agent, and a take there would delete the ask while the
+ *  navigation tears the lane down: the words reach no box the member can send. */
+test("an ask keyed to the agent alone is left standing by a lane's history", async () => {
+  const { calls } = wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/slots": () => json({ slots: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  drawHome([AGENT_ID]);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+  const lane = await screen.findByRole("region", { name: "History" });
+  act(() => setPendingAsk(AGENT_ID, "Build it.", false));
+  expect((within(lane).getByLabelText("Ask UFO") as HTMLTextAreaElement).value).toBe("");
+
+  location.hash = newChatHash(AGENT_ID);
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+  await waitFor(() =>
+    expect((screen.getByLabelText("Ask UFO") as HTMLTextAreaElement).value).toBe("Build it."),
+  );
+  expect(foundingSends(calls)).toHaveLength(0);
+});
+
+/** A founding send that fails is read where it was said: the words stand in the log with the fault
+ *  under them, and the box is live to send again — never a box that cleared and shows nothing. */
+test("a founding send that fails under a lane's history keeps the words and states the fault", async () => {
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/slots": () => json({ slots: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/chat": () => new Response(null, { status: 500 }),
+  });
+  drawHome([AGENT_ID]);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+  const lane = await screen.findByRole("region", { name: "History" });
+  await userEvent.type(within(lane).getByLabelText("Ask UFO"), "found the ledger");
+  await userEvent.click(within(lane).getByRole("button", { name: "Send" }));
+
+  expect(await within(lane).findByText("found the ledger")).toBeTruthy();
+  expect(await within(lane).findByText("Error 500 — try again.")).toBeTruthy();
+  const send = within(lane).getByRole("button", { name: "Send" }) as HTMLButtonElement;
+  expect(send.disabled).toBe(false);
+});
+
+/** The lane's own box may be founding on the lane key when the member turns to the history. The
+ *  landing moves that key to the conversation and leaves the forwarding record behind it; the
+ *  history's box founds on a key of its own, so it is still standing and still sends. */
+test("a founding send that lands while the history stands leaves the history's own box sending", async () => {
+  let release: (landed: Response) => void = () => {};
+  let sends = 0;
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/slots": () => json({ slots: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/chat": () => {
+      sends += 1;
+      if (sends === 1) return new Promise<Response>((resolve) => (release = resolve));
+      return json({ turn_id: TURN_ID, conversation_id: FOUNDED_CONVO_ID, title: "the next one" });
+    },
+  });
+  drawHome([AGENT_ID]);
+
+  await userEvent.type(await screen.findByLabelText("Ask UFO"), "first");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await userEvent.click(screen.getByRole("button", { name: "History for Assistant" }));
+  const lane = await screen.findByRole("region", { name: "History" });
+  act(() =>
+    release(json({ turn_id: TURN_ID, conversation_id: OTHER_CONVO_ID, title: "Ship the ledger" })),
+  );
+  await within(lane).findByText(/Ship the ledger/);
+
+  await userEvent.type(within(lane).getByLabelText("Ask UFO"), "second");
+  await userEvent.click(within(lane).getByRole("button", { name: "Send" }));
+
+  await waitFor(() =>
+    expect(location.hash).toBe(homeHash({ opens: [homeConversationLane(FOUNDED_CONVO_ID)] })),
+  );
+});
+
+/** Two founding sends can be in flight at once, and each landing writes the track as the address
+ *  holds it at the landing, never as it stood when the send left: the second landing keeps the
+ *  conversation the first put on the track. */
+test("two founding sends racing under two histories land as two conversations", async () => {
+  const releases: ((landed: Response) => void)[] = [];
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/slots": () => json({ slots: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/chat": () => new Promise<Response>((resolve) => releases.push(resolve)),
+  });
+  drawHome([AGENT_ID, AGENT_INSTANCE]);
+
+  await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Assistant"]));
+  const [first, second] = standingLanes();
+  await userEvent.click(within(first).getByRole("button", { name: "History for Assistant" }));
+  await userEvent.click(within(second).getByRole("button", { name: "History for Assistant" }));
+  await userEvent.type(within(first).getByLabelText("Ask UFO"), "first");
+  await userEvent.click(within(first).getByRole("button", { name: "Send" }));
+  await userEvent.type(within(second).getByLabelText("Ask UFO"), "second");
+  await userEvent.click(within(second).getByRole("button", { name: "Send" }));
+
+  await waitFor(() => expect(releases).toHaveLength(2));
+  act(() => releases[0](json({ turn_id: TURN_ID, conversation_id: OTHER_CONVO_ID, title: "one" })));
+  await waitFor(() =>
+    expect(location.hash).toBe(
+      homeHash({ opens: [homeConversationLane(OTHER_CONVO_ID), AGENT_INSTANCE] }),
+    ),
+  );
+  act(() => releases[1](json({ turn_id: TURN_ID, conversation_id: FOUNDED_CONVO_ID, title: "two" })));
+  await waitFor(() =>
+    expect(location.hash).toBe(
+      homeHash({
+        opens: [homeConversationLane(OTHER_CONVO_ID), homeConversationLane(FOUNDED_CONVO_ID)],
+      }),
+    ),
+  );
+});
+
+/** The hand-off that swaps the lane clears what the founding left behind — the forwarding record on
+ *  the history's own key, and the lane key the chat box founds on — so the next lane this app
+ *  stands up opens a new chat rather than the conversation the member just left. */
+test("the next lane this app stands up opens a new chat, not the conversation the history founded", async () => {
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/slots": () => json({ slots: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_CONVO_ID, title: "next" }),
+  });
+  drawHome([AGENT_ID]);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+  const lane = await screen.findByRole("region", { name: "History" });
+  await userEvent.type(within(lane).getByLabelText("Ask UFO"), "found it");
+  await userEvent.click(within(lane).getByRole("button", { name: "Send" }));
+  await waitFor(() =>
+    expect(location.hash).toBe(homeHash({ opens: [homeConversationLane(FOUNDED_CONVO_ID)] })),
+  );
+
+  location.hash = homeHash({ opens: [AGENT_ID] });
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+  await waitFor(() => expect(laneNames()).toEqual(["Assistant"]));
+  const box = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
+  expect(box.placeholder).toBe("Start new chat…");
+});
+
 test("a chat lane's history lists the member's own conversations and groups colleagues' under one heading", async () => {
   const colleague = {
     ...CHAT_ROW,
@@ -498,7 +759,7 @@ test("a chat lane's history lists the member's own conversations and groups coll
   expect(rows).toHaveLength(2);
   expect(rows[0]).toContain(CHAT_ROW.title);
   expect(rows[1]).toContain(colleague.title);
-  expect(within(lane).getByRole("heading", { name: "Other members", level: 3 })).toBeTruthy();
+  expect(within(lane).getByRole("heading", { name: "Other members", level: 4 })).toBeTruthy();
   expect(within(lane).queryByText(/justin@simplecasual.com/)).toBeNull();
   expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(false);
 });

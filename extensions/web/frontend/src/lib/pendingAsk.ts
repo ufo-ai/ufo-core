@@ -23,11 +23,12 @@ const PENDING = new Map<string, PendingAsk>();
 
 const WAITING = new Set<() => void>();
 
-/** `meant` names the one composer the words are for, by its chat key, where the setter is about to
- *  route to it — home can stand a founding composer for the same agent, and an ask keyed by the
- *  agent alone would be taken by that lane while the navigation tears it down, the words sent into
- *  a screen the member just left. A setter whose composer is the screen it stands on passes null,
- *  and the first founding composer for the agent takes it. */
+/** `meant` names the one composer the words are for, by its chat key — home can stand founding
+ *  composers for the same agent, and an ask any of them could take would be taken by a lane while
+ *  the navigation tears it down, the words sent into a screen the member just left. A setter
+ *  routing somewhere other than the agent's new chat screen names the key it is routing to; null
+ *  names that screen's own key, `new:<agentId>`, which is where every setter that passes it
+ *  goes. */
 export function setPendingAsk(
   agentId: string,
   text: string,
@@ -39,11 +40,11 @@ export function setPendingAsk(
 }
 
 /** The pending ask for this agent, removed as this composer reads it, or null when there is none —
- *  or when the ask names a different composer than the one asking. */
+ *  or when the ask is meant for a different composer than the one asking. */
 export function takePendingAsk(agentId: string, chatKey: string): PendingAsk | null {
   const held = PENDING.get(agentId) ?? null;
   if (held === null) return null;
-  if (held.meant !== null && held.meant !== chatKey) return null;
+  if ((held.meant ?? "new:" + agentId) !== chatKey) return null;
   PENDING.delete(agentId);
   return held;
 }

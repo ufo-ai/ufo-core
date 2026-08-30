@@ -3143,6 +3143,24 @@ test("a turn the fleet picked back up says so among its steps", async () => {
   expect(screen.getByText("Applying the migration.")).toBeTruthy();
 });
 
+/** The words in the box say what a send there does. In a conversation the member is reading, the
+ *  next message carries the transcript on; every box that founds one says the same thing, so the
+ *  start screen reads as the history does. */
+test("an opened thread's box asks for a follow-up, and the start screen's starts a new chat", async () => {
+  wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }] }));
+  open();
+
+  const box = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
+  expect(box.placeholder).toBe("Ask a follow-up…");
+
+  cleanup();
+  location.hash = newChatHash(AGENT_ID);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const starting = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
+  expect(starting.placeholder).toBe("Start new chat…");
+});
+
 /** Which app a new conversation reaches is settled by the route that opened the start screen, not
  *  by a control inside the box: the composer holds the words, the files and the send, and nothing
  *  that would rename the app under them. */

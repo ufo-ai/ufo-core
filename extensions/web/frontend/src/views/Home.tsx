@@ -15,7 +15,7 @@ import {
 import { PressRow } from "@/components/ui/pressrow";
 import { Empty, Waiting } from "@/kernel/panel";
 import { SlotTrack, useSlot, type Seek } from "@/kernel/slots";
-import { isPortalChat, origin, surfaceWord } from "@/lib/audience";
+import { isPortalChat, origin } from "@/lib/audience";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
@@ -24,17 +24,15 @@ import { CHAT_SURFACE } from "@/lib/mainAgent";
 import {
   CHAT_LADDERS,
   CHAT_SHOWN_OPTIONS,
-  OTHER_MEMBERS,
   chatRuns,
   holdChatHidden,
   holdChatLadder,
   useChatHidden,
   useChatLadder,
   type ChatLadder,
-  type ChatRow,
 } from "@/lib/rail";
 import { seekChat, useRail } from "@/lib/railStore";
-import { placeHome } from "@/lib/router";
+import { heldRoute, placeHome } from "@/lib/router";
 import {
   HOME_NEW_LANE,
   homeConversationLane,
@@ -213,6 +211,7 @@ function HomeLane({
         agents={agents}
         member={member}
         onOpens={onOpens}
+        onFounded={onFounded}
         onActivity={onActivity}
       />
     );
@@ -342,55 +341,62 @@ function HistoryAct({
   );
 }
 
-/** The conversations a chat-shaped lane's history lists: this app's rows off the rail — the
- *  member's own conversations and the ones their audience grants make readable, which is the one
- *  member-scoped listing every screen reads them from. The app's own conversation index is not that
- *  listing: it answers every conversation the app holds, another member's private one among them
- *  for an admin, so a history drawn from it named colleagues the member never spoke with.
+/** A lane turned to its history by the act on its band: the same list the chat lane opens on — the
+ *  runs the rows stand in and the narrowings behind their glyph — over the entry the next
+ *  conversation starts in. One history is drawn one way, so the list a member reads from the band is
+ *  the list they read on a new tab.
  *
- *  A colleague's row follows the member's own under one heading rather than standing among them, the
- *  way the chat app's own screen groups them. A row takes the lane over as that conversation's
- *  lane. */
-function PastList({
+ *  The entry is the chat lane's own shape — `Chat` holding the history where a transcript would
+ *  stand — so a send that fails is read where it was said: the words stand in the log with the
+ *  fault under them, never a box that cleared and shows nothing. It founds on a key of its own, the
+ *  way the wizard does: the lane's chat box may be founding on the lane key while this stands, and
+ *  two boxes on one key are one row and one draft, the first to found leaving the other unable to
+ *  send. A send here founds a conversation and the lane becomes it, exactly as picking a row off
+ *  the list does; the hand-off clears the founding key, so the record it leaves cannot open the old
+ *  conversation under the next lane this app stands up.
+ *
+ *  The hand-off lands on the send's answer, and it writes the track as the address holds it then —
+ *  the send window is long enough for the member to change the track, and a write off the sending
+ *  render would revert what they did. A lane the member closed, and a member no longer on home,
+ *  take no write at all: the conversation stands on the rail. */
+function HistoryLane({
   agent,
+  member,
   lane,
   opens,
   onOpens,
+  onFounded,
 }: {
   agent: Agent;
+  member: Member;
   lane: string;
   opens: string[];
   onOpens: (opens: string[]) => void;
+  onFounded: (agent: Agent, conversationId: string, title: string) => void;
 }) {
-  const rail = useRail();
-  const rows = rail.rows.filter((row) => row.agent_id === agent.id);
-  const theirs = rows.filter((row) => !row.mine);
-  const drawn = (row: ChatRow) => (
-    <PressRow
-      key={row.conversation_id}
-      line={row.title || agentName(row.agent_name)}
-      note={isPortalChat(row.surface) ? undefined : surfaceWord(row.surface)}
-      when={row.last_at}
-      onPress={() => onOpens(taken(opens, lane, homeConversationLane(row.conversation_id)))}
-    />
-  );
+  const foundingKey = "history:" + lane;
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable py-md">
-      {rows.length ? (
-        <div className="flex flex-col">
-          {rows.filter((row) => row.mine).map(drawn)}
-          {theirs.length ? (
-            <>
-              <h3 className={PICK_LABEL}>{OTHER_MEMBERS}</h3>
-              {theirs.map(drawn)}
-            </>
-          ) : null}
-        </div>
-      ) : rail.phase === "loading" ? (
-        <Waiting />
-      ) : (
-        <Empty>{NO_HISTORY}</Empty>
-      )}
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <Chat
+        agent={agent}
+        member={member}
+        conversationId={null}
+        foundingKey={foundingKey}
+        unsaid={<History lane={lane} opens={opens} onOpens={onOpens} />}
+        onCreated={(conversationId, title) => {
+          clearChat(foundingKey);
+          onFounded(agent, conversationId, title);
+          const seen = heldRoute();
+          if (seen.kind !== "home") return;
+          const held = seen.place.opens ?? [];
+          if (!held.includes(lane)) return;
+          clearChat(lane);
+          placeHome(
+            { ...seen.place, opens: taken(held, lane, homeConversationLane(conversationId)) },
+            "replace",
+          );
+        }}
+      />
     </div>
   );
 }
@@ -593,7 +599,14 @@ function ChatLane({
       onOpens={shut}
       node={
         history ? (
-          <PastList agent={agent} lane={lane} opens={opens} onOpens={onOpens} />
+          <HistoryLane
+            agent={agent}
+            member={member}
+            lane={lane}
+            opens={opens}
+            onOpens={shut}
+            onFounded={onFounded}
+          />
         ) : (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <Chat
@@ -627,6 +640,7 @@ function ConversationLane({
   agents,
   member,
   onOpens,
+  onFounded,
   onActivity,
 }: {
   lane: string;
@@ -635,6 +649,7 @@ function ConversationLane({
   agents: Agent[];
   member: Member;
   onOpens: (opens: string[]) => void;
+  onFounded: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
 }) {
   const rail = useRail();
@@ -678,7 +693,14 @@ function ConversationLane({
       onOpens={onOpens}
       node={
         history ? (
-          <PastList agent={agent} lane={lane} opens={opens} onOpens={onOpens} />
+          <HistoryLane
+            agent={agent}
+            member={member}
+            lane={lane}
+            opens={opens}
+            onOpens={onOpens}
+            onFounded={onFounded}
+          />
         ) : (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <Chat

@@ -240,6 +240,7 @@ export function Chat({
         draftKey={draftKey}
         input={composer}
         starting={bare}
+        placeholder={conversationId !== null ? FOLLOW_UP_PLACEHOLDER : NEW_CHAT_PLACEHOLDER}
         /* The band names the app a message addresses, which qualifies the words where the app is
            not the surface — a directive chat with Radar reads as Radar's. The chat app is the
            surface, so naming it there states the screen the member is already looking at. */
@@ -310,6 +311,7 @@ export function FoundingChat({
         draftKey={draftKey}
         input={composer}
         starting={false}
+        placeholder={NEW_CHAT_PLACEHOLDER}
         eyebrow={agent.app === CHAT_SURFACE ? null : agentName(agent.name)}
         eyebrowIcon={agent.icon}
       />
@@ -648,7 +650,12 @@ async function deliver(
 }
 
 const COMPOSER_LABEL = "Ask UFO";
-const COMPOSER_PLACEHOLDER = COMPOSER_LABEL + "…";
+/** What the box says wherever it founds a conversation rather than joining one — the start screen
+ *  and the box under a history both: the words a member writes there open a conversation. */
+const NEW_CHAT_PLACEHOLDER = "Start new chat…";
+/** What the box says in a conversation the member is reading: the transcript over it is what the
+ *  next words carry on from. */
+const FOLLOW_UP_PLACEHOLDER = "Ask a follow-up…";
 /** What the start screen says before the member has said anything. The screen is otherwise empty,
  *  and a pane that opens on nothing states nothing about what it is for. */
 const START_INTRO = "What can I help you with?";
@@ -662,6 +669,7 @@ function Composer({
   draftKey,
   input,
   starting,
+  placeholder,
   eyebrow,
   eyebrowIcon,
 }: {
@@ -669,6 +677,7 @@ function Composer({
   draftKey: string;
   input: RefObject<HTMLTextAreaElement | null>;
   starting: boolean;
+  placeholder: string;
   eyebrow: string | null;
   eyebrowIcon?: string;
 }) {
@@ -804,7 +813,7 @@ function Composer({
           event.currentTarget.form?.requestSubmit();
         }}
         autoComplete="off"
-        placeholder={COMPOSER_PLACEHOLDER}
+        placeholder={placeholder}
         aria-label={COMPOSER_LABEL}
       />
       <PromptInputToolbar>
