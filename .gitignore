@@ -17,7 +17,6 @@ dist/
 implementation-details.md
 ufo.toml
 !dev/ufo.toml
-!evals/terminal_bench/ufo.toml
 blobs/
 bundle/
 deploy/

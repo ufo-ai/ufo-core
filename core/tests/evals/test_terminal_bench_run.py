@@ -1,6 +1,5 @@
 import json
 import subprocess
-from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -11,15 +10,6 @@ import sqlalchemy as sa
 
 from evals.__main__ import _terminal_bench_credentials
 from evals.__main__ import main as evals_main
-from evals.terminal_bench.configure import (
-    CONFIG_DIGEST_FILE,
-    CONFIG_FILE,
-    TEMPLATE,
-    render_config,
-)
-from evals.terminal_bench.configure import (
-    main as configure_main,
-)
 from evals.terminal_bench.run import (
     CUSTOM_AGENT,
     DAYTONA_BACKEND,
@@ -33,105 +23,14 @@ from evals.terminal_bench.run import (
 )
 from evals.terminal_bench.setup import UPSTREAM_FILE, load_upstream
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, verified_claims
-from ufo.config import BlobConfig, Config, ConnectConfig, DatabaseConfig, load_config
+from ufo.config import BlobConfig, Config, ConnectConfig, DatabaseConfig
 from ufo.db import workspace_tx
-from ufo.models.interface import AUTO_MODEL
 from ufo.schema import tables
-from ufo.schema.records import DEFAULT_AGENT_NAME
 
 TOKEN = "ufo-bearer-4d0f2c8a1b6e"
 DATASET = "terminal-bench/terminal-bench-2-1"
 DATASET_DIGEST = "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
 CASES = ("openssl-selfsigned-cert", "regex-log", "cancel-async-tasks")
-
-
-def test_tracked_config_pins_the_terminal_bench_control_plane() -> None:
-    config = load_config(TEMPLATE)
-
-    assert config.models.auto_model == "z-ai/glm-5.3-flash"
-    assert config.models.ambient_reply_model == "gpt-5.6-luna"
-    assert config.models.background_jobs_model == "gpt-5.6-luna"
-    assert config.models.subagent_models == {"coding": "z-ai/glm-5.3-flash"}
-    assert config.pack.name == "assistant_hosted"
-    assert config.sandbox.backend == "local"
-    assert config.hub.backend == "in_process"
-    assert config.terminal.backend == "in_process"
-
-
-def test_rendered_config_isolates_runtime_values_and_records_its_digest(tmp_path: Path) -> None:
-    root = tmp_path / "candidate"
-
-    output = render_config(
-        root,
-        "https://candidate.eval.test",
-        "candidate/model",
-        serve_port=58001,
-        proxy_port=58002,
-    )
-    payload = output.read_bytes()
-    config = load_config(output)
-
-    assert output == root / CONFIG_FILE
-    assert config.database.url == f"sqlite+aiosqlite:///{root / 'ufo.db'}"
-    assert config.database.owner_url == config.database.url
-    assert config.blob.root == root / "blobs"
-    assert config.models.auto_model == "candidate/model"
-    assert config.models.subagent_models == {"coding": "candidate/model"}
-    assert config.serve.port == 58001
-    assert config.connect.public_base_url == "https://candidate.eval.test"
-    assert config.sandbox.workspace_root == root / "workspaces"
-    assert config.sandbox.proxy_port == 58002
-    assert (root / CONFIG_DIGEST_FILE).read_text() == f"{sha256(payload).hexdigest()}\n"
-    assert (
-        render_config(
-            root,
-            "https://candidate.eval.test",
-            "candidate/model",
-            serve_port=58001,
-            proxy_port=58002,
-        ).read_bytes()
-        == payload
-    )
-
-
-@pytest.mark.parametrize(
-    ("url", "model", "serve_port", "proxy_port", "message"),
-    (
-        ("http://eval.test", "candidate/model", 58001, 58002, "public HTTPS"),
-        ("https:///missing", "candidate/model", 58001, 58002, "public HTTPS"),
-        ("https://eval.test", "auto", 58001, 58002, "concrete model"),
-        ("https://eval.test", "candidate/model", 0, 58002, "between 1 and 65535"),
-        ("https://eval.test", "candidate/model", 58001, 58001, "must differ"),
-    ),
-)
-def test_rendered_config_rejects_ambiguous_runtime_values(
-    tmp_path: Path,
-    url: str,
-    model: str,
-    serve_port: int,
-    proxy_port: int,
-    message: str,
-) -> None:
-    with pytest.raises(ValueError, match=message):
-        render_config(tmp_path, url, model, serve_port, proxy_port)
-
-
-def test_configure_cli_uses_the_tracked_model(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    root = tmp_path / "control"
-
-    configure_main(
-        [
-            "--root",
-            str(root),
-            "--public-base-url",
-            "https://control.eval.test",
-        ]
-    )
-
-    assert capsys.readouterr().out.strip() == str(root / CONFIG_FILE)
-    assert load_config(root / CONFIG_FILE).models.auto_model == "z-ai/glm-5.3-flash"
 
 
 def test_default_and_named_cases_resolve_in_manifest_order() -> None:
@@ -280,7 +179,7 @@ def test_selected_run_keeps_harbor_grading_and_one_concurrent_job(
 
     monkeypatch.setattr(subprocess, "run", complete)
 
-    assert TerminalBenchRun(root, CASES, 12, credentials, TEMPLATE).run() == 0
+    assert TerminalBenchRun(root, CASES, 12, credentials).run() == 0
     assert len(seen) == 1
     command, environment = seen[0]
     assert command[command.index("--n-concurrent") + 1] == "12"
@@ -289,12 +188,6 @@ def test_selected_run_keeps_harbor_grading_and_one_concurrent_job(
     ) == tuple(f"terminal-bench/{case}" for case in CASES)
     assert environment["UFO_BENCH_TOKEN"] == TOKEN
     assert TOKEN not in " ".join(command)
-    job_dir = (
-        Path(command[command.index("--jobs-dir") + 1]) / command[command.index("--job-name") + 1]
-    )
-    config = TEMPLATE.read_bytes()
-    assert (job_dir / CONFIG_FILE).read_bytes() == config
-    assert (job_dir / CONFIG_DIGEST_FILE).read_text() == f"{sha256(config).hexdigest()}\n"
 
 
 @pytest.mark.parametrize(
@@ -311,7 +204,7 @@ def test_invalid_remote_configuration_fails_before_harbor(
     root, credentials = _prepared_root(tmp_path, workspace_url=url)
 
     with pytest.raises(ValueError, match=message):
-        TerminalBenchRun(root, (), concurrency, credentials, TEMPLATE).run()
+        TerminalBenchRun(root, (), concurrency, credentials).run()
 
     assert not (root / "jobs").exists()
 
@@ -320,14 +213,7 @@ def test_missing_client_fails_before_harbor(tmp_path: Path) -> None:
     root, credentials = _prepared_root(tmp_path)
     credentials.client.unlink()
     with pytest.raises(FileNotFoundError, match="client"):
-        TerminalBenchRun(root, (), 1, credentials, TEMPLATE).run()
-
-
-def test_missing_config_fails_before_harbor(tmp_path: Path) -> None:
-    root, credentials = _prepared_root(tmp_path)
-
-    with pytest.raises(FileNotFoundError, match="ufo config"):
-        TerminalBenchRun(root, (), 1, credentials, tmp_path / "missing.toml").run()
+        TerminalBenchRun(root, (), 1, credentials).run()
 
 
 def test_official_outputs_require_results_and_rewards(tmp_path: Path) -> None:
@@ -359,25 +245,7 @@ def test_recorded_trial_exception_fails_the_run(
 
     monkeypatch.setattr(subprocess, "run", complete)
 
-    assert TerminalBenchRun(root, ("regex-log",), 1, credentials, TEMPLATE).run() == 1
-
-
-def test_harbor_failure_still_retains_the_rendered_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root, credentials = _prepared_root(tmp_path)
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(command, 7),
-    )
-
-    assert TerminalBenchRun(root, ("regex-log",), 1, credentials, TEMPLATE).run() == 7
-
-    (job_dir,) = (root / "jobs").iterdir()
-    payload = TEMPLATE.read_bytes()
-    assert (job_dir / CONFIG_FILE).read_bytes() == payload
-    assert (job_dir / CONFIG_DIGEST_FILE).read_text() == f"{sha256(payload).hexdigest()}\n"
+    assert TerminalBenchRun(root, ("regex-log",), 1, credentials).run() == 1
 
 
 def test_eval_runner_routes_remote_scale_into_one_harbor_run(
@@ -386,7 +254,7 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
     workspace_id = uuid4()
     root = tmp_path / "terminal-bench"
     credentials = BenchCredentials(root / "bin/x86_64/ufo", TOKEN, "https://eval.ufo.test")
-    captured: list[tuple[Path, tuple[str, ...], int, BenchCredentials, Path, HarborBackend]] = []
+    captured: list[tuple[Path, tuple[str, ...], int, BenchCredentials, HarborBackend]] = []
 
     async def resolved(*_args: object) -> BenchCredentials:
         return credentials
@@ -401,10 +269,9 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             cases: tuple[str, ...],
             concurrency: int,
             credentials: BenchCredentials,
-            config_file: Path,
             backend: HarborBackend,
         ) -> None:
-            captured.append((root, cases, concurrency, credentials, config_file, backend))
+            captured.append((root, cases, concurrency, credentials, backend))
 
         def run(self) -> int:
             return 0
@@ -414,7 +281,6 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
         blob=BlobConfig(backend="filesystem", root=tmp_path / "blobs"),
     )
     monkeypatch.setattr("evals.__main__.load_config", lambda: config)
-    monkeypatch.setattr("evals.__main__.config_path", lambda: TEMPLATE)
     monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
     monkeypatch.setattr("evals.__main__.dispose_db", disposed)
     monkeypatch.setattr("evals.__main__._terminal_bench_credentials", resolved)
@@ -445,7 +311,6 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             ("regex-log",),
             18,
             credentials,
-            TEMPLATE.resolve(),
             HarborBackend(environment="e2b", extra="e2b"),
         )
     ]
@@ -505,18 +370,6 @@ async def test_remote_credentials_bind_the_workspace_admin_and_built_client(
                 updated_at=sa.func.now(),
             )
         )
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                name=DEFAULT_AGENT_NAME,
-                prompt="",
-                model=AUTO_MODEL,
-                is_main=True,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
     secret = "terminal-bench-test-secret"
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, secret)
     root = tmp_path / "terminal-bench"
@@ -531,15 +384,6 @@ async def test_remote_credentials_bind_the_workspace_admin_and_built_client(
     assert credentials.client == (root / "bin/x86_64/ufo").resolve()
     assert credentials.workspace_url == "https://eval.ufo.test"
     assert verified_claims(credentials.token) == (str(workspace_id), "owner@example.com")
-
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.agent)
-            .where(tables.agent.c.workspace_id == workspace_id)
-            .values(model="candidate/model")
-        )
-    with pytest.raises(ValueError, match="must use model 'auto'"):
-        await _terminal_bench_credentials(config, workspace_id, root)
 
 
 def _prepared_root(

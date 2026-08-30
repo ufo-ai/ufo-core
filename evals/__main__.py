@@ -188,7 +188,6 @@ from ufo.loop.prompts.render import render_system_prompt
 from ufo.loop.spawn_catalog import spawn_catalog_skill
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog_skill import model_catalog_skill
-from ufo.models.interface import AUTO_MODEL
 from ufo.models.registry import ModelRegistry, model_registry
 from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV
 from ufo.schema import tables
@@ -240,23 +239,8 @@ async def _terminal_bench_credentials(
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            target_model = (
-                await connection.execute(
-                    sa.select(tables.agent.c.model).where(
-                        tables.agent.c.workspace_id == workspace_id,
-                        tables.agent.c.is_main.is_(True),
-                    )
-                )
-            ).scalar_one_or_none()
     if email is None:
         raise ValueError(f"workspace {workspace_id} has no admin member")
-    if target_model is None:
-        raise ValueError(f"workspace {workspace_id} has no main agent")
-    if target_model != AUTO_MODEL:
-        raise ValueError(
-            f"Terminal-Bench workspace main agent must use model {AUTO_MODEL!r}, "
-            f"not {target_model!r}"
-        )
     return BenchCredentials(
         client=(root / TERMINAL_BENCH_CLIENT).resolve(),
         token=mint_token(secret, str(workspace_id), email, TERMINAL_BENCH_TOKEN_TTL),
@@ -591,7 +575,6 @@ def main(argv: list[str] | None = None) -> None:
                 cases=tuple(args.terminal_bench_case),
                 concurrency=args.concurrency,
                 credentials=credentials,
-                config_file=config_path().resolve(),
                 backend=HarborBackend(
                     environment=args.terminal_bench_environment,
                     extra=args.terminal_bench_harbor_extra,
@@ -1011,15 +994,14 @@ async def _run(
                 workspace_id = await RemoteWorkspaceProvisioner(
                     onboard, budget_micro_usd
                 ).provision(recorder.id)
-            subagents = SubagentRegistry(
-                (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
-            ).with_models(config.models.subagent_models)
             profile = None
             if agent_name.startswith("profile:"):
                 if candidate_proposal is not None:
                     raise ValueError("a profile target cannot use --candidate-from-proposal")
                 profile_name = agent_name.removeprefix("profile:")
-                profile = subagents.get(profile_name)
+                profile = SubagentRegistry(
+                    (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
+                ).get(profile_name)
                 resolved_agent = await resolve_workspace_and_agent(DEFAULT_AGENT_NAME, workspace_id)
             elif candidate_proposal is not None:
                 workspace_id, agent_name = await seed_candidate_agent(
@@ -1080,6 +1062,9 @@ async def _run(
                 if any(task.suite == SKILL_LOADING_SUITE for task in tasks):
                     loadable_skills = frozenset(
                         skill_registry(manifests, (model_catalog_skill(registry),)).by_name
+                    )
+                    subagents = SubagentRegistry(
+                        (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
                     )
                     loadable_skills |= frozenset(
                         ((await spawn_catalog_skill(subagents, None)).name,)

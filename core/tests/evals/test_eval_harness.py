@@ -10079,8 +10079,7 @@ async def test_eval_run_installs_credentials_pins_model_and_closes_blob_client(
                 credentials=(
                     SimpleNamespace(name="member-slot", member_filled=True),
                     SimpleNamespace(name="provider-slot", member_filled=False),
-                ),
-                subagents=(),
+                )
             ),
         ),
     )

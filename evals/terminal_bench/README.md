@@ -6,26 +6,6 @@ Runs use Harbor 0.21.0.
 
 ```bash
 uv run python -m evals.terminal_bench.setup
-uv run python -m evals.terminal_bench.configure \
-  --root .local/terminal_bench/glm-5-3-flash \
-  --public-base-url https://ufo-eval.example.com \
-  --model z-ai/glm-5.3-flash
-export UFO_CONFIG=.local/terminal_bench/glm-5-3-flash/ufo.toml
-uv run ufoctl migrate
-uv run ufoctl init --email evals@localhost
-uv run ufoctl serve
-```
-
-The HTTPS base must forward to the generated config's loopback serve port. The renderer does not
-create that ingress. Use one root per model; it derives isolated SQLite, blob, and workspace paths
-and writes the complete config plus `ufo.toml.sha256`. Initialize without `--model` so the main
-agent keeps `model = "auto"` and resolves through the generated `[models].auto_model`. The same
-config overrides the ordinary `coding` subagent to that model; product configurations keep the
-profile's pinned Opus default.
-
-In another terminal, use the workspace id printed by `ufoctl init`:
-
-```bash
 uv run python -m evals \
   --terminal-bench \
   --terminal-bench-case openssl-selfsigned-cert \
@@ -43,8 +23,7 @@ selected Harbor environment must be configured.
 Setup builds the static x86-64 client uploaded to each remote environment. Harbor resolves the
 immutable dataset directly; no benchmark task archive is downloaded or rewritten locally. One
 Harbor job runs the selected cases at the eval runner's `--concurrency` and retains official trial
-results, verifier output, rewards, the rendered `ufo.toml`, and its SHA-256 under
-`.local/terminal_bench/jobs/`.
+results, verifier output, and rewards under `.local/terminal_bench/jobs/`.
 
 The client runs with `--json` inside each Harbor environment and stays attached to that environment.
 This is required: the agent changes the same filesystem and live services Harbor verifies. The

@@ -17,7 +17,7 @@ conversation is where its messages arrive; a profile child runs under the spawni
 it always has."""
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -159,18 +159,6 @@ class SubagentRegistry:
 
     def find(self, name: str) -> SubagentProfile | None:
         return next((profile for profile in self.profiles if profile.name == name), None)
-
-    def with_models(self, models: Mapping[str, str]) -> "SubagentRegistry":
-        """Return this profile set under deployment model choices, refusing unknown names."""
-        unknown = sorted(set(models) - {profile.name for profile in self.profiles})
-        if unknown:
-            raise ValueError(f"models.subagent_models names unknown profiles: {', '.join(unknown)}")
-        return SubagentRegistry(
-            tuple(
-                replace(profile, model=models.get(profile.name, profile.model))
-                for profile in self.profiles
-            )
-        )
 
 
 @dataclass(frozen=True)

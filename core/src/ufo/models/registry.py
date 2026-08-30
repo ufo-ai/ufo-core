@@ -105,10 +105,9 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
     price table their entries build. A duplicate id — two specs claiming one slug — fails loud, so a
     contributed model never silently shadows a core one, and so does a configured model naming no
     registered spec: an agent that defers its model resolves through `auto_model` every turn, every
-    ambient reply decision resolves through `ambient_reply_model`, every background job's own
-    model call resolves through `background_jobs_model`, and a configured subagent override names
-    a served model, so a typo in any of them is one boot failure rather than a mid-turn failure per
-    workspace."""
+    ambient reply decision resolves through `ambient_reply_model`, and every background job's own
+    model call resolves through `background_jobs_model`, so a typo in any of the three is one boot
+    failure rather than a mid-turn failure per workspace."""
     core = core_model_specs(config.models.anthropic_api_key_env, config.models.openai_api_key_env)
     specs: dict[str, ModelSpec] = {}
     for spec in (*core, *(spec for manifest in manifests for spec in manifest.models)):
@@ -130,12 +129,6 @@ def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegi
             f"models.background_jobs_model {config.models.background_jobs_model!r} is not a "
             "registered model id — every background job's model call resolves through it"
         )
-    for profile, model in config.models.subagent_models.items():
-        resolved = config.models.auto_model if model == AUTO_MODEL else model
-        if resolved not in specs:
-            raise ValueError(
-                f"models.subagent_models.{profile} {model!r} is not a registered model id"
-            )
     return ModelRegistry(
         specs=specs,
         pricing=pricing_from({model: spec.price for model, spec in specs.items()}),

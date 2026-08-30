@@ -90,8 +90,7 @@ class ModelsConfig(BaseModel):
     extraction, memory consolidation, chat titles — pinned separately for the same reason: a job is
     one bounded schema-bound one-shot over a payload nothing re-reads, so it reads no cache and pays
     full price on every token. A job whose payload can outgrow this model's context window declares
-    `JobSpec.needs_deploy_model` and keeps `auto_model` instead. `subagent_models` lets one
-    deployment replace a profile's declared model; absent entries preserve the profile default."""
+    `JobSpec.needs_deploy_model` and keeps `auto_model` instead."""
 
     model_config = ConfigDict(extra="forbid")
     anthropic_api_key_env: str = "ANTHROPIC_API_KEY"
@@ -99,7 +98,6 @@ class ModelsConfig(BaseModel):
     auto_model: str = DEFAULT_AUTO_MODEL
     ambient_reply_model: str = DEFAULT_AMBIENT_REPLY_MODEL
     background_jobs_model: str = DEFAULT_BACKGROUND_JOBS_MODEL
-    subagent_models: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _models_concrete(self) -> "ModelsConfig":
@@ -112,12 +110,6 @@ class ModelsConfig(BaseModel):
         if not self.background_jobs_model or self.background_jobs_model == AUTO_MODEL:
             raise ValueError(
                 "models.background_jobs_model must be a concrete model id, not empty or 'auto'"
-            )
-        if invalid := sorted(
-            name for name, model in self.subagent_models.items() if not name or not model
-        ):
-            raise ValueError(
-                f"models.subagent_models has an empty profile name or model: {', '.join(invalid)}"
             )
         return self
 

@@ -1592,13 +1592,6 @@ def test_registry_rejects_a_background_jobs_model_no_spec_describes(tmp_path: Pa
         model_registry(_config(tmp_path, ModelsConfig(background_jobs_model="gpt-5.7-terra")), ())
 
 
-def test_registry_rejects_a_subagent_override_no_spec_describes(tmp_path: Path) -> None:
-    with pytest.raises(
-        ValueError, match=r"models\.subagent_models\.coding 'missing' is not a registered"
-    ):
-        model_registry(_config(tmp_path, ModelsConfig(subagent_models={"coding": "missing"})), ())
-
-
 def test_registry_registers_the_default_background_jobs_model_with_tool_use(tmp_path: Path) -> None:
     """The jobs seam's default has to serve every job call site: a forced-tool extraction pass, a
     tool-aware replay, and three text one-shots. Reasoning composes with tools on its surface, so no

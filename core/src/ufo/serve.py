@@ -298,9 +298,7 @@ def run() -> None:
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, credentials)
     memory = memory_search(manifests, credentials, index, embed)
-    subagents = SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))).with_models(
-        config.models.subagent_models
-    )
+    subagents = SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests)))
     subagent_grants = turn_subagent_grants(manifests)
     skills = skill_registry(manifests, (model_catalog_skill(registry),))
     system_skill_bundle = SystemSkillBundle.from_skills(skills.bundled_skills())

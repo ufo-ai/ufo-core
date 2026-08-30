@@ -173,19 +173,6 @@ def test_models_auto_parse(tmp_path: Path) -> None:
     assert config.models.auto_model == "claude-sonnet-5"
 
 
-def test_subagent_model_overrides_parse(tmp_path: Path) -> None:
-    path = tmp_path / "ufo.toml"
-    path.write_text(VALID + '\n[models.subagent_models]\ncoding = "z-ai/glm-5.3-flash"\n')
-    assert load_config(path).models.subagent_models == {"coding": "z-ai/glm-5.3-flash"}
-
-
-def test_subagent_model_overrides_reject_empty_models(tmp_path: Path) -> None:
-    path = tmp_path / "ufo.toml"
-    path.write_text(VALID + '\n[models.subagent_models]\ncoding = ""\n')
-    with pytest.raises(ValidationError, match="subagent_models"):
-        load_config(path)
-
-
 def test_auto_model_rejects_the_auto_sentinel(tmp_path: Path) -> None:
     path = tmp_path / "ufo.toml"
     path.write_text(VALID + '\n[models]\nauto_model = "auto"\n')
