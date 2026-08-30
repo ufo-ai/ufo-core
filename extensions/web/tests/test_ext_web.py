@@ -7018,7 +7018,7 @@ async def test_a_failed_asset_publish_fails_the_page_and_the_next_page_retries(
 async def test_a_clicked_conversation_survives_the_sign_in_it_lands_in(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """A `view on web` click by a signed-out member keeps its target: the conversation names itself
+    """A `chat on web` click by a signed-out member keeps its target: the conversation names itself
     in the query (a fragment would never reach the server), so it rides the redirect to the
     sign-in page and its automatic POST redirects onto the same conversation. The
     target is re-parsed as a UUID, so a mixed-case id normalizes and anything else is dropped

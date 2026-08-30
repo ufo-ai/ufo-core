@@ -2602,10 +2602,10 @@ async def _reply_thread(
 
 class FollowerContext(Protocol):
     """What a thread follower needs of a context: the bot token, the turn's frames, the durable
-    terminal read that stops the reporter posting after the reply, and the two reads its footer
-    renders from. A surface's own `SurfaceContext` satisfies it as it stands, and the adapter below
-    reads a hook's scoped context as one — so the turn's own execution arms the same followers,
-    writing the same way."""
+    terminal read that stops the reporter posting after the reply, and the read its footer renders
+    from. A surface's own `SurfaceContext` satisfies it as it stands, and the adapter below reads a
+    hook's scoped context as one — so the turn's own execution arms the same followers, writing the
+    same way."""
 
     @property
     def workspace_id(self) -> UUID: ...
@@ -2620,8 +2620,6 @@ class FollowerContext(Protocol):
     ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]: ...
 
     async def turn_is_terminal(self, turn_id: UUID) -> bool: ...
-
-    async def conversation_agent(self, conversation_id: UUID) -> UUID | None: ...
 
     async def is_operator_workspace(self) -> bool: ...
 
@@ -3154,16 +3152,12 @@ class ThreadProgress:
         terminal frame, so the cache share and the model it settled on do not exist yet and the
         footer omits them; tokens are the tail's own latest `CostTick`, absent until the first model
         round prices one."""
-        agent_id = await self.ctx.conversation_agent(self.conversation_id)
-        if agent_id is None:
-            return None
         accounting = None if spend is None else f"{spend.tokens:,} tokens"
         return await _slack_footer(
             self.ctx,
             bot_token,
             channel,
             self.conversation_id,
-            agent_id,
             self.turn_id,
             accounting,
         )
@@ -3274,9 +3268,6 @@ class _HookFollowerContext:
 
     async def turn_is_terminal(self, turn_id: UUID) -> bool:
         return await self.ext.turn_is_terminal(turn_id)
-
-    async def conversation_agent(self, conversation_id: UUID) -> UUID | None:
-        return await self.ext.conversation_agent(conversation_id)
 
     async def is_operator_workspace(self) -> bool:
         return await self.ext.is_operator_workspace()
@@ -3963,29 +3954,25 @@ async def _slack_footer(
     bot_token: str,
     channel: str,
     conversation_id: UUID,
-    agent_id: UUID,
     turn_id: UUID,
     accounting: str | None,
 ) -> str | None:
     """The context-block footer a turn's Slack messages carry — its first progress post and its
-    reply — so both reach the conversation on the web and the agent's configuration. The
-    conversation rides as the `?c=` query parameter, not a fragment: a fragment never reaches the
-    server, so a signed-out click would arrive at the portal with the target already dropped. The
-    operator workspace's internal messages lead with `accounting` and add a session-debugger link; a
-    Slack Connect or org-shared thread never exposes those operator fields. `accounting` is the
-    tokens and model the caller can state — a caller with none renders the links alone, never a
-    placeholder. No message states a price: a turn's cost is read in the ledger, never in a
-    thread."""
-    web_links = None
+    reply — so both reach the conversation on the web. The conversation rides as the `?c=` query
+    parameter, not a fragment: a fragment never reaches the server, so a signed-out click would
+    arrive at the portal with the target already dropped. The operator workspace's internal messages
+    lead with `accounting` and add a session-debugger link; a Slack Connect or org-shared thread
+    never exposes those operator fields. `accounting` is the tokens and model the caller can state —
+    a caller with none renders the links alone, never a placeholder. No message states a price: a
+    turn's cost is read in the ledger, never in a thread."""
+    web_link = None
     if ctx.public_base_url is not None:
         web_base = f"{ctx.public_base_url.rstrip('/')}{WEB_SURFACE_PATH}"
-        web_links = (
-            f"<{web_base}?c={conversation_id}|view on web> · <{web_base}#/agents/{agent_id}|config>"
-        )
+        web_link = f"<{web_base}?c={conversation_id}|chat on web>"
     if not await ctx.is_operator_workspace() or await _channel_is_externally_shared(
         bot_token, channel
     ):
-        return web_links
+        return web_link
     elements = [accounting] if accounting is not None else []
     if ctx.public_base_url is not None:
         debug_url = (
@@ -3993,8 +3980,8 @@ async def _slack_footer(
             f"?ws={ctx.workspace_id}&c={conversation_id}&t={turn_id}"
         )
         elements.append(f"<{debug_url}|debug>")
-    if web_links is not None:
-        elements.append(web_links)
+    if web_link is not None:
+        elements.append(web_link)
     return " · ".join(elements)[:SLACK_CONTEXT_TEXT_LIMIT] if elements else None
 
 
@@ -4272,7 +4259,6 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         bot_token,
         channel,
         writeback.conversation_id,
-        writeback.agent_id,
         writeback.turn_id,
         f"{writeback.terminal.tokens:,} tokens, {writeback.terminal.cache_percent}% cached · "
         f"{model}{params}",

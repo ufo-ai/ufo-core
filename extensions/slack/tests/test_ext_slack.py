@@ -754,7 +754,7 @@ async def _debug_footer(
     async with workspace_tx() as connection:
         target = (
             await connection.execute(
-                sa.select(tables.conversation.c.id, tables.conversation.c.agent_id).where(
+                sa.select(tables.conversation.c.id).where(
                     tables.conversation.c.workspace_id == workspace_id,
                     tables.conversation.c.queue_key == queue_key,
                 )
@@ -763,8 +763,7 @@ async def _debug_footer(
     return (
         f"{f'{label} · ' if label is not None else ''}"
         f"<{PUBLIC_BASE_URL}/surface/debug?ws={workspace_id}&c={target.id}&t={turn_id}"
-        f"|debug> · <{PUBLIC_BASE_URL}/surface/web?c={target.id}|view on web> · "
-        f"<{PUBLIC_BASE_URL}/surface/web#/agents/{target.agent_id}|config>"
+        f"|debug> · <{PUBLIC_BASE_URL}/surface/web?c={target.id}|chat on web>"
     )
 
 
@@ -772,16 +771,13 @@ async def _web_footer(workspace_id: UUID, queue_key: str) -> str:
     async with workspace_tx() as connection:
         target = (
             await connection.execute(
-                sa.select(tables.conversation.c.id, tables.conversation.c.agent_id).where(
+                sa.select(tables.conversation.c.id).where(
                     tables.conversation.c.workspace_id == workspace_id,
                     tables.conversation.c.queue_key == queue_key,
                 )
             )
         ).one()
-    return (
-        f"<{PUBLIC_BASE_URL}/surface/web?c={target.id}|view on web> · "
-        f"<{PUBLIC_BASE_URL}/surface/web#/agents/{target.agent_id}|config>"
-    )
+    return f"<{PUBLIC_BASE_URL}/surface/web?c={target.id}|chat on web>"
 
 
 def test_signature_verify_accepts_valid_and_rejects_tampered() -> None:
@@ -8405,9 +8401,9 @@ async def test_a_turns_first_progress_post_carries_the_footer_and_no_later_one_r
 ) -> None:
     """The first message a turn posts is where the member looks for the conversation on the web, so
     it ends with the same footer the reply does — the accounting the tail has priced by then, the
-    debugger, the web link, the agent's configuration. Every checkpoint after it posts bare: the
-    footer belongs to the turn's first message, and a second one stacked under an update would put
-    the same links in the thread over and over."""
+    debugger, the web link. Every checkpoint after it posts bare: the footer belongs to the turn's
+    first message, and a second one stacked under an update would put the same links in the thread
+    over and over."""
     workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
@@ -8512,8 +8508,8 @@ async def test_a_first_progress_posts_footer_withholds_the_operator_fields_the_r
     channels: dict[str, dict[str, object]] | None,
 ) -> None:
     """The first message's footer is gated exactly as the reply's: a guest on a Slack Connect
-    channel and a customer's own workspace see the web link and the agent configuration, never the
-    turn's spend or the session debugger."""
+    channel and a customer's own workspace see the web link, never the turn's spend or the session
+    debugger."""
     workspace_id, _ = await _seed(member_email=member_email)
     recorder: list[httpx.Request] = []
     hub = InProcessHub()

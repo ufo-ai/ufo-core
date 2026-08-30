@@ -951,7 +951,7 @@ large, so it is asked only where the turn's tools worked: the checkouts the turn
 every checkout the last scan reported dirty — a turn that ran no such tool asks nothing, and a
 checkout nested below a non-checkout root answers only when a file tool names a path inside it. `surface_identity` and `conversation.surface`
 are open namespaces validated by surface registration, not a fixed enum.
-Slack renders links to the exact web conversation and its agent configuration as the reply's final
+Slack renders a link to the exact web conversation as the reply's final
 context block for every workspace when the deploy has a public base URL. In the operator's own
 workspace — the one whose first member's email domain is `OPERATOR_EMAIL_DOMAIN`, the fleet-level
 constant naming us, never a tenant-level role — an internal channel's block also renders terminal
