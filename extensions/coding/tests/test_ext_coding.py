@@ -173,11 +173,17 @@ def test_the_child_prompt_names_the_shared_workspace_and_checks_before_cloning()
     assert "you share the workspace with the parent and sibling subagents" in coding.CODING_PROMPT
     assert "Look at the path first" in coding.CODING_PROMPT
     assert "if not, clone once" in coding.CODING_PROMPT
-    assert "use the existing checkout at <path>, from <url>. Do not clone." in coding.CODING_PROMPT
+    assert "If the path is missing, clone <url> there once." in coding.CODING_PROMPT
+    assert "Do not clone or fetch; if it is missing, report it." in coding.CODING_PROMPT
 
 
 def test_the_setup_contract_fetches_the_repository_once_per_turn() -> None:
     instructions = skill_registry((coding.manifest(),)).named("coding").instructions
+    assert "Do not search outside that directory or\ncap the search depth" in instructions
+    assert "Use portable shell syntax; do not rely on platform-specific flags" in instructions
+    assert "When the request gives a path, URL, or commit, skip the lookup" in " ".join(
+        instructions.split()
+    )
     assert "One remote clone per turn" in instructions
     assert "the first remote clone is the only fetch" in instructions
     assert "You do not run the clone — the first child does" in instructions
@@ -187,33 +193,15 @@ def test_the_setup_contract_fetches_the_repository_once_per_turn() -> None:
         "use the existing checkout at <absolute path>. Do not clone or fetch; if it is missing, "
         "report it."
     ) in instructions
-
-
-def test_both_existing_checkout_sentences_reach_the_child_prompt() -> None:
-    instructions = skill_registry((coding.manifest(),)).named("coding").instructions
-    located = (
-        "use the existing checkout at <absolute path>. Do not clone or fetch; if it is missing, "
-        "report it."
-    )
-    assert located in instructions
     assert (
-        "use the existing checkout at /workspace/org-repo, from https://github.com/org/repo. "
-        "Do not clone."
-    ) in instructions
-    assert "The URL is what the child falls back to if the path is not there." in instructions
-    assert (
-        "use the existing checkout at /workspace/acme-cobbledb, from "
-        "https://github.com/acme/cobbledb. Do not clone."
+        "use the existing checkout at <absolute path>, from <url>. If the path is missing, clone "
+        "<url> there once."
     ) in instructions
     assert (
-        "use the existing checkout at /workspace/cobbledb. Do not clone or fetch; if it is "
-        "missing, report it."
+        "from https://github.com/acme/cobbledb. If the path is missing, clone "
+        "https://github.com/acme/cobbledb there once."
     ) in instructions
-    assert located.replace("<absolute path>", "<path>") in coding.CODING_PROMPT
-    assert "use the existing checkout at <path>, from <url>. Do not clone." in coding.CODING_PROMPT
-    recovery = "If it is missing, clone that URL into it rather than ending your turn."
-    assert recovery in coding.CODING_PROMPT
-    assert "report the missing path and end the turn" in coding.CODING_PROMPT
+    assert "from https://github.com/acme/cobbledb. Do not clone." not in instructions
 
 
 def test_the_setup_contract_isolates_parallel_writers() -> None:

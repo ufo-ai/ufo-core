@@ -8,11 +8,13 @@ description: Load when asked to inspect or change source code, fix bugs, produce
 
 ## Existing Task Checkout
 
-When a repository is named without a path, URL, or commit, use one shell call from the current
-working directory to locate a matching git checkout before resolving a remote. Inspect paths only:
-do not read repository files or change anything. If found, pass its absolute path through Existing
-checkout; the coding child shares this turn's sandbox and terminal. If none exists, follow Finding
-the Repository. Never guess a URL.
+When a repository is named without a path, URL, or commit, use one shell call to search the current
+working directory recursively for a matching git checkout. Do not search outside that directory or
+cap the search depth. Use portable shell syntax; do not rely on platform-specific flags. Inspect
+paths only: do not read repository files or change anything. If found, pass its absolute path and
+configured origin URL, when present, through Existing checkout; the coding child shares this turn's
+sandbox and terminal. If none exists, follow Finding the Repository. When the request gives a path,
+URL, or commit, skip the lookup and delegate with the matching setup mode. Never guess a URL.
 
 **Your turn on a repository task is exactly this procedure — nothing else:**
 
@@ -59,7 +61,7 @@ Before calling `spawn(target="coding", ...)`, choose exactly one setup mode and 
 
   **A clone that fails to authenticate means the workspace is not connected. Run the `connect_github` action on the `github-app-installation` credential object — that is the next action, not a fallback route.** Reaching the files another way is the trap here, and every route is forbidden, not just the obvious one: no `gh api` file reads, and no `GITHUB_DOWNLOAD_A_REPOSITORY_ARCHIVE_ZIP`/`_TAR`, zipball, tarball, or `GITHUB_GET_RAW_REPOSITORY_CONTENT` through `call_external_tool`. A snapshot fetched that way has no `.git`, cannot push, and hides from the member that nothing is connected.
 - **Pinned commit:** Use when the task names an exact commit. Start the objective with: `Repository setup: fetch commit <sha> from https://github.com/org/repo into /workspace/org-repo with git at depth 1 and check out exactly that commit, then work inside it. The checkout is the only route to the files — no raw.githubusercontent.com, zipball, or tarball fetches.` As with a clone, you never run the fetch — the first child does.
-- **Existing checkout:** Use for a checkout found by the path lookup or any later spawn after the child using that path has finished. Start the objective with: `Repository setup: use the existing checkout at <absolute path>. Do not clone or fetch; if it is missing, report it.` The path lookup hands you no URL, so that sentence carries none and a missing path is reported back to you. When an earlier spawn of this turn cloned the path, you already own its URL: name it instead with `Repository setup: use the existing checkout at /workspace/org-repo, from https://github.com/org/repo. Do not clone.` The URL is what the child falls back to if the path is not there.
+- **Existing checkout:** Use for a checkout found by the path lookup or any later spawn after the child using that path has finished. With a known URL, start the objective with: `Repository setup: use the existing checkout at <absolute path>, from <url>. If the path is missing, clone <url> there once.` Without a known URL, start with: `Repository setup: use the existing checkout at <absolute path>. Do not clone or fetch; if it is missing, report it.`
 - **Local checkout:** Use for every spawn that overlaps another child. Start the objective with: `Repository setup: copy the committed tree at /workspace/org-repo to /workspace/org-repo-<slug> with git, base the work on <base>, keep the source as workspace, use https://github.com/org/repo as origin, then work inside it.` This copies from disk without a fetch, separates the source's branches from GitHub's, and keeps pushes pointed at GitHub.
 - **No repository:** Use only for coding-adjacent tasks that do not need repository files. Start the objective with: `Repository setup: no repository clone is needed.`
 
@@ -128,7 +130,7 @@ spawn(
 )
 ```
 
-A second spawn after the first finishes opens with `Repository setup: use the existing checkout at /workspace/acme-cobbledb, from https://github.com/acme/cobbledb. Do not clone.` The first spawn cloned that URL, so the child clones it again if the path is gone. A checkout the path lookup found carries no URL, so its spawn opens with `Repository setup: use the existing checkout at /workspace/cobbledb. Do not clone or fetch; if it is missing, report it.`
+A second spawn after the first finishes opens with `Repository setup: use the existing checkout at /workspace/acme-cobbledb, from https://github.com/acme/cobbledb. If the path is missing, clone https://github.com/acme/cobbledb there once.`
 
 **Example fan-out (two concurrent children, one repository):**
 

@@ -106,8 +106,20 @@ STRUCTURED_REVIEW_OBJECTIVE = (
 )
 STRUCTURED_AGENT_NAME = "structured-worker"
 TASK_REPOSITORY = "dclm"
+FALLBACK_REPOSITORY = "source"
 TASK_REPOSITORY_FILES = ("README.md", "src/model.py", "tests/test_model.py")
 GIT_IDENTITY = ("-c", "user.email=evals@localhost", "-c", "user.name=evals")
+EXISTING_CHECKOUT_NO_URL_OBJECTIVE = (
+    "Repository setup: use the existing checkout at /workspace/dclm. Do not clone or fetch; "
+    "if it is missing, report it.\n\nReport the number of tracked files. Do not change the "
+    "checkout. Reply exactly `ANSWER: <count>`."
+)
+EXISTING_CHECKOUT_URL_FALLBACK_OBJECTIVE = (
+    "Repository setup: use the existing checkout at /workspace/dclm, from "
+    "file:///workspace/source. If the path is missing, clone file:///workspace/source there "
+    "once.\n\nReport the number of tracked files. Do not change the checkout after setup. "
+    "Reply exactly `ANSWER: <count>`."
+)
 
 
 def _recommended_timeout_actions(text: str) -> tuple[str, ...]:
@@ -245,9 +257,12 @@ def task_environment_scorer() -> Grader:
         if not lookups or any(
             token in str(call.input.get("command", "")).casefold()
             for call in lookups
-            for token in ("clone", "fetch", "ls-files", " cat ", " sed ")
+            for token in ("clone", "fetch", "ls-files", " cat ")
         ):
             return CapabilityVerdict(False, "the parent did not limit its shell use to path lookup")
+        checkout_paths = [f"/workspace/{TASK_REPOSITORY}"]
+        if output.workspace_dir is not None:
+            checkout_paths.append(str(output.workspace_dir / TASK_REPOSITORY))
         payload = first.input.get("payload")
         objective = payload.get("objective") if isinstance(payload, dict) else None
         target = first.input.get("target")
@@ -255,7 +270,10 @@ def task_environment_scorer() -> Grader:
             not isinstance(target, str)
             or target.removeprefix("profile:") != "coding"
             or not isinstance(objective, str)
-            or "use the existing checkout at /workspace/dclm" not in objective.casefold()
+            or not any(
+                f"use the existing checkout at {path}".casefold() in objective.casefold()
+                for path in checkout_paths
+            )
             or "do not clone or fetch" not in objective.casefold()
         ):
             return CapabilityVerdict(False, "the parent did not delegate the discovered path")
@@ -346,8 +364,24 @@ def url_repository_scorer() -> Grader:
     )
 
 
-async def prepare_task_repository(_workspace_id: UUID, workspace_dir: Path) -> None:
-    repository = workspace_dir / TASK_REPOSITORY
+def existing_checkout_execution_scorer(*, clone: bool) -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        commands = tuple(
+            str(call.input.get("command", "")) for call in output.calls if call.name == "bash"
+        )
+        cloned = any(re.search(r"(?:^|\s)git\s+clone(?:\s|$)", command) for command in commands)
+        if cloned != clone:
+            return CapabilityVerdict(False, "the child chose the wrong missing-checkout behavior")
+        if not any(TASK_REPOSITORY in command and "ls-files" in command for command in commands):
+            return CapabilityVerdict(False, "the child did not inspect the requested checkout")
+        return CapabilityVerdict(True, "the child used the requested existing-checkout branch")
+
+    branch = "clones the supplied URL when missing" if clone else "does not clone without a URL"
+    return DescribedGrader(f"the coding child {branch} and reads the requested checkout", grade)
+
+
+async def _prepare_repository(workspace_dir: Path, name: str) -> None:
+    repository = workspace_dir / name
     await asyncio.to_thread(repository.mkdir, parents=True)
     for relative in TASK_REPOSITORY_FILES:
         path = repository / relative
@@ -368,6 +402,14 @@ async def prepare_task_repository(_workspace_id: UUID, workspace_dir: Path) -> N
         _out, error = await process.communicate()
         if process.returncode != 0:
             raise RuntimeError(f"git {' '.join(argv)} failed: {error.decode().strip()}")
+
+
+async def prepare_task_repository(_workspace_id: UUID, workspace_dir: Path) -> None:
+    await _prepare_repository(workspace_dir, TASK_REPOSITORY)
+
+
+async def prepare_fallback_repository(_workspace_id: UUID, workspace_dir: Path) -> None:
+    await _prepare_repository(workspace_dir, FALLBACK_REPOSITORY)
 
 
 async def _seed_structured_agent(
@@ -1850,6 +1892,28 @@ CASES = (
 )
 
 PROFILE_CASES = (
+    CapabilityCase(
+        "coding-profile-existing-checkout-no-url",
+        profile_proxy_message(EXISTING_CHECKOUT_NO_URL_OBJECTIVE),
+        profile_proxy_scorer(
+            EXISTING_CHECKOUT_NO_URL_OBJECTIVE,
+            combine(exact_scorer("3"), existing_checkout_execution_scorer(clone=False)),
+        ),
+        samples=1,
+        prepare=prepare_task_repository,
+        digest_tag="coding-profile:existing-checkout:no-url:v1",
+    ),
+    CapabilityCase(
+        "coding-profile-existing-checkout-url-fallback",
+        profile_proxy_message(EXISTING_CHECKOUT_URL_FALLBACK_OBJECTIVE),
+        profile_proxy_scorer(
+            EXISTING_CHECKOUT_URL_FALLBACK_OBJECTIVE,
+            combine(exact_scorer("3"), existing_checkout_execution_scorer(clone=True)),
+        ),
+        samples=1,
+        prepare=prepare_fallback_repository,
+        digest_tag="coding-profile:existing-checkout:url-fallback:v1",
+    ),
     CapabilityCase(
         "coding-subagent-structured-review-result",
         profile_proxy_message(STRUCTURED_REVIEW_OBJECTIVE),
