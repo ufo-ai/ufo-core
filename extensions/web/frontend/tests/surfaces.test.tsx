@@ -32,6 +32,7 @@ const WITHHELD: Surfaces = {
   memory: false,
   "community-skills": false,
   "installed-skills": false,
+  usage: false,
 };
 
 /** An app the deploy withholds. The mark rides the boot read's own agent row, so the app is the
@@ -79,6 +80,7 @@ test("a withheld workspace screen loses its tab", async () => {
   await waitFor(() => expect(screen.queryByRole("tab", { name: "Team" })).toBeTruthy());
   expect(screen.queryByRole("tab", { name: "Memory" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Skills" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Usage" })).toBeNull();
 });
 
 test("the skills tab stands while either of its two panels is offered", async () => {
@@ -101,6 +103,7 @@ test("an offered workspace screen keeps its tab", async () => {
   render(<App agents={[AGENT]} member={MEMBER} surfaces={ALL_SURFACES} onAgents={() => {}} />);
 
   expect(await screen.findByRole("tab", { name: "Memory" })).toBeTruthy();
+  expect(screen.getByRole("tab", { name: "Usage" })).toBeTruthy();
   expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Sources" })).toBeNull();
 });

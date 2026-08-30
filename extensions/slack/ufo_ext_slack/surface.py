@@ -3152,16 +3152,12 @@ class ThreadProgress:
     async def _footer(self, bot_token: str, channel: str, spend: CostTick | None) -> str | None:
         """The standard footer under the same gating the reply's carries. A running turn has no
         terminal frame, so the cache share and the model it settled on do not exist yet and the
-        footer omits them; cost and tokens are the tail's own latest `CostTick`, absent until the
-        first model round prices one."""
+        footer omits them; tokens are the tail's own latest `CostTick`, absent until the first model
+        round prices one."""
         agent_id = await self.ctx.conversation_agent(self.conversation_id)
         if agent_id is None:
             return None
-        accounting = (
-            None
-            if spend is None
-            else f"${spend.cost_micro_usd / 1_000_000:.6f} ({spend.tokens:,} tokens)"
-        )
+        accounting = None if spend is None else f"{spend.tokens:,} tokens"
         return await _slack_footer(
             self.ctx,
             bot_token,
@@ -3977,7 +3973,9 @@ async def _slack_footer(
     server, so a signed-out click would arrive at the portal with the target already dropped. The
     operator workspace's internal messages lead with `accounting` and add a session-debugger link; a
     Slack Connect or org-shared thread never exposes those operator fields. `accounting` is the
-    spend the caller can state — a caller with none renders the links alone, never a placeholder."""
+    tokens and model the caller can state — a caller with none renders the links alone, never a
+    placeholder. No message states a price: a turn's cost is read in the ledger, never in a
+    thread."""
     web_links = None
     if ctx.public_base_url is not None:
         web_base = f"{ctx.public_base_url.rstrip('/')}{WEB_SURFACE_PATH}"
@@ -4276,8 +4274,7 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         writeback.conversation_id,
         writeback.agent_id,
         writeback.turn_id,
-        f"${writeback.terminal.cost_micro_usd / 1_000_000:.6f} "
-        f"({writeback.terminal.tokens:,} tokens, {writeback.terminal.cache_percent}% cached) · "
+        f"{writeback.terminal.tokens:,} tokens, {writeback.terminal.cache_percent}% cached · "
         f"{model}{params}",
     )
     parts = slack_reply_parts(text)

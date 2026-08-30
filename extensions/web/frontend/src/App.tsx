@@ -829,9 +829,11 @@ function offeredTabs(surfaces: Surfaces): readonly WorkspaceTab[] {
   return WORKSPACE_TABS.filter((tab) =>
     tab === "memory"
       ? surfaces.memory
-      : tab === "skills"
-        ? surfaces["community-skills"] || surfaces["installed-skills"]
-        : true,
+      : tab === "usage"
+        ? surfaces.usage
+        : tab === "skills"
+          ? surfaces["community-skills"] || surfaces["installed-skills"]
+          : true,
   );
 }
 

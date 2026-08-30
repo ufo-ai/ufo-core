@@ -110,6 +110,7 @@ export type Surfaces = {
   memory: boolean;
   "community-skills": boolean;
   "installed-skills": boolean;
+  usage: boolean;
 };
 
 export type AgentsPayload = {

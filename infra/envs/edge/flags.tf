@@ -36,6 +36,7 @@ locals {
       "enable-installed-skills" = true
       "enable-issues-app"       = true
       "enable-memory-tab"       = true
+      "enable-usage-tab"        = true
       "enable-wiki-app"         = true
     }
     prod = {
@@ -46,6 +47,7 @@ locals {
       "enable-installed-skills" = false
       "enable-issues-app"       = false
       "enable-memory-tab"       = false
+      "enable-usage-tab"        = false
       "enable-wiki-app"         = false
     }
   }

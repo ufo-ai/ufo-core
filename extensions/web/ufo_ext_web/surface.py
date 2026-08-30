@@ -991,6 +991,7 @@ PORTAL_SURFACES = {
     "memory": "enable-memory-tab",
     "community-skills": "enable-community-skills",
     "installed-skills": "enable-installed-skills",
+    "usage": "enable-usage-tab",
 }
 # The flags that read closed. A flag withholding a screen the product already offers reads open, so
 # no outage, no unseeded deploy and no key an operator has yet to create takes it away. The wiki app

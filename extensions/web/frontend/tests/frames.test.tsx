@@ -365,10 +365,11 @@ test("a turn with no tool calls renders no fold", async () => {
   expect(screen.queryByText(/tool calls?$/)).toBeNull();
 });
 
-test("a cost frame meters tokens and priced spend", async () => {
+test("a cost frame meters tokens and states no price", async () => {
   const stream = await streaming();
   stream.emit("cost", { tokens: 1200, cost_micro_usd: 34500 });
-  expect(await screen.findByText("1,200 tok · $0.03")).toBeTruthy();
+  expect(await screen.findByText("1,200 tok")).toBeTruthy();
+  expect(screen.queryByText(/\$0\.03/)).toBeNull();
 });
 
 test("a connect frame offers the act, pressable to the address that mints its consent", async () => {
@@ -564,7 +565,7 @@ test("a done terminal meters the model, tokens, and spend of the turn", async ()
     tokens: 800,
     cost_micro_usd: 12000,
   });
-  expect(await screen.findByText("opus · 800 tok · $0.01")).toBeTruthy();
+  expect(await screen.findByText("opus · 800 tok")).toBeTruthy();
   expect(await screen.findByText("Answered.")).toBeTruthy();
 });
 
