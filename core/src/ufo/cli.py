@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import json
 import os
 import re
 import secrets
@@ -47,6 +48,9 @@ from ufo.db import (
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import load_manifests, lockfile_path
 from ufo.ext.store import ExtensionStore, read_catalog
+from ufo.ext.surface import TurnStep
+from ufo.loop.steps import DurableTurnSteps
+from ufo.models.interface import TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
 from ufo.onboard.seed import KitchenSink
 from ufo.proxy_serve import OWNER_DSN_ENV
@@ -1149,6 +1153,84 @@ async def _cancel_turn(config: Config, turn_id: UUID, named_workspace: str) -> b
             return await cancel_one_turn(client, turn_id) is not None
     finally:
         await dispose_db()
+
+
+@turn.command(name="steps")
+@click.argument("turn_id")
+@click.option("--workspace-id", default="")
+def turn_steps(turn_id: str, workspace_id: str) -> None:
+    """Print one turn's durable trajectory from the DBOS step log.
+
+    The recorded record survives however the turn ended — a turn cancelled or wedged with no
+    written answer still holds every model round and tool result it completed, uncompacted, which
+    the conversation transcript (the compacted window a later turn reads) no longer shows. This is
+    the operator's read of what a turn actually did."""
+    config = load_config()
+    asyncio.run(_print_turn_steps(config, UUID(turn_id), workspace_id))
+
+
+async def _print_turn_steps(config: Config, turn_id: UUID, named_workspace: str) -> None:
+    init_db(config.database.url)
+    owner_dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
+    try:
+        if named_workspace:
+            workspace_id = UUID(named_workspace)
+        else:
+            if owner_dsn is None:
+                raise click.ClickException(
+                    "owner database is unavailable; name the turn's workspace with --workspace-id"
+                )
+            init_owner_db(owner_dsn)
+            async with owner_tx() as connection:
+                resolved = (
+                    await connection.execute(
+                        sa.select(tables.turn.c.workspace_id).where(tables.turn.c.id == turn_id)
+                    )
+                ).scalar_one_or_none()
+            if resolved is None:
+                raise click.ClickException(f"no turn {turn_id}")
+            workspace_id = resolved
+        client = replay_safe_client(config.database.system_url)
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                attempt = (
+                    await connection.execute(
+                        sa.select(tables.turn.c.running_attempt).where(tables.turn.c.id == turn_id)
+                    )
+                ).scalar_one_or_none()
+            steps = await DurableTurnSteps(client=client).read(attempt or str(turn_id))
+        _echo_turn_steps(steps)
+    finally:
+        await dispose_db()
+
+
+def _echo_turn_steps(steps: tuple[TurnStep, ...]) -> None:
+    if not steps:
+        click.echo("no recorded steps")
+        return
+    for step in steps:
+        span = "" if step.duration_ms is None else f"  {step.duration_ms}ms"
+        click.echo(f"{step.number:>3}. [{step.kind}] {step.name}  {step.function_name}{span}")
+        for message in step.messages:
+            content = message.content
+            if isinstance(content, str):
+                click.echo(f"       {message.role}: {content}")
+                continue
+            for block in content:
+                click.echo(f"       {message.role}: {_echo_block(block)}")
+
+
+def _echo_block(block: object) -> str:
+    match block:
+        case TextBlock(text=text):
+            return text
+        case ToolUseBlock(name=name, input=arguments):
+            return f"call {name} {json.dumps(arguments, separators=(',', ':'))}"
+        case ToolResultBlock(content=result, is_error=is_error):
+            body = result if isinstance(result, str) else "[non-text result]"
+            return f"result{' (error)' if is_error else ''}: {body}"
+        case _:
+            return type(block).__name__
 
 
 @main.group()

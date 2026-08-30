@@ -55,6 +55,7 @@ export type TurnStep = {
   started_at: string | null;
   completed_at: string | null;
   duration_ms: number | null;
+  messages: TranscriptMessage[];
 };
 
 export type TurnDetail = {

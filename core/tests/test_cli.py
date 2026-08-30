@@ -246,3 +246,64 @@ def test_the_config_init_writes_boots_the_pack_it_names() -> None:
     providers = {c.oauth.provider: c.oauth for m in manifests for c in m.connectors}
     assert providers, "the pack registers no connector, so this proves nothing about connect"
     assert _connect_redirect_uri(config, providers).startswith(f"{config.connect.public_base_url}/")
+
+
+def test_turn_steps_echo_renders_each_step_and_its_rebuilt_messages(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from datetime import UTC, datetime
+
+    from ufo.cli import _echo_turn_steps
+    from ufo.ext.surface import TurnStep
+    from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+
+    steps = (
+        TurnStep(
+            number=1,
+            kind="model",
+            name="model round",
+            function_name="TurnEngine._stream_once",
+            started_at=datetime(2026, 4, 26, 15, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 4, 26, 15, 0, 6, tzinfo=UTC),
+            duration_ms=6000,
+            messages=(
+                Message(
+                    role="assistant",
+                    content=(
+                        TextBlock(text="checking"),
+                        ToolUseBlock(id="c1", name="bash", input={"command": "pwd"}),
+                    ),
+                ),
+            ),
+        ),
+        TurnStep(
+            number=2,
+            kind="tool",
+            name="bash",
+            function_name="TurnEngine._dispatch_step",
+            started_at=None,
+            completed_at=None,
+            duration_ms=None,
+            messages=(
+                Message(
+                    role="user",
+                    content=(
+                        ToolResultBlock(tool_use_id="c1", content="/workspace", is_error=False),
+                    ),
+                ),
+            ),
+        ),
+    )
+    _echo_turn_steps(steps)
+    out = capsys.readouterr().out
+    assert "1. [model] model round  TurnEngine._stream_once  6000ms" in out
+    assert "assistant: checking" in out
+    assert "call bash" in out and '"command":"pwd"' in out
+    assert "result: /workspace" in out
+
+
+def test_turn_steps_echo_reports_an_empty_log(capsys: pytest.CaptureFixture[str]) -> None:
+    from ufo.cli import _echo_turn_steps
+
+    _echo_turn_steps(())
+    assert capsys.readouterr().out.strip() == "no recorded steps"

@@ -38,7 +38,7 @@ function Prelude(props: { label: string; text: string }) {
   );
 }
 
-function Bubble(props: { message: TranscriptMessage }) {
+export function Bubble(props: { message: TranscriptMessage }) {
   const { message } = props;
   return (
     <div className={`bubble ${message.role}`}>

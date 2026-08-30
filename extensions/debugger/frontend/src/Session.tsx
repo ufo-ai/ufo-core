@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   duration,
   get,
@@ -10,6 +10,7 @@ import {
   TurnStep,
   when,
 } from "./api";
+import { Bubble } from "./Transcript";
 import { Compactions } from "./Compactions";
 import { Files } from "./Files";
 import { Params } from "./nav";
@@ -356,14 +357,25 @@ function Steps(props: { turnId: string }) {
         </thead>
         <tbody>
           {steps.map((step) => (
-            <tr key={step.number}>
-              <td>{timestamp(step.started_at)}</td>
-              <td className="step-duration">{duration(step.duration_ms)}</td>
-              <td>{step.kind}</td>
-              <td>
-                {step.name} <code>{step.function_name}</code>
-              </td>
-            </tr>
+            <Fragment key={step.number}>
+              <tr>
+                <td>{timestamp(step.started_at)}</td>
+                <td className="step-duration">{duration(step.duration_ms)}</td>
+                <td>{step.kind}</td>
+                <td>
+                  {step.name} <code>{step.function_name}</code>
+                </td>
+              </tr>
+              {step.messages.length > 0 && (
+                <tr>
+                  <td colSpan={4} className="step-messages">
+                    {step.messages.map((message, index) => (
+                      <Bubble key={index} message={message} />
+                    ))}
+                  </td>
+                </tr>
+              )}
+            </Fragment>
           ))}
         </tbody>
       </table>

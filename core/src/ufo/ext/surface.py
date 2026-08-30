@@ -1521,7 +1521,11 @@ class LedgerEntry(BaseModel):
 
 
 class TurnStep(BaseModel):
-    """One durable workflow step with its recorded identity and wall-clock interval."""
+    """One durable workflow step with its recorded identity and wall-clock interval. `messages` is
+    what the step's recorded output rebuilds — a model round as the assistant message it produced,
+    a tool dispatch as its result — so a reader sees the turn's actual trajectory, uncompacted, and
+    not only the timeline. A step whose output carries no window (a compaction, a claimed arrival, a
+    round that only errored) contributes none."""
 
     number: int = Field(ge=1)
     kind: Literal["model", "tool", "workflow"]
@@ -1530,6 +1534,7 @@ class TurnStep(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     duration_ms: int | None = Field(ge=0)
+    messages: tuple[Message, ...] = ()
 
     @field_validator("started_at", "completed_at")
     @classmethod

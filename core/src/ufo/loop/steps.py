@@ -8,6 +8,50 @@ from dbos import DBOSClient
 
 from ufo.ext.surface import TurnStep
 from ufo.loop.engine import DispatchResult, StreamResult
+from ufo.models.interface import Message, TextBlock, ToolResultBlock
+
+IMAGE_ATTACHMENT_NOTE = "\n[{count} image attachment(s) omitted]"
+
+
+def _step_messages(output: object) -> tuple[Message, ...]:
+    """The window a recorded step output rebuilds, for a diagnostic read of a turn's trajectory.
+    A model round is the assistant message it produced — its reasoning, its text, its tool calls —
+    or its salvaged partial output when the round errored mid-stream; a tool dispatch is the result
+    the model saw, image bytes left as a note rather than rehydrated. Every other output — a
+    compaction, a claimed-arrival batch, a round that errored with nothing salvaged — rebuilds no
+    window and contributes none. The text is the model's own, reply markup and all, because a
+    reader diagnosing a turn wants what was emitted, not what the member was shown."""
+    match output:
+        case StreamResult() as streamed:
+            blocks = (
+                *streamed.reasoning,
+                *((TextBlock(text=streamed.text),) if streamed.text else ()),
+                *streamed.tool_calls,
+            )
+            if blocks:
+                return (Message(role="assistant", content=blocks),)
+            if streamed.partial_output:
+                return (Message(role="assistant", content=streamed.partial_output),)
+            return ()
+        case DispatchResult() as dispatched:
+            content = dispatched.text
+            if dispatched.image_refs:
+                content += IMAGE_ATTACHMENT_NOTE.format(count=len(dispatched.image_refs))
+            return (
+                Message(
+                    role="user",
+                    content=(
+                        ToolResultBlock(
+                            tool_use_id=dispatched.tool_use_id,
+                            content=content,
+                            is_error=dispatched.is_error,
+                            activity=dispatched.activity,
+                        ),
+                    ),
+                ),
+            )
+        case _:
+            return ()
 
 
 @dataclass(frozen=True)
@@ -53,6 +97,7 @@ class DurableTurnSteps:
                         if started_ms is None or completed_ms is None
                         else max(completed_ms - started_ms, 0)
                     ),
+                    messages=_step_messages(step.get("output")),
                 )
             )
         return tuple(projected)

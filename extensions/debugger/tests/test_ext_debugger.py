@@ -587,6 +587,31 @@ async def test_turns_and_detail_read_terminal_ledger_and_children(debug) -> None
         ("tool", "bash", 120_105),
     ]
     assert steps[0]["started_at"] == "2026-04-26T15:00:00.123000Z"
+    # The step view carries what each output rebuilds — the model round as the assistant message
+    # that issued the call, the dispatch as the result the model saw.
+    assert steps[0]["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call-1", "name": "bash", "input": {"command": "pwd"}}
+            ],
+        }
+    ]
+    assert steps[1]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": "/workspace",
+                    "is_error": False,
+                    "activity": False,
+                    "activity_text": "",
+                }
+            ],
+        }
+    ]
     missing = await client.get(f"/surface/debug/api/turns/{uuid4()}", headers=_auth(token))
     assert missing.status_code == 404
     missing_steps = await client.get(
