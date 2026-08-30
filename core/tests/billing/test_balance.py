@@ -15,9 +15,12 @@ from ufo.billing.balance import (
     billing_screen_url,
     count_charge,
     credit,
+    read_auto_topup,
     read_balance,
     recent_purchases,
+    set_auto_topup,
     set_reserve,
+    topping_up_workspaces,
 )
 from ufo.db import workspace_tx
 from ufo.schema import tables
@@ -118,6 +121,29 @@ async def test_a_later_credit_leaves_the_reserve_alone(db: None) -> None:
     assert current is not None
     assert current.balance_micro_usd == 20_000_000
     assert current.reserve_micro_usd == 2_000_000
+
+
+async def test_the_refill_candidates_name_only_a_workspace_that_has_reached_its_line(
+    db: None,
+) -> None:
+    """The refill ticks every minute for the whole fleet, so a candidate read that names a workspace
+    the handler can only decline costs a durable execution and a workspace transaction per workspace
+    per minute for nothing. The seam answers exactly what `read_auto_topup` answers."""
+    async with workspace_tx() as connection:
+        due = await _workspace(connection)
+        above = await _workspace(connection)
+        unarranged = await _workspace(connection)
+        for workspace_id in (due, above, unarranged):
+            await credit(connection, workspace_id, 10_000_000, 10_000_000, "opening")
+        await set_auto_topup(connection, due, 50_000_000, 10_000_000)
+        await set_auto_topup(connection, above, 50_000_000, 5_000_000)
+        reads = [
+            workspace_id
+            for workspace_id in (due, above, unarranged)
+            if await read_auto_topup(connection, workspace_id) is not None
+        ]
+    assert reads == [due]
+    assert await topping_up_workspaces()() == (due,)
 
 
 def test_the_billing_screen_url_is_the_home_surface_path_plus_the_billing_route() -> None:

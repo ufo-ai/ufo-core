@@ -18,6 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.o11y import emit_metric
+from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.schema import tables
 
 BALANCE_PRESENCE_TTL_SECONDS = 5.0
@@ -131,6 +132,23 @@ async def read_auto_topup(connection: AsyncConnection, workspace_id: UUID) -> Au
         amount_micro_usd=int(row.auto_topup_micro_usd),
         threshold_micro_usd=int(row.auto_topup_threshold_micro_usd),
     )
+
+
+def topping_up_workspaces() -> WorkspaceCandidates:
+    """Candidates for a refill job: the workspaces that arranged a refill and have reached their
+    line. It is `read_auto_topup`'s own predicate, taken once over the balance rows, so a workspace
+    with no refill arranged — or one still above its line — is never fired at and opens no
+    transaction to be told so. The refill ticks every minute for the whole fleet, and the
+    workspaces owing a charge on any one tick are a small minority of the ones holding a member."""
+
+    def short_of_its_line() -> sa.Select[tuple[UUID]]:
+        return sa.select(tables.workspace_balance.c.workspace_id).where(
+            tables.workspace_balance.c.auto_topup_micro_usd.is_not(None),
+            tables.workspace_balance.c.balance_micro_usd
+            <= tables.workspace_balance.c.auto_topup_threshold_micro_usd,
+        )
+
+    return owner_candidates(short_of_its_line)
 
 
 async def set_auto_topup(

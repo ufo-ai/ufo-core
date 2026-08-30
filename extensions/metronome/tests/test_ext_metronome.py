@@ -39,6 +39,7 @@ from ufo.billing.balance import (
     mark_topup_verified,
     read_balance,
     read_headroom,
+    set_auto_topup,
     set_reserve,
 )
 from ufo.blob import FilesystemBlobStore
@@ -1463,6 +1464,34 @@ async def test_autopay_refills_the_balance_from_the_card_on_file(
     assert charge["amount"] == "5000"
     assert charge["off_session"] == "true"
     assert charge["customer"].startswith("cus_")
+
+
+async def test_the_refill_job_fans_out_only_to_a_workspace_that_reached_its_line(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refill fires every minute for the whole fleet, and one execution per workspace opens a
+    workspace transaction before it can learn there is nothing to refill. Naming every workspace
+    that holds a member spends that fan-out on the fleet, where the workspaces owing a charge are a
+    few: the candidate read carries core's trigger, so a workspace with no refill arranged, and one
+    still above its line, is never fired at."""
+    _billing_env(monkeypatch)
+    due, _owner, _mate, _conversation = await _billing_seed()
+    above, _above_owner, _above_mate, _above_conversation = await _billing_seed()
+    unarranged, _idle_owner, _idle_mate, _idle_conversation = await _billing_seed()
+    for workspace_id, threshold in ((due, 10), (above, 1), (unarranged, None)):
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
+                if threshold is not None:
+                    await set_auto_topup(connection, workspace_id, 50 * DOLLAR, threshold * DOLLAR)
+    declared = metronome.manifest()
+    runner = JobRunner(
+        bindings=bindings_from((declared,), ()), manifests=(declared,), registry=_registry()
+    )
+
+    named = await runner.candidates(f"{metronome.NAME}:{metronome.TOPUP_JOB_NAME}")
+
+    assert named == (due,)
 
 
 async def test_autopay_leaves_a_balance_above_its_line_alone(

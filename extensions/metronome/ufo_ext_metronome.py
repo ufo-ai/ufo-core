@@ -67,6 +67,7 @@ from ufo.sdk.balance import (
     read_headroom,
     recent_purchases,
     set_auto_topup,
+    topping_up_workspaces,
 )
 from ufo.sdk.bearer import SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.context import ExtensionContext
@@ -78,7 +79,6 @@ from ufo.sdk.objects import WORKSPACE_KIND
 from ufo.sdk.seats import (
     member_by_email,
     member_is_admin,
-    member_workspaces,
 )
 from ufo.sdk.tools import (
     ActionPresentation,
@@ -990,7 +990,7 @@ def manifest() -> Manifest:
                 name=TOPUP_JOB_NAME,
                 schedule=TOPUP_JOB_SCHEDULE,
                 handler=_top_up,
-                candidates=member_workspaces(),
+                candidates=topping_up_workspaces(),
             ),
         ),
         routes=(

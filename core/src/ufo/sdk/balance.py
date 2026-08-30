@@ -46,3 +46,6 @@ from ufo.billing.balance import (
 from ufo.billing.balance import (
     set_auto_topup as set_auto_topup,
 )
+from ufo.billing.balance import (
+    topping_up_workspaces as topping_up_workspaces,
+)
