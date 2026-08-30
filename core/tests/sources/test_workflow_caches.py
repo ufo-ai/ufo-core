@@ -7,7 +7,9 @@ import yaml
 WORKFLOWS = Path(__file__).parents[3] / ".github" / "workflows"
 
 
-@pytest.mark.parametrize("workflow", ["ci.yaml", "deploy.yml", "deploy-production.yml"])
+@pytest.mark.parametrize(
+    "workflow", ["ci.yaml", "integration.yaml", "deploy.yml", "deploy-production.yml"]
+)
 def test_runner_builds_restore_their_package_caches(workflow: str) -> None:
     loaded = yaml.load((WORKFLOWS / workflow).read_text(), Loader=yaml.BaseLoader)
     assert isinstance(loaded, dict)

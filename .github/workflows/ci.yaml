@@ -396,7 +396,8 @@ jobs:
       - run: cargo test
 
   integration:
-    if: github.event_name == 'push'
+    needs: triage
+    if: needs.triage.outputs.checks == 'true'
     uses: ./.github/workflows/integration.yaml
 
   # Every assertion states the exact conclusion the triage decision implies, so a lane selected to
@@ -434,7 +435,7 @@ jobs:
       - if: ${{ !contains(needs.*.result, 'cancelled') }}
         run: test "${{ needs.control-test.result }}" = "${{ needs.triage.outputs.control == 'true' && 'success' || 'skipped' }}"
       - if: ${{ !contains(needs.*.result, 'cancelled') }}
-        run: test "${{ needs.integration.result }}" = "${{ github.event_name == 'push' && 'success' || 'skipped' }}"
+        run: test "${{ needs.integration.result }}" = "${{ needs.triage.outputs.checks == 'true' && 'success' || 'skipped' }}"
       - if: ${{ !contains(needs.*.result, 'cancelled') }}
         run: test "${{ needs.wheel.result }}" = "${{ needs.triage.outputs.wheel == 'true' && 'success' || 'skipped' }}"
       - if: ${{ !contains(needs.*.result, 'cancelled') }}

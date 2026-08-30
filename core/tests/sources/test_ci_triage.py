@@ -15,6 +15,7 @@ GATED_JOBS = {
     "web-build": "checks",
     "web-test": "checks",
     "test-shard": "checks",
+    "integration": "checks",
     "wheel": "wheel",
     "control-test": "control",
     "rls": "control",
@@ -195,3 +196,14 @@ def test_the_portal_suite_stays_off_the_shard_critical_path() -> None:
     assert any(step.get("run") == "pnpm -C extensions/web/frontend test" for step in suite)
     assert jobs["test-shard"]["needs"] == ["triage", "web-build", "sandbox-client"]
     assert "web-test" in jobs["test"]["needs"]
+
+
+def test_integration_shards_start_on_the_lane_decision_alone() -> None:
+    jobs = _jobs()
+    assert jobs["integration"]["needs"] == "triage"
+    assert jobs["integration"]["uses"] == "./.github/workflows/integration.yaml"
+    gate = "\n".join(step.get("run", "") for step in jobs["test"]["steps"])
+    assert (
+        'test "${{ needs.integration.result }}" = '
+        "\"${{ needs.triage.outputs.checks == 'true' && 'success' || 'skipped' }}\""
+    ) in gate

@@ -22,6 +22,7 @@ ROOT = Path(__file__).parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
 IMAGE_KEY_SCRIPT = ROOT / ".github" / "scripts" / "sandbox_image_key.sh"
 REUSE_STEP = "Reuse the published sandbox image"
+START_STEP = "Start pulling the published sandbox image"
 PUBLISH_STEP = "Publish the sandbox image under its definition key"
 IMAGE_REPOSITORY_EXPRESSION = "ghcr.io/${{ github.repository_owner }}/ufo-sandbox"
 IMAGE_REPOSITORY = "ghcr.io/metalcraftai/ufo-sandbox"
@@ -30,6 +31,7 @@ BASE_DIGEST = "sha256:" + "1" * 64
 MOVED_DIGEST = "sha256:" + "2" * 64
 KEY_LENGTH = 16
 WALLED_CALLS = 3
+JOIN_WALLS = 1
 # Every input the image key moves with, as the publisher's `paths` names them.
 KEY_INPUTS = frozenset(
     {
@@ -179,16 +181,7 @@ def _step(workflow: str, name: str) -> dict[str, object]:
     return found[0]
 
 
-def _run_step(
-    workflow: str, name: str, root: Path, *, shorten_walls: bool = False, **overrides: str
-) -> subprocess.CompletedProcess[str]:
-    step = _step(workflow, name)
-    script = step["run"]
-    assert "bash .github/scripts/sandbox_image_key.sh" in script
-    assert step["env"]["IMAGE_REPOSITORY"] == IMAGE_REPOSITORY_EXPRESSION
-    if shorten_walls:
-        script, walled = re.subn(r"timeout \d+ ", "timeout 1 ", script)
-        assert walled == WALLED_CALLS, f"{name} walls {walled} calls, not {WALLED_CALLS}"
+def _run_script(script: str, root: Path, **overrides: str) -> subprocess.CompletedProcess[str]:
     if "timeout " in script and shutil.which("timeout") is None:
         pytest.skip("coreutils timeout is absent, so the step's walls would not run at all")
     return subprocess.run(
@@ -206,6 +199,52 @@ def _run_step(
             REGISTRY_USER="publisher",
             **overrides,
         ),
+    )
+
+
+def _walled(script: str, walls: int, name: str) -> str:
+    shortened, walled = re.subn(r"timeout \d+ ", "timeout 1 ", script)
+    assert walled == walls, f"{name} walls {walled} calls, not {walls}"
+    return shortened
+
+
+def _run_step(
+    workflow: str, name: str, root: Path, *, shorten_walls: bool = False, **overrides: str
+) -> subprocess.CompletedProcess[str]:
+    step = _step(workflow, name)
+    script = step["run"]
+    assert "bash .github/scripts/sandbox_image_key.sh" in script
+    assert step["env"]["IMAGE_REPOSITORY"] == IMAGE_REPOSITORY_EXPRESSION
+    if shorten_walls:
+        script = _walled(script, WALLED_CALLS, name)
+    return _run_script(script, root, **overrides)
+
+
+def _exported(root: Path) -> dict[str, str]:
+    recorded = root / "github-env"
+    if not recorded.exists():
+        return {}
+    return dict(line.split("=", 1) for line in recorded.read_text().splitlines())
+
+
+def _run_pull(
+    root: Path, *, shorten_walls: bool = False, **overrides: str
+) -> subprocess.CompletedProcess[str]:
+    started = _run_step(
+        "integration.yaml", START_STEP, root, shorten_walls=shorten_walls, **overrides
+    )
+    exported = _exported(root)
+    if started.returncode != 0 or "SANDBOX_PULL_IMAGE" not in exported:
+        return started
+    join = _step("integration.yaml", REUSE_STEP)
+    assert join["if"] == "env.SANDBOX_PULL_IMAGE != ''"
+    script = _walled(join["run"], JOIN_WALLS, REUSE_STEP) if shorten_walls else join["run"]
+    joined = _run_script(script, root, **exported, **overrides)
+    return subprocess.CompletedProcess(
+        joined.args,
+        joined.returncode,
+        started.stdout + joined.stdout,
+        started.stderr + joined.stderr,
     )
 
 
@@ -326,15 +365,13 @@ def test_the_consumer_names_the_image_the_publisher_pushed(tmp_path: Path) -> No
     consumer = _sandbox(tmp_path, "consumer")
 
     published = _run_step("sandbox-image.yml", PUBLISH_STEP, publisher)
-    consumed = _run_step("integration.yaml", REUSE_STEP, consumer)
+    consumed = _run_pull(consumer)
 
     assert published.returncode == 0, published.stderr
     assert consumed.returncode == 0, consumed.stderr
     pushed = [call.removeprefix("push ") for call in _calls(publisher) if call.startswith("push ")]
     assert pushed == [f"{IMAGE_REPOSITORY}:{_derive_key(publisher).stdout.strip()}"]
-    assert (consumer / "github-env").read_text().split() == [
-        f"{plugin.PREBUILT_IMAGE_ENV}={pushed[0]}"
-    ]
+    assert _exported(consumer)[plugin.PREBUILT_IMAGE_ENV] == pushed[0]
     assert f"pull -q {pushed[0]}" in _calls(consumer)
     assert sum("stage_client_binary" in call for call in _uv_calls(publisher)) == 1
     assert sum("stage_system_skills" in call for call in _uv_calls(publisher)) == 1
@@ -346,11 +383,11 @@ def test_a_miss_leaves_the_integration_job_its_tests(tmp_path: Path, miss: dict[
     same job, so failing it would take the Postgres and live-turn tests down with the pull."""
     root = _sandbox(tmp_path)
 
-    consumed = _run_step("integration.yaml", REUSE_STEP, root, **miss)
+    consumed = _run_pull(root, **miss)
 
     assert consumed.returncode == 0, consumed.stderr
     assert "the fixture builds it" in consumed.stdout
-    assert not (root / "github-env").exists()
+    assert plugin.PREBUILT_IMAGE_ENV not in _exported(root)
 
 
 @pytest.mark.parametrize(
@@ -373,13 +410,13 @@ def test_a_call_that_never_returns_ends_as_a_miss(
     root = _sandbox(tmp_path)
 
     started = time.monotonic()
-    consumed = _run_step("integration.yaml", REUSE_STEP, root, shorten_walls=True, **stalled)
+    consumed = _run_pull(root, shorten_walls=True, **stalled)
     elapsed = time.monotonic() - started
 
     assert consumed.returncode == 0, consumed.stderr
     assert re.search(notice, consumed.stdout), consumed.stdout
     assert [call.split()[0] for call in _calls(root)] == reached
-    assert not (root / "github-env").exists()
+    assert plugin.PREBUILT_IMAGE_ENV not in _exported(root)
     assert elapsed < float(HANG_SECONDS) / 2, elapsed
 
 
