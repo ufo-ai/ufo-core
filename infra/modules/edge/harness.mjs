@@ -15,12 +15,28 @@ const sourceTemplate = await readFile(new URL("worker.js", moduleDir), "utf8");
 export const LANDING_PAGE = await readFile(new URL("landing.html", moduleDir), "utf8");
 
 const legalShell = await readFile(new URL("legal.html", moduleDir), "utf8");
-const legalPage = async (title, body) =>
+const legalPage = async ({ title, description, canonical, body }) =>
   legalShell
     .replaceAll("__TITLE__", title)
+    .replaceAll("__DESCRIPTION__", description)
+    .replaceAll("__CANONICAL__", canonical)
     .replace("__BODY__", await readFile(new URL(body, moduleDir), "utf8"));
-export const PRIVACY_PAGE = await legalPage("Privacy Policy", "privacy.html");
-export const TERMS_PAGE = await legalPage("Terms of Service", "terms.html");
+export const PRIVACY_DESCRIPTION =
+  "What ufo.ai collects when you sign in and use the service, how that information is used, and how long it is kept.";
+export const TERMS_DESCRIPTION =
+  "The terms that govern your use of ufo.ai: accounts, acceptable use, intellectual property, and liability.";
+export const PRIVACY_PAGE = await legalPage({
+  title: "Privacy Policy",
+  description: PRIVACY_DESCRIPTION,
+  canonical: "https://ufo.ai/privacy",
+  body: "privacy.html",
+});
+export const TERMS_PAGE = await legalPage({
+  title: "Terms of Service",
+  description: TERMS_DESCRIPTION,
+  canonical: "https://ufo.ai/terms",
+  body: "terms.html",
+});
 
 // Each tag is a distinct module, so a test gets its own isolate-level caches.
 export async function importWorker(tag) {

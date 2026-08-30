@@ -9,15 +9,29 @@ terraform {
 }
 
 locals {
-  waitlist_sender = "no-reply@flyingobject.ai"
-  landing_html    = file("${path.module}/landing.html")
-  legal_shell     = file("${path.module}/legal.html")
+  waitlist_sender     = "no-reply@flyingobject.ai"
+  landing_html        = file("${path.module}/landing.html")
+  legal_shell         = file("${path.module}/legal.html")
+  privacy_description = "What ufo.ai collects when you sign in and use the service, how that information is used, and how long it is kept."
+  terms_description   = "The terms that govern your use of ufo.ai: accounts, acceptable use, intellectual property, and liability."
   privacy_html = replace(
-    replace(local.legal_shell, "__TITLE__", "Privacy Policy"),
+    replace(
+      replace(
+        replace(local.legal_shell, "__TITLE__", "Privacy Policy"),
+        "__DESCRIPTION__", local.privacy_description,
+      ),
+      "__CANONICAL__", "https://ufo.ai/privacy",
+    ),
     "__BODY__", file("${path.module}/privacy.html"),
   )
   terms_html = replace(
-    replace(local.legal_shell, "__TITLE__", "Terms of Service"),
+    replace(
+      replace(
+        replace(local.legal_shell, "__TITLE__", "Terms of Service"),
+        "__DESCRIPTION__", local.terms_description,
+      ),
+      "__CANONICAL__", "https://ufo.ai/terms",
+    ),
     "__BODY__", file("${path.module}/terms.html"),
   )
 }

@@ -4601,7 +4601,7 @@ def test_edge_doors_use_separate_environment_origins() -> None:
 def test_edge_worker_artifact_substitutes_every_placeholder() -> None:
     module = ROOT / "infra" / "modules" / "edge"
     terraform = (module / "main.tf").read_text()
-    assert 'landing_html    = file("${path.module}/landing.html")' in terraform
+    assert re.search(r'landing_html\s+= file\("\$\{path\.module\}/landing\.html"\)', terraform)
     assert not re.search(r"__[A-Z_]+__", (module / "landing.html").read_text())
     worker = (module / "worker.js").read_text()
     harness = (module / "harness.mjs").read_text()

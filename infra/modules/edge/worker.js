@@ -5,6 +5,14 @@ const COUNT_TTL_MS = 3_600_000;
 const FLEET_TTL_MS = 300_000;
 const FLEET_FETCH_TIMEOUT_MS = 3_000;
 const PAGE_CACHE = "public, max-age=600";
+// One script fronts several doors, and every document it serves names the production apex as its
+// canonical home, so the sitemap and robots.txt name that apex too rather than the door they were
+// fetched from: a crawler on any other door is told where the pages actually live.
+const APEX = "https://ufo.ai";
+const INDEXED = ["/", "/privacy", "/terms"];
+// Everything else the worker answers is an endpoint rather than a page: a form post, a shell
+// script, a counter, the onboarding API, and the hop to the authenticated host.
+const UNCRAWLED = ["/waitlist", "/ufo", "/fleet", "/v1/onboard/", "/login"];
 const SITE_CARD_PREFIX = "/surface/sites/share/site/";
 const ARTIFACT_PREFIX = "/artifacts/";
 const JOIN_PREFIX = "/join/";
@@ -90,10 +98,31 @@ function secure(url) {
   return Response.redirect(https.href, 301);
 }
 
-function page(html) {
-  return new Response(html, {
-    headers: { "cache-control": PAGE_CACHE, "content-type": "text/html; charset=utf-8" },
+function page(body, type = "text/html; charset=utf-8") {
+  return new Response(body, {
+    headers: { "cache-control": PAGE_CACHE, "content-type": type },
   });
+}
+
+function sitemap() {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ...INDEXED.map((path) => `  <url><loc>${APEX}${path}</loc></url>`),
+    "</urlset>",
+    "",
+  ].join("\n");
+}
+
+function robots() {
+  return [
+    "User-agent: *",
+    "Allow: /",
+    ...UNCRAWLED.map((path) => `Disallow: ${path}`),
+    "",
+    `Sitemap: ${APEX}/sitemap.xml`,
+    "",
+  ].join("\n");
 }
 
 async function ensureWaitlist(db) {
@@ -231,6 +260,10 @@ export default {
         });
       case "/waitlist":
         return request.method === "POST" ? join(request, env, url) : text(usage(url.hostname));
+      case "/robots.txt":
+        return secure(url) ?? page(robots(), "text/plain; charset=utf-8");
+      case "/sitemap.xml":
+        return secure(url) ?? page(sitemap(), "application/xml; charset=utf-8");
       case "/privacy":
         return secure(url) ?? page(PRIVACY_HTML);
       case "/terms":

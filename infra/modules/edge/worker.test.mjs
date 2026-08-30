@@ -8,7 +8,9 @@ import {
   FAVICON_DARK_SVG,
   FAVICON_SVG,
   LANDING_PAGE,
+  PRIVACY_DESCRIPTION,
   PRIVACY_PAGE,
+  TERMS_DESCRIPTION,
   TERMS_PAGE,
   d1,
   edgeCache,
@@ -98,6 +100,8 @@ test("the browser page links the product favicon and holds no copy of it", () =>
 // value it draws is held here, because a card is invisible in the product and only ever seen in
 // somebody else's Slack.
 const SHARE_CARD = "https://ufo.ai/share/og-home.jpg";
+const SHARE_CARD_ALT =
+  "The UFO wordmark in white with three ember dots beside it, centred on a black field.";
 
 function shareTags(page) {
   const tags = {};
@@ -123,8 +127,7 @@ test("the page hands an unfurler a titled card at an absolute https URL", async 
       "og:image:width": "1200",
       "og:image:height": "630",
       "og:image:type": "image/jpeg",
-      "og:image:alt":
-        "The UFO wordmark in white with three ember dots beside it, centred on a black field.",
+      "og:image:alt": SHARE_CARD_ALT,
       "twitter:card": "summary_large_image",
       "twitter:title": "UFO — Build the unknown.",
       "twitter:description": "UFO. Build the unknown.",
@@ -676,6 +679,8 @@ const LEGAL = [
     path: "/privacy",
     document: PRIVACY_PAGE,
     title: "Privacy Policy",
+    description: PRIVACY_DESCRIPTION,
+    canonical: "https://ufo.ai/privacy",
     headings: [
       "1. Information We Collect",
       "2. How We Use Information",
@@ -691,6 +696,8 @@ const LEGAL = [
     path: "/terms",
     document: TERMS_PAGE,
     title: "Terms of Service",
+    description: TERMS_DESCRIPTION,
+    canonical: "https://ufo.ai/terms",
     headings: [
       "1. Use of the Service",
       "2. Accounts",
@@ -752,6 +759,106 @@ test("no public surface links to a legal page", async () => {
   for (const { path } of LEGAL) {
     assert.doesNotMatch(LANDING_PAGE, new RegExp(path));
     assert.doesNotMatch(card, new RegExp(path));
+  }
+});
+
+// Nothing links to these pages, so a search engine has the head and nothing else to work with:
+// each one says what it is, where it lives, and what an unfurler draws, as the home page does.
+test("each legal page carries its own description, canonical URL, and share tags", async () => {
+  for (const legal of LEGAL) {
+    const served = await (
+      await request(`https://flyingobject.ai${legal.path}`, { ua: "Mozilla/5.0" })
+    ).text();
+    assert.match(served, new RegExp(`<meta name="description" content="${legal.description}" />`));
+    assert.match(served, new RegExp(`<link rel="canonical" href="${legal.canonical}" />`));
+    const tags = shareTags(served);
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(tags).map(([name, { content }]) => [name, content])),
+      {
+        "og:type": "website",
+        "og:site_name": "UFO",
+        "og:url": legal.canonical,
+        "og:title": legal.title,
+        "og:description": legal.description,
+        "og:image": SHARE_CARD,
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "og:image:type": "image/jpeg",
+        "og:image:alt": SHARE_CARD_ALT,
+        "twitter:card": "summary_large_image",
+        "twitter:title": legal.title,
+        "twitter:description": legal.description,
+        "twitter:image": SHARE_CARD,
+      },
+    );
+    for (const [name, { kind }] of Object.entries(tags)) {
+      assert.equal(kind, name.startsWith("og:") ? "property" : "name", name);
+    }
+  }
+});
+
+const locations = (xml) => [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)].map(([, loc]) => loc);
+const refusals = (rules) => [...rules.matchAll(/^Disallow: (\S+)$/gm)].map(([, path]) => path);
+
+// Every page the apex has: the home page and the two legal documents.
+const INDEXED = ["https://ufo.ai/", ...LEGAL.map(({ canonical }) => canonical)];
+
+// What Search Console is given to submit. The apex is written out on every door, matching the
+// canonical tag each page carries, so a crawler reading the testing door is sent to the real one.
+test("the sitemap lists the home page and each legal page at its canonical URL", async () => {
+  const reply = await request("https://flyingobject.ai/sitemap.xml", { ua: "Googlebot/2.1" });
+  assert.equal(reply.status, 200);
+  assert.equal(reply.headers.get("content-type"), "application/xml; charset=utf-8");
+  assert.equal(reply.headers.get("cache-control"), "public, max-age=600");
+  const served = await reply.text();
+  assert.match(served, /^<\?xml version="1\.0" encoding="UTF-8"\?>\n/);
+  assert.match(served, /<urlset xmlns="http:\/\/www\.sitemaps\.org\/schemas\/sitemap\/0\.9">/);
+  assert.deepEqual(locations(served), INDEXED);
+});
+
+// A listed URL that answers with anything but a document is a crawl error Search Console reports,
+// so every entry is fetched back off the worker that published it.
+test("every page the sitemap lists is served as a document", async () => {
+  for (const location of INDEXED) {
+    const reply = await request(`https://flyingobject.ai${new URL(location).pathname}`, {
+      ua: "Mozilla/5.0",
+    });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
+  }
+});
+
+// The zone's managed file is comments alone, so the crawl rules and the sitemap live here.
+test("robots.txt opens the pages, refuses the endpoints, and names the sitemap", async () => {
+  const reply = await request("https://flyingobject.ai/robots.txt", { ua: "Googlebot/2.1" });
+  assert.equal(reply.status, 200);
+  assert.equal(reply.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(reply.headers.get("cache-control"), "public, max-age=600");
+  const served = await reply.text();
+  assert.match(served, /^User-agent: \*\nAllow: \/\n/);
+  assert.deepEqual(refusals(served), ["/waitlist", "/ufo", "/fleet", "/v1/onboard/", "/login"]);
+  assert.match(served, /^Sitemap: https:\/\/ufo\.ai\/sitemap\.xml$/m);
+});
+
+// One file inviting a path the other forbids is the shape Search Console reports as a blocked
+// submitted URL, so the two are read against each other.
+test("no page the sitemap lists is a path robots.txt refuses", async () => {
+  const refused = refusals(await (await request("https://flyingobject.ai/robots.txt")).text());
+  for (const location of INDEXED) {
+    const { pathname } = new URL(location);
+    assert.deepEqual(
+      refused.filter((path) => pathname.startsWith(path)),
+      [],
+      pathname,
+    );
+  }
+});
+
+test("the crawl files over plain http are bounced to https", async () => {
+  for (const path of ["/robots.txt", "/sitemap.xml"]) {
+    const reply = await request(`http://flyingobject.ai${path}`, { ua: "Googlebot/2.1" });
+    assert.equal(reply.status, 301);
+    assert.equal(reply.headers.get("location"), `https://flyingobject.ai${path}`);
   }
 });
 
