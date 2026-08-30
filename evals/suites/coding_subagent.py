@@ -1,7 +1,9 @@
 """Coding-subagent cases grade delegation through the `coding` profile and isolated fan-out."""
 
+import asyncio
 import json
 import re
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -103,6 +105,9 @@ STRUCTURED_REVIEW_OBJECTIVE = (
     + json.dumps(STRUCTURED_REVIEW_RESULT, separators=(",", ":"))
 )
 STRUCTURED_AGENT_NAME = "structured-worker"
+TASK_REPOSITORY = "dclm"
+TASK_REPOSITORY_FILES = ("README.md", "src/model.py", "tests/test_model.py")
+GIT_IDENTITY = ("-c", "user.email=evals@localhost", "-c", "user.name=evals")
 
 
 def _recommended_timeout_actions(text: str) -> tuple[str, ...]:
@@ -220,6 +225,149 @@ def workspace_agent_result_scorer(objective: str, expected: JsonObject) -> Grade
         "one default-contract workspace agent returns a complete machine-readable review finding",
         grade,
     )
+
+
+def task_environment_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        loads = tuple(
+            call
+            for call in output.own_calls
+            if call.name == "load_skill" and call.input.get("name") == "coding"
+        )
+        if not loads:
+            return CapabilityVerdict(False, "the parent did not load the coding workflow")
+        spawns = tuple(call for call in output.own_calls if call.name == "spawn")
+        if not spawns:
+            return CapabilityVerdict(False, "the parent did not delegate the existing checkout")
+        first = spawns[0]
+        earlier = output.own_calls[: output.own_calls.index(first)]
+        lookups = tuple(call for call in earlier if call.name == "bash")
+        if not lookups or any(
+            token in str(call.input.get("command", "")).casefold()
+            for call in lookups
+            for token in ("clone", "fetch", "ls-files", " cat ", " sed ")
+        ):
+            return CapabilityVerdict(False, "the parent did not limit its shell use to path lookup")
+        payload = first.input.get("payload")
+        objective = payload.get("objective") if isinstance(payload, dict) else None
+        target = first.input.get("target")
+        if (
+            not isinstance(target, str)
+            or target.removeprefix("profile:") != "coding"
+            or not isinstance(objective, str)
+            or "use the existing checkout at /workspace/dclm" not in objective.casefold()
+            or "do not clone or fetch" not in objective.casefold()
+        ):
+            return CapabilityVerdict(False, "the parent did not delegate the discovered path")
+        if any(
+            call.name in {"memory_search", "call_external_tool", "search_web"} for call in earlier
+        ):
+            return CapabilityVerdict(
+                False, "the parent searched remotely before using the checkout"
+            )
+        return CapabilityVerdict(True, "the discovered checkout was delegated by exact path")
+
+    return DescribedGrader(
+        "the parent locates a named checkout and delegates its exact path without repository work",
+        grade,
+    )
+
+
+def workspace_repository_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        loads = tuple(
+            call
+            for call in output.own_calls
+            if call.name == "load_skill" and call.input.get("name") == "coding"
+        )
+        if not loads:
+            return CapabilityVerdict(False, "the parent did not load the coding workflow")
+        spawns = tuple(call for call in output.own_calls if call.name == "spawn")
+        if not spawns:
+            return CapabilityVerdict(False, "the parent did not delegate the shared checkout")
+        first = spawns[0]
+        payload = first.input.get("payload")
+        objective = payload.get("objective") if isinstance(payload, dict) else None
+        target = first.input.get("target")
+        if (
+            not isinstance(target, str)
+            or target.removeprefix("profile:") != "coding"
+            or not isinstance(objective, str)
+            or "use the existing checkout at /workspace/dclm" not in objective.casefold()
+            or objective.casefold().lstrip().startswith("repository setup: clone")
+        ):
+            return CapabilityVerdict(False, "the parent did not use the shared checkout")
+        if any(
+            call.name in {"bash", "glob", "read"}
+            for call in output.own_calls[: output.own_calls.index(first)]
+        ):
+            return CapabilityVerdict(False, "the parent inspected before delegating")
+        return CapabilityVerdict(True, "the shared checkout stayed delegated")
+
+    return DescribedGrader(
+        "the parent loads coding and delegates an existing checkout under /workspace",
+        grade,
+    )
+
+
+def url_repository_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        loads = tuple(
+            call
+            for call in output.own_calls
+            if call.name == "load_skill" and call.input.get("name") == "coding"
+        )
+        if not loads:
+            return CapabilityVerdict(False, "the parent did not load the coding workflow")
+        spawns = tuple(call for call in output.own_calls if call.name == "spawn")
+        if not spawns:
+            return CapabilityVerdict(False, "the parent did not delegate the URL-backed task")
+        first = spawns[0]
+        payload = first.input.get("payload")
+        objective = payload.get("objective") if isinstance(payload, dict) else None
+        target = first.input.get("target")
+        if (
+            not isinstance(target, str)
+            or target.removeprefix("profile:") != "coding"
+            or not isinstance(objective, str)
+            or "clone https://github.com/octocat/Hello-World" not in objective
+        ):
+            return CapabilityVerdict(False, "the parent did not delegate with the repository URL")
+        if any(
+            call.name in {"bash", "glob", "read"}
+            for call in output.own_calls[: output.own_calls.index(first)]
+        ):
+            return CapabilityVerdict(False, "the parent inspected before delegating")
+        return CapabilityVerdict(True, "the URL-backed task stayed delegated")
+
+    return DescribedGrader(
+        "the parent loads coding and delegates a URL-backed repository before inspecting it",
+        grade,
+    )
+
+
+async def prepare_task_repository(_workspace_id: UUID, workspace_dir: Path) -> None:
+    repository = workspace_dir / TASK_REPOSITORY
+    await asyncio.to_thread(repository.mkdir, parents=True)
+    for relative in TASK_REPOSITORY_FILES:
+        path = repository / relative
+        await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(path.write_text, f"{relative}\n")
+    for argv in (
+        ("init", "--initial-branch", "main"),
+        ("add", *TASK_REPOSITORY_FILES),
+        (*GIT_IDENTITY, "commit", "-m", "fixture"),
+    ):
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            *argv,
+            cwd=repository,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _out, error = await process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError(f"git {' '.join(argv)} failed: {error.decode().strip()}")
 
 
 async def _seed_structured_agent(
@@ -1596,6 +1744,36 @@ CASES = (
         parallel_checkout_scorer(),
         web_dependent=True,
         digest_tag="delegation:coding-subagent-parallel-checkouts",
+    ),
+    CapabilityCase(
+        "coding-subagent-task-environment",
+        "Use the coding workflow to report the number of tracked files in my repository dclm. Do "
+        "not change it. Stop after the first attempted route; do not retry failed tools or "
+        "delegate substitute workers.",
+        task_environment_scorer(),
+        samples=1,
+        prepare=prepare_task_repository,
+        digest_tag="delegation:coding-subagent-task-environment:v6",
+    ),
+    CapabilityCase(
+        "coding-subagent-workspace-repository",
+        "Use the coding workflow to report the tracked-file count for the existing checkout at "
+        "/workspace/dclm. Do not change it. Stop after the first attempted route; do not retry "
+        "failed tools or delegate substitute workers.",
+        workspace_repository_scorer(),
+        samples=1,
+        prepare=prepare_task_repository,
+        digest_tag="delegation:coding-subagent-workspace-repository:v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-url-repository",
+        "Use the coding workflow to report the tracked-file count for "
+        "https://github.com/octocat/Hello-World. Do not change it. Stop after the first attempted "
+        "route; do not retry failed tools or delegate substitute workers.",
+        url_repository_scorer(),
+        samples=1,
+        web_dependent=True,
+        digest_tag="delegation:coding-subagent-url-repository:v2",
     ),
     CapabilityCase(
         "coding-subagent-github-app-api",
