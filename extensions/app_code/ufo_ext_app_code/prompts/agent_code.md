@@ -58,17 +58,9 @@ Coalesce the two finding lists. Merge findings that describe the same changed co
 
 Read the pull-request source again immediately before publication. Stop without publishing if the pull request is now draft, closed, merged, or has a different head SHA. If its head SHA changed, cancel or discard the current review and start again.
 
-Every write of this verdict runs in the sandbox, with the token assignment on the command:
+When the coalesced `findings` list is not empty, publish one GitHub pull-request review through the existing GitHub connection by calling:
 
-`GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api ...`
-
-Keep the assignment on each `gh` command. Never print the variable. That token is the installed ufo GitHub App where the workspace installed one, and the workspace's own stored GitHub token where it did not. An unmodified `gh` command, or a call through the GitHub connection, writes as the member whose account is connected and never as the App.
-
-Read each written object back to learn which identity carried it: on the review, `user.type` equal to `Bot` with `user.login` ending in `[bot]`; on the status, `creator.type` equal to `Bot`. Any other value is a workspace with no App installation, publishing under its own stored token — publish the whole verdict anyway, and name in your answer the identity that wrote the review and the identity that wrote the status. Do not probe the identity with `gh api user`: an installation token has no user. Do not read `GET /repos/{owner}/{repo}/commits/{head_sha}/status` either: an installation token cannot read that endpoint.
-
-When the coalesced `findings` list is not empty, publish one GitHub pull-request review by calling:
-
-`GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api --method POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews`
+`POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews`
 
 Use:
 
@@ -98,9 +90,9 @@ Before publication, verify that each `path` and `line` identifies a changed line
 
 When the coalesced `findings` list is empty, do not create a pull-request review.
 
-After review publication, publish the verdict as exactly one GitHub commit status by calling:
+After review publication, publish the verdict as exactly one GitHub commit status, through the existing GitHub connection, by calling:
 
-`GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api --method POST /repos/{owner}/{repo}/statuses/{head_sha}`
+`POST /repos/{owner}/{repo}/statuses/{head_sha}`
 
 Use:
 
@@ -110,7 +102,7 @@ Use:
 - `description`: `Review passed.` or `Review found N blocking defects.`
 - `target_url`: the published review URL when findings exist; otherwise, this conversation URL when available
 
-That commit status is the only permitted publication of the verdict. Never create a GitHub Check Run for it. Never call `POST /repos/{owner}/{repo}/check-runs`, with the GitHub connection or with any other credential, App token, or subagent. The context `ufo review` belongs to the commit status alone: a Check Run named `ufo review` also satisfies the branch rule, so a Check Run written there is invisible until a person reads the API. If a Check Run route ever publishes a verdict, it uses its own name and never `ufo review`.
+That commit status is the only permitted publication of the verdict. Never create a GitHub Check Run for it. Never call `POST /repos/{owner}/{repo}/check-runs`, with the GitHub connection or with any other credential, App token, or subagent. The context `ufo review` belongs to the commit status alone: a Check Run named `ufo review` also satisfies the branch rule, so a Check Run written there is invisible until a person reads the API. If a GitHub App token route ever publishes a verdict, it uses its own context name and never `ufo review`.
 
 If review or status publication fails, report the exact provider error and fail the turn. Do not claim that the review completed. Do not ask questions.
 

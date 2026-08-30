@@ -304,28 +304,6 @@ def test_the_review_agent_publishes_the_status_the_repository_requires() -> None
     assert "/repos/{owner}/{repo}/pulls/{pull_number}/reviews" in agent.spec.prompt
 
 
-def test_the_verdict_is_written_with_the_app_token_and_publishes_under_either_identity() -> None:
-    """The connection is a person's account, so a review or a status published through it arrives
-    under whoever armed the turn. `UFO_GITHUB_API_AUTH` is the App where the workspace installed one
-    and the stored member token where it did not, and it is a per-command prefix — so the prompt
-    names it on each write and reads the written object back, because an installation token has no
-    `gh api user` to probe. A person's identity there names itself and withholds nothing: the commit
-    status is the only publication of the verdict, so a head that never gets one never merges."""
-    prompt = " ".join(app_code.CODE_APP_PROMPT.split())
-    for write in (
-        "/repos/{owner}/{repo}/pulls/{pull_number}/reviews",
-        "/repos/{owner}/{repo}/statuses/{head_sha}",
-    ):
-        assert f'GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api --method POST {write}' in prompt
-    assert "through the existing GitHub connection" not in prompt
-    assert "Do not probe the identity with `gh api user`" in prompt
-    assert "`user.type` equal to `Bot` with `user.login` ending in `[bot]`" in prompt
-    assert "`creator.type` equal to `Bot`" in prompt
-    assert "publish the whole verdict anyway" in prompt
-    assert "name in your answer the identity that wrote the review" in prompt
-    assert "publish nothing further" not in prompt
-
-
 def test_the_review_agent_declares_the_account_it_cannot_arrive_with() -> None:
     """A shipped agent arrives with no grant, so the provision names the one kind of authority a
     member must give it: a GitHub account, which its publication calls through. The instructions
@@ -445,27 +423,3 @@ def test_the_merge_gate_holds_on_nothing_this_app_cannot_clear() -> None:
     assert re.search(r"thread this app's own review left is not\b", merging)
     assert "`ufo review` status on the head you merge is its answer" in merging
     assert "Resolve nothing" in merging
-
-
-def test_the_sweeps_own_writes_carry_the_app_identity_the_review_publishes_with() -> None:
-    """A decision comment, a thread reply and a merge all take the sandbox default `GH_TOKEN`, which
-    is the connected person's account — so an unprefixed command names a colleague as the author of
-    the sweep's decision. The rule has to reach the worker too: a worker reads its objective and
-    nothing else, so the sweep writes the prefix into every objective it sends. A workspace that
-    installed no App fills that variable with its own stored token: the identity read back is then a
-    person, which the round names and never halts on, or no pull request in scope ever merges."""
-    skill = " ".join(BABYSIT_SKILL_FILE.read_text().split())
-    assert 'GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api ...' in skill
-    assert 'GH_TOKEN="$UFO_GITHUB_API_AUTH" gh pr merge ...' in skill
-    assert "Do not probe the identity with `gh api user`" in skill
-    assert "`user.login` ending in `[bot]`" in skill
-    decision = skill.split("## A decision is never forced through", 1)[1].split("## ", 1)[0]
-    assert 'Post one comment with `GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api ...`' in decision
-    worker = skill.split("## What a worker may do", 1)[1].split("## ", 1)[0]
-    assert 'a thread reply runs as `GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api ...`' in worker
-    merging = skill.split("## Merging", 1)[1].split("## ", 1)[0]
-    assert 'Merge with `GH_TOKEN="$UFO_GITHUB_API_AUTH" gh pr merge ...`' in merging
-    # The gate is a read, and it stays the status the publisher writes.
-    assert "including `ufo review`" in merging
-    assert "write nothing further" not in skill
-    assert "name nobody further" not in skill
