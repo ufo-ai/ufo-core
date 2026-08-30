@@ -20,13 +20,18 @@ class Conversation(BaseModel):
     """The durable transcript: the message window at `seq`, plus — on a completed turn's write —
     the exact `system` string that turn's model calls ran with and the `injected` context its
     user_prompt_submit hooks contributed after the submitted message in the model context, so the
-    debug surface can show the full model input, not just the messages."""
+    debug surface can show the full model input, not just the messages.
+
+    `from_run` marks the write as the one the turn's own execution made, carrying what the turn
+    did. A write without it knows only the member's messages — the repair fallback for a turn whose
+    run may never have written, and every record stored before this field existed."""
 
     model_config = ConfigDict(strict=True)
     seq: int = Field(ge=1)
     messages: tuple[Message, ...]
     system: str | None = None
     injected: str | None = None
+    from_run: bool = False
 
 
 class TranscriptDecodeError(ValueError):

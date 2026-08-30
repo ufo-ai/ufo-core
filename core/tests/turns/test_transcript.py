@@ -161,7 +161,7 @@ async def test_stored_bytes_are_lz4_compact_json(tmp_path: Path) -> None:
     raw = await blob.get(transcript_key(conversation_id))
     decoded = lz4.frame.decompress(raw).decode()
     assert decoded == (
-        '{"seq":1,"messages":[{"role":"user","content":"hi"}],"system":null,"injected":null}'
+        '{"seq":1,"messages":[{"role":"user","content":"hi"}],"system":null,"injected":null,"from_run":false}'
     )
 
 
@@ -229,3 +229,74 @@ async def test_read_compaction_after_fetches_the_light_half_alone(tmp_path: Path
         Message(role="user", content="after 1"),
     )
     assert await read_compaction_after(blob, conversation_id, 2) is None
+
+
+async def test_a_shorter_run_record_never_clobbers_a_fuller_fallback_at_the_same_seq(
+    tmp_path: Path,
+) -> None:
+    """Defect from review: a turn that persists after its commit (an intent turn, or the
+    denied-founding path) rebuilds its record from a read that self-excludes the fallback's own
+    same-seq write, so it comes back holding only the founding and the answer. A redelivery lands
+    the full-history fallback first; the run's shorter record must not stand over it, or every
+    message before this turn is deleted and the next turn opens with no history."""
+    blob = FilesystemBlobStore(root=tmp_path)
+    conversation_id = uuid4()
+    transcript = Transcript(blob=blob, conversation_id=conversation_id)
+
+    # The repair fallback lands first at seq 3, carrying the whole conversation before this turn.
+    fallback = Conversation(
+        seq=3,
+        messages=(
+            Message(role="user", content="turn one"),
+            Message(role="assistant", content="answer one"),
+            Message(role="user", content="turn two"),
+            Message(role="assistant", content="answer two"),
+            Message(role="user", content="turn three founding"),
+        ),
+        from_run=False,
+    )
+    await transcript.write(fallback)
+
+    # The run's own record, rebuilt from a self-excluding read, holds only founding + answer.
+    truncated_run = Conversation(
+        seq=3,
+        messages=(
+            Message(role="user", content="turn three founding"),
+            Message(role="assistant", content="answer three"),
+        ),
+        from_run=True,
+    )
+    await transcript.write(truncated_run)
+
+    stored = await transcript.read()
+    assert stored is not None
+    assert len(stored.messages) == 5
+    assert stored.messages[0].content == "turn one"
+
+
+async def test_a_fuller_run_record_still_supersedes_the_thin_fallback(tmp_path: Path) -> None:
+    """The guard preserves the interrupt fix: a run whose record carries at least what the fallback
+    held still replaces it when the fallback landed first."""
+    blob = FilesystemBlobStore(root=tmp_path)
+    conversation_id = uuid4()
+    transcript = Transcript(blob=blob, conversation_id=conversation_id)
+    await transcript.write(
+        Conversation(
+            seq=2,
+            messages=(Message(role="user", content="founding"),),
+            from_run=False,
+        )
+    )
+    await transcript.write(
+        Conversation(
+            seq=2,
+            messages=(
+                Message(role="user", content="founding"),
+                Message(role="assistant", content="a tool call"),
+                Message(role="user", content="a tool result"),
+            ),
+            from_run=True,
+        )
+    )
+    stored = await transcript.read()
+    assert stored is not None and stored.from_run and len(stored.messages) == 3

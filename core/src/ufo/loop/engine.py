@@ -198,6 +198,10 @@ DENIED_INBOUND_NOTICE = "<denied_member_message>{reason}</denied_member_message>
 REQUESTED_BY_HINT = (
     " Set requested_by to the message_ref of the member who asked; active member messages: {refs}."
 )
+INTERRUPTED_TURN_NOTICE = (
+    "<interrupted_turn>The turn above ended before it answered. Everything it ran is above and "
+    "already happened — treat those results as done, and do not repeat them.</interrupted_turn>"
+)
 INJECTED_CONTEXT = "{content}\n\n<injected_context>\n{injected}\n</injected_context>"
 CONTEXT_TIME_FORMAT = "%A %Y-%m-%d %H:%M %Z"
 FORCE_FINAL_PROMPT = (
@@ -524,6 +528,23 @@ class _RejectedToolCall:
 
 type _DispatchInput = _BoundToolCall | _RejectedToolCall
 type _Resolution = EffectiveCall | _RejectedToolCall
+
+
+@dataclass
+class _RoundWindow:
+    """The turn's durable-so-far record, kept consistent through the round loop so an interrupt at
+    any point persists exactly what happened and nothing it did not. `messages` is snapshotted only
+    where the window is consistent — the founding once it is rendered, each arrival the moment it is
+    absorbed (its queue row is now consumed, so the record is the only place it survives), and each
+    round once its tool calls are all answered — never mid-round, where a call would lack its
+    result. `ran` is true once a round of THIS turn completed, so the interrupt notice is owed by
+    what this turn did, not by an assistant message an earlier turn left in the window. `denied` is
+    the safe founding-denial notice when a hook refused the founding message, set before any
+    cancellable step so an interrupt can never fall back to rendering the refused body."""
+
+    messages: tuple[Message, ...] = ()
+    ran: bool = False
+    denied: str | None = None
 
 
 @dataclass
@@ -956,6 +977,25 @@ class TranscriptRepair:
             (*messages, Message(role="assistant", content=answer)),
             system=system,
             injected=injected or None,
+            from_run=True,
+        )
+
+    async def persist_interrupted(self, messages: tuple[Message, ...], ran: bool) -> None:
+        """What the turn did, for a turn that ended without answering. The rounds it completed are
+        facts about the world — a deploy it dispatched, a file it wrote — and the next turn reads
+        this window as its history, so dropping them is how an interrupted turn comes to look like
+        one that never acted and runs them again. `messages` is the turn's own consistent window —
+        its founding, every arrival it absorbed, and every round it completed — snapshotted by the
+        loop only where every tool call is answered, so a partial answer or a raised mid-round error
+        cannot land. The empty case never reaches here: the caller owes the founding through
+        `persist_inbound` instead, which alone knows the safe notice for a refused founding.
+
+        `ran` is whether a round of THIS turn completed — the notice disowns what this turn did, so
+        it is owed by this turn's own work, never by an assistant message an earlier turn left in
+        the window."""
+        await self.write_conversation(
+            (*messages, Message(role="user", content=INTERRUPTED_TURN_NOTICE)) if ran else messages,
+            from_run=True,
         )
 
     async def persist_inbound(
@@ -1003,9 +1043,14 @@ class TranscriptRepair:
         messages: tuple[Message, ...],
         system: str | None = None,
         injected: str | None = None,
+        from_run: bool = False,
     ) -> None:
         conversation = Conversation(
-            seq=self.turn.seq, messages=messages, system=system, injected=injected
+            seq=self.turn.seq,
+            messages=messages,
+            system=system,
+            injected=injected,
+            from_run=from_run,
         )
         for attempt in range(TRANSCRIPT_WRITE_ATTEMPTS):
             try:
@@ -1155,6 +1200,7 @@ class TurnEngine:
     verbs: ObjectVerbs = field(default_factory=lambda: ObjectVerbs({}))
     granted_actions: frozenset[str] = frozenset()
     _activity: _ActivityState = field(default_factory=_ActivityState, init=False, repr=False)
+    _window: _RoundWindow = field(default_factory=_RoundWindow, init=False, repr=False)
     _find_usages: ContextVar[list[Usage] | None] = field(
         default_factory=lambda: ContextVar("find_usages", default=None),
         init=False,
@@ -1258,6 +1304,7 @@ class TurnEngine:
             auto_model=self.auto_model,
         )
         created: dict[ObjectRef, None] = dict.fromkeys(self.turn.created_refs)
+        messages: tuple[Message, ...] = ()
         try:
             if not await self._mark_running():
                 return await self._resolve_unclaimed()
@@ -1276,6 +1323,7 @@ class TurnEngine:
             pending_guard = not self.turn.spawned
             injected = inbound.injected
             if inbound.denied is not None:
+                self._window.denied = DENIED_INBOUND_NOTICE.format(reason=escape(inbound.denied))
                 denial = await self._commit(
                     "done",
                     usage_events,
@@ -1310,6 +1358,7 @@ class TurnEngine:
                 if injected:
                     rendered = INJECTED_CONTEXT.format(content=founding, injected=injected)
                     messages = (*messages[:-1], Message(role="user", content=rendered))
+            self._window.messages = messages
             change_paths: dict[str, None] = {}
             while True:
                 (
@@ -1361,7 +1410,7 @@ class TurnEngine:
                 if frame.status == "done":
                     await self._persist_transcript(final_messages, answer, system, injected)
                 else:
-                    await self._persist_inbound(tuple(arrival_log), founding_denial)
+                    await self._persist_interrupted(final_messages)
                 await self._publish_terminal(frame)
                 await self._record_workspace_changes(tuple(change_paths))
                 return frame
@@ -1373,7 +1422,7 @@ class TurnEngine:
             meter.exited(CANCELLED)
             await self._bill_cancelled(usage_events)
             await self._release_unabsorbed(tuple(absorbed_ids))
-            await self._persist_inbound(tuple(arrival_log), founding_denial)
+            await self._persist_interrupted(self._window.messages)
             await self._stop_sandbox_commands()
             raise
         except asyncio.CancelledError:
@@ -1387,7 +1436,7 @@ class TurnEngine:
             )
             try:
                 await self._release_unabsorbed(tuple(absorbed_ids))
-                await self._persist_inbound(tuple(arrival_log), founding_denial)
+                await self._persist_interrupted(self._window.messages)
             finally:
                 if frame is not None:
                     await self._publish_terminal(frame)
@@ -1653,6 +1702,7 @@ class TurnEngine:
             if len(absorbed) > len(messages):
                 question = None
             messages = absorbed
+            self._window.messages = messages
             await self._enforce_spend(usage_events, requesters)
             self._reseed_loaded_skills(messages)
             active_requests = tuple(message.rendered for message in requesters.values())
@@ -1806,6 +1856,8 @@ class TurnEngine:
                 Message(role="assistant", content=assistant_blocks),
                 Message(role="user", content=results),
             )
+            self._window.messages = messages
+            self._window.ran = True
         meter.incomplete_reason = ROUND_BUDGET_INCOMPLETE
         messages, text = await self._force_final(messages, usage_events, system, requesters)
         return messages, text, None, credential_request, connect_request
@@ -3550,7 +3602,18 @@ class TurnEngine:
     async def _persist_transcript(
         self, messages: tuple[Message, ...], answer: str, system: str, injected: str
     ) -> None:
-        labeled = tuple(
+        await self._repair().persist_transcript(self._labeled(messages), answer, system, injected)
+
+    async def _persist_interrupted(self, messages: tuple[Message, ...]) -> None:
+        if messages:
+            await self._repair().persist_interrupted(self._labeled(messages), ran=self._window.ran)
+        else:
+            await self._repair().persist_inbound(founding_denial=self._window.denied)
+
+    def _labeled(self, messages: tuple[Message, ...]) -> tuple[Message, ...]:
+        """The window with each tool result carrying the activity line this turn showed for it, so
+        a stored record reads the way the surface did."""
+        return tuple(
             message.model_copy(
                 update={
                     "content": tuple(
@@ -3573,11 +3636,3 @@ class TurnEngine:
             else message
             for message in messages
         )
-        await self._repair().persist_transcript(labeled, answer, system, injected)
-
-    async def _persist_inbound(
-        self,
-        arrivals: tuple[Message, ...] = (),
-        founding_denial: str | None = None,
-    ) -> None:
-        await self._repair().persist_inbound(arrivals, founding_denial)

@@ -72,6 +72,7 @@ from ufo.loop.engine import (
     FORCE_FINAL_PROMPT,
     FORCE_FINISH_PROMPT,
     FRESH_CLAIM,
+    INTERRUPTED_TURN_NOTICE,
     MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
     MODEL_TRUNCATED_ERROR_CLASS,
@@ -91,6 +92,7 @@ from ufo.loop.engine import (
     DispatchResult,
     EffectiveCall,
     ModelStreamError,
+    TranscriptRepair,
     TurnEngine,
     TurnParked,
     _bounded,
@@ -385,6 +387,39 @@ class CancelThenFailModel:
             )
         raise RuntimeError("round failed after the row went terminal")
         yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass(frozen=True)
+class InterruptOnFirstRoundModel:
+    """Raises on the first model stream. A member message queued before the turn runs is absorbed
+    at the round top, then this interrupt hits before the round completes — the arrival must still
+    reach the record even though no round of this turn finished."""
+
+    error: Exception
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        raise self.error
+        yield TextDelta(text="")
+
+
+@dataclass(frozen=True)
+class ToolThenInterruptedModel:
+    """Emits one bash tool call, then raises once its result is back — a turn whose side effect has
+    already happened when the interruption reaches it."""
+
+    error: Exception
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        ran = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if ran:
+            raise self.error
+        yield ToolCallStart(id="c1", name="bash")
+        yield ToolCallDelta(id="c1", partial_json='{"command": "echo shipped"}')
+        yield Usage(input_tokens=2, output_tokens=2)
 
 
 @dataclass(frozen=True)
@@ -3319,16 +3354,16 @@ async def test_an_executor_preemption_is_metered_apart_from_a_cancel(
 async def test_a_cancelled_execution_meters_before_the_writes_that_can_fail(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The cancel handler persists the inbound so the next turn still sees it, and that write is not
-    best-effort. The execution ended when the cancel reached it, so its wall clock is recorded
-    before anything that can raise past it."""
+    """The cancel handler persists what the turn did so the next turn still sees it, and that write
+    is not best-effort. The execution ended when the cancel reached it, so its wall clock is
+    recorded before anything that can raise past it."""
     reader = _metric_capture(monkeypatch)
     turn = await _seed_turn("queued", None)
 
     async def blob_fault(*args: object, **kwargs: object) -> None:
         raise RuntimeError("blob store down")
 
-    monkeypatch.setattr("ufo.loop.engine.TranscriptRepair.persist_inbound", blob_fault)
+    monkeypatch.setattr("ufo.loop.engine.TranscriptRepair.persist_interrupted", blob_fault)
     with pytest.raises(RuntimeError, match="blob store down"):
         await _engine(turn, WorkflowCancelModel(), tmp_path).run()
     points = _exported_metrics(reader)
@@ -8198,3 +8233,230 @@ async def test_a_byok_turn_is_never_parked_by_an_empty_balance(db: None, tmp_pat
         await set_reserve(connection, turn.workspace_id, 10_000_000)
     engine = _engine(turn, EchoModel(), tmp_path, byok=True)
     await engine._enforce_spend([Usage(input_tokens=1_000_000)], {})
+
+
+def _ran_commands(stored: Conversation) -> list[str]:
+    return [
+        str(block.input.get("command", ""))
+        for message in stored.messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolUseBlock)
+    ]
+
+
+async def test_a_cancelled_turn_hands_the_next_turn_what_it_already_ran(
+    db: None, tmp_path: Path
+) -> None:
+    """The turn dispatched something real before the cancel reached it. The next turn reads this
+    window as its history, so the record of that has to survive — a turn whose side effects are
+    invisible to its successor is a turn the successor runs again."""
+    turn = await _seed_turn("queued", None)
+    engine = _engine(
+        turn, ToolThenInterruptedModel(DBOSWorkflowCancelledError("cancelled")), tmp_path
+    )
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await engine.run()
+    stored = await engine.transcript.read()
+    assert stored is not None and stored.from_run
+    assert _ran_commands(stored) == ["echo shipped"]
+    assert any(
+        message.content == INTERRUPTED_TURN_NOTICE
+        for message in stored.messages
+        if isinstance(message.content, str)
+    )
+
+
+async def test_a_failed_turn_hands_the_next_turn_what_it_already_ran(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = _engine(turn, ToolThenInterruptedModel(RuntimeError("model exploded")), tmp_path)
+    with pytest.raises(ModelStreamError, match="model exploded"):
+        await engine.run()
+    stored = await engine.transcript.read()
+    assert stored is not None and stored.from_run
+    assert _ran_commands(stored) == ["echo shipped"]
+
+
+async def test_the_repair_fallback_never_strands_the_record_the_run_wrote(
+    db: None, tmp_path: Path
+) -> None:
+    """The terminal row is committed before the blob is written, so a redelivery can reach the
+    fallback while the run that owns the seq is still writing. Ranking by seq alone would let
+    whichever landed first stand, and the fallback knows nothing the turn did."""
+    turn = await _seed_turn("queued", None)
+    engine = _engine(
+        turn, ToolThenInterruptedModel(DBOSWorkflowCancelledError("cancelled")), tmp_path
+    )
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await engine.run()
+
+    await TranscriptRepair(
+        turn=turn, transcript=engine.transcript, hub=engine.hub
+    ).persist_inbound()
+
+    stored = await engine.transcript.read()
+    assert stored is not None and stored.from_run
+    assert _ran_commands(stored) == ["echo shipped"]
+
+
+async def test_the_run_record_replaces_a_fallback_that_landed_first(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    engine = _engine(
+        turn, ToolThenInterruptedModel(DBOSWorkflowCancelledError("cancelled")), tmp_path
+    )
+    await TranscriptRepair(
+        turn=turn, transcript=engine.transcript, hub=engine.hub
+    ).persist_inbound()
+    assert not (await engine.transcript.read()).from_run
+
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await engine.run()
+    stored = await engine.transcript.read()
+    assert stored is not None and stored.from_run
+    assert _ran_commands(stored) == ["echo shipped"]
+
+
+async def test_a_deploy_roll_then_a_cancel_still_hands_over_the_rounds_it_ran(
+    db: None, tmp_path: Path
+) -> None:
+    """The incident's own shape. A deploy roll pre-empts the run mid-turn, which writes nothing and
+    leaves the turn to DBOS. The re-run replays the recorded rounds — rebuilding the window as it
+    re-folds each one — and when the turn is then cancelled for good, what it ran reaches the next
+    turn all the same. Losing it here is how a dispatched deploy becomes a deploy dispatched twice.
+    """
+    turn = await _seed_turn("queued", None)
+    with pytest.raises(asyncio.CancelledError):
+        await _engine(turn, ExecutorDeathModel(), tmp_path).run()
+    transcript = Transcript(
+        blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
+    )
+    assert await transcript.read() is None
+
+    engine = _engine(
+        turn, ToolThenInterruptedModel(DBOSWorkflowCancelledError("cancelled")), tmp_path
+    )
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await engine.run()
+    stored = await transcript.read()
+    assert stored is not None and stored.from_run
+    assert _ran_commands(stored) == ["echo shipped"]
+
+
+async def test_an_arrival_absorbed_by_an_interrupted_round_survives_in_the_record(
+    db: None, tmp_path: Path
+) -> None:
+    """Defect from review: a member message queued before the turn runs is absorbed at the round
+    top and its queue row stamped consumed; the round is then cancelled before it completes. The
+    absorbed arrival is in no queue any later turn drains, so the record is the only place it can
+    survive — dropping it loses the member's message."""
+    turn = await _seed_turn("queued", None)
+    await _queue_arrival(turn, "second member message", admission_source="member")
+    engine = _engine(
+        turn, InterruptOnFirstRoundModel(DBOSWorkflowCancelledError("cancelled")), tmp_path
+    )
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await engine.run()
+    stored = await engine.transcript.read()
+    assert stored is not None and stored.from_run
+    bodies = [m.content for m in stored.messages if isinstance(m.content, str)]
+    assert any("second member message" in b for b in bodies)
+    assert all(INTERRUPTED_TURN_NOTICE not in b for b in bodies)
+
+
+async def test_a_turn_that_ran_nothing_appends_no_notice_after_a_prior_exchange(
+    db: None, tmp_path: Path
+) -> None:
+    """Defect from review: the interrupt notice must be owed by THIS turn's work, not by an
+    assistant message an earlier turn left in the window. A turn cancelled before any round
+    completes, in a conversation that already holds a finished exchange, must not claim work."""
+    turn = await _seed_turn("queued", None, seq=2)
+    transcript = Transcript(
+        blob=FilesystemBlobStore(root=tmp_path), conversation_id=turn.conversation_id
+    )
+    await transcript.write(
+        Conversation(
+            seq=1,
+            messages=(
+                Message(role="user", content="earlier ask"),
+                Message(role="assistant", content="earlier answer"),
+            ),
+        )
+    )
+    engine = _engine(
+        turn, InterruptOnFirstRoundModel(DBOSWorkflowCancelledError("cancelled")), tmp_path
+    )
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await engine.run()
+    stored = await transcript.read()
+    assert stored is not None and stored.seq == 2
+    assert all(
+        INTERRUPTED_TURN_NOTICE not in m.content
+        for m in stored.messages
+        if isinstance(m.content, str)
+    )
+
+
+async def test_an_interrupt_after_a_denied_founding_never_records_the_refused_body(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect from review: a user_prompt_submit hook denies the founding message; an arrival keeps
+    the turn open; the turn is then interrupted inside the first round before its window is built.
+    The interrupt record must carry the safe denial notice, never the refused body — a record at
+    from_run=True the next turn would otherwise send straight to the model."""
+    blocked = "founding secret the model must never see"
+    turn = (await _seed_turn("queued", None)).model_copy(update={"inbound": blocked})
+    async with workspace_tx() as connection:
+        founder = (
+            await connection.execute(
+                sa.select(tables.member.c.id).where(
+                    tables.member.c.workspace_id == turn.workspace_id
+                )
+            )
+        ).scalar_one()
+    await _queue_arrival(turn, "allowed follow-up", founder)
+
+    async def deny_founder(ctx: HookContext) -> HookOutcome:
+        if isinstance(ctx.payload, UserPromptSubmit) and ctx.payload.text == blocked:
+            return Deny(reason="The founding message was refused.")
+        return None
+
+    engine = _engine(turn.model_copy(update={"speaker_member_id": founder}), EchoModel(), tmp_path)
+    engine = replace(
+        engine,
+        hooks=HookChain(
+            hooks={
+                "user_prompt_submit": (
+                    BoundHook(
+                        spec=HookSpec(event="user_prompt_submit", handler=deny_founder),
+                        ext=context_for("probe", frozenset(), audience=engine.audience),
+                    ),
+                )
+            },
+            audience=engine.audience,
+        ),
+    )
+
+    # A cancel lands while the denial branch builds its context — before the founding window is
+    # seeded — so the interrupt persists from the empty-window fallback, the one path that could
+    # re-derive the founding from the raw inbound.
+    real_prior = TranscriptRepair._prior_messages
+    calls = {"n": 0}
+
+    async def prior_then_cancel(self: TranscriptRepair) -> tuple[Message, ...]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise DBOSWorkflowCancelledError("cancelled")
+        return await real_prior(self)
+
+    monkeypatch.setattr(TranscriptRepair, "_prior_messages", prior_then_cancel)
+    with pytest.raises(DBOSWorkflowCancelledError):
+        await engine.run()
+    stored = await engine.transcript.read()
+    assert stored is not None
+    for message in stored.messages:
+        assert isinstance(message.content, str)
+        assert blocked not in message.content
