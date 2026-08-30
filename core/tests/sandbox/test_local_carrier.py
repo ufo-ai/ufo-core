@@ -464,6 +464,24 @@ async def test_the_serve_environment_does_not_reach_a_command(
     assert lifted.stdout == "spec-carried"
 
 
+async def test_the_local_runtime_environment_reaches_a_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NODE_PATH", "/runtime/node_modules")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/runtime/playwright")
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    argv = ("bash", "-lc", 'printf "%s|%s" "$NODE_PATH" "$PLAYWRIGHT_BROWSERS_PATH"')
+
+    created = await carrier.exec(await carrier.create(_spec(workspace)), argv, 30)
+    attached_handle = await carrier.attach(_spec(workspace))
+    assert attached_handle is not None
+    attached = await carrier.exec(attached_handle, argv, 30)
+
+    assert created.stdout == "/runtime/node_modules|/runtime/playwright"
+    assert attached.stdout == created.stdout
+
+
 async def test_exec_reaches_a_service_on_the_sandbox_loopback(tmp_path: Path) -> None:
     """A proxy-aware client in the sandbox reaches a service the turn started on the sandbox's own
     loopback. The proxy admits only globally routable destinations, so a loopback request routed to

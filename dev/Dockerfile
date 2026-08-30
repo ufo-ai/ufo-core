@@ -16,6 +16,9 @@ RUN GOTOOLCHAIN=local CGO_ENABLED=0 \
     go install -trimpath -ldflags='-s -w' github.com/cli/cli/v2/cmd/gh@v2.97.0 \
     && gzip -9 /go/bin/gh
 
+FROM node:24.19.0-bookworm-slim AS node
+RUN npm install -g --prefix /usr/local --no-fund --no-audit vite playwright@1.62.0
+
 FROM rust:1-bookworm AS client
 WORKDIR /client
 # Cargo validates every target the manifest declares before it selects one, so the benches the
@@ -47,6 +50,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:0.9.7 /uv /usr/local/bin/uv
 COPY --from=control /usr/local/bin/ufo-control /usr/local/bin/ufo-control
 COPY --from=client /usr/local/bin/ufo /usr/local/bin/ufo
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -s ../lib/node_modules/vite/bin/vite.js /usr/local/bin/vite \
+    && ln -s ../lib/node_modules/playwright/cli.js /usr/local/bin/playwright
+
+ENV NODE_PATH=/usr/local/lib/node_modules
+ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/lib/playwright
+
+RUN playwright install-deps chromium \
+    && playwright install chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chromium_path="$(node -e "process.stdout.write(require('playwright').chromium.executablePath())")" \
+    && test -x "$chromium_path" \
+    && ln -s "$chromium_path" /usr/local/bin/chromium \
+    && chromium --version
 
 # The local Postgres speaks no TLS, so `sslmode=prefer` falls back to plaintext and no bundle is
 # needed here — the compose DSNs stay as they are.

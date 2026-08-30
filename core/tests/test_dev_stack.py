@@ -4,6 +4,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from sandbox.build_template import NODE_VERSION
+from ufo.sdk.sandbox import NODE_GLOBAL_MODULES, PLAYWRIGHT_BROWSERS_DIR, PLAYWRIGHT_VERSION
+
 REPO = Path(__file__).parents[2]
 
 
@@ -91,6 +94,25 @@ def test_stack_passes_every_model_provider_key() -> None:
     assert serve["UFO_ANTHROPIC_API_KEY"] == "${UFO_ANTHROPIC_API_KEY:-}"
     assert serve["UFO_OPENAI_API_KEY"] == "${UFO_OPENAI_API_KEY:-}"
     assert serve["OPENROUTER_API_KEY"] == "${OPENROUTER_API_KEY:-}"
+
+
+def test_local_sandbox_has_the_application_builder_runtime() -> None:
+    dockerfile = (REPO / "dev/Dockerfile").read_text()
+
+    assert f"FROM node:{NODE_VERSION}-bookworm-slim AS node" in dockerfile
+    assert f"playwright@{PLAYWRIGHT_VERSION}" in dockerfile
+    assert "--no-audit vite playwright@" in dockerfile
+    assert "COPY --from=node /usr/local/bin/node /usr/local/bin/node" in dockerfile
+    assert "COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules" in dockerfile
+    assert "ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm" in dockerfile
+    assert "ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx" in dockerfile
+    assert "ln -s ../lib/node_modules/vite/bin/vite.js /usr/local/bin/vite" in dockerfile
+    assert "ln -s ../lib/node_modules/playwright/cli.js /usr/local/bin/playwright" in dockerfile
+    assert f"ENV NODE_PATH={NODE_GLOBAL_MODULES}" in dockerfile
+    assert f"ENV PLAYWRIGHT_BROWSERS_PATH={PLAYWRIGHT_BROWSERS_DIR}" in dockerfile
+    assert "playwright install chromium" in dockerfile
+    assert 'test -x "$chromium_path"' in dockerfile
+    assert 'ln -s "$chromium_path" /usr/local/bin/chromium' in dockerfile
 
 
 def test_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> None:

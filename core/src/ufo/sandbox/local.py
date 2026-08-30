@@ -61,7 +61,14 @@ from ufo.sandbox.session import (
 
 LOCAL_CONTAINER_ID = "local"
 LOCAL_PROXY_HOST = "127.0.0.1"
-ENV_PASSTHROUGH = ("TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
+ENV_PASSTHROUGH = (
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "NODE_PATH",
+    "PLAYWRIGHT_BROWSERS_PATH",
+)
 CA_FILENAME = "egress-ca.pem"
 EXEC_TIMEOUT_CODE = 124
 READ_CHUNK_BYTES = 1024 * 1024
