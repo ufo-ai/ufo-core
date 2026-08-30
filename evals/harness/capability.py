@@ -346,8 +346,9 @@ class CapabilityCase:
     """A message and its deterministic and semantic criteria. `web_dependent` infra-excludes an
     external outage; `samples` re-runs the case and passes if any sample passes; `digest_tag`
     stabilizes the suite digest. `member_key`, when set, is the exact email of the workspace member
-    whose private memory the eval conversation may recall. `followup`, when set, derives one second
-    inbound from the first turn's output and durable state; returning None grades the first turn.
+    whose private memory the eval conversation may recall. `followup`, when set, derives each next
+    inbound from the current output and durable state; returning None ends the conversation, and
+    `followup_turns` bounds the admitted followup turns.
     `rubric` judges the answer text — with `answer_spans_artifacts`, the Markdown the turn shared
     joins that answer, for a case whose reply is expected to carry its detail in a shared file
     rather than inline; `artifact_rubric` judges the Markdown files the turn shared, or, when
@@ -384,6 +385,7 @@ class CapabilityCase:
     undelivered: tuple[UndeliveredRound, ...] = ()
     references: tuple[CapabilityReference, ...] = ()
     followup: CapabilityFollowup | None = None
+    followup_turns: int = 1
     seed: CapabilitySeed | None = None
     prepare: WorkspacePrepare | None = None
     cleanup: CapabilitySeed | None = None
@@ -402,6 +404,8 @@ class CapabilityCase:
             )
         if self.followup_artifact_probe is not None and self.followup is None:
             raise ValueError("a followup artifact probe requires a followup")
+        if self.followup_turns < 1:
+            raise ValueError("followup_turns must be at least 1")
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -464,6 +468,7 @@ class CapabilityCase:
             ]
         if self.followup is not None:
             payload["followup"] = source_digest(self.followup)
+            payload["followupTurns"] = self.followup_turns
         if self.seed is not None:
             payload["seed"] = source_digest(self.seed)
         if self.prepare is not None:
@@ -629,64 +634,77 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
     if not result.clean:
         return CapabilitySample(result.output, _unclean_verdict(result), result.trajectory)
     if case.followup is not None:
-        message = await case.followup(result.output)
-        if message is not None:
-            trajectory = result.trajectory
+        trajectory = result.trajectory
+        first_output = result.output
+        for index in range(case.followup_turns):
+            message = await case.followup(result.output)
+            if message is None:
+                break
             if trajectory is None:
                 return CapabilitySample(
                     result.output,
                     CapabilityVerdict(False, "followup requires the first turn trajectory"),
                     None,
                 )
-            first_output = result.output
+            prior_output = result.output
             result = await target.step(
                 trajectory.conversation_id,
                 message,
-                f"{case.name}:followup:{trajectory.conversation_id}",
+                (
+                    f"{case.name}:followup:{trajectory.conversation_id}"
+                    if case.followup_turns == 1
+                    else f"{case.name}:followup:{index}:{trajectory.conversation_id}"
+                ),
             )
-            output = replace(result.output, workspace_dir=first_output.workspace_dir)
+            step_output = result.output
+            output = replace(step_output, workspace_dir=first_output.workspace_dir)
+            followup_probe_failed = False
             if case.followup_artifact_probe is not None:
-                output = await target.capture_artifacts(
+                probed = await target.capture_artifacts(
                     trajectory.conversation_id,
                     output,
                     case.followup_artifact_probe,
                 )
-            followup_has_artifact_evidence = bool(output.artifacts or output.artifact_references)
+                followup_probe_failed = probed.artifact_error != output.artifact_error
+                output = probed
+            followup_owns_artifact_evidence = bool(
+                output.artifacts or output.artifact_references or followup_probe_failed
+            )
             final_artifacts = (
-                output.artifacts if followup_has_artifact_evidence else first_output.artifacts
+                output.artifacts if followup_owns_artifact_evidence else prior_output.artifacts
             )
             final_artifact_references = (
                 output.artifact_references
-                if followup_has_artifact_evidence
-                else first_output.artifact_references
+                if followup_owns_artifact_evidence
+                else prior_output.artifact_references
             )
             _offline_artifacts(final_artifacts, final_artifact_references)
             result = replace(
                 result,
                 output=replace(
                     output,
-                    tokens=first_output.tokens + result.output.tokens,
-                    cost_micro_usd=first_output.cost_micro_usd + result.output.cost_micro_usd,
-                    calls=merge_tool_calls(first_output.calls, output.calls),
+                    tokens=prior_output.tokens + step_output.tokens,
+                    cost_micro_usd=prior_output.cost_micro_usd + step_output.cost_micro_usd,
+                    calls=merge_tool_calls(prior_output.calls, output.calls),
                     tool_errors=(
                         output.tool_errors
-                        if frozenset(call.call_id for call in first_output.calls if call.call_id)
+                        if frozenset(call.call_id for call in prior_output.calls if call.call_id)
                         & frozenset(call.call_id for call in output.calls if call.call_id)
-                        else (*first_output.tool_errors, *output.tool_errors)
+                        else (*prior_output.tool_errors, *output.tool_errors)
                     ),
                     artifacts=final_artifacts,
                     artifact_references=final_artifact_references,
                     artifact_error="; ".join(
                         error
-                        for error in (first_output.artifact_error, output.artifact_error)
+                        for error in (prior_output.artifact_error, output.artifact_error)
                         if error
                     ),
                     log=first_output.log,
                     compactions=first_output.compactions,
                     compaction_records=first_output.compaction_records,
                     timing=first_output.timing,
-                    handoffs=first_output.handoffs + result.output.handoffs,
-                    own_calls=merge_tool_calls(first_output.own_calls, output.own_calls),
+                    handoffs=prior_output.handoffs + step_output.handoffs,
+                    own_calls=merge_tool_calls(prior_output.own_calls, output.own_calls),
                 ),
             )
             if not result.clean:

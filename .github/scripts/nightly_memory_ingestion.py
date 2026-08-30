@@ -20,13 +20,13 @@ DATABASE_URL = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 SMOKE_CASES = (
     "longmem/118b2229",
     "locomo/conv-26/120",
-    "locomo/conv-26/146",
+    "locomo/conv-30/060",
     "longmem/9aaed6a3",
-    "locomo/conv-41/006",
+    "locomo/conv-49/002",
     "locomo/conv-41/021",
     "longmem/0bb5a684",
     "locomo/conv-26/062",
-    "locomo/conv-30/030",
+    "locomo/conv-42/037",
 )
 LONGMEM_SELECTION = Selection.model_validate_json(SELECTION_FILE.read_bytes()).longmem.model_dump()
 FULL_REPORT_CASES = {

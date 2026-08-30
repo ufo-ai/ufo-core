@@ -6683,6 +6683,196 @@ async def test_capability_followup_replaces_a_near_cap_initial_artifact_set() ->
     assert [item["name"] for item in artifact_contents] == ["final-preview.zip"]
 
 
+async def test_capability_followup_derives_each_bounded_turn_from_current_evidence() -> None:
+    conversation_id = uuid4()
+    stepped: list[tuple[str, str]] = []
+
+    async def followup(output: CapabilityOutput) -> str | None:
+        if output.response == "initial":
+            return "repair initial issues"
+        if output.response == "first repair":
+            return "repair remaining issues"
+        return None
+
+    async def capture(output: CapabilityOutput, _probe: WorkspaceProbe) -> ArtifactProbeResult:
+        return ArtifactProbeResult(
+            artifacts=(SharedArtifact(f"{output.response}.json", b"evidence"),)
+        )
+
+    @dataclass
+    class IterativeTarget:
+        judge: None = None
+
+        async def run(self, _case: CapabilityCase) -> TargetResult:
+            return TargetResult(
+                CapabilityOutput("initial", (), tokens=1),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content="initial"),),
+                ),
+            )
+
+        async def step(
+            self, continued_conversation_id: UUID, message: str, idempotency_key: str
+        ) -> TargetResult:
+            assert continued_conversation_id == conversation_id
+            stepped.append((message, idempotency_key))
+            response = "first repair" if len(stepped) == 1 else "final"
+            return TargetResult(
+                CapabilityOutput(response, (), tokens=1),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content=response),),
+                ),
+            )
+
+        async def capture_artifacts(
+            self,
+            continued_conversation_id: UUID,
+            output: CapabilityOutput,
+            artifact_probe: ArtifactProbe,
+        ) -> CapabilityOutput:
+            assert continued_conversation_id == conversation_id
+            captured = await artifact_probe(output, cast(WorkspaceProbe, object()))
+            return replace(output, artifacts=captured.artifacts)
+
+    case = CapabilityCase(
+        "iterative",
+        "inspect",
+        exact_scorer("final"),
+        followup=followup,
+        followup_turns=2,
+        followup_artifact_probe=capture,
+    )
+
+    result = await run_capability_case(case, IterativeTarget())  # type: ignore[arg-type]
+
+    assert result.passed
+    assert stepped == [
+        ("repair initial issues", f"iterative:followup:0:{conversation_id}"),
+        ("repair remaining issues", f"iterative:followup:1:{conversation_id}"),
+    ]
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["tokens"] == 3
+    assert attempt["artifacts"] == ["final.json"]
+    assert case.payload()["followupTurns"] == 2
+
+
+async def test_capability_followup_with_a_failed_probe_withholds_the_prior_turn_evidence() -> None:
+    """A followup turn whose artifact probe failed has no evidence of its own, and the previous
+    turn's audit describes source this turn has already edited. The grader must see the empty set
+    and the probe error, never the earlier turn's final evidence beside both turns' edits."""
+    conversation_id = uuid4()
+    first_evidence = SharedArtifact("first-final-evidence.json", b'{"compilePassed": true}')
+    first_reference = SharedArtifactReference(
+        name=first_evidence.name,
+        blob_key="shared/first-final-evidence.json",
+        digest=f"sha256:{sha256(first_evidence.content).hexdigest()}",
+        size_bytes=len(first_evidence.content),
+    )
+    first_edit = ToolInvocation("edit", {"turn": 1}, has_result=True, call_id="edit-1")
+    second_edit = ToolInvocation("edit", {"turn": 2}, has_result=True, call_id="edit-2")
+    graded: list[CapabilityOutput] = []
+    stepped: list[str] = []
+
+    async def followup(output: CapabilityOutput) -> str | None:
+        if output.response == "initial":
+            return "repair the initial issues"
+        if output.response == "first repair":
+            return "repair the remaining issues"
+        return None
+
+    async def capture(output: CapabilityOutput, _probe: WorkspaceProbe) -> ArtifactProbeResult:
+        if output.response == "first repair":
+            return ArtifactProbeResult(artifacts=(first_evidence,))
+        return ArtifactProbeResult(error="app audit command exited 1: app.tsx does not compile")
+
+    async def grader(output: CapabilityOutput) -> CapabilityVerdict:
+        graded.append(output)
+        return CapabilityVerdict(True, "graded")
+
+    @dataclass
+    class FailedProbeTarget:
+        judge: None = None
+
+        async def run(self, _case: CapabilityCase) -> TargetResult:
+            return TargetResult(
+                CapabilityOutput("initial", ()),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content="initial"),),
+                ),
+            )
+
+        async def step(
+            self, continued_conversation_id: UUID, message: str, _idempotency_key: str
+        ) -> TargetResult:
+            assert continued_conversation_id == conversation_id
+            stepped.append(message)
+            first = len(stepped) == 1
+            response = "first repair" if first else "second repair"
+            call = first_edit if first else second_edit
+            return TargetResult(
+                CapabilityOutput(response, (call,)),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content=response),),
+                ),
+            )
+
+        async def capture_artifacts(
+            self,
+            continued_conversation_id: UUID,
+            output: CapabilityOutput,
+            artifact_probe: ArtifactProbe,
+        ) -> CapabilityOutput:
+            assert continued_conversation_id == conversation_id
+            captured = await artifact_probe(output, cast(WorkspaceProbe, object()))
+            return replace(
+                output,
+                artifacts=(*output.artifacts, *captured.artifacts),
+                artifact_references=(first_reference,) if captured.artifacts else (),
+                artifact_error="; ".join(
+                    error for error in (output.artifact_error, captured.error) if error
+                ),
+            )
+
+    case = CapabilityCase(
+        "failed-probe",
+        "audit",
+        grader,
+        followup=followup,
+        followup_turns=2,
+        followup_artifact_probe=capture,
+    )
+
+    result = await run_capability_case(case, FailedProbeTarget())  # type: ignore[arg-type]
+
+    assert result.passed
+    assert stepped == ["repair the initial issues", "repair the remaining issues"]
+    assert [output.response for output in graded] == ["second repair"]
+    assert graded[0].artifacts == ()
+    assert graded[0].artifact_references == ()
+    assert "app audit command exited 1" in graded[0].artifact_error
+    assert [call.call for call in graded[0].calls] == ["edit", "edit"]
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["artifacts"] == []
+    assert attempt["artifactReferences"] == []
+    assert attempt["artifactContents"] == []
+
+
 async def test_capability_followup_without_artifact_evidence_preserves_the_initial_set() -> None:
     conversation_id = uuid4()
     initial = SharedArtifact("initial-audit.json", b"initial")

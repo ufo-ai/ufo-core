@@ -41,13 +41,13 @@ has three single-fact, three multi-session, and three temporal cases:
 ```text
 longmem/118b2229
 locomo/conv-26/120
-locomo/conv-26/146
+locomo/conv-30/060
 longmem/9aaed6a3
-locomo/conv-41/006
+locomo/conv-49/002
 locomo/conv-41/021
 longmem/0bb5a684
 locomo/conv-26/062
-locomo/conv-30/030
+locomo/conv-42/037
 ```
 
 ## Materialize and run

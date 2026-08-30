@@ -135,6 +135,7 @@ class ReplayEvidence(BaseModel):
     agent_ms: int = Field(alias="agentMs", ge=0)
     agent_response: str = Field(alias="agentResponse")
     agent_calls: int = Field(alias="agentCalls", ge=0)
+    repair_turn: int = Field(default=0, alias="repairTurn", ge=0)
 
 
 def issue_fingerprint(issues: tuple[ApplicationAuditIssue, ...]) -> str:
@@ -144,10 +145,31 @@ def issue_fingerprint(issues: tuple[ApplicationAuditIssue, ...]) -> str:
     ).hexdigest()
 
 
+@dataclass
+class RepairTurns:
+    """The repair turns one replay conversation has admitted, which the followup counts and the
+    final probe records: a failed probe writes no evidence, so the evidence a turn left behind
+    cannot name the turn. The conversation's workspace directory identifies the run, so a repeated
+    sample counts from its own first turn."""
+
+    workspace: Path | None = None
+    turn: int = 0
+
+    def next_turn(self, workspace: Path | None) -> int:
+        if workspace != self.workspace:
+            self.workspace = workspace
+            self.turn = 0
+        return self.turn + 1
+
+    def admit(self) -> None:
+        self.turn += 1
+
+
 @dataclass(frozen=True)
 class AppQaReplayProbe:
     fixture: ReplayFixture
     phase: Literal["initial", "final"]
+    turns: RepairTurns
 
     async def __call__(
         self, output: CapabilityOutput, probe: WorkspaceProbe
@@ -157,6 +179,7 @@ class AppQaReplayProbe:
         name = f"{self.fixture.name}-{self.phase}"
         relative = Path(".eval-output/ufo-app-qa-replay") / self.fixture.name / self.phase
         directory = output.workspace_dir / relative
+        evidence_path = directory / f"{name}-evidence.json"
         result = await probe.run(
             app_audit_command(
                 name=name,
@@ -207,9 +230,9 @@ class AppQaReplayProbe:
             agentMs=output.timing.wall_ms if output.timing is not None else 0,
             agentResponse=output.response,
             agentCalls=len(output.calls),
+            repairTurn=0 if self.phase == "initial" else self.turns.turn,
         )
         evidence_bytes = evidence.model_dump_json(by_alias=True).encode()
-        evidence_path = directory / f"{name}-evidence.json"
         sandbox_evidence_path = (
             f"{OUTPUT_ROOT}/{self.fixture.name}/{self.phase}/{evidence_path.name}"
         )
@@ -260,21 +283,80 @@ def _evidence(output: CapabilityOutput, fixture: ReplayFixture, phase: str) -> R
     return ReplayEvidence.model_validate_json(found[0].content)
 
 
-def _repair_followup(fixture: ReplayFixture):
+def _repair_followup(fixture: ReplayFixture, turns: RepairTurns):
     async def followup(output: CapabilityOutput) -> str | None:
-        try:
-            initial = _evidence(output, fixture, "initial")
-        except ValueError:
-            return None
-        if initial.feedback_sha256 != fixture.expected.sha256:
-            raise RuntimeError(
-                f"{fixture.name} initial feedback moved from {fixture.expected.sha256} "
-                f"to {initial.feedback_sha256}"
+        turn = turns.next_turn(output.workspace_dir)
+        if turn == 1:
+            try:
+                evidence = _evidence(output, fixture, "initial")
+            except ValueError:
+                return None
+            if evidence.feedback_sha256 != fixture.expected.sha256:
+                raise RuntimeError(
+                    f"{fixture.name} initial feedback moved from {fixture.expected.sha256} "
+                    f"to {evidence.feedback_sha256}"
+                )
+            if fixture.name == "pre-meeting-briefs":
+                instruction = (
+                    "Repair every live deterministic issue below in /workspace/ufo-app/app.tsx. "
+                    "Read only the current file. For contrast, pair a fixed light background with "
+                    "an explicit dark foreground and pair a theme background with a theme "
+                    "foreground. For overflow, keep every region in its original order and keep "
+                    "its display and layout direction; reduce an existing width, minimum width, "
+                    "padding, or gap, or add minWidth: 0. Before every edit call, read the current "
+                    "file, copy each old string from that latest read, include unique surrounding "
+                    "JSX, and submit one edit at a time. Pass edits as a JSON array. Never use "
+                    "replace_all. Do not replace a fixed background with a theme variable or read "
+                    "or change another file."
+                )
+            else:
+                instruction = (
+                    "Repair only the live deterministic issues below in "
+                    "/workspace/ufo-app/app.tsx. Read that file before exact edits. Do not change "
+                    "another file."
+                )
+        else:
+            final_name = f"{fixture.name}-final-evidence.json"
+            final_artifacts = tuple(
+                artifact for artifact in output.artifacts if artifact.name == final_name
             )
-        issues = [issue.model_dump(mode="json") for issue in initial.issues]
+            if len(final_artifacts) > 1:
+                raise RuntimeError(
+                    f"replay captured {len(final_artifacts)} final evidence artifacts"
+                )
+            if not final_artifacts:
+                return None
+            evidence = ReplayEvidence.model_validate_json(final_artifacts[0].content)
+            if not evidence.issues:
+                return None
+            issue_codes = {issue.code for issue in evidence.issues}
+            instructions = [
+                "Repair every remaining deterministic issue below in the current "
+                "/workspace/ufo-app/app.tsx. Read only the current file before exact edits. Fix "
+                "every listed issue."
+            ]
+            if "contrast" in issue_codes:
+                instructions.append(
+                    "For contrast, pair a fixed light background with an explicit dark foreground "
+                    "and pair a theme background with a theme foreground. Before every edit call, "
+                    "read the current file, copy each old string from that latest read, include "
+                    "unique surrounding JSX, and submit one edit at a time."
+                )
+            if "overflow" in issue_codes:
+                instructions.append(
+                    "For overflow, keep every region in its original order and keep its display "
+                    "and layout direction; reduce an existing width, minimum width, padding, or "
+                    "gap, or add minWidth: 0."
+                )
+            instruction = " ".join(instructions) + (
+                " Do not replace a fixed background with a theme variable or read or change "
+                "another file."
+            )
+        issues = [issue.model_dump(mode="json") for issue in evidence.issues]
+        turns.admit()
         return (
-            "Repair only the live deterministic issues below in /workspace/ufo-app/app.tsx. "
-            "Read that file before exact edits. Do not change another file.\n\n"
+            instruction
+            + "\n\n"
             + json.dumps({"issues": issues}, sort_keys=True, separators=(",", ":"))
         )
 
@@ -293,6 +375,10 @@ def _replay_grader(fixture: ReplayFixture) -> DescribedGrader[CapabilityOutput]:
         )
         forbidden = tuple(call.name for call in output.calls if call.name not in ALLOWED_TOOLS)
         failed = sum(call.is_error for call in output.calls)
+        repair_turns = max(final.repair_turn, 1)
+        edit_call_limit = APP_QA_EDIT_CALL_LIMIT * repair_turns
+        edit_old_bytes_limit = APP_QA_EDIT_OLD_BYTES_LIMIT * repair_turns
+        edit_new_bytes_limit = APP_QA_EDIT_NEW_BYTES_LIMIT * repair_turns
         paths: list[str] = []
         edit_paths: list[str] = []
         replace_all = False
@@ -345,12 +431,12 @@ def _replay_grader(fixture: ReplayFixture) -> DescribedGrader[CapabilityOutput]:
             failures.append("used replace_all")
         if invalid_edit_payload:
             failures.append("used an invalid edit payload")
-        if edits > APP_QA_EDIT_CALL_LIMIT:
-            failures.append(f"exceeded edit call limit {APP_QA_EDIT_CALL_LIMIT}")
-        if old_string_bytes > APP_QA_EDIT_OLD_BYTES_LIMIT:
-            failures.append(f"exceeded old_string byte limit {APP_QA_EDIT_OLD_BYTES_LIMIT}")
-        if new_string_bytes > APP_QA_EDIT_NEW_BYTES_LIMIT:
-            failures.append(f"exceeded new_string byte limit {APP_QA_EDIT_NEW_BYTES_LIMIT}")
+        if edits > edit_call_limit:
+            failures.append(f"exceeded edit call limit {edit_call_limit}")
+        if old_string_bytes > edit_old_bytes_limit:
+            failures.append(f"exceeded old_string byte limit {edit_old_bytes_limit}")
+        if new_string_bytes > edit_new_bytes_limit:
+            failures.append(f"exceeded new_string byte limit {edit_new_bytes_limit}")
         if reads == 0:
             failures.append("did not read app.tsx")
         if edits == 0:
@@ -368,7 +454,11 @@ def _replay_grader(fixture: ReplayFixture) -> DescribedGrader[CapabilityOutput]:
             "repairMs": final.agent_ms,
             "finalCompileMs": final.compile_ms,
             "finalAuditMs": final.audit_ms,
-            "turns": 2,
+            "turns": final.repair_turn + 1,
+            "repairTurns": repair_turns,
+            "editCallLimit": edit_call_limit,
+            "editOldBytesLimit": edit_old_bytes_limit,
+            "editNewBytesLimit": edit_new_bytes_limit,
             "reads": reads,
             "edits": edits,
             "oldStringBytes": old_string_bytes,
@@ -399,6 +489,7 @@ FIXTURES = tuple(ReplayFixture.load(name) for name in ("pre-meeting-briefs", "is
 
 
 def _case(fixture: ReplayFixture) -> CapabilityCase:
+    turns = RepairTurns()
     return CapabilityCase(
         name=fixture.name,
         message="Start the fixed application QA replay. Reply only READY without tools.",
@@ -415,9 +506,10 @@ def _case(fixture: ReplayFixture) -> CapabilityCase:
             WorkspaceFile("ufo-app/vite.config.ts", PROJECT_CONFIG_BYTES),
         ),
         prepare=_prepare_kit,
-        artifact_probe=AppQaReplayProbe(fixture, "initial"),
-        followup=_repair_followup(fixture),
-        followup_artifact_probe=AppQaReplayProbe(fixture, "final"),
+        artifact_probe=AppQaReplayProbe(fixture, "initial", turns),
+        followup=_repair_followup(fixture, turns),
+        followup_turns=2,
+        followup_artifact_probe=AppQaReplayProbe(fixture, "final", turns),
     )
 
 

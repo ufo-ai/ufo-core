@@ -16,6 +16,7 @@ from evals.suites.ufo_app_qa_replay import (
     FIXTURES,
     PROBE_ERROR_DETAIL_CHARS,
     AppQaReplayProbe,
+    RepairTurns,
     ReplayEvidence,
     _prepare_kit,
     _repair_followup,
@@ -79,8 +80,9 @@ async def test_real_followup_probe_captures_initial_evidence_artifact(
     )
     output = CapabilityOutput(response="READY", calls=(), workspace_dir=workspace)
 
+    turns = RepairTurns()
     probe = AppBenchWorkspaceProbe(conversation_id, driver, sandbox_image)
-    captured = await AppQaReplayProbe(fixture, "initial")(output, probe)
+    captured = await AppQaReplayProbe(fixture, "initial", turns)(output, probe)
 
     assert captured.error == ""
     evidence = tuple(
@@ -119,7 +121,8 @@ async def test_real_followup_probe_captures_initial_evidence_artifact(
     )
     assert editable[0] == 0, editable[2]
 
-    final = await AppQaReplayProbe(fixture, "final")(output, probe)
+    turns.admit()
+    final = await AppQaReplayProbe(fixture, "final", turns)(output, probe)
     assert final.error == ""
     assert {
         artifact.name for artifact in final.artifacts if artifact.name.endswith("-evidence.json")
@@ -128,12 +131,12 @@ async def test_real_followup_probe_captures_initial_evidence_artifact(
         f"{fixture.name}-final-evidence.json",
     }
 
-    failed = await AppQaReplayProbe(fixture, "initial")(
+    failed = await AppQaReplayProbe(fixture, "initial", turns)(
         output,
         AppBenchWorkspaceProbe(uuid4()),
     )
     failed_output = replace(output, artifact_error=failed.error)
-    followup = await _repair_followup(fixture)(failed_output)
+    followup = await _repair_followup(fixture, RepairTurns())(failed_output)
     verdict = await CASES[fixture_index].grader(failed_output)
 
     assert "No such container" in failed.error

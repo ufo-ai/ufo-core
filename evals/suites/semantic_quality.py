@@ -44,8 +44,10 @@ CASES = (
     ),
     CapabilityCase(
         "commitment-tradeoff",
-        "Make the launch decision from the facts below. Use the exact section headings Decision, "
-        "Tradeoff, Trigger, and Not promised.\n\n"
+        "Make the launch decision from the facts below. In Trigger, state what happens if security "
+        "approval fails and what later capacity or signed SSO commitment would justify revisiting "
+        "SSO. Add no facts beyond the list. Use the exact section headings Decision, Tradeoff, "
+        "Trigger, and Not promised.\n\n"
         "Facts:\n"
         "- The contractual launch date cannot move.\n"
         "- Signed pilot contracts require CSV export on that date.\n"

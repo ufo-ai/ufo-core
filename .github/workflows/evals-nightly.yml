@@ -112,7 +112,7 @@ jobs:
       - run: uv sync
       - id: matrix
         run: |
-          jobs="$(uv run python .github/scripts/nightly_eval_matrix.py --jobs "$SWEEP_SMOKE")"
+          jobs="$(uv run python .github/scripts/nightly_eval_matrix.py --jobs "$SWEEP_SMOKE" --reasoning "$EVAL_REASONING")"
           models="$(uv run python .github/scripts/nightly_eval_matrix.py --models)"
           echo "$jobs"
           echo "$models"
@@ -219,6 +219,7 @@ jobs:
       # one, and only suites bound to that pack reach the shard, none of which browse.
       TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
       EVAL_MODEL: ${{ matrix.model }}
+      EVAL_REASONING: ${{ matrix.reasoning }}
     steps:
       - uses: actions/checkout@v4
 

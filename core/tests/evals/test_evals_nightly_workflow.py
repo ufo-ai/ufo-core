@@ -157,6 +157,7 @@ def test_the_nightly_models_have_artifact_safe_labels(planner, capsys) -> None:
     assert all(
         planner.UNSAFE_LABEL_CHARS.search(model.label) is None for model in planner.NIGHTLY_MODELS
     )
+    assert [model.reasoning for model in planner.NIGHTLY_MODELS] == ["auto", "medium"]
     planner.main(["--models"])
     assert json.loads(capsys.readouterr().out) == [
         {"id": model.id, "label": model.label} for model in planner.NIGHTLY_MODELS
@@ -179,6 +180,13 @@ def test_fixed_model_shards_run_once_while_auto_model_shards_run_twice(planner, 
     fixed = next(job for job in payload if job["target"] == "fixed model")
     assert fixed["artifact"] == planner.FIXED_MODEL_LABEL
     assert fixed["model"] == planner.NIGHTLY_MODELS[0].id
+    assert {job["reasoning"] for job in payload if job["target"] == "z-ai/glm-5.3-flash"} == {
+        "medium"
+    }
+    assert {job["reasoning"] for job in payload if job["target"] == "claude-opus-5"} == {"auto"}
+
+    planner.main(["--jobs", "--smoke", "--reasoning", "low"])
+    assert {job["reasoning"] for job in json.loads(capsys.readouterr().out)} == {"low"}
 
 
 def test_a_written_shard_is_input_the_stack_accepts(planner, tmp_path: Path) -> None:
@@ -232,6 +240,7 @@ def test_the_workflow_fans_out_over_the_planned_shards(workflow) -> None:
     assert sweep["strategy"]["fail-fast"] is False
     assert sweep["strategy"]["matrix"] == {"include": "${{ fromJSON(needs.plan.outputs.jobs) }}"}
     assert '--jobs "$SWEEP_SMOKE"' in plan["steps"][-1]["run"]
+    assert '--reasoning "$EVAL_REASONING"' in plan["steps"][-1]["run"]
     assert "--models" in plan["steps"][-1]["run"]
 
 
@@ -252,6 +261,7 @@ def test_the_nightly_models_and_dispatch_reasoning_reach_the_sweep(workflow) -> 
     }
     assert workflow["env"]["EVAL_REASONING"] == "${{ inputs.reasoning || 'auto' }}"
     assert workflow["jobs"]["sweep"]["env"]["EVAL_MODEL"] == "${{ matrix.model }}"
+    assert workflow["jobs"]["sweep"]["env"]["EVAL_REASONING"] == "${{ matrix.reasoning }}"
     assert '--model "$EVAL_MODEL"' in write["run"]
     assert '--reasoning "$EVAL_REASONING"' in write["run"]
     assert workflow["jobs"]["sweep"]["env"]["OPENROUTER_API_KEY"] == (
@@ -504,6 +514,16 @@ def test_memory_ingestion_inputs_pin_luna_and_the_corpus(memory_nightly, tmp_pat
     assert matrix.run[0].label == "memory-ingestion"
     assert matrix.run[0].memory_ingestion == snapshot.resolve()
     assert matrix.run[0].reasoning == "medium"
+
+
+def test_memory_ingestion_smoke_uses_supported_cases(memory_nightly) -> None:
+    assert "locomo/conv-30/060" in memory_nightly.SMOKE_CASES
+    assert "locomo/conv-41/134" not in memory_nightly.SMOKE_CASES
+    assert "locomo/conv-26/146" not in memory_nightly.SMOKE_CASES
+    assert "locomo/conv-49/002" in memory_nightly.SMOKE_CASES
+    assert "locomo/conv-42/037" in memory_nightly.SMOKE_CASES
+    assert "locomo/conv-30/030" not in memory_nightly.SMOKE_CASES
+    assert "locomo/conv-41/006" not in memory_nightly.SMOKE_CASES
 
 
 def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly) -> None:

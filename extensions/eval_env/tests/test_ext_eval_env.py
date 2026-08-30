@@ -80,7 +80,7 @@ async def test_app_qa_repair_agent_and_hook_keep_one_exact_edit_surface() -> Non
     manifest = env.manifest()
     repair = next(agent for agent in manifest.agents if agent.name == env.APP_QA_REPAIR_AGENT_NAME)
 
-    assert repair.spec.model == "google/gemini-3.7-flash"
+    assert repair.spec.model == "claude-opus-5"
     assert repair.spec.use_workspace_skills is False
     assert repair.tools == ("read", "edit")
     assert (

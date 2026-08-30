@@ -5,6 +5,7 @@ import shutil
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from uuid import UUID, uuid4
 
 import pytest
 from ufo_ext_eval_env.manifest import (
@@ -18,16 +19,19 @@ from ufo_ext_sites.tools import APPLICATION_AUDIT_TIMEOUT_SECONDS
 
 import evals.suites.ufo_app_qa_replay as replay
 from evals.harness.capability import (
+    ArtifactProbe,
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
+    EvalTrajectory,
     ProbeCommandResult,
     SharedArtifact,
     ToolInvocation,
     linked_artifacts,
     run_capability_case,
+    sample_capability,
 )
-from evals.harness.harness import EvalMetric, EvalReport
+from evals.harness.harness import EvalMetric, EvalReport, JsonObject
 from evals.harness.target import TargetResult
 from evals.registry import TASKS
 from evals.suites.app_audit_probe import app_audit_command
@@ -37,6 +41,7 @@ from evals.suites.ufo_app_qa_replay import (
     FIXTURES,
     SOURCE_PATH,
     AppQaReplayProbe,
+    RepairTurns,
     _case,
     _repair_followup,
     issue_fingerprint,
@@ -60,11 +65,8 @@ EXPECTED = {
 }
 
 
-def _passing_output(
-    fixture: replay.ReplayFixture,
-    calls: tuple[ToolInvocation, ...],
-) -> CapabilityOutput:
-    initial = {
+def _initial_evidence(fixture: replay.ReplayFixture) -> JsonObject:
+    return {
         "phase": "initial",
         "sourceSha256": fixture.provenance.source_sha256,
         "feedbackSha256": fixture.expected.sha256,
@@ -75,6 +77,14 @@ def _passing_output(
         "agentResponse": "READY",
         "agentCalls": 0,
     }
+
+
+def _passing_output(
+    fixture: replay.ReplayFixture,
+    calls: tuple[ToolInvocation, ...],
+    repair_turn: int = 1,
+) -> CapabilityOutput:
+    initial = _initial_evidence(fixture)
     final = {
         "phase": "final",
         "sourceSha256": "1" * 64,
@@ -85,6 +95,7 @@ def _passing_output(
         "agentMs": 4,
         "agentResponse": "Fixed.",
         "agentCalls": len(calls),
+        "repairTurn": repair_turn,
     }
     return CapabilityOutput(
         response="Fixed.",
@@ -206,7 +217,84 @@ async def test_followup_refuses_a_moved_initial_feedback_fingerprint() -> None:
     )
 
     with pytest.raises(RuntimeError, match="initial feedback moved"):
-        await _repair_followup(fixture)(output)
+        await _repair_followup(fixture, RepairTurns())(output)
+
+
+async def test_followup_retries_every_remaining_deterministic_issue() -> None:
+    fixture = FIXTURES[0]
+
+    def output_for(code: str) -> CapabilityOutput:
+        issue = next(issue for issue in fixture.expected.issues if issue.code == code)
+        evidence = {
+            "phase": "final",
+            "sourceSha256": "1" * 64,
+            "feedbackSha256": issue_fingerprint((issue,)),
+            "issues": [issue.model_dump(mode="json")],
+            "compileMs": 1,
+            "auditMs": 1,
+            "agentMs": 1,
+            "agentResponse": "Fixed.",
+            "agentCalls": 1,
+            "repairTurn": 1,
+        }
+        return CapabilityOutput(
+            response="Fixed.",
+            calls=(),
+            artifacts=(
+                SharedArtifact(
+                    f"{fixture.name}-final-evidence.json", json.dumps(evidence).encode()
+                ),
+            ),
+        )
+
+    initial = CapabilityOutput(
+        response="READY",
+        calls=(),
+        artifacts=(
+            SharedArtifact(
+                f"{fixture.name}-initial-evidence.json",
+                json.dumps(_initial_evidence(fixture)).encode(),
+            ),
+        ),
+    )
+    contrast_followup = _repair_followup(fixture, RepairTurns())
+    overflow_followup = _repair_followup(fixture, RepairTurns())
+    first = await contrast_followup(initial)
+    contrast = await contrast_followup(output_for("contrast"))
+    await overflow_followup(initial)
+    overflow = await overflow_followup(output_for("overflow"))
+
+    assert first is not None
+    assert "live deterministic issue" in first
+    assert "Before every edit call" in first
+    assert "Pass edits as a JSON array" in first
+    assert "Never use replace_all" in first
+    assert contrast is not None
+    assert "every remaining deterministic issue" in contrast
+    assert "fixed light background with an explicit dark foreground" in contrast
+    assert "theme background with a theme foreground" in contrast
+    assert "Before every edit call" in contrast
+    assert overflow is not None
+    assert "every remaining deterministic issue" in overflow
+    assert "keep every region in its original order" in overflow
+
+    issue_owner = FIXTURES[1]
+    issue_owner_initial = CapabilityOutput(
+        response="READY",
+        calls=(),
+        artifacts=(
+            SharedArtifact(
+                f"{issue_owner.name}-initial-evidence.json",
+                json.dumps(_initial_evidence(issue_owner)).encode(),
+            ),
+        ),
+    )
+    issue_owner_first = await _repair_followup(issue_owner, RepairTurns())(issue_owner_initial)
+
+    assert issue_owner_first is not None
+    assert "Read that file before exact edits" in issue_owner_first
+    assert "Pass edits as a JSON array" not in issue_owner_first
+    assert "Before every edit call" not in issue_owner_first
 
 
 async def test_final_probe_is_a_self_contained_artifact_set(tmp_path: Path) -> None:
@@ -240,12 +328,20 @@ async def test_final_probe_is_a_self_contained_artifact_set(tmp_path: Path) -> N
             (directory / "timing.json").write_text('{"compileMs":1,"auditMs":2}')
             return ProbeCommandResult(0, "", "")
 
+    turns = RepairTurns()
     output = CapabilityOutput("READY", (), workspace_dir=tmp_path)
-    initial = await AppQaReplayProbe(fixture, "initial")(output, Probe())
-    final = await AppQaReplayProbe(fixture, "final")(output, Probe())
+    initial = await AppQaReplayProbe(fixture, "initial", turns)(output, Probe())
+    turns.admit()
+    final = await AppQaReplayProbe(fixture, "final", turns)(output, Probe())
 
     assert not initial.error
     assert not final.error
+    recorded = next(
+        replay.ReplayEvidence.model_validate_json(artifact.content)
+        for artifact in final.artifacts
+        if artifact.name == f"{fixture.name}-final-evidence.json"
+    )
+    assert recorded.repair_turn == turns.turn == 1
     names = {artifact.name for artifact in final.artifacts}
     assert sum(len(artifact.content) for artifact in final.artifacts) <= final.max_payload_bytes
     assert {item["name"] for item in linked_artifacts(final.artifacts, ())} == names
@@ -270,7 +366,7 @@ async def test_failed_initial_probe_persists_its_bounded_root_error() -> None:
         artifact_error=f"app QA replay probe failed: {root_error}" + "x" * 1_000,
     )
 
-    followup = await _repair_followup(fixture)(output)
+    followup = await _repair_followup(fixture, RepairTurns())(output)
     verdict = await CASES[0].grader(output)
 
     assert followup is None
@@ -295,6 +391,75 @@ async def test_failed_initial_probe_persists_its_bounded_root_error() -> None:
     assert attempt["reason"] == verdict.reason
 
 
+async def test_failed_final_probe_ends_the_replay_instead_of_repeating_the_repair_turn(
+    tmp_path: Path,
+) -> None:
+    fixture = FIXTURES[0]
+    case = _case(fixture)
+    initial_artifacts = (
+        SharedArtifact(
+            f"{fixture.name}-initial-evidence.json",
+            json.dumps(_initial_evidence(fixture)).encode(),
+        ),
+    )
+    edit = ToolInvocation(
+        "edit",
+        {"file_path": SOURCE_PATH, "edits": [{"old_string": "#aaa", "new_string": "#111"}]},
+        has_result=True,
+    )
+
+    class BrokenBuildProbe:
+        async def run(self, _command: str, _timeout_s: int = 60) -> ProbeCommandResult:
+            return ProbeCommandResult(1, "", "vite build failed: app.tsx(12,3): TS1005")
+
+    class BrokenBuildTarget:
+        judge = None
+
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        async def run(self, _case: CapabilityCase) -> TargetResult:
+            return TargetResult(
+                output=CapabilityOutput(
+                    response="READY",
+                    calls=(),
+                    artifacts=initial_artifacts,
+                    workspace_dir=tmp_path,
+                ),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=uuid4(), turn_id=None, status=None, messages=()
+                ),
+            )
+
+        async def step(self, _conversation_id: UUID, message: str, _key: str) -> TargetResult:
+            self.messages.append(message)
+            return TargetResult(
+                output=CapabilityOutput(response="Fixed.", calls=(edit,)), clean=True
+            )
+
+        async def capture_artifacts(
+            self, _conversation_id: UUID, output: CapabilityOutput, capture: ArtifactProbe
+        ) -> CapabilityOutput:
+            captured = await capture(output, BrokenBuildProbe())
+            return replace(output, artifacts=captured.artifacts, artifact_error=captured.error)
+
+    target = BrokenBuildTarget()
+    sample = await sample_capability(case, target)  # type: ignore[arg-type]
+    probe = case.followup_artifact_probe
+
+    assert isinstance(probe, AppQaReplayProbe)
+    assert len(target.messages) == 1
+    assert "live deterministic issue" in target.messages[0]
+    assert probe.turns.turn == len(target.messages)
+    assert sum(call.name == "edit" for call in sample.output.calls) == len(target.messages)
+    assert not sample.verdict.passed
+    assert sample.output.artifacts == ()
+    assert sample.verdict.reason.startswith("replay captured 0 initial evidence artifacts")
+    assert "vite build failed" in sample.verdict.reason
+    assert "edit call limit" not in sample.verdict.reason
+
+
 async def test_followup_probe_requires_a_followup() -> None:
     async def grade(_output: CapabilityOutput) -> CapabilityVerdict:
         return CapabilityVerdict(True, "passed")
@@ -304,7 +469,7 @@ async def test_followup_probe_requires_a_followup() -> None:
             name="bad",
             message="bad",
             grader=grade,
-            followup_artifact_probe=AppQaReplayProbe(FIXTURES[0], "final"),
+            followup_artifact_probe=AppQaReplayProbe(FIXTURES[0], "final", RepairTurns()),
         )
 
 
@@ -460,21 +625,23 @@ async def test_replay_grader_enforces_exact_edit_budget_boundaries() -> None:
     output = _passing_output(fixture, tuple(calls))
 
     boundary = await CASES[0].grader(output)
-    over_calls = await CASES[0].grader(
-        replace(
-            output,
-            calls=(
-                *output.calls,
-                ToolInvocation(
-                    "edit",
-                    {
-                        "file_path": SOURCE_PATH,
-                        "edits": [{"old_string": "extra", "new_string": "extra"}],
-                    },
-                    has_result=True,
-                ),
+    over_calls_output = replace(
+        output,
+        calls=(
+            *output.calls,
+            ToolInvocation(
+                "edit",
+                {
+                    "file_path": SOURCE_PATH,
+                    "edits": [{"old_string": "extra", "new_string": "extra"}],
+                },
+                has_result=True,
             ),
-        )
+        ),
+    )
+    over_calls = await CASES[0].grader(over_calls_output)
+    two_turn_calls = await CASES[0].grader(
+        _passing_output(fixture, over_calls_output.calls, repair_turn=2)
     )
     over_old = await CASES[0].grader(
         _passing_output(
@@ -520,6 +687,7 @@ async def test_replay_grader_enforces_exact_edit_budget_boundaries() -> None:
     )
 
     assert boundary.passed
+    assert two_turn_calls.passed
     assert not over_calls.passed
     assert "edit call limit" in over_calls.reason
     assert not over_old.passed

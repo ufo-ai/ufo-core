@@ -53,15 +53,16 @@ UNSAFE_LABEL_CHARS = re.compile(r"[^A-Za-z0-9.-]+")
 
 @dataclass(frozen=True)
 class NightlyModel:
-    """One target model and its artifact-safe label."""
+    """One target model, artifact-safe label, and default reasoning."""
 
     id: str
     label: str
+    reasoning: ReasoningEffort
 
 
 NIGHTLY_MODELS = (
-    NightlyModel("claude-opus-5", "claude-opus-5"),
-    NightlyModel("z-ai/glm-5.3-flash", "z-ai-glm-5.3-flash"),
+    NightlyModel("claude-opus-5", "claude-opus-5", "auto"),
+    NightlyModel("z-ai/glm-5.3-flash", "z-ai-glm-5.3-flash", "medium"),
 )
 FIXED_MODEL_LABEL = "fixed-model"
 
@@ -103,6 +104,7 @@ class SweepJob:
     shard: Shard
     config_model: NightlyModel
     expected_model: str | None
+    reasoning: ReasoningEffort
 
 
 def _label_token(value: str) -> str:
@@ -151,7 +153,9 @@ def plan(smoke: bool) -> tuple[Shard, ...]:
     return tuple(shards)
 
 
-def sweep_jobs(smoke: bool) -> tuple[SweepJob, ...]:
+def sweep_jobs(
+    smoke: bool, reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
+) -> tuple[SweepJob, ...]:
     """Pair auto-model shards with both targets and fixed-model shards with one execution."""
     jobs = []
     for shard in plan(smoke):
@@ -164,6 +168,7 @@ def sweep_jobs(smoke: bool) -> tuple[SweepJob, ...]:
                 shard=shard,
                 config_model=model,
                 expected_model=None if fixed_model else model.id,
+                reasoning=model.reasoning if reasoning == DEFAULT_REASONING_EFFORT else reasoning,
             )
             for model in models
         )
@@ -282,8 +287,9 @@ def main(argv: list[str] | None = None) -> None:
                             if job.expected_model is not None
                             else FIXED_MODEL_LABEL
                         ),
+                        "reasoning": job.reasoning,
                     }
-                    for job in sweep_jobs(args.smoke)
+                    for job in sweep_jobs(args.smoke, args.reasoning)
                 ]
             )
         )
