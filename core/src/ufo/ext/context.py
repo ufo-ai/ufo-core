@@ -84,6 +84,7 @@ from ufo.schema.records import (
     AgentChange,
     AgentVisibility,
     ProposalRef,
+    TurnRuntimeConfig,
     TurnStatus,
     Usage,
 )
@@ -739,6 +740,7 @@ class TurnInvoker(Protocol):
         as_scheduled: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
     ) -> UUID | None: ...
 
 

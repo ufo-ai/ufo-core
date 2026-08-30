@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
@@ -38,6 +39,7 @@ from ufo.sandbox.session import (
     RunTokenCodec,
 )
 from ufo.schema import tables
+from ufo.schema.records import TurnRuntimeConfig
 from ufo.tools.bridge import (
     TOOL_BRIDGE_HOST,
     ToolBridgeRequest,
@@ -128,6 +130,7 @@ async def _seed_turn(
     connection: AsyncConnection,
     status: str = "running",
     internet_access_allowed: bool = True,
+    runtime_config: TurnRuntimeConfig | None = None,
 ) -> _Seeded:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     await connection.execute(
@@ -179,11 +182,27 @@ async def _seed_turn(
             status=status,
             inbound="hi",
             terminal=terminal,
+            runtime_config=(
+                None if runtime_config is None else runtime_config.model_dump(mode="json")
+            ),
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
     )
     return _Seeded(workspace_id, turn_id, agent_id, member_id, conversation_id)
+
+
+async def test_turn_runtime_config_can_disable_but_not_enable_public_egress(db: None) -> None:
+    runtime_config = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
+    async with workspace_tx() as connection:
+        narrowed = await _seed_turn(connection, runtime_config=runtime_config)
+    resolver = PerAgentRules(base=(), grants=None, internet=(InternetRule(),))
+
+    rules = await resolver.resolve(RunToken(narrowed.workspace_id, narrowed.turn_id))
+
+    assert InternetRule() not in rules
+    with pytest.raises(ValueError, match="False"):
+        TurnRuntimeConfig.model_validate({"model": "claude-opus-4-8", "internet_access": True})
 
 
 def test_rule_json_matches_the_golden_contract() -> None:

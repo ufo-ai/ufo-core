@@ -17,7 +17,12 @@ from ufo.ext.surface import Admitted, conversation_name, fence_member_message, m
 from ufo.hub import ArrivalQueued, InProcessHub, Reply
 from ufo.loop.engine import _claim_turn
 from ufo.schema import tables
-from ufo.schema.records import SURFACE_COMMENT_ROUND_INDEX, TerminalFrame, TurnContext
+from ufo.schema.records import (
+    SURFACE_COMMENT_ROUND_INDEX,
+    TerminalFrame,
+    TurnContext,
+    TurnRuntimeConfig,
+)
 from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
 from ufo.surfaces.admission import (
     ADMITTED_TURN_METRIC,
@@ -121,6 +126,76 @@ async def test_member_admission_persists_the_latest_valid_timezone(db: None) -> 
             )
         ).scalar_one()
     assert timezone == "America/Los_Angeles"
+
+
+async def test_each_opening_turn_persists_its_own_runtime_config(db: None) -> None:
+    workspace_id, member_id, _agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    first_config = TurnRuntimeConfig(model="model-one")
+    second_config = TurnRuntimeConfig(model="model-two")
+
+    first = await admission.admit_member(
+        workspace_id,
+        conversation_id,
+        "first",
+        member_id,
+        runtime_config=first_config,
+    )
+    await _finish(first.turn_id)
+    await admission.admit_member(
+        workspace_id,
+        conversation_id,
+        "second",
+        member_id,
+        runtime_config=second_config,
+    )
+
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.turn.c.runtime_config)
+                .where(tables.turn.c.conversation_id == conversation_id)
+                .order_by(tables.turn.c.seq)
+            )
+        ).scalars()
+    assert tuple(TurnRuntimeConfig.model_validate(value) for value in rows) == (
+        first_config,
+        second_config,
+    )
+
+
+async def test_paid_work_with_an_old_runtime_config_joins_the_live_turn(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    old_config = TurnRuntimeConfig(model="model-one")
+    live_config = TurnRuntimeConfig(model="model-two")
+    live = await admission.admit_member(
+        workspace_id,
+        conversation_id,
+        "new request",
+        member_id,
+        runtime_config=live_config,
+    )
+
+    delivered = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "<spawn_result>done</spawn_result>",
+        "subagent-result:old-config",
+        holds_work_already_done=True,
+        runtime_config=old_config,
+    )
+
+    assert delivered == live.turn_id
+    assert await _queued_bodies(conversation_id) == ["<spawn_result>done</spawn_result>"]
+    async with workspace_tx() as connection:
+        runtime_config = (
+            await connection.execute(
+                sa.select(tables.turn.c.runtime_config).where(tables.turn.c.id == live.turn_id)
+            )
+        ).scalar_one()
+    assert TurnRuntimeConfig.model_validate(runtime_config) == live_config
 
 
 async def _queued_bodies(conversation_id: UUID) -> list[str]:

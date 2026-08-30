@@ -7,6 +7,8 @@ Start `ufoctl serve` with a test workspace. You can delete the workspace after t
 ```bash
 uv run python -m evals --workspace <workspace-id> --label baseline
 uv run python -m evals --remote --workspace <workspace-id> --label remote
+uv run python -m evals --remote --model z-ai/glm-5.3-flash \
+  --workspace <workspace-id> --label remote-glm
 uv run python -m evals --remote --only coding_profile --agent profile:coding \
   --workspace <workspace-id> --label coding-profile
 uv run python -m evals --view
@@ -19,6 +21,9 @@ use the private member audience of the terminal surface; shared-audience cases f
 The server attests its config, sandbox templates, model, and reasoning; a packaged deploy also
 attests its immutable image and revision. The runner refuses a missing or mixed identity before it
 records any score and binds the identity into every runtime-pinned suite digest.
+`--model` sends a concrete model selection with every case, replacing the deployed model for the
+main agent, extension agents, and every subagent profile in that turn tree; the runner refuses a
+terminal frame attesting any other model.
 `profile:<name>` is an explicit profile target for suites that pin it. The member turn is a proxy
 that must foreground-spawn that qualified production profile with the case objective unchanged;
 the grader reads the child's validated result and ignores the proxy's answer. A durable agent with
@@ -28,9 +33,9 @@ Corpus runs use the same concurrency control:
 
 ```bash
 uv run python -m evals --swebench --swebench-subset all --remote \
-  --fresh-workspace --concurrency 26
+  --model z-ai/glm-5.3-flash --fresh-workspace --concurrency 26
 uv run python -m evals --terminal-bench --remote \
-  --workspace <workspace-id> --concurrency 24
+  --model z-ai/glm-5.3-flash --workspace <workspace-id> --concurrency 24
 ```
 
 Capture patches already shared by a completed remote SWE-bench workspace without rerunning turns:

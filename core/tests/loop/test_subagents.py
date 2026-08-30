@@ -34,7 +34,14 @@ from ufo.loop.subagents import (
 )
 from ufo.o11y import current_traceparent
 from ufo.schema import tables
-from ufo.schema.records import AskQuestion, AskUserInput, TerminalFrame, Turn, turn_id_for
+from ufo.schema.records import (
+    AskQuestion,
+    AskUserInput,
+    TerminalFrame,
+    Turn,
+    TurnRuntimeConfig,
+    turn_id_for,
+)
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, RuntimeSkill, SkillCard
 from ufo.skills.selection import prompt_index
 from ufo.surfaces.admission import Admission, AdmissionInvoker
@@ -502,6 +509,7 @@ async def _running_child(
     agent_id: UUID,
     parent_id: UUID,
     on_behalf_of_member_id: UUID | None = None,
+    runtime_config: TurnRuntimeConfig | None = None,
 ) -> tuple[UUID, UUID]:
     conversation_id = uuid4()
     child_id = turn_id_for(workspace_id, conversation_id, 1)
@@ -531,6 +539,9 @@ async def _running_child(
                 parent_turn_id=parent_id,
                 on_behalf_of_member_id=on_behalf_of_member_id,
                 subagent_profile=GENERAL_PURPOSE,
+                runtime_config=(
+                    None if runtime_config is None else runtime_config.model_dump(mode="json")
+                ),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -567,8 +578,13 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
         speaker_member_id=member_id,
     )
+    runtime_config = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
     child_id, child_conversation = await _running_child(
-        workspace_id, agent_id, parent.id, on_behalf_of_member_id=member_id
+        workspace_id,
+        agent_id,
+        parent.id,
+        on_behalf_of_member_id=member_id,
+        runtime_config=runtime_config,
     )
     client = _RecordingClient()
     subagents = Subagents(
@@ -594,6 +610,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
                     tables.turn.c.parent_turn_id,
                     tables.turn.c.speaker_member_id,
                     tables.turn.c.traceparent,
+                    tables.turn.c.runtime_config,
                 ).where(tables.turn.c.id == status.turn_id)
             )
         ).one()
@@ -603,6 +620,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
     assert row.parent_turn_id == parent.id
     assert row.speaker_member_id is None
     assert row.traceparent == SPAWNING_TRACEPARENT
+    assert TurnRuntimeConfig.model_validate(row.runtime_config) == runtime_config
     assert client.enqueued == [str(status.turn_id)]
 
 

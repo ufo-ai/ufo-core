@@ -84,6 +84,7 @@ from ufo.schema.records import (
     CredentialRequest,
     RuntimeIdentity,
     TerminalFrame,
+    TurnRuntimeConfig,
     Usage,
 )
 from ufo.sdk.bearer import verify_token, workspace_claim
@@ -226,7 +227,6 @@ def test_turn_ending_frames_carry_the_deployed_runtime_and_selected_model() -> N
     terminal = Terminal(
         frame=TerminalFrame(status="done", text="done", model="glm-5.3-flash", reasoning="high")
     )
-
     lines = directives_for(terminal, streamed=True, runtime=runtime)
 
     assert json.loads(lines[0].decode().removeprefix("runtime\t")) == {
@@ -902,6 +902,70 @@ async def test_shared_fleet_scopes_each_turn_to_its_token_workspace(
     turn_b, status_b = await _sole_turn(ws_b)
     assert (status_a, status_b) == ("done", "done")
     assert turn_a != turn_b
+
+
+async def test_runtime_config_overrides_a_concrete_agent_for_one_turn(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        response = await client.post(
+            "/surface/ufo/configured",
+            content=b"use the selected model",
+            headers={
+                "authorization": f"Bearer {token}",
+                "x-ufo-model": "claude-sonnet-5",
+                "x-ufo-internet": "off",
+            },
+        )
+
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.runtime_config, tables.turn.c.terminal).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+    assert TurnRuntimeConfig.model_validate(row.runtime_config) == TurnRuntimeConfig(
+        model="claude-sonnet-5", internet_access=False
+    )
+    assert TerminalFrame.model_validate(row.terminal).model == "claude-sonnet-5"
+
+
+async def test_a_runtime_config_that_cannot_run_or_would_widen_is_refused(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    refused = (
+        {"x-ufo-model": "no-such-model"},
+        {"x-ufo-internet": "off"},
+        {"x-ufo-model": "claude-sonnet-5", "x-ufo-internet": "on"},
+    )
+
+    for headers in refused:
+        response = await client.post(
+            "/surface/ufo/refused",
+            content=b"never admitted",
+            headers={"authorization": f"Bearer {token}", **headers},
+        )
+        assert response.status_code == 400, response.text
+
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert turns == 0
 
 
 async def test_shared_fleet_rejects_a_forged_or_missing_bearer(shared_ufo: AsyncClient) -> None:

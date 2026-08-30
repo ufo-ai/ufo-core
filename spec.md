@@ -327,6 +327,10 @@ deploy builds and serves, held to the server's op contracts by the client's own 
 client is told to update the moment the server sees its version. `ufo --remote` sends no terminal
 binding, so the conversation opens on the deploy's configured carrier exactly as web and Slack do;
 `--json` changes only the client event framing and composes with either carrier choice.
+A client's `--model` travels with each admitted turn: that concrete model replaces every agent and
+subagent profile model in the turn tree, and `--no-internet` beside it may only narrow the deployed
+agent policy. The server validates both at admission and stores the selection on each turn; it
+never changes the deployed configuration.
 A packaged deploy's terminal end attests its revision, immutable image, config and sandbox digests,
 and the terminal frame's selected model and reasoning. Remote evals bind that identity into their
 runtime digest and refuse missing, mixed, or unexpected attestations before recording scores.
@@ -341,6 +345,8 @@ through a metered opaque tunnel. DNS is pinned and every IPv6, loopback, private
 reserved, multicast, or shared-space answer is refused. Tokenless and ended turns cannot use public
 internet. An agent's owner or an admin may narrow that deploy capability per agent through the agent object's
 `internet_access_allowed`; the proxy snapshots it into that turn's cached rules.
+An admitted turn may narrow it further through its runtime config; no client config can enable
+internet for an agent whose deployed policy blocks it.
 Extensions never register raw network rules; the proxy's rewrite rules are *derived* from their
 manifests — sandbox internet, a credential slot, a connector, or a model provider implies its
 scoping, injection, and metering rules. Declare, don't open. The enterprise k8s layer later ships

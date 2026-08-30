@@ -177,6 +177,7 @@ class RemoteClient:
     workspace_url: str
     token_secret: str
     home_root: Path
+    model: str | None = None
     runtime: RemoteRuntimeLog = field(default_factory=RemoteRuntimeLog)
 
     async def validate(self) -> None:
@@ -188,7 +189,8 @@ class RemoteClient:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await process.communicate()
-        if process.returncode or b"--remote" not in stdout or b"--json" not in stdout:
+        needed = (b"--remote", b"--json", *((b"--model",) if self.model is not None else ()))
+        if process.returncode or any(option not in stdout for option in needed):
             detail = (stderr or stdout).decode("utf-8", "replace").strip()
             raise RuntimeError(f"{self.executable} does not support remote JSON sessions: {detail}")
 
@@ -221,6 +223,7 @@ class RemoteClient:
                     process = await asyncio.create_subprocess_exec(
                         self.executable,
                         "--remote",
+                        *(() if self.model is None else ("--model", self.model)),
                         "--json",
                         "--resume",
                         str(conversation_id),

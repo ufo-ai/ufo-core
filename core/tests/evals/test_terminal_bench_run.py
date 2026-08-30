@@ -161,6 +161,55 @@ async def test_terminal_bench_agent_closes_json_stdin(
     }
 
 
+async def test_terminal_bench_agent_sends_the_selected_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench.agent import UfoAgent
+
+    environment = SimpleNamespace(context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    agent._workspace_url = "https://eval.ufo.test"
+    agent._model = "z-ai/glm-5.3-flash"
+    execute = AsyncMock()
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+
+    await agent.run("repair input", environment, AgentContext())
+
+    assert execute.await_args.kwargs["command"] == (
+        "/installed-agent/ufo --model z-ai/glm-5.3-flash --json 'repair input' </dev/null"
+    )
+
+
+async def test_terminal_bench_agent_reads_the_selected_model_from_its_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    from evals.terminal_bench.agent import CLIENT_TARGET, CREDENTIALS_TARGET, UfoAgent
+
+    client = tmp_path / "ufo"
+    client.write_text("client")
+    client.chmod(0o755)
+    monkeypatch.setenv("UFO_BENCH_CLIENT", str(client))
+    monkeypatch.setenv("UFO_BENCH_TOKEN", TOKEN)
+    monkeypatch.setenv("UFO_BENCH_WORKSPACE_URL", "https://eval.ufo.test")
+    monkeypatch.setenv("UFO_BENCH_MODEL", "z-ai/glm-5.3-flash")
+    environment = SimpleNamespace(default_user="agent", upload_file=AsyncMock())
+    agent = UfoAgent(tmp_path)
+    monkeypatch.setattr(agent, "exec_as_root", AsyncMock())
+    monkeypatch.setattr(agent, "exec_as_agent", AsyncMock())
+
+    await agent.install(environment)
+
+    assert agent._model == "z-ai/glm-5.3-flash"
+    assert [call.args[1] for call in environment.upload_file.await_args_list] == [
+        CLIENT_TARGET,
+        CREDENTIALS_TARGET,
+    ]
+
+
 def test_selected_run_keeps_harbor_grading_and_one_concurrent_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -179,7 +228,7 @@ def test_selected_run_keeps_harbor_grading_and_one_concurrent_job(
 
     monkeypatch.setattr(subprocess, "run", complete)
 
-    assert TerminalBenchRun(root, CASES, 12, credentials).run() == 0
+    assert TerminalBenchRun(root, CASES, 12, credentials, model="z-ai/glm-5.3-flash").run() == 0
     assert len(seen) == 1
     command, environment = seen[0]
     assert command[command.index("--n-concurrent") + 1] == "12"
@@ -187,6 +236,7 @@ def test_selected_run_keeps_harbor_grading_and_one_concurrent_job(
         command[index + 1] for index, value in enumerate(command) if value == "--include-task-name"
     ) == tuple(f"terminal-bench/{case}" for case in CASES)
     assert environment["UFO_BENCH_TOKEN"] == TOKEN
+    assert environment["UFO_BENCH_MODEL"] == "z-ai/glm-5.3-flash"
     assert TOKEN not in " ".join(command)
 
 
@@ -254,7 +304,9 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
     workspace_id = uuid4()
     root = tmp_path / "terminal-bench"
     credentials = BenchCredentials(root / "bin/x86_64/ufo", TOKEN, "https://eval.ufo.test")
-    captured: list[tuple[Path, tuple[str, ...], int, BenchCredentials, HarborBackend]] = []
+    captured: list[
+        tuple[Path, tuple[str, ...], int, BenchCredentials, HarborBackend, str | None]
+    ] = []
 
     async def resolved(*_args: object) -> BenchCredentials:
         return credentials
@@ -270,8 +322,9 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             concurrency: int,
             credentials: BenchCredentials,
             backend: HarborBackend,
+            model: str | None,
         ) -> None:
-            captured.append((root, cases, concurrency, credentials, backend))
+            captured.append((root, cases, concurrency, credentials, backend, model))
 
         def run(self) -> int:
             return 0
@@ -298,6 +351,8 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             "--terminal-bench-harbor-extra",
             "e2b",
             "--remote",
+            "--model",
+            "z-ai/glm-5.3-flash",
             "--workspace",
             str(workspace_id),
             "--concurrency",
@@ -312,6 +367,7 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             18,
             credentials,
             HarborBackend(environment="e2b", extra="e2b"),
+            "z-ai/glm-5.3-flash",
         )
     ]
 

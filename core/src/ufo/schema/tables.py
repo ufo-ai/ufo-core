@@ -250,6 +250,7 @@ turn = sa.Table(
     sa.Column("billing_identity", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("result_delivery", sa.Text, nullable=True),
     sa.Column("traceparent", sa.Text, nullable=True),
+    sa.Column("runtime_config", sa.JSON, nullable=True),
     sa.Column("idempotency_key", sa.Text, nullable=True),
     sa.Column("running_attempt", sa.Text, nullable=True),
     sa.Column("dispatch_enqueued_at", sa.DateTime(timezone=True), nullable=True),

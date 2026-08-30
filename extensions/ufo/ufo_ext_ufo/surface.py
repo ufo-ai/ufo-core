@@ -72,6 +72,7 @@ from ufo.sdk.surfaces import (
     TerminalGone,
     TerminalOp,
     TurnContext,
+    TurnRuntimeConfig,
     member_message_text,
 )
 
@@ -97,6 +98,8 @@ LISTEN_HEADER = "x-ufo-listen"
 OP_ERR_HEADER = "x-ufo-op-err"
 SCRIPT_HEADER = "x-ufo-script"
 TIMEZONE_HEADER = "x-ufo-timezone"
+MODEL_HEADER = "x-ufo-model"
+INTERNET_HEADER = "x-ufo-internet"
 CLIENT_VERSION_ENV = "UFO_CLIENT_VERSION"
 QUEUE_KEY_SEPARATOR = ":"
 RUNTIME_ID_HEX_CHARS = 32
@@ -611,6 +614,23 @@ def _turn_context(email: str, request: Request) -> TurnContext:
         return TurnContext(sender=email, source=source)
 
 
+def _runtime_config(ctx: SurfaceContext, request: Request) -> TurnRuntimeConfig | None:
+    model = request.headers.get(MODEL_HEADER, "").strip()
+    internet = request.headers.get(INTERNET_HEADER, "").strip()
+    if internet and internet != "off":
+        raise ValueError(f"{INTERNET_HEADER} only narrows: the one value is 'off'")
+    if internet and not model:
+        raise ValueError(f"{INTERNET_HEADER} requires {MODEL_HEADER}")
+    if not model:
+        return None
+    try:
+        runtime_config = TurnRuntimeConfig(model=model, internet_access=False if internet else None)
+    except ValidationError as error:
+        raise ValueError("runtime config is invalid") from error
+    ctx.validate_runtime_config(runtime_config)
+    return runtime_config
+
+
 async def channel(ctx: SurfaceContext, request: Request) -> Response:
     """One held turn on a channel. The bearer names the member; the channel path scopes their
     conversation. A body admits a turn and streams it; an empty body admits nothing and resumes
@@ -701,14 +721,22 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
                 return PlainTextResponse(_client_update())
             if len(body.encode()) > MAX_MESSAGE_BYTES:
                 return PlainTextResponse("message too large", status_code=413)
+            try:
+                runtime_config = _runtime_config(ctx, request)
+            except ValueError as error:
+                return PlainTextResponse(str(error), status_code=400)
             if cwd and await ctx.claim_terminal(conversation_id, cwd):
                 note = directive("note", f"Workspace: {cwd}")
-            admitted = await ctx.admit(
-                conversation_id,
-                body,
-                context=_turn_context(email, request),
-                speaker_member_id=member_id,
-            )
+            try:
+                admitted = await ctx.admit(
+                    conversation_id,
+                    body,
+                    context=_turn_context(email, request),
+                    speaker_member_id=member_id,
+                    runtime_config=runtime_config,
+                )
+            except ValueError as error:
+                return PlainTextResponse(str(error), status_code=409)
             turn_id = admitted.turn_id
             sent = directive(
                 "sent",
@@ -796,16 +824,26 @@ async def _send(
         return PlainTextResponse("a send carries a message", status_code=400)
     if len(body.encode()) > MAX_MESSAGE_BYTES:
         return PlainTextResponse("message too large", status_code=413)
+    try:
+        runtime_config = _runtime_config(ctx, request)
+    except ValueError as error:
+        return PlainTextResponse(str(error), status_code=400)
     note = b""
     if cwd and await ctx.claim_terminal(conversation_id, cwd):
         note = directive("note", f"Workspace: {cwd}")
-    admitted = await ctx.admit(
-        conversation_id,
-        body,
-        idempotency_key=f"{conversation_id}{QUEUE_KEY_SEPARATOR}send{QUEUE_KEY_SEPARATOR}{send_id}",
-        context=_turn_context(email, request),
-        speaker_member_id=member_id,
-    )
+    try:
+        admitted = await ctx.admit(
+            conversation_id,
+            body,
+            idempotency_key=(
+                f"{conversation_id}{QUEUE_KEY_SEPARATOR}send{QUEUE_KEY_SEPARATOR}{send_id}"
+            ),
+            context=_turn_context(email, request),
+            speaker_member_id=member_id,
+            runtime_config=runtime_config,
+        )
+    except ValueError as error:
+        return PlainTextResponse(str(error), status_code=409)
     ack = directive(
         "sent",
         str(admitted.turn_id),

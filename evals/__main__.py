@@ -296,6 +296,10 @@ def main(argv: list[str] | None = None) -> None:
         help="run against the configured remote execution boundary",
     )
     parser.add_argument(
+        "--model",
+        help="concrete model id sent with each remote eval turn",
+    )
+    parser.add_argument(
         "--fresh-workspace",
         action="store_true",
         help="provision a clean hosted workspace for a remote eval run",
@@ -451,6 +455,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--remote runs eval suites")
     if args.fresh_workspace and not args.remote:
         parser.error("--fresh-workspace requires --remote")
+    if args.model is not None and not args.remote:
+        parser.error("--model requires --remote")
     if args.fresh_workspace and args.workspace is not None:
         parser.error("--fresh-workspace conflicts with --workspace")
     if args.budget_usd is not None and (not args.remote or args.budget_usd <= 0):
@@ -579,6 +585,7 @@ def main(argv: list[str] | None = None) -> None:
                     environment=args.terminal_bench_environment,
                     extra=args.terminal_bench_harbor_extra,
                 ),
+                model=args.model,
             ).run()
         except (OSError, ValueError, ValidationError) as error:
             parser.error(str(error))
@@ -867,6 +874,7 @@ def main(argv: list[str] | None = None) -> None:
             mcp_atlas_external_url=args.mcp_atlas_external_url,
             fresh_workspace=args.fresh_workspace,
             remote=args.remote,
+            model=args.model,
             candidate_proposal=args.candidate_from_proposal,
             concurrency=args.concurrency,
             budget_micro_usd=(
@@ -931,6 +939,7 @@ async def _run(
     mcp_atlas_external_url: str | None = None,
     fresh_workspace: bool = False,
     remote: bool = False,
+    model: str | None = None,
     candidate_proposal: UUID | None = None,
     concurrency: int = 1,
     budget_micro_usd: int | None = None,
@@ -974,6 +983,7 @@ async def _run(
                     or f"http://{config.serve.host}:{config.serve.port}",
                     token_secret=token_secret,
                     home_root=REMOTE_HOME_ROOT,
+                    model=model,
                 )
                 await remote_client.validate()
             if fresh_workspace:
@@ -1030,7 +1040,11 @@ async def _run(
             blob = WorkspaceBlobStore(backend=blob_backend)
             dbos = replay_safe_client(config.database.system_url)
             registry = model_registry(config, manifests)
-            resolved_agent_model = registry.resolve(agent_model)
+            if model is None:
+                resolved_agent_model = registry.resolve(agent_model)
+            else:
+                resolved_agent_model = model
+                registry.spec(resolved_agent_model)
             driver = WorkspaceDriver(
                 workspace_id,
                 agent_id,

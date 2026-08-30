@@ -29,7 +29,7 @@ from ufo.ext.manifest import CredentialSlot
 from ufo.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
 from ufo.sandbox.session import SENTINEL_MODEL_KEY, ProbeToken, RunToken
 from ufo.schema import tables
-from ufo.schema.records import RUNNING
+from ufo.schema.records import RUNNING, TurnRuntimeConfig
 from ufo.tools.bridge import TOOL_BRIDGE_HOST
 from ufo.workspace import ws
 
@@ -135,12 +135,13 @@ class PerAgentRules:
                 return rules
 
     async def _turn_of(self, run: RunToken) -> _Authority | None:
-        """The turn's agent and snapshotted internet policy in one indexed read."""
+        """The turn's agent and effective internet policy in one indexed read."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
                     sa.select(
                         tables.turn.c.agent_id,
+                        tables.turn.c.runtime_config,
                         tables.agent.c.internet_access_allowed,
                     )
                     .select_from(
@@ -158,7 +159,15 @@ class PerAgentRules:
             ).one_or_none()
         if row is None:
             return None
-        return _Authority(row.agent_id, row.internet_access_allowed, run.acting_member_id)
+        runtime_config = (
+            None
+            if row.runtime_config is None
+            else TurnRuntimeConfig.model_validate(row.runtime_config)
+        )
+        internet_access_allowed = row.internet_access_allowed and (
+            runtime_config is None or runtime_config.internet_access is None
+        )
+        return _Authority(row.agent_id, internet_access_allowed, run.acting_member_id)
 
     async def _conversation_of(self, probe: ProbeToken) -> _Authority | None:
         """The probed conversation's agent and snapshotted internet policy — the same two columns

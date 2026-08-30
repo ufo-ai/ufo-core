@@ -65,7 +65,14 @@ from ufo.sandbox.conversation import (
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
-from ufo.schema.records import ReasoningEffort, TerminalFrame, Turn, TurnContext, Usage
+from ufo.schema.records import (
+    ReasoningEffort,
+    TerminalFrame,
+    Turn,
+    TurnContext,
+    TurnRuntimeConfig,
+    Usage,
+)
 from ufo.surfaces import hub_tail
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import TextContent, ToolContext, ToolResult
@@ -420,7 +427,13 @@ class Turns:
     hub: Hub
     admission: Admission
 
-    async def admit(self, seed: Seed, body: str, idempotency_key: str | None = None) -> str:
+    async def admit(
+        self,
+        seed: Seed,
+        body: str,
+        idempotency_key: str | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
+    ) -> str:
         admitted = await MemberAdmission(
             admission=self.admission, workspace_id=seed.workspace_id
         ).admit(
@@ -428,6 +441,7 @@ class Turns:
             body,
             idempotency_key=idempotency_key,
             speaker_member_id=seed.member_id,
+            runtime_config=runtime_config,
         )
         return str(admitted.turn_id)
 
@@ -1915,6 +1929,33 @@ async def test_subagent_bills_under_its_profile_model_not_the_parents(
     assert ROUNDTRIP_PROFILE.model is None
     assert PINNED_PROFILE.output_model is ROUNDTRIP_PROFILE.output_model
     assert sibling_model == "claude-opus-4-8"
+
+
+async def test_runtime_config_model_overrides_the_parent_and_profile_models(
+    surface: Turns,
+) -> None:
+    seed = await _bootstrap()
+    runtime_config = TurnRuntimeConfig(model="claude-sonnet-5")
+    parent = await surface.admit(seed, "spawn-pinned", runtime_config=runtime_config)
+    _, terminal = await surface.consume(seed, parent)
+    assert terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        child = (
+            await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.runtime_config).where(
+                    tables.turn.c.parent_turn_id == UUID(parent)
+                )
+            )
+        ).one()
+        models = (
+            await connection.execute(
+                sa.select(tables.ledger.c.model)
+                .where(tables.ledger.c.turn_id.in_((UUID(parent), child.id)))
+                .order_by(tables.ledger.c.turn_id)
+            )
+        ).scalars()
+    assert set(models) == {"claude-sonnet-5"}
+    assert TurnRuntimeConfig.model_validate(child.runtime_config) == runtime_config
 
 
 async def _child_echo(parent: str) -> int:

@@ -55,6 +55,7 @@ uv run python -m evals \
   --swebench \
   --swebench-subset all \
   --remote \
+  --model z-ai/glm-5.3-flash \
   --fresh-workspace \
   --concurrency 66
 ```
@@ -63,6 +64,8 @@ uv run python -m evals \
 hosted onboarding, and records the workspace id with the run. It requires
 `UFO_ONBOARD_CONTROL_TOKEN` and `connect.public_base_url`. Pass `--workspace <workspace-id>` instead
 to reuse an existing workspace.
+`--model` selects one model for the main agent and every core or extension subagent profile it
+spawns. The deployed service performs the work; no local `ufoctl serve` is involved.
 
 `--swebench` requires `--swebench-subset` or `--swebench-case`; `all` selects the complete pinned
 roster. Each subset runs as its own

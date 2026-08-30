@@ -279,6 +279,7 @@ from ufo.schema.records import (
     RuntimeIdentity,
     ToolIntent,
     TurnContext,
+    TurnRuntimeConfig,
     TurnStatus,
     Usage,
 )
@@ -8181,7 +8182,7 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
 
     async def spawn(*args, **kwargs) -> Process:
         if args[1:] == ("--help",):
-            return Process(b"--remote --json\n")
+            return Process(b"--remote --model --json\n")
         env = kwargs["env"]
         home = Path(env["UFO_HOME"])
         calls.append(
@@ -8243,6 +8244,7 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
         workspace_url="http://workspace.test",
         token_secret="remote-test-secret",
         home_root=tmp_path / "ufo-home",
+        model=MODEL,
     )
     driver = WorkspaceDriver(
         workspace_id,
@@ -8288,6 +8290,8 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
         {
             "args": [
                 "--remote",
+                "--model",
+                MODEL,
                 "--json",
                 "--resume",
                 str(conversation_id),
@@ -11573,6 +11577,7 @@ async def test_capability_workflow_cancellation_settles_deferred_delivery_before
             as_scheduled: bool = False,
             unless_member_since: int | None = None,
             unless_member_arrival_since: int | None = None,
+            runtime_config: TurnRuntimeConfig | None = None,
         ) -> UUID:
             async with workspace_tx() as connection:
                 await connection.execute(

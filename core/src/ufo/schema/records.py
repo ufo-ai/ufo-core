@@ -432,6 +432,22 @@ class RuntimeIdentity(BaseModel):
         return self
 
 
+class TurnRuntimeConfig(BaseModel):
+    """The runtime choices one turn tree pins without changing its deployed runtime: a concrete
+    model, and optionally narrowed sandbox internet access."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: str = Field(min_length=1)
+    internet_access: Literal[False] | None = None
+
+    @model_validator(mode="after")
+    def _concrete_model(self) -> "TurnRuntimeConfig":
+        if self.model == "auto":
+            raise ValueError("a turn pins a concrete model id, not 'auto'")
+        return self
+
+
 class RuntimeAttestation(BaseModel):
     """A turn-ending frame's actual model settings bound to its running service identity."""
 
@@ -531,6 +547,7 @@ class Turn(BaseModel):
     result_delivery: ResultDelivery | None = None
     sandbox_conversation_id: UUID | None = None
     traceparent: str | None = None
+    runtime_config: TurnRuntimeConfig | None = None
 
     @property
     def spawned(self) -> bool:

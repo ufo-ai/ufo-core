@@ -21,6 +21,7 @@ BENCH_ENVIRONMENT = (
     "UFO_BENCH_CLIENT",
     "UFO_BENCH_TOKEN",
     "UFO_BENCH_WORKSPACE_URL",
+    "UFO_BENCH_MODEL",
 )
 REWARD_FILE = "reward.txt"
 JOB_STAMP = "%Y%m%dT%H%M%SZ"
@@ -123,7 +124,9 @@ def harbor_command(
     )
 
 
-def harbor_environment(base: Mapping[str, str], credentials: BenchCredentials) -> dict[str, str]:
+def harbor_environment(
+    base: Mapping[str, str], credentials: BenchCredentials, model: str | None = None
+) -> dict[str, str]:
     """Pass benchmark credentials to the custom-agent process only."""
     environment = {name: value for name, value in base.items() if name not in BENCH_ENVIRONMENT}
     environment.update(
@@ -133,6 +136,8 @@ def harbor_environment(base: Mapping[str, str], credentials: BenchCredentials) -
             "UFO_BENCH_WORKSPACE_URL": credentials.workspace_url,
         }
     )
+    if model is not None:
+        environment["UFO_BENCH_MODEL"] = model
     return environment
 
 
@@ -175,6 +180,7 @@ class TerminalBenchRun:
     credentials: BenchCredentials
     backend: HarborBackend = DAYTONA_BACKEND
     upstream_file: Path = UPSTREAM_FILE
+    model: str | None = None
 
     def run(self) -> int:
         """Run one concurrent Harbor job and return its exit status."""
@@ -195,7 +201,9 @@ class TerminalBenchRun:
         )
         print(shlex.join(command))
         completed = subprocess.run(
-            command, check=False, env=harbor_environment(os.environ, self.credentials)
+            command,
+            check=False,
+            env=harbor_environment(os.environ, self.credentials, self.model),
         )
         job_dir = jobs_dir / job_name
         if completed.returncode:

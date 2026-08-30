@@ -212,6 +212,8 @@ pub struct Session {
     pub since: Option<String>,
     pub installed: bool,
     pub tty: bool,
+    model: Option<String>,
+    no_internet: bool,
     agent: OnceCell<ureq::Agent>,
     last_post: std::time::Instant,
 }
@@ -258,9 +260,17 @@ impl Session {
             since: None,
             installed,
             tty,
+            model: None,
+            no_internet: false,
             agent: OnceCell::new(),
             last_post: std::time::Instant::now(),
         }
+    }
+
+    pub fn with_runtime_config(mut self, model: Option<String>, no_internet: bool) -> Session {
+        self.model = model;
+        self.no_internet = no_internet;
+        self
     }
 
     /// The endpoint this session posts to: the workspace surface when signed in, onboarding
@@ -335,6 +345,8 @@ impl Session {
             endpoint: self.endpoint(),
             session_id: self.session_id.clone(),
             token: self.token.clone(),
+            model: self.model.clone(),
+            no_internet: self.no_internet,
         })
     }
 
@@ -480,6 +492,12 @@ impl Session {
         if let Some(since) = &self.since {
             request = request.set("x-ufo-since", since);
         }
+        if let Some(model) = &self.model {
+            request = request.set("x-ufo-model", model);
+        }
+        if self.no_internet {
+            request = request.set("x-ufo-internet", "off");
+        }
         request
     }
 }
@@ -500,6 +518,8 @@ pub struct SendLane {
     endpoint: String,
     session_id: String,
     token: Option<String>,
+    model: Option<String>,
+    no_internet: bool,
 }
 
 impl SendLane {
@@ -517,6 +537,12 @@ impl SendLane {
         }
         if let Some(token) = &self.token {
             request = request.set("authorization", &format!("Bearer {token}"));
+        }
+        if let Some(model) = &self.model {
+            request = request.set("x-ufo-model", model);
+        }
+        if self.no_internet {
+            request = request.set("x-ufo-internet", "off");
         }
         let response = match request.send_string(text) {
             Ok(response) => response,
@@ -1075,6 +1101,25 @@ mod tests {
         assert!(lowered.contains("content-length: 0"), "{request}");
         assert!(lowered.contains("authorization: bearer tok"), "{request}");
         assert!(lowered.contains("x-ufo-session: sid"), "{request}");
+    }
+
+    #[test]
+    fn a_runtime_config_is_sent_with_a_message() {
+        let (base, serving) = served("200 OK", "ask\t>\n");
+        let mut session =
+            stopping(base).with_runtime_config(Some("z-ai/glm-5.3-flash".into()), true);
+
+        session
+            .post(PostBody::Message("run it".into()))
+            .expect("the message is accepted");
+
+        let request = serving.join().expect("the server thread");
+        assert!(
+            request.contains("x-ufo-model: z-ai/glm-5.3-flash"),
+            "{request}"
+        );
+        assert!(request.contains("x-ufo-internet: off"), "{request}");
+        assert!(request.ends_with("\r\n\r\nrun it"), "{request}");
     }
 
     #[test]

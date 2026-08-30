@@ -12,6 +12,7 @@ uv run python -m evals \
   --terminal-bench-case regex-log \
   --terminal-bench-case cancel-async-tasks \
   --remote \
+  --model z-ai/glm-5.3-flash \
   --workspace <workspace-id> \
   --concurrency 3
 ```
@@ -30,3 +31,6 @@ This is required: the agent changes the same filesystem and live services Harbor
 outer eval runner's `--remote` selects the remote Harbor environment and public ufo service; using
 the client's `--remote` flag inside a task would provision a different sandbox and leave the graded
 environment untouched.
+The attached client still sends `--model` to the public ufo service, which runs the selected model
+for the main agent and every spawned profile while tool operations remain attached to Harbor's
+graded filesystem.

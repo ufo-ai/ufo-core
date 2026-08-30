@@ -79,6 +79,7 @@ from ufo.schema.records import (
     ToolIntent,
     TurnAdmissionSource,
     TurnContext,
+    TurnRuntimeConfig,
     TurnStatus,
     admits_spent_balance,
     mid_turn_reply_id_for,
@@ -131,6 +132,7 @@ class Admission:
         context: TurnContext | None = None,
         intent: ToolIntent | None = None,
         comment: str | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
     ) -> Admitted:
         if intent is not None and speaker_member_id is None:
             raise ValueError("a prepared intent requires a speaking member")
@@ -150,6 +152,7 @@ class Admission:
                 member_admission=True,
                 intent=intent,
                 comment=comment,
+                runtime_config=runtime_config,
             )
         if admitted.arrival_id is not None and not admitted.opened_run and self.hub is not None:
             await self.hub.publish(admitted.turn_id, ArrivalQueued(arrival_id=admitted.arrival_id))
@@ -229,6 +232,7 @@ class Admission:
         as_scheduled: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
     ) -> UUID | None:
         """Admit an internal turn. `on_behalf_of_member_id` carries forward the authority the work
         already held — a subagent hands its result back to the conversation that delegated it, and
@@ -288,6 +292,7 @@ class Admission:
                 as_scheduled=as_scheduled,
                 unless_member_since=unless_member_since,
                 unless_member_arrival_since=unless_member_arrival_since,
+                runtime_config=runtime_config,
             )
         except _SupersededByMember:
             return None
@@ -310,6 +315,7 @@ class Admission:
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         comment: str | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
     ) -> Admitted:
         if (unless_member_since is None) != (unless_member_arrival_since is None):
             raise ValueError("waiting on a member takes both watermarks, turn and arrival")
@@ -376,6 +382,7 @@ class Admission:
                             tables.turn.c.conversation_id,
                             tables.turn.c.agent_id,
                             tables.turn.c.running_attempt,
+                            tables.turn.c.runtime_config,
                         )
                         .where(
                             tables.turn.c.workspace_id == workspace_id,
@@ -447,6 +454,12 @@ class Admission:
                 if deduped is not None:
                     if deduped.conversation_id != conversation_id or deduped.agent_id != agent_id:
                         raise RuntimeError("idempotency key reused for a different turn")
+                    if runtime_config is not None and (
+                        deduped.runtime_config is None
+                        or TurnRuntimeConfig.model_validate(deduped.runtime_config)
+                        != runtime_config
+                    ):
+                        raise ValueError("turn already has a different runtime config")
             if (
                 deduped is None
                 and unless_member_since is not None
@@ -487,6 +500,7 @@ class Admission:
                             tables.turn.c.speaker_member_id,
                             tables.turn.c.admission_source,
                             tables.turn.c.on_behalf_of_member_id,
+                            tables.turn.c.runtime_config,
                         )
                         .where(
                             tables.turn.c.workspace_id == workspace_id,
@@ -498,6 +512,21 @@ class Admission:
                         .with_for_update()
                     )
                 ).one_or_none()
+                live_runtime_config = (
+                    None
+                    if live_turn is None or live_turn.runtime_config is None
+                    else TurnRuntimeConfig.model_validate(live_turn.runtime_config)
+                )
+                if (
+                    runtime_config is not None
+                    and live_turn is not None
+                    and live_runtime_config != runtime_config
+                    and not holds_work_already_done
+                ):
+                    raise ValueError("running turn has a different runtime config")
+                effective_runtime_config = (
+                    live_runtime_config if live_turn is not None else runtime_config
+                )
                 parked_gate = (
                     None
                     if live_turn is None or live_turn.status != PARKED
@@ -549,7 +578,14 @@ class Admission:
                     None
                     if fold_decision is None or fold_decision.outcome != ALLOW
                     else await BalanceGate(workspace_id, self.billing_url).admits(
-                        connection, agent_id, self.key_slot_for
+                        connection,
+                        agent_id,
+                        self.key_slot_for,
+                        model=(
+                            None
+                            if effective_runtime_config is None
+                            else effective_runtime_config.model
+                        ),
                     )
                 )
                 if (
@@ -674,7 +710,10 @@ class Admission:
                         SpendDecision(outcome=ALLOW, message="")
                         if intent is not None and admits_spent_balance(intent)
                         else await BalanceGate(workspace_id, self.billing_url).admits(
-                            connection, agent_id, self.key_slot_for
+                            connection,
+                            agent_id,
+                            self.key_slot_for,
+                            model=(None if runtime_config is None else runtime_config.model),
                         )
                     )
                     match decision.outcome:
@@ -717,6 +756,11 @@ class Admission:
                         terminal=None if terminal is None else terminal.model_dump(mode="json"),
                         idempotency_key=idempotency_key,
                         traceparent=current_traceparent(),
+                        runtime_config=(
+                            None
+                            if runtime_config is None
+                            else runtime_config.model_dump(mode="json")
+                        ),
                         created_at=admitted_at if admitted_at is not None else sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -907,6 +951,7 @@ class AdmissionInvoker:
         as_scheduled: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
     ) -> UUID | None:
         return await self.admission.invoke(
             self.workspace_id,
@@ -920,6 +965,7 @@ class AdmissionInvoker:
             as_scheduled=as_scheduled,
             unless_member_since=unless_member_since,
             unless_member_arrival_since=unless_member_arrival_since,
+            runtime_config=runtime_config,
         )
 
 
@@ -941,6 +987,7 @@ class MemberAdmission:
         speaker_member_id: UUID | None,
         intent: ToolIntent | None = None,
         comment: str | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
     ) -> Admitted:
         return await self.admission.admit_member(
             self.workspace_id,
@@ -951,6 +998,7 @@ class MemberAdmission:
             context=context,
             intent=intent,
             comment=comment,
+            runtime_config=runtime_config,
         )
 
 

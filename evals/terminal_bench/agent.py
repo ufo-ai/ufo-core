@@ -27,6 +27,7 @@ class UfoAgent(BaseInstalledAgent):
     """Install the native client and run one turn inside Harbor's graded environment."""
 
     _workspace_url: str
+    _model: str | None = None
 
     @staticmethod
     @override
@@ -38,6 +39,7 @@ class UfoAgent(BaseInstalledAgent):
         client = await asyncio.to_thread(Path(_required_environment("UFO_BENCH_CLIENT")).resolve)
         token = _required_environment("UFO_BENCH_TOKEN")
         workspace_url = _required_environment("UFO_BENCH_WORKSPACE_URL")
+        self._model = os.environ.get("UFO_BENCH_MODEL") or None
         parsed = urlsplit(workspace_url)
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("UFO_BENCH_WORKSPACE_URL must be a public HTTPS URL")
@@ -91,9 +93,13 @@ class UfoAgent(BaseInstalledAgent):
             "channel": channel,
             "client_target": CLIENT_TARGET,
         }
+        command = [CLIENT_TARGET]
+        if self._model is not None:
+            command.extend(("--model", self._model))
+        command.extend(("--json", instruction))
         await self.exec_as_agent(
             environment,
-            command=f"{shlex.join((CLIENT_TARGET, '--json', instruction))} </dev/null",
+            command=f"{shlex.join(command)} </dev/null",
             env={
                 "UFO_HOME": HOME_TARGET,
                 "WORKSPACE_URL": self._workspace_url,

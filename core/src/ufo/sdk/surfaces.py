@@ -216,6 +216,9 @@ from ufo.schema.records import (
 from ufo.schema.records import (
     TurnContext as TurnContext,
 )
+from ufo.schema.records import (
+    TurnRuntimeConfig as TurnRuntimeConfig,
+)
 from ufo.turns.ambient_reply import (
     AmbientMessage as AmbientMessage,
 )

@@ -61,6 +61,7 @@ from ufo.schema.records import (
     TURN_WORKFLOW_NAME,
     TerminalFrame,
     Turn,
+    TurnRuntimeConfig,
     turn_id_for,
 )
 from ufo.seats import member_is_admin
@@ -312,7 +313,11 @@ class Subagents:
             inbound=typed_input.model_dump_json(),
             delivers_result=delivers_result,
             name=name,
-            model=_target_model(resolved),
+            model=(
+                _target_model(resolved)
+                if self.parent.runtime_config is None
+                else self.parent.runtime_config.model
+            ),
         ):
             await self._enqueue(turn_id, conversation_id)
         if background:
@@ -477,6 +482,7 @@ class Subagents:
                         tables.turn.c.agent_id,
                         tables.turn.c.subagent_profile,
                         tables.turn.c.result_delivery,
+                        tables.turn.c.runtime_config,
                     ).where(tables.turn.c.id == turn_id)
                 )
             ).one()
@@ -501,8 +507,19 @@ class Subagents:
             if followup is not None and followup.conversation_id != child.conversation_id:
                 raise ValueError("dedup key belongs to another follow-up")
             if followup is None:
+                runtime_config = (
+                    None
+                    if child.runtime_config is None
+                    else TurnRuntimeConfig.model_validate(child.runtime_config)
+                )
                 await self._require_balance(
-                    connection, self._profile_model(child.subagent_profile), child.agent_id
+                    connection,
+                    (
+                        self._profile_model(child.subagent_profile)
+                        if runtime_config is None
+                        else runtime_config.model
+                    ),
+                    child.agent_id,
                 )
                 followup_seq = (
                     await connection.execute(
@@ -537,6 +554,7 @@ class Subagents:
                         ),
                         subagent_profile=child.subagent_profile,
                         traceparent=current_traceparent(),
+                        runtime_config=child.runtime_config,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -803,6 +821,11 @@ class Subagents:
                     subagent_profile=profile,
                     subagent_name=name or None,
                     traceparent=current_traceparent(),
+                    runtime_config=(
+                        None
+                        if self.parent.runtime_config is None
+                        else self.parent.runtime_config.model_dump(mode="json")
+                    ),
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -1076,6 +1099,7 @@ class SubagentResult:
             f"{SPAWN_RESULT_KEY_PREFIX}{child.id}",
             on_behalf_of_member_id=child.on_behalf_of_member_id,
             holds_work_already_done=True,
+            runtime_config=child.runtime_config,
         )
         async with workspace_tx() as connection:
             await connection.execute(

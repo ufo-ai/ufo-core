@@ -127,6 +127,7 @@ from ufo.schema.records import (
     Turn,
     TurnAdmissionSource,
     TurnContext,
+    TurnRuntimeConfig,
 )
 from ufo.sdk.http import cookie_secure
 from ufo.seats import (
@@ -370,6 +371,7 @@ class MemberAdmitter(Protocol):
         speaker_member_id: UUID | None,
         intent: ToolIntent | None = None,
         comment: str | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
     ) -> Admitted: ...
 
 
@@ -1804,6 +1806,11 @@ class SurfaceContext:
         on."""
         return self._models
 
+    def validate_runtime_config(self, runtime_config: TurnRuntimeConfig) -> None:
+        """Refuse a turn model selection this deployed runtime cannot execute."""
+        if runtime_config.model not in self._models:
+            raise ValueError(f"unknown model: {runtime_config.model}")
+
     @property
     def sandbox_sizes(self) -> tuple[str, ...]:
         """The sandbox sizes this deploy's selected carrier provisions, empty for a single-shape
@@ -2472,6 +2479,7 @@ class SurfaceContext:
         speaker_member_id: UUID | None,
         intent: ToolIntent | None = None,
         comment: str | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
     ) -> Admitted:
         """Admit an inbound message onto the durable turn queue and return its turn, with whether
         this delivery opened that turn's run. The turn executes as the conversation's bound agent —
@@ -2495,6 +2503,7 @@ class SurfaceContext:
             speaker_member_id=speaker_member_id,
             intent=intent,
             comment=comment,
+            runtime_config=runtime_config,
         )
 
     async def connect_url(self, turn_id: UUID, member_id: UUID) -> str:

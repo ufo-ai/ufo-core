@@ -106,6 +106,7 @@ from ufo.schema.records import (
     Turn,
     TurnAdmissionSource,
     TurnContext,
+    TurnRuntimeConfig,
 )
 from ufo.search import SearchProvider
 from ufo.skills.runtime import (
@@ -600,6 +601,11 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             )
         with span("turn.load"):
             turn, agent, audience = await _load_turn(UUID(turn_id))
+        if turn.runtime_config is not None:
+            runtime.registry.spec(turn.runtime_config.model)
+        internet_access_allowed = agent.internet_access_allowed and (
+            turn.runtime_config is None or turn.runtime_config.internet_access is None
+        )
         lineage = await _run_lineage(turn)
         previous_turn_ended_at = (
             None
@@ -675,7 +681,16 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         member_skill_block = ""
         connector_read_only = False
         if turn.subagent_profile is None:
-            resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
+            resolved = agent.model_copy(
+                update={
+                    "model": (
+                        runtime.registry.resolve(agent.model)
+                        if turn.runtime_config is None
+                        else turn.runtime_config.model
+                    ),
+                    "internet_access_allowed": internet_access_allowed,
+                }
+            )
             granted_actions = _agent_actions(
                 verbs.actions,
                 agent.tools,
@@ -723,8 +738,13 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     skills=_prompt_skill_index(skills, runtime.config.skills.member_block),
                     preload=preload,
                 ),
-                model=runtime.registry.resolve(profile.model or agent.model),
+                model=(
+                    runtime.registry.resolve(profile.model or agent.model)
+                    if turn.runtime_config is None
+                    else turn.runtime_config.model
+                ),
                 reasoning=profile.reasoning or agent.reasoning,
+                internet_access_allowed=internet_access_allowed,
             )
             granted_actions = _subagent_actions(
                 verbs.actions, profile, runtime.subagent_grants.get(profile.name, frozenset())
@@ -804,7 +824,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 injecting_slots(runtime.manifests),
                 cache_rewrite=(
                     runtime.config.sandbox.cache_daemon is not None
-                    and agent.internet_access_allowed
+                    and resolved.internet_access_allowed
                 ),
             ),
             existing=lambda: runtime.sandboxes.existing(
@@ -1017,6 +1037,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.subagent_name,
                     tables.turn.c.result_delivery,
                     tables.conversation.c.sandbox_conversation_id,
+                    tables.turn.c.runtime_config,
                     tables.turn.c.traceparent,
                     tables.agent.c.prompt,
                     tables.agent.c.model,
@@ -1062,6 +1083,11 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         result_delivery=row.result_delivery,
         sandbox_conversation_id=row.sandbox_conversation_id,
         traceparent=row.traceparent,
+        runtime_config=(
+            None
+            if row.runtime_config is None
+            else TurnRuntimeConfig.model_validate(row.runtime_config)
+        ),
     )
     return (
         turn,
