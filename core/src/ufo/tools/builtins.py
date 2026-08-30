@@ -140,8 +140,10 @@ class BashInput(BaseModel):
     timeout: int | None = Field(
         default=None,
         description="How long to wait for the command in the foreground, in milliseconds. Max "
-        "600000 (10 minutes). A command still running at the deadline is not stopped — it "
-        "continues in the background and the result hands back its task id, log path, and pid.",
+        "600000 (10 minutes). Size it to cover the whole run — a command re-issued in "
+        "short waits pays this budget again each time. A command still running at the "
+        "deadline is not stopped — it continues in the background and the result hands "
+        "back its task id, log path, and pid.",
     )
     background: bool = Field(
         default=False,
