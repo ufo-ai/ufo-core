@@ -168,6 +168,9 @@ from evals.registry import (
     selected_run_tasks,
 )
 from evals.suites import coding_subagent, github_connections, low_stakes_default
+from evals.suites.bash_waiting import (
+    WORKFLOW_WAIT_SECONDS as BASH_WAITING_WORKFLOW_WAIT_SECONDS,
+)
 from evals.suites.browser_nav import CASES as BROWSER_CASES
 from evals.suites.closing_message import CASES as CLOSING_CASES
 from evals.suites.closing_message import (
@@ -459,6 +462,18 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "tool_activity",
         }
     )
+
+
+def test_bash_waiting_keeps_its_wait_beside_faster_suites() -> None:
+    """A release the case cannot size outlasts the default wait, and the suites it is ablated
+    against are fast — the wait has to ride the task, not the run."""
+    tasks = {task.name: task for task in TASKS}
+
+    assert tasks["bash_waiting"].wait_seconds == BASH_WAITING_WORKFLOW_WAIT_SECONDS
+    assert _task_workflow_wait_seconds((tasks["bash_waiting"], tasks["tool_calling"])) == (
+        DEFAULT_WORKFLOW_WAIT_SECONDS
+    )
+    assert tasks["tool_calling"].wait_seconds is None
 
 
 def test_ufo_app_bench_uses_its_screen_build_wait_bound() -> None:

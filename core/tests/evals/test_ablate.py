@@ -869,7 +869,25 @@ def test_an_arm_installs_no_dev_group_and_the_failure_names_the_package(
     with pytest.raises(RuntimeError, match="actionlint-py"):
         ablation._sync(tmp_path / "worktree")
 
-    assert commands == [("uv", "sync", "--no-dev")]
+    assert commands == [("uv", "sync", "--no-dev", "--reinstall")]
+
+
+def test_an_arm_reinstalls_so_a_pack_or_extension_replacement_reaches_its_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extensions and packs install as copies, so a sync that reuses the build already present for
+    their unchanged version leaves the arm running base code while it reports itself as the
+    variant — an arm that measures nothing and says nothing about it."""
+    commands = []
+
+    def sync(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess:
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(ablate.subprocess, "run", sync)
+    Ablation(repo=tmp_path, spec=_spec(), out=tmp_path / "out")._sync(tmp_path / "worktree")
+
+    assert "--reinstall" in commands[0]
 
 
 def test_an_arm_carries_the_app_page_build_output(tmp_path: Path) -> None:

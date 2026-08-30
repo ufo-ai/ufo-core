@@ -97,7 +97,9 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     capability_task("skill_tail_search", skill_tail_search.CASES, serial=True),
     capability_task("tool_calling", tool_calling.CASES),
     capability_task("sandbox_cli", sandbox_cli.CASES),
-    capability_task("bash_waiting", bash_waiting.CASES),
+    capability_task(
+        "bash_waiting", bash_waiting.CASES, wait_seconds=bash_waiting.WORKFLOW_WAIT_SECONDS
+    ),
     capability_task("problem_report", problem_report.CASES),
     capability_task(
         "authority_handoff",

@@ -754,10 +754,20 @@ class Ablation:
         that builds by downloading a release binary fails wherever that download is closed — which
         materializes no arm at all, for a group no arm needs.
 
+        `--reinstall` is what makes the arm its diff: every extension and pack installs as a copy,
+        not editable, and a plain sync reuses the build it already has for that version — so a
+        replacement inside one of them lands in the worktree, never in the venv the arm runs, and
+        the arm measures the base while reporting itself as the variant. Core alone is editable,
+        which is why only the arms that touch an extension or a pack were silently empty.
+
         `uv sync` reports the failing package on stderr and `CalledProcessError` carries none of it,
         so the tail rides the raised error instead."""
         done = subprocess.run(
-            ("uv", "sync", "--no-dev"), cwd=root, check=False, capture_output=True, text=True
+            ("uv", "sync", "--no-dev", "--reinstall"),
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
         )
         if done.returncode != 0:
             raise RuntimeError(f"uv sync --no-dev failed in {root}: {done.stderr[-TAIL_CHARS:]}")
