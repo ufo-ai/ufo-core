@@ -19,7 +19,9 @@ uv run ufoctl serve
 The HTTPS base must forward to the generated config's loopback serve port. The renderer does not
 create that ingress. Use one root per model; it derives isolated SQLite, blob, and workspace paths
 and writes the complete config plus `ufo.toml.sha256`. Initialize without `--model` so the main
-agent keeps `model = "auto"` and resolves through the generated `[models].auto_model`.
+agent keeps `model = "auto"` and resolves through the generated `[models].auto_model`. The same
+config overrides the ordinary `coding` subagent to that model; product configurations keep the
+profile's pinned Opus default.
 
 In another terminal, use the workspace id printed by `ufoctl init`:
 

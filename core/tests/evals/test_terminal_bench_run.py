@@ -51,6 +51,7 @@ def test_tracked_config_pins_the_terminal_bench_control_plane() -> None:
     assert config.models.auto_model == "z-ai/glm-5.3-flash"
     assert config.models.ambient_reply_model == "gpt-5.6-luna"
     assert config.models.background_jobs_model == "gpt-5.6-luna"
+    assert config.models.subagent_models == {"coding": "z-ai/glm-5.3-flash"}
     assert config.pack.name == "assistant_hosted"
     assert config.sandbox.backend == "local"
     assert config.hub.backend == "in_process"
@@ -75,6 +76,7 @@ def test_rendered_config_isolates_runtime_values_and_records_its_digest(tmp_path
     assert config.database.owner_url == config.database.url
     assert config.blob.root == root / "blobs"
     assert config.models.auto_model == "candidate/model"
+    assert config.models.subagent_models == {"coding": "candidate/model"}
     assert config.serve.port == 58001
     assert config.connect.public_base_url == "https://candidate.eval.test"
     assert config.sandbox.workspace_root == root / "workspaces"

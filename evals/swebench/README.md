@@ -59,6 +59,10 @@ uv run python -m evals \
   --concurrency 66
 ```
 
+For a model-comparison run, start an isolated service from a config that sets both
+`models.auto_model` and `models.subagent_models.coding` to the target model. The latter is scoped to
+that service; the product coding profile remains pinned to Opus.
+
 `--fresh-workspace` derives a new workspace from the run id, founds its admin and main agent through
 hosted onboarding, and records the workspace id with the run. It requires
 `UFO_ONBOARD_CONTROL_TOKEN` and `connect.public_base_url`. Pass `--workspace <workspace-id>` instead

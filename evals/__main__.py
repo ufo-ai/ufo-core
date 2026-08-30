@@ -1011,14 +1011,15 @@ async def _run(
                 workspace_id = await RemoteWorkspaceProvisioner(
                     onboard, budget_micro_usd
                 ).provision(recorder.id)
+            subagents = SubagentRegistry(
+                (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
+            ).with_models(config.models.subagent_models)
             profile = None
             if agent_name.startswith("profile:"):
                 if candidate_proposal is not None:
                     raise ValueError("a profile target cannot use --candidate-from-proposal")
                 profile_name = agent_name.removeprefix("profile:")
-                profile = SubagentRegistry(
-                    (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
-                ).get(profile_name)
+                profile = subagents.get(profile_name)
                 resolved_agent = await resolve_workspace_and_agent(DEFAULT_AGENT_NAME, workspace_id)
             elif candidate_proposal is not None:
                 workspace_id, agent_name = await seed_candidate_agent(
@@ -1079,9 +1080,6 @@ async def _run(
                 if any(task.suite == SKILL_LOADING_SUITE for task in tasks):
                     loadable_skills = frozenset(
                         skill_registry(manifests, (model_catalog_skill(registry),)).by_name
-                    )
-                    subagents = SubagentRegistry(
-                        (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
                     )
                     loadable_skills |= frozenset(
                         ((await spawn_catalog_skill(subagents, None)).name,)

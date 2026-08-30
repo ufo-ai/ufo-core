@@ -103,6 +103,19 @@ def test_registry_get_returns_named_profile() -> None:
     assert registry.get("b").tool_names == ("bash", "read")
 
 
+def test_registry_applies_deployment_model_choices_without_changing_other_profiles() -> None:
+    registry = SubagentRegistry(
+        (replace(_profile("coding"), model="anthropic.claude-opus-5"), _profile("research"))
+    ).with_models({"coding": "z-ai/glm-5.3-flash"})
+    assert registry.get("coding").model == "z-ai/glm-5.3-flash"
+    assert registry.get("research").model is None
+
+
+def test_registry_rejects_a_model_choice_for_an_unknown_profile() -> None:
+    with pytest.raises(ValueError, match="unknown profiles: missing"):
+        SubagentRegistry((_profile("coding"),)).with_models({"missing": "model"})
+
+
 def test_system_prompt_carries_instructions_and_the_finish_contract() -> None:
     prompt = subagent_system_prompt(_profile("research"))
     assert "research instructions" in prompt

@@ -43,7 +43,11 @@ def render_config(
             "database": DatabaseConfig(url=database_url, owner_url=database_url),
             "blob": BlobConfig(backend="filesystem", root=destination / "blobs"),
             "models": ModelsConfig.model_validate(
-                template.models.model_dump() | {"auto_model": model}
+                template.models.model_dump()
+                | {
+                    "auto_model": model,
+                    "subagent_models": template.models.subagent_models | {"coding": model},
+                }
             ),
             "serve": template.serve.model_copy(update={"host": "127.0.0.1", "port": serve_port}),
             "connect": ConnectConfig(public_base_url=public_base_url),

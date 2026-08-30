@@ -11,6 +11,9 @@ auto_model = "z-ai/glm-5.3-flash"
 ambient_reply_model = "gpt-5.6-luna"
 background_jobs_model = "gpt-5.6-luna"
 
+[models.subagent_models]
+coding = "z-ai/glm-5.3-flash"
+
 [serve]
 host = "127.0.0.1"
 port = 8710
