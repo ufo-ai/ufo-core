@@ -48,6 +48,9 @@ AUTHOR_QUIET_LABEL = "Author quiet prose"
 
 pytestmark = pytest.mark.skipif(chrome_for_testing() is None, reason=MISSING_BROWSER_REASON)
 
+VIEWPORT_WIDTH = 1280
+VIEWPORT_HEIGHT = 800
+
 
 def _function_source(name: str) -> str:
     text = AUDIT_SCRIPT.read_text()
@@ -242,7 +245,6 @@ def _browser_output(page: Path) -> str:
             [
                 str(chrome_for_testing()),
                 *headless_flags(sys.platform),
-                "--window-size=1280,800",
                 "--remote-debugging-port=0",
                 "--remote-allow-origins=*",
                 f"--user-data-dir={profile}",
@@ -289,6 +291,15 @@ def _browser_output(page: Path) -> str:
                         return answer["result"]
 
                 call("Page.enable")
+                call(
+                    "Emulation.setDeviceMetricsOverride",
+                    {
+                        "width": VIEWPORT_WIDTH,
+                        "height": VIEWPORT_HEIGHT,
+                        "deviceScaleFactor": 1,
+                        "mobile": False,
+                    },
+                )
                 call("Runtime.enable")
                 call("Page.navigate", {"url": url})
                 deadline = time.monotonic() + 15
@@ -719,7 +730,7 @@ def test_text_truth_matches_real_chromium_paint_and_intersection(tmp_path: Path)
             f'style="position:absolute;left:{left}px;top:{top}px;height:24px;{overflow}">'
             f"{markup}</section>"
         )
-        assert (name != "below-fold") is (top < 800)
+        assert (name != "below-fold") is (top < VIEWPORT_HEIGHT)
     page = tmp_path / "text-truth.html"
     page.write_text(
         f"""<!doctype html><style>html,body{{margin:0;width:1280px;min-height:1100px}}</style>

@@ -956,9 +956,10 @@ def test_app_bench_audit_reads_the_page_chromium_paints(
     subprocess.run(
         ("docker", "exec", "-i", container, "tee", "/workspace/accepted-design.svg"),
         input=(
-            b'<svg viewBox="0 0 1280 800">'
-            b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
-            b'<g data-app-region="detail"><rect x="680" width="600" height="800" /></g>'
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" '
+            b'width="305" height="844">'
+            b'<g data-app-region="queue"><rect width="145" height="844" /></g>'
+            b'<g data-app-region="detail"><rect x="160" width="145" height="844" /></g>'
             b"</svg>"
         ),
         check=True,
@@ -1048,11 +1049,12 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         assert isinstance(value, list)
         return value
 
-    native_lane = render(
+    lane_design = (
         b'<svg viewBox="0 0 305 844" width="305" height="844">'
         b'<g data-app-region="queue"><rect width="305" height="420" /></g>'
         b'<g data-app-region="detail"><rect y="424" width="305" height="420" /></g></svg>'
     )
+    native_lane = render(lane_design)
     assert [region["name"] for region in native_lane] == ["queue", "detail"]
 
     right_overrun = invoke(
@@ -1090,7 +1092,7 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         'text="Investor Update Review" overlaps text="21:00 - 21:30 UTC"'
         in internal_collision.stderr
     )
-    assert 'text="Attendees: investor@transpose" crosses rect' in internal_collision.stderr
+    assert 'text="Attendees: investor@transpose" crosses tag=rect' in internal_collision.stderr
 
     ordinary_lines_and_avatar_stack = render(
         b'<svg viewBox="0 0 305 844" width="305" height="844">'
@@ -1249,20 +1251,25 @@ def test_app_bench_design_measurement_uses_painted_pixels(
     )
     assert [region["name"] for region in visible_alpha] == ["queue"]
 
-    retained_references = render(
-        b'<svg viewBox="0 0 1280 800"><defs>'
-        b'<symbol id="card"><rect width="600" height="800" /></symbol>'
-        b'<clipPath id="clip"><rect width="300" height="800" /></clipPath>'
-        b'<mask id="mask" maskUnits="userSpaceOnUse" x="0" y="0" width="600" height="800">'
-        b'<rect width="300" height="800" fill="white" /></mask></defs>'
-        b'<rect width="1280" height="800" fill="white" />'
-        b'<g data-app-region="queue" opacity="0.2" clip-path="url(#clip)">'
-        b'<use href="#card" /></g>'
-        b'<g data-app-region="detail" opacity="0.2" transform="translate(900 0)" '
-        b'mask="url(#mask)"><use href="#card" /></g></svg>'
+    clipped_references = invoke(
+        native(
+            b'<svg viewBox="0 0 1280 800"><defs>'
+            b'<symbol id="card"><rect width="600" height="800" /></symbol>'
+            b'<clipPath id="clip"><rect width="300" height="800" /></clipPath>'
+            b'<mask id="mask" maskUnits="userSpaceOnUse" x="0" y="0" width="600" height="800">'
+            b'<rect width="300" height="800" fill="white" /></mask></defs>'
+            b'<rect width="1280" height="800" fill="white" />'
+            b'<g data-app-region="queue" opacity="0.2" clip-path="url(#clip)">'
+            b'<use href="#card" /></g>'
+            b'<g data-app-region="detail" opacity="0.2" transform="translate(900 0)" '
+            b'mask="url(#mask)"><use href="#card" /></g></svg>'
+        )
     )
-    assert [region["name"] for region in retained_references] == ["queue", "detail"]
-    assert all(0.2 < float(region["width"]) < 0.25 for region in retained_references)
+    assert clipped_references.returncode != 0
+    assert (
+        "application design native bounds do not support clip, mask, or filter effects"
+        in clipped_references.stderr
+    )
 
     visible_reference = render(
         b'<svg viewBox="0 0 1280 800">'
@@ -1361,17 +1368,6 @@ def test_app_bench_design_measurement_uses_painted_pixels(
     )
     assert [region["name"] for region in hidden] == ["visible"]
 
-    definitions = render(
-        b'<svg viewBox="0 0 1280 800"><defs>'
-        b'<clipPath id="clip"><rect width="300" height="800" /></clipPath>'
-        b'<mask id="mask"><rect width="300" height="800" fill="white" /></mask></defs>'
-        b'<g data-app-region="queue"><rect width="600" height="800" clip-path="url(#clip)" /></g>'
-        b'<g data-app-region="detail"><rect x="900" width="380" height="800" '
-        b'mask="url(#mask)" /></g></svg>'
-    )
-    assert [region["name"] for region in definitions] == ["queue"]
-    assert 0.2 < float(definitions[0]["width"]) < 0.25
-
     subprocess.run(
         ("docker", "exec", "-i", container, "tee", "/workspace/fixture.html"),
         input=(
@@ -1383,14 +1379,8 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         timeout=120,
     )
     subprocess.run(
-        (
-            "docker",
-            "exec",
-            container,
-            "cp",
-            "/workspace/application-design.svg",
-            "/workspace/accepted-design.svg",
-        ),
+        ("docker", "exec", "-i", container, "tee", "/workspace/accepted-design.svg"),
+        input=native(lane_design),
         check=True,
         capture_output=True,
         timeout=120,
@@ -1398,7 +1388,7 @@ def test_app_bench_design_measurement_uses_painted_pixels(
     audit = _run_application_audit(container, "design-report", "design-")
     assert audit.returncode == 0, audit.stderr
     report = loads((workspace / "design-report.json").read_bytes())
-    assert report["designRegions"] == definitions
+    assert report["designRegions"] == native_lane
     graded = asyncio.run(
         _design_region_scorer()(
             CapabilityOutput(

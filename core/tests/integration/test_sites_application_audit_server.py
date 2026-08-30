@@ -5,9 +5,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from ufo_testsupport.plugin import docker_or_fail
 
 from evals.sandbox_image import SandboxImagePlan
 from sandbox.build_template import build_definition_digest
+from ufo.sandbox.session import SANDBOX_GID, SANDBOX_UID
 
 pytestmark = pytest.mark.docker
 
@@ -122,6 +124,28 @@ void (async () => {
 """
 
 
+def _share_with_sandbox_user(tmp_path: Path, sandbox_image: str) -> None:
+    tmp_path.chmod(0o755)
+    docker_or_fail(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "chown",
+            "--user",
+            "0:0",
+            "-v",
+            f"{tmp_path}:/fixture",
+            sandbox_image,
+            "-R",
+            f"{SANDBOX_UID}:{SANDBOX_GID}",
+            "/fixture",
+        ],
+        timeout=TIMEOUT_SECONDS,
+    )
+
+
 def test_application_eval_image_runs_the_node_owned_audit_protocol(
     sandbox_image: str, tmp_path: Path
 ) -> None:
@@ -156,6 +180,7 @@ def test_node_owned_audit_serves_only_the_application_and_closes(
     (assets / "data.json").write_text('{"ok":true}')
     (assets / "escape.txt").symlink_to(tmp_path / "outside.txt")
     (app / "escape-root.txt").symlink_to(tmp_path / "outside.txt")
+    _share_with_sandbox_user(tmp_path, sandbox_image)
 
     routed = subprocess.run(
         [
@@ -237,7 +262,7 @@ def test_root_cli_writes_ordered_outputs_and_closes_on_success_and_failure(
     (app / "app.webmanifest").write_text('{"name":"Audit fixture"}')
     (dist / "assets" / "app.css").write_text("body{color:#111;background:#fff}")
     design = (
-        b'<svg viewBox="0 0 305 844" width="305" height="844">'
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 305 844" width="305" height="844">'
         b'<g data-app-region="queue"><rect width="145" height="844" /></g>'
         b'<g data-app-region="detail"><rect x="160" width="145" height="844" /></g>'
         b"</svg>"
@@ -322,6 +347,7 @@ else
   test "$?" -eq 3
 fi
 """
+    _share_with_sandbox_user(tmp_path, sandbox_image)
     completed = subprocess.run(
         [
             "docker",
