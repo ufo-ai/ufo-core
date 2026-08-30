@@ -18,6 +18,7 @@ import pytest
 import sqlalchemy as sa
 import yaml
 from sqlalchemy.exc import IntegrityError
+from ufo_ext_memory.store import memory_item
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
@@ -48,9 +49,19 @@ from ufo_ext_scheduled_tasks.visibility import task_content_visible
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.suites.object_tools import (
     BOUNDED_INFORMATIONAL_FIRES,
+    EXPLICIT_DAILY_FIRES,
+    FEW_FIRES_MAX,
+    REMEMBERED_CADENCE,
+    SINGLE_RUN_FIRES,
+    _graded_a_few_runs,
     _graded_bounded_daily,
+    _graded_cron_syntax,
     _graded_final_fire_result_and_check_in,
+    _graded_no_emulated_run_once,
     _graded_operational_task_stays_open,
+    _graded_remembered_cadence,
+    _graded_run_count,
+    _remember_cadence,
 )
 from ufo.agent_scope import AgentUnbound, agent
 from ufo.blob import FilesystemBlobStore
@@ -72,6 +83,7 @@ from ufo.sdk.audience import (
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
+from ufo.turns.subjects import SHARED_SUBJECT
 from ufo.workspace import ws
 
 TOOL_NARRATION = "setting up the reminder"
@@ -1483,6 +1495,244 @@ async def test_operational_eval_requires_an_open_ended_task(db: None) -> None:
             paused=False,
         )
         assert (await _graded_operational_task_stays_open(CapabilityOutput("", ()))).passed
+
+
+def _fire_after(schedule: str, first_fire: datetime, occurrences: int) -> datetime:
+    fire = first_fire
+    for _ in range(occurrences):
+        fire = next_fire(schedule, fire)
+    return fire
+
+
+async def test_cron_syntax_eval_requires_both_requested_weekdays_at_the_asked_clock(
+    db: None,
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    tuesdays = "30 18 * * 2"
+    both_days = "30 18 * * 2,4"
+    wrong_clock = "0 18 * * 2,4"
+    prompt = "Post the changelog highlights."
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        task = await store.create(
+            conversation_id,
+            "changelog-highlights",
+            tuesdays,
+            prompt,
+            "Changelog highlights",
+            next_fire(tuesdays, datetime(2026, 8, 1, tzinfo=UTC)),
+        )
+        one_day = await _graded_cron_syntax(CapabilityOutput("", ()))
+        assert not one_day.passed
+        assert "one of the two requested days" in one_day.reason
+        task = await store.update(
+            task,
+            wrong_clock,
+            prompt,
+            "Changelog highlights",
+            next_fire(wrong_clock, datetime(2026, 8, 1, tzinfo=UTC)),
+            paused=False,
+        )
+        off_clock = await _graded_cron_syntax(CapabilityOutput("", ()))
+        assert not off_clock.passed
+        assert "fires at" in off_clock.reason
+        await store.update(
+            task,
+            both_days,
+            prompt,
+            "Changelog highlights",
+            next_fire(both_days, datetime(2026, 8, 1, tzinfo=UTC)),
+            paused=False,
+        )
+        assert (await _graded_cron_syntax(CapabilityOutput("", ()))).passed
+
+
+async def test_run_once_eval_rejects_a_cron_schedule_bounded_by_an_expiry(db: None) -> None:
+    workspace_id, agent_id, _ = await _seed()
+    applied = CapabilityOutput(
+        "",
+        (
+            ToolInvocation(
+                name="object_apply",
+                input={
+                    "manifest": _task_manifest(
+                        "board-deck-link",
+                        "0 9 * * *",
+                        "Post the Q3 board deck link.",
+                        expires_at=datetime(2026, 8, 2, 9, tzinfo=UTC),
+                    )
+                },
+                result="created",
+                has_result=True,
+            ),
+        ),
+    )
+    recurring = CapabilityOutput(
+        "",
+        (
+            ToolInvocation(
+                name="object_apply",
+                input={
+                    "manifest": _task_manifest(
+                        "board-deck-link", "0 9 * * *", "Post the Q3 board deck link."
+                    )
+                },
+                result="created",
+                has_result=True,
+            ),
+        ),
+    )
+    with ws(workspace_id), agent(agent_id):
+        emulated = await _graded_no_emulated_run_once(applied)
+        assert not emulated.passed
+        assert "expiry" in emulated.reason
+        assert not (await _graded_no_emulated_run_once(recurring)).passed
+        assert (await _graded_no_emulated_run_once(CapabilityOutput("", ()))).passed
+
+
+async def test_run_count_eval_counts_the_fires_the_expiry_admits(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    schedule = "0 6 * * *"
+    first_fire = datetime(2026, 8, 1, 6, tzinfo=UTC)
+    prompt = "Report the shipping queue backlog."
+    single_run = _graded_run_count(SINGLE_RUN_FIRES, "O14-explicit-single-run")
+    ten_runs = _graded_run_count(EXPLICIT_DAILY_FIRES, "O14-explicit-single-run")
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        task = await store.create(
+            conversation_id,
+            "shipping-backlog",
+            schedule,
+            prompt,
+            "Shipping queue backlog",
+            first_fire,
+        )
+        open_ended = await single_run(CapabilityOutput("", ()))
+        assert not open_ended.passed
+        assert "expires_at" in open_ended.reason
+        task = await store.update(
+            task,
+            schedule,
+            prompt,
+            "Shipping queue backlog",
+            first_fire,
+            expires_at=_fire_after(schedule, first_fire, 2),
+            paused=False,
+        )
+        two_fires = await single_run(CapabilityOutput("", ()))
+        assert not two_fires.passed
+        assert "permits 2 fires, not 1" in two_fires.reason
+        task = await store.update(
+            task,
+            schedule,
+            prompt,
+            "Shipping queue backlog",
+            first_fire,
+            expires_at=_fire_after(schedule, first_fire, 1),
+            paused=False,
+        )
+        assert (await single_run(CapabilityOutput("", ()))).passed
+        await store.update(
+            task,
+            schedule,
+            prompt,
+            "Shipping queue backlog",
+            first_fire,
+            expires_at=_fire_after(schedule, first_fire, EXPLICIT_DAILY_FIRES),
+            paused=False,
+        )
+        assert (await ten_runs(CapabilityOutput("", ()))).passed
+
+
+async def test_a_few_runs_eval_accepts_a_small_bound_and_rejects_a_long_one(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    schedule = "0 5 * * *"
+    first_fire = datetime(2026, 8, 1, 5, tzinfo=UTC)
+    prompt = "Report warehouse temperature readings out of range."
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        task = await store.create(
+            conversation_id,
+            "warehouse-temperature",
+            schedule,
+            prompt,
+            "Warehouse temperature log",
+            first_fire,
+            expires_at=_fire_after(schedule, first_fire, FEW_FIRES_MAX + 3),
+        )
+        too_many = await _graded_a_few_runs(CapabilityOutput("", ()))
+        assert not too_many.passed
+        assert "that 'a few' names" in too_many.reason
+        await store.update(
+            task,
+            schedule,
+            prompt,
+            "Warehouse temperature log",
+            first_fire,
+            expires_at=_fire_after(schedule, first_fire, 3),
+            paused=False,
+        )
+        assert (await _graded_a_few_runs(CapabilityOutput("", ()))).passed
+
+
+async def test_remembered_cadence_eval_seeds_the_preference_and_requires_its_cadence(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    remembered = "0 8 * * 1-5"
+    guessed = "0 9 * * 1-5"
+    prompt = "Report anything red on the staging deploy dashboard."
+    store = _store()
+    with ws(workspace_id), agent(agent_id):
+        await _remember_cadence(workspace_id, agent_id, FilesystemBlobStore(root=tmp_path))
+        await _remember_cadence(workspace_id, agent_id, FilesystemBlobStore(root=tmp_path))
+        async with workspace_tx() as connection:
+            remembered_rows = list(
+                (
+                    await connection.execute(
+                        sa.select(memory_item.c.body, memory_item.c.subject).where(
+                            memory_item.c.workspace_id == workspace_id
+                        )
+                    )
+                ).all()
+            )
+        assert [(row.body, row.subject) for row in remembered_rows] == [
+            (REMEMBERED_CADENCE, SHARED_SUBJECT)
+        ]
+        task = await store.create(
+            conversation_id,
+            "staging-deploy-watch",
+            guessed,
+            prompt,
+            "Staging deploy dashboard",
+            next_fire(guessed, datetime(2026, 8, 1, tzinfo=UTC)),
+        )
+        guessed_cadence = await _graded_remembered_cadence(CapabilityOutput("", ()))
+        assert not guessed_cadence.passed
+        assert "remembered weekday 08:00 UTC" in guessed_cadence.reason
+        await store.update(
+            task,
+            remembered,
+            prompt,
+            "Staging deploy dashboard",
+            next_fire(remembered, datetime(2026, 8, 1, tzinfo=UTC)),
+            paused=False,
+        )
+        searched = await _graded_remembered_cadence(
+            CapabilityOutput(
+                "",
+                (
+                    ToolInvocation(
+                        name="memory_search",
+                        input={"query": "regularly"},
+                        result=REMEMBERED_CADENCE,
+                        has_result=True,
+                    ),
+                ),
+            )
+        )
+        assert searched.passed
+        assert searched.evidence["memory_search"] is True
 
 
 async def test_final_fire_eval_requires_result_then_check_in() -> None:

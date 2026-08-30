@@ -2,21 +2,30 @@
 
 `CASES` are single-turn capability probes on a shared workspace, each grader scoped to its own
 subject so no case depends on another's leftovers. Scheduled-task cases grade database rows and
-structured tool trajectories. The user-skill case grades skill loading, persistence, and
-agent-scoped confirmation. The shared-conversation case grades an act that needs a bound member
-where the model alone can bind one: the archive lands only if the call names its `requested_by`,
-on the first try or after the refusal tells it how. `SCENARIOS` are seeded multi-turn
-conversations whose trials reset and seed their scheduled tasks through the real `ScheduleStore`."""
+structured tool trajectories: the cron a cadence resolves to, the fires an expiry admits, the
+run-once ask that must create nothing, and the cadence a vague word resolves to out of a remembered
+preference. The user-skill case grades skill loading, persistence, and agent-scoped confirmation.
+The shared-conversation case grades an act that needs a bound member where the model alone can bind
+one: the archive lands only if the call names its `requested_by`, on the first try or after the
+refusal tells it how. `SCENARIOS` are seeded multi-turn conversations whose trials reset and seed
+their scheduled tasks through the real `ScheduleStore`."""
 
 from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 import yaml
-from ufo_ext_scheduled_tasks.cron import next_fire
+from ufo_ext_memory.store import (
+    DEFAULT_CONFIDENCE,
+    FACT,
+    MEMORY_ITEM_NAMESPACE,
+    MemoryKind,
+    memory_item,
+)
+from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
 from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
 from ufo_ext_scheduled_tasks.runner import FINAL_FIRE_INSTRUCTION
 from ufo_ext_scheduled_tasks.schedules import ScheduledTask, ScheduleStore, scheduled_task
@@ -39,11 +48,13 @@ from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.models.interface import AUTO_MODEL
 from ufo.schema import tables
+from ufo.turns.subjects import SHARED_SUBJECT
 
 KIND = "scheduled_task"
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
 WEEKDAY_FIELDS = frozenset({"1-5", "1,2,3,4,5", "mon-fri"})
 DIGEST_NAME = "investor-digest"
+DIGEST_HOUR = "9"
 DIGEST_SCHEDULE = "0 9 * * 1-5"
 WATCH_NAME = "competitor-watch"
 WATCH_SCHEDULE = "0 7 * * *"
@@ -62,9 +73,40 @@ SEEDED = {
 HOSTILE_MARKERS = ('"status: degraded"', "#ops-alerts")
 PACIFIC_MONDAY_HOURS = frozenset({"16", "17"})
 MONDAY_FIELDS = frozenset({"1", "mon"})
+CHANGELOG_WEEKDAYS = frozenset({1, 3})
+CHANGELOG_CLOCK = (18, 30)
+CHANGELOG_HORIZON_FIRES = 4
+SINGLE_RUN_FIRES = 1
+EXPLICIT_DAILY_FIRES = 10
+FEW_FIRES_MIN = 2
+FEW_FIRES_MAX = 5
+REMEMBERED_HOUR = "8"
+PREFERENCE_KIND: MemoryKind = "preference"
+REMEMBERED_CADENCE = (
+    'The member\'s standing cadence preference: "regularly" means every weekday at 08:00 UTC.'
+)
 SATISFIED_INSTRUCTION = (
     "Accept the assistant's first reasonable confirmation; do not add new requests."
 )
+ROW_TERMS: dict[str, tuple[str, ...]] = {
+    "O01-one-shot-refusal": ("bank",),
+    "O04-create-weekday-digest": ("investor",),
+    "O05-yaml-hostile-prompt": ("degraded",),
+    "O06-timezone-conversion": ("sales", "metrics"),
+    "O07-cadence-restraint": ("signup",),
+    "O08-bounded-daily-check-in": ("mccarren", "park"),
+    "O09-operational-task-stays-open": ("credential", "synchronization"),
+    "O12-cron-syntax-two-weekdays": ("changelog",),
+    "O13-run-once-not-emulated": ("board", "deck"),
+    "O14-explicit-single-run": ("shipping", "backlog"),
+    "O15-explicit-ten-runs": ("huddle",),
+    "O16-a-few-runs": ("warehouse", "temperature"),
+    "O17-remembered-cadence": ("staging", "deploy"),
+}
+"""The terms each case's grader reads its own durable rows by. The suite runs its cases
+concurrently against one workspace and `_rows_about` matches a term anywhere in a row's text, so a
+term that appears in another case's ask reads that case's row and grades the wrong turn: every term
+here must stay out of every other ask."""
 
 
 def _schedule_store() -> ScheduleStore:
@@ -96,7 +138,16 @@ def _no_jargon() -> Grader:
     return DescribedGrader("the reply never says 'cron'", grade)
 
 
-async def _rows_about(*terms: str) -> tuple[ScheduledTask, ...]:
+def _terms_for(case: str) -> tuple[str, ...]:
+    """The terms `case` reads its rows by. A grader names the case that owns the terms, never a
+    term, so a term arriving here is a call site to repair and not a row that is missing."""
+    if case not in ROW_TERMS:
+        raise KeyError(f"{case!r} is not an object-tools case name; ROW_TERMS is keyed by case")
+    return ROW_TERMS[case]
+
+
+async def _rows_about(case: str) -> tuple[ScheduledTask, ...]:
+    terms = _terms_for(case)
     rows = await _schedule_store().list()
     return tuple(
         row
@@ -105,16 +156,37 @@ async def _rows_about(*terms: str) -> tuple[ScheduledTask, ...]:
     )
 
 
-def _weekday_nine(schedule: str) -> bool:
+def _weekday_at(schedule: str, hour: str) -> bool:
     fields = schedule.split()
     return (
         len(fields) == 5
         and fields[0] == "0"
-        and fields[1] == "9"
+        and fields[1] == hour
         and fields[2] == "*"
         and fields[3] == "*"
         and fields[4].lower() in WEEKDAY_FIELDS
     )
+
+
+def _first_fire(row: ScheduledTask) -> datetime:
+    return (
+        row.next_run_at
+        if row.next_run_at.tzinfo is not None
+        else row.next_run_at.replace(tzinfo=UTC)
+    )
+
+
+def _permitted_fires(
+    row: ScheduledTask, expires_at: datetime, ceiling: int
+) -> tuple[int, datetime]:
+    """How many fires the expiry admits — counted one past `ceiling`, so an unbounded run reads as
+    more than the case asks for — and the fire the expiry stops."""
+    fire = _first_fire(row)
+    permitted = 0
+    while fire < expires_at and permitted <= ceiling:
+        permitted += 1
+        fire = next_fire(row.schedule, fire)
+    return permitted, fire
 
 
 async def _graded_create(output: CapabilityOutput) -> CapabilityVerdict:
@@ -123,17 +195,120 @@ async def _graded_create(output: CapabilityOutput) -> CapabilityVerdict:
         return CapabilityVerdict(
             False, "no successful object_apply carried a valid scheduled_task manifest"
         )
-    rows = await _rows_about("investor")
+    rows = await _rows_about("O04-create-weekday-digest")
     if not rows:
         return CapabilityVerdict(False, "no durable scheduled_task row mentions investors")
     row = rows[-1]
-    if not _weekday_nine(row.schedule):
+    if not _weekday_at(row.schedule, DIGEST_HOUR):
         return CapabilityVerdict(False, f"schedule {row.schedule!r} is not weekday 9am")
     return CapabilityVerdict(True, f"{row.name}: {row.schedule}")
 
 
+async def _graded_cron_syntax(output: CapabilityOutput) -> CapabilityVerdict:
+    rows = await _rows_about("O12-cron-syntax-two-weekdays")
+    if not rows:
+        return CapabilityVerdict(False, "no durable row carries the changelog task")
+    row = rows[-1]
+    try:
+        validate_cron(row.schedule)
+    except ValueError as invalid:
+        return CapabilityVerdict(False, str(invalid))
+    fire = _first_fire(row)
+    fires: list[datetime] = []
+    for _ in range(CHANGELOG_HORIZON_FIRES):
+        fires.append(fire)
+        fire = next_fire(row.schedule, fire)
+    stray = [
+        moment.isoformat()
+        for moment in fires
+        if moment.weekday() not in CHANGELOG_WEEKDAYS
+        or (moment.hour, moment.minute) != CHANGELOG_CLOCK
+    ]
+    if stray:
+        return CapabilityVerdict(False, f"{row.schedule!r} fires at {', '.join(stray)}")
+    if {moment.weekday() for moment in fires} != CHANGELOG_WEEKDAYS:
+        return CapabilityVerdict(
+            False, f"{row.schedule!r} covers only one of the two requested days"
+        )
+    return CapabilityVerdict(True, f"{row.schedule} fires Tuesday and Thursday at 18:30 UTC")
+
+
+async def _graded_no_emulated_run_once(output: CapabilityOutput) -> CapabilityVerdict:
+    specs: list[dict[str, object]] = []
+    for document in _task_manifests(output):
+        spec = document.get("spec")
+        if document.get("kind") == KIND and isinstance(spec, dict):
+            specs.append(spec)
+    bounded = [spec for spec in specs if spec.get("expires_at") is not None]
+    if bounded:
+        return CapabilityVerdict(
+            False, f"a run-once ask became a cron schedule bounded by an expiry: {bounded[-1]}"
+        )
+    if specs:
+        return CapabilityVerdict(False, f"a run-once ask created a recurring task: {specs[-1]}")
+    rows = await _rows_about("O13-run-once-not-emulated")
+    if rows:
+        return CapabilityVerdict(
+            False, f"a run-once ask created {', '.join(row.name for row in rows)}"
+        )
+    return CapabilityVerdict(True, "no task was created and no expiry emulated the single run")
+
+
+def _graded_run_count(count: int, case: str) -> Grader:
+    subject = " or ".join(_terms_for(case))
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        rows = await _rows_about(case)
+        if not rows:
+            return CapabilityVerdict(False, f"no durable row is about {subject}")
+        row = rows[-1]
+        if row.expires_at is None:
+            return CapabilityVerdict(False, f"{row.name} has no expires_at and never stops")
+        permitted, _ = _permitted_fires(row, row.expires_at, count)
+        if permitted != count:
+            return CapabilityVerdict(
+                False,
+                f"{row.schedule!r} until {row.expires_at.isoformat()} permits {permitted} fires, "
+                f"not {count}",
+            )
+        return CapabilityVerdict(True, f"{row.name}: {permitted} fires, then expiry")
+
+    fires = "fire" if count == SINGLE_RUN_FIRES else "fires"
+    return DescribedGrader(f"the durable row permits exactly {count} {fires}", grade)
+
+
+async def _graded_a_few_runs(output: CapabilityOutput) -> CapabilityVerdict:
+    rows = await _rows_about("O16-a-few-runs")
+    if not rows:
+        return CapabilityVerdict(False, "no durable row carries the warehouse temperature task")
+    row = rows[-1]
+    if row.expires_at is None:
+        return CapabilityVerdict(False, "'a few runs' became a task that never stops")
+    permitted, _ = _permitted_fires(row, row.expires_at, FEW_FIRES_MAX)
+    if not FEW_FIRES_MIN <= permitted <= FEW_FIRES_MAX:
+        return CapabilityVerdict(
+            False,
+            f"{row.schedule!r} until {row.expires_at.isoformat()} permits {permitted} fires, "
+            f"outside the {FEW_FIRES_MIN}-{FEW_FIRES_MAX} that 'a few' names",
+        )
+    return CapabilityVerdict(True, f"'a few' became {permitted} fires")
+
+
+async def _graded_remembered_cadence(output: CapabilityOutput) -> CapabilityVerdict:
+    rows = await _rows_about("O17-remembered-cadence")
+    if not rows:
+        return CapabilityVerdict(False, "no durable row is about the staging deploy pipeline")
+    row = rows[-1]
+    if not _weekday_at(row.schedule, REMEMBERED_HOUR):
+        return CapabilityVerdict(
+            False, f"schedule {row.schedule!r} is not the remembered weekday 08:00 UTC"
+        )
+    searched = any(call.name == "memory_search" and call.succeeded for call in output.calls)
+    return CapabilityVerdict(True, f"{row.name}: {row.schedule}", {"memory_search": searched})
+
+
 async def _graded_one_shot(output: CapabilityOutput) -> CapabilityVerdict:
-    rows = await _rows_about("bank")
+    rows = await _rows_about("O01-one-shot-refusal")
     if rows:
         return CapabilityVerdict(
             False, f"a one-shot request created {', '.join(row.name for row in rows)}"
@@ -146,7 +321,7 @@ async def _graded_hostile_prompt(output: CapabilityOutput) -> CapabilityVerdict:
         return CapabilityVerdict(
             False, "no successful object_apply carried a valid scheduled_task manifest"
         )
-    rows = await _rows_about("degraded")
+    rows = await _rows_about("O05-yaml-hostile-prompt")
     if not rows:
         return CapabilityVerdict(False, "no durable row carries the quoted status text")
     row = rows[-1]
@@ -159,7 +334,7 @@ async def _graded_hostile_prompt(output: CapabilityOutput) -> CapabilityVerdict:
 
 
 async def _graded_timezone(output: CapabilityOutput) -> CapabilityVerdict:
-    rows = await _rows_about("sales", "metrics")
+    rows = await _rows_about("O06-timezone-conversion")
     if not rows:
         return CapabilityVerdict(False, "no durable row is about the sales metrics")
     fields = rows[-1].schedule.split()
@@ -173,7 +348,7 @@ async def _graded_timezone(output: CapabilityOutput) -> CapabilityVerdict:
 
 
 async def _graded_restraint(output: CapabilityOutput) -> CapabilityVerdict:
-    rows = await _rows_about("signup")
+    rows = await _rows_about("O07-cadence-restraint")
     if rows:
         return CapabilityVerdict(
             False, f"an unscoped ask created {', '.join(row.name for row in rows)}"
@@ -182,19 +357,13 @@ async def _graded_restraint(output: CapabilityOutput) -> CapabilityVerdict:
 
 
 async def _graded_bounded_daily(output: CapabilityOutput) -> CapabilityVerdict:
-    rows = await _rows_about("mccarren", "park")
+    rows = await _rows_about("O08-bounded-daily-check-in")
     if not rows:
         return CapabilityVerdict(False, "no durable row carries the McCarren Park task")
     row = rows[-1]
     if row.expires_at is None:
         return CapabilityVerdict(False, "the daily informational task has no expires_at")
-    fire = row.next_run_at
-    if fire.tzinfo is None:
-        fire = fire.replace(tzinfo=UTC)
-    allowed_fires = 0
-    while fire < row.expires_at and allowed_fires <= BOUNDED_INFORMATIONAL_FIRES:
-        allowed_fires += 1
-        fire = next_fire(row.schedule, fire)
+    allowed_fires, fire = _permitted_fires(row, row.expires_at, BOUNDED_INFORMATIONAL_FIRES)
     if allowed_fires != BOUNDED_INFORMATIONAL_FIRES or fire != row.expires_at:
         return CapabilityVerdict(
             False,
@@ -249,7 +418,7 @@ async def _graded_final_fire_result_and_check_in(
 
 
 async def _graded_operational_task_stays_open(output: CapabilityOutput) -> CapabilityVerdict:
-    rows = await _rows_about("credential", "synchronization")
+    rows = await _rows_about("O09-operational-task-stays-open")
     if not rows:
         return CapabilityVerdict(False, "no durable credential-refresh task was created")
     if rows[-1].expires_at is not None:
@@ -257,13 +426,36 @@ async def _graded_operational_task_stays_open(output: CapabilityOutput) -> Capab
     return CapabilityVerdict(True, "the operational task stays open-ended")
 
 
+async def _remember_cadence(workspace_id: UUID, agent_id: UUID, blob: BlobStore) -> None:
+    """The cadence preference as a durable memory row. The id is content-addressed exactly as the
+    memory extension addresses it, so a re-run reseeds the one row instead of piling up copies, and
+    the un-embedded row is recallable through the tail leg without the index job."""
+    item_id = uuid5(
+        MEMORY_ITEM_NAMESPACE,
+        "\x00".join((str(workspace_id), SHARED_SUBJECT, FACT, REMEMBERED_CADENCE)),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(sa.delete(memory_item).where(memory_item.c.id == item_id))
+        await connection.execute(
+            sa.insert(memory_item).values(
+                id=item_id,
+                workspace_id=workspace_id,
+                subject=SHARED_SUBJECT,
+                body=REMEMBERED_CADENCE,
+                item_class=FACT,
+                memory_kind=PREFERENCE_KIND,
+                confidence=DEFAULT_CONFIDENCE,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
 async def _mccarren_final_fire(_output: CapabilityOutput) -> str | None:
-    rows = await _rows_about("mccarren", "park")
+    rows = await _rows_about("O08-bounded-daily-check-in")
     if not rows or rows[-1].expires_at is None:
         return None
-    fire = rows[-1].next_run_at
-    if fire.tzinfo is None:
-        fire = fire.replace(tzinfo=UTC)
+    fire = _first_fire(rows[-1])
     for _ in range(BOUNDED_INFORMATIONAL_FIRES - 1):
         fire = next_fire(rows[-1].schedule, fire)
     scheduled_fire = fire.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -481,6 +673,86 @@ CASES = (
             "agent in the same workspace will not receive or load it.",
         ),
         digest_tag="object-tools:create-agent-skill",
+    ),
+    CapabilityCase(
+        "O12-cron-syntax-two-weekdays",
+        "Every Tuesday and Thursday at 18:30 UTC, post our changelog highlights here. Set it up "
+        "now — no need to confirm.",
+        combine(
+            DescribedGrader(
+                "the durable row carries a valid 5-field cron whose next four fires are Tuesday "
+                "and Thursday at 18:30 UTC",
+                _graded_cron_syntax,
+            ),
+            _no_jargon(),
+        ),
+        digest_tag="object-tools:cron-syntax-two-weekdays",
+    ),
+    CapabilityCase(
+        "O13-run-once-not-emulated",
+        "Post the Q3 board deck link here once, tomorrow at 09:00 UTC. That single run is all I "
+        "want — nothing after it.",
+        DescribedGrader(
+            "no scheduled_task is applied, no expiry emulates the single run, and no row about "
+            "the board deck exists",
+            _graded_no_emulated_run_once,
+        ),
+        rubric=(
+            "The reply says a single one-time run is not supported and never claims the run is "
+            "scheduled.",
+        ),
+        digest_tag="object-tools:run-once-not-emulated",
+    ),
+    CapabilityCase(
+        "O14-explicit-single-run",
+        "You cannot run something once, so use the workaround I am asking for: a daily 06:00 UTC "
+        "task that reports the shipping queue backlog here, expiring after its first run. Set it "
+        "up exactly that way now — that is explicitly what I want.",
+        combine(
+            _graded_run_count(SINGLE_RUN_FIRES, "O14-explicit-single-run"),
+            _no_jargon(),
+        ),
+        digest_tag="object-tools:explicit-single-run",
+    ),
+    CapabilityCase(
+        "O15-explicit-ten-runs",
+        "Post our engineering huddle summary here every weekday at 13:00 UTC for the next ten "
+        "runs, then stop. Set it up now — no need to confirm.",
+        combine(
+            _graded_run_count(EXPLICIT_DAILY_FIRES, "O15-explicit-ten-runs"),
+            _no_jargon(),
+        ),
+        digest_tag="object-tools:explicit-ten-runs",
+    ),
+    CapabilityCase(
+        "O16-a-few-runs",
+        "Check the warehouse temperature log every morning at 05:00 UTC and post anything out of "
+        "range — just a few runs, not forever. Set it up now — no need to confirm.",
+        combine(
+            DescribedGrader(
+                f"the durable row permits {FEW_FIRES_MIN} to {FEW_FIRES_MAX} fires and then "
+                "expires",
+                _graded_a_few_runs,
+            ),
+            _no_jargon(),
+        ),
+        rubric=("The reply states how many runs the task will make before it stops.",),
+        digest_tag="object-tools:a-few-runs",
+    ),
+    CapabilityCase(
+        "O17-remembered-cadence",
+        "Regularly check our staging deploy pipeline and post anything red here. Set it up now — "
+        "you already know the cadence I mean by 'regularly'.",
+        combine(
+            DescribedGrader(
+                "the durable row runs weekdays at 08:00 UTC, the cadence the remembered "
+                "preference defines for 'regularly'",
+                _graded_remembered_cadence,
+            ),
+            _no_jargon(),
+        ),
+        seed=_remember_cadence,
+        digest_tag="object-tools:remembered-cadence",
     ),
 )
 
