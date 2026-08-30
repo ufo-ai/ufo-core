@@ -19,14 +19,16 @@ say so to the model, and both tool defs are the untrusted-content boundary the l
 
 import json
 import re
+from typing import Literal
 
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.types import TextContent as McpTextContent
 from mcp.types import Tool as McpTool
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ufo.sdk.context import JsonValue
+from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.manifest import CredentialSlot, Manifest
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
@@ -85,6 +87,72 @@ class McpServersConfig(BaseModel):
     from the stored BYOK secret, so it validates at construction (each url is http/https)."""
 
     servers: dict[str, McpServer]
+
+
+class McpServerUpdate(McpServer):
+    name: str = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("MCP server name is empty")
+        return name
+
+
+class McpServerRemoval(BaseModel):
+    name: str = Field(min_length=1)
+    remove: Literal[True]
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("MCP server name is empty")
+        return name
+
+
+def merge_mcp_server(current: str | None, submitted: str) -> str:
+    try:
+        raw = json.loads(submitted)
+        if not isinstance(raw, dict):
+            raise ValueError("MCP server must be an object")
+        if "servers" in raw:
+            incoming = McpServersConfig.model_validate(raw)
+            return incoming.model_dump_json(exclude_none=True)
+        if raw.get("remove") is True:
+            removal = McpServerRemoval.model_validate(raw)
+            configured = (
+                McpServersConfig(servers={})
+                if current is None
+                else McpServersConfig.model_validate_json(current)
+            )
+            servers = dict(configured.servers)
+            if removal.name not in servers:
+                raise CredentialValueInvalid(f"MCP server {removal.name!r} is not configured")
+            del servers[removal.name]
+            return McpServersConfig(servers=servers).model_dump_json(exclude_none=True)
+        if not isinstance(raw.get("name"), str):
+            return McpServersConfig(servers=raw).model_dump_json(exclude_none=True)
+        update = McpServerUpdate.model_validate(raw)
+        configured = (
+            McpServersConfig(servers={})
+            if current is None
+            else McpServersConfig.model_validate_json(current)
+        )
+    except CredentialValueInvalid:
+        raise
+    except (ValidationError, ValueError, TypeError) as error:
+        raise CredentialValueInvalid("MCP server name, HTTP URL, or token is invalid") from error
+    servers = dict(configured.servers)
+    server = McpServer(url=update.url, auth=update.auth)
+    previous = servers.get(update.name)
+    if previous is not None and "auth" not in update.model_fields_set:
+        server = server.model_copy(update={"auth": previous.auth})
+    servers[update.name] = server
+    return McpServersConfig(servers=servers).model_dump_json(exclude_none=True)
 
 
 class ListMcpToolsInput(BaseModel):
@@ -267,11 +335,11 @@ def manifest() -> Manifest:
             CredentialSlot(
                 name=MCP_SERVERS_SLOT,
                 description=(
-                    "BYOK MCP servers as a JSON map of name -> {url, auth}. Read in-process to "
-                    "reach each server's endpoint; auth (optional) is sent as a Bearer token. No "
-                    "injection target: the server URL is workspace-supplied, so the call runs in "
-                    "the core process, not through the sandbox egress proxy."
+                    "BYOK MCP servers. Submit {name, url, auth?} to add or update one server, "
+                    "{name, remove: true} to remove one, or a name -> {url, auth} map to replace "
+                    "all servers. auth is sent as a Bearer token."
                 ),
+                merge=merge_mcp_server,
             ),
         ),
     )

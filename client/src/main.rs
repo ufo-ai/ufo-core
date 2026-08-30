@@ -292,6 +292,16 @@ fn send_instant(lane: SendLane, text: String, evt: Sender<LoopEvent>, cmd: Sende
     });
 }
 
+fn stop_instant(prepared: Stop, evt: Sender<LoopEvent>) {
+    thread::spawn(move || {
+        if let Err(error) = prepared.send() {
+            let _ = evt.send(LoopEvent::Wire(WireEvent::Dir(Directive::Note(format!(
+                "Not stopped: {error}"
+            )))));
+        }
+    });
+}
+
 fn random_channel() -> String {
     random_hex::<16>()
 }
@@ -963,6 +973,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
     app.paint();
     let mut gate = Gate::default();
     let mut stop: Option<Stop> = None;
+    let mut stop_requested = false;
     let mut sends: Option<SendLane> = None;
     let mut clip_pending = false;
     let mut listening = false;
@@ -1062,14 +1073,9 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     }
                     Reply::Stop => {
                         if let Some(prepared) = stop.take() {
-                            let notify = stop_evt.clone();
-                            thread::spawn(move || {
-                                if let Err(error) = prepared.send() {
-                                    let _ = notify.send(LoopEvent::Wire(WireEvent::Dir(
-                                        Directive::Note(format!("Not stopped: {error}")),
-                                    )));
-                                }
-                            });
+                            stop_instant(prepared, stop_evt.clone());
+                        } else {
+                            stop_requested = true;
                         }
                     }
                     Reply::Recall { text, arrival_id } => match sends.clone() {
@@ -1081,6 +1087,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                         // presentation, and their next message takes the queueing lane that
                         // rejoins the turn.
                         listening = false;
+                        stop_requested = false;
                         let _ = cmd_tx.send(WireCmd::Detach);
                         app.end_turn(false);
                         app.note("Detached; the turn continues, and a new message rejoins it.");
@@ -1180,7 +1187,14 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                         .to_string();
                     app.set_endpoint(host, channel);
                 }
-                WireEvent::Stoppable(prepared) => stop = Some(prepared),
+                WireEvent::Stoppable(prepared) => {
+                    if stop_requested {
+                        stop_requested = false;
+                        stop_instant(prepared, stop_evt.clone());
+                    } else {
+                        stop = Some(prepared);
+                    }
+                }
                 WireEvent::Sendable(lane) => sends = Some(lane),
                 WireEvent::Sent { text, ack } => {
                     if ack.opened {
@@ -1216,6 +1230,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                         app.paint();
                         continue;
                     }
+                    stop_requested = false;
                     if !gate.secrets.is_empty() {
                         // Only the stream that delivered the prompts opens the entry: an idle
                         // bounce ending here must not reset what the member is typing.

@@ -11,12 +11,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Field, Input } from "@/components/ui/field";
+import { Field } from "@/components/ui/field";
 import { codeSpans } from "@/kernel/cards";
 import { OutcomeNotice, type NoticeState, QUIET } from "@/kernel/panel";
 import type { ListingSpec } from "@/kernel/listing";
 import { BASE } from "@/lib/api";
 import type { ActionView, CredentialPrompt } from "@/lib/types";
+import {
+  CredentialValueFields,
+  MCP_SERVERS_SLOT,
+} from "@/views/CredentialPrompt";
 
 type Slot = {
   name: string;
@@ -55,7 +59,7 @@ const SERVICE_KEY_SLOTS = [
   "browser_use_api_key",
 ] as const;
 
-const MCP_SLOTS = ["mcp_servers"] as const;
+const MCP_SLOTS = [MCP_SERVERS_SLOT] as const;
 
 const SECTION_ORDER = ["Model providers", "Service keys", "MCP"];
 const EXTENSION_SECTIONS: Record<string, string> = {
@@ -136,7 +140,7 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
             disabled={busy}
             onClick={() => action(request, credentialRequest(row))}
           >
-            {row.filled ? "Replace" : "Set"}
+            {row.filled ? (row.slot === MCP_SERVERS_SLOT ? "Update" : "Replace") : "Set"}
           </Button>
         ) : null}
         {row.filled ? (
@@ -157,9 +161,17 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {request.prompts.length === 1 ? "Set Credential" : "Set Credentials"}
+            {request.prompts.length === 1 && request.prompts[0].slot === MCP_SERVERS_SLOT
+              ? "Save MCP Server"
+              : request.prompts.length === 1
+                ? "Set Credential"
+                : "Set Credentials"}
           </DialogTitle>
-          <DialogDescription>{request.reason}</DialogDescription>
+          <DialogDescription>
+            {request.prompts.length === 1 && request.prompts[0].slot === MCP_SERVERS_SLOT
+              ? "Add or update one server. Saved servers stay in place."
+              : request.reason}
+          </DialogDescription>
         </DialogHeader>
         <CredentialPromptDialogForm
           sealed={request.sealed}
@@ -202,11 +214,11 @@ function CredentialPromptDialogForm({
 
   useEffect(() => () => report(), []);
 
-  async function store(prompt: CredentialPrompt): Promise<string | null> {
+  async function store(prompt: CredentialPrompt, value = values[prompt.slot]): Promise<string | null> {
     const body = new URLSearchParams({
       sealed,
       slot: prompt.slot,
-      value: values[prompt.slot],
+      value,
     });
     try {
       const res = await fetch(BASE + "/credentials", {
@@ -218,6 +230,20 @@ function CredentialPromptDialogForm({
     } catch {
       return "Network error — try again.";
     }
+  }
+
+  async function remove(prompt: CredentialPrompt, name: string) {
+    if (busy) return;
+    setBusy(true);
+    const failure = await store(prompt, JSON.stringify({ name, remove: true }));
+    setBusy(false);
+    if (failure !== null) {
+      setNotice({ text: failure, refused: true });
+      return;
+    }
+    held.current.push(prompt.slot);
+    report();
+    onComplete();
   }
 
   async function submit(event: FormEvent) {
@@ -253,23 +279,32 @@ function CredentialPromptDialogForm({
         onSubmit={submit}
         className="flex flex-col gap-lg"
       >
-        {pending.map((prompt) => (
-          <Field key={prompt.slot} label={prompt.prompt} htmlFor={prompt.slot}>
-            <Input
-              id={prompt.slot}
-              type="password"
-              autoComplete="off"
-              required
-              value={values[prompt.slot] ?? ""}
-              onChange={(event) =>
-                setValues((current) => ({
-                  ...current,
-                  [prompt.slot]: event.target.value,
-                }))
+        {pending.map((prompt) =>
+          prompt.slot === MCP_SERVERS_SLOT ? (
+            <CredentialValueFields
+              key={prompt.slot}
+              idPrefix={prompt.slot}
+              prompt={prompt}
+              onChange={(value) =>
+                setValues((current) => ({ ...current, [prompt.slot]: value }))
               }
+              onRemove={
+                pending.length === 1 ? (name) => void remove(prompt, name) : undefined
+              }
+              busy={busy}
             />
-          </Field>
-        ))}
+          ) : (
+            <Field key={prompt.slot} label={prompt.prompt} htmlFor={prompt.slot}>
+              <CredentialValueFields
+                idPrefix={prompt.slot}
+                prompt={prompt}
+                onChange={(value) =>
+                  setValues((current) => ({ ...current, [prompt.slot]: value }))
+                }
+              />
+            </Field>
+          ),
+        )}
       </form>
       <DialogFooter>
         <Button
@@ -279,7 +314,11 @@ function CredentialPromptDialogForm({
           busy={busy}
           disabled={!ready}
         >
-          {pending.length === 1 ? "Set credential" : "Set credentials"}
+          {pending.length === 1 && pending[0].slot === MCP_SERVERS_SLOT
+            ? "Save server"
+            : pending.length === 1
+              ? "Set credential"
+              : "Set credentials"}
         </Button>
       </DialogFooter>
     </>

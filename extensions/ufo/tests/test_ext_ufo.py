@@ -23,6 +23,7 @@ from httpx import ASGITransport, AsyncClient, Response
 from starlette.datastructures import Headers
 from starlette.requests import Request as StarletteRequest
 from ufo_ext_index_default import DefaultIndex
+from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
 from ufo_ext_ufo.surface import (
     HOLD_SECONDS,
@@ -1897,7 +1898,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
     app = FastAPI()
     _mount_shared_surfaces(
         app,
-        (ufo_manifest(),),
+        (ufo_manifest(), slack_manifest()),
         store,
         blob,
         sandboxes,

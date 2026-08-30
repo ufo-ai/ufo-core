@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 
 import { IconCheck, IconChevronRight, IconMessage, IconPlug } from "@tabler/icons-react";
 
-import { CredentialPromptForm } from "@/views/CredentialPrompt";
+import { CredentialPromptForm, MCP_SERVERS_SLOT } from "@/views/CredentialPrompt";
 import {
   Questionnaire,
   QuestionnaireActions,
@@ -197,7 +197,12 @@ export function Chat({
           >
             {credentials ? (
               <Handoff>
-                <div>{credentials.reason}</div>
+                <div>
+                  {credentials.prompts.length === 1 &&
+                  credentials.prompts[0].slot === MCP_SERVERS_SLOT
+                    ? "Add or update one MCP server. Saved servers stay in place."
+                    : credentials.reason}
+                </div>
                 {credentials.prompts.map((prompt) => (
                   <CredentialPromptForm
                     key={prompt.slot}

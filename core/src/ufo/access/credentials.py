@@ -11,9 +11,11 @@ never through the transcript or the sandbox."""
 import hashlib
 import os
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from cryptography.fernet import Fernet, InvalidToken
@@ -23,6 +25,7 @@ from ufo.db import workspace_tx
 from ufo.schema import tables
 
 CREDENTIAL_REQUEST_TTL_SECONDS = 900
+CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS = 86_400
 NAME_DIGEST_LENGTH = 8
 
 
@@ -96,6 +99,8 @@ class CredentialRequestState(BaseModel):
     workspace_id: UUID
     member_id: UUID | None = None
     slots: tuple[str, ...]
+    request_id: UUID | None = None
+    issued_at: int | None = None
     payload: str | None = None
     purpose: str = CREDENTIAL_REQUEST_PURPOSE
 
@@ -161,7 +166,13 @@ class CredentialRequests:
             )
         return seal_credential_request(
             self.fernet,
-            CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=slots),
+            CredentialRequestState(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                slots=slots,
+                request_id=uuid4(),
+                issued_at=int(time.time()),
+            ),
         )
 
     def authorize(self, workspace_id: UUID, member_id: UUID, slot: str, payload: str) -> str:
@@ -289,6 +300,55 @@ class CredentialStore:
                         ciphertext=ciphertext,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
+                    )
+                )
+
+    async def update(
+        self,
+        workspace_id: UUID,
+        slot: str,
+        submitted: str,
+        merge: Callable[[str | None, str], str],
+    ) -> None:
+        """Merge one private submission into a slot while holding the workspace write lock."""
+        if not submitted:
+            raise ValueError("credential value is empty")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.select(tables.workspace.c.id)
+                .where(tables.workspace.c.id == workspace_id)
+                .with_for_update()
+            )
+            row = (
+                await connection.execute(
+                    sa.select(tables.credential.c.ciphertext).where(
+                        tables.credential.c.workspace_id == workspace_id,
+                        tables.credential.c.slot == slot,
+                    )
+                )
+            ).one_or_none()
+            current = None if row is None else self.fernet.decrypt(row.ciphertext).decode()
+            plaintext = merge(current, submitted)
+            if not plaintext:
+                raise ValueError("credential value is empty")
+            ciphertext = self.fernet.encrypt(plaintext.encode())
+            if row is None:
+                await connection.execute(
+                    sa.insert(tables.credential).values(
+                        workspace_id=workspace_id,
+                        slot=slot,
+                        ciphertext=ciphertext,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            else:
+                await connection.execute(
+                    sa.update(tables.credential)
+                    .values(ciphertext=ciphertext, updated_at=sa.func.now())
+                    .where(
+                        tables.credential.c.workspace_id == workspace_id,
+                        tables.credential.c.slot == slot,
                     )
                 )
 
@@ -458,10 +518,12 @@ class DeclaredSlot:
     """One declared BYOK slot as reads project it: the slot name, its documentation, the extension
     that declares it, whether a member fills it (`member_filled=False` is deploy machinery — a
     provider callback's seal, never a typed key), and `host` — the wire target when the slot
-    carries one, either a fixed hostname or the `HostChoice` a member selects within."""
+    carries one, either a fixed hostname or the `HostChoice` a member selects within. `merge`
+    updates a structured secret from one private submission at the encrypted store boundary."""
 
     name: str
     description: str
     extension: str
     member_filled: bool = True
     host: str | HostChoice | None = None
+    merge: Callable[[str | None, str], str] | None = None

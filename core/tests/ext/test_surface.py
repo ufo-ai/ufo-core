@@ -5,7 +5,9 @@ writeback) and blob bytes that core wrote. The full end-to-end through a real re
 proven by the sample-extension conformance probe and the Slack extension's own tests."""
 
 import asyncio
+import hashlib
 import logging
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -29,10 +31,14 @@ from ufo_testsupport.surfaces import (
 import ufo.ext.surface as surface_module
 from ufo.access.connectors import DIRECT_ACCOUNT, ConnectorRegistry
 from ufo.access.credentials import (
+    CREDENTIAL_REQUEST_PURPOSE,
+    CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
+    CREDENTIAL_REQUEST_TTL_SECONDS,
     CredentialRequestInvalid,
     CredentialRequestState,
     CredentialStore,
     DeclaredSlot,
+    open_credential_request,
     seal_credential_request,
 )
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
@@ -2753,7 +2759,13 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
     (test_credentials)."""
     workspace_id, _, _ = await _seed()
     blob = FilesystemBlobStore(root=tmp_path)
-    context = _context(workspace_id, StubDbos(), blob)
+    context = replace(
+        _context(workspace_id, StubDbos(), blob),
+        _declared_slots=(
+            DeclaredSlot(name="a", description="", extension="sample"),
+            DeclaredSlot(name="b", description="", extension="sample"),
+        ),
+    )
     member_id = uuid4()
     sealed = seal_credential_request(
         context._credentials.fernet,
@@ -2764,6 +2776,13 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
         assert await context.credential_prompt_pending(sealed, "b") is True
         assert await context.credential_prompt_pending(sealed, "unnamed") is False
         assert await context.credential_prompt_pending("garbage", "a") is False
+        expired = context._credentials.fernet.encrypt_at_time(
+            CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=("a",))
+            .model_dump_json()
+            .encode(),
+            int(time.time()) - CREDENTIAL_REQUEST_TTL_SECONDS - 1,
+        ).decode()
+        assert await context.credential_prompt_pending(expired, "a") is False
         foreign = seal_credential_request(
             context._credentials.fernet,
             CredentialRequestState(workspace_id=uuid4(), member_id=member_id, slots=("a",)),
@@ -2771,6 +2790,8 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
         assert await context.credential_prompt_pending(foreign, "a") is False
         await context.fulfill_credential_request(sealed, "a", "one", member_id)
         assert await context.credential_prompt_pending(sealed, "a") is False
+        marker = hashlib.sha256(sealed.encode()).hexdigest()[:32]
+        assert await context.blob.exists(f"credential_requests/{marker}/a")
         assert await context.credential_prompt_pending(sealed, "b") is True
         await context.fulfill_credential_request(sealed, "b", "two", member_id)
         assert await context.credential_prompt_pending(sealed, "b") is False
@@ -2785,6 +2806,139 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
             await context.fulfill_credential_request(sealed, "a", "hijack", uuid4())
         with pytest.raises(CredentialRequestInvalid, match="slot"):
             await context.fulfill_credential_request(sealed, "c", "off-seal", member_id)
+
+
+async def test_credential_fulfillment_uses_the_declared_merge(db: None, tmp_path) -> None:
+    workspace_id, _, _ = await _seed()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    def merge(current: str | None, submitted: str) -> str:
+        return submitted if current is None else f"{current},{submitted}"
+
+    context = replace(
+        context,
+        _declared_slots=(
+            DeclaredSlot(name="structured", description="", extension="sample", merge=merge),
+        ),
+    )
+    member_id = uuid4()
+    first = seal_credential_request(
+        context._credentials.fernet,
+        CredentialRequestState(
+            workspace_id=workspace_id, member_id=member_id, slots=("structured",)
+        ),
+    )
+    second = seal_credential_request(
+        context._credentials.fernet,
+        CredentialRequestState(
+            workspace_id=workspace_id, member_id=member_id, slots=("structured",)
+        ),
+    )
+
+    with ws(workspace_id):
+        await context.fulfill_credential_request(first, "structured", "one", member_id)
+        with pytest.raises(CredentialRequestInvalid, match="already fulfilled"):
+            await context.fulfill_credential_request(first, "structured", "reused", member_id)
+        await context.fulfill_credential_request(second, "structured", "two", member_id)
+        assert await context._credentials.get(workspace_id, "structured") == "one,two"
+        undeclared = seal_credential_request(
+            context._credentials.fernet,
+            CredentialRequestState(
+                workspace_id=workspace_id, member_id=member_id, slots=("removed",)
+            ),
+        )
+        with pytest.raises(CredentialRequestInvalid, match="not declared"):
+            await context.fulfill_credential_request(undeclared, "removed", "value", member_id)
+        machinery = seal_credential_request(
+            context._credentials.fernet,
+            CredentialRequestState(
+                workspace_id=workspace_id, member_id=member_id, slots=("provider",)
+            ),
+        )
+        context = replace(
+            context,
+            _declared_slots=(
+                DeclaredSlot(
+                    name="provider",
+                    description="",
+                    extension="sample",
+                    member_filled=False,
+                ),
+            ),
+        )
+        with pytest.raises(CredentialRequestInvalid, match="never entered"):
+            await context.fulfill_credential_request(machinery, "provider", "value", member_id)
+        authorization = seal_credential_request(
+            context._credentials.fernet,
+            CredentialRequestState(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                slots=("provider",),
+                payload="provider-state",
+            ),
+        )
+        await context.fulfill_credential_request(authorization, "provider", "one", member_id)
+        await context.fulfill_credential_request(authorization, "provider", "two", member_id)
+        assert await context._credentials.get(workspace_id, "provider") == "two"
+
+
+async def test_credential_request_renewal_requires_the_requesting_admin(db: None, tmp_path) -> None:
+    workspace_id, _, member_id = await _seed(member_email="owner@example.com")
+    assert member_id is not None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=True).where(tables.member.c.id == member_id)
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    recently_expired = context._credentials.fernet.encrypt_at_time(
+        CredentialRequestState(
+            workspace_id=workspace_id, member_id=member_id, slots=("structured",)
+        )
+        .model_dump_json()
+        .encode(),
+        int(time.time()) - CREDENTIAL_REQUEST_TTL_SECONDS - 1,
+    ).decode()
+    stale = context._credentials.fernet.encrypt_at_time(
+        CredentialRequestState(
+            workspace_id=workspace_id, member_id=member_id, slots=("structured",)
+        )
+        .model_dump_json()
+        .encode(),
+        int(time.time()) - CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS - 1,
+    ).decode()
+    old_claim_in_fresh_seal = context._credentials.fernet.encrypt(
+        CredentialRequestState(
+            workspace_id=workspace_id,
+            member_id=member_id,
+            slots=("structured",),
+            issued_at=int(time.time()) - CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS - 1,
+        )
+        .model_dump_json()
+        .encode()
+    ).decode()
+
+    with ws(workspace_id):
+        renewed = await context.renew_credential_request(recently_expired, member_id)
+        assert renewed is not None
+        assert await context.credential_prompt_pending(renewed, "structured")
+        renewed_state = open_credential_request(
+            context._credentials.fernet,
+            renewed,
+            purpose=CREDENTIAL_REQUEST_PURPOSE,
+        )
+        assert renewed_state.issued_at == context._credentials.fernet.extract_timestamp(
+            recently_expired.encode()
+        )
+        assert await context.renew_credential_request(recently_expired, uuid4()) is None
+        assert await context.renew_credential_request(stale, member_id) is None
+        assert await context.renew_credential_request(old_claim_in_fresh_seal, member_id) is None
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=False).where(tables.member.c.id == member_id)
+        )
+    with ws(workspace_id):
+        assert await context.renew_credential_request(recently_expired, member_id) is None
 
 
 async def test_join_member_seats_every_teammate_it_creates(db: None, tmp_path) -> None:

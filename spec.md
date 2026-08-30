@@ -594,6 +594,10 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   last frame rendered: an op ends the stream, and a terminal that prints as it reads must not
   reprint the notes it already showed.
 
+A member-filled credential slot may declare a pure merge for one private structured update. Core
+locks the workspace, opens the encrypted row, applies that merge, and stores the whole value; the
+surface never reads the existing secrets.
+
 | Surface | Home | Delivery | Identity | Conversation key |
 |---|---|---|---|---|
 | Terminal | `extensions/ufo` | live (held directive stream) | member token | session (private) |
@@ -883,6 +887,9 @@ clear. Setting a slot's
 value is the one mutation whose payload never enters an intent: the intent asks for the same
 sealed `request_credentials` prompt a chat turn produces, and the value crosses only in that
 prompt's private fulfillment, so a secret reaches no turn, transcript, or intent response.
+The durable request carries one identity across refreshed seals: an authenticated admin read may
+renew its short-lived seal for 24 hours from the request, and a stored marker keeps every fulfilled
+prompt closed.
 
 A rebuild is the lane's one act that writes nothing. The radar's entries and the wiki's
 page-derived rows are a job's text, and derived state is a job's to produce, so the intent marks

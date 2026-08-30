@@ -1363,7 +1363,12 @@ async def test_oauth_callback_installs_the_workspace(db: None, tmp_path, monkeyp
             f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
             params={"code": "the-code", "state": sealed},
         )
+        repeated = await client.get(
+            f"{EVENTS_PATH}/{slack.SLACK_OAUTH_CALLBACK_PATH}",
+            params={"code": "another-code", "state": sealed},
+        )
     assert response.status_code == 200
+    assert repeated.status_code == 200
     assert "installed" in response.text
     # Nothing is left for the member here, so the page draws the mark, offers the one way back into
     # the conversation, and takes its own tab away where the browser allows it.

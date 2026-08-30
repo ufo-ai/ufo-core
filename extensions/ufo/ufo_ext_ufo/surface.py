@@ -859,6 +859,8 @@ async def _fulfill_secret(
         await ctx.fulfill_credential_request(sealed, slot, value, member_id)
     except CredentialRequestInvalid as error:
         return PlainTextResponse(directive("say", f"not stored - {error}"), status_code=403)
+    except CredentialValueInvalid as error:
+        return PlainTextResponse(directive("say", f"not stored - {error}"), status_code=400)
     return PlainTextResponse(directive("say", f"stored {slot}"))
 
 

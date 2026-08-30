@@ -146,6 +146,19 @@ async def test_put_upserts(db: None) -> None:
     assert await store.get(workspace_id, "sample_api") == "two"
 
 
+async def test_update_merges_with_the_value_under_the_workspace_lock(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+
+    def append(current: str | None, submitted: str) -> str:
+        return (current or "") + submitted
+
+    await store.update(workspace_id, "structured", "one", append)
+    await store.update(workspace_id, "structured", "-two", append)
+
+    assert await store.get(workspace_id, "structured") == "one-two"
+
+
 async def test_rotate_updates_only_the_expected_existing_value(db: None) -> None:
     workspace_id = await _workspace()
     store = _store()
@@ -287,6 +300,22 @@ def test_credential_requests_seal_only_declared_slots() -> None:
     assert requests.seal(uuid4(), uuid4(), ("a",))
     with pytest.raises(ValueError, match="declares credential slot"):
         requests.seal(uuid4(), uuid4(), ("a", "nope"))
+
+
+def test_credential_request_seal_records_its_issue_time() -> None:
+    requests = CredentialRequests(
+        fernet=Fernet(Fernet.generate_key()), declared=frozenset({"a"}), fillable=frozenset({"a"})
+    )
+    before = int(time.time())
+    sealed = requests.seal(uuid4(), uuid4(), ("a",))
+    state = open_credential_request(
+        requests.fernet,
+        sealed,
+        purpose=CREDENTIAL_REQUEST_PURPOSE,
+    )
+
+    assert state.issued_at is not None
+    assert before <= state.issued_at <= int(time.time())
 
 
 async def test_credential_requests_open_an_owner_bound_authorization(db: None) -> None:

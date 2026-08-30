@@ -1285,6 +1285,83 @@ fn esc_on_a_running_turn_posts_the_stop() {
 
 #[cfg(unix)]
 #[test]
+fn a_second_esc_in_one_turn_leaves_the_next_turn_running() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 3000,
+            status: 200,
+            reply_lines: &["txt\tthinking", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tcancelled", "ask\t>"],
+        },
+        Exchange {
+            delay_ms: 500,
+            status: 200,
+            reply_lines: &["say\tanswered", "exit\t0"],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tanswered", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("stop-twice");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the turn's own post reaches the gateway");
+    session.press(b"\x1b");
+    session.press(b"\x1b");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !session.screen().contains("thinking") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn never answered:\n{}",
+            session.screen()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    thread::sleep(Duration::from_millis(400));
+    session.press(b"the next question\r");
+    assert!(session.ended(), "the next turn's script ends the client");
+    let requests = served.gateway.done();
+    session.reaped();
+    let stops = requests
+        .iter()
+        .filter(|request| request.stop_header.is_some())
+        .count();
+    assert_eq!(
+        stops, 1,
+        "only the turn that armed the stop is stopped: {requests:?}"
+    );
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert_eq!(requests[0].body, "go");
+    assert_eq!(
+        requests[1].stop_header.as_deref(),
+        Some("1"),
+        "the first Esc stops the turn that armed it: {requests:?}"
+    );
+    assert_eq!(
+        requests[2].body, "the next question",
+        "the next turn posts the message the member typed: {requests:?}"
+    );
+    assert!(
+        requests[2].send_header.is_none(),
+        "the next turn opens with a post of its own: {requests:?}"
+    );
+    assert!(
+        requests[2].stop_header.is_none(),
+        "the next turn's post carries no stop: {requests:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
 fn an_ack_naming_no_arrival_settles_the_row_at_once() {
     let served = serve(vec![
         Exchange {

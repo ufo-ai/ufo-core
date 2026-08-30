@@ -52,6 +52,7 @@ from ufo.sdk.balance import read_headroom
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
 from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader
+from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.flags import flag_enabled
 from ufo.sdk.http import (
     FormData,
@@ -2397,11 +2398,13 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
         if turn.terminal is None:
             payload["turn"] = str(turn.id)
         else:
-            payload.update(await _open_handoffs(ctx, turn.terminal))
+            payload.update(await _open_handoffs(ctx, turn.terminal, member_id))
     return JSONResponse(payload)
 
 
-async def _open_handoffs(ctx: SurfaceContext, terminal: TerminalFrame) -> dict[str, object]:
+async def _open_handoffs(
+    ctx: SurfaceContext, terminal: TerminalFrame, member_id: UUID
+) -> dict[str, object]:
     """What the conversation's newest committed turn still asks of the member, so a reload
     re-renders the affordance the live stream drew: credential prompts still awaiting values. A
     question, a shared file, an app's card, and the connect control are not among them — each rides
@@ -2409,7 +2412,7 @@ async def _open_handoffs(ctx: SurfaceContext, terminal: TerminalFrame) -> dict[s
     and presses the fourth."""
     handoffs: dict[str, object] = {}
     if terminal.credential_request is not None:
-        prompts = await _pending_prompts(ctx, terminal.credential_request)
+        prompts = await _pending_prompts(ctx, terminal.credential_request, member_id)
         if prompts is not None:
             handoffs["credentials"] = prompts
     return handoffs
@@ -4018,19 +4021,22 @@ def _event(name: str, payload: dict[str, object]) -> bytes:
 
 
 async def _pending_prompts(
-    ctx: SurfaceContext, request_: CredentialRequest
+    ctx: SurfaceContext, request_: CredentialRequest, member_id: UUID
 ) -> dict[str, object] | None:
     """The credential prompts of a terminal request still awaiting values, as the page renders
-    them — the same per-slot gate the terminal shell uses, so a fulfilled or expired prompt never
-    re-renders on reconnect while an unanswered sibling keeps asking."""
+    them — an authenticated read renews the short-lived seal, while the request's stable marker
+    keeps each fulfilled prompt closed and an unanswered sibling asking."""
+    sealed = await ctx.renew_credential_request(request_.sealed, member_id)
+    if sealed is None:
+        return None
     pending = [
         {"slot": prompt.slot, "prompt": prompt.prompt}
         for prompt in request_.prompts
-        if await ctx.credential_prompt_pending(request_.sealed, prompt.slot)
+        if await ctx.credential_prompt_pending(sealed, prompt.slot)
     ]
     if not pending:
         return None
-    return {"reason": request_.reason, "sealed": request_.sealed, "prompts": pending}
+    return {"reason": request_.reason, "sealed": sealed, "prompts": pending}
 
 
 def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, object]:
@@ -4120,7 +4126,7 @@ async def _events(
                 ):
                     yield _event("connect", _connect_control(ctx, request.provider, turn_id))
                 if frame.frame.credential_request is not None:
-                    prompts = await _pending_prompts(ctx, frame.frame.credential_request)
+                    prompts = await _pending_prompts(ctx, frame.frame.credential_request, member_id)
                     if prompts is not None:
                         yield _event("credentials", prompts)
                 files = [
@@ -4166,6 +4172,8 @@ async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response:
         await ctx.fulfill_credential_request(sealed, slot, value.strip(), member_id)
     except CredentialRequestInvalid as error:
         return Response(f"not stored: {error}", status_code=403)
+    except CredentialValueInvalid as error:
+        return Response(f"not stored: {error}", status_code=400)
     return JSONResponse({"stored": slot})
 
 

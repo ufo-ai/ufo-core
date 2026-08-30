@@ -111,6 +111,7 @@ import ufo.kinds.conversations as conversations_kind
 import ufo.objects as objects_module
 from ufo.access.connectors import CatalogEntry, CatalogPage, ConnectorEntry, ConnectorRegistry
 from ufo.access.credentials import (
+    CREDENTIAL_REQUEST_TTL_SECONDS,
     CredentialRequestState,
     CredentialSlotUnset,
     CredentialStore,
@@ -285,6 +286,7 @@ SLOTTED = Manifest(
     version="0",
     credentials=(
         CredentialSlot(name="acme_api_key", description="ACME API key"),
+        CredentialSlot(name="acme_signing_key", description="ACME signing key"),
         CredentialSlot(
             name="acme_install_seal",
             description="ACME install binding",
@@ -3237,7 +3239,14 @@ async def test_credentials_view_reports_slots_and_never_values(
             "extension": "stub",
             "description": "ACME API key",
             "filled": True,
-        }
+        },
+        {
+            "slot": "acme_signing_key",
+            "name": "acme-signing-key",
+            "extension": "stub",
+            "description": "ACME signing key",
+            "filled": False,
+        },
     ]
     assert "sealed" not in listed.text
     assert "acme_install_seal" not in listed.text
@@ -5075,6 +5084,7 @@ async def test_the_credential_index_lists_every_declared_slot_and_no_value(
         } == {
             "acme-api-key": True,
             "acme-install-seal": False,
+            "acme-signing-key": False,
         }
         assert "s3cret" not in json.dumps(listed)
         read = await client.get(
@@ -7550,17 +7560,20 @@ async def test_credential_prompts_stream_pending_and_fulfill_privately(
     or touching a transcript, and the seal's member gate refuses anyone but the requester."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    sealed = seal_credential_request(
-        CREDENTIAL_FERNET,
-        CredentialRequestState(
-            workspace_id=workspace_id, member_id=member_id, slots=("api_key", "signing_key")
-        ),
+    state = CredentialRequestState(
+        workspace_id=workspace_id,
+        member_id=member_id,
+        slots=("acme_api_key", "acme_signing_key"),
     )
+    sealed = CREDENTIAL_FERNET.encrypt_at_time(
+        state.model_dump_json().encode(),
+        int(datetime.now(UTC).timestamp()) - CREDENTIAL_REQUEST_TTL_SECONDS - 1,
+    ).decode()
     request = CredentialRequest(
         reason="the acme connector needs its keys",
         prompts=(
-            CredentialPrompt(slot="api_key", prompt="Acme API key"),
-            CredentialPrompt(slot="signing_key", prompt="Acme signing key"),
+            CredentialPrompt(slot="acme_api_key", prompt="Acme API key"),
+            CredentialPrompt(slot="acme_signing_key", prompt="Acme signing key"),
         ),
         sealed=sealed,
     )
@@ -7573,29 +7586,37 @@ async def test_credential_prompts_stream_pending_and_fulfill_privately(
     )
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     events = dict(await _collect_events(client, token, turn_id))
-    assert [p["slot"] for p in events["credentials"]["prompts"]] == ["api_key", "signing_key"]
+    assert [p["slot"] for p in events["credentials"]["prompts"]] == [
+        "acme_api_key",
+        "acme_signing_key",
+    ]
+    renewed = events["credentials"]["sealed"]
+    assert renewed != sealed
     _member_b, token_b = await _seed_member(workspace_id, "b@example.com")
     hijack = await client.post(
         "/surface/web/credentials",
-        data={"sealed": sealed, "slot": "api_key", "value": "stolen"},
+        data={"sealed": renewed, "slot": "acme_api_key", "value": "stolen"},
         headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
     )
     assert hijack.status_code == 403
     stored = await client.post(
         "/surface/web/credentials",
-        data={"sealed": sealed, "slot": "api_key", "value": "s3cr3t"},
+        data={"sealed": renewed, "slot": "acme_api_key", "value": "s3cr3t"},
         headers=cookie,
     )
     assert stored.status_code == 200
-    assert stored.json() == {"stored": "api_key"}
-    assert await CredentialStore(fernet=CREDENTIAL_FERNET).get(workspace_id, "api_key") == "s3cr3t"
+    assert stored.json() == {"stored": "acme_api_key"}
+    assert (
+        await CredentialStore(fernet=CREDENTIAL_FERNET).get(workspace_id, "acme_api_key")
+        == "s3cr3t"
+    )
     events = dict(await _collect_events(client, token, turn_id))
-    assert [p["slot"] for p in events["credentials"]["prompts"]] == ["signing_key"]
+    assert [p["slot"] for p in events["credentials"]["prompts"]] == ["acme_signing_key"]
     loaded = await client.get(
         f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
         headers=cookie,
     )
-    assert [p["slot"] for p in loaded.json()["credentials"]["prompts"]] == ["signing_key"]
+    assert [p["slot"] for p in loaded.json()["credentials"]["prompts"]] == ["acme_signing_key"]
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(

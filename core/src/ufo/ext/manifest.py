@@ -98,13 +98,17 @@ class CredentialSlot:
     an installation, where the value is a seal the member could not compose and a typed one is
     meaningless. `request_credentials` and `ufoctl credential set` refuse it, so the only value it
     can hold is one that opens. Without that, the sole guard on a typed value is the reader that
-    later refuses it — which withholds the slot's host on every turn until someone rebinds."""
+    later refuses it — which withholds the slot's host on every turn until someone rebinds.
+
+    `merge` belongs to a structured secret whose private prompt submits one update. Core owns the
+    encrypted row and lock, so the extension supplies only the pure value merge."""
 
     name: str
     description: str
     injection: InjectionTarget | None = None
     source: CredentialSource | None = None
     member_filled: bool = True
+    merge: Callable[[str | None, str], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -901,6 +905,7 @@ def declared_slots(manifests: tuple[Manifest, ...]) -> tuple[DeclaredSlot, ...]:
             extension=manifest.name,
             member_filled=slot.member_filled,
             host=None if slot.injection is None else slot.injection.host,
+            merge=slot.merge,
         )
         for manifest in manifests
         for slot in manifest.credentials

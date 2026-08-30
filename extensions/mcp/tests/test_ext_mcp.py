@@ -164,6 +164,101 @@ def test_manifest_declares_the_two_dynamic_tools_and_the_server_slot() -> None:
     (slot,) = mcp.manifest().credentials
     assert slot.name == "mcp_servers"
     assert slot.injection is None
+    assert slot.merge is mcp.merge_mcp_server
+
+
+def test_one_mcp_server_update_preserves_other_servers_and_saved_auth() -> None:
+    current = json.dumps(
+        {
+            "servers": {
+                "railway": {"url": "https://mcp.railway.com/mcp", "auth": "railway-token"},
+                "vercel": {"url": "https://mcp.vercel.com", "auth": "old-vercel-token"},
+            }
+        }
+    )
+
+    added = mcp.McpServersConfig.model_validate_json(
+        mcp.merge_mcp_server(
+            current,
+            json.dumps(
+                {
+                    "name": "github",
+                    "url": "https://api.githubcopilot.com/mcp/",
+                    "auth": "github-token",
+                }
+            ),
+        )
+    )
+    updated = mcp.McpServersConfig.model_validate_json(
+        mcp.merge_mcp_server(
+            added.model_dump_json(),
+            json.dumps({"name": "vercel", "url": "https://mcp.vercel.com/mcp"}),
+        )
+    )
+
+    assert set(updated.servers) == {"railway", "vercel", "github"}
+    assert updated.servers["railway"].auth == "railway-token"
+    assert updated.servers["vercel"] == mcp.McpServer(
+        url="https://mcp.vercel.com/mcp", auth="old-vercel-token"
+    )
+    assert updated.servers["github"].auth == "github-token"
+
+
+def test_whole_mcp_server_config_replaces_saved_servers() -> None:
+    replaced = mcp.McpServersConfig.model_validate_json(
+        mcp.merge_mcp_server(
+            json.dumps(
+                {
+                    "servers": {
+                        "railway": {
+                            "url": "https://mcp.railway.com/mcp",
+                            "auth": "railway-token",
+                        }
+                    }
+                }
+            ),
+            json.dumps({}),
+        )
+    )
+
+    assert replaced.servers == {}
+
+
+def test_whole_mcp_server_config_repairs_invalid_saved_value() -> None:
+    repaired = mcp.McpServersConfig.model_validate_json(
+        mcp.merge_mcp_server(
+            "not json",
+            json.dumps({"servers": {"vercel": {"url": "https://mcp.vercel.com"}}}),
+        )
+    )
+
+    assert repaired.servers == {"vercel": mcp.McpServer(url="https://mcp.vercel.com")}
+
+
+def test_one_mcp_server_can_be_removed_without_reentering_the_others() -> None:
+    updated = mcp.McpServersConfig.model_validate_json(
+        mcp.merge_mcp_server(
+            json.dumps(
+                {
+                    "servers": {
+                        "railway": {"url": "https://mcp.railway.com/mcp"},
+                        "vercel": {"url": "https://mcp.vercel.com"},
+                    }
+                }
+            ),
+            json.dumps({"name": "vercel", "remove": True}),
+        )
+    )
+
+    assert updated.servers == {"railway": mcp.McpServer(url="https://mcp.railway.com/mcp")}
+
+
+def test_removing_an_unknown_mcp_server_fails() -> None:
+    with pytest.raises(mcp.CredentialValueInvalid, match=r"missing.*not configured"):
+        mcp.merge_mcp_server(
+            json.dumps({"servers": {"railway": {"url": "https://mcp.railway.com/mcp"}}}),
+            json.dumps({"name": "missing", "remove": True}),
+        )
 
 
 def test_server_config_rejects_a_non_http_url() -> None:

@@ -55,12 +55,14 @@ from starlette.responses import Response
 from ufo.access.connectors import DIRECT_ACCOUNT, CatalogPage, ConnectorRegistry
 from ufo.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
+    CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
     CredentialRequestInvalid,
     CredentialRequestState,
     CredentialStore,
     DeclaredSlot,
     named_slots,
     open_credential_request,
+    seal_credential_request,
 )
 from ufo.access.grants import (
     ConnectHandoff,
@@ -127,7 +129,14 @@ from ufo.schema.records import (
     TurnContext,
 )
 from ufo.sdk.http import cookie_secure
-from ufo.seats import SeatEntry, Seats, create_member, email_domain, workspace_domain
+from ufo.seats import (
+    SeatEntry,
+    Seats,
+    create_member,
+    email_domain,
+    member_is_admin,
+    workspace_domain,
+)
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
 from ufo.sources.backend import ConnectorSourceConfig, binding_name
 from ufo.turns.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
@@ -1597,12 +1606,14 @@ class KeyedAdmission(BaseModel):
     inbound: str
 
 
-def _fulfilled_marker_key(sealed: str, slot: str) -> str:
-    """The blob marker one fulfilled prompt leaves, keyed by the seal's digest and the slot — the
-    render gate reads it per prompt, so a stored slot stops prompting while its siblings keep
-    asking, and a fresh request (a rotation) seals differently and prompts anew."""
-    digest = hashlib.sha256(sealed.encode()).hexdigest()[:32]
-    return f"credential_requests/{digest}/{slot}"
+def _fulfilled_marker_key(request_id: UUID, slot: str) -> str:
+    return f"credential_requests/{request_id.hex}/{slot}"
+
+
+def _credential_request_id(state: CredentialRequestState, sealed: str) -> UUID:
+    if state.request_id is not None:
+        return state.request_id
+    return UUID(bytes=hashlib.sha256(sealed.encode()).digest()[:16])
 
 
 async def _main_agent(workspace_id: UUID) -> UUID:
@@ -1805,20 +1816,52 @@ class SurfaceContext:
         return await self._credentials.get(self.workspace_id, slot)
 
     async def credential_prompt_pending(self, sealed: str, slot: str) -> bool:
-        """Whether one prompt of a sealed credential request still awaits its value — the per-slot
-        render gate, so a fulfilled, expired, or foreign prompt is never re-presented on reconnect
-        while an unanswered sibling keeps asking (and a rotation, sealing afresh, asks anew)."""
+        """Whether one prompt of a sealed credential request still awaits its value."""
         if self._credentials is None:
             return False
         try:
             state = open_credential_request(
-                self._credentials.fernet, sealed, purpose=CREDENTIAL_REQUEST_PURPOSE
+                self._credentials.fernet,
+                sealed,
+                purpose=CREDENTIAL_REQUEST_PURPOSE,
             )
         except CredentialRequestInvalid:
             return False
         if state.workspace_id != self.workspace_id or slot not in state.slots:
             return False
-        return not await self.blob.exists(_fulfilled_marker_key(sealed, slot))
+        request_id = _credential_request_id(state, sealed)
+        return not await self.blob.exists(_fulfilled_marker_key(request_id, slot))
+
+    async def renew_credential_request(self, sealed: str, member_id: UUID) -> str | None:
+        """Renew one authenticated member's pending request for a page reload."""
+        if self._credentials is None:
+            return None
+        try:
+            state = open_credential_request(
+                self._credentials.fernet,
+                sealed,
+                purpose=CREDENTIAL_REQUEST_PURPOSE,
+                ttl=CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
+            )
+        except CredentialRequestInvalid:
+            return None
+        if state.workspace_id != self.workspace_id or state.member_id != member_id:
+            return None
+        issued_at = state.issued_at
+        if issued_at is None:
+            issued_at = self._credentials.fernet.extract_timestamp(sealed.encode())
+        if int(datetime.now(UTC).timestamp()) - issued_at > CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS:
+            return None
+        async with workspace_tx() as connection:
+            if not await member_is_admin(connection, self.workspace_id, member_id):
+                return None
+        state = state.model_copy(
+            update={
+                "request_id": state.request_id or _credential_request_id(state, sealed),
+                "issued_at": issued_at,
+            }
+        )
+        return seal_credential_request(self._credentials.fernet, state)
 
     def open_credential_authorization(self, sealed: str) -> CredentialRequestState:
         """Open a sealed credential-authorization handoff, returning its claims (workspace, member,
@@ -1853,11 +1896,28 @@ class SurfaceContext:
             )
         if slot not in state.slots:
             raise CredentialRequestInvalid(f"credential request does not name slot {slot!r}")
-        await self._credentials.put(self.workspace_id, slot, value)
-        await self.blob.put(
-            _fulfilled_marker_key(sealed, slot),
-            json.dumps({"at": datetime.now(UTC).timestamp()}).encode(),
+        declared = next((entry for entry in self._declared_slots if entry.name == slot), None)
+        if declared is None:
+            raise CredentialRequestInvalid(f"credential slot {slot!r} is not declared")
+        private_prompt = state.payload is None
+        if private_prompt and not declared.member_filled:
+            raise CredentialRequestInvalid(f"credential slot {slot!r} is never entered by a member")
+        marker = (
+            _fulfilled_marker_key(_credential_request_id(state, sealed), slot)
+            if private_prompt
+            else None
         )
+        if marker is not None and await self.blob.exists(marker):
+            raise CredentialRequestInvalid("credential request was already fulfilled")
+        if declared.merge is None:
+            await self._credentials.put(self.workspace_id, slot, value)
+        else:
+            await self._credentials.update(self.workspace_id, slot, value, declared.merge)
+        if marker is not None:
+            await self.blob.put(
+                marker,
+                json.dumps({"at": datetime.now(UTC).timestamp()}).encode(),
+            )
 
     async def bind_installation(self, installation_id: str) -> None:
         """Bind this surface's external installation identity (a Slack team) to this workspace,
