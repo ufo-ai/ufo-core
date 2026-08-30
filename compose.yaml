@@ -128,6 +128,7 @@ services:
       # The base-pinned embed backend reads this on every embed call, so memory indexing and recall
       # raise without it while the rest of the deploy runs. `ufoctl init` names it when it is unset.
       UFO_OPENAI_API_KEY: ${UFO_OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       # The broker is what makes a connector grant possible at all, so without it a first session
       # can record what a team uses and connect none of it. Read from the environment in-process,
       # never per workspace. The search backend is a per-workspace key instead

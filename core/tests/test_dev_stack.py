@@ -84,6 +84,15 @@ def test_stack_origin_reaches_every_browser_callback() -> None:
     )
 
 
+def test_stack_passes_every_model_provider_key() -> None:
+    compose = yaml.safe_load((REPO / "compose.yaml").read_text())
+    serve = compose["services"]["serve"]["environment"]
+
+    assert serve["UFO_ANTHROPIC_API_KEY"] == "${UFO_ANTHROPIC_API_KEY:-}"
+    assert serve["UFO_OPENAI_API_KEY"] == "${UFO_OPENAI_API_KEY:-}"
+    assert serve["OPENROUTER_API_KEY"] == "${OPENROUTER_API_KEY:-}"
+
+
 def test_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> None:
     ignored = set((REPO / ".dockerignore").read_text().splitlines())
     assert {".local", "**/.local", ".worktrees", "**/.worktrees"} <= ignored
