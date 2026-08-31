@@ -438,6 +438,66 @@ async def test_complete_recovers_missing_final_usage_from_the_generation() -> No
     assert requests[0].headers["authorization"] == f"Bearer {OPENROUTER_KEY}"
 
 
+async def test_generation_recovery_retries_past_the_ledgers_indexing_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(openrouter, "GENERATION_404_RETRY_SECONDS", 0.0)
+    requests: list[httpx.Request] = []
+
+    def generation(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) < 3:
+            return httpx.Response(404)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "cancelled": False,
+                    "finish_reason": "tool_calls",
+                    "native_tokens_prompt": 13,
+                    "native_tokens_completion": 5,
+                    "native_tokens_cached": 8,
+                }
+            },
+        )
+
+    create = ScriptedCreate([_chunk(content="ok"), _chunk(finish="tool_calls")])
+    client = replace(
+        _client(create),
+        key=OPENROUTER_KEY,
+        generation_transport=httpx.MockTransport(generation),
+    )
+
+    events = [event async for event in client.complete(REQUEST)]
+
+    assert events[-1] == Usage(input_tokens=5, output_tokens=5, cache_read_tokens=8)
+    assert len(requests) == 3
+
+
+async def test_generation_recovery_fails_loud_on_a_persistent_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(openrouter, "GENERATION_404_RETRY_SECONDS", 0.0)
+    requests: list[httpx.Request] = []
+
+    def generation(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(404)
+
+    create = ScriptedCreate([_chunk(content="ok"), _chunk(finish="tool_calls")])
+    client = replace(
+        _client(create),
+        key=OPENROUTER_KEY,
+        generation_transport=httpx.MockTransport(generation),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError, match="404"):
+        async for _ in client.complete(REQUEST):
+            pass
+
+    assert len(requests) == openrouter.GENERATION_404_RETRIES + 1
+
+
 async def test_complete_does_not_recover_an_unfinished_stream() -> None:
     requests: list[httpx.Request] = []
 

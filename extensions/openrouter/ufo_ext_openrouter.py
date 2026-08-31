@@ -81,6 +81,12 @@ GEMINI_ABORT_ERROR = "The operation was aborted"
 JSON_REFERENCE_KEYS = frozenset({"$ref", "$dynamicRef"})
 GENERATION_PATH = "/generation"
 GENERATION_TIMEOUT_SECONDS = 10.0
+GENERATION_404_RETRIES = 5
+GENERATION_404_RETRY_SECONDS = 2.0
+"""The generation ledger is eventually consistent: a lookup right after the stream ends can 404
+before the row is indexed, and a turn that already streamed its output must not die on that
+window. A 404 that survives the bounded retries is a generation that is not coming back, and
+fails loud."""
 
 OPENROUTER_CONTEXT_WINDOW = 200_000
 _REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
@@ -551,7 +557,17 @@ class OpenRouterModelClient:
             timeout=GENERATION_TIMEOUT_SECONDS,
             transport=self.generation_transport,
         ) as client:
-            response = await client.get(GENERATION_PATH, params={"id": generation_id})
+            for attempt in range(GENERATION_404_RETRIES + 1):
+                response = await client.get(GENERATION_PATH, params={"id": generation_id})
+                if response.status_code != 404 or attempt == GENERATION_404_RETRIES:
+                    break
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=self.spec.id,
+                    kind="generation_404",
+                )
+                await asyncio.sleep(GENERATION_404_RETRY_SECONDS)
         response.raise_for_status()
         generation = _GenerationResponse.model_validate(response.json()).data
         if generation.cancelled or generation.finish_reason != finish_reason:
