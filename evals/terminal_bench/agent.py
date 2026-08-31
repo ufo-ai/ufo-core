@@ -4,10 +4,11 @@ import shlex
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import override
+from typing import Any, override
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+import httpcore
 from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
@@ -18,6 +19,9 @@ CREDENTIALS_TARGET = f"{HOME_TARGET}/credentials"
 ENVIRONMENT_TARGET = f"{HOME_TARGET}/environment.yaml"
 POLL_INTERVAL_SECONDS = 5
 OUTPUT_TAIL_BYTES = 10_000
+TRANSPORT_FAULTS = (httpcore.LocalProtocolError, httpcore.ReadError)
+TRANSPORT_ATTEMPTS = 5
+TRANSPORT_RETRY_SECONDS = 2
 
 
 def _required_environment(name: str) -> str:
@@ -122,18 +126,22 @@ class UfoAgent(BaseInstalledAgent):
         stdout_target = f"{HOME_TARGET}/{channel}.out"
         stderr_target = f"{HOME_TARGET}/{channel}.err"
         exit_target = f"{HOME_TARGET}/{channel}.exit"
-        await self.exec_as_agent(
-            environment,
-            command=(
-                f"nohup sh -c {shlex.quote(f'{client}; echo $? >{exit_target}')} "
-                f"</dev/null >{stdout_target} 2>{stderr_target} &"
-            ),
-            env={
-                "UFO_HOME": HOME_TARGET,
-                "WORKSPACE_URL": self._workspace_url,
-                "UFO_CHANNEL": channel,
-            },
-        )
+        try:
+            await self.exec_as_agent(
+                environment,
+                command=(
+                    f"nohup sh -c {shlex.quote(f'{client}; echo $? >{exit_target}')} "
+                    f"</dev/null >{stdout_target} 2>{stderr_target} &"
+                ),
+                env={
+                    "UFO_HOME": HOME_TARGET,
+                    "WORKSPACE_URL": self._workspace_url,
+                    "UFO_CHANNEL": channel,
+                },
+            )
+        except TRANSPORT_FAULTS:
+            if not await self._client_started(environment, exit_target, stdout_target):
+                raise
         exit_code = await self._recorded_exit_code(environment, exit_target)
         if exit_code != 0:
             raise self._classify_exec_error(
@@ -145,9 +153,18 @@ class UfoAgent(BaseInstalledAgent):
                 ),
             )
 
+    async def _client_started(
+        self, environment: BaseEnvironment, exit_target: str, stdout_target: str
+    ) -> bool:
+        probe = await self._idempotent_exec(
+            environment,
+            command=f"if [ -e {exit_target} ] || [ -e {stdout_target} ]; then echo started; fi",
+        )
+        return bool((probe.stdout or "").strip())
+
     async def _recorded_exit_code(self, environment: BaseEnvironment, exit_target: str) -> int:
         while True:
-            result = await self.exec_as_agent(
+            result = await self._idempotent_exec(
                 environment, command=f"cat {exit_target} 2>/dev/null || true"
             )
             recorded = (result.stdout or "").strip()
@@ -156,7 +173,15 @@ class UfoAgent(BaseInstalledAgent):
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     async def _output_tail(self, environment: BaseEnvironment, target: str) -> str:
-        result = await self.exec_as_agent(
+        result = await self._idempotent_exec(
             environment, command=f"tail -c {OUTPUT_TAIL_BYTES} {target} 2>/dev/null || true"
         )
         return result.stdout or ""
+
+    async def _idempotent_exec(self, environment: BaseEnvironment, command: str) -> Any:
+        for _ in range(TRANSPORT_ATTEMPTS - 1):
+            try:
+                return await self.exec_as_agent(environment, command=command)
+            except TRANSPORT_FAULTS:
+                await asyncio.sleep(TRANSPORT_RETRY_SECONDS)
+        return await self.exec_as_agent(environment, command=command)

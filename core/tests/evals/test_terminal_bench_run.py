@@ -356,6 +356,117 @@ async def test_terminal_bench_agent_classifies_the_recorded_failure(
         await agent.run("repair input", environment, AgentContext())
 
 
+async def test_terminal_bench_agent_retries_a_transport_fault_on_the_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    import httpcore
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench import agent as agent_module
+    from evals.terminal_bench.agent import UfoAgent
+
+    monkeypatch.setattr(agent_module, "TRANSPORT_RETRY_SECONDS", 0)
+    environment = SimpleNamespace(context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    agent._workspace_url = "https://eval.ufo.test"
+    execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(stdout=""),
+            httpcore.ReadError("read failed"),
+            httpcore.LocalProtocolError("connection closed"),
+            SimpleNamespace(stdout="0\n"),
+        ]
+    )
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+
+    await agent.run("repair input", environment, AgentContext())
+
+    channel = execute.await_args_list[0].kwargs["env"]["UFO_CHANNEL"]
+    poll = f"cat /installed-agent/home/{channel}.exit 2>/dev/null || true"
+    assert [call.kwargs["command"] for call in execute.await_args_list[1:]] == [poll, poll, poll]
+
+
+async def test_terminal_bench_agent_raises_the_transport_fault_past_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    import httpcore
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench import agent as agent_module
+    from evals.terminal_bench.agent import UfoAgent
+
+    monkeypatch.setattr(agent_module, "TRANSPORT_RETRY_SECONDS", 0)
+    environment = SimpleNamespace(context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    agent._workspace_url = "https://eval.ufo.test"
+    faults = [httpcore.ReadError(f"read failed {attempt}") for attempt in range(5)]
+    execute = AsyncMock(side_effect=[SimpleNamespace(stdout=""), *faults])
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+
+    with pytest.raises(httpcore.ReadError) as raised:
+        await agent.run("repair input", environment, AgentContext())
+
+    assert raised.value is faults[-1]
+    assert execute.await_count == 6
+
+
+async def test_terminal_bench_agent_start_fault_falls_through_when_the_client_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    import httpcore
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench.agent import UfoAgent
+
+    environment = SimpleNamespace(context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    agent._workspace_url = "https://eval.ufo.test"
+    execute = AsyncMock(
+        side_effect=[
+            httpcore.ReadError("read failed"),
+            SimpleNamespace(stdout="started\n"),
+            SimpleNamespace(stdout="0\n"),
+        ]
+    )
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+    context = AgentContext()
+
+    await agent.run("repair input", environment, context)
+
+    channel = context.metadata["channel"]
+    assert [call.kwargs["command"] for call in execute.await_args_list[1:]] == [
+        f"if [ -e /installed-agent/home/{channel}.exit ] || "
+        f"[ -e /installed-agent/home/{channel}.out ]; then echo started; fi",
+        f"cat /installed-agent/home/{channel}.exit 2>/dev/null || true",
+    ]
+
+
+async def test_terminal_bench_agent_start_fault_raises_when_the_client_never_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    import httpcore
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench.agent import UfoAgent
+
+    environment = SimpleNamespace(context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    agent._workspace_url = "https://eval.ufo.test"
+    fault = httpcore.LocalProtocolError("connection closed")
+    execute = AsyncMock(side_effect=[fault, SimpleNamespace(stdout="")])
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+
+    with pytest.raises(httpcore.LocalProtocolError) as raised:
+        await agent.run("repair input", environment, AgentContext())
+
+    assert raised.value is fault
+    assert execute.await_count == 2
+
+
 async def test_terminal_bench_agent_reads_the_selected_model_from_its_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -30,6 +30,10 @@ The client runs with `--json` inside each Harbor environment and stays attached 
 The agent starts it detached (`nohup`, stdout, stderr, and exit code recorded to files) and polls
 the exit file with short execs: an exec stream held open for a task's whole duration dies on long
 tasks and voids the trial.
+The poll and tail reads are idempotent, so each retries E2B transport faults (`httpcore.ReadError`,
+`httpcore.LocalProtocolError`) up to five attempts. The start exec is not idempotent and never
+retries: on a transport fault the agent probes for the client's recorded files and raises only when
+the client never started.
 This is required: the agent changes the same filesystem and live services Harbor verifies. The
 outer eval runner's `--remote` selects the remote Harbor environment and public ufo service; using
 the client's `--remote` flag inside a task would provision a different sandbox and leave the graded
