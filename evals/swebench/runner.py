@@ -23,7 +23,6 @@ from evals.harness.capability import (
 from evals.harness.coding import AllOf, PinnedRepositoryRoute
 from evals.harness.harness import JsonObject
 from evals.harness.registry import EvalTask, capability_task, rewrapped
-from evals.harness.scorers import delegation_only_scorer
 from evals.swebench.models import SUBSET_SIZES, Subset, SWEbenchCase
 from evals.swebench.snapshot import load_snapshot
 from ufo.blob import WorkspaceBlobStore
@@ -38,8 +37,7 @@ SNAPSHOT_ROOT = LOCAL_ROOT / "snapshot"
 SUBMISSIONS_ROOT = LOCAL_ROOT / "submissions"
 SWEBENCH_PACKS = ("assistant", "assistant_hosted")
 WORKFLOW_WAIT_SECONDS = 7_200.0
-PARENT_FORBIDDEN_TOOLS = ("bash", "edit", "grep", "glob")
-ENVELOPE_REVISION = "pinned-fetch-enforced-share-exact-half"
+ENVELOPE_REVISION = "patch-graded-regardless-of-delegation"
 DIFF_HEADER = b"diff --git "
 OLD_FILE_HEADER = b"--- "
 NEW_FILE_HEADER = b"+++ "
@@ -169,7 +167,6 @@ def _capability_case(
         grader=AllOf(
             (
                 PinnedRepositoryRoute(case.repo, case.base_commit),
-                delegation_only_scorer(PARENT_FORBIDDEN_TOOLS),
                 PatchCapture(case.instance_id, submissions_root),
             )
         ),

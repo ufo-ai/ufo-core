@@ -17,11 +17,9 @@ from evals.harness.capability import (
 )
 from evals.harness.coding import AllOf, PinnedRepositoryRoute
 from evals.harness.registry import EvalTask
-from evals.harness.scorers import delegation_only_scorer
 from evals.harness.target import TargetResult
 from evals.swebench.models import SMOKE_CASE_IDS, Subset, SWEbenchCase
 from evals.swebench.runner import (
-    PARENT_FORBIDDEN_TOOLS,
     SWEBENCH_PACKS,
     WORKFLOW_WAIT_SECONDS,
     CapturedPatches,
@@ -178,9 +176,8 @@ def test_one_selected_case_builds_the_exact_pinned_capability_case(tmp_path: Pat
     assert case.patch not in capability.message
     assert case.test_patch not in capability.message
     assert isinstance(capability.grader, AllOf)
-    route, delegation, capture = capability.grader.graders
+    route, capture = capability.grader.graders
     assert route == PinnedRepositoryRoute(case.repo, case.base_commit)
-    assert delegation.grading == delegation_only_scorer(PARENT_FORBIDDEN_TOOLS).grading
     assert isinstance(capture, PatchCapture)
     assert capture.case_id == case.instance_id
 
@@ -528,7 +525,7 @@ async def test_task_removes_only_a_case_stale_capture_when_that_case_starts(
     assert (submissions / unselected / f"{unselected}.patch").read_bytes() == b"stale"
 
 
-async def test_task_runs_all_three_deterministic_graders_and_captures_the_patch(
+async def test_task_runs_both_deterministic_graders_and_captures_the_patch(
     tmp_path: Path,
 ) -> None:
     snapshot_root = snapshot(tmp_path / "snapshot")
@@ -548,7 +545,6 @@ async def test_task_runs_all_three_deterministic_graders_and_captures_the_patch(
     assert saved.read_bytes() == patch
     grader_evidence = report.cases[0].evidence["attempts"][0]["grader"]
     assert grader_evidence["codingSpawns"] == 1
-    assert grader_evidence["ownTools"] == []
     assert grader_evidence["sizeBytes"] == len(patch)
 
 
