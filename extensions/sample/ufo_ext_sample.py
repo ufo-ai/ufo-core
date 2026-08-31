@@ -36,6 +36,7 @@ from ufo.sdk.connectors import (
     UnknownBrokerTool,
 )
 from ufo.sdk.context import AgentChange, ExtensionContext, JsonValue, SourceReader
+from ufo.sdk.flags import SERVED_FALSE, SERVED_TRUE
 from ufo.sdk.http import (
     JSONResponse,
     PlainTextResponse,
@@ -1298,9 +1299,11 @@ class SampleSearchProvider:
 def build_flag_provider(_cache_ttl_seconds: float) -> InMemoryProvider:
     """The OpenFeature provider the probe registers through the `flag_providers` Manifest point:
     `sample-flag-on` resolves true and `sample-flag-off` false, so a flagged path is driven both
-    ways through the real SDK. It answers from memory, so the deploy's cache window has nothing to
-    hold; the Flagship backend keeps the HTTP proof."""
-    variants = {ON_VARIANT: True, OFF_VARIANT: False}
+    ways through the real SDK. Its variations are the strings a flag service holds, which is what
+    `flag_enabled` reads — a backend answering JSON booleans is one no deploy can have. It answers
+    from memory, so the deploy's cache window has nothing to hold; the Flagship backend keeps the
+    HTTP proof."""
+    variants = {ON_VARIANT: SERVED_TRUE, OFF_VARIANT: SERVED_FALSE}
     return InMemoryProvider(
         {
             FLAG_ON: InMemoryFlag(default_variant=ON_VARIANT, variants=variants),

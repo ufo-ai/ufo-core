@@ -134,7 +134,7 @@ import ufo.runtime.objects as objects_module
 from ufo.blob import FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.flags import init_flags
+from ufo.flags import SERVED_FALSE, SERVED_TRUE, init_flags
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.catalog import (
     ANTHROPIC_KEY_SLOT,
@@ -2701,7 +2701,7 @@ async def test_the_wiki_app_is_listed_where_the_service_answers_for_it(
         InMemoryProvider(
             {
                 "enable-wiki-app": InMemoryFlag(
-                    default_variant="on", variants={"on": True, "off": False}
+                    default_variant="on", variants={"on": SERVED_TRUE, "off": SERVED_FALSE}
                 )
             }
         )
@@ -2725,7 +2725,7 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
     address still opens it — carrying the mark that keeps it out of every list, while a flag the
     same service answers true leaves its screen exactly where it was."""
     client, workspace_id, _agent_id = web
-    variants = {"on": True, "off": False}
+    variants = {"on": SERVED_TRUE, "off": SERVED_FALSE}
     init_flags(
         InMemoryProvider(
             {
@@ -3513,7 +3513,7 @@ async def test_the_first_run_offers_no_imessage_step_where_the_flag_reads_off(
         InMemoryProvider(
             {
                 web_surface.IMESSAGE_STEP_FLAG: InMemoryFlag(
-                    default_variant="off", variants={"on": True, "off": False}
+                    default_variant="off", variants={"on": SERVED_TRUE, "off": SERVED_FALSE}
                 )
             }
         )

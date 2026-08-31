@@ -11,13 +11,16 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import replace
+from uuid import uuid4
 
 import httpx
 import pytest
 import ufo_ext_flagship as flagship
 from flagship import FlagshipServerProvider
+from openfeature import api
 
-from ufo.flags import FLAG_TIMEOUT_SECONDS
+from ufo.flags import FLAG_TIMEOUT_SECONDS, flag_enabled, init_flags
+from ufo.runtime.workspace import ws
 
 APP_ID = "flagship-app-7"
 ACCOUNT_ID = "cf-account-42"
@@ -211,3 +214,37 @@ def test_a_refusal_carries_what_cloudflare_said(monkeypatch: pytest.MonkeyPatch)
     )
     with pytest.raises(RuntimeError, match="Authentication error"):
         admin.serve("enable-wiki-app", on=True)
+
+
+@pytest.mark.parametrize(
+    ("served", "variant", "expected"),
+    [("true", "on", True), ("false", "off", False)],
+)
+async def test_the_evaluate_answer_this_app_gives_reads_through_as_a_flag(
+    monkeypatch: pytest.MonkeyPatch, served: str, variant: str, expected: bool
+) -> None:
+    """The whole read, on the bytes the live app answers with. Flagship types a flag from the
+    variation values it was written with, and terraform can only write strings
+    (`cloudflare_flagship_flag.variations` is `map(string)`), so `value` comes back as `"true"` and
+    never as a JSON boolean. Asked for a boolean this answer is a type mismatch the SDK returns
+    rather than raises, which reads as a flag no operator can move — so the vendor provider, the
+    core helper, and this response shape are proven together or not at all."""
+    _keyed(monkeypatch)
+    provider = flagship.build(0.0)
+    assert isinstance(provider, FlagshipServerProvider)
+    answer = {
+        "flagKey": "enable-wiki-app",
+        "value": served,
+        "variant": variant,
+        "reason": "DEFAULT",
+    }
+    provider._client._async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=answer))
+    )
+    api.clear_providers()
+    init_flags(provider)
+    try:
+        with ws(uuid4()):
+            assert await flag_enabled("enable-wiki-app", default=not expected) is expected
+    finally:
+        api.clear_providers()
