@@ -1185,8 +1185,12 @@ async def _audience_for(
 
 
 APP_FLAGS = {
-    "wiki": "enable-wiki-app",
+    "code": "enable-code-app",
     "issues": "enable-issues-app",
+    "meetings": "enable-meetings-app",
+    "metrics": "enable-metrics-app",
+    "radar": "enable-radar-app",
+    "wiki": "enable-wiki-app",
 }
 MAIN_AGENT_FLAG = "enable-assistant-app"
 PORTAL_SURFACES = {
@@ -1196,11 +1200,13 @@ PORTAL_SURFACES = {
     "installed-skills": "enable-installed-skills",
     "usage": "enable-usage-tab",
 }
-# The flags that read closed. A flag withholding a screen the product already offers reads open, so
-# no outage, no unseeded deploy and no key an operator has yet to create takes it away. The wiki app
-# has never been offered, and the same silence must not be what ships it — so its flag is the one
-# that has to be answered before a member sees the app.
-CLOSED_UNTIL_ANSWERED = frozenset({APP_FLAGS["wiki"]})
+# The flags that read closed. A flag withholding one of the portal's own screens reads open, so no
+# outage, no unseeded deploy and no key an operator has yet to create takes away what a member
+# already had. Every shipped app is the other case: it is listed where its flag says so and nowhere
+# else. That is the whole of what withholding one does — the workspace still holds the app, its
+# address still opens it, and its standing work keeps its clock — so the silences that must not take
+# a screen away are free to withhold an app, and offering one is a deliberate act.
+CLOSED_UNTIL_ANSWERED = frozenset(APP_FLAGS.values())
 
 
 def _visibility_flag(agent: AgentSummary) -> str | None:
@@ -1215,10 +1221,10 @@ async def _flag_reads(agents: tuple[AgentSummary, ...]) -> dict[str, bool]:
     visibility of each agent listed.
 
     Each is read at the default its own feature ships in (`CLOSED_UNTIL_ANSWERED`). A flag
-    withholding a screen the product already offers reads open, so a deploy holding no flag service,
-    one whose keys are unseeded, a key nobody has created and a Flagship outage all leave a member
-    exactly what they had; a flag holding back something never offered reads closed, so none of
-    those four is what finally ships it."""
+    withholding one of the portal's own screens reads open, so a deploy holding no flag service, one
+    whose keys are unseeded, a key nobody has created and a Flagship outage all leave a member
+    exactly what they had; a shipped app's flag reads closed, so none of those four lists an app,
+    and a member sees one where somebody turned it on."""
     keys = list(
         dict.fromkeys(
             [
@@ -1253,8 +1259,8 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     rather than dropped: the workspace holds the app either way, the portal draws it in no list, and
     a member holding its link still opens it. `surfaces` answers the same question for the portal's
     own screens. Each flag is read at the default its own feature ships in, so a deploy whose flag
-    service answers nothing draws the portal it drew before — with the wiki app, which has never
-    been offered, still withheld.
+    service answers nothing draws the portal's own screens as it drew them before, and lists no
+    shipped app.
 
     The create act draws nothing from this read:
     it is a conversation the `create-application` skill runs, and the screen offers it to every

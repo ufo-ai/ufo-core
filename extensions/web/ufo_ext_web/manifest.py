@@ -40,8 +40,12 @@ VERSION = "0.1.0"
 # environment's `infra/envs/*/flags.tf` to exactly this set, so no key the portal reads is one the
 # flag service was never told about.
 FLAGS = (
-    FlagSpec(key=APP_FLAGS["wiki"], what="The Wiki app is listed in the portal."),
+    FlagSpec(key=APP_FLAGS["code"], what="The Code app is listed in the portal."),
     FlagSpec(key=APP_FLAGS["issues"], what="The Issues app is listed in the portal."),
+    FlagSpec(key=APP_FLAGS["meetings"], what="The Meetings app is listed in the portal."),
+    FlagSpec(key=APP_FLAGS["metrics"], what="The Metrics app is listed in the portal."),
+    FlagSpec(key=APP_FLAGS["radar"], what="The Radar app is listed in the portal."),
+    FlagSpec(key=APP_FLAGS["wiki"], what="The Wiki app is listed in the portal."),
     FlagSpec(key=MAIN_AGENT_FLAG, what="The workspace's main agent is listed in the portal."),
     FlagSpec(key=PORTAL_SURFACES["admin"], what="An admin is offered the administration screen."),
     FlagSpec(key=PORTAL_SURFACES["memory"], what="The workspace Memory tab is drawn."),

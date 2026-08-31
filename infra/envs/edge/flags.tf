@@ -7,8 +7,12 @@
 #
 # The set is pinned to what the active extensions declare at the `flags` Manifest point, by a gate,
 # so a key the portal reads and this file omits fails CI rather than reading its default forever in
-# a live deploy. Testing creates every flag on, because that is where a screen is seen first;
-# production creates each one off, so nothing reaches a member there before somebody turns it on.
+# a live deploy. Testing creates a flag over one of the portal's own screens on, because that is
+# where a screen is seen first; production creates each one off, so nothing reaches a member there
+# before somebody turns it on. A flag over a shipped app is created off in both, because it is what
+# offers that app rather than what withholds it — the apps a member is offered today are the ones
+# somebody turned on, and every other one is drawn in no list while the workspace still holds it and
+# its standing work keeps running.
 #
 # Terraform owns that each flag exists and the shape it has — its type, its two variations, and
 # `enabled`. It does not own what the flag serves. With no rule matching, the served value is
@@ -31,22 +35,30 @@ locals {
     testing = {
       "enable-admin-settings"   = true
       "enable-assistant-app"    = true
+      "enable-code-app"         = false
       "enable-community-skills" = true
       "enable-imessage-step"    = true
       "enable-installed-skills" = true
-      "enable-issues-app"       = true
+      "enable-issues-app"       = false
+      "enable-meetings-app"     = false
       "enable-memory-tab"       = true
+      "enable-metrics-app"      = false
+      "enable-radar-app"        = false
       "enable-usage-tab"        = true
-      "enable-wiki-app"         = true
+      "enable-wiki-app"         = false
     }
     prod = {
       "enable-admin-settings"   = false
       "enable-assistant-app"    = false
+      "enable-code-app"         = false
       "enable-community-skills" = false
       "enable-imessage-step"    = false
       "enable-installed-skills" = false
       "enable-issues-app"       = false
+      "enable-meetings-app"     = false
       "enable-memory-tab"       = false
+      "enable-metrics-app"      = false
+      "enable-radar-app"        = false
       "enable-usage-tab"        = false
       "enable-wiki-app"         = false
     }

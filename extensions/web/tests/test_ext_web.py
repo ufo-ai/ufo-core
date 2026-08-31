@@ -2645,27 +2645,36 @@ def unbound_flags() -> Iterator[None]:
     init_flags(None)
 
 
-async def _seed_wiki_app(workspace_id: UUID) -> UUID:
-    """The wiki app as its extension provisions it: the slug the portal reads its flag by comes off
-    `provisioned_by`, not off the row's member-visible name."""
+async def _seed_shipped_app(workspace_id: UUID, slug: str) -> UUID:
+    """One shipped app as its extension provisions it: the slug the portal reads its flag by comes
+    off `provisioned_by`, not off the row's member-visible name."""
     agent_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.agent).values(
                 id=agent_id,
                 workspace_id=workspace_id,
-                name="wiki",
-                prompt="be the wiki",
+                name=slug,
+                prompt=f"be the {slug}",
                 model="claude-sonnet-5",
                 icon="book",
-                provisioned_by="app_wiki",
-                provisioned_name="wiki",
+                provisioned_by=f"app_{slug}",
+                provisioned_name=slug,
                 provisioned_version="0.1.0",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
     return agent_id
+
+
+async def _app_visibility(
+    client: AsyncClient, token: str
+) -> tuple[dict[str | None, bool], dict[str, bool]]:
+    boot = (
+        await client.get("/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    ).json()
+    return {agent["app"]: agent["hidden"] for agent in boot["agents"]}, boot["surfaces"]
 
 
 @pytest.mark.parametrize("bound", [False, True])
@@ -2675,46 +2684,43 @@ async def test_a_flag_service_that_answers_nothing_leaves_a_member_what_they_had
     """The two silences are one state to a member: a deploy that selected no flag backend (a
     development run, an eval stack, a self-hosted deploy) and one whose service holds none of these
     keys — which is every deploy the moment this lands, and every deploy again while Flagship is
-    unreachable. Neither takes a shipped screen away, and neither is what finally offers the wiki
-    app, which has never been offered and so is the one flag read closed."""
+    unreachable. Neither takes one of the portal's own screens away, and neither lists a shipped
+    app: an app is offered where somebody turned its flag on, so silence draws it in no list while
+    the workspace goes on holding it."""
     client, workspace_id, _agent_id = web
     init_flags(InMemoryProvider({}) if bound else None)
-    await _seed_wiki_app(workspace_id)
+    for slug in web_surface.APP_FLAGS:
+        await _seed_shipped_app(workspace_id, slug)
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    boot = (
-        await client.get("/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"})
-    ).json()
-    assert boot["surfaces"] == dict.fromkeys(web_surface.PORTAL_SURFACES, True)
-    assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [
-        (None, False),
-        ("wiki", True),
-    ]
+    visibility, surfaces = await _app_visibility(client, token)
+    assert surfaces == dict.fromkeys(web_surface.PORTAL_SURFACES, True)
+    assert visibility == {None: False, **dict.fromkeys(web_surface.APP_FLAGS, True)}
 
 
-async def test_the_wiki_app_is_listed_where_the_service_answers_for_it(
+async def test_an_app_is_listed_where_the_flag_service_answers_for_it_and_no_other_with_it(
     web: tuple[AsyncClient, UUID, UUID], unbound_flags: None
 ) -> None:
-    """The other half of the exception: closed is the state before an answer, not a state no answer
-    can leave — flipping this environment's `enable-wiki-app` to true offers the app."""
+    """The other half: closed is the state before an answer, not a state no answer can leave —
+    flipping one environment's `enable-code-app` to true offers that app there, and offers nothing
+    else with it."""
     client, workspace_id, _agent_id = web
     init_flags(
         InMemoryProvider(
             {
-                "enable-wiki-app": InMemoryFlag(
+                "enable-code-app": InMemoryFlag(
                     default_variant="on", variants={"on": SERVED_TRUE, "off": SERVED_FALSE}
                 )
             }
         )
     )
-    await _seed_wiki_app(workspace_id)
+    for slug in web_surface.APP_FLAGS:
+        await _seed_shipped_app(workspace_id, slug)
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    boot = (
-        await client.get("/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"})
-    ).json()
-    assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [
-        (None, False),
-        ("wiki", False),
-    ]
+    visibility, _surfaces = await _app_visibility(client, token)
+    assert visibility == {
+        None: False,
+        **{slug: slug != "code" for slug in web_surface.APP_FLAGS},
+    }
 
 
 async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
@@ -2738,7 +2744,7 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
             }
         )
     )
-    await _seed_wiki_app(workspace_id)
+    await _seed_shipped_app(workspace_id, "wiki")
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     boot = (
         await client.get("/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"})

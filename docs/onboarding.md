@@ -360,9 +360,9 @@ The flag backend's three keys (`cloudflare-flagship-app-id`, `cloudflare-account
 `cloudflare-flagship-token`) are the one family neither deploy requires: both write them empty when
 the document lacks them, because the cluster projects each one by name and a property Secrets
 Manager does not hold leaves the ExternalSecret unready. Seed all three to read flags; leave them
-and serve builds no flag provider, so every flag resolves to the default its call site passes — for
-the portal's own flags that is the screen drawn, because each of them withholds something already
-shipped.
+and serve builds no flag provider, so every flag resolves to the default its call site passes: a
+flag over one of the portal's own screens draws that screen, because it withholds something already
+shipped, and a flag over a shipped app lists no app, because turning one on is what offers it.
 
 Those three read flags and cannot write one. Which flags exist is code: `infra/envs/edge/flags.tf`
 declares every key for both environments, applied by each deploy on a token scoped to that
