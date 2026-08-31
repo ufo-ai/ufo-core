@@ -27,6 +27,9 @@ Harbor job runs the selected cases at the eval runner's `--concurrency` and reta
 results, verifier output, and rewards under `.local/terminal_bench/jobs/`.
 
 The client runs with `--json` inside each Harbor environment and stays attached to that environment.
+The agent starts it detached (`nohup`, stdout, stderr, and exit code recorded to files) and polls
+the exit file with short execs: an exec stream held open for a task's whole duration dies on long
+tasks and voids the trial.
 This is required: the agent changes the same filesystem and live services Harbor verifies. The
 outer eval runner's `--remote` selects the remote Harbor environment and public ufo service; using
 the client's `--remote` flag inside a task would provision a different sandbox and leave the graded

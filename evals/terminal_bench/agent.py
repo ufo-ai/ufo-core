@@ -2,6 +2,7 @@ import asyncio
 import os
 import shlex
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import override
 from urllib.parse import urlsplit
@@ -15,6 +16,8 @@ CLIENT_TARGET = "/installed-agent/ufo"
 HOME_TARGET = "/installed-agent/home"
 CREDENTIALS_TARGET = f"{HOME_TARGET}/credentials"
 ENVIRONMENT_TARGET = f"{HOME_TARGET}/environment.yaml"
+POLL_INTERVAL_SECONDS = 5
+OUTPUT_TAIL_BYTES = 10_000
 
 
 def _required_environment(name: str) -> str:
@@ -22,6 +25,13 @@ def _required_environment(name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is required")
     return value
+
+
+@dataclass(frozen=True)
+class _ClientExit:
+    return_code: int
+    stdout: str
+    stderr: str
 
 
 class UfoAgent(BaseInstalledAgent):
@@ -108,12 +118,45 @@ class UfoAgent(BaseInstalledAgent):
         if self._environment is not None:
             command.extend(("--environment", self._environment))
         command.extend(("--json", instruction))
+        client = f"{shlex.join(command)} </dev/null"
+        stdout_target = f"{HOME_TARGET}/{channel}.out"
+        stderr_target = f"{HOME_TARGET}/{channel}.err"
+        exit_target = f"{HOME_TARGET}/{channel}.exit"
         await self.exec_as_agent(
             environment,
-            command=f"{shlex.join(command)} </dev/null",
+            command=(
+                f"nohup sh -c {shlex.quote(f'{client}; echo $? >{exit_target}')} "
+                f"</dev/null >{stdout_target} 2>{stderr_target} &"
+            ),
             env={
                 "UFO_HOME": HOME_TARGET,
                 "WORKSPACE_URL": self._workspace_url,
                 "UFO_CHANNEL": channel,
             },
         )
+        exit_code = await self._recorded_exit_code(environment, exit_target)
+        if exit_code != 0:
+            raise self._classify_exec_error(
+                client,
+                _ClientExit(
+                    return_code=exit_code,
+                    stdout=await self._output_tail(environment, stdout_target),
+                    stderr=await self._output_tail(environment, stderr_target),
+                ),
+            )
+
+    async def _recorded_exit_code(self, environment: BaseEnvironment, exit_target: str) -> int:
+        while True:
+            result = await self.exec_as_agent(
+                environment, command=f"cat {exit_target} 2>/dev/null || true"
+            )
+            recorded = (result.stdout or "").strip()
+            if recorded:
+                return int(recorded)
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+    async def _output_tail(self, environment: BaseEnvironment, target: str) -> str:
+        result = await self.exec_as_agent(
+            environment, command=f"tail -c {OUTPUT_TAIL_BYTES} {target} 2>/dev/null || true"
+        )
+        return result.stdout or ""

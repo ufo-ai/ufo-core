@@ -1,4 +1,5 @@
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -173,7 +174,7 @@ async def test_terminal_bench_agent_uploads_and_pins_the_environment_document(
     environment = SimpleNamespace(default_user="agent", upload_file=AsyncMock(), context_id=uuid4())
     agent = UfoAgent(tmp_path)
     monkeypatch.setattr(agent, "exec_as_root", AsyncMock())
-    execute = AsyncMock()
+    execute = AsyncMock(return_value=SimpleNamespace(stdout="0"))
     monkeypatch.setattr(agent, "exec_as_agent", execute)
 
     await agent.install(environment)
@@ -184,9 +185,11 @@ async def test_terminal_bench_agent_uploads_and_pins_the_environment_document(
     ]
 
     await agent.run("repair input", environment, AgentContext())
-    assert execute.await_args.kwargs["command"] == (
+    start = execute.await_args_list[1]
+    channel = start.kwargs["env"]["UFO_CHANNEL"]
+    assert shlex.split(start.kwargs["command"])[3] == (
         "/installed-agent/ufo --environment /installed-agent/home/environment.yaml "
-        "--json 'repair input' </dev/null"
+        f"--json 'repair input' </dev/null; echo $? >/installed-agent/home/{channel}.exit"
     )
 
 
@@ -201,23 +204,40 @@ async def test_terminal_bench_agent_closes_json_stdin(
     environment = SimpleNamespace(context_id=uuid4())
     agent = UfoAgent(tmp_path)
     agent._workspace_url = "https://eval.ufo.test"
-    execute = AsyncMock()
+    execute = AsyncMock(return_value=SimpleNamespace(stdout="0"))
     context = AgentContext()
     monkeypatch.setattr(agent, "exec_as_agent", execute)
 
     await agent.run("repair 'quoted' input", environment, context)
 
-    execute.assert_awaited_once_with(
-        environment,
-        command="/installed-agent/ufo --json 'repair '\"'\"'quoted'\"'\"' input' </dev/null",
-        env={
-            "UFO_HOME": "/installed-agent/home",
-            "WORKSPACE_URL": "https://eval.ufo.test",
-            "UFO_CHANNEL": execute.await_args.kwargs["env"]["UFO_CHANNEL"],
-        },
+    start = execute.await_args_list[0]
+    channel = start.kwargs["env"]["UFO_CHANNEL"]
+    assert start.args == (environment,)
+    assert start.kwargs["env"] == {
+        "UFO_HOME": "/installed-agent/home",
+        "WORKSPACE_URL": "https://eval.ufo.test",
+        "UFO_CHANNEL": channel,
+    }
+    assert start.kwargs["command"].endswith(
+        f"</dev/null >/installed-agent/home/{channel}.out 2>/installed-agent/home/{channel}.err &"
     )
+    words = shlex.split(start.kwargs["command"])
+    assert words[:3] == ["nohup", "sh", "-c"]
+    client, _, epilogue = words[3].partition("; ")
+    assert client == "/installed-agent/ufo --json 'repair '\"'\"'quoted'\"'\"' input' </dev/null"
+    assert epilogue == f"echo $? >/installed-agent/home/{channel}.exit"
+    assert shlex.split(client) == [
+        "/installed-agent/ufo",
+        "--json",
+        "repair 'quoted' input",
+        "</dev/null",
+    ]
+    assert execute.await_args_list[1].kwargs["command"] == (
+        f"cat /installed-agent/home/{channel}.exit 2>/dev/null || true"
+    )
+    assert execute.await_count == 2
     assert context.metadata == {
-        "channel": execute.await_args.kwargs["env"]["UFO_CHANNEL"],
+        "channel": channel,
         "client_target": "/installed-agent/ufo",
     }
 
@@ -234,14 +254,106 @@ async def test_terminal_bench_agent_sends_the_selected_model(
     agent = UfoAgent(tmp_path)
     agent._workspace_url = "https://eval.ufo.test"
     agent._model = "z-ai/glm-5.3-flash"
-    execute = AsyncMock()
+    execute = AsyncMock(return_value=SimpleNamespace(stdout="0"))
     monkeypatch.setattr(agent, "exec_as_agent", execute)
 
     await agent.run("repair input", environment, AgentContext())
 
-    assert execute.await_args.kwargs["command"] == (
-        "/installed-agent/ufo --model z-ai/glm-5.3-flash --json 'repair input' </dev/null"
+    start = execute.await_args_list[0]
+    channel = start.kwargs["env"]["UFO_CHANNEL"]
+    assert shlex.split(start.kwargs["command"])[3] == (
+        "/installed-agent/ufo --model z-ai/glm-5.3-flash --json 'repair input' </dev/null; "
+        f"echo $? >/installed-agent/home/{channel}.exit"
     )
+
+
+async def test_terminal_bench_agent_polls_until_the_exit_file_appears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench import agent as agent_module
+    from evals.terminal_bench.agent import UfoAgent
+
+    monkeypatch.setattr(agent_module, "POLL_INTERVAL_SECONDS", 0)
+    environment = SimpleNamespace(context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    agent._workspace_url = "https://eval.ufo.test"
+    execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(stdout=""),
+            SimpleNamespace(stdout=""),
+            SimpleNamespace(stdout=""),
+            SimpleNamespace(stdout="0\n"),
+        ]
+    )
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+
+    await agent.run("repair input", environment, AgentContext())
+
+    channel = execute.await_args_list[0].kwargs["env"]["UFO_CHANNEL"]
+    poll = f"cat /installed-agent/home/{channel}.exit 2>/dev/null || true"
+    assert [call.kwargs["command"] for call in execute.await_args_list[1:]] == [poll, poll, poll]
+
+
+async def test_terminal_bench_agent_raises_a_nonzero_exit_with_the_stderr_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    from harbor.agents.installed.base import NonZeroAgentExitCodeError
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench.agent import UfoAgent
+
+    environment = SimpleNamespace(context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    agent._workspace_url = "https://eval.ufo.test"
+    execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(stdout=""),
+            SimpleNamespace(stdout="3\n"),
+            SimpleNamespace(stdout="turn output tail"),
+            SimpleNamespace(stdout="wedged: connection reset by peer"),
+        ]
+    )
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+
+    with pytest.raises(NonZeroAgentExitCodeError, match="connection reset by peer") as raised:
+        await agent.run("repair input", environment, AgentContext())
+
+    assert "exit 3" in str(raised.value)
+    channel = execute.await_args_list[0].kwargs["env"]["UFO_CHANNEL"]
+    assert [call.kwargs["command"] for call in execute.await_args_list[2:]] == [
+        f"tail -c 10000 /installed-agent/home/{channel}.out 2>/dev/null || true",
+        f"tail -c 10000 /installed-agent/home/{channel}.err 2>/dev/null || true",
+    ]
+
+
+async def test_terminal_bench_agent_classifies_the_recorded_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    from harbor.agents.installed.base import ApiRateLimitError
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench.agent import UfoAgent
+
+    environment = SimpleNamespace(context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    agent._workspace_url = "https://eval.ufo.test"
+    execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(stdout=""),
+            SimpleNamespace(stdout="1"),
+            SimpleNamespace(stdout=""),
+            SimpleNamespace(stdout="request failed: rate limit exceeded"),
+        ]
+    )
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+
+    with pytest.raises(ApiRateLimitError, match="rate limit exceeded"):
+        await agent.run("repair input", environment, AgentContext())
 
 
 async def test_terminal_bench_agent_reads_the_selected_model_from_its_environment(
