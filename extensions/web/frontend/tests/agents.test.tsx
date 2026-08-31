@@ -974,6 +974,22 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
+test("the workspace Apps tab opens the workspace settings", async () => {
+  wire({
+    "/settings": () => json({ ...SETTINGS, agent: { ...SETTINGS.agent, archivable: false } }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/workspace/apps";
+  render(<App agents={[AGENT]} archived={[]} member={ADMIN} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getAllByText("Assistant")).toHaveLength(2);
+  expect(await within(dialog).findByText("Profile")).toBeTruthy();
+});
+
 test("the workspace Apps tab lists every app and narrows to the member's own", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   location.hash = "#/workspace/apps";

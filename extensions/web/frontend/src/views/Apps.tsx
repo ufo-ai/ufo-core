@@ -1,10 +1,13 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
 
+import { IconSettings } from "@tabler/icons-react";
+
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Filter } from "@/components/ui/filter";
 import { ACTS, Lede, Td, TdActs, TdFact } from "@/components/ui/table";
 import { ActionForm } from "@/kernel/action";
+import { ObjectPane } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { Panel, Section, usePanelRead } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
@@ -15,6 +18,10 @@ import { useMainAgent } from "@/lib/mainAgent";
 import { Moment } from "@/lib/moments";
 import { openAgent } from "@/lib/router";
 import type { ActionView, Agent, ArchivedApp } from "@/lib/types";
+import { AppSettings } from "@/views/Agents";
+import { SETTINGS_TABS, type SettingsTab } from "@/views/AgentPane";
+import { AgentConnectors } from "@/views/Connectors";
+import { Settings } from "@/views/Settings";
 
 type AppsState = {
   agents: Agent[];
@@ -57,41 +64,89 @@ export function Apps({
   const state = useContext(AppsContext);
   if (!state) throw new Error("AppsProvider is required");
   const { agents, archived, onRestored } = state;
+  const mainAgent = useMainAgent();
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(SETTINGS_TABS[0]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [scheduled, setScheduled] = useState<string[]>([]);
   const picked = place.chip ?? "";
   const bar = (
-    <Filter
-      options={FILTERS}
-      value={picked}
-      onChange={(value) => onPlace({ chip: value || undefined })}
-    />
+    <>
+      <Filter
+        options={FILTERS}
+        value={picked}
+        onChange={(value) => onPlace({ chip: value || undefined })}
+      />
+      <span className="flex-1" />
+      <Button
+        variant="outline"
+        size="bar"
+        disabled={!mainAgent}
+        onClick={() => {
+          setSettingsTab(SETTINGS_TABS[0]);
+          setScheduled([]);
+          setSettingsOpen(true);
+        }}
+      >
+        <IconSettings aria-hidden />
+        Settings
+      </Button>
+    </>
   );
-  if (picked === ARCHIVED) {
-    return (
-      <Section bar={bar}>
-        <ArchivedTable apps={archived} onRestored={onRestored} />
-      </Section>
-    );
-  }
   const apps = picked === CREATED_BY_ME ? agents.filter((agent) => agent.mine) : agents;
   return (
-    <Section bar={bar}>
-      <DataTable
-        columns={["Application", "Purpose"]}
-        rows={apps}
-        rowKey={(app) => app.id}
-        empty={picked === CREATED_BY_ME ? "You haven't created an app." : "No apps."}
-        open={(app) => () => openAgent(app.id)}
-      >
-        {(app) => (
-          <>
-            <Td>
-              <Lede mark={<AgentIcon name={app.icon} />}>{agentName(app.name)}</Lede>
-            </Td>
-            <Td className="text-ink-soft">{app.purpose ?? ""}</Td>
-          </>
+    <>
+      <Section bar={bar}>
+        {picked === ARCHIVED ? (
+          <ArchivedTable apps={archived} onRestored={onRestored} />
+        ) : (
+          <DataTable
+            columns={["Application", "Purpose"]}
+            rows={apps}
+            rowKey={(app) => app.id}
+            empty={picked === CREATED_BY_ME ? "You haven't created an app." : "No apps."}
+            open={(app) => () => openAgent(app.id)}
+          >
+            {(app) => (
+              <>
+                <Td>
+                  <Lede mark={<AgentIcon name={app.icon} />}>{agentName(app.name)}</Lede>
+                </Td>
+                <Td className="text-ink-soft">{app.purpose ?? ""}</Td>
+              </>
+            )}
+          </DataTable>
         )}
-      </DataTable>
-    </Section>
+      </Section>
+      {mainAgent ? (
+        <AppSettings
+          agent={mainAgent}
+          tab={settingsTab}
+          open={settingsOpen}
+          onTab={setSettingsTab}
+          onClose={() => setSettingsOpen(false)}
+        >
+          {settingsTab === "settings" ? (
+            <Settings
+              agent={mainAgent}
+              onArchived={() => {
+                setSettingsOpen(false);
+                onRestored();
+              }}
+            />
+          ) : null}
+          {settingsTab === "connectors" ? <AgentConnectors agent={mainAgent} /> : null}
+          {settingsTab === "scheduled" ? (
+            <ObjectPane
+              agentId={mainAgent.id}
+              kind="scheduled_task"
+              makes={false}
+              opens={scheduled}
+              onPlace={(next) => setScheduled(next.opens ?? [])}
+            />
+          ) : null}
+        </AppSettings>
+      ) : null}
+    </>
   );
 }
 

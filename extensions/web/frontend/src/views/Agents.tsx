@@ -255,7 +255,7 @@ const TASK_KIND = "scheduled_task";
  *  without going back to the band they came from. It stays out of the modal state radix would take:
  *  a record opened from the tasks read raises the shared sheet over this panel, and a modal layer
  *  under it would hold the pointer away from that sheet. */
-function AppSettings({
+export function AppSettings({
   agent,
   tab,
   open,
