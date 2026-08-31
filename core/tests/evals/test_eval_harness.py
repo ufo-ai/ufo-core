@@ -7838,7 +7838,12 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
                     seq=1,
                     status="done",
                     inbound="Run it.",
-                    terminal={"status": "done", "text": "Done.", "model": MODEL},
+                    terminal={
+                        "status": "done",
+                        "text": "Done.",
+                        "model": MODEL,
+                        "reasoning": AGENT_REASONING,
+                    },
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -7940,6 +7945,130 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
     assert not (tmp_path / "ufo-home" / str(conversation_id)).exists()
 
 
+async def test_child_attestations_count_identities_but_never_the_model_pin(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The BYOK regression (2026-08-31): a coding child legitimately runs the member's own model,
+    and its attestation reaches the session stream beside the root's. The pin reads the admitted
+    turn's durable row — root-scoped — so the run verifies clean against its pinned model while
+    both identities stay counted; a root whose own terminal reports another model still refuses."""
+    workspace_id = await _workspace()
+    await _seed_owner(workspace_id)
+    agent_id = await _seed_agent(workspace_id)
+    identity = _runtime_identity("abc12345")
+    rolled = _runtime_identity("def67890")
+    root_models = iter((MODEL, "another-model"))
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, output: bytes) -> None:
+            self.output = output
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(output)
+            self.stdout.feed_eof()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return self.output, b""
+
+        async def wait(self) -> int:
+            return self.returncode
+
+    async def spawn(*args, **kwargs) -> Process:
+        if args[1:] == ("--help",):
+            return Process(b"--remote --model --json\n")
+        conversation = UUID(kwargs["env"]["UFO_CHANNEL"])
+        turn_id = uuid4()
+        root_model = next(root_models)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="done",
+                    inbound="Run it.",
+                    terminal={
+                        "status": "done",
+                        "text": "Done.",
+                        "model": root_model,
+                        "reasoning": AGENT_REASONING,
+                    },
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        events = (
+            dumps({"type": "session_start"}),
+            dumps(
+                {
+                    "type": "message_sent",
+                    "turn_id": str(turn_id),
+                    "opened_run": True,
+                    "arrival_id": "arrival-1",
+                }
+            ),
+            dumps(
+                {
+                    "type": "runtime",
+                    "runtime": identity.model_dump(mode="json"),
+                    "model": root_model,
+                    "reasoning": AGENT_REASONING,
+                }
+            ),
+            dumps(
+                {
+                    "type": "runtime",
+                    "runtime": rolled.model_dump(mode="json"),
+                    "model": "claude-opus-5",
+                    "reasoning": AGENT_REASONING,
+                }
+            ),
+            dumps({"type": "turn_end"}),
+        )
+        return Process(("\n".join(events) + "\n").encode())
+
+    monkeypatch.setattr("evals.driver.asyncio.create_subprocess_exec", spawn)
+    remote = RemoteClient(
+        executable="/bin/ufo",
+        workspace_url="http://workspace.test",
+        token_secret="remote-test-secret",
+        home_root=tmp_path / "ufo-home",
+        model=MODEL,
+    )
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path / "blobs"),
+        UNCALLED_DBOS,
+        tmp_path / "workspaces",
+        remote=remote,
+    )
+
+    with ws(workspace_id):
+        await remote.validate()
+        clean = await driver.open("byok-case")
+        await driver.admit(clean, "Run it.")
+        certified = remote.runtime.verify(MODEL, AGENT_REASONING)
+        assert certified.model == MODEL
+        assert certified.runtime == identity
+        assert remote.runtime.identity_counts() == {
+            _identity_key(identity): 1,
+            _identity_key(rolled): 1,
+        }
+
+        crossed = await driver.open("wrong-root-case")
+        await driver.admit(crossed, "Run it.")
+
+    with pytest.raises(RuntimeError, match="expected model"):
+        remote.runtime.verify(MODEL, AGENT_REASONING)
+
+
 async def test_environment_files_resolve_local_paths_to_stored_digests(tmp_path: Path) -> None:
     from evals.driver import _resolved_environment_files
 
@@ -7987,20 +8116,22 @@ def test_remote_runtime_log_counts_identities_and_refuses_mismatched_attestation
     assert list(log.identity_counts()) == [rolled_key, key]
     assert log.verify(MODEL, AGENT_REASONING).runtime == rolled
 
-    log.record(third, RuntimeAttestation(runtime=rolled, model=MODEL, reasoning=AGENT_REASONING))
+    log.record(third, RuntimeAttestation(runtime=rolled, model="claude-opus-5", reasoning="high"))
+    log.pin_target(MODEL, AGENT_REASONING, None)
+    assert log.verify(MODEL, AGENT_REASONING).model == MODEL
     with pytest.raises(RuntimeError, match="expected model"):
         log.verify("another-model", AGENT_REASONING)
     with pytest.raises(RuntimeError, match="expected environment"):
         log.verify(MODEL, AGENT_REASONING, f"sha256:{'e' * 64}")
 
+    log.pin_target("another-model", AGENT_REASONING, None)
+    with pytest.raises(RuntimeError, match="expected model"):
+        log.verify(MODEL, AGENT_REASONING)
+
     arm = RemoteRuntimeLog()
     digest = f"sha256:{'e' * 64}"
-    arm.record(
-        uuid4(),
-        RuntimeAttestation(
-            runtime=runtime, model=MODEL, reasoning=AGENT_REASONING, environment=digest
-        ),
-    )
+    arm.record(uuid4(), RuntimeAttestation(runtime=runtime))
+    arm.pin_target(MODEL, AGENT_REASONING, digest)
     assert arm.verify(MODEL, AGENT_REASONING, digest).environment == digest
     with pytest.raises(RuntimeError, match="expected environment"):
         arm.verify(MODEL, AGENT_REASONING, None)
@@ -9921,6 +10052,7 @@ async def test_mid_run_deploy_records_both_identities_and_reports_normally(
         log.record(uuid4(), RuntimeAttestation(runtime=identity))
         log.record(uuid4(), RuntimeAttestation(runtime=identity))
         log.record(uuid4(), RuntimeAttestation(runtime=rolled))
+        log.pin_target(MODEL, "auto", None)
         harvested = await PatchCapture("case-3", submissions)(
             CapabilityOutput(
                 response="done",
@@ -9976,17 +10108,15 @@ async def test_mid_run_deploy_records_both_identities_and_reports_normally(
 async def test_mismatched_attestations_mark_the_report_uncertified_instead_of_losing_it(
     tmp_path, monkeypatch
 ) -> None:
-    """An attestation the gate refuses — here a model the run did not expect — no longer detonates
-    the report stage: the report survives on disk and in the return, marked with the refusal, and
-    the run fails at exit."""
+    """An attestation the gate refuses — here a case turn pinned on a model the run did not
+    expect — no longer detonates the report stage: the report survives on disk and in the return,
+    marked with the refusal, and the run fails at exit."""
     remotes: list[RemoteClient] = []
     identity = _runtime_identity("abc12345")
 
     async def run(target, slots) -> EvalReport:
-        remotes[0].runtime.record(
-            uuid4(),
-            RuntimeAttestation(runtime=identity, model="another-model", reasoning="high"),
-        )
+        remotes[0].runtime.record(uuid4(), RuntimeAttestation(runtime=identity))
+        remotes[0].runtime.pin_target("another-model", "high", None)
         return EvalReport(
             name="swebench_verified",
             suite="swebench",

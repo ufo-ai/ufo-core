@@ -395,8 +395,10 @@ never changes the deployed configuration.
 A packaged deploy's terminal end attests its revision, immutable image, config and sandbox digests,
 and the terminal frame's selected model and reasoning. Remote evals bind the most-covered identity
 into their runtime digest and list every identity seen with its case coverage — a deploy rolling
-mid-run is recorded, not refused. A missing or mismatched attestation is never certified: reports
-keep their measurements marked uncertified with the refusal, and the run fails.
+mid-run is recorded, not refused. The model pin judges only the case turns the runner admitted,
+never a profile child running the member's own model; a missing attestation or a mismatched case
+terminal is never certified: reports keep their measurements marked uncertified with the refusal,
+and the run fails.
 
 **The sandbox proxy is core, not an extension** — it is the enforcement point for three core
 invariants: **sentinel swap** (processes inside see placeholder credentials; the proxy swaps real

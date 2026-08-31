@@ -143,11 +143,21 @@ class RemoteRuntimeLog:
     error: str = ""
 
     def record(self, conversation_id: UUID, attestation: RuntimeAttestation) -> None:
+        """Count one streamed attestation's identity. Identity only: a session's stream renders
+        every terminal it tails — a profile child's beside the case root's — so the model pin
+        never reads it."""
         self.identity_cases.setdefault(attestation.runtime, set()).add(conversation_id)
-        if attestation.model:
-            self.models.add(attestation.model)
-            self.reasoning.add(attestation.reasoning)
-            self.environments.add(attestation.environment)
+
+    def pin_target(
+        self, model: str, reasoning: ReasoningEffort | None, environment: str | None
+    ) -> None:
+        """One admitted case turn's terminal settings — what `verify` holds against the run's pin.
+        The driver pins only the turn it admitted, read off that turn's durable row, so a profile
+        child legitimately running the member's own model never taints the pin."""
+        if model:
+            self.models.add(model)
+            self.reasoning.add(reasoning)
+            self.environments.add(environment)
 
     def reject(self, reason: str) -> None:
         self.error = reason
@@ -914,7 +924,7 @@ class WorkspaceDriver:
             if sender is None:
                 raise ValueError("remote eval conversations require a member speaker")
             try:
-                return await self.remote.admit(
+                turn_id = await self.remote.admit(
                     self.workspace_id,
                     conversation_id,
                     sender,
@@ -927,7 +937,9 @@ class WorkspaceDriver:
                         "ufo remote session timed out before admitting a turn"
                     ) from error
                 await self._cancel_overdue(conversation_id, error.turn_id)
-                return error.turn_id
+                turn_id = error.turn_id
+            await self._pin_admitted_runtime(self.remote, turn_id)
+            return turn_id
         admitter = MemberAdmission(
             admission=Admission(dbos=self.dbos, durable_surfaces=frozenset()),
             workspace_id=self.workspace_id,
@@ -941,6 +953,31 @@ class WorkspaceDriver:
             runtime_config=await self._local_environment(),
         )
         return admitted.turn_id
+
+    async def _pin_admitted_runtime(self, remote: RemoteClient, turn_id: UUID) -> None:
+        """Pin the admitted turn's terminal model, reasoning, and environment for runtime
+        verification, read off its durable row — the session stream carries no turn attribution,
+        so a profile child's terminal rendered on it must never reach the pin. The runner only
+        admits case roots, and the row proves it: a spawned turn carries its lineage
+        (`parent_turn_id`, `subagent_profile`) and pins nothing. A turn without a terminal —
+        the wait deadline lost its race to the cancel — pins nothing either, exactly as a session
+        that never rendered one."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.terminal,
+                        tables.turn.c.parent_turn_id,
+                        tables.turn.c.subagent_profile,
+                    ).where(tables.turn.c.id == turn_id)
+                )
+            ).one_or_none()
+        if row is None or row.terminal is None:
+            return
+        if row.parent_turn_id is not None or row.subagent_profile is not None:
+            return
+        frame = TerminalFrame.model_validate(row.terminal)
+        remote.runtime.pin_target(frame.model, frame.reasoning, frame.environment)
 
     async def _local_environment(self) -> TurnRuntimeConfig | None:
         """The digest every in-process turn pins: the run's environment document, stored once
