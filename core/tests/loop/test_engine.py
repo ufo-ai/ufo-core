@@ -4017,6 +4017,30 @@ async def test_text_streamed_during_a_paced_flush_still_reaches_the_hub(
     assert published == "first second"
 
 
+@dataclass
+class FailingTextPublishHub(RecordingHub):
+    """RecordingHub whose text-delta publishes raise — the shape of a hub whose Redis is
+    unreachable mid-round."""
+
+    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
+        if isinstance(frame, TextDelta):
+            raise ConnectionError("hub unreachable")
+        return await super().publish(turn_id, frame)
+
+
+async def test_delta_publish_failure_never_fails_the_turn(db: None, tmp_path: Path) -> None:
+    """The live leg never fails the turn: a hub that cannot take a text delta loses that frame
+    while the round completes and the durable terminal still carries the model's answer."""
+    hub = FailingTextPublishHub()
+    turn = await _seed_turn("queued", None)
+    engine = replace(_engine(turn, EchoModel(), tmp_path), hub=hub)
+    async with asyncio.timeout(5):
+        frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == "answer"
+    assert [f for f in hub.frames if isinstance(f, TextDelta)] == []
+
+
 async def test_multi_tool_round_publishes_one_summary_per_tool(db: None, tmp_path: Path) -> None:
     class CurrentActivityModel:
         model = "gpt-5.6-luna"

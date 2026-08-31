@@ -2561,9 +2561,7 @@ class TurnEngine:
                         new_tool_call=lambda call_id, name, arguments: ToolUseBlock(
                             id=call_id, name=name, input=arguments
                         ),
-                        publish_text=lambda text: self.hub.publish(
-                            self.turn.id, TextDelta(text=text)
-                        ),
+                        publish_text=lambda text: self._publish(TextDelta(text=text)),
                         milestone=lambda event: round_span.add_event(f"model.{event}"),
                         monotonic=time.monotonic,
                     )
