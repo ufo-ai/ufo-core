@@ -44,6 +44,16 @@ def credential_object_name(slot: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", slot.lower()).strip("-")
 
 
+MEMBER_SLOT_INFIX = ":member:"
+
+
+def member_slot(slot: str, member_id: UUID) -> str:
+    """The slot holding one member's own value for `slot` — the same encrypted store, keyed to the
+    person whose account the value came from, so a workspace holds one row per member beside the
+    workspace-wide row."""
+    return f"{slot}{MEMBER_SLOT_INFIX}{member_id}"
+
+
 def named_slots(slots: "tuple[DeclaredSlot, ...]") -> "dict[str, DeclaredSlot]":
     """The `credential` object kind's name for each declared slot — the one naming every read and
     verb shares, so a portal row and an `object_delete` intent address the same instance. A slug
@@ -302,6 +312,17 @@ class CredentialStore:
                         updated_at=sa.func.now(),
                     )
                 )
+
+    async def clear(self, workspace_id: UUID, slot: str) -> None:
+        """Drop one slot's stored value. A slot that holds nothing is already cleared, so this is
+        the same act either way and never raises for a member disconnecting twice."""
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.credential).where(
+                    tables.credential.c.workspace_id == workspace_id,
+                    tables.credential.c.slot == slot,
+                )
+            )
 
     async def update(
         self,

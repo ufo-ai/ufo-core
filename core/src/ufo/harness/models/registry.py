@@ -5,6 +5,7 @@ fails loud at `spec`, rather than across a mid-turn 400, a render crash, and a s
 provider resolves its own api key when the turn selects it, so a serve missing one key runs fine
 until an agent pinned to that backend actually runs. See RFC 0018."""
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from ufo.config import Config
@@ -14,12 +15,50 @@ from ufo.harness.models.interface import (
     PROVIDER_ANTHROPIC,
     PROVIDER_OPENAI,
     ModelClient,
+    ModelEvent,
+    ModelRequest,
 )
 from ufo.harness.models.pricing import Pricing, pricing_from
 from ufo.harness.models.spec import ModelSpec
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialValueInvalid
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.workspace import ws_current
+
+
+@dataclass(frozen=True)
+class _RebuiltOnRejection:
+    """A member's account client, rebuilt once if the provider rejects its token mid-turn.
+
+    One client serves a whole turn, and a coding turn runs to a hundred rounds — far longer than an
+    access token's remaining life when the turn happens to start near expiry. Rebuilding re-reads
+    the slot, which is what refreshes a spent grant, so the round that would have died on a 401
+    carries on under the pair that refresh bought. The retry is spent only before the first event:
+    a stream that already delivered cannot be replayed without repeating what the turn has seen.
+
+    Once, and it is the unwrapped client that serves the retry — a rebuild is wrapped again by the
+    registry, so retrying through the wrapper would make every rejection open another, and a
+    credential the rebuild cannot change (an account without entitlement, a grant revoked at the
+    provider while the stored one still looks live) would recurse instead of surfacing the fault
+    that names the account to connect again."""
+
+    registry: "ModelRegistry"
+    model: str
+    built: ModelClient
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        delivered = False
+        try:
+            async for event in self.built.complete(request):
+                delivered = True
+                yield event
+            return
+        except CredentialValueInvalid:
+            if delivered:
+                raise
+        rebuilt = await self.registry.client_for(self.model)
+        once = rebuilt.built if isinstance(rebuilt, _RebuiltOnRejection) else rebuilt
+        async for event in once.complete(request):
+            yield event
 
 
 @dataclass(frozen=True)
@@ -57,7 +96,7 @@ class ModelRegistry:
             return spec.client(spec, "")
         needed = spec.key_env or spec.key_slot.upper()
         try:
-            key = await ws_current().credential(spec.key_slot, spec.key_env or None)
+            key = await ws_current().model_credential(spec.key_slot, spec.key_env or None, model)
         except CredentialSlotUnset as unset:
             raise RuntimeError(
                 f"model {model!r} needs a key: set env UFO_{needed} (or {needed}) or the "
@@ -71,7 +110,10 @@ class ModelRegistry:
                 f"{needed}) or the workspace's {spec.key_slot!r} BYOK slot holds a value the "
                 "provider wire cannot carry."
             ) from error
-        return spec.client(spec, key)
+        built = spec.client(spec, key)
+        if spec.key_slot and ws_current().member_routed_call(spec.key_slot, model):
+            return _RebuiltOnRejection(registry=self, model=model, built=built)
+        return built
 
     def provider_for(self, model: str) -> str:
         """The provider that serves `model` — the `provider` metric dimension its calls are metered

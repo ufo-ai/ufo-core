@@ -127,10 +127,41 @@ test("a credential intent that answers with a request renders the prompt carryin
   expect(sent.get("value")).toBe("sk-live");
 });
 
+/** The coding accounts a member holds are theirs, not the workspace's, so they are offered where a
+ *  member comes back to replace one — above the workspace slots, under no heading of their own. */
+test("the credentials screen offers the member their own coding accounts", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({
+    "/workspace/credentials": () => json({ slots: [SLOT] }),
+    "/workspace/accounts": () =>
+      json({
+        accounts: [
+          { provider: "openai", label: "ChatGPT", connected: true },
+          { provider: "anthropic", label: "Claude", connected: false },
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  expect(
+    await screen.findByText(
+      "This account is yours alone. Each member connects their own, and it is used only for coding tasks.",
+    ),
+  ).toBeTruthy();
+  const held = (await screen.findByRole("button", { name: "Disconnect" })).closest("div")!;
+  expect(held.textContent).toContain("ChatGPT");
+  expect(within(held).getByRole("button", { name: "Replace" })).toBeTruthy();
+  expect(screen.getByText("Claude")).toBeTruthy();
+  expect(
+    [...document.querySelectorAll("main h2")].map((heading) => heading.textContent),
+  ).toEqual(["Model providers"]);
+});
+
 test("credentials group, sort, and render slot state and literals", async () => {
   location.hash = "#/workspace/credentials";
   wire({
     "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, EMPTY_SLOT] }),
+    "/workspace/accounts": () => json({ accounts: [] }),
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 

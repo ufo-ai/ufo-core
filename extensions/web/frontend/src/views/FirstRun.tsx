@@ -23,6 +23,7 @@ import {
 } from "@/kernel/panel";
 import mark from "@brand/ufo-mark.svg";
 import { postAction, postObjectAction, type ObjectAction } from "@/lib/api";
+import { ConnectAccount } from "@/views/ConnectAccount";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
@@ -41,6 +42,7 @@ export type FirstRunPayload = {
   connectors: Connector[];
   imessage: boolean;
   actions: { member: ActionView[]; memory: ActionView[] };
+  model_key_held: boolean;
 };
 
 const ADD_MEMBER_ACTION = "add_member";
@@ -178,9 +180,30 @@ const CONNECT_COPY: Record<
 };
 
 const TOOLS_STEP = "tools";
+const MODEL_KEY_STEP = "model-key";
 const TEAM_STEP = "team";
 const IMESSAGE_STEP = "imessage";
 const US_PHONE_PATTERN = /^[2-9][0-9]{2}[2-9][0-9]{6}$/;
+
+/** The routes the member's own coding-agent account is connected through. Every answer the run has
+ *  taken so far is held in this document, so all six answer JSON and the step spends them where it
+ *  stands: navigating this page away would drop the goal, the picks and the addresses the member
+ *  has written. The only address that opens elsewhere is the provider's own. */
+
+
+/** The line an account act states when the surface cannot be reached at all — the sentence a
+ *  failed read states, because the member's next move is the same one. */
+
+/** The code the member types on OpenAI's own page, the page that takes it, and how many seconds
+ *  OpenAI wants between asks. */
+
+/** What starting a device sign-in answers: the code, or the one line to state when OpenAI would
+ *  not open one. */
+
+/** What spending a code or a key answers. A refusal carries the line the member reads. */
+
+/** What the device poll answers, which is either of those or the member not having typed the code
+ *  in yet. */
 
 /** The invite step's form, named so the act that submits it can stand in the page's head with the
  *  other acts rather than inside the fields it commits. */
@@ -205,6 +228,10 @@ const STEP_COPY: Record<string, { title: ReactNode; note: ReactNode }> = {
         Pick the ones your team works in, so <Mention>@ufo</Mention> knows where your work lives.
       </>
     ),
+  },
+  [MODEL_KEY_STEP]: {
+    title: "Connect your coding agent",
+    note: "Optionally connect your ChatGPT or Claude account to power the built-in UFO coding agent.",
   },
   [TEAM_STEP]: {
     title: "Invite your team",
@@ -293,7 +320,8 @@ export function FirstRun({
   member: Member;
   onOpenChat: () => void;
 }) {
-  const state = usePanelRead<FirstRunPayload>(FIRST_RUN_READ);
+  const [reads, setReads] = useState(0);
+  const state = usePanelRead<FirstRunPayload>(FIRST_RUN_READ, reads);
   const [goal, setGoal] = useState<Goal | "">("");
   const [detail, setDetail] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
@@ -365,14 +393,17 @@ export function FirstRun({
     >
       {(payload) => {
         const chosen = payload.connectors.filter((row) => (recorded ?? []).includes(row.name));
-        /** The run the member is on. Three steps are certain from the start — the goal, the tools,
-         *  and the team — so the head states three until the tools are recorded, and a connector
-         *  picked there lengthens the run by its own step. Holding the team back until then would
-         *  have the head announce the run finished while a step it always draws is still to come. */
+        /** The run the member is on. Four steps are certain from the start — the goal, the tools,
+         *  the model account, and the team — so the head states four until the tools are recorded,
+         *  and a connector picked there lengthens the run by its own step. Holding the team back
+         *  until then would have the head announce the run finished while a step it always draws is
+         *  still to come. The model step is drawn whether or not the member already holds an
+         *  account: a run that dropped a step for some members would answer "what did I just go
+         *  through" differently per member, and the step states what is true either way. */
         const revealed =
           recorded === null
-            ? [GOAL_STEP, TOOLS_STEP, TEAM_STEP]
-            : [GOAL_STEP, TOOLS_STEP, ...chosen.map((row) => row.name), TEAM_STEP];
+            ? [GOAL_STEP, TOOLS_STEP, MODEL_KEY_STEP, TEAM_STEP]
+            : [GOAL_STEP, TOOLS_STEP, ...chosen.map((row) => row.name), MODEL_KEY_STEP, TEAM_STEP];
         const step = imessageOffer ? IMESSAGE_STEP : revealed[at];
         const connector = chosen.filter((row) => row.name === step)[0];
         const ConnectIcon =
@@ -400,6 +431,14 @@ export function FirstRun({
         const offerImessage = () => (payload.imessage ? setImessageOffer(true) : finish());
         const back = () => (imessageOffer ? setImessageOffer(false) : setAt(at - 1));
         const skip = () => (step === TEAM_STEP ? offerImessage() : advance());
+        /** The way on from the model step, and what the step reports a connection through. The
+         *  account this page holds was read before the step connected one, so the act that carries
+         *  the member onward asks for it again: stepping back then reads the account they
+         *  connected rather than the acts they connected it through. */
+        const proceed = () => {
+          setReads(reads + 1);
+          advance();
+        };
         const wanted = rows
           .map((row) => row.trim())
           .filter(Boolean)
@@ -514,7 +553,13 @@ export function FirstRun({
                       (step === GOAL_STEP && !goal && !detail.trim()) ||
                       (connector !== undefined && !held)
                     }
-                    onClick={step === TOOLS_STEP ? () => record(payload) : advance}
+                    onClick={
+                      step === TOOLS_STEP
+                        ? () => record(payload)
+                        : step === MODEL_KEY_STEP
+                          ? proceed
+                          : advance
+                    }
                   >
                     Continue
                   </Button>
@@ -583,6 +628,9 @@ export function FirstRun({
                   advance();
                 }}
               />
+            ) : null}
+            {step === MODEL_KEY_STEP ? (
+              <ConnectAccount stacked />
             ) : null}
             {step === IMESSAGE_STEP ? (
               <div className="flex w-full max-w-(--container-connect) flex-col gap-2xl px-2xl">

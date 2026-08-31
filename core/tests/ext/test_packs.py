@@ -18,6 +18,7 @@ import ufo_pack_dsqa_eval as dsqa_eval
 import ufo_pack_gdpval_eval as gdpval
 
 import ufo.host.ext.loader as loader
+from ufo.harness.models.catalog import CORE_MODEL_SPECS
 from ufo.host.ext.loader import discovered_packs, load_manifests, skill_registry
 from ufo.runtime.ext.manifest import Pack
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, parse_skill
@@ -39,10 +40,14 @@ def test_activating_the_assistant_pack_makes_exactly_its_bundle_active() -> None
 
 
 def test_a_pack_that_ships_coding_registers_its_profile_models() -> None:
-    """`coding` pins its profiles to model ids other extensions register, so a pack that brings up
-    `coding` without either registrar has a child that cannot resolve its model and never runs. The
-    pins are only as good as the set they come up in, which is why this is asserted per activated
-    pack rather than against every installed extension."""
+    """`coding` names model ids that other extensions register, so a pack that brings up `coding`
+    without either registrar has a child that cannot resolve its model and never runs. The names are
+    only as good as the set they come up in, which is why this is asserted per activated pack rather
+    than against every installed extension.
+
+    Both ways a profile reaches a model count: the escalation rung pins one, and the coding rung
+    names one per provider a member can connect. A routed id nothing registers fails in the child's
+    own dispatch exactly as a bad pin would, and only for members who connected that provider."""
     for pack in (assistant, assistant_billing, assistant_eval, assistant_hosted):
         manifests = load_manifests(pack.NAME)
         if not any(manifest.name == "coding" for manifest in manifests):
@@ -50,12 +55,19 @@ def test_a_pack_that_ships_coding_registers_its_profile_models() -> None:
         profiles = {
             profile.name: profile for manifest in manifests for profile in manifest.subagents
         }
-        pinned = {
-            profiles[coding.CODING_PROFILE_NAME].model,
-            profiles[coding.FABLE_ESCALATION_PROFILE_NAME].model,
+        named = {
+            model
+            for name in (coding.CODING_PROFILE_NAME, coding.FABLE_ESCALATION_PROFILE_NAME)
+            for model in (
+                *profiles[name].own_key_models.values(),
+                *((profiles[name].model,) if profiles[name].model else ()),
+            )
         }
-        served = {spec.id for manifest in manifests for spec in manifest.models}
-        assert pinned <= served, f"{pack.NAME} activates coding but does not register {pinned}"
+        served = {spec.id for spec in CORE_MODEL_SPECS}
+        served |= {spec.id for manifest in manifests for spec in manifest.models}
+        assert named <= served, (
+            f"{pack.NAME} activates coding but does not register {named - served}"
+        )
 
 
 def test_assistant_packs_mount_the_member_portal() -> None:

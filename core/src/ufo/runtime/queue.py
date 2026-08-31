@@ -56,7 +56,6 @@ from ufo.runtime.access.credentials import (
 )
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.billing.accounting import workspace_owns_the_key
 from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import (
     ADOPTED_CLAIM,
@@ -113,7 +112,7 @@ from ufo.runtime.subagents import (
     subagent_system_prompt,
 )
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
-from ufo.runtime.tools.context import Spawn, UnknownSubagentProfile
+from ufo.runtime.tools.context import SPAWN_CONNECT_PATH, Spawn, UnknownSubagentProfile
 from ufo.runtime.tools.registry import ACTION_READ_TOOLS, OBJECT_ACTION_TOOL, ToolDef, ToolRegistry
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import (
@@ -124,7 +123,7 @@ from ufo.runtime.turns.activity import (
 )
 from ufo.runtime.turns.audience import Audience, parse_audience
 from ufo.runtime.turns.contracts import Contract, output_contract
-from ufo.runtime.workspace import ws
+from ufo.runtime.workspace import speaker, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -308,6 +307,57 @@ def _agent_actions(
         return frozenset(action.canonical_id for action in declared if not action.profile_only)
     names = with_implied_grants(set(allowed))
     return frozenset(action.canonical_id for action in declared if action.canonical_id in names)
+
+
+class SubagentKeyWithdrawn(Exception):
+    """A profile that runs on the speaking member's own provider account reached execution with no
+    account behind it. The spawn gate refuses this at admission, so the turn in hand was admitted
+    while the member held one and they disconnected before it ran. There is no second model to fall
+    back to: the deploy's key is exactly what this profile exists not to spend.
+
+    It carries the same address the spawn refusal does, because the member reading it is in the
+    same position — the account is gone, and the screen that connects one is what they need."""
+
+    def __init__(self, profile: str, connect_url: str | None = None) -> None:
+        connect = f"{connect_url.rstrip('/')}{SPAWN_CONNECT_PATH}" if connect_url else "the portal"
+        super().__init__(
+            f"subagent profile {profile!r} runs the coding agent on the member's own ChatGPT or "
+            "Claude account, and that account is no longer connected, so this task cannot run. "
+            f"Send them to {connect}"
+        )
+        self.profile = profile
+
+
+def _member_accounts_connectable(runtime: "Runtime") -> bool:
+    """Whether any installed extension can store a member's own provider account."""
+    return any(manifest.connects_member_accounts for manifest in runtime.manifests)
+
+
+def _subagent_model(
+    profile: SubagentProfile,
+    connected: str | None,
+    agent: Agent,
+    runtime: "Runtime",
+    pinned: str | None,
+) -> str:
+    """The model a subagent turn runs on.
+
+    A profile bound to the member's own account takes the model that account serves and nothing
+    else — a pin cannot reach it, because the pinned id is not one the account was bound to serve
+    and the turn would quietly fall through to the deploy's key, which is the spend this profile
+    exists to prevent. Every other profile takes the turn's pin, else its own, else the agent's."""
+    if profile.needs_own_model_key:
+        own = profile.own_key_models.get(connected or "")
+        if own is not None:
+            return runtime.registry.resolve(own)
+        if _member_accounts_connectable(runtime):
+            raise SubagentKeyWithdrawn(profile.name, runtime.config.connect.public_base_url)
+        if profile.model is None:
+            raise SubagentKeyWithdrawn(profile.name, runtime.config.connect.public_base_url)
+        return runtime.registry.resolve(profile.model)
+    if pinned is not None:
+        return pinned
+    return runtime.registry.resolve(profile.model or agent.model)
 
 
 def _subagent_actions(
@@ -524,7 +574,9 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
     argument for the whole body via `with ws(...)`: every query, credential read, and model call
     inside runs under it — the RLS scope on the shared RLS-subject role, the workspace's BYOK keys,
     and the ledger it bills. One fleet serves many workspaces from one pool; a single-workspace
-    deploy binds its sole one."""
+    deploy binds its sole one. The speaker is bound only for a profile that runs on the member's
+    own provider account, so an ordinary turn spends the workspace's key and not the account a
+    member connected for coding."""
     runtime = _runtime
     if runtime is None:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
@@ -541,6 +593,8 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                             tables.turn.c.traceparent,
                             tables.turn.c.subagent_profile,
                             tables.turn.c.parent_turn_id,
+                            tables.turn.c.speaker_member_id,
+                            tables.turn.c.on_behalf_of_member_id,
                             tables.turn.c.admission_source,
                         ).where(
                             tables.turn.c.id == turn_uuid,
@@ -548,6 +602,19 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                         )
                     )
                 ).one()
+            profile = (
+                runtime.subagents.find(row.subagent_profile)
+                if row.subagent_profile is not None
+                else None
+            )
+            own_account_member = (
+                (row.speaker_member_id or row.on_behalf_of_member_id)
+                if profile is not None and profile.needs_own_model_key
+                else None
+            )
+            own_account_models = (
+                frozenset() if profile is None else frozenset(profile.own_key_models.values())
+            )
             gates = _turn_gates(row.parent_turn_id, row.admission_source)
             queued = time.monotonic()
             async with AsyncExitStack() as held:
@@ -558,6 +625,7 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                 await _apply_provisions(runtime, workspace_uuid)
                 with (
                     agent(row.agent_id),
+                    speaker(own_account_member, own_account_models),
                     turn_span(
                         turn_uuid,
                         row.conversation_id,
@@ -691,6 +759,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             hub=runtime.hub,
             key_slot_for=runtime.registry.key_slot_for,
             billing_url=runtime.billing_url,
+            connect_url=runtime.config.connect.public_base_url,
+            member_accounts_connectable=_member_accounts_connectable(runtime),
         )
 
         def subagents_for(
@@ -783,16 +853,20 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 member_visibility(turn.inbound, tuple(skills.member_cards.values())),
                 runtime.config.skills.member_block,
             )
+            own_account_member = turn.speaker_member_id or turn.on_behalf_of_member_id
+            connected = await ws_current().member_model_provider(own_account_member)
             resolved = Agent(
                 prompt=subagent_system_prompt(
                     profile,
                     skills=_prompt_skill_index(skills, runtime.config.skills.member_block),
                     preload=preload,
                 ),
-                model=(
-                    runtime.registry.resolve(profile.model or agent.model)
-                    if turn.runtime_config is None
-                    else turn.runtime_config.model
+                model=_subagent_model(
+                    profile,
+                    connected,
+                    agent,
+                    runtime,
+                    None if turn.runtime_config is None else turn.runtime_config.model,
                 ),
                 reasoning=profile.reasoning or agent.reasoning,
                 internet_access_allowed=internet_access_allowed,
@@ -852,10 +926,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             },
             digest=billing.price_digest,
         )
+        key_slot = runtime.registry.spec(resolved.model).key_slot
         byok = await _frozen_byok(
-            turn.workspace_id,
             turn.id,
-            runtime.registry.spec(resolved.model).key_slot or None,
+            bool(key_slot) and await ws_current().credential_is_stored(key_slot, resolved.model),
             attempt,
         )
         grants = GrantStore() if runtime.credentials is not None else None
@@ -1261,11 +1335,12 @@ async def _frozen_billing_identity(turn_id: UUID, candidate: _BillingIdentity) -
     return candidate
 
 
-async def _frozen_byok(
-    workspace_id: UUID, turn_id: UUID, key_slot: str | None, attempt: str
-) -> bool:
-    """Whether the workspace's own key serves this run attempt, decided once per attempt and kept
-    on the turn row.
+async def _frozen_byok(turn_id: UUID, decided: bool, attempt: str) -> bool:
+    """Whether a key of the workspace's own serves this run attempt, held to `decided` once per
+    attempt on the turn row. The caller reads it off the same resolution the model client's key
+    read walks, under the same speaker binding, so the verdict names the key that actually paid:
+    a member's connected account bills nothing on the coding run it serves, and a turn the
+    platform default serves is billed however many members have connected an account of their own.
 
     The money keys on the attempt: a turn parked and resumed re-runs every round for real under a
     fresh workflow id, and each burn is billed under its own attempt. So the verdict has to key on
@@ -1289,7 +1364,6 @@ async def _frozen_byok(
         ).one_or_none()
         if stored is not None and stored.byok is not None and stored.byok_attempt == attempt:
             return bool(stored.byok)
-        decided = await workspace_owns_the_key(connection, workspace_id, key_slot)
         await connection.execute(
             sa.update(tables.turn)
             .where(

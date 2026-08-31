@@ -57,7 +57,6 @@ from ufo.runtime.billing.accounting import (
     ack_usage_exports,
     mint_usage_exports,
     read_pending_usage_exports,
-    workspace_owns_the_key,
 )
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.runtime.ext.surface import (
@@ -803,11 +802,12 @@ class ModelAccess:
     async def _serves_itself(self, model: str) -> bool:
         """Whether the workspace's own provider key serves this job's call, decided beside the call
         rather than at billing time — a background job is metered on the same terms a turn is, and
-        the workspace already paid its provider directly for what its own key served."""
-        async with workspace_tx() as connection:
-            return await workspace_owns_the_key(
-                connection, ws_current().workspace_id, self._resolver.key_slot_for(model)
-            )
+        the workspace already paid its provider directly for what its own key served.
+
+        Asked the way the call itself resolves its key: a job binds no speaker, so a member's own
+        account is not in its order and a job served by the platform key is billed as one."""
+        slot = self._resolver.key_slot_for(model)
+        return slot is not None and await ws_current().credential_is_stored(slot)
 
     async def turn(self, request: ModelRequest) -> Message:
         """Run one tool-aware model turn and return its assistant message after metering it. A

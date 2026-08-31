@@ -49,6 +49,7 @@ from ufo.runtime.seats import member_is_admin
 from ufo.runtime.skills.runtime import CORE_SKILLS, LoadedSkill, loaded_context
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
+    SpawnNeedsOwnModelKey,
     SpawnResult,
     SubagentStatus,
     UnknownSpawnTarget,
@@ -62,6 +63,7 @@ from ufo.runtime.turns.contracts import (
     input_contract,
     output_contract,
 )
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -225,6 +227,11 @@ class Subagents:
     hub: Hub | None = None
     key_slot_for: Callable[[str], str | None] | None = None
     billing_url: str | None = None
+    connect_url: str | None = None
+    """Whether this deploy can hold a member's own provider account at all. A deploy carrying no
+    extension that connects one has no member to refuse: the profile runs on the deploy's own key
+    there, so refusing work nobody could ever enable would take the capability away entirely."""
+    member_accounts_connectable: bool = True
     requester_member_id: UUID | None = None
 
     def authorize(self, requester_member_id: UUID | None) -> "Subagents":
@@ -269,6 +276,12 @@ class Subagents:
         resolved = await self._resolve(target)
         match resolved:
             case SubagentProfile():
+                if (
+                    resolved.needs_own_model_key
+                    and self.member_accounts_connectable
+                    and not await ws_current().member_holds_own_model_key(self.acting_member_id)
+                ):
+                    raise SpawnNeedsOwnModelKey(target, self.connect_url)
                 agent_id = self.parent.agent_id
                 profile_name: str | None = resolved.name
                 inherits_sandbox = True

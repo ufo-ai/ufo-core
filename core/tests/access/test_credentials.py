@@ -1,16 +1,27 @@
+import asyncio
 import logging
 import re
 import time
 from base64 import b64encode
+from collections.abc import AsyncIterator
 from dataclasses import replace
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
+from ufo import product as product_module
 from ufo.db import workspace_tx
+from ufo.harness.models import grant as grant_module
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
+from ufo.harness.models.grant import Grant, read_grant
+from ufo.harness.models.pricing import Pricing
+from ufo.harness.models.registry import ModelRegistry
 from ufo.host.ext.loader import injecting_slots
+from ufo.product import PRODUCT_ATTACH_METRIC, product_census
+from ufo.runtime import workspace as workspace_module
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
@@ -22,8 +33,10 @@ from ufo.runtime.access.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
     CredentialStore,
+    CredentialValueInvalid,
     HostChoice,
     credential_host,
+    member_slot,
     open_credential_request,
     open_installation,
     seal_credential_request,
@@ -37,13 +50,16 @@ from ufo.runtime.access.egress_rules import (
     ScopeRule,
     derive_credential_rules,
 )
+from ufo.runtime.billing.accounting import workspace_owns_the_key
 from ufo.runtime.ext.manifest import (
     ConnectorProvider,
     CredentialSlot,
     InjectionTarget,
     Manifest,
 )
-from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
+from ufo.runtime.kinds.credential_kind import CREDENTIAL_KIND
+from ufo.runtime.seats import create_member
+from ufo.runtime.workspace import init_workspace_credentials, speaker, ws, ws_current
 from ufo.schema import tables
 
 
@@ -69,6 +85,11 @@ DATADOG_SITES = HostChoice(
     default=DATADOG_HOST,
     env="DD_HOST",
 )
+
+"""The two models one coding turn asks OpenAI for: the one the member's account serves, and the
+deploy's own background model that summarizes the same turn's tool calls."""
+BACKGROUND_MODEL = "gpt-5.6-luna"
+OWN_ACCOUNT_MODEL = "gpt-5.6-sol"
 
 
 def _keyed_manifest() -> Manifest:
@@ -248,6 +269,105 @@ async def test_platform_default_prefers_the_ufo_prefixed_env(
         assert await ws_current().credential("sample_api") == "ufo-scoped"
         monkeypatch.setenv("UFO_SAMPLE_API", "")
         assert await ws_current().credential("sample_api") == "ambient"
+
+
+async def test_a_member_key_serves_only_a_turn_bound_to_that_member(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member connects a provider account for the work that requires it, so their key resolves
+    only while a turn is bound to them. Every other turn binds nobody and reads the workspace row,
+    then the platform default: no member's account pays for a call that was not theirs, and an
+    admin's is a member's."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    monkeypatch.setenv("OPENAI_API_KEY", "platform-default")
+    async with workspace_tx() as connection:
+        admin = await create_member(connection, workspace_id, "admin@work.com", is_admin=True)
+        teammate = await create_member(connection, workspace_id, "teammate@work.com")
+        keyless = await create_member(connection, workspace_id, "keyless@work.com")
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, admin), "admin-key")
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, teammate), "teammate-key")
+    served = frozenset({OWN_ACCOUNT_MODEL})
+    with ws(workspace_id):
+        assert await ws_current().credential(OPENAI_KEY_SLOT) == "platform-default"
+        assert not await ws_current().credential_is_stored(OPENAI_KEY_SLOT)
+        with speaker(teammate, served):
+            assert (
+                await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+                == "teammate-key"
+            )
+            assert await ws_current().credential_is_stored(OPENAI_KEY_SLOT, OWN_ACCOUNT_MODEL)
+        with speaker(keyless, served):
+            assert (
+                await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+                == "platform-default"
+            )
+        await store.put(workspace_id, OPENAI_KEY_SLOT, "workspace-key")
+        with speaker(keyless, served):
+            assert (
+                await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+                == "workspace-key"
+            )
+        assert await ws_current().credential(OPENAI_KEY_SLOT) == "workspace-key"
+
+
+async def test_a_members_key_never_serves_a_slot_that_is_not_member_routed(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the slots a member signs in with resolve per person. Every other slot — a connector
+    secret the sandbox proxy injects — stays the workspace's one value, so a member row could never
+    redirect a connector's traffic to their own account."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    monkeypatch.setenv("SAMPLE_API", "platform-default")
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "member@work.com", is_admin=True)
+    await store.put(workspace_id, member_slot("sample_api", member), "member-key")
+    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+        assert await ws_current().credential("sample_api", None, OWN_ACCOUNT_MODEL) == (
+            "platform-default"
+        )
+
+
+async def test_a_members_own_key_is_not_the_workspaces_to_spend(db: None) -> None:
+    """`workspace_owns_the_key` is the balance guard's question — whether the workspace pays its own
+    way for work the deploy would otherwise fund — so a member's personally connected account never
+    answers it. Counting one would let a workspace at zero balance keep running platform-key turns
+    because somebody signed in, and that account serves only the subagent that requires it."""
+    workspace_id = await _workspace()
+    store = _store()
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "member@work.com")
+        assert not await workspace_owns_the_key(connection, workspace_id, OPENAI_KEY_SLOT)
+
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), "member-key")
+    async with workspace_tx() as connection:
+        assert not await workspace_owns_the_key(connection, workspace_id, OPENAI_KEY_SLOT)
+
+    await store.put(workspace_id, OPENAI_KEY_SLOT, "workspace-key")
+    async with workspace_tx() as connection:
+        assert await workspace_owns_the_key(connection, workspace_id, OPENAI_KEY_SLOT)
+
+
+async def test_the_guard_reads_a_workspace_where_two_members_connected_the_same_provider(
+    db: None,
+) -> None:
+    """The match is a row per member, so the second person in a workspace to connect a provider is
+    the ordinary case. Reading it as one row raised `MultipleResultsFound` — on the turn path, which
+    made that second sign-in break every turn on the provider's models."""
+    workspace_id = await _workspace()
+    store = _store()
+    async with workspace_tx() as connection:
+        first = await create_member(connection, workspace_id, "first@work.com")
+        second = await create_member(connection, workspace_id, "second@work.com")
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, first), "first-key")
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, second), "second-key")
+    await store.put(workspace_id, OPENAI_KEY_SLOT, "workspace-key")
+
+    async with workspace_tx() as connection:
+        assert await workspace_owns_the_key(connection, workspace_id, OPENAI_KEY_SLOT)
 
 
 def test_credential_request_seal_round_trips_and_expires() -> None:
@@ -1088,3 +1208,303 @@ async def test_any_slot_fault_withholds_its_own_host_and_leaves_the_rest_derivin
         ]
         assert [entry["slot"] for entry in withheld] == ["github_git_token"]
         assert withheld[0]["error_class"] == type(error).__name__
+
+
+async def test_a_bound_account_serves_its_own_models_and_no_other_call_in_the_turn(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The binding names models, not a provider, because one turn asks the same provider for two
+    different reasons: the coding agent runs on the member's account, and the deploy summarizes that
+    turn's tool calls on its own background model. Both read `openai_api_key`, and only the first is
+    the member's to pay for — a provider-wide binding would send the deploy's background work to a
+    person's personal account, and to a backend that does not serve that model."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    monkeypatch.setenv("OPENAI_API_KEY", "platform-default")
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), "member-account")
+
+    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+        assert (
+            await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+            == "member-account"
+        )
+        assert (
+            await ws_current().credential(OPENAI_KEY_SLOT, None, BACKGROUND_MODEL)
+            == "platform-default"
+        )
+        assert not await ws_current().credential_is_stored(OPENAI_KEY_SLOT, BACKGROUND_MODEL)
+
+
+async def test_a_spent_grant_is_refreshed_in_place_before_a_call_gets_it(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An account grant expires, so the row a member connected once has to keep working without
+    them. The refreshed pair replaces the stored one — providers rotate the refresh token, so
+    keeping the old one would strand the account at the next expiry."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    spent = Grant(access="stale-access", refresh="refresh-1", expires_at=time.time() - 1)
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), spent.stored())
+
+    async def buys(grant: Grant, slot: str) -> Grant:
+        assert (grant.refresh, slot) == ("refresh-1", OPENAI_KEY_SLOT)
+        return Grant(access="fresh-access", refresh="refresh-2", expires_at=time.time() + 3600)
+
+    monkeypatch.setattr(workspace_module, "refreshed", buys)
+    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+        assert (
+            await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+            == "fresh-access"
+        )
+
+    written = read_grant(await store.get(workspace_id, member_slot(OPENAI_KEY_SLOT, member)))
+    assert written is not None
+    assert (written.access, written.refresh) == ("fresh-access", "refresh-2")
+
+
+async def test_a_live_grant_is_spent_as_it_stands(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A grant with time left is handed straight to the call: refreshing every read would spend a
+    round-trip on every turn and rotate a token nothing had finished with."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    live = Grant(access="live-access", refresh="refresh-1", expires_at=time.time() + 3600)
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), live.stored())
+
+    async def never(grant: Grant, slot: str) -> Grant:
+        raise AssertionError("a live grant must not be refreshed")
+
+    monkeypatch.setattr(workspace_module, "refreshed", never)
+    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+        assert (
+            await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+            == "live-access"
+        )
+
+
+async def test_two_turns_finding_one_grant_spent_exchange_its_token_once(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One member's work fans out, so two turns can find the same grant spent at the same moment.
+    A refresh token is one-time and providers read a second exchange of one as reuse, revoking the
+    account — so the refresh is claimed, and the turn that loses the claim waits for the pair the
+    winner bought instead of spending the same token behind it."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    slot = member_slot(OPENAI_KEY_SLOT, member)
+    spent = Grant(access="stale", refresh="refresh-1", expires_at=time.time() - 1)
+    await store.put(workspace_id, slot, spent.stored())
+    exchanged: list[str] = []
+
+    async def buys(grant: Grant, named: str) -> Grant:
+        exchanged.append(grant.refresh)
+        await asyncio.sleep(0.05)
+        return Grant(
+            access=f"access-{len(exchanged)}",
+            refresh=f"refresh-{len(exchanged) + 1}",
+            expires_at=time.time() + 3600,
+        )
+
+    monkeypatch.setattr(workspace_module, "refreshed", buys)
+
+    async def turn() -> str:
+        with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+            return await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+
+    served = await asyncio.gather(turn(), turn())
+
+    assert exchanged == ["refresh-1"]
+    assert served == ["access-1", "access-1"]
+    written = read_grant(await store.get(workspace_id, slot))
+    assert written is not None
+    assert (written.access, written.refresh) == ("access-1", "refresh-2")
+
+
+async def test_no_transaction_is_held_open_across_the_provider_refresh(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ufoctl serve` is one process, and on SQLite one transaction takes a lock the whole node
+    waits behind. A provider call can take as long as its timeout allows, so every write in the
+    deploy — a seat, a member, a credential the portal set — would stall behind one member's token
+    refresh. The refresh runs outside every transaction: the claim and the write are their own."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    slot = member_slot(OPENAI_KEY_SLOT, member)
+    spent = Grant(access="stale", refresh="refresh-1", expires_at=time.time() - 1)
+    await store.put(workspace_id, slot, spent.stored())
+    wrote_during_refresh = False
+
+    async def buys(grant: Grant, named: str) -> Grant:
+        """A write from elsewhere in the deploy, while the provider call is in flight."""
+        nonlocal wrote_during_refresh
+        async with asyncio.timeout(5):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.select(tables.workspace.c.id)
+                    .where(tables.workspace.c.id == workspace_id)
+                    .with_for_update()
+                )
+        wrote_during_refresh = True
+        return Grant(access="fresh", refresh="refresh-2", expires_at=time.time() + 3600)
+
+    monkeypatch.setattr(workspace_module, "refreshed", buys)
+    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+        assert (
+            await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL) == "fresh"
+        )
+
+    assert wrote_during_refresh
+
+
+def test_a_grant_is_refreshed_as_the_client_the_deploy_signed_in_as(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh names the same client the sign-in did. A deploy presenting its own OAuth client
+    would otherwise mint grants under it and refresh them under the published one, which the
+    provider refuses — and every coding turn would die from the first expiry onward."""
+    assert grant_module.openai_client_id() == grant_module.OPENAI_PUBLIC_CLIENT_ID
+    assert grant_module.anthropic_client_id() == grant_module.ANTHROPIC_PUBLIC_CLIENT_ID
+
+    monkeypatch.setenv(grant_module.OPENAI_CLIENT_ID_ENV, "deploys-own-openai")
+    monkeypatch.setenv(grant_module.ANTHROPIC_CLIENT_ID_ENV, "deploys-own-anthropic")
+
+    assert grant_module.openai_client_id() == "deploys-own-openai"
+    assert grant_module.anthropic_client_id() == "deploys-own-anthropic"
+    assert grant_module.GRANT_CLIENTS[OPENAI_KEY_SLOT][1]() == "deploys-own-openai"
+    assert grant_module.GRANT_CLIENTS[ANTHROPIC_KEY_SLOT][1]() == "deploys-own-anthropic"
+
+
+async def test_the_product_census_counts_no_members_own_account(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The census counts what a workspace attached, and a member's personally connected account is
+    not one of those — its slot carries their id, so counting one names a person in a metric
+    dimension and grows the series with every member in the fleet."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    await store.put(workspace_id, OPENAI_KEY_SLOT, "workspace-key")
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), "member-account")
+
+    counted: list[tuple[str, str]] = []
+
+    def record(name: str, amount: int = 1, /, **dimensions: str) -> None:
+        if name == PRODUCT_ATTACH_METRIC and dimensions.get("kind") == CREDENTIAL_KIND:
+            counted.append((dimensions["kind"], dimensions["name"]))
+
+    monkeypatch.setattr(product_module, "emit_metric", record)
+    with ws(workspace_id):
+        await product_census()
+
+    assert counted == [(CREDENTIAL_KIND, OPENAI_KEY_SLOT)]
+    assert not any(str(member) in name for _kind, name in counted)
+
+
+async def test_a_token_rejected_mid_turn_is_refreshed_and_the_round_carries_on(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One client serves a whole turn, and a coding turn runs to a hundred rounds — longer than an
+    access token's remaining life when the turn starts near expiry. The round that meets the 401
+    rebuilds, which re-reads the slot and refreshes the grant, rather than ending the task
+    part-done."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    slot = member_slot(OPENAI_KEY_SLOT, member)
+    live = Grant(access="first", refresh="refresh-1", expires_at=time.time() + 3600)
+    await store.put(workspace_id, slot, live.stored())
+    served: list[str] = []
+
+    class Wire:
+        def __init__(self, key: str) -> None:
+            self.key = key
+
+        async def complete(self, request: object) -> AsyncIterator[str]:
+            served.append(self.key)
+            if self.key == "first":
+                await store.put(
+                    workspace_id,
+                    slot,
+                    Grant(
+                        access="second", refresh="refresh-2", expires_at=time.time() + 3600
+                    ).stored(),
+                )
+                raise CredentialValueInvalid("key was rejected by the provider")
+            yield "round"
+
+    spec = SimpleNamespace(
+        key_slot=OPENAI_KEY_SLOT, key_env=None, client=lambda _spec, key: Wire(key)
+    )
+    registry = ModelRegistry(
+        specs={OWN_ACCOUNT_MODEL: spec},
+        pricing=Pricing(prices={}, digest="test"),
+        auto_model=OWN_ACCOUNT_MODEL,
+    )
+
+    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+        client = await registry.client_for(OWN_ACCOUNT_MODEL)
+        assert [event async for event in client.complete(object())] == ["round"]
+
+    assert served == ["first", "second"]
+
+
+async def test_a_rejection_the_rebuild_cannot_fix_is_raised_after_one_retry(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not every 401 is an expired token: an account without entitlement, or a grant the member
+    revoked at the provider while the stored one still looks live, is rejected however often it is
+    rebuilt. The retry is spent once and the credential fault reaches the turn — retrying through
+    the wrapper would make each rejection open another and bury the fault under a RecursionError."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    live = Grant(access="rejected", refresh="refresh-1", expires_at=time.time() + 3600)
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), live.stored())
+    attempts: list[str] = []
+
+    class Wire:
+        def __init__(self, key: str) -> None:
+            self.key = key
+
+        async def complete(self, request: object) -> AsyncIterator[str]:
+            attempts.append(self.key)
+            raise CredentialValueInvalid("key was rejected by the provider")
+            yield ""
+
+    spec = SimpleNamespace(
+        key_slot=OPENAI_KEY_SLOT, key_env=None, client=lambda _spec, key: Wire(key)
+    )
+    registry = ModelRegistry(
+        specs={OWN_ACCOUNT_MODEL: spec},
+        pricing=Pricing(prices={}, digest="test"),
+        auto_model=OWN_ACCOUNT_MODEL,
+    )
+
+    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+        client = await registry.client_for(OWN_ACCOUNT_MODEL)
+        with pytest.raises(CredentialValueInvalid):
+            [event async for event in client.complete(object())]
+
+    assert attempts == ["rejected", "rejected"]

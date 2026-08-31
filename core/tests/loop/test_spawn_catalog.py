@@ -2,14 +2,20 @@
 against — both-ends for docs: every registered profile and every workspace agent appears with its
 payload keys, so an agent that loads the catalog has the target names before its first call."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 from pydantic import BaseModel
+from ufo_ext_coding.manifest import CODING_MODEL, CODING_PROFILE
 
 from ufo.db import workspace_tx
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
+from ufo.harness.models.interface import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
 from ufo.host.ext.loader import skill_registry
+from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.ext.manifest import SubagentProfile
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
 from ufo.runtime.spawn_catalog import (
@@ -18,7 +24,8 @@ from ufo.runtime.spawn_catalog import (
     spawn_catalog_skill,
 )
 from ufo.runtime.subagents import SubagentRegistry
-from ufo.runtime.workspace import ws
+from ufo.runtime.tools.context import SPAWN_CONNECT_PATH, SpawnNeedsOwnModelKey
+from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 
 
@@ -116,6 +123,23 @@ async def test_an_agent_shadowed_by_a_profile_is_listed_qualified(db: None) -> N
     assert "| `agent:scout` | agent |" in skill.instructions
 
 
+async def test_a_profile_on_the_members_own_key_shadows_their_agent(db: None) -> None:
+    """A profile the member cannot spawn yet is still a name they cannot spawn bare: the resolver
+    reads the whole registry and refuses a bare name two records answer to, so the agent is listed
+    under the qualified form that resolver accepts."""
+    workspace_id = await _workspace_with_agents({"coding": None})
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    registry = SubagentRegistry((replace(_profile("coding"), needs_own_model_key=True),))
+
+    with ws(workspace_id):
+        keyless = await _catalog_member(workspace_id, admin=True)
+        listed = await spawn_catalog_skill(registry, keyless)
+        assert "| `coding` | profile |" in listed.instructions
+        assert "| `agent:coding` | agent |" in listed.instructions
+        assert "| `coding` | agent |" not in listed.instructions
+
+
 async def test_the_catalog_gives_a_member_their_own_agents_and_an_admin_all(db: None) -> None:
     workspace_id = await _workspace_with_agents({"shared": None})
     with ws(workspace_id):
@@ -173,3 +197,119 @@ async def test_the_catalog_stands_on_its_own_in_the_index(db: None) -> None:
         SPAWN_CATALOG_SKILL_NAME
     ]
     assert (SPAWN_CATALOG_SKILL_NAME, SPAWN_CATALOG_DESCRIPTION) in registry.index()
+
+
+async def test_a_profile_on_the_members_own_key_is_listed_whether_or_not_they_connected(
+    db: None,
+) -> None:
+    """Connecting a provider is a skippable onboarding step, and the coding subagent is what
+    skipping costs — so the member who skipped is exactly the one who has to find out. Withholding
+    the target hides the capability: the model would never name coding, and nothing would tell them
+    it exists or why it is off. It is listed either way, and the spawn refusal is what names the
+    account it needs and the screen that connects one."""
+    workspace_id = await _workspace_with_agents({})
+    member_id = await _catalog_member(workspace_id)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    registry = SubagentRegistry(
+        (
+            _profile("research"),
+            replace(_profile("coding"), needs_own_model_key=True),
+        )
+    )
+
+    with ws(workspace_id):
+        skipped = await spawn_catalog_skill(registry, member_id)
+        assert "`research`" in skipped.instructions
+        assert "`coding`" in skipped.instructions
+
+        await store.put(
+            workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-connected"
+        )
+        connected = await spawn_catalog_skill(registry, member_id)
+        assert "`research`" in connected.instructions
+        assert "`coding`" in connected.instructions
+
+
+async def test_either_provider_is_enough_to_earn_the_profile(db: None) -> None:
+    """The step asks for one of the two, so either satisfies it — and a key the workspace or an
+    admin holds is not the member's own: the subagent spends the account of the person who
+    connected it, so a deploy key cannot stand in for a member who skipped."""
+    workspace_id = await _workspace_with_agents({})
+    admin_id = await _catalog_member(workspace_id, admin=True)
+    member_id = await _catalog_member(workspace_id)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+
+    with ws(workspace_id):
+        assert not await ws_current().member_holds_own_model_key(member_id)
+
+        await store.put(workspace_id, ANTHROPIC_KEY_SLOT, "sk-ant-workspace")
+        await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, admin_id), "sk-admin")
+        assert not await ws_current().member_holds_own_model_key(member_id)
+
+        await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member_id), "sk-member")
+        assert await ws_current().member_holds_own_model_key(member_id)
+
+
+async def test_the_provider_a_member_connected_is_the_one_they_are_read_as(db: None) -> None:
+    """Which provider they connected, not merely whether they did — a profile that runs on the
+    member's own account has to know which account that is, so the model it picks is one that
+    account can serve."""
+    workspace_id = await _workspace_with_agents({})
+    member_id = await _catalog_member(workspace_id)
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+
+    with ws(workspace_id):
+        assert await ws_current().member_model_provider(member_id) is None
+
+        await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member_id), "sk-openai")
+        assert await ws_current().member_model_provider(member_id) == PROVIDER_OPENAI
+
+        await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant")
+        assert await ws_current().member_model_provider(member_id) == PROVIDER_ANTHROPIC
+
+
+def test_a_member_key_outranks_the_profiles_own_model_pin() -> None:
+    """The coding subagent is gated on the member having connected an account, so it must also RUN
+    on that account. A pinned model naming some third backend would spend the deploy's key on the
+    very work the member's key was asked for — which is what happened before this: the spawn passed
+    the gate and then died on a backend nobody had connected."""
+    profile = replace(
+        _profile("coding"),
+        model="anthropic.claude-opus-5",
+        needs_own_model_key=True,
+        own_key_models={PROVIDER_ANTHROPIC: "claude-opus-5", PROVIDER_OPENAI: "gpt-5.6-sol"},
+    )
+
+    assert profile.own_key_models.get(PROVIDER_ANTHROPIC) == "claude-opus-5"
+    assert profile.own_key_models.get(PROVIDER_OPENAI) == "gpt-5.6-sol"
+    assert (profile.own_key_models.get(PROVIDER_ANTHROPIC) or profile.model) == "claude-opus-5"
+    assert (profile.own_key_models.get("") or profile.model) == "anthropic.claude-opus-5"
+
+
+def test_the_shipped_coding_profile_runs_only_on_a_members_own_account() -> None:
+    """Both ends of the rule, on the profile that actually ships: it declares a model for each
+    provider a member can connect, and one of its own for the deploys that can hold no member
+    account at all — a pack shipping this profile and no extension that connects one."""
+    assert CODING_PROFILE.needs_own_model_key
+    assert CODING_PROFILE.model == CODING_MODEL
+    assert set(CODING_PROFILE.own_key_models) == {PROVIDER_ANTHROPIC, PROVIDER_OPENAI}
+
+
+def test_the_refusal_hands_over_the_address_that_satisfies_it() -> None:
+    """The first run offers to connect an account, but a member whose workspace already exists
+    never sees that screen again — so the refusal is where most members meet the requirement. It
+    names the connect screen, because "connect one from the portal" is not something a member can
+    click, and one screen takes either account — a second address would only ask them to pick a
+    provider before they have seen what each one is."""
+    named = str(SpawnNeedsOwnModelKey("coding", "https://ufo.example/"))
+    assert f"https://ufo.example{SPAWN_CONNECT_PATH}" in named
+    assert "coding" in named
+    assert "ChatGPT or Claude" in named
+    assert "OpenAI" not in named and "Anthropic" not in named
+
+    unconfigured = str(SpawnNeedsOwnModelKey("coding"))
+    assert "the portal" in unconfigured
+    assert "surface/web" not in unconfigured

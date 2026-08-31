@@ -432,6 +432,19 @@ def test_responses_request_always_disables_retention_and_asks_for_encrypted_reas
     assert kwargs["include"] == ["reasoning.encrypted_content"]
 
 
+def test_the_codex_wire_carries_no_output_budget() -> None:
+    """The backend a member's ChatGPT account reaches refuses `max_output_tokens` outright — it
+    answers 400 `Unsupported parameter`, so every coding round of every member who connected
+    ChatGPT dies on the first request. The platform wire still carries the budget."""
+    platform = responses_request(_request(), None)
+    assert platform["max_output_tokens"] == _request().max_tokens
+
+    codex = responses_request(_request(), None, True)
+    assert "max_output_tokens" not in codex
+    assert codex["stream"] is True
+    assert codex["store"] is False
+
+
 def test_responses_request_preserves_input_controls_and_disables_storage() -> None:
     request = ModelRequest(
         model="gpt-5.6-terra",

@@ -5,6 +5,36 @@ An extension types against these here rather than reaching into core internals."
 from ufo.harness.models.anthropic import (
     AnthropicClient as AnthropicClient,
 )
+from ufo.harness.models.catalog import (
+    ANTHROPIC_KEY_SLOT as ANTHROPIC_KEY_SLOT,
+)
+from ufo.harness.models.catalog import (
+    OPENAI_KEY_SLOT as OPENAI_KEY_SLOT,
+)
+from ufo.harness.models.grant import (
+    ANTHROPIC_CLIENT_ID_ENV as ANTHROPIC_CLIENT_ID_ENV,
+)
+from ufo.harness.models.grant import (
+    ANTHROPIC_TOKEN_URL as ANTHROPIC_TOKEN_URL,
+)
+from ufo.harness.models.grant import (
+    OPENAI_CLIENT_ID_ENV as OPENAI_CLIENT_ID_ENV,
+)
+from ufo.harness.models.grant import (
+    OPENAI_TOKEN_URL as OPENAI_TOKEN_URL,
+)
+from ufo.harness.models.grant import (
+    Grant as Grant,
+)
+from ufo.harness.models.grant import (
+    anthropic_client_id as anthropic_client_id,
+)
+from ufo.harness.models.grant import (
+    granted as granted,
+)
+from ufo.harness.models.grant import (
+    openai_client_id as openai_client_id,
+)
 from ufo.harness.models.interface import (
     ImageBlock as ImageBlock,
 )
@@ -73,6 +103,9 @@ from ufo.harness.models.openai import (
 )
 from ufo.harness.models.openai import (
     OpenAIClient as OpenAIClient,
+)
+from ufo.harness.models.openai import (
+    chatgpt_account_id as chatgpt_account_id,
 )
 from ufo.harness.models.openai import (
     openai_messages as openai_messages,

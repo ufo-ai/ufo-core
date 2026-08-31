@@ -71,7 +71,10 @@ CODING_TOOL_NAMES = (
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 100
-CODING_MODEL = "anthropic.claude-opus-5"
+"""What the coding agent runs on where no member account can be held: the deploy's own
+key, on the model it would have served anyway."""
+CODING_MODEL = "claude-opus-5"
+CODING_MODELS = {"anthropic": "claude-opus-5", "openai": "gpt-5.6-sol"}
 FABLE_ESCALATION_PROFILE_NAME = "fable_escalation"
 FABLE_ESCALATION_MODEL = "anthropic/claude-fable-5"
 FABLE_ESCALATION_PROMPT = (
@@ -174,6 +177,8 @@ CODING_PROFILE = SubagentProfile(
     output_model=CodingOutput,
     max_rounds=CODING_ROUND_LIMIT,
     model=CODING_MODEL,
+    own_key_models=CODING_MODELS,
+    needs_own_model_key=True,
 )
 
 FABLE_ESCALATION_PROFILE = SubagentProfile(

@@ -3,9 +3,14 @@ and the pricing the ledger stamps against. The single home for core model facts 
 cutoff, context window, routing, and reasoning capability. An extension contributes its own specs
 through the manifest; the registry folds core's and theirs into one id-keyed table."""
 
-from ufo.harness.models.anthropic import AnthropicClient, anthropic_sdk_client
+from ufo.harness.models.anthropic import AnthropicClient, anthropic_sdk_client, is_oauth_credential
 from ufo.harness.models.interface import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
-from ufo.harness.models.openai import OpenAIClient, openai_sdk_client
+from ufo.harness.models.openai import (
+    OpenAIClient,
+    chatgpt_account_id,
+    codex_sdk_client,
+    openai_sdk_client,
+)
 from ufo.harness.models.pricing import ModelPrice, pricing_from
 from ufo.harness.models.spec import ApiSurface, ModelSpec, ReasoningSupport
 
@@ -25,11 +30,16 @@ DEFAULT_REASONS_WITH_TOOLS = ReasoningSupport(
 
 
 def _anthropic_client(spec: ModelSpec, key: str) -> AnthropicClient:
-    return AnthropicClient(client=anthropic_sdk_client(key), spec=spec)
+    return AnthropicClient(
+        client=anthropic_sdk_client(key), spec=spec, oauth=is_oauth_credential(key)
+    )
 
 
 def _openai_client(spec: ModelSpec, key: str) -> OpenAIClient:
-    return OpenAIClient(client=openai_sdk_client(key), spec=spec)
+    account = chatgpt_account_id(key)
+    if account is None:
+        return OpenAIClient(client=openai_sdk_client(key), spec=spec)
+    return OpenAIClient(client=codex_sdk_client(key, account), spec=spec, codex=True)
 
 
 def _anthropic(

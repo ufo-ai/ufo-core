@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 from opentelemetry import trace
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -17,8 +18,10 @@ import ufo.runtime.subagents as subagents_module
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT
 from ufo.harness.o11y import current_traceparent
 from ufo.host.tools.builtins import BUILTIN_TOOLS, SPAWN_BACKGROUND_DIRECTIVE, _spawn_handles
+from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.billing.balance import BalanceExhausted, credit, set_reserve
 from ufo.runtime.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.runtime.ext.surface import conversation_name
@@ -39,6 +42,7 @@ from ufo.runtime.subagents import (
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import (
     AmbiguousSpawnTarget,
+    SpawnNeedsOwnModelKey,
     UnknownSpawnTarget,
     UnknownSubagentProfile,
     UntrustedContentError,
@@ -51,6 +55,7 @@ from ufo.runtime.turns.audience import (
     room_audience,
 )
 from ufo.runtime.turns.delivery_register import DELIVERY_REGISTER_BLOCK, SUBAGENT_RESULT_DESCRIPTION
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import (
     AskQuestion,
@@ -3327,3 +3332,49 @@ def test_a_moved_spawn_is_reported_as_any_background_one() -> None:
     assert SPAWN_BACKGROUND_DIRECTIVE in moved
     assert "A message arrived on this conversation" in moved
     assert "A message arrived on this conversation" not in asked
+
+
+async def test_a_speakerless_turn_spawns_on_the_account_the_member_it_acts_for_connected(
+    db: None, dbos_launched: Config
+) -> None:
+    """A scheduled fire and every child turn are speakerless — they carry the member they act on
+    behalf of, not a speaker. The account is that member's, so the gate reads the same fold the
+    catalog and the child's own stamp read; reading the speaker alone refuses the coding agent to a
+    member who connected an account and offers them the screen they already used."""
+    workspace_id, agent_id = await _workspace_agent()
+    member_id = uuid4()
+    parent = (await _parent(workspace_id, agent_id)).model_copy(
+        update={"on_behalf_of_member_id": member_id}
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    own_account = replace(_profile("coding"), needs_own_model_key=True)
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((own_account,)),
+        parent=parent,
+        audience=conversation_audience(member_id),
+    )
+
+    with ws(workspace_id):
+        with pytest.raises(SpawnNeedsOwnModelKey):
+            await subagents.spawn("coding", {"task": "acme"}, background=True)
+
+        await store.put(
+            workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-connected"
+        )
+        spawned = await subagents.spawn("coding", {"task": "acme"}, background=True)
+
+    child, _, _ = await _load_turn(spawned.turn_id)
+    assert child.speaker_member_id is None
+    assert child.on_behalf_of_member_id == member_id

@@ -311,6 +311,10 @@
      ratio at any size rather than each carrying its own hand-set figure. */
   --tracking-ui: 0.005em;
 
+  /* A one-time code is read off the screen and typed somewhere else, character by character, so it
+     opens far wider than running type: the reader needs each glyph to stand on its own. */
+  --tracking-code: 0.2em;
+
   --leading-chrome: 1.5;
   --leading-reading: 1.65;
 

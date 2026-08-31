@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import uvicorn
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -35,7 +36,7 @@ from ufo.config import Config, EnvironmentConfig
 from ufo.db import workspace_tx
 from ufo.harness import o11y
 from ufo.harness.durability import replay_safe_client
-from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING, OPENAI_KEY_SLOT
 from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
@@ -57,6 +58,7 @@ from ufo.host.devhost import overrides_app
 from ufo.host.ext.loader import HostEnvironment, embed_backend, index_backend, skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.engine import (
     EMPTY_RESPONSE_NUDGE,
     FINISH_TOOL,
@@ -67,17 +69,18 @@ from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest
 from ufo.runtime.hub import CostTick, Hub, InProcessHub, Parked, SubagentActivity, Terminal
 from ufo.runtime.jobs import TurnDispatcher
+from ufo.runtime.seats import create_member
 from ufo.runtime.subagents import FINISH_CONTRACT, SubagentProfile, SubagentRegistry, Subagents
 from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
-from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.context import SPAWN_CONNECT_PATH, TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import ACTIVITY_PROMPT
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.transcript import Conversation
 from ufo.runtime.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
-from ufo.runtime.workspace import ws
+from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     INTENT_ADMISSION,
@@ -1180,6 +1183,94 @@ async def test_backstop_terminal_carries_class_and_message(
     assert row.terminal["error_message"] == "boom outside the engine"
 
 
+OWN_ACCOUNT_MODEL = "gpt-5.6-sol"
+BACKGROUND_MODEL = "gpt-5.6-luna"
+
+OWN_ACCOUNT_PROFILE = SubagentProfile(
+    name="own_account",
+    prompt="OWN ACCOUNT: run on the provider account the member connected.",
+    tool_names=(),
+    input_model=RoundTripInput,
+    output_model=RoundTripOutput,
+    own_key_models={"openai": OWN_ACCOUNT_MODEL},
+    needs_own_model_key=True,
+)
+
+
+async def test_only_a_turn_that_needs_the_members_account_runs_on_it(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member connects a provider account so the work that requires it — the coding agent — runs
+    on it, so only a turn under such a profile binds them: that turn reads their key and is billed
+    as the workspace's own spend. The same member's ordinary turn binds nobody, reads the deploy's
+    key, and is billed to the platform, because normal operation is not what the account was
+    connected for. Neither turn reaches the admin's own key."""
+    workspace_id, turn_id = await _running_turn()
+    async with workspace_tx() as connection:
+        admin = await create_member(connection, workspace_id, "admin@work.com", is_admin=True)
+        member = await create_member(connection, workspace_id, "member@work.com")
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(speaker_member_id=member)
+        )
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    monkeypatch.setenv("OPENAI_API_KEY", "platform-default")
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, admin), "admin-key")
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), "member-key")
+    served: list[tuple[str, bool]] = []
+    background: list[str] = []
+
+    async def record(_runtime: object, running: str) -> str:
+        served.append(
+            (
+                await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL),
+                await loop_queue._frozen_byok(
+                    UUID(running),
+                    await ws_current().credential_is_stored(OPENAI_KEY_SLOT, OWN_ACCOUNT_MODEL),
+                    f"attempt-{len(served)}",
+                ),
+            )
+        )
+        background.append(await ws_current().credential(OPENAI_KEY_SLOT, None, BACKGROUND_MODEL))
+        return "done"
+
+    async def no_provisions(_runtime: object, _workspace_id: UUID) -> None:
+        return None
+
+    monkeypatch.setattr(loop_queue, "_run_turn", record)
+    monkeypatch.setattr(loop_queue, "_apply_provisions", no_provisions)
+    monkeypatch.setattr(
+        loop_queue,
+        "_runtime",
+        SimpleNamespace(hub=InProcessHub(), subagents=SubagentRegistry((OWN_ACCOUNT_PROFILE,))),
+    )
+
+    assert await loop_queue._execute_turn(str(workspace_id), str(turn_id)) == "done"
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(subagent_profile=OWN_ACCOUNT_PROFILE.name)
+        )
+    assert await loop_queue._execute_turn(str(workspace_id), str(turn_id)) == "done"
+
+    assert served == [("platform-default", False), ("member-key", True)]
+    """The deploy's own background work inside the very turn the member's account serves still
+    reads the deploy's key: the binding covers the models that account was connected for, and the
+    summarizer's is not one of them."""
+    assert background == ["platform-default", "platform-default"]
+    async with workspace_tx() as connection:
+        byok = (
+            await connection.execute(
+                sa.select(tables.turn.c.byok).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+    assert byok is True
+
+
 async def test_agent_scope_lookup_failure_commits_a_terminal(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2223,6 +2314,76 @@ async def test_profile_only_tools_stay_out_of_main_agent_turns(surface: Turns) -
     assert all("spawn" not in names for names in child_offers)
 
 
+def test_a_profile_on_the_members_account_has_no_deploy_model_to_fall_back_to() -> None:
+    """The account can be disconnected between admitting a turn and running it, and the deploy's
+    key is exactly what this profile exists not to spend — so the model resolves from the
+    connected provider or the turn fails saying so. Every other profile keeps its own pin, else
+    the agent's."""
+    agent = SimpleNamespace(model="workspace-model")
+    runtime = SimpleNamespace(
+        registry=SimpleNamespace(resolve=lambda model: model),
+        config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example")),
+        manifests=(SimpleNamespace(connects_member_accounts=True),),
+    )
+
+    assert (
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "openai", agent, runtime, None)
+        == OWN_ACCOUNT_MODEL
+    )
+    with pytest.raises(loop_queue.SubagentKeyWithdrawn):
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, None)
+    with pytest.raises(loop_queue.SubagentKeyWithdrawn):
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "anthropic", agent, runtime, None)
+
+    ordinary = replace(OWN_ACCOUNT_PROFILE, needs_own_model_key=False, own_key_models={})
+    assert loop_queue._subagent_model(ordinary, None, agent, runtime, None) == ("workspace-model")
+
+
+def test_a_pinned_model_cannot_move_a_coding_turn_onto_the_deploys_key() -> None:
+    """A member pinning a model on their conversation pins it for the work that runs on the
+    deploy's account. The coding agent does not: the pinned id is not one their account was bound
+    to serve, so honouring it drops the member slot on every credential read and the deploy funds
+    the run — the one outcome this profile exists to prevent. Every other profile takes the pin."""
+    agent = SimpleNamespace(model="workspace-model")
+    runtime = SimpleNamespace(
+        registry=SimpleNamespace(resolve=lambda model: model),
+        config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example")),
+        manifests=(SimpleNamespace(connects_member_accounts=True),),
+    )
+
+    assert (
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "openai", agent, runtime, "pinned-model")
+        == OWN_ACCOUNT_MODEL
+    )
+    with pytest.raises(loop_queue.SubagentKeyWithdrawn):
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, "pinned-model")
+
+    ordinary = replace(OWN_ACCOUNT_PROFILE, needs_own_model_key=False, own_key_models={})
+    assert (
+        loop_queue._subagent_model(ordinary, None, agent, runtime, "pinned-model") == "pinned-model"
+    )
+
+
+def test_a_withdrawn_account_hands_over_the_same_address_the_spawn_refusal_does() -> None:
+    """A member whose account went missing between admitting a turn and running it is in the same
+    position as one who never connected: the fix is the same screen. Naming their uuid instead
+    hands the model something no member can act on."""
+    runtime = SimpleNamespace(
+        registry=SimpleNamespace(resolve=lambda model: model),
+        config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example/")),
+        manifests=(SimpleNamespace(connects_member_accounts=True),),
+    )
+    agent = SimpleNamespace(model="workspace-model")
+
+    with pytest.raises(loop_queue.SubagentKeyWithdrawn) as withdrawn:
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, None)
+
+    named = str(withdrawn.value)
+    assert f"https://ufo.example{SPAWN_CONNECT_PATH}" in named
+    assert "ChatGPT or Claude" in named
+    assert OWN_ACCOUNT_PROFILE.name in named
+
+
 async def test_spawned_children_run_outside_the_member_slot(
     surface: Turns, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2272,3 +2433,31 @@ async def test_the_member_slot_gates_only_model_loop_turns() -> None:
     scheduled = loop_queue._turn_gates(None, SCHEDULED_ADMISSION)
     assert len(scheduled) == 2 and scheduled[1] is member[0]
     assert scheduled[0]._value == loop_queue.SCHEDULED_TURN_CONCURRENCY
+
+
+def test_a_deploy_that_cannot_hold_an_account_runs_the_profile_on_its_own_key() -> None:
+    """A pack shipping `coding` and no extension that connects an account — the eval packs are
+    exactly that shape — has no member to refuse. Requiring one there takes the capability away on
+    every deploy that could never have offered it, so the profile falls to its own declared pin on
+    the deploy's key. Where an account *can* be connected, skipping still costs the capability."""
+    agent = SimpleNamespace(model="workspace-model")
+    pinned_profile = replace(OWN_ACCOUNT_PROFILE, model="profile-pin")
+
+    def runtime_with(connectable: bool) -> SimpleNamespace:
+        return SimpleNamespace(
+            registry=SimpleNamespace(resolve=lambda model: model),
+            config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example")),
+            manifests=(SimpleNamespace(connects_member_accounts=connectable),),
+        )
+
+    assert (
+        loop_queue._subagent_model(pinned_profile, None, agent, runtime_with(False), None)
+        == "profile-pin"
+    )
+    with pytest.raises(loop_queue.SubagentKeyWithdrawn):
+        loop_queue._subagent_model(pinned_profile, None, agent, runtime_with(True), None)
+
+    assert (
+        loop_queue._subagent_model(pinned_profile, "openai", agent, runtime_with(False), None)
+        == OWN_ACCOUNT_MODEL
+    )

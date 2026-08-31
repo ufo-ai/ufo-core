@@ -62,6 +62,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
+        connects_member_accounts=True,
         tools=WEB_ACCESS_TOOLS,
         conversation_slots=(CHANGES_SLOT, ARTIFACTS_SLOT),
         surfaces=(

@@ -9,7 +9,7 @@ installed extensions it bundles plus any pack-level skills and onboarding steps 
 activating one named pack brings a coherent product config up together."""
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
@@ -679,7 +679,13 @@ class SubagentProfile:
     result is walled. `concise_parent_handoff` gives a member-facing profile the shared short
     result discipline; machine-readable and workspace-agent results keep their full contract.
     `isolated_tools` makes
-    `tool_names` exact by excluding cross-extension grants and subagent defaults."""
+    `tool_names` exact by excluding cross-extension grants and subagent defaults.
+    `needs_own_model_key` marks a profile that runs on the speaking member's own provider account:
+    the spawn catalog omits it and a spawn refuses it for a member who connected neither provider,
+    so skipping that step in onboarding takes the capability away rather than silently spending the
+    deploy's key on it. `own_key_models` names the model to run per provider they may have
+    connected, and it outranks `model` — a pin naming some third backend would spend the deploy's
+    account on the very work the member's key was asked for."""
 
     name: str
     prompt: str
@@ -693,6 +699,8 @@ class SubagentProfile:
     concise_parent_handoff: bool = False
     isolated_tools: bool = False
     connector_read_only: bool = False
+    needs_own_model_key: bool = False
+    own_key_models: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if OBJECT_ACTION_TOOL in self.tool_names:
@@ -789,11 +797,15 @@ class Manifest:
     egress for live turns when the extension's sandbox tools require it. `deploy_keys` names the
     environment keys this extension needs the deploy to carry — a provider key nobody can mint, so
     `init` reports the ones a fresh checkout is missing rather than leaving them to be discovered
-    when the first job that needs one raises."""
+    when the first job that needs one raises. `connects_member_accounts` says this extension can
+    store a member's own provider account — a deploy carrying none has no way to hold one, so a
+    profile that runs on such an account runs on the deploy's own key there instead of refusing
+    work nobody on that deploy could ever enable."""
 
     name: str
     version: str
     _: KW_ONLY
+    connects_member_accounts: bool = False
     tools: tuple[ToolDef, ...] = ()
     objects: tuple[ObjectKind, ...] = ()
     jobs: tuple[JobSpec, ...] = ()

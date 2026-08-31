@@ -70,8 +70,10 @@ from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
     CredentialRequestInvalid,
     CredentialRequestState,
+    CredentialSlotUnset,
     CredentialStore,
     DeclaredSlot,
+    member_slot,
     named_slots,
     open_credential_request,
     seal_credential_request,
@@ -143,7 +145,7 @@ from ufo.runtime.turns.workspace_changes import (
     WorkspaceChanges,
     recorded_workspace_changes,
 )
-from ufo.runtime.workspace import ws, ws_current
+from ufo.runtime.workspace import MEMBER_ROUTED_SLOTS, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     MEMBER_ADMISSION,
@@ -1831,6 +1833,48 @@ class SurfaceContext:
         if self._credentials is None:
             raise RuntimeError(f"surface {self.surface!r} reads a credential but holds no store")
         return await self._credentials.get(self.workspace_id, slot)
+
+    async def put_member_credential(self, member_id: UUID, slot: str, value: str) -> None:
+        """Store one member's own value for `slot`, keyed to them. The sign-in leg that collected it
+        has already proven which member is speaking, so the value lands directly rather than through
+        a sealed chat handoff."""
+        if self._credentials is None:
+            raise RuntimeError(f"surface {self.surface!r} stores a credential but holds no store")
+        await self._credentials.put(self.workspace_id, member_slot(slot, member_id), value)
+
+    async def member_credential_stored(self, member_id: UUID, slot: str) -> bool:
+        """Whether this member holds their own value for `slot`. Asked per provider, so a screen can
+        say which account is connected rather than only that one is."""
+        if self._credentials is None:
+            return False
+        try:
+            await self._credentials.get(self.workspace_id, member_slot(slot, member_id))
+        except CredentialSlotUnset:
+            return False
+        return True
+
+    async def clear_member_credential(self, member_id: UUID, slot: str) -> None:
+        """Drop this member's own value for `slot`, so they can connect a different account or
+        replace one that was revoked. Only their row goes — an admin's key and the workspace's own
+        are not a member's to clear."""
+        if self._credentials is None:
+            raise RuntimeError(f"surface {self.surface!r} clears a credential but holds no store")
+        await self._credentials.clear(self.workspace_id, member_slot(slot, member_id))
+
+    async def member_holds_own_model_key(self, member_id: UUID) -> bool:
+        """Whether this member signed in with a provider account of their own — the same question
+        the subagent gate asks, over the same slot set, so a screen that offers to connect one and
+        the capability that turns on when they do can never disagree about which slots count. The
+        store is this surface's own; only the rule is shared."""
+        if self._credentials is None:
+            return False
+        for slot in MEMBER_ROUTED_SLOTS:
+            try:
+                await self._credentials.get(self.workspace_id, member_slot(slot, member_id))
+            except CredentialSlotUnset:
+                continue
+            return True
+        return False
 
     async def credential_prompt_pending(self, sealed: str, slot: str) -> bool:
         """Whether one prompt of a sealed credential request still awaits its value."""

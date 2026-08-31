@@ -17,6 +17,7 @@ import { OutcomeNotice, type NoticeState, QUIET } from "@/kernel/panel";
 import type { ListingSpec } from "@/kernel/listing";
 import { BASE } from "@/lib/api";
 import type { ActionView, CredentialPrompt } from "@/lib/types";
+import { ConnectAccount } from "@/views/ConnectAccount";
 import {
   CredentialValueFields,
   MCP_SERVERS_SLOT,
@@ -91,6 +92,17 @@ function extensionTitle(extension: string) {
 export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
   note: "Credential values are shared across the workspace.",
+  /* The slots below are the workspace's; a coding account is the member's own, and this is where
+     they come back to replace one that was rotated or revoked. */
+  lead: (
+    <div className="flex flex-col gap-sm px-lg pt-lg">
+      <p className="m-0 text-ink-soft">
+        This account is yours alone. Each member connects their own, and it is used only for coding
+        tasks.
+      </p>
+      <ConnectAccount />
+    </div>
+  ),
   group: credentialSection,
   rows: (payload) =>
     [...payload.slots].sort((left, right) => {

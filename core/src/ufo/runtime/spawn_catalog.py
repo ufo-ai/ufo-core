@@ -55,8 +55,16 @@ async def spawn_catalog_skill(registry: SubagentRegistry, member_id: UUID | None
     same records. Agents are the set the spawn gate admits: the turn's member's own rows, and for
     a workspace admin every row — an ownerless row (main, provisioned) is the admins'. An agent
     whose name a profile shadows is listed under its qualified form, which is the only form a
-    spawn of it accepts."""
-    profile_names = frozenset(profile.name for profile in registry.profiles)
+    spawn of it accepts.
+
+    A profile that runs on the member's own provider account is listed whether or not they
+    connected one. Withholding it hides the capability from the member who has not met it yet: the
+    model would never name coding, so nothing would ever tell them it exists or why it is off. The
+    spawn refusal is what carries that — it names the account the profile needs and the screen that
+    connects one — so the member meets the requirement by reaching for the thing and being told,
+    rather than by never being offered it."""
+    profiles = registry.profiles
+    profile_names = frozenset(profile.name for profile in profiles)
     async with workspace_tx() as connection:
         admin = member_id is not None and await member_is_admin(
             connection, ws_current().workspace_id, member_id
@@ -76,7 +84,7 @@ async def spawn_catalog_skill(registry: SubagentRegistry, member_id: UUID | None
         (
             *(
                 f"| `{profile.name}` | profile | {_profile_payload(profile)} |"
-                for profile in sorted(registry.profiles, key=lambda profile: profile.name)
+                for profile in sorted(profiles, key=lambda profile: profile.name)
             ),
             *(
                 f"| `{'agent:' if agent.name in profile_names else ''}{agent.name}` | agent "

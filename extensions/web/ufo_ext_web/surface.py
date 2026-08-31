@@ -100,7 +100,17 @@ from ufo.sdk.manifest import (
     validated_image_preview,
 )
 from ufo.sdk.memory import MemoryMatch
-from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.sdk.models import (
+    ANTHROPIC_KEY_SLOT,
+    OPENAI_KEY_SLOT,
+    Message,
+    ModelRequest,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    anthropic_client_id,
+    openai_client_id,
+)
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import (
     AGENT_KIND,
@@ -137,8 +147,46 @@ from ufo.sdk.surfaces import (
     member_message_text,
 )
 from ufo.sdk.tools import ActionBinding
+from ufo_ext_web.anthropic_login import (
+    AUTHORIZE_PATH as ANTHROPIC_AUTHORIZE_PATH,
+)
+from ufo_ext_web.anthropic_login import (
+    CODE_FIELD as ANTHROPIC_CODE_FIELD,
+)
+from ufo_ext_web.anthropic_login import (
+    CODE_MISSING as ANTHROPIC_CODE_MISSING,
+)
+from ufo_ext_web.anthropic_login import (
+    CODE_PATH as ANTHROPIC_CODE_PATH,
+)
+from ufo_ext_web.anthropic_login import (
+    CODE_REFUSED as ANTHROPIC_CODE_REFUSED,
+)
+from ufo_ext_web.anthropic_login import (
+    MAX_CODE_BYTES as ANTHROPIC_MAX_CODE_BYTES,
+)
+from ufo_ext_web.anthropic_login import (
+    SIGN_IN_PATH as ANTHROPIC_SIGN_IN_PATH,
+)
+from ufo_ext_web.anthropic_login import (
+    STATE_COOKIE as ANTHROPIC_STATE_COOKIE,
+)
+from ufo_ext_web.anthropic_login import (
+    AnthropicCodeLogin,
+)
+from ufo_ext_web.anthropic_login import (
+    verified_key as anthropic_verified_key,
+)
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
+from ufo_ext_web.openai_login import (
+    DEVICE_COOKIE,
+    DEVICE_PATH,
+    DEVICE_UNAVAILABLE,
+    POLL_PATH,
+    SIGN_IN_PATH,
+    OpenAiDeviceLogin,
+)
 from ufo_ext_web.panels import (
     FIRST_RUN_PROVIDERS,
     SPOKEN_ROOM_PREFIXES,
@@ -238,6 +286,9 @@ USAGE_RANGES = {
     "all": None,
 }
 PORTAL_PATH = "/surface/web"
+ARRIVAL_PATHS = frozenset(
+    {PORTAL_PATH, f"{PORTAL_PATH}/{SIGN_IN_PATH}", f"{PORTAL_PATH}/{ANTHROPIC_SIGN_IN_PATH}"}
+)
 CHAT_TARGET_PARAM = "c"
 PORTAL_BUILD = "make build"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -323,9 +374,12 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
     cookie for the requests that follow); never a query parameter, so it stays out of URLs, access
     logs, and browser history. Each fallback keys on the previous credential failing to RESOLVE,
     not merely being absent, so a member whose cookie outlived its bearer's expiry recovers by
-    posting a fresh token instead of being locked behind the stale cookie. An unresolved GET of
-    the portal page redirects to the deploy's one sign-in page, so the portal offers no second way
-    in and nothing of the shell is served to a stranger. Only a urlencoded body is read for the
+    posting a fresh token instead of being locked behind the stale cookie. An unresolved GET of an
+    address a member arrives at cold — the portal page and the two provider doors, which are handed
+    around in mail and in chat — redirects to the deploy's one sign-in page, so the portal offers no
+    second way in and nothing of the shell is served to a stranger. Every other unresolved request
+    stays the 401 it is, so a page's read or intent never answers a redirect its fetch would follow.
+    Only a urlencoded body is read for the
     token — the type gateway sign-in posts — so an unauthenticated multipart request is
     rejected without its parse ever running. A conversation the arrival names (`?c=<uuid>`) rides
     on to the sign-in page, so the target survives signing in; it is re-parsed as a UUID, so only
@@ -350,7 +404,7 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
     if (
         workspace is None
         and request.method == "GET"
-        and request.url.path.rstrip("/") == PORTAL_PATH
+        and request.url.path.rstrip("/") in ARRIVAL_PATHS
     ):
         target = _chat_target(request)
         login = f"{LOGIN_PATH}?{CHAT_TARGET_PARAM}={target}" if target else LOGIN_PATH
@@ -542,6 +596,154 @@ async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
     await _assets_published(ctx.fleet_blob, APPS)
     shell = portal_shell(PORTAL_HTML, rum_config(os.environ))
     return HTMLResponse(shell, headers={"cache-control": "no-store"})
+
+
+ACCOUNTS_PATH = "workspace/accounts"
+DISCONNECT_SUFFIX = "disconnect"
+CONNECT_HASH = "#/workspace/credentials"
+CONNECTED = "connected"
+REFUSED = "refused"
+PENDING = "pending"
+
+CODING_ACCOUNTS = (
+    ("openai", "ChatGPT", OPENAI_KEY_SLOT),
+    ("anthropic", "Claude", ANTHROPIC_KEY_SLOT),
+)
+
+
+def _refused(message: str) -> Response:
+    return JSONResponse({"status": REFUSED, "message": message})
+
+
+async def workspace_accounts(ctx: SurfaceContext, request: Request) -> Response:
+    """Which coding accounts this member has connected, one row per provider. The screen that offers
+    to connect one and the screen that offers to replace it read the same row, so the first run and
+    the settings panel can never disagree about what a member holds."""
+    authenticated = await _authenticate(ctx, request)
+    if isinstance(authenticated, Response):
+        return authenticated
+    member_id, _ = authenticated
+    return JSONResponse(
+        {
+            "accounts": [
+                {
+                    "provider": provider,
+                    "label": label,
+                    "connected": await ctx.member_credential_stored(member_id, slot),
+                }
+                for provider, label, slot in CODING_ACCOUNTS
+            ]
+        }
+    )
+
+
+async def openai_device(ctx: SurfaceContext, request: Request) -> Response:
+    """Open a device grant and hand back the code the member types at OpenAI. The device code is the
+    handle that claims it, so it rides an HttpOnly cookie; only the short user code crosses."""
+    authenticated = await _authenticate(ctx, request)
+    if isinstance(authenticated, Response):
+        return authenticated
+    opened = await OpenAiDeviceLogin(client_id=openai_client_id()).request_code()
+    if opened is None:
+        return JSONResponse({"error": DEVICE_UNAVAILABLE})
+    answer = JSONResponse(
+        {
+            "user_code": opened.user_code,
+            "verification_uri": opened.verification_uri,
+            "interval": opened.interval,
+        }
+    )
+    set_session_cookie(
+        answer,
+        DEVICE_COOKIE,
+        f"{opened.device_auth_id}.{opened.user_code}",
+        samesite="lax",
+        secure=ctx.cookie_secure,
+    )
+    return answer
+
+
+async def openai_device_poll(ctx: SurfaceContext, request: Request) -> Response:
+    """One poll of the device grant. Pending while the member is still at OpenAI; connected once the
+    grant bought a key and it is stored; refused with the line they have to read."""
+    authenticated = await _authenticate(ctx, request)
+    if isinstance(authenticated, Response):
+        return authenticated
+    member_id, _ = authenticated
+    device_auth_id, _, user_code = request.cookies.get(DEVICE_COOKIE, "").partition(".")
+    if not device_auth_id or not user_code:
+        return _refused(DEVICE_UNAVAILABLE)
+    claimed = await OpenAiDeviceLogin(client_id=openai_client_id()).claim(device_auth_id, user_code)
+    if claimed.status == "pending":
+        return JSONResponse({"status": PENDING})
+    if claimed.status == "refused":
+        return _refused(claimed.refusal)
+    await ctx.put_member_credential(member_id, OPENAI_KEY_SLOT, claimed.key)
+    log("web.openai_signed_in", member=str(member_id), route="device")
+    return JSONResponse({"status": CONNECTED})
+
+
+async def anthropic_authorize(ctx: SurfaceContext, request: Request) -> Response:
+    """Open an authorization the member finishes at Anthropic. Its page displays the code rather
+    than returning it here, so they carry it back by hand and the verifier waits in a cookie."""
+    authenticated = await _authenticate(ctx, request)
+    if isinstance(authenticated, Response):
+        return authenticated
+    pending = AnthropicCodeLogin(client_id=anthropic_client_id()).authorize()
+    answer = JSONResponse({"url": pending.url})
+    set_session_cookie(
+        answer, ANTHROPIC_STATE_COOKIE, pending.cookie, samesite="lax", secure=ctx.cookie_secure
+    )
+    return answer
+
+
+async def anthropic_code(ctx: SurfaceContext, request: Request) -> Response:
+    """Spend the code the member pasted back for an access token, stored under their own slot."""
+    refused = _framed_length(request, ANTHROPIC_MAX_CODE_BYTES)
+    if refused is not None:
+        return refused
+    authenticated = await _authenticate(ctx, request)
+    if isinstance(authenticated, Response):
+        return authenticated
+    member_id, _ = authenticated
+    form = await _form(request)
+    if isinstance(form, Response):
+        return form
+    pasted = form.get(ANTHROPIC_CODE_FIELD, "")
+    if not isinstance(pasted, str) or not pasted.strip():
+        return _refused(ANTHROPIC_CODE_MISSING)
+    grant = await AnthropicCodeLogin(client_id=anthropic_client_id()).claim(
+        pasted, request.cookies.get(ANTHROPIC_STATE_COOKIE, "")
+    )
+    if grant is None or not await anthropic_verified_key(grant.access):
+        return _refused(ANTHROPIC_CODE_REFUSED)
+    await ctx.put_member_credential(member_id, ANTHROPIC_KEY_SLOT, grant.stored())
+    log("web.anthropic_signed_in", member=str(member_id), route="code")
+    return JSONResponse({"status": CONNECTED})
+
+
+async def account_disconnect(ctx: SurfaceContext, request: Request) -> Response:
+    """Drop the account this member connected, so they can replace one revoked or rotated. Only
+    their own row goes: an admin's key and the workspace's own are not theirs to clear."""
+    authenticated = await _authenticate(ctx, request)
+    if isinstance(authenticated, Response):
+        return authenticated
+    member_id, _ = authenticated
+    provider = request.path_params["provider"]
+    slot = next((slot for name, _, slot in CODING_ACCOUNTS if name == provider), None)
+    if slot is None:
+        return JSONResponse({"error": "unknown provider"}, status_code=404)
+    await ctx.clear_member_credential(member_id, slot)
+    log("web.account_disconnected", member=str(member_id), route=provider)
+    return JSONResponse({"status": "disconnected"})
+
+
+async def connect_arrival(ctx: SurfaceContext, request: Request) -> Response:
+    """A connect link in mail or chat: the flow lives in the portal, so the member lands there."""
+    authenticated = await _authenticate(ctx, request)
+    if isinstance(authenticated, Response):
+        return authenticated
+    return RedirectResponse(f"/surface/{ctx.surface}{CONNECT_HASH}", status_code=303)
 
 
 async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | Response:
@@ -3536,15 +3738,17 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     team can say it uses, and the two of them the pages install themselves, beside whether the
     workspace holds them. The read also states whether the first run offers iMessage — its extension
     is in the deploy and this environment's flag is open — so every member sees that branch after
-    the team step only where both hold. Each connector step reads the leg its own Connect act
-    writes: Slack's is the surface installation `slack_connect` binds,
-    GitHub's the `git_push` credential leg `github/coverage` reports — what `connect_github` fills
-    by installing the App, and what a stored token fills where no organization installed it — never
-    the `api` leg, a broker connection row that act neither writes nor needs. Both rows are the
-    whole workspace's rather than the reader's audience: the row is stated as a bare boolean, and a
-    step narrowed by audience would tell a member to install what the workspace already has. Both
-    steps carry the catalog's own label, so a tile and the step it reveals never name one connector
-    two ways."""
+    the team step only where both hold, and whether the reading member holds a provider key of their
+    own under either slot, which is the reader's answer rather than the workspace's: a key is what
+    the member's own turns run on, so the step that offers the door reads the member. Each connector
+    step reads the leg its own Connect act writes: Slack's is the surface installation
+    `slack_connect` binds, GitHub's the `git_push` credential leg `github/coverage` reports — what
+    `connect_github` fills by installing the App, and what a stored token fills where no
+    organization installed it — never the `api` leg, a broker connection row that act neither writes
+    nor needs. Both connector rows are the whole workspace's rather than the reader's audience: the
+    row is stated as a bare boolean, and a step narrowed by audience would tell a member to install
+    what the workspace already has. Both steps carry the catalog's own label, so a tile and the step
+    it reveals never name one connector two ways."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -3555,10 +3759,12 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     imessage = any(
         extension.name == IMESSAGE_EXTENSION for extension in ctx.deploy_extensions
     ) and await flag_enabled(IMESSAGE_STEP_FLAG, default=True)
+    model_key_held = await ctx.member_holds_own_model_key(member_id)
     return JSONResponse(
         {
             "providers": [tile.model_dump(mode="json") for tile in FIRST_RUN_PROVIDERS],
             "imessage": imessage,
+            "model_key_held": model_key_held,
             "connectors": [
                 ConnectStep(name=tile.name, label=tile.label, installed=held[tile.name]).model_dump(
                     mode="json"
@@ -5010,4 +5216,14 @@ ROUTES = (
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="GET", path="turns/{turn_id}/connect", handler=connect_handoff),
     SurfaceRoute(method="POST", path="credentials", handler=fulfill_credential),
+    SurfaceRoute(method="GET", path=ACCOUNTS_PATH, handler=workspace_accounts),
+    SurfaceRoute(method="GET", path=SIGN_IN_PATH, handler=connect_arrival),
+    SurfaceRoute(method="GET", path=ANTHROPIC_SIGN_IN_PATH, handler=connect_arrival),
+    SurfaceRoute(method="POST", path=DEVICE_PATH, handler=openai_device),
+    SurfaceRoute(method="GET", path=POLL_PATH, handler=openai_device_poll),
+    SurfaceRoute(method="POST", path=ANTHROPIC_AUTHORIZE_PATH, handler=anthropic_authorize),
+    SurfaceRoute(method="POST", path=ANTHROPIC_CODE_PATH, handler=anthropic_code),
+    SurfaceRoute(
+        method="POST", path="accounts/{provider}/" + DISCONNECT_SUFFIX, handler=account_disconnect
+    ),
 )

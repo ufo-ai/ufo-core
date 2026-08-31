@@ -1783,19 +1783,17 @@ async def test_a_background_job_on_the_workspaces_own_key_debits_nothing(
     """A background job is metered on the same terms a turn is: the workspace already paid its own
     provider for what its own key served, so the balance must not be taken twice. The flag has to be
     produced beside the call — decided at billing time it would have no producer at all, and every
-    job would debit at full price."""
+    job would debit at full price.
+
+    The key is stored through the deploy's credential store, which is the only way the call could
+    reach it: the verdict is asked the way the call resolves its key, so a row no resolver can open
+    is not a key the workspace served itself with."""
     workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
     async with workspace_tx() as connection:
         await credit(connection, workspace_id, 50 * 1_000_000, 0, "opening")
-        await connection.execute(
-            sa.insert(tables.credential).values(
-                workspace_id=workspace_id,
-                slot="anthropic_api_key",
-                ciphertext=b"sealed",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
+    await store.put(workspace_id, "anthropic_api_key", "workspace-key")
     context = context_for(
         "core",
         frozenset(),

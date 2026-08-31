@@ -34,6 +34,9 @@ from ufo.harness.o11y import emit_metric, log
 from ufo.schema.records import Usage
 
 PROVIDER_TIMEOUT_SECONDS = 60.0
+ANTHROPIC_OAUTH_TOKEN_PREFIX = "sk-ant-oat"
+ANTHROPIC_OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20"
+OAUTH_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
 MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
@@ -47,11 +50,28 @@ STREAM_TRANSPORT_ERRORS = (
 STREAM_STATUS_ERRORS = (anthropic.APIStatusError,)
 
 
-def anthropic_sdk_client(api_key: str) -> anthropic.AsyncAnthropic:
-    """SDK client with its own retries disabled: the retry policy lives in AnthropicClient."""
+def anthropic_sdk_client(credential: str) -> anthropic.AsyncAnthropic:
+    """SDK client with its own retries disabled: the retry policy lives in AnthropicClient.
+
+    A member who signed in with their Anthropic account holds an OAuth access token rather than an
+    API key, and the two authenticate differently on the same wire: a token is a bearer under the
+    OAuth beta, a key is `x-api-key`. The prefix is what tells them apart, so one slot carries
+    whichever the member connected and the branch is a wire fact rather than a second setting."""
+    if is_oauth_credential(credential):
+        return anthropic.AsyncAnthropic(
+            auth_token=credential,
+            default_headers={"anthropic-beta": ANTHROPIC_OAUTH_BETA},
+            max_retries=0,
+            timeout=PROVIDER_TIMEOUT_SECONDS,
+        )
     return anthropic.AsyncAnthropic(
-        api_key=api_key, max_retries=0, timeout=PROVIDER_TIMEOUT_SECONDS
+        api_key=credential, max_retries=0, timeout=PROVIDER_TIMEOUT_SECONDS
     )
+
+
+def is_oauth_credential(credential: str) -> bool:
+    """Whether this credential is a member's OAuth access token rather than an API key."""
+    return credential.startswith(ANTHROPIC_OAUTH_TOKEN_PREFIX)
 
 
 def _anthropic_image(source: ImageSource) -> dict[str, object]:
@@ -110,6 +130,7 @@ def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dic
 class AnthropicClient:
     client: anthropic.AsyncAnthropic
     spec: ModelSpec
+    oauth: bool = False
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         """Yield text and tool-call events then exactly one Usage as the final event. The round's
@@ -164,11 +185,12 @@ class AnthropicClient:
             create_kwargs: dict[str, Any] = {
                 "model": request.model,
                 "system": [
+                    *([{"type": "text", "text": OAUTH_SYSTEM_PREFIX}] if self.oauth else []),
                     {
                         "type": "text",
                         "text": request.system,
                         "cache_control": system_cache,
-                    }
+                    },
                 ],
                 "messages": [
                     {"role": m.role, "content": anthropic_content(m.content)}

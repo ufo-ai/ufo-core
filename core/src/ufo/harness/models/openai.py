@@ -4,9 +4,16 @@ The api surface a model is called on is a fact of its `ModelSpec` (`spec.api_sur
 from its id: a model that rejects `tools` + `reasoning_effort` together on `/v1/chat/completions`
 (the `gpt-5.6-terra` case, #568) declares `api_surface="responses"` and this client renders the
 legal Responses request. One client class serves both surfaces so an OpenAI-compatible extension
-(Bedrock Mantle, OpenRouter) reuses it by handing its own spec and base_url."""
+(Bedrock Mantle, OpenRouter) reuses it by handing its own spec and base_url.
+
+The credential decides the host: a member who signs in with their ChatGPT account holds an account
+token, which api.openai.com refuses and the ChatGPT Codex backend answers for — and that backend
+serves Responses alone, so a client built for such a token calls that surface whatever the model's
+spec declares."""
 
 import asyncio
+import base64
+import binascii
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -88,6 +95,13 @@ STREAM_TRANSPORT_ERRORS = (
 STREAM_STATUS_ERRORS = (openai.APIStatusError,)
 REASONING_ENCRYPTED_CONTENT = "reasoning.encrypted_content"
 REASONING_OFF_EFFORT: OpenAIEffort = "none"
+CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+CODEX_ACCOUNT_HEADER = "chatgpt-account-id"
+CODEX_ORIGINATOR = "ufo"
+CODEX_RESPONSES_BETA = "responses=experimental"
+CODEX_STREAM_ACCEPT = "text/event-stream"
+CHATGPT_AUTH_CLAIM = "https://api.openai.com/auth"
+CHATGPT_ACCOUNT_CLAIM = "chatgpt_account_id"
 
 
 def _cache_write_tokens(details: PromptTokensDetails | InputTokensDetails | None) -> int:
@@ -118,13 +132,55 @@ def _responses_usage(raw: ResponseUsage, cache_write_30m_priced: bool) -> Usage:
     )
 
 
-def openai_sdk_client(api_key: str, base_url: str | None = None) -> openai.AsyncOpenAI:
+def openai_sdk_client(
+    api_key: str, base_url: str | None = None, default_headers: dict[str, str] | None = None
+) -> openai.AsyncOpenAI:
     """SDK client with its own retries disabled: the retry policy lives in OpenAIClient. A base_url
     points the OpenAI-compatible client at another host — an OpenRouter or Bedrock Mantle
-    model-provider extension speaks the OpenAI wire against its own endpoint."""
+    model-provider extension speaks the OpenAI wire against its own endpoint — and default_headers
+    carries whatever that host demands on every request beyond the bearer."""
     return openai.AsyncOpenAI(
-        api_key=api_key, base_url=base_url, max_retries=0, timeout=PROVIDER_TIMEOUT_SECONDS
+        api_key=api_key,
+        base_url=base_url,
+        default_headers=default_headers,
+        max_retries=0,
+        timeout=PROVIDER_TIMEOUT_SECONDS,
     )
+
+
+def chatgpt_account_id(credential: str) -> str | None:
+    """The ChatGPT account a member's account token was issued for, read from its own JWT claims,
+    or None for a platform API key — which is not a JWT and carries no claims. One slot holds
+    whichever the member connected, so the claim is what separates the two wires."""
+    parts = credential.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, binascii.Error):
+        return None
+    claims = payload.get(CHATGPT_AUTH_CLAIM) if isinstance(payload, dict) else None
+    account = claims.get(CHATGPT_ACCOUNT_CLAIM) if isinstance(claims, dict) else None
+    return account if isinstance(account, str) and account else None
+
+
+def codex_sdk_client(credential: str, account: str) -> openai.AsyncOpenAI:
+    """SDK client for the ChatGPT Codex backend, which is what serves a member's account token. It
+    answers only when the account the token was issued for, the calling app, and the Responses beta
+    ride every request alongside the bearer.
+
+    `Accept` is the fourth: the SDK hardcodes `application/json` on every request and never lifts it
+    for a stream, so without this the backend is free to answer a JSON body, the stream yields no
+    events, and the turn dies reporting no usage rather than anything a member can act on. The
+    capitalization is load-bearing — a lowercase key is appended beside the SDK's rather than
+    replacing it, and the request goes out asking for both."""
+    headers = {
+        CODEX_ACCOUNT_HEADER: account,
+        "originator": CODEX_ORIGINATOR,
+        "OpenAI-Beta": CODEX_RESPONSES_BETA,
+        "Accept": CODEX_STREAM_ACCEPT,
+    }
+    return openai_sdk_client(credential, base_url=CODEX_BASE_URL, default_headers=headers)
 
 
 def _status_retry_wait(error: openai.APIStatusError, delay: float) -> float:
@@ -328,22 +384,29 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
     return items
 
 
-def responses_request(request: ModelRequest, effort: OpenAIEffort) -> dict[str, Any]:
+def responses_request(
+    request: ModelRequest, effort: OpenAIEffort, codex: bool = False
+) -> dict[str, Any]:
     """The `/v1/responses` request, carrying the `effort` the client resolved against the model's
     spec — None sends no reasoning parameter. `store=False` keeps the conversation ours — nothing
     is left on the provider between rounds — and `include` is what asks for the encrypted reasoning
     body that a kept conversation then has to replay: without it a reasoning item comes back as an
     id the next request cannot resolve, so the pair travels together, on every wire this surface
-    serves."""
+    serves.
+
+    The Codex backend a member's ChatGPT account reaches refuses `max_output_tokens` outright, so
+    that budget is the platform wire's alone. The rounds it bounds are bounded there by the same
+    round limit every profile carries."""
     kwargs: dict[str, Any] = {
         "model": request.model,
         "instructions": request.system,
         "input": responses_input(request.messages),
-        "max_output_tokens": request.max_tokens,
         "stream": True,
         "include": [REASONING_ENCRYPTED_CONTENT],
         "store": False,
     }
+    if not codex:
+        kwargs["max_output_tokens"] = request.max_tokens
     if effort is not None:
         kwargs["reasoning"] = {"effort": effort}
     if request.tools:
@@ -367,13 +430,16 @@ def responses_request(request: ModelRequest, effort: OpenAIEffort) -> dict[str, 
 class OpenAIClient:
     """An OpenAI-wire backend for one model. `spec.api_surface` selects the Chat Completions or
     Responses request shape; `spec.reasoning` gates whether reasoning is emitted and whether it
-    composes with tools on the chat surface (the #568 fix)."""
+    composes with tools on the chat surface (the #568 fix). `codex` marks a client built for a
+    member's ChatGPT account token: that backend serves Responses alone, and the host a credential
+    reaches is not a fact the model's spec can carry, so it overrides the declared surface."""
 
     client: openai.AsyncOpenAI
     spec: ModelSpec
+    codex: bool = False
 
     def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        if self.spec.api_surface == "responses":
+        if self.codex or self.spec.api_surface == "responses":
             return self._complete_responses(request)
         return self._complete_chat(request)
 
@@ -627,7 +693,9 @@ class OpenAIClient:
             usage: Usage | None = None
             terminal_error: Exception | None = None
             try:
-                stream = await self.client.responses.create(**responses_request(request, effort))
+                stream = await self.client.responses.create(
+                    **responses_request(request, effort, self.codex)
+                )
                 stream_started = False
                 async for event in stream:
                     if not stream_started:

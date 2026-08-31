@@ -1802,23 +1802,12 @@ async def test_a_recovery_of_one_attempt_bills_the_key_that_served_it(db: None) 
     """A crash recovery re-executes the same attempt and must bill the tokens already burned under
     the verdict they were burned under. Re-deciding there would make the whole attempt free because
     a key arrived after the crash, or charge for what the workspace's own key paid because one
-    left."""
+    left. The verdict is the caller's — decided against the key that resolved for this turn — so
+    the freeze is what the recovery reads, whatever the second call is handed."""
     async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-    first = await loop_queue._frozen_byok(workspace_id, turn_id, "anthropic_api_key", "attempt-1")
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.credential).values(
-                workspace_id=workspace_id,
-                slot="anthropic_api_key",
-                ciphertext=b"sealed",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    recovered = await loop_queue._frozen_byok(
-        workspace_id, turn_id, "anthropic_api_key", "attempt-1"
-    )
+        _workspace_id, turn_id = await _seed_turn(connection)
+    first = await loop_queue._frozen_byok(turn_id, False, "attempt-1")
+    recovered = await loop_queue._frozen_byok(turn_id, True, "attempt-1")
     assert first is False
     assert recovered is False
 
@@ -1863,26 +1852,10 @@ async def test_a_resumed_attempt_decides_against_the_key_that_will_serve_it(db: 
     a key during the pause charges for calls the workspace's own key paid, removing one makes the
     entire re-run free, and either is repeatable with ordinary workspace permissions."""
     async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-    parked = await loop_queue._frozen_byok(workspace_id, turn_id, "anthropic_api_key", "attempt-1")
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.credential).values(
-                workspace_id=workspace_id,
-                slot="anthropic_api_key",
-                ciphertext=b"sealed",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    resumed = await loop_queue._frozen_byok(workspace_id, turn_id, "anthropic_api_key", "attempt-2")
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.delete(tables.credential).where(tables.credential.c.workspace_id == workspace_id)
-        )
-    resumed_again = await loop_queue._frozen_byok(
-        workspace_id, turn_id, "anthropic_api_key", "attempt-3"
-    )
+        _workspace_id, turn_id = await _seed_turn(connection)
+    parked = await loop_queue._frozen_byok(turn_id, False, "attempt-1")
+    resumed = await loop_queue._frozen_byok(turn_id, True, "attempt-2")
+    resumed_again = await loop_queue._frozen_byok(turn_id, False, "attempt-3")
     assert parked is False
     assert resumed is True
     assert resumed_again is False

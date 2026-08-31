@@ -104,18 +104,27 @@ def _prompt_tokens(usage: Usage) -> int:
 async def workspace_owns_the_key(
     connection: AsyncConnection, workspace_id: UUID, key_slot: str | None
 ) -> bool:
-    """Whether the workspace's own provider key served this burn — the same rule the usage export
-    labels `byok` with, so the balance and the export never disagree about who paid."""
+    """Whether the WORKSPACE holds its own key for `key_slot` — its own row, never a member's.
+
+    This is the guard's question: whether the workspace pays its own way for the work the deploy
+    would otherwise fund. A member's personally connected account is not the workspace's to spend
+    and serves only the subagent that requires it, so counting one here would let a workspace at
+    zero balance keep running platform-key turns because somebody signed in.
+
+    A call's own verdict is `ws_current().credential_is_stored`, which resolves under the speaker
+    the turn bound and so answers for the key that actually served it."""
     if not key_slot:
         return False
-    return (
-        await connection.execute(
-            sa.select(tables.credential.c.slot).where(
-                tables.credential.c.workspace_id == workspace_id,
-                tables.credential.c.slot == key_slot,
+    return bool(
+        await connection.scalar(
+            sa.select(
+                sa.exists().where(
+                    tables.credential.c.workspace_id == workspace_id,
+                    tables.credential.c.slot == key_slot,
+                )
             )
         )
-    ).one_or_none() is not None
+    )
 
 
 async def record_turn_usage(

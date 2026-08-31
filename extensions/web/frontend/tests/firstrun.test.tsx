@@ -12,6 +12,10 @@ const ADMIN = { ...MEMBER, admin: true };
 const SLACK_LINK = "https://slack.com/oauth/v2/authorize?state=sealed";
 const IMESSAGE_LINK = "sms:+14085550123?&body=UFO%20ABC123";
 
+
+/** A line the account routes answer with. Every refusal a member reads on this step is the
+ *  provider's own, carried through by the route, so a case states one and asserts it comes back. */
+
 const OPENED = { turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Setting up" };
 
 /** The acts the run writes through, as their kinds project them: the member collection's add and
@@ -64,6 +68,7 @@ const INSTALL_READS: Record<string, Route> = {
 
 const FIRST_RUN = {
   imessage: true,
+  model_key_held: true,
   providers: [
     { name: "slack", label: "Slack" },
     { name: "github", label: "GitHub" },
@@ -79,6 +84,10 @@ const FIRST_RUN = {
   ],
   actions: { member: [ADD_MEMBER], memory: [RECORD_FIRST_RUN] },
 };
+
+/** A member who signed in on the workspace's own key: the model step offers them the two doors
+ *  rather than stating an account they already hold. */
+const NO_MODEL_KEY = { ...FIRST_RUN, model_key_held: false };
 
 const HELD_SLACK = {
   ...FIRST_RUN,
@@ -100,6 +109,13 @@ function open(routes: Record<string, Route> = {}, member = ADMIN, payload = FIRS
     ...chatsOnWire([]),
     ...INSTALL_READS,
     "/workspace/first-run": () => json(payload),
+    "/workspace/accounts": () =>
+      json({
+        accounts: [
+          { provider: "openai", label: "ChatGPT", connected: payload.model_key_held },
+          { provider: "anthropic", label: "Claude", connected: false },
+        ],
+      }),
     ...routes,
   });
   render(<App agents={[AGENT]} member={member} onAgents={() => {}} />);
@@ -159,6 +175,22 @@ function commit(): HTMLButtonElement {
   return screen.getByRole("button", { name: "Continue" }) as HTMLButtonElement;
 }
 
+/** The model step every run draws, taken on the account the workspace read already holds. */
+async function passModel() {
+  await screen.findByRole("heading", { name: "Connect your coding agent" });
+  await userEvent.click(commit());
+}
+
+/** The run stood on the model step, for a member holding no account of their own, over whatever
+ *  account routes the case answers. */
+async function atModel(routes: Record<string, Route> = {}) {
+  const posted = recorder();
+  const wired = open({ ...lanes(posted), ...routes }, ADMIN, NO_MODEL_KEY);
+  await record("Notion");
+  await screen.findByRole("heading", { name: "Connect your coding agent" });
+  return { posted, wired };
+}
+
 /** The picks as the page writes them: one sentence naming the catalog's labels in the catalog's own
  *  order, posted as the memory collection's write. */
 function toolingIntent(...providers: string[]) {
@@ -216,24 +248,29 @@ test("the page draws no shell around the step", async () => {
   expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
 });
 
-test("the head counts the three certain steps, and no connector leaves them three", async () => {
+test("the head counts the four certain steps, and no connector leaves them four", async () => {
   const posted = recorder();
   open({ ...lanes(posted) });
 
   const progress = await screen.findByRole("progressbar", { name: "Step" });
   expect(progress.getAttribute("aria-valuenow")).toBe("1");
-  expect(progress.getAttribute("aria-valuemax")).toBe("3");
-  expect(progress.querySelectorAll('[aria-hidden="true"]')).toHaveLength(3);
+  expect(progress.getAttribute("aria-valuemax")).toBe("4");
+  expect(progress.querySelectorAll('[aria-hidden="true"]')).toHaveLength(4);
 
   await chooseGoal();
   expect(progress.getAttribute("aria-valuenow")).toBe("2");
-  expect(progress.getAttribute("aria-valuemax")).toBe("3");
+  expect(progress.getAttribute("aria-valuemax")).toBe("4");
 
   await userEvent.click(screen.getByRole("button", { name: "Continue" }));
-  await screen.findByRole("heading", { name: "Invite your team" });
+  await screen.findByRole("heading", { name: "Connect your coding agent" });
   expect(progress.getAttribute("aria-valuenow")).toBe("3");
-  expect(progress.getAttribute("aria-valuemax")).toBe("3");
-  expect(progress.querySelectorAll('[aria-hidden="true"]')).toHaveLength(3);
+  expect(progress.getAttribute("aria-valuemax")).toBe("4");
+
+  await userEvent.click(commit());
+  await screen.findByRole("heading", { name: "Invite your team" });
+  expect(progress.getAttribute("aria-valuenow")).toBe("4");
+  expect(progress.getAttribute("aria-valuemax")).toBe("4");
+  expect(progress.querySelectorAll('[aria-hidden="true"]')).toHaveLength(4);
 });
 
 /** The head never states the run finished while a step it is certain to draw is still ahead. The
@@ -251,7 +288,7 @@ test("the run never counts itself complete before its last step", async () => {
   );
 });
 
-test("both connectors reveal a five-step run", async () => {
+test("both connectors reveal a six-step run", async () => {
   const posted = recorder();
   open({ ...lanes(posted) });
 
@@ -259,8 +296,8 @@ test("both connectors reveal a five-step run", async () => {
 
   const progress = screen.getByRole("progressbar", { name: "Step" });
   expect(progress.getAttribute("aria-valuenow")).toBe("3");
-  expect(progress.getAttribute("aria-valuemax")).toBe("5");
-  expect(progress.querySelectorAll('[aria-hidden="true"]')).toHaveLength(5);
+  expect(progress.getAttribute("aria-valuemax")).toBe("6");
+  expect(progress.querySelectorAll('[aria-hidden="true"]')).toHaveLength(6);
 });
 
 test("the goal is the whole first step", async () => {
@@ -358,6 +395,7 @@ test("picking neither connector skips to the invite step", async () => {
   open({ ...lanes(posted) });
 
   await record("Notion");
+  await passModel();
 
   const invite = (await screen.findByRole("heading", { name: "Invite your team" })).parentElement!;
   expect(invite.querySelector("p")!.textContent).toBe(
@@ -383,6 +421,7 @@ test("each connector picked is its own step, in the order the tiles offer them",
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+  await passModel();
   await screen.findByRole("heading", { name: "Invite your team" });
   expect(screen.getByRole("button", { name: "Invite" })).toBeTruthy();
 });
@@ -434,6 +473,7 @@ test("the foot carries only the acts the step has", async () => {
   await screen.findByRole("heading", { name: "Add @ufo to Slack" });
   expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+  await passModel();
 
   await screen.findByRole("heading", { name: "Invite your team" });
   expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
@@ -613,6 +653,7 @@ test("skip leaves the connect step behind with nothing connected", async () => {
 
   await record("Slack");
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+  await passModel();
 
   await screen.findByRole("heading", { name: "Invite your team" });
   expect(intents(posted.calls)).toEqual([toolingIntent("slack")]);
@@ -749,9 +790,38 @@ test("a member who is not an admin is told who installs, and presses nothing", a
   await screen.findByText("A workspace admin connects Slack.");
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+  await passModel();
   await screen.findByText("A workspace admin adds members.");
   expect(screen.queryByLabelText("Email 1")).toBeNull();
   expect(intents(posted.calls)).toEqual([toolingIntent("slack")]);
+});
+
+/** The step is counted from the first screen, the way the team step is: a member without an
+ *  account of their own is certain to be asked for one, whatever they pick at the tools step. */
+test("the model step a member without an account is asked for is counted from the first screen", async () => {
+  const posted = recorder();
+  open(lanes(posted), ADMIN, NO_MODEL_KEY);
+
+  const progress = await screen.findByRole("progressbar", { name: "Step" });
+  expect(progress.getAttribute("aria-valuemax")).toBe("4");
+
+  await record("Notion");
+
+  await screen.findByRole("heading", { name: "Connect your coding agent" });
+  expect(progress.getAttribute("aria-valuenow")).toBe("3");
+  expect(progress.getAttribute("aria-valuemax")).toBe("4");
+});
+
+test("skip leaves the model step behind with nothing connected", async () => {
+  const { posted, wired } = await atModel();
+
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+
+  await screen.findByRole("heading", { name: "Invite your team" });
+  expect(intents(posted.calls)).toEqual([toolingIntent("notion")]);
+  expect(
+    wired.calls.filter((url) => url.includes("openai") || url.includes("anthropic")),
+  ).toEqual([]);
 });
 
 test("the invite step opens on three boxes and grows one at a time", async () => {
@@ -759,6 +829,7 @@ test("the invite step opens on three boxes and grows one at a time", async () =>
   open({ ...lanes(posted) });
 
   await record("Notion");
+  await passModel();
 
   await screen.findByLabelText("Email 1");
   expect(screen.getByLabelText("Email 2")).toBeTruthy();
@@ -774,6 +845,7 @@ test("the first box takes the cursor as the step arrives", async () => {
   open({ ...lanes(posted) });
 
   await record("Notion");
+  await passModel();
 
   const first = await screen.findByLabelText("Email 1");
   await waitFor(() => expect(document.activeElement).toBe(first));
@@ -791,6 +863,7 @@ test("every address written is added on one press, and then iMessage is offered"
   });
 
   await record("Notion");
+  await passModel();
   await userEvent.type(await screen.findByLabelText("Email 1"), "sam@work.com");
   await userEvent.type(screen.getByLabelText("Email 3"), "alex@work.com");
   await userEvent.click(screen.getByRole("button", { name: "Invite" }));
@@ -818,6 +891,7 @@ test("skipping every invite offers iMessage before the chat opens", async () => 
   });
 
   await record("Notion");
+  await passModel();
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
 
   await screen.findByRole("heading", { name: "Use this agent in iMessage" });
@@ -842,6 +916,7 @@ test("a deploy without iMessage finishes when every invite is skipped", async ()
   );
 
   await record("Notion");
+  await passModel();
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
 
   await waitFor(() =>
@@ -870,6 +945,7 @@ test("the iMessage offer starts the phone claim through the intent lane", async 
   });
 
   await record("Notion");
+  await passModel();
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
   const connect = await screen.findByRole("button", { name: "Connect iMessage" });
   expect((connect as HTMLButtonElement).disabled).toBe(true);
@@ -940,6 +1016,7 @@ test("the pending iMessage step confirms once the phone proves its code", async 
     });
 
     await record("Notion");
+    await passModel();
     await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
     await userEvent.type(screen.getByLabelText("iMessage phone number"), "(559) 425-9991");
     await userEvent.click(await screen.findByRole("button", { name: "Connect iMessage" }));
@@ -988,6 +1065,7 @@ test("the pending iMessage step states the lapsed window when the claim expires"
   });
 
   await record("Notion");
+  await passModel();
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
   await userEvent.type(screen.getByLabelText("iMessage phone number"), "(559) 425-9991");
   await userEvent.click(await screen.findByRole("button", { name: "Connect iMessage" }));
@@ -1011,6 +1089,7 @@ test("the lapsed iMessage step mints another code from the same page", async () 
   });
 
   await record("Notion");
+  await passModel();
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
   await userEvent.type(screen.getByLabelText("iMessage phone number"), "(559) 425-9991");
   await userEvent.click(await screen.findByRole("button", { name: "Connect iMessage" }));
@@ -1037,6 +1116,7 @@ test("an invalid iMessage phone stays on the form with one instruction", async (
   open({ ...lanes(posted) });
 
   await record("Notion");
+  await passModel();
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
   await userEvent.type(screen.getByLabelText("iMessage phone number"), "425-9991");
   await userEvent.click(screen.getByRole("button", { name: "Connect iMessage" }));
@@ -1056,6 +1136,7 @@ test("an iMessage phone that states another country code is refused, not cut to 
   open({ ...lanes(posted) });
 
   await record("Notion");
+  await passModel();
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
   fireEvent.change(await screen.findByLabelText("iMessage phone number"), {
     target: { value: "+44 7911 123456" },
@@ -1080,6 +1161,7 @@ test("back from the iMessage offer returns to the invite fields", async () => {
   open({ ...lanes(posted) });
 
   await record("Notion");
+  await passModel();
   await userEvent.type(await screen.findByLabelText("Email 1"), "sam@work.com");
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
   await userEvent.click(await screen.findByRole("button", { name: "Back" }));
@@ -1095,6 +1177,7 @@ test("a refused invite states the refusal and adds nobody", async () => {
   open({ ...lanes(posted) });
 
   await record("Notion");
+  await passModel();
   await userEvent.type(await screen.findByLabelText("Email 1"), "teammate@work.com");
   await userEvent.click(screen.getByRole("button", { name: "Invite" }));
 
@@ -1121,6 +1204,7 @@ test("the last act says the picks and the question into the agent's new chat", a
   await userEvent.click(await screen.findByRole("button", { name: "Notion" }));
   await userEvent.click(screen.getByRole("button", { name: "Gmail" }));
   await userEvent.click(commit());
+  await passModel();
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
   await screen.findByRole("heading", { name: "Use this agent in iMessage" });
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
@@ -1151,6 +1235,7 @@ test("picking no connector records nothing and still sends the goal", async () =
 
   await chooseGoal("More revenue");
   await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  await passModel();
   await screen.findByRole("heading", { name: "Invite your team" });
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
   await screen.findByRole("heading", { name: "Use this agent in iMessage" });
@@ -1179,6 +1264,7 @@ test("free text becomes the initial prompt", async () => {
   await userEvent.type(context, "Reduce support response time.");
   await userEvent.click(commit());
   await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  await passModel();
   await screen.findByRole("heading", { name: "Invite your team" });
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
   await screen.findByRole("heading", { name: "Use this agent in iMessage" });
@@ -1202,4 +1288,43 @@ test("a refused record keeps the member on the first step and states the refusal
   expect(location.hash).toBe("#/first-run");
   expect(screen.queryByRole("heading", { name: "Invite your team" })).toBeNull();
   expect((screen.getByRole("button", { name: "Gmail" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+/** The step mounts the shared connect component: the run draws it, and the acts it offers come
+ *  from the component's own read rather than from anything this screen holds. The flow itself is
+ *  pinned in connectaccount.test.tsx, beside the component both this run and the settings panel
+ *  mount. */
+test("the model step draws the connect acts for both accounts", async () => {
+  await atModel();
+
+  expect(await screen.findByRole("button", { name: "Connect ChatGPT" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Connect Claude" })).toBeTruthy();
+  expect(
+    screen.getByText(
+      "Optionally connect your ChatGPT or Claude account to power the built-in UFO coding agent.",
+    ),
+  ).toBeTruthy();
+});
+
+test("opening an account holds the run, with every answer already written in it", async () => {
+  open(lanes(recorder()), ADMIN, NO_MODEL_KEY);
+
+  await chooseGoal("Faster product dev", "Ship the billing rewrite");
+  await userEvent.click(await screen.findByRole("button", { name: "Notion" }));
+  await userEvent.click(commit());
+  await screen.findByRole("heading", { name: "Connect your coding agent" });
+
+  await userEvent.click(await screen.findByRole("button", { name: "Connect ChatGPT" }));
+  await screen.findByRole("dialog");
+  await userEvent.keyboard("{Escape}");
+
+  expect(screen.getByRole("heading", { name: "Connect your coding agent" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect(
+    (await screen.findByRole("button", { name: "Notion" })).getAttribute("aria-pressed"),
+  ).toBe("true");
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  expect((await screen.findByLabelText("Add context")).getAttribute("value")).toBe(
+    "Ship the billing rewrite",
+  );
 });

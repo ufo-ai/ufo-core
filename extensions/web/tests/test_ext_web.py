@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import secrets
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, aclosing, contextmanager
 from dataclasses import dataclass, replace
@@ -11,7 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast, get_args
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, quote_plus, urljoin, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -62,8 +63,29 @@ from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT
 from ufo_ext_web import community as web_community
 from ufo_ext_web import panels as web_panels
 from ufo_ext_web import surface as web_surface
+from ufo_ext_web.anthropic_login import (
+    AUTHORIZE_URL as ANTHROPIC_AUTHORIZE_URL,
+)
+from ufo_ext_web.anthropic_login import (
+    CODE_FIELD as ANTHROPIC_CODE_FIELD,
+)
+from ufo_ext_web.anthropic_login import (
+    CODE_REFUSED as ANTHROPIC_CODE_REFUSED,
+)
+from ufo_ext_web.anthropic_login import (
+    STATE_COOKIE as ANTHROPIC_STATE_COOKIE,
+)
+from ufo_ext_web.anthropic_login import (
+    PendingAuthorization as AnthropicPending,
+)
 from ufo_ext_web.audience import AUDIENCE_PREFIX, EXTENSION_WEB, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
+from ufo_ext_web.openai_login import (
+    DEVICE_COOKIE,
+    DEVICE_UNAVAILABLE,
+    DeviceAuthorization,
+    DeviceClaim,
+)
 from ufo_ext_web.panels import (
     FIRST_RUN_PROVIDER_NAMES,
     FRAME_HEADER,
@@ -114,7 +136,17 @@ from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.flags import init_flags
 from ufo.harness.durability import replay_safe_client
-from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.catalog import (
+    ANTHROPIC_KEY_SLOT,
+    CORE_MODEL_SPECS,
+    CORE_PRICING,
+    OPENAI_KEY_SLOT,
+)
+from ufo.harness.models.grant import (
+    ANTHROPIC_CLIENT_ID_ENV,
+    Grant,
+    read_grant,
+)
 from ufo.harness.models.interface import (
     Message,
     ModelEvent,
@@ -151,6 +183,7 @@ from ufo.runtime.access.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
     CredentialStore,
+    member_slot,
     seal_credential_request,
 )
 from ufo.runtime.access.grants import (
@@ -1030,11 +1063,14 @@ async def _seed_workspace() -> tuple[UUID, UUID]:
     return workspace_id, agent_id
 
 
-async def _seed_member(workspace_id: UUID, email: str, *, admin: bool = False) -> tuple[UUID, str]:
+async def _seed_member(
+    workspace_id: UUID, email: str, *, admin: bool = False, openai_key: str | None = "sk-seeded"
+) -> tuple[UUID, str]:
     """Seed a member and mint the signed bearer the gateway or `ufoctl init` would — the value the
     `ufo_session` cookie carries; the web surface resolves the workspace and the member email from
     it. An admin reaches every agent; anyone else reaches the main agent plus the non-main agents
-    the web audience grants."""
+    the web audience grants. The member arrives holding the OpenAI key sign-in collects, which is
+    what the portal opens for; `openai_key=None` seeds the member who has not signed in yet."""
     member_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1046,6 +1082,10 @@ async def _seed_member(workspace_id: UUID, email: str, *, admin: bool = False) -
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
+        )
+    if openai_key is not None:
+        await CredentialStore(fernet=CREDENTIAL_FERNET).put(
+            workspace_id, member_slot(OPENAI_KEY_SLOT, member_id), openai_key
         )
     token = mint_token(TOKEN_SECRET, str(workspace_id), email, timedelta(hours=1))
     return member_id, token
@@ -3400,6 +3440,7 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     assert bare.status_code == 200
     payload = bare.json()
     assert payload["imessage"] is True
+    assert payload["model_key_held"] is True
     assert {"gmail", "notion", "linear", "slack", "github"} <= {
         tile["name"] for tile in payload["providers"]
     }
@@ -3449,7 +3490,13 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     }
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
-    assert set(payload) == {"providers", "connectors", "imessage", "actions"}
+    assert set(payload) == {
+        "providers",
+        "connectors",
+        "imessage",
+        "actions",
+        "model_key_held",
+    }
     assert [view["name"] for view in payload["actions"]["member"]] == ["add_member"]
 
 
@@ -6863,6 +6910,323 @@ async def test_the_portal_page_states_the_recording_configuration_of_its_deploy(
     assert json.loads(held[1]) == rum_config(RUM_DEPLOY)
 
 
+def _stub_openai(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    authorization: DeviceAuthorization | None,
+    claims: tuple[DeviceClaim, ...] = (),
+) -> None:
+    """OpenAI's auth server, scripted: what the ask is granted and what each poll answers in turn.
+    The surface constructs its own login object, so the stand-in is a class over this call's script
+    rather than an instance."""
+    pending = list(claims)
+
+    @dataclass(frozen=True)
+    class StubDeviceLogin:
+        client_id: str
+
+        async def request_code(self) -> DeviceAuthorization | None:
+            return authorization
+
+        async def claim(self, device_auth_id: str, user_code: str) -> DeviceClaim:
+            assert (device_auth_id, user_code) == ("auth-1", "HY0H-0FOKK")
+            return pending.pop(0)
+
+    monkeypatch.setattr(web_surface, "OpenAiDeviceLogin", StubDeviceLogin)
+
+
+def _authorization() -> DeviceAuthorization:
+    return DeviceAuthorization(
+        device_auth_id="auth-1",
+        user_code="HY0H-0FOKK",
+        verification_uri="https://auth.test/codex/device",
+        interval=1,
+    )
+
+
+async def test_the_portal_opens_for_a_member_who_connected_no_provider(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Connecting a provider is an onboarding step, not a toll gate: a member who skipped it reaches
+    the portal and everything in it that does not need their key. What skipping costs them is the
+    coding subagent, which is asserted where that gate lives — not here."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "skipper@example.com", openai_key=None)
+    _stub_openai(monkeypatch, authorization=_authorization())
+
+    opened = await client.get("/surface/web", headers={"cookie": f"{SESSION_COOKIE}={token}"})
+
+    assert opened.status_code == 200
+
+
+async def test_the_accounts_read_states_which_coding_account_the_member_holds(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """One row per provider, answered for the member who asked — the workspace's own key is not
+    theirs, and neither is another member's. The first run and the credentials screen both draw
+    these rows, so what a member is offered and what they are told they hold cannot disagree."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "rows@example.com", openai_key=None)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    store = CredentialStore(fernet=CREDENTIAL_FERNET)
+    await store.put(workspace_id, OPENAI_KEY_SLOT, "sk-workspace")
+
+    bare = await client.get("/surface/web/workspace/accounts", headers=cookie)
+
+    assert bare.status_code == 200
+    assert bare.json() == {
+        "accounts": [
+            {"provider": "openai", "label": "ChatGPT", "connected": False},
+            {"provider": "anthropic", "label": "Claude", "connected": False},
+        ]
+    }
+
+    await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-member")
+    held = await client.get("/surface/web/workspace/accounts", headers=cookie)
+    assert held.json()["accounts"][1] == {
+        "provider": "anthropic",
+        "label": "Claude",
+        "connected": True,
+    }
+
+
+async def test_disconnecting_drops_the_members_own_row_and_nothing_else(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A member who rotated or revoked an account comes back to replace it, so dropping theirs is
+    an act they hold. It reaches their row only: the workspace key an admin set stands."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "rotator@example.com", openai_key=None)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    store = CredentialStore(fernet=CREDENTIAL_FERNET)
+    await store.put(workspace_id, OPENAI_KEY_SLOT, "sk-workspace")
+    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member_id), "sk-member")
+
+    dropped = await client.post("/surface/web/accounts/openai/disconnect", headers=cookie)
+
+    assert dropped.status_code == 200
+    assert dropped.json() == {"status": "disconnected"}
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, member_slot(OPENAI_KEY_SLOT, member_id))
+    assert await store.get(workspace_id, OPENAI_KEY_SLOT) == "sk-workspace"
+
+    stray = await client.post("/surface/web/accounts/gemini/disconnect", headers=cookie)
+    assert stray.status_code == 404
+
+
+async def test_the_anthropic_ask_opens_an_authorization_the_member_pastes_back(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The member is sent to Anthropic carrying a PKCE challenge, and the verifier stays in an
+    HttpOnly cookie — the code they paste back is only spendable with it."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "grant@example.com", openai_key=None)
+    monkeypatch.setenv(ANTHROPIC_CLIENT_ID_ENV, "client-1")
+
+    opened = await client.post(
+        "/surface/web/anthropic/authorize", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+
+    assert opened.status_code == 200
+    url = opened.json()["url"]
+    assert url.startswith(ANTHROPIC_AUTHORIZE_URL)
+    assert quote_plus("client-1") in url
+    assert "code_challenge_method=S256" in url
+    state_cookie = opened.headers["set-cookie"]
+    assert state_cookie.startswith(f"{ANTHROPIC_STATE_COOKIE}=")
+    assert "HttpOnly" in state_cookie
+
+
+async def test_a_pasted_anthropic_code_lands_the_token_under_the_members_own_slot(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pasted code buys an access token, which is checked against Anthropic before it is
+    stored — and stored under the member who pasted it, never the workspace row."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "paster@example.com", openai_key=None)
+    monkeypatch.setenv(ANTHROPIC_CLIENT_ID_ENV, "client-1")
+    store = CredentialStore(fernet=CREDENTIAL_FERNET)
+
+    @dataclass(frozen=True)
+    class StubLogin:
+        client_id: str
+
+        def authorize(self) -> AnthropicPending:
+            return AnthropicPending(url="https://claude.test/authorize", cookie="state-1.verify-1")
+
+        async def claim(self, pasted: str, cookie: str) -> Grant | None:
+            assert cookie == "state-1.verify-1"
+            if pasted != "code-1#state-1":
+                return None
+            return Grant(
+                access="sk-ant-oat01-granted", refresh="r-1", expires_at=time.time() + 3600
+            )
+
+    async def anthropic_answers(credential: str) -> bool:
+        return credential == "sk-ant-oat01-granted"
+
+    monkeypatch.setattr(web_surface, "AnthropicCodeLogin", StubLogin)
+    monkeypatch.setattr(web_surface, "anthropic_verified_key", anthropic_answers)
+    waiting = {"cookie": f"{SESSION_COOKIE}={token}; {ANTHROPIC_STATE_COOKIE}=state-1.verify-1"}
+
+    refused = await client.post(
+        "/surface/web/anthropic/code", data={ANTHROPIC_CODE_FIELD: "wrong"}, headers=waiting
+    )
+    assert refused.status_code == 200
+    assert refused.json() == {"status": "refused", "message": ANTHROPIC_CODE_REFUSED}
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id))
+
+    taken = await client.post(
+        "/surface/web/anthropic/code",
+        data={ANTHROPIC_CODE_FIELD: "code-1#state-1"},
+        headers=waiting,
+    )
+    assert taken.json() == {"status": "connected"}
+    stored = read_grant(await store.get(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id)))
+    assert stored is not None
+    assert (stored.access, stored.refresh) == ("sk-ant-oat01-granted", "r-1")
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, ANTHROPIC_KEY_SLOT)
+
+
+async def test_the_device_ask_hands_back_the_code_and_keeps_the_grant_in_a_cookie(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The member types the short user code at OpenAI, so that crosses. The device auth id is the
+    handle that claims the grant, so it rides an HttpOnly cookie and never reaches the page."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "walker@example.com", openai_key=None)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    _stub_openai(monkeypatch, authorization=_authorization())
+
+    opened = await client.post("/surface/web/openai/device", headers=cookie)
+
+    assert opened.status_code == 200
+    assert opened.json() == {
+        "user_code": "HY0H-0FOKK",
+        "verification_uri": "https://auth.test/codex/device",
+        "interval": 1,
+    }
+    assert "auth-1" not in opened.text
+    device_cookie = opened.headers["set-cookie"]
+    assert device_cookie.startswith(f"{DEVICE_COOKIE}=auth-1.HY0H-0FOKK")
+    assert "HttpOnly" in device_cookie
+
+
+async def test_an_account_the_grant_is_refused_for_is_told_so_rather_than_left_waiting(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An account with device code authorization switched off gets no grant. The ask says so, and
+    sets no cookie — a poll behind a grant that was never opened would never end."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "blocked@example.com", openai_key=None)
+    _stub_openai(monkeypatch, authorization=None)
+
+    refused = await client.post(
+        "/surface/web/openai/device", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+
+    assert refused.status_code == 200
+    assert refused.json() == {"error": DEVICE_UNAVAILABLE}
+    assert "set-cookie" not in refused.headers
+
+
+async def test_the_poll_lands_the_key_when_the_member_approves_the_grant(
+    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each poll answers pending while the member is still at OpenAI, and connected once they
+    approved. The key lands under that member's own slot, never the workspace row."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "device@example.com", openai_key=None)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    _stub_openai(
+        monkeypatch,
+        authorization=_authorization(),
+        claims=(DeviceClaim(status="pending"), DeviceClaim(status="granted", key="sk-device")),
+    )
+    await client.post("/surface/web/openai/device", headers=cookie)
+    waiting = {"cookie": f"{SESSION_COOKIE}={token}; {DEVICE_COOKIE}=auth-1.HY0H-0FOKK"}
+    store = CredentialStore(fernet=CREDENTIAL_FERNET)
+
+    pending = await client.get("/surface/web/openai/device/poll", headers=waiting)
+    assert pending.json() == {"status": "pending"}
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, member_slot(OPENAI_KEY_SLOT, member_id))
+
+    granted = await client.get("/surface/web/openai/device/poll", headers=waiting)
+    assert granted.json() == {"status": "connected"}
+    assert await store.get(workspace_id, member_slot(OPENAI_KEY_SLOT, member_id)) == "sk-device"
+    with pytest.raises(CredentialSlotUnset):
+        await store.get(workspace_id, OPENAI_KEY_SLOT)
+
+
+async def test_a_poll_with_no_grant_behind_it_is_refused_rather_than_left_pending(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A poll only follows an ask. One arriving without the cookie that ask set has no grant to
+    claim, so it says so instead of holding the screen in a loop that cannot end."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "stray@example.com", openai_key=None)
+
+    stray = await client.get(
+        "/surface/web/openai/device/poll", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+
+    assert stray.json() == {"status": "refused", "message": DEVICE_UNAVAILABLE}
+
+
+async def test_a_connect_link_lands_on_the_screen_that_holds_the_accounts(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A connect link is handed around — in mail, in chat, as a bookmark — and the asking lives in
+    the portal, so the link takes the member to the screen that holds it. With no session it lands
+    on the deploy's one sign-in page, while a read still answers 401: a redirect would reach the
+    shell's fetch as a sign-in page where a payload belongs."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "linked@example.com", openai_key=None)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    for arrival in ("/surface/web/openai", "/surface/web/anthropic"):
+        landed = await client.get(arrival, headers=cookie)
+        assert landed.status_code == 303
+        assert landed.headers["location"] == "/surface/web#/workspace/credentials"
+
+        cold = await client.get(arrival)
+        assert cold.status_code == 303
+        assert cold.headers["location"] == "/login"
+
+    for refused in ("/surface/web/api/agents", "/surface/web/openai/device/poll"):
+        stranger = await client.get(refused)
+        assert stranger.status_code == 401
+
+
+async def test_the_first_run_states_whether_the_reading_member_holds_a_model_key(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The step that offers the doors reads the member, not the workspace: turns run on the key
+    stored under the member's own id, so an admin's workspace row leaves them holding none, and
+    either provider's slot answers for both doors."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "keyless@example.com", openai_key=None)
+    _other_id, other_token = await _seed_member(workspace_id, "keyed@example.com")
+    path = "/surface/web/workspace/first-run"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    store = CredentialStore(fernet=CREDENTIAL_FERNET)
+    await store.put(workspace_id, OPENAI_KEY_SLOT, "sk-workspace")
+
+    bare = await client.get(path, headers=cookie)
+    assert bare.status_code == 200
+    assert bare.json()["model_key_held"] is False
+
+    await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-member")
+    held = await client.get(path, headers=cookie)
+    assert held.json()["model_key_held"] is True
+
+    seeded = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={other_token}"})
+    assert seeded.json()["model_key_held"] is True
+
+
 INLINE_ASSET = "data:"
 URL_REFERENCE = re.compile(r"""url\((?:"([^"]*)"|'([^']*)'|([^)]*))\)""")
 
@@ -9386,7 +9750,11 @@ async def test_credential_fulfillment_refusals(
     assert garbage.status_code == 403
     async with workspace_tx() as connection:
         stored = (
-            await connection.execute(sa.select(sa.func.count()).select_from(tables.credential))
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.credential)
+                .where(tables.credential.c.slot == "api_key")
+            )
         ).scalar_one()
     assert stored == 0
 

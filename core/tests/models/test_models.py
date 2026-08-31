@@ -1,3 +1,5 @@
+import base64
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
@@ -23,7 +25,12 @@ from ufo.config import (
 )
 from ufo.harness.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
 from ufo.harness.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
-from ufo.harness.models.anthropic import AnthropicClient, anthropic_sdk_client
+from ufo.harness.models.anthropic import (
+    OAUTH_SYSTEM_PREFIX,
+    AnthropicClient,
+    anthropic_sdk_client,
+    is_oauth_credential,
+)
 from ufo.harness.models.catalog import core_model_specs
 from ufo.harness.models.interface import (
     IMAGE_OMITTED_TEXT,
@@ -47,15 +54,19 @@ from ufo.harness.models.interface import (
     omit_images,
     trim_images,
 )
-from ufo.harness.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
-from ufo.harness.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
 from ufo.harness.models.openai import (
+    CHATGPT_AUTH_CLAIM,
+    CODEX_ACCOUNT_HEADER,
+    CODEX_STREAM_ACCEPT,
     OpenAIClient,
+    chatgpt_account_id,
     openai_messages,
     openai_sdk_client,
     responses_input,
     responses_request,
 )
+from ufo.harness.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
+from ufo.harness.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
 from ufo.harness.models.pricing import ModelPrice
 from ufo.harness.models.registry import model_registry
 from ufo.harness.models.spec import ModelSpec, ReasoningSupport
@@ -399,6 +410,133 @@ async def test_anthropic_caches_tools_system_and_growing_conversation(ttl: str) 
     tools = create.kwargs["tools"]
     assert "cache_control" not in tools[0]
     assert tools[1]["cache_control"] == system_cache
+
+
+async def test_an_oauth_credential_leads_with_the_system_block_it_is_granted_under() -> None:
+    """A member's Anthropic OAuth token is granted for Claude Code, and the API answers a request
+    from it only when that identity leads the system blocks — measured: without it the same token
+    is refused, with it the agent's own prompt rides as the second block and is not lost. An API
+    key carries no such block, so a workspace running on one is unchanged."""
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    async for _ in AnthropicClient(
+        client=anthropic_sdk(create), spec=ANTHROPIC_SPEC, oauth=True
+    ).complete(REQUEST):
+        pass
+
+    assert create.kwargs["system"] == [
+        {"type": "text", "text": OAUTH_SYSTEM_PREFIX},
+        {"type": "text", "text": "be terse", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+    ]
+
+
+async def test_an_api_key_carries_no_oauth_system_block() -> None:
+    create = CapturingCreate(
+        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
+    )
+    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
+        REQUEST
+    ):
+        pass
+
+    assert create.kwargs["system"] == [
+        {"type": "text", "text": "be terse", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    ]
+
+
+def test_the_credential_shape_decides_how_a_client_authenticates() -> None:
+    """One slot carries whichever the member connected, so the prefix is what routes a token to the
+    bearer wire and a key to `x-api-key`."""
+    assert is_oauth_credential("sk-ant-oat01-abc")
+    assert not is_oauth_credential("sk-ant-api03-abc")
+
+
+CHATGPT_ACCOUNT = "acct-8f2"
+
+
+def chatgpt_token(claims: object) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"eyJhbGciOiJub25lIn0.{payload}.signature"
+
+
+CHATGPT_TOKEN = chatgpt_token({CHATGPT_AUTH_CLAIM: {"chatgpt_account_id": CHATGPT_ACCOUNT}})
+
+
+def core_openai_spec() -> ModelSpec:
+    specs = core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+    return next(spec for spec in specs if spec.id == "gpt-5.5")
+
+
+def test_a_chatgpt_account_token_is_served_by_the_codex_backend() -> None:
+    """A member who signs in with OpenAI holds a ChatGPT account token, not a platform key, and
+    api.openai.com refuses it. The token names the account it was issued for, so one slot carries
+    whichever the member connected and that claim routes the client to the backend that answers for
+    it, under the account, originator and beta headers that backend requires."""
+    spec = core_openai_spec()
+    client = spec.client(spec, CHATGPT_TOKEN)
+    assert isinstance(client, OpenAIClient)
+    assert client.codex
+    assert str(client.client.base_url) == "https://chatgpt.com/backend-api/codex/"
+    assert client.client.auth_headers == {"Authorization": f"Bearer {CHATGPT_TOKEN}"}
+    headers = client.client.default_headers
+    assert CODEX_ACCOUNT_HEADER == "chatgpt-account-id"
+    assert CHATGPT_AUTH_CLAIM == "https://api.openai.com/auth"
+    assert headers["chatgpt-account-id"] == CHATGPT_ACCOUNT
+    assert headers["Accept"] == "text/event-stream"
+    assert CODEX_STREAM_ACCEPT == "text/event-stream"
+    assert headers["originator"] == "ufo"
+    assert headers["OpenAI-Beta"] == "responses=experimental"
+
+
+def test_a_platform_api_key_still_reaches_openai_bare() -> None:
+    """The slot holds either credential, so the key path has to be untouched by the token path: the
+    same host, the same bearer, and none of the Codex headers."""
+    spec = core_openai_spec()
+    client = spec.client(spec, "sk-proj-abc")
+    assert isinstance(client, OpenAIClient)
+    assert not client.codex
+    assert str(client.client.base_url) == "https://api.openai.com/v1/"
+    assert client.client.auth_headers == {"Authorization": "Bearer sk-proj-abc"}
+    headers = client.client.default_headers
+    assert "chatgpt-account-id" not in headers
+    assert headers["Accept"] == "application/json"
+    assert "originator" not in headers
+    assert "OpenAI-Beta" not in headers
+
+
+async def test_the_codex_backend_is_called_on_responses_whatever_the_spec_declares() -> None:
+    """That backend serves `/responses` alone. Which host a member's credential reaches is not a
+    fact any model's spec can carry — the same spec serves both — so a codex client calls the
+    Responses surface for a chat-surface model rather than a 404 the turn cannot read."""
+    chat = CapturingCreate(([openai_text("ok"), openai_usage(prompt=1, completion=1)], None))
+    responses = CapturingCreate(RuntimeError("codex responses surface"))
+    sdk = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=chat)),
+        responses=SimpleNamespace(create=responses),
+    )
+    assert OPENAI_SPEC.api_surface == "chat"
+    with pytest.raises(RuntimeError, match="codex responses surface"):
+        async for _ in OpenAIClient(client=sdk, spec=OPENAI_SPEC, codex=True).complete(REQUEST):
+            pass
+    assert chat.calls == 0
+    assert responses.calls == 1
+
+
+def test_the_account_claim_is_what_separates_a_token_from_a_key() -> None:
+    """A platform key is not a JWT, and a JWT naming no account is not one the Codex backend will
+    serve — both take the api.openai.com wire rather than a Codex request missing its account."""
+    assert chatgpt_account_id(CHATGPT_TOKEN) == CHATGPT_ACCOUNT
+    for refused in (
+        "sk-proj-abc",
+        "header.payload.signature",
+        chatgpt_token({}),
+        chatgpt_token([CHATGPT_AUTH_CLAIM]),
+        chatgpt_token({CHATGPT_AUTH_CLAIM: "acct-8f2"}),
+        chatgpt_token({CHATGPT_AUTH_CLAIM: {}}),
+        chatgpt_token({CHATGPT_AUTH_CLAIM: {"chatgpt_account_id": ""}}),
+    ):
+        assert chatgpt_account_id(refused) is None
 
 
 async def test_openai_request_carries_image_url_and_lifts_tool_result_images() -> None:

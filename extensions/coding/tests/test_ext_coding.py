@@ -274,26 +274,33 @@ def test_coding_profile_raises_the_round_budget() -> None:
 def test_the_escalation_profile_reuses_the_coding_contract_and_raises_only_the_model() -> None:
     """The last rung is the coding child on a stronger model: same tools, same round budget, same
     payload and result schema, its own prompt. A caller escalates by naming the target, so any other
-    difference here would be a second contract to keep in step with the first."""
+    difference here would be a second contract to keep in step with the first.
+
+    The two rungs pick their model differently and that is the difference: coding runs on the
+    account the member connected, so it names one model per provider, and falls to its own pin only
+    where no account can be connected; escalation is the deploy's own rung and has no other."""
     coding_profile, escalation = coding.manifest().subagents
     assert escalation.name == coding.FABLE_ESCALATION_PROFILE_NAME == "fable_escalation"
     assert escalation.tool_names == coding_profile.tool_names
     assert escalation.input_model is coding_profile.input_model
     assert escalation.output_model is coding_profile.output_model
     assert escalation.max_rounds == coding_profile.max_rounds
-    assert coding_profile.model == coding.CODING_MODEL == "anthropic.claude-opus-5"
+    assert coding_profile.model == coding.CODING_MODEL
+    assert coding_profile.own_key_models == coding.CODING_MODELS
     assert escalation.model == coding.FABLE_ESCALATION_MODEL == "anthropic/claude-fable-5"
+    assert not escalation.own_key_models
     assert escalation.prompt == coding.FABLE_ESCALATION_PROMPT != coding_profile.prompt
 
 
 def test_the_coding_profile_models_are_registered() -> None:
-    """Nothing checks a pinned id at boot, so an id no `ModelSpec` describes first fails inside the
-    child's own dispatch. Core's catalog alone is not that check: this rung runs on a provider an
-    extension registers, and asserting against the core table would pass only by adding the id to a
-    table core does not serve it from. The union every turn resolves through is the check."""
+    """Nothing checks a named id at boot, so an id no `ModelSpec` describes first fails inside the
+    child's own dispatch. Core's catalog alone is not that check: the escalation rung runs on a
+    provider an extension registers, and asserting against the core table would pass only by adding
+    the id to a table core does not serve it from. The union every turn resolves through is the
+    check, and it covers every model the coding rung can be routed to as well as the pinned one."""
     served = {spec.id for spec in CORE_MODEL_SPECS}
     served |= {spec.id for manifest in load_manifests() for spec in manifest.models}
-    assert coding.CODING_MODEL in served
+    assert set(coding.CODING_MODELS.values()) <= served
     assert coding.FABLE_ESCALATION_MODEL in served
 
 

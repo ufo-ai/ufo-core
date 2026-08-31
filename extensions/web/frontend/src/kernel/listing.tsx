@@ -73,6 +73,10 @@ type Presentation<Row> =
 export type ListingSpec<Payload, Row> = {
   read: string;
   note?: string;
+  /** What the screen draws above its table, for a page whose subject is not only its rows. It sits
+   *  under the bar and carries no heading of its own, so the groups below stay the page's only
+   *  headings and a reader meets the rows where every other listing puts them. */
+  lead?: ReactNode;
   rows: (payload: Payload) => Row[];
   rowKey: (row: Row) => string;
   empty: string;
@@ -162,6 +166,7 @@ export function Listing<Payload, Row>({
     <>
       <OutcomeNotice state={notice} />
       {search ? <PageToolbar /> : null}
+      {spec.lead}
       <Section
         note={spec.note}
         bar={

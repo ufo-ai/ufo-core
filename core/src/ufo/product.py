@@ -28,6 +28,7 @@ import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.harness.o11y import emit_metric
+from ufo.runtime.access.credentials import MEMBER_SLOT_INFIX
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION
@@ -121,7 +122,10 @@ async def product_census() -> None:
         )
         .distinct(),
         sa.select(sa.literal(CREDENTIAL_KIND), tables.credential.c.slot)
-        .where(tables.credential.c.workspace_id == workspace_id)
+        .where(
+            tables.credential.c.workspace_id == workspace_id,
+            ~tables.credential.c.slot.contains(MEMBER_SLOT_INFIX),
+        )
         .distinct(),
         sa.select(sa.literal(CONNECTOR_KIND), tables.connection.c.provider)
         .select_from(
