@@ -12,10 +12,12 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from ufo.db import owner_tx, workspace_tx
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT
 from ufo.onboard.onboard_control import (
     CROSS_WORKSPACE_READ,
     SIGNUP_GRANT_MICRO_USD,
@@ -25,9 +27,10 @@ from ufo.onboard.onboard_control import (
     agent_prompt,
 )
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.billing.balance import read_balance
 from ufo.runtime.seats import create_member, signup_workspace_id
-from ufo.runtime.workspace import ws
+from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 
@@ -146,6 +149,55 @@ async def test_seat_grants_the_signup_balance_once(onboard_client: AsyncClient) 
             after_join = await read_balance(connection, workspace_id)
     assert after_join is not None
     assert after_join.granted_micro_usd == SIGNUP_GRANT_MICRO_USD, "the grant is once per founding"
+
+
+async def test_seat_stores_a_member_model_key_where_the_connect_flow_does(
+    onboard_client: AsyncClient,
+) -> None:
+    """The seed lands in `member_slot(slot, member_id)` — the exact row the browser connect flow
+    writes — so `member_holds_own_model_key`, the predicate the coding subagent's spawn gate reads,
+    holds for the seated member. A provider no member slot serves is refused before any write."""
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    try:
+        workspace_id = signup_workspace_id("acme.com")
+        async with onboard_client as client:
+            seated = await client.post(
+                "/internal/onboard/seat",
+                json={
+                    "workspace_id": str(workspace_id),
+                    "domain": "acme.com",
+                    "email": "founder@acme.com",
+                    "signup_subject": "acme.com",
+                    "model_key": {"provider": "anthropic", "key": "sk-ant-seeded"},
+                },
+            )
+            refused = await client.post(
+                "/internal/onboard/seat",
+                json={
+                    "workspace_id": str(workspace_id),
+                    "domain": "acme.com",
+                    "email": "teammate@acme.com",
+                    "signup_subject": "acme.com",
+                    "model_key": {"provider": "openrouter", "key": "sk-or-unserved"},
+                },
+            )
+        assert seated.status_code == 200
+        assert refused.status_code == 422
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                member_id = (
+                    await connection.execute(
+                        sa.select(tables.member.c.id).where(
+                            tables.member.c.workspace_id == workspace_id
+                        )
+                    )
+                ).scalar_one()
+            stored = await store.get(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id))
+            assert stored == "sk-ant-seeded"
+            assert await ws_current().member_holds_own_model_key(member_id)
+    finally:
+        init_workspace_credentials(None)
 
 
 async def test_seat_refuses_a_workspace_its_domain_no_longer_names(

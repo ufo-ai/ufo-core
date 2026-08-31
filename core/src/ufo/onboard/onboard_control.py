@@ -28,16 +28,17 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.dialects.postgresql import insert
 
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.o11y import warn
 from ufo.harness.untrusted import wall
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.runtime.access.credentials import member_slot
 from ufo.runtime.billing.balance import credit, set_reserve
 from ufo.runtime.seats import create_member, email_domain, signup_workspace_id, workspace_subject
-from ufo.runtime.workspace import ws
+from ufo.runtime.workspace import MEMBER_ROUTED_SLOTS, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
 
@@ -106,6 +107,25 @@ class SignupProfile(BaseModel):
     goals: str
 
 
+class MemberModelKey(BaseModel):
+    """One member's own model-provider credential, stored at seat time in the exact slot the
+    connect flow writes — what an operator-provisioned workspace (a hosted eval run) supplies so
+    the seated member holds their own key without a browser sign-in."""
+
+    provider: str
+    key: str = Field(min_length=1)
+
+    @field_validator("provider")
+    @classmethod
+    def _served(cls, provider: str) -> str:
+        if provider not in MEMBER_ROUTED_SLOTS.values():
+            raise ValueError(f"provider must be one of {sorted(MEMBER_ROUTED_SLOTS.values())}")
+        return provider
+
+    def slot(self) -> str:
+        return next(slot for slot, served in MEMBER_ROUTED_SLOTS.items() if served == self.provider)
+
+
 class SeatRequest(BaseModel):
     workspace_id: UUID
     # Optional because the verified address already carries it, and because the two images either
@@ -121,6 +141,7 @@ class SeatRequest(BaseModel):
     # `ufo_control.fill_signup_subject` applies to the rows that same pod writes.
     signup_subject: str | None = None
     profile: SignupProfile | None = None
+    model_key: MemberModelKey | None = None
 
 
 class EnsuredWorkspace(BaseModel):
@@ -293,7 +314,8 @@ class OnboardControl:
         """Create the workspace this verified signup subject names, or join one already there, and
         seat the member either way. What the intake form collected opens the main agent's prompt,
         so the agent knows who it works for from its first turn instead of asking for what this
-        customer already told us."""
+        customer already told us. A `model_key` lands in the seated member's own credential slot —
+        the row the connect flow writes — once the seat has committed."""
         member, _, signup_subject = _verified_signup(
             request.email, request.domain, request.signup_subject
         )
@@ -375,6 +397,10 @@ class OnboardControl:
                         sa.select(tables.member.c.is_admin).where(tables.member.c.id == member_id)
                     )
                 ).scalar_one()
+            if request.model_key is not None:
+                await ws_current().put_credential(
+                    member_slot(request.model_key.slot(), member_id), request.model_key.key
+                )
         return EnsuredWorkspace(
             workspace_id=str(workspace_id), admin=admin, founding=first_email is None
         )

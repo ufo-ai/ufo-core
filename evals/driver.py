@@ -33,13 +33,16 @@ from evals.harness.capability import UndeliveredRound, WorkspaceFile
 from evals.harness.timing import TurnStep
 from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.models.catalog import ANTHROPIC_KEY_ENV, CORE_PRICING, OPENAI_KEY_ENV
+from ufo.harness.models.interface import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
 from ufo.harness.models.pricing import Pricing
 from ufo.host.environment import store_environment_document, store_environment_file
 from ufo.onboard.onboard_control import (
     EnsuredWorkspace,
+    MemberModelKey,
     SeatRequest,
 )
+from ufo.runtime.access.credentials import deploy_env
 from ufo.runtime.auth.bearer import mint_token
 from ufo.runtime.engine import DispatchResult, StreamResult
 from ufo.runtime.ext.context import Trajectory
@@ -176,13 +179,31 @@ class RemoteRuntimeLog:
         )
 
 
+RUNNER_KEY_ENVS = ((PROVIDER_ANTHROPIC, ANTHROPIC_KEY_ENV), (PROVIDER_OPENAI, OPENAI_KEY_ENV))
+
+
+def runner_model_key() -> MemberModelKey | None:
+    """The member model-key seed a fresh remote workspace gets: the first provider key the runner's
+    environment holds, in the provider order the gate reads. None when it holds neither, and the
+    workspace is seated without one — a coding-profile spawn then refuses exactly as it would for a
+    member who never connected an account."""
+    for provider, env in RUNNER_KEY_ENVS:
+        key = deploy_env(env)
+        if key:
+            return MemberModelKey(provider=provider, key=key)
+    return None
+
+
 @dataclass(frozen=True)
 class RemoteWorkspaceProvisioner:
     client: AsyncClient
     budget_micro_usd: int
+    model_key: MemberModelKey | None = None
 
     async def provision(self, run_id: UUID) -> UUID:
-        """Found one clean hosted workspace whose identity is derived from the eval run."""
+        """Found one clean hosted workspace whose identity is derived from the eval run. The seat
+        carries `model_key` so the seated member holds their own provider account and a profile
+        gated on one (the coding subagent) spawns for them."""
         domain = f"{run_id.hex}.{REMOTE_EVAL_DOMAIN}"
         workspace_id = signup_workspace_id(domain)
         request = SeatRequest(
@@ -190,6 +211,7 @@ class RemoteWorkspaceProvisioner:
             domain=domain,
             email=f"swebench@{domain}",
             signup_subject=domain,
+            model_key=self.model_key,
         )
         response = await self.client.post(
             "/internal/onboard/seat",

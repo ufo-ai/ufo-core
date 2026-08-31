@@ -52,6 +52,7 @@ from evals.driver import (
     RemoteWorkspaceProvisioner,
     WorkspaceDriver,
     resolve_workspace_and_agent,
+    runner_model_key,
     seed_candidate_agent,
 )
 from evals.dsqa_100.runner import DSQA100Run, load_dsqa_100
@@ -1014,7 +1015,7 @@ async def _run(
                     )
                 )
                 workspace_id = await RemoteWorkspaceProvisioner(
-                    onboard, budget_micro_usd
+                    onboard, budget_micro_usd, runner_model_key()
                 ).provision(recorder.id)
             profile = None
             if agent_name.startswith("profile:"):

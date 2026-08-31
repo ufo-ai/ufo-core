@@ -31,7 +31,8 @@ from aiobotocore.session import get_session
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from dbos import error as dbos_error
-from httpx import AsyncClient, MockTransport, Request, Response
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient, MockTransport, Request, Response
 from ufo_ext_coding.manifest import CODING_PROFILE
 from ufo_ext_coding.manifest import manifest as coding_manifest
 from ufo_ext_sites.application_builder import (
@@ -65,6 +66,7 @@ from evals.driver import (
     RemoteWorkspaceProvisioner,
     WorkspaceDriver,
     resolve_workspace_and_agent,
+    runner_model_key,
     seed_candidate_agent,
 )
 from evals.driver import (
@@ -225,7 +227,7 @@ from ufo.config import (
     DatabaseConfig,
 )
 from ufo.db import workspace_tx
-from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, CORE_PRICING
 from ufo.harness.models.interface import (
     MAX_IMAGE_BYTES_PER_REQUEST,
     PROVIDER_ANTHROPIC,
@@ -247,11 +249,13 @@ from ufo.harness.models.interface import (
 from ufo.harness.models.pricing import ModelPrice, pricing_from
 from ufo.harness.models.registry import ModelRegistry
 from ufo.host.ext.loader import load_manifests, skill_registry
+from ufo.onboard.onboard_control import MemberModelKey, OnboardControl
 from ufo.runtime.access.credentials import (
     CredentialRequests,
     CredentialSlotUnset,
     CredentialStore,
     install_credential_requests,
+    member_slot,
     open_installation,
     seal_installation,
 )
@@ -282,7 +286,7 @@ from ufo.runtime.turns.transcript import (
     encode,
     transcript_key,
 )
-from ufo.runtime.workspace import init_workspace_credentials, ws
+from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_SANDBOX_SIZE,
@@ -7599,6 +7603,7 @@ async def test_remote_workspace_provisioner_reserves_the_run_budget(
                 "email": f"swebench@{domain}",
                 "signup_subject": domain,
                 "profile": None,
+                "model_key": None,
             },
             "Bearer control-token",
         )
@@ -7726,6 +7731,61 @@ async def test_remote_workspace_provisioner_rejects_a_non_founding_response(
     ) as client:
         with pytest.raises(RuntimeError, match="did not create the expected admin workspace"):
             await RemoteWorkspaceProvisioner(client, 20_000_000).provision(run_id)
+
+
+def test_runner_model_key_reads_the_first_provider_key_the_env_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "UFO_ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "UFO_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert runner_model_key() is None
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-runner")
+    assert runner_model_key() == MemberModelKey(provider="openai", key="sk-openai-runner")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-runner")
+    assert runner_model_key() == MemberModelKey(provider="anthropic", key="sk-ant-runner")
+
+
+async def test_the_provisioned_member_holds_their_own_model_key(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Producer to consumer: the provisioner seeds the key the runner's env holds through the real
+    seat route, and the seated member satisfies `member_holds_own_model_key` — the predicate the
+    coding subagent's own-account spawn gate reads."""
+    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ant-eval-seed")
+    run_id = UUID("99999999-8888-7777-6666-555555555555")
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    app = FastAPI()
+    app.include_router(OnboardControl(control_token="control-token").router())
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://control",
+            headers={"authorization": "Bearer control-token"},
+        ) as client:
+            workspace_id = await RemoteWorkspaceProvisioner(
+                client, budget_micro_usd=20_000_000, model_key=runner_model_key()
+            ).provision(run_id)
+
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                member_id = (
+                    await connection.execute(
+                        sa.select(tables.member.c.id).where(
+                            tables.member.c.workspace_id == workspace_id
+                        )
+                    )
+                ).scalar_one()
+            stored = await store.get(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id))
+            assert stored == "sk-ant-eval-seed"
+            assert await ws_current().member_holds_own_model_key(member_id)
+    finally:
+        init_workspace_credentials(None)
 
 
 async def test_remote_workspace_driver_uses_the_ufo_json_transport(
@@ -9759,9 +9819,12 @@ async def test_fresh_workspace_is_provisioned_before_agent_resolution(
         events.append("validated")
 
     class Provisioner:
-        def __init__(self, client: AsyncClient, budget_micro_usd: int) -> None:
+        def __init__(
+            self, client: AsyncClient, budget_micro_usd: int, model_key: MemberModelKey | None
+        ) -> None:
             assert client.headers["authorization"] == "Bearer onboard-token"
             assert budget_micro_usd == 20_000_000
+            assert model_key == runner_model_key()
 
         async def provision(self, run_id: UUID) -> UUID:
             assert events == ["validated"]
