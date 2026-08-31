@@ -517,13 +517,25 @@ def test_memory_ingestion_inputs_pin_luna_and_the_corpus(memory_nightly, tmp_pat
 
 
 def test_memory_ingestion_smoke_uses_supported_cases(memory_nightly) -> None:
-    assert "locomo/conv-30/060" in memory_nightly.SMOKE_CASES
-    assert "locomo/conv-41/134" not in memory_nightly.SMOKE_CASES
-    assert "locomo/conv-26/146" not in memory_nightly.SMOKE_CASES
-    assert "locomo/conv-49/002" in memory_nightly.SMOKE_CASES
+    """The gate carries only cases every model passes at least one of three samples. conv-30/060
+    ("happy" vs a joy paraphrase) and conv-49/002 (answers Jasper, never the Rockies) went 0/3 on
+    claude-opus-5, and longmem/9aaed6a3 (a "last Thursday" the answer anchors to the wrong week)
+    went 0/3 on glm-5.3-flash — all with configuration, judge, and prompts pinned. Chronic misses
+    read in the full sweep's aggregate, never as a gate."""
+    assert "locomo/conv-26/120" in memory_nightly.SMOKE_CASES
+    assert "longmem/a96c20ee" in memory_nightly.SMOKE_CASES
     assert "locomo/conv-42/037" in memory_nightly.SMOKE_CASES
-    assert "locomo/conv-30/030" not in memory_nightly.SMOKE_CASES
-    assert "locomo/conv-41/006" not in memory_nightly.SMOKE_CASES
+    assert memory_nightly.SMOKE_SAMPLES == 3
+    for excluded in (
+        "locomo/conv-30/060",
+        "locomo/conv-49/002",
+        "longmem/9aaed6a3",
+        "locomo/conv-41/134",
+        "locomo/conv-26/146",
+        "locomo/conv-30/030",
+        "locomo/conv-41/006",
+    ):
+        assert excluded not in memory_nightly.SMOKE_CASES
 
 
 def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly) -> None:

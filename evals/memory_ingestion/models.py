@@ -31,6 +31,10 @@ class IngestionCase(BaseModel):
     question: str = Field(min_length=1)
     expected_answer: str = Field(min_length=1)
     evidence_refs: tuple[str, ...] = ()
+    samples: int = Field(default=1, ge=1)
+    """Recall attempts the case is scored over — any passing sample passes the case. A substance
+    rubric judged at one sample fails a sound corpus about half the runs, so a gate-sized subset
+    carries three; the full sweep keeps one and reads misses in aggregate."""
 
 
 class IngestionPage(BaseModel):

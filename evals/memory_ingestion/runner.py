@@ -85,6 +85,7 @@ def load_memory_ingestion(snapshot_root: Path, readiness_path: Path) -> MemoryIn
                 answer_spans_artifacts=True,
                 member_key=readiness.asker_email,
                 shared_audience=True,
+                samples=case.samples,
             )
         )
     tasks = tuple(

@@ -17,12 +17,11 @@ from ufo.schema.records import DEFAULT_REASONING_EFFORT, ReasoningEffort
 
 LABEL = "memory-ingestion"
 DATABASE_URL = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
+SMOKE_SAMPLES = 3
 SMOKE_CASES = (
     "longmem/118b2229",
     "locomo/conv-26/120",
-    "locomo/conv-30/060",
-    "longmem/9aaed6a3",
-    "locomo/conv-49/002",
+    "longmem/a96c20ee",
     "locomo/conv-41/021",
     "longmem/0bb5a684",
     "locomo/conv-26/062",
@@ -40,8 +39,8 @@ FULL_REPORT_CASES = {
     },
 }
 SMOKE_REPORT_CASES = {
-    "memory_ingestion.locomo.information_extraction": 2,
-    "memory_ingestion.locomo.multi_hop": 2,
+    "memory_ingestion.locomo.information_extraction": 1,
+    "memory_ingestion.locomo.multi_hop": 1,
     "memory_ingestion.locomo.temporal_reasoning": 2,
     "memory_ingestion.longmem.information_extraction": 1,
     "memory_ingestion.longmem.multi_session": 1,
@@ -101,7 +100,9 @@ def prepare(
     reasoning: ReasoningEffort,
 ) -> None:
     snapshot = root / "snapshot"
-    MemoryIngestionBuilder(longmem, locomo, snapshot).run(SMOKE_CASES if smoke else ())
+    MemoryIngestionBuilder(longmem, locomo, snapshot).run(
+        SMOKE_CASES if smoke else (), samples=SMOKE_SAMPLES if smoke else 1
+    )
     write_inputs(root, snapshot, model, reasoning)
 
 

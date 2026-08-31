@@ -241,9 +241,23 @@ def test_builder_matches_memory_100_and_builds_deterministic_locomo_cases(
     assert {path.name: path.read_bytes() for path in output.iterdir()} == {
         path.name: path.read_bytes() for path in second.iterdir()
     }
+    assert all(case.samples == 1 for case in snapshot.cases)
+    smoke_ids = tuple(sorted(case.id for case in snapshot.cases))[:3]
+    smoke_output = tmp_path / "smoke"
+    MemoryIngestionBuilder(
+        longmem,
+        locomo,
+        smoke_output,
+        longmem_asset=longmem_asset,
+        locomo_asset=locomo_asset,
+        notices_file=notices,
+    ).run(smoke_ids, samples=3)
+    smoke_snapshot = load_snapshot(smoke_output)
+    assert {case.id for case in smoke_snapshot.cases} == set(smoke_ids)
+    assert all(case.samples == 3 for case in smoke_snapshot.cases)
 
 
-def _snapshot(root: Path) -> None:
+def _snapshot(root: Path, samples: int = 1) -> None:
     body = "The project codename is Polaris and it remains active for the launch."
     write_snapshot(
         root,
@@ -257,6 +271,7 @@ def _snapshot(root: Path) -> None:
                 question="What is the project codename?",
                 expected_answer="Polaris",
                 evidence_refs=("longmem/polaris/session/answer",),
+                samples=samples,
             ),
         ),
         pages=(
@@ -350,6 +365,16 @@ async def test_runner_requires_derived_evidence_from_recall_or_search(tmp_path: 
     readiness_path.write_text(readiness.model_dump_json())
 
     run = load_memory_ingestion(snapshot_root, readiness_path)
+    sampled_root = tmp_path / "sampled"
+    _snapshot(sampled_root, samples=3)
+    sampled_readiness = tmp_path / "sampled-readiness.json"
+    sampled_readiness.write_text(
+        readiness.model_copy(
+            update={"snapshot_digest": load_snapshot(sampled_root).manifest.digest}
+        ).model_dump_json()
+    )
+    sampled = load_memory_ingestion(sampled_root, sampled_readiness)
+    assert sampled.tasks[0].digest != run.tasks[0].digest
     grader = MemoryIngestionGrader(
         (ExpectedDerivedEvidence("longmem/polaris/session/answer", frozenset({memory_id})),)
     )

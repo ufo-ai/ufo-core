@@ -91,8 +91,9 @@ class MemoryIngestionBuilder:
     selection_file: Path = SELECTION_FILE
     notices_file: Path = THIRD_PARTY_NOTICES_FILE
 
-    def run(self, case_ids: tuple[str, ...] = ()) -> IngestionManifest:
-        """Build the deterministic 100-case corpus or an exact named subset."""
+    def run(self, case_ids: tuple[str, ...] = (), samples: int = 1) -> IngestionManifest:
+        """Build the deterministic 100-case corpus or an exact named subset, each case scored over
+        `samples` recall attempts."""
         verify_asset(self.longmem, self.longmem_asset)
         verify_asset(self.locomo, self.locomo_asset)
         selection = Selection.model_validate_json(self.selection_file.read_bytes()).longmem
@@ -110,6 +111,8 @@ class MemoryIngestionBuilder:
             cases = tuple(case for case in cases if case.id in requested)
             evidence = {ref for case in cases for ref in case.evidence_refs}
             pages = tuple(page for page in pages if page.evidence_ref in evidence)
+        if samples != 1:
+            cases = tuple(case.model_copy(update={"samples": samples}) for case in cases)
         manifest = write_snapshot(
             self.output,
             upstreams=(self.longmem_asset, self.locomo_asset),
