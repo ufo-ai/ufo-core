@@ -5,6 +5,8 @@ from uuid import uuid4
 
 import pytest
 
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.harness.auth.token_signing import sign_token
 from ufo.harness.sandbox.ingress_token import (
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,
@@ -15,8 +17,6 @@ from ufo.harness.sandbox.ingress_token import (
     mint_ingress_token,
     verify_ingress_token,
 )
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.runtime.auth.token_signing import sign_token
 
 
 def _claims(exp_offset: int = 900) -> IngressClaims:

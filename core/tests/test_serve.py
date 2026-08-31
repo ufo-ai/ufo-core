@@ -24,13 +24,13 @@ from ufo.config import (
     SandboxConfig,
 )
 from ufo.db import dispose_db, init_db, workspace_tx
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.models.catalog import CORE_PRICING
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import EGRESS_CA_CERT_ENV, RunTokenCodec
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_rules import InjectionRule, ScopeRule
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget, Manifest
 from ufo.runtime.ext.surface import SurfaceSpec
 

@@ -15,7 +15,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import turn_tools
-from ufo.runtime.kinds.workspace_kind import WORKSPACE_KIND, WORKSPACE_OBJECT
+from ufo.host.kinds.workspace_kind import WORKSPACE_KIND, WORKSPACE_OBJECT
 from ufo.runtime.objects import UnknownObject, VerbNotSupported
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.tools.registry import ToolDef

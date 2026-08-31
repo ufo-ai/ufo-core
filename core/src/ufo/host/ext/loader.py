@@ -31,12 +31,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ufo.blob import WorkspaceBlobStore
 from ufo.harness.o11y import log
-from ufo.host.tools.builtins import BUILTIN_ACTIONS, BUILTIN_TOOLS
-from ufo.runtime.access.connectors import CliCredential
-from ufo.runtime.access.credentials import CredentialStore, HostChoice
-from ufo.runtime.access.grants import ConnectionRecorded
-from ufo.runtime.ext.context import ExtensionContext, context_for
-from ufo.runtime.ext.extension_kind import (
+from ufo.host.ext.extension_kind import (
     EXTENSION_DESCRIPTION,
     EXTENSION_GUIDANCE,
     EXTENSION_KIND,
@@ -44,6 +39,30 @@ from ufo.runtime.ext.extension_kind import (
     ExtensionSpec,
     named_extensions,
 )
+from ufo.host.kinds.artifacts import artifact_object
+from ufo.host.kinds.conversations import CONVERSATION_OBJECT
+from ufo.host.kinds.credential_kind import (
+    CREDENTIAL_DESCRIPTION,
+    CREDENTIAL_GUIDANCE,
+    CREDENTIAL_KIND,
+    CredentialObjects,
+    CredentialSpec,
+)
+from ufo.host.kinds.members import MEMBER_OBJECT
+from ufo.host.kinds.surface_kind import (
+    SURFACE_DESCRIPTION,
+    SURFACE_GUIDANCE,
+    SURFACE_KIND,
+    SurfaceObjects,
+    SurfaceObjectSpec,
+    registered_surfaces,
+)
+from ufo.host.kinds.workspace_kind import WORKSPACE_OBJECT
+from ufo.host.tools.builtins import BUILTIN_ACTIONS, BUILTIN_TOOLS
+from ufo.runtime.access.connectors import CliCredential
+from ufo.runtime.access.credentials import CredentialStore, HostChoice
+from ufo.runtime.access.grants import ConnectionRecorded
+from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.hooks import (
     CONNECTION_RECORDED,
     HOOK_TIMEOUT_SECONDS,
@@ -66,25 +85,6 @@ from ufo.runtime.ext.manifest import (
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.agents import AGENT_OBJECT
-from ufo.runtime.kinds.artifacts import artifact_object
-from ufo.runtime.kinds.conversations import CONVERSATION_OBJECT
-from ufo.runtime.kinds.credential_kind import (
-    CREDENTIAL_DESCRIPTION,
-    CREDENTIAL_GUIDANCE,
-    CREDENTIAL_KIND,
-    CredentialObjects,
-    CredentialSpec,
-)
-from ufo.runtime.kinds.members import MEMBER_OBJECT
-from ufo.runtime.kinds.surface_kind import (
-    SURFACE_DESCRIPTION,
-    SURFACE_GUIDANCE,
-    SURFACE_KIND,
-    SurfaceObjects,
-    SurfaceObjectSpec,
-    registered_surfaces,
-)
-from ufo.runtime.kinds.workspace_kind import WORKSPACE_OBJECT
 from ufo.runtime.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.runtime.object_views import frame_admissible_ids
 from ufo.runtime.objects import (

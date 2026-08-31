@@ -4,7 +4,7 @@ these accounting value objects — the same sums `ufoctl spend` prints.
 `ufo.sdk` is a package of thin re-export modules with an empty `__init__.py`, so the public
 surface lives in named modules like this one."""
 
-from ufo.runtime.billing.accounting import (
+from ufo.harness.models.pricing import (
     MICRO_USD_PER_USD as MICRO_USD_PER_USD,
 )
 from ufo.runtime.billing.accounting import (

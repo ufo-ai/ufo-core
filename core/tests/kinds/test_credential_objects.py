@@ -18,9 +18,9 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import load_manifests, turn_tools
+from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget, Manifest
-from ufo.runtime.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.runtime.objects import AdminRequired, VerbNotSupported
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.tools.registry import ToolDef

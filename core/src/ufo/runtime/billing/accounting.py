@@ -13,7 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.harness.models.catalog import CORE_PRICING
-from ufo.harness.models.pricing import Pricing
+from ufo.harness.models.pricing import MICRO_USD_PER_USD, Pricing
 from ufo.runtime.billing.balance import (
     _forget_absent_balance,
     balance_refusal_message,
@@ -23,8 +23,6 @@ from ufo.runtime.billing.balance import (
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.schema import tables
 from ufo.schema.records import TurnStatus, Usage, ledger_id_for
-
-MICRO_USD_PER_USD = 1_000_000
 
 TOKENS_DIMENSION = "tokens"
 EGRESS_DIMENSION = "egress"

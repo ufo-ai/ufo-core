@@ -33,8 +33,8 @@ from ufo_ext_skill_create.manifest import SKILL_OBJECT
 from ufo_ext_sources.pages import PAGE_OBJECT
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
-import ufo.runtime.kinds.artifacts as artifacts
-import ufo.runtime.kinds.conversations as conversations
+import ufo.host.kinds.artifacts as artifacts
+import ufo.host.kinds.conversations as conversations
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.models.catalog import core_model_specs
@@ -49,6 +49,15 @@ from ufo.harness.sandbox.session import (
     SandboxSpec,
 )
 from ufo.host.ext.loader import load_manifests, turn_tools, validate_ext_tools
+from ufo.host.kinds.artifacts import (
+    ARTIFACT_KIND,
+    ArtifactObjects,
+    artifact_object,
+    artifact_object_names,
+)
+from ufo.host.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
+from ufo.host.kinds.credential_kind import CredentialObjects
+from ufo.host.kinds.members import MEMBER_OBJECT
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ExtensionContext, JsonValue, context_for
@@ -65,15 +74,6 @@ from ufo.runtime.kinds.agents import (
     AgentObjects,
     AgentSpec,
 )
-from ufo.runtime.kinds.artifacts import (
-    ARTIFACT_KIND,
-    ArtifactObjects,
-    artifact_object,
-    artifact_object_names,
-)
-from ufo.runtime.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
-from ufo.runtime.kinds.credential_kind import CredentialObjects
-from ufo.runtime.kinds.members import MEMBER_OBJECT
 from ufo.runtime.media.artifact_url import verify_artifact_url
 from ufo.runtime.object_name import (
     OBJECT_NAME_MAX_LENGTH,

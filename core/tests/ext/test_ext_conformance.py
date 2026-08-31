@@ -47,6 +47,7 @@ from ufo.config import (
     TerminalConfig,
 )
 from ufo.db import workspace_tx
+from ufo.harness.auth.bearer import mint_token
 from ufo.harness.models.interface import Message, ModelRequest, TextDelta
 from ufo.harness.models.registry import model_registry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -79,7 +80,6 @@ from ufo.runtime.access.connectors import UnknownBrokerTool
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.auth.bearer import mint_token
 from ufo.runtime.ext.context import (
     ConversationProbes,
     ExtensionContext,

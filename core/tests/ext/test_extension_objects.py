@@ -17,9 +17,9 @@ from cryptography.fernet import Fernet
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.extension_kind import EXTENSION_KIND, ExtensionObjects, named_extensions
 from ufo.host.ext.loader import core_object_kinds, load_manifests, turn_tools
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.ext.extension_kind import EXTENSION_KIND, ExtensionObjects, named_extensions
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest
 from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH, InvalidName
 from ufo.runtime.objects import UnknownObject, VerbNotSupported

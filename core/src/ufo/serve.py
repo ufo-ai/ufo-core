@@ -50,6 +50,8 @@ from ufo.db import (
     verify_db_reachable,
 )
 from ufo.flags import init_flags
+from ufo.harness.auth.bearer import JOIN_PATH, LOGIN_PATH, LOGOUT_PATH
+from ufo.harness.document_renderer import DocumentRenderer
 from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.harness.models.catalog_skill import model_catalog_skill
 from ufo.harness.models.interface import AUTO_MODEL
@@ -117,7 +119,6 @@ from ufo.runtime.access.egress_rules import (
     derive_manifest_rules,
 )
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
-from ufo.runtime.auth.bearer import JOIN_PATH, LOGIN_PATH, LOGOUT_PATH
 from ufo.runtime.billing.balance import billing_screen_url
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import ConversationProbes, CredentialAccess, ModelAccess
@@ -159,7 +160,6 @@ from ufo.runtime.jobs import (
     bindings_from,
     core_jobs,
 )
-from ufo.runtime.media.document_renderer import DocumentRenderer
 from ufo.runtime.media.preview_renderer import (
     PREVIEW_SERVICE_URL_ENV,
     PREVIEW_TOKEN_ENV,

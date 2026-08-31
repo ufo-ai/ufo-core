@@ -4,29 +4,29 @@ internals.
 `ufo.sdk` is a package of thin re-export modules with an empty `__init__.py` (the gate bans
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
+from ufo.host.kinds.artifacts import (
+    ARTIFACT_KIND as ARTIFACT_KIND,
+)
+from ufo.host.kinds.conversations import (
+    CONVERSATION_KIND as CONVERSATION_KIND,
+)
+from ufo.host.kinds.credential_kind import (
+    CREDENTIAL_KIND as CREDENTIAL_KIND,
+)
+from ufo.host.kinds.members import (
+    MEMBER_KIND as MEMBER_KIND,
+)
+from ufo.host.kinds.surface_kind import (
+    SURFACE_KIND as SURFACE_KIND,
+)
+from ufo.host.kinds.workspace_kind import (
+    WORKSPACE_KIND as WORKSPACE_KIND,
+)
 from ufo.runtime.kinds.agents import (
     AGENT_KIND as AGENT_KIND,
 )
 from ufo.runtime.kinds.agents import (
     AgentSpec as AgentSpec,
-)
-from ufo.runtime.kinds.artifacts import (
-    ARTIFACT_KIND as ARTIFACT_KIND,
-)
-from ufo.runtime.kinds.conversations import (
-    CONVERSATION_KIND as CONVERSATION_KIND,
-)
-from ufo.runtime.kinds.credential_kind import (
-    CREDENTIAL_KIND as CREDENTIAL_KIND,
-)
-from ufo.runtime.kinds.members import (
-    MEMBER_KIND as MEMBER_KIND,
-)
-from ufo.runtime.kinds.surface_kind import (
-    SURFACE_KIND as SURFACE_KIND,
-)
-from ufo.runtime.kinds.workspace_kind import (
-    WORKSPACE_KIND as WORKSPACE_KIND,
 )
 from ufo.runtime.object_name import (
     ObjectRef as ObjectRef,

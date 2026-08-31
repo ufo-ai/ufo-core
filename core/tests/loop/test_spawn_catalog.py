@@ -15,14 +15,14 @@ from ufo.db import workspace_tx
 from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
 from ufo.harness.models.interface import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
 from ufo.host.ext.loader import skill_registry
-from ufo.runtime.access.credentials import CredentialStore, member_slot
-from ufo.runtime.ext.manifest import SubagentProfile
-from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
-from ufo.runtime.spawn_catalog import (
+from ufo.host.spawn_catalog import (
     SPAWN_CATALOG_DESCRIPTION,
     SPAWN_CATALOG_SKILL_NAME,
     spawn_catalog_skill,
 )
+from ufo.runtime.access.credentials import CredentialStore, member_slot
+from ufo.runtime.ext.manifest import SubagentProfile
+from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.tools.context import SPAWN_CONNECT_PATH, SpawnNeedsOwnModelKey
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current

@@ -30,7 +30,7 @@ from typing import cast
 from urllib.parse import quote
 from uuid import UUID
 
-from ufo.runtime.auth.token_signing import sign_detached, verify_detached
+from ufo.harness.auth.token_signing import sign_detached, verify_detached
 from ufo.runtime.media.image_previews import (
     IMAGE_PREVIEW_MAX_BYTES,
     RASTER_IMAGE_SUFFIXES,

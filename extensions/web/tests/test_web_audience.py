@@ -32,12 +32,12 @@ from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.host.kinds.conversations import CONVERSATION_KIND
+from ufo.host.kinds.members import MEMBER_KIND
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.surface import SurfaceContext
 from ufo.runtime.hub import InProcessHub
-from ufo.runtime.kinds.conversations import CONVERSATION_KIND
-from ufo.runtime.kinds.members import MEMBER_KIND
 from ufo.runtime.object_scope import ObjectActionTarget, ObjectAgent
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.surfaces.hub_tail import HubTailer

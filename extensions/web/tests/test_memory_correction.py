@@ -42,6 +42,7 @@ from ufo_testsupport.surfaces import (
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
+from ufo.harness.auth.bearer import mint_token
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
@@ -58,7 +59,6 @@ from ufo.host.ext.loader import (
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.auth.bearer import mint_token
 from ufo.runtime.ext.context import ScopedStore, context_for
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.indexing import TextChunker

@@ -5,7 +5,7 @@ import httpx
 from PIL import Image
 
 from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.runtime.media.site_previewer import SitePreviewer
 from ufo.runtime.workspace import ws
 

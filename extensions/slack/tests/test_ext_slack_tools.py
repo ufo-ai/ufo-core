@@ -54,6 +54,7 @@ from ufo.harness.models.interface import (
 )
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import skill_registry, turn_hooks, turn_tools
+from ufo.host.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
@@ -65,7 +66,6 @@ from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import TurnEngine
 from ufo.runtime.ext.context import ExtensionContext
 from ufo.runtime.hub import InProcessHub
-from ufo.runtime.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.prompts.render import rendered_prompt
 from ufo.runtime.queue import _agent_actions, _agent_tools, _with_action_verbs
 from ufo.runtime.tools.context import SpawnResult, ToolContext

@@ -45,6 +45,7 @@ from ufo import bundle, cli
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config, DatabaseConfig, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
+from ufo.harness.auth.bearer import mint_token
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
@@ -57,7 +58,6 @@ from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
-from ufo.runtime.auth.bearer import mint_token
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.schema import tables

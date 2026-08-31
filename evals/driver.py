@@ -34,6 +34,7 @@ from evals.harness.capability import UndeliveredRound, WorkspaceFile
 from evals.harness.timing import TurnStep
 from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.harness.auth.bearer import mint_token
 from ufo.harness.models.catalog import ANTHROPIC_KEY_ENV, CORE_PRICING, OPENAI_KEY_ENV
 from ufo.harness.models.interface import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
 from ufo.harness.models.pricing import Pricing
@@ -44,7 +45,6 @@ from ufo.onboard.onboard_control import (
     SeatRequest,
 )
 from ufo.runtime.access.credentials import deploy_env
-from ufo.runtime.auth.bearer import mint_token
 from ufo.runtime.engine import DispatchResult, StreamResult
 from ufo.runtime.ext.context import Trajectory
 from ufo.runtime.kinds.governance import prompt_digest

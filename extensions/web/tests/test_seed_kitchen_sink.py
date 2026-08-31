@@ -24,6 +24,7 @@ from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY, no_member_skills
 from ufo.blob import BlobNotFound, FilesystemBlobStore
 from ufo.cli import _seed_target
 from ufo.db import workspace_tx
+from ufo.harness.auth.bearer import mint_token
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
@@ -35,7 +36,6 @@ from ufo.onboard.seed import (
     KitchenSink,
 )
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.auth.bearer import mint_token
 from ufo.runtime.ext.context import ScopedStore
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.turns.audience import conversation_audience

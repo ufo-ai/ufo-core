@@ -129,12 +129,13 @@ from ufo_testsupport.surfaces import (
 )
 
 import ufo.db
-import ufo.runtime.kinds.conversations as conversations_kind
+import ufo.host.kinds.conversations as conversations_kind
 import ufo.runtime.objects as objects_module
 from ufo.blob import FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.flags import SERVED_FALSE, SERVED_TRUE, init_flags
+from ufo.harness.auth.bearer import mint_token
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.catalog import (
     ANTHROPIC_KEY_SLOT,
@@ -171,6 +172,7 @@ from ufo.host.ext.loader import (
     member_skill_listing,
     skill_registry,
 )
+from ufo.host.kinds.members import ADD_MEMBER_GATE
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import (
     CatalogEntry,
@@ -194,7 +196,6 @@ from ufo.runtime.access.grants import (
     install_connect_flow,
 )
 from ufo.runtime.agent_scope import agent as bind_agent
-from ufo.runtime.auth.bearer import mint_token
 from ufo.runtime.billing.accounting import record_egress_request, record_turn_usage
 from ufo.runtime.engine import FINISH_PROMPT
 from ufo.runtime.ext.context import ScopedStore, context_for
@@ -219,7 +220,6 @@ from ufo.runtime.hub import (
     SubagentActivity,
     Terminal,
 )
-from ufo.runtime.kinds.members import ADD_MEMBER_GATE
 from ufo.runtime.media.image_previews import IMAGE_PREVIEW_MAX_BYTES
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.objects import OBJECT_LIST_PAGE

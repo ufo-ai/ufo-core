@@ -20,7 +20,7 @@ flowchart TD
 | Layer | Question | Mechanism | Home |
 |---|---|---|---|
 | Tenancy | which workspace | `ws()` / `agent()` contextvars + Postgres RLS + blob key prefix | `core/src/ufo/runtime/workspace.py`, `db.py`, `blob.py`, `servers/control/src/rls.rs` |
-| Identity | which human | `surface_identity` row + HMAC bearer (`ufo_session` cookie / CLI token) | `core/src/ufo/runtime/ext/surface.py`, `core/src/ufo/runtime/auth/bearer.py` |
+| Identity | which human | `surface_identity` row + HMAC bearer (`ufo_session` cookie / CLI token) | `core/src/ufo/runtime/ext/surface.py`, `core/src/ufo/harness/auth/bearer.py` |
 | Admission | may this turn start | membership, agent-binding assertion, seat gate, spend preflight | `core/src/ufo/runtime/surfaces/admission.py`, `core/src/ufo/runtime/seats.py` |
 | Authority | who does this act speak for | `speaker_member_id` per message, `on_behalf_of_member_id` for background work, `requested_by` per tool call | `core/src/ufo/runtime/engine.py`, `tools/context.py` |
 | Grants | which external capability | `connector_grant`, `source_grant`, `credential`, web-audience grant, agent tool set | `core/src/ufo/runtime/access/grants.py`, `credentials.py` |

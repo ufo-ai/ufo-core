@@ -108,6 +108,7 @@ from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.harness import containment
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.ingress_host import site_label
@@ -121,7 +122,6 @@ from ufo.harness.sandbox.ingress_token import (
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ExecResult, ProxyEndpoint
 from ufo.host.ext.loader import member_object_registry, turn_tools
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
 from ufo.runtime.hub import InProcessHub

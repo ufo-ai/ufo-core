@@ -42,13 +42,13 @@ from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSand
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import RUNTIME_DIRNAME, ProxyEndpoint
 from ufo.host.ext.loader import turn_tools
+from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.runtime.access.credentials import CredentialStore, credential_object_name, named_slots
 from ufo.runtime.access.grants import GrantStore, account_object_name
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import JsonValue, context_for
 from ufo.runtime.ext.manifest import declared_slots
 from ufo.runtime.ext.surface import _binding_fields
-from ufo.runtime.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.runtime.objects import UnknownObject
 from ufo.runtime.sources.sync import SyncDriver
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker

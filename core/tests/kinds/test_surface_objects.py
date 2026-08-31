@@ -11,9 +11,9 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import core_object_kinds, turn_tools
+from ufo.host.kinds.surface_kind import SURFACE_KIND, SurfaceObjects, registered_surfaces
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.ext.surface import SurfaceSpec
-from ufo.runtime.kinds.surface_kind import SURFACE_KIND, SurfaceObjects, registered_surfaces
 from ufo.runtime.object_name import InvalidName
 from ufo.runtime.objects import ObjectListQuery, UnknownObject, VerbNotSupported
 from ufo.runtime.tools.context import SpawnResult, ToolContext

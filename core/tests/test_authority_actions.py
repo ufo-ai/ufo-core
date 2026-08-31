@@ -9,10 +9,10 @@ from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import Sandbox
 from ufo.host.ext.loader import turn_tools
+from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
+from ufo.host.kinds.members import MEMBER_KIND
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.kinds.agents import AGENT_KIND, RestoreApplication, RestoreApplicationInput
-from ufo.runtime.kinds.credential_kind import CREDENTIAL_KIND
-from ufo.runtime.kinds.members import MEMBER_KIND
 from ufo.runtime.object_scope import ObjectActionTarget
 from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext
 from ufo.runtime.turns.audience import conversation_audience

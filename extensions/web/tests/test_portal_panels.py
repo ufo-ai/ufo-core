@@ -49,6 +49,7 @@ from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
+from ufo.harness.auth.bearer import mint_token
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
@@ -60,7 +61,6 @@ from ufo.host.ext.loader import (
 )
 from ufo.runtime.access.credentials import CredentialStore, credential_object_name
 from ufo.runtime.agent_scope import agent as bind_agent
-from ufo.runtime.auth.bearer import mint_token
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.indexing import TextChunker

@@ -26,7 +26,7 @@ from evals.terminal_bench.run import (
 from evals.terminal_bench.setup import UPSTREAM_FILE, load_upstream
 from ufo.config import BlobConfig, Config, ConnectConfig, DatabaseConfig
 from ufo.db import workspace_tx
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, verified_claims
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, verified_claims
 from ufo.schema import tables
 
 TOKEN = "ufo-bearer-4d0f2c8a1b6e"

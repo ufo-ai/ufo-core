@@ -169,8 +169,10 @@ from evals.wandr.runner import (
 from ufo.blob import S3BlobStore, WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.catalog_skill import model_catalog_skill
+from ufo.harness.models.pricing import MICRO_USD_PER_USD
 from ufo.harness.models.registry import ModelRegistry, model_registry
 from ufo.host.ext.loader import (
     embed_backend,
@@ -179,6 +181,7 @@ from ufo.host.ext.loader import (
     skill_registry,
     turn_subagents,
 )
+from ufo.host.spawn_catalog import spawn_catalog_skill
 from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV
 from ufo.runtime.access.credentials import (
     CredentialRequests,
@@ -186,14 +189,11 @@ from ufo.runtime.access.credentials import (
     install_credential_requests,
 )
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.runtime.billing.accounting import MICRO_USD_PER_USD
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.kinds.agent_setup import setup_skill
 from ufo.runtime.kinds.governance import prompt_digest
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
 from ufo.runtime.prompts.render import render_system_prompt
-from ufo.runtime.spawn_catalog import spawn_catalog_skill
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.workspace import init_workspace_credentials, ws

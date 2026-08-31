@@ -14,7 +14,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import turn_tools
-from ufo.runtime.kinds.members import ADD_MEMBER_TOOL_DEF, MEMBER_KIND
+from ufo.host.kinds.members import ADD_MEMBER_TOOL_DEF, MEMBER_KIND
 from ufo.runtime.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, create_member
 from ufo.runtime.surfaces.admission import Admission

@@ -73,8 +73,8 @@ from evals.harness.registry import narrowed_tasks
 from evals.harness.viewer import EvalRun, write_viewer
 from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
+from ufo.harness.models.pricing import MICRO_USD_PER_USD
 from ufo.harness.sandbox.client_binary import CLIENT_BINARY_NAME
-from ufo.runtime.billing.accounting import MICRO_USD_PER_USD
 from ufo.schema.records import ReasoningEffort
 
 CONTROL_ARM = "control"

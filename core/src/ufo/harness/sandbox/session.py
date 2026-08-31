@@ -24,10 +24,10 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import ufo.harness.containment as containment_module
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.harness.auth.token_signing import SignedTokenError, sign_token, verify_token
 from ufo.harness.containment import ContainmentError, contained_relative
 from ufo.harness.sandbox.protocol import SandboxCommands, SandboxFileOperations
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.runtime.auth.token_signing import SignedTokenError, sign_token, verify_token
 
 WORKSPACE_DIR = "/workspace"
 WORKSPACE_WRITE_MODE = 0o644

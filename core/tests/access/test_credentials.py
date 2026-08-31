@@ -20,6 +20,7 @@ from ufo.harness.models.grant import Grant, read_grant
 from ufo.harness.models.pricing import Pricing
 from ufo.harness.models.registry import ModelRegistry
 from ufo.host.ext.loader import injecting_slots
+from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.product import PRODUCT_ATTACH_METRIC, product_census
 from ufo.runtime import workspace as workspace_module
 from ufo.runtime.access.connectors import CliCredential
@@ -57,7 +58,6 @@ from ufo.runtime.ext.manifest import (
     InjectionTarget,
     Manifest,
 )
-from ufo.runtime.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.runtime.seats import create_member
 from ufo.runtime.workspace import init_workspace_credentials, speaker, ws, ws_current
 from ufo.schema import tables

@@ -21,7 +21,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.runtime.auth.bearer import LOGIN_PATH, SESSION_COOKIE, verified_claims
+from ufo.harness.auth.bearer import LOGIN_PATH, SESSION_COOKIE, verified_claims
 from ufo.runtime.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
     ArtifactClaims,

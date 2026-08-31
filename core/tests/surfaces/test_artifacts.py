@@ -14,8 +14,8 @@ from PIL import Image
 
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.runtime.auth.bearer import LOGIN_PATH, SESSION_COOKIE, UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.runtime.auth.token_signing import sign_detached
+from ufo.harness.auth.bearer import LOGIN_PATH, SESSION_COOKIE, UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.harness.auth.token_signing import sign_detached
 from ufo.runtime.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
     ARTIFACT_MEDIA_TYPES,

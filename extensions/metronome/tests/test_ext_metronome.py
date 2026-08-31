@@ -26,11 +26,12 @@ from cryptography.fernet import Fernet
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.harness.models.registry import ModelRegistry, model_registry
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import turn_tools
+from ufo.host.kinds.workspace_kind import WORKSPACE_KIND
 from ufo.runtime.access.credentials import CredentialRequests, CredentialStore
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.runtime.billing.accounting import (
     record_egress_request,
     record_sandbox_tokens,
@@ -50,7 +51,6 @@ from ufo.runtime.billing.balance import (
 )
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.jobs import JobRunner, bindings_from
-from ufo.runtime.kinds.workspace_kind import WORKSPACE_KIND
 from ufo.runtime.surfaces.admission import Admission
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.tools.registry import ToolDef

@@ -25,6 +25,7 @@ from websockets.typing import Origin, Subprotocol
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import dispose_db, workspace_tx
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.sandbox import ingress_serve
 from ufo.harness.sandbox.ingress_host import serve_port, shipped_anchor, site_label
 from ufo.harness.sandbox.ingress_serve import (
@@ -72,7 +73,6 @@ from ufo.harness.sandbox.session import (
     SandboxSpec,
     SandboxUnreachable,
 )
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.runtime.ext.manifest import CarrierSpec
 from ufo.schema import tables
 

@@ -38,6 +38,7 @@ from ufo.host.ext.loader import (
     turn_member_skills,
     turn_tools,
 )
+from ufo.host.spawn_catalog import spawn_catalog_skill
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import ExtensionContext
@@ -74,7 +75,6 @@ from ufo.runtime.skills.runtime import (
     parse_skill_content,
 )
 from ufo.runtime.skills.selection import MemberVisibility, member_visibility
-from ufo.runtime.spawn_catalog import spawn_catalog_skill
 from ufo.runtime.subagents import FINISH_CONTRACT, subagent_system_prompt
 from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ToolDef, ToolRegistry

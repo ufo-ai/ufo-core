@@ -31,6 +31,7 @@ from ufo_testsupport.surfaces import (
 import ufo.runtime.ext.surface as surface_module
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.containment import ContainmentError
 from ufo.harness.models.interface import (
     Message,
@@ -65,7 +66,6 @@ from ufo.runtime.access.credentials import (
     open_credential_request,
     seal_credential_request,
 )
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.runtime.engine import INJECTED_CONTEXT, _context_tag
 from ufo.runtime.ext.surface import (
     CONVERSATION_TITLE_CHARS,

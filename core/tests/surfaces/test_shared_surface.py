@@ -19,12 +19,12 @@ from ufo_testsupport.surfaces import (
 from ufo.blob import blob_store_for
 from ufo.config import BlobConfig
 from ufo.db import current_workspace, workspace_tx
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.ingress_host import parse_site_label
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.host.ext.loader import load_manifests
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.ext.surface import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
 from ufo.runtime.hub import InProcessHub

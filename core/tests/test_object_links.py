@@ -31,10 +31,10 @@ from ufo_ext_sources.tools import SOURCE_OBJECT
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import Message, ToolUseBlock
+from ufo.host.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.kinds.agents import AGENT_KIND, AGENT_OBJECT
-from ufo.runtime.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.objects import (
     BoundKind,

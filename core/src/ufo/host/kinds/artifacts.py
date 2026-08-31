@@ -29,8 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
+from ufo.host.kinds.conversations import CONVERSATION_KIND
 from ufo.runtime.ext.context import ExtensionContext, JsonValue
-from ufo.runtime.kinds.conversations import CONVERSATION_KIND
 from ufo.runtime.media.artifact_url import (
     artifact_url_expiry,
     mint_artifact_url,

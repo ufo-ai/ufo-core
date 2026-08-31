@@ -40,9 +40,11 @@ from ufo.db import (
     owner_tx,
     workspace_tx,
 )
+from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.harness.containment import contained_file
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.interface import TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.harness.models.pricing import MICRO_USD_PER_USD
 from ufo.harness.sandbox.ingress_serve import run as ingress_run
 from ufo.host.ext.loader import load_manifests, lockfile_path
 from ufo.host.ext.store import ExtensionStore, read_catalog
@@ -51,7 +53,6 @@ from ufo.onboard.seed import KitchenSink
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.grants import GrantSummary, workspace_grant_summaries
-from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.runtime.billing.accounting import SpendReport, SpendRollup
 from ufo.runtime.billing.balance import Balance, credit, read_balance, set_reserve
 from ufo.runtime.ext.surface import TurnStep
@@ -74,7 +75,6 @@ PORTAL_REACH_TIMEOUT_SECONDS = 5.0
 HANDOFF_PATH_BYTES = 24
 REASONING_EFFORTS = ("auto", "off", "low", "medium", "high")
 LOOPBACK = "127.0.0.1"
-MICRO_USD_PER_USD = 1_000_000
 CLI_TOKEN_TTL = timedelta(days=3650)
 DEFAULT_CONFIG = """\
 [database]

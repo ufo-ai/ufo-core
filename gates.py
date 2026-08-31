@@ -46,7 +46,7 @@ ROLE_PACKAGES = (
     "ufo.runtime.profiles",
     "ufo.runtime.queue",
     "ufo.runtime.runtime_instance",
-    "ufo.runtime.spawn_catalog",
+    "ufo.host.spawn_catalog",
     "ufo.runtime.steps",
     "ufo.runtime.subagents",
     "ufo.runtime.tool_bridge",

@@ -58,6 +58,7 @@ from ufo.harness.sandbox.conversation import (
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.host.ext.loader import turn_hooks, turn_tools
+from ufo.host.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.access.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
@@ -97,7 +98,6 @@ from ufo.runtime.hub import (
     Terminal,
     TextDelta,
 )
-from ufo.runtime.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.media.artifact_url import verify_artifact_url
 from ufo.runtime.queue import _load_turn
 from ufo.runtime.seats import UNRESOLVED_SPEAKER_MESSAGE

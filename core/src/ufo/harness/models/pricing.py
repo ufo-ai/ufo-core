@@ -9,6 +9,7 @@ from ufo.harness.o11y import log
 from ufo.schema.records import Usage
 
 TOKENS_PER_MTOK = 1_000_000
+MICRO_USD_PER_USD = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)

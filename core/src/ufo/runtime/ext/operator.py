@@ -25,7 +25,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, field_validator
 
 from ufo.db import owner_tx, workspace_tx
-from ufo.runtime.auth.bearer import LOGIN_PATH, verified_claims
+from ufo.harness.auth.bearer import LOGIN_PATH, verified_claims
 from ufo.runtime.ext.surface import OPERATOR_EMAIL_DOMAIN, SurfaceAuth, SurfaceContext
 from ufo.runtime.seats import email_domain, workspace_by_domain, workspace_domain
 from ufo.runtime.workspace import ws

@@ -58,11 +58,11 @@ from ufo.harness.sandbox.session import (
     shell_path,
     workspace_path,
 )
+from ufo.host.kinds.artifacts import artifact_object_names
+from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
+from ufo.host.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.runtime.access.grants import installed_connect_flow
 from ufo.runtime.kinds.agents import RESTORE_APPLICATION_TOOL_DEF
-from ufo.runtime.kinds.artifacts import artifact_object_names
-from ufo.runtime.kinds.credential_kind import CREDENTIAL_KIND
-from ufo.runtime.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.runtime.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
     artifact_media_type,

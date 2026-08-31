@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from ufo.db import workspace_tx
 from ufo.harness.containment import PathNotFound, configured_root, contained_dir
+from ufo.harness.document_renderer import DocumentRenderer
 from ufo.harness.o11y import warn
 from ufo.harness.sandbox.session import (
     SANDBOX_GID,
@@ -51,7 +52,6 @@ from ufo.harness.sandbox.terminal import (
     Terminals,
     TerminalTransport,
 )
-from ufo.runtime.media.document_renderer import DocumentRenderer
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 

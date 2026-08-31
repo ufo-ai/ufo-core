@@ -78,6 +78,7 @@ from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSand
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.host.ext.loader import turn_tools
+from ufo.host.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import ScopedStore, context_for
@@ -89,7 +90,6 @@ from ufo.runtime.ext.surface import (
     member_message_text,
 )
 from ufo.runtime.hub import InProcessHub
-from ufo.runtime.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.queue import _agent_actions
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.surfaces.hub_tail import HubTailer

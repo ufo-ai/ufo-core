@@ -28,6 +28,11 @@ from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
+from ufo.harness.document_renderer import (
+    DOCUMENT_INPUT_MAX_BYTES,
+    DOCUMENT_PAGES_MAX,
+    DocumentRenderer,
+)
 from ufo.harness.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     EGRESS_CA_CERT_ENV,
@@ -42,11 +47,6 @@ from ufo.harness.sandbox.session import (
     SandboxSpec,
     SandboxUnreachable,
     host_argv,
-)
-from ufo.runtime.media.document_renderer import (
-    DOCUMENT_INPUT_MAX_BYTES,
-    DOCUMENT_PAGES_MAX,
-    DocumentRenderer,
 )
 
 CLIENT_BACKEND = "client"
