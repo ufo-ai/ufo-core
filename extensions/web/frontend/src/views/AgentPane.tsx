@@ -23,7 +23,6 @@ import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
 import { isPortalChat, surfaceWord, useViewer } from "@/lib/audience";
 import { agentName } from "@/lib/agentName";
-import { holdTrack } from "@/lib/tracks";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import type { ChatRow } from "@/lib/rail";
@@ -576,11 +575,6 @@ export function AgentPane({
                 disabled={target === undefined}
                 className="rounded-full border border-edge bg-surface"
                 onClick={() => {
-                  // The track this screen is leaving is cleared before the address changes. An
-                  // empty track writes no key, so the address states none, and on a route that
-                  // carries no place — the bare apps hash — the store would answer over it and hand
-                  // back the conversation the member asked to leave.
-                  holdTrack(`agent:${agent.id}`, []);
                   onPlace({ ...place, opens: [] }, "push");
                 }}
               >

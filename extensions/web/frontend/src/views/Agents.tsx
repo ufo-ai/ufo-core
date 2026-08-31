@@ -22,14 +22,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Ticker } from "@/components/ui/ticker";
 import { ObjectPane } from "@/kernel/objects";
-import { Empty } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { statusDot, useAppStatus, type AgentStatus } from "@/lib/appStatusStore";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
-import { openAgents } from "@/lib/router";
+import { openApps } from "@/lib/router";
 import {
   AgentPane,
   SETTINGS_TABS,
@@ -46,21 +45,19 @@ import type { Agent, Member } from "@/lib/types";
 
 export type AgentsProps = {
   member: Member;
-  /** The agent the hash names, or null on the bare route — which shows the main agent without
-   *  navigating. */
-  selected: Agent | null;
-  /** Whether the hash names the wizard: the builder holds the pane whatever run state it finds. */
-  build: boolean;
+  selected: Agent;
   chats: ChatRow[] | null;
   place: WorkspacePlace;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onAgents: () => void;
-  /** Leaves the wizard's address for the apps screen, which closing the builder is. */
+};
+
+export type AgentBuilderProps = {
+  member: Member;
+  onAgents: () => void;
   onExitBuilder: () => void;
-  /** Where an unbacked wizard address forwards, replacing itself rather than stacking. */
-  onForwardAgents: () => void;
-  /** Whether a member's press raised the wizard: the address alone must not found a run. */
+  onForwardApps: () => void;
   buildWanted: boolean;
 };
 
@@ -443,114 +440,108 @@ export function AppsIndex({
   );
 }
 
-/** The apps screen: the selected app's pane whole — the main app on the bare route — or the
- *  app-building wizard at its own address; switching apps is the sidebar's own list. */
-export function Agents({
+export function AgentBuilder({
   member,
-  selected,
-  build,
-  chats,
-  place,
-  onPlace,
-  onCreated,
   onAgents,
   onExitBuilder,
-  onForwardAgents,
+  onForwardApps,
   buildWanted,
-}: AgentsProps) {
+}: AgentBuilderProps) {
   const mainAgent = useMainAgent();
-  const shown = selected ?? mainAgent;
   const key = mainAgent ? wizardKey(mainAgent.id) : null;
   const held = useChat(key ?? "");
   const running =
     key !== null &&
     !held.closed &&
     (held.busy || (held.messages ?? []).length > 0 || held.founded !== null);
-  // The wizard's address is honoured only behind a member's press or a run already in flight: the
-  // builder's mount founds a conversation, and Back or a reload landing on the bare address must
-  // not send a turn nobody asked for.
-  const building = mainAgent !== null && build && (buildWanted || running);
-  const forwarding = build && !building;
+  const building = mainAgent !== null && (buildWanted || running);
+  const forwarding = !building;
   useEffect(() => {
-    if (forwarding) onForwardAgents();
-  }, [forwarding, onForwardAgents]);
+    if (forwarding) onForwardApps();
+  }, [forwarding, onForwardApps]);
+
+  if (!building || !mainAgent) return null;
+
+  return (
+    <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-1">
+      <AppBuilder
+        agent={mainAgent}
+        member={member}
+        onSettled={onAgents}
+        onClose={() => {
+          if (key !== null) {
+            if (chatState(key).busy) updateChat(key, (state) => ({ ...state, closed: true }));
+            else clearChat(key);
+          }
+          onExitBuilder();
+        }}
+      />
+    </div>
+  );
+}
+
+/** An app's pane whole. */
+export function Agents({
+  member,
+  selected,
+  chats,
+  place,
+  onPlace,
+  onCreated,
+  onAgents,
+}: AgentsProps) {
   const [settling, setSettling] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(SETTINGS_TABS[0]);
   const [scheduled, setScheduled] = useState<string[]>([]);
 
-  if (forwarding) return null;
-
   return (
     <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-1">
-      {building && mainAgent ? (
-        <AppBuilder
-          agent={mainAgent}
-          member={member}
-          onSettled={onAgents}
-          onClose={() => {
-            // Closing ends the run's presence here. A run whose founding send is still in flight
-            // cannot be cleared out from under that send, so the key wears the close instead and
-            // the landing leaves no forwarding record behind. The wizard's own address closes by
-            // navigation, back to the screen it was raised over.
-            if (key !== null) {
-              if (chatState(key).busy) updateChat(key, (state) => ({ ...state, closed: true }));
-              else clearChat(key);
-            }
-            onExitBuilder();
-          }}
-        />
-      ) : shown ? (
-        <AgentPane
-          key={shown.id}
-          agent={shown}
-          member={member}
-          chats={chats}
-          onCreated={(conversationId, title) => onCreated(shown, conversationId, title)}
-          onFounded={onCreated}
-          onAgents={onAgents}
-          onSettings={(tab) => {
-            setSettingsTab(tab);
-            setScheduled([]);
-            setSettling(true);
-          }}
-          place={place}
-          onPlace={onPlace}
-        />
-      ) : (
-        <Empty>No app is visible to you.</Empty>
-      )}
-      {shown && !building ? (
-        <AppSettings
-          agent={shown}
-          tab={settingsTab}
-          open={settling}
-          onTab={setSettingsTab}
-          onClose={() => setSettling(false)}
-        >
-          {settingsTab === "settings" ? (
-            <Settings
-              key={shown.id}
-              agent={shown}
-              onArchived={() => {
-                setSettling(false);
-                openAgents();
-                onAgents();
-              }}
-            />
-          ) : null}
-          {settingsTab === "connectors" ? <AgentConnectors agent={shown} /> : null}
-          {settingsTab === "scheduled" ? (
-            <ObjectPane
-              key={shown.id}
-              agentId={shown.id}
-              kind={TASK_KIND}
-              makes={false}
-              opens={scheduled}
-              onPlace={(next) => setScheduled(next.opens ?? [])}
-            />
-          ) : null}
-        </AppSettings>
-      ) : null}
+      <AgentPane
+        key={selected.id}
+        agent={selected}
+        member={member}
+        chats={chats}
+        onCreated={(conversationId, title) => onCreated(selected, conversationId, title)}
+        onFounded={onCreated}
+        onAgents={onAgents}
+        onSettings={(tab) => {
+          setSettingsTab(tab);
+          setScheduled([]);
+          setSettling(true);
+        }}
+        place={place}
+        onPlace={onPlace}
+      />
+      <AppSettings
+        agent={selected}
+        tab={settingsTab}
+        open={settling}
+        onTab={setSettingsTab}
+        onClose={() => setSettling(false)}
+      >
+        {settingsTab === "settings" ? (
+          <Settings
+            key={selected.id}
+            agent={selected}
+            onArchived={() => {
+              setSettling(false);
+              openApps();
+              onAgents();
+            }}
+          />
+        ) : null}
+        {settingsTab === "connectors" ? <AgentConnectors agent={selected} /> : null}
+        {settingsTab === "scheduled" ? (
+          <ObjectPane
+            key={selected.id}
+            agentId={selected.id}
+            kind={TASK_KIND}
+            makes={false}
+            opens={scheduled}
+            onPlace={(next) => setScheduled(next.opens ?? [])}
+          />
+        ) : null}
+      </AppSettings>
     </div>
   );
 }

@@ -602,11 +602,13 @@ test("an app with no homepage draws one column and no second half", async () => 
   expect(document.querySelector("iframe")).toBeNull();
 });
 
-test("the bare agents hash shows the main agent without navigating", async () => {
+test("the bare agents hash shows the apps list, not one app's homepage", async () => {
   location.hash = "#/agents";
   open({});
 
-  expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
+  expect(await screen.findByRole("cell", { name: "Assistant" })).toBeTruthy();
+  expect(screen.queryByRole("region", { name: "Assistant homepage" })).toBeNull();
   expect(location.hash).toBe("#/agents");
 });
 
@@ -619,7 +621,6 @@ function openChatApp(hash: string, homepage: unknown = SET) {
     "/homepage": () => json(homepage),
     "/conversations$": () => json({ conversations: [LISTED], more: false }),
   });
-  // The shipped chat app is the main agent, so the bare apps hash stands this same pane.
   const main = { ...CHAT_APP, main: true, homepage } as Agent;
   render(<App agents={[main]} member={MEMBER} onAgents={() => {}} />);
 }
@@ -638,12 +639,7 @@ test("History sends the chat app's page to the conversations it holds", async ()
   expect(screen.queryByRole("region", { name: CHAT_ROW.title })).toBeNull();
 });
 
-/** The track store answers for a screen the address states nothing about, so History leaves no
- *  track behind for it to answer with — otherwise the act would be undone by the conversation the
- *  member asked to leave. The bare apps hash is the address that cannot tell the router it already
- *  stands where it lands, and it is also where the page draws the list already, so the act is spent
- *  there rather than pressable into that trap. */
-test("History leaves no track behind, and is spent where the list already stands", async () => {
+test("History clears the app's track and becomes disabled", async () => {
   openChatApp("#/agents/" + CHAT_APP_ID + "?open=" + CONVO_ID);
   await screen.findByTitle("Chat homepage");
   expect(sessionStorage.getItem("ufo.track.agent:" + CHAT_APP_ID)).toContain(CONVO_ID);
@@ -651,13 +647,6 @@ test("History leaves no track behind, and is spent where the list already stands
   await userEvent.click(await screen.findByRole("button", { name: "History for Chat" }));
 
   expect(sessionStorage.getItem("ufo.track.agent:" + CHAT_APP_ID)).toBeNull();
-  expect(
-    (await screen.findByRole("button", { name: "History for Chat" })).hasAttribute("disabled"),
-  ).toBe(true);
-
-  location.hash = "#/agents";
-  window.dispatchEvent(new HashChangeEvent("hashchange"));
-  await screen.findByTitle("Chat homepage");
   expect(
     (await screen.findByRole("button", { name: "History for Chat" })).hasAttribute("disabled"),
   ).toBe(true);

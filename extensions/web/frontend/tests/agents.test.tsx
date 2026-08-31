@@ -569,15 +569,15 @@ test("pressing a section's band folds it away, and the fold holds across a reloa
   expect(await screen.findByRole("navigation", { name: "Apps" })).toBeTruthy();
 });
 
-/** A phone screen has no width for a column beside the page, so the nav drawer holds the index
- *  there and the app's own pane is the page — the main app's until the member picks another. */
+/** A phone screen has no width for a column beside the page, so the nav drawer holds the second app
+ *  index there until the member picks an app from it. */
 test("the drawer holds the apps index at a phone width, and a pick shuts it", async () => {
   atPhoneWidth();
   location.hash = "#/agents";
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
 
-  expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
   expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Menu" }));
@@ -591,7 +591,7 @@ test("the drawer holds the apps index at a phone width, and a pick shuts it", as
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
-test("closing the wizard gives the pane back to the app and clears the run's row", async () => {
+test("closing the wizard gives the pane back to the apps list and clears the run's row", async () => {
   wire({
     "/api/agents": () => boot([AGENT], ADMIN),
     "/chat": () => json(OPENED),
@@ -607,7 +607,7 @@ test("closing the wizard gives the pane back to the app and clears the run's row
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
   expect(within(await shownIndex()).queryByText("App Builder")).toBeNull();
   await shutDrawer();
-  expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
 });
 
 /** The pane and its Close button stand open while the founding send is in flight, so that send's own
@@ -934,7 +934,7 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/apps?chip=Archived";
+  location.hash = "#/agents?chip=Archived";
   render(
     <App
       agents={[AGENT]}
@@ -979,7 +979,7 @@ test("the workspace Apps tab opens the workspace settings", async () => {
     "/settings": () => json({ ...SETTINGS, agent: { ...SETTINGS.agent, archivable: false } }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/apps";
+  location.hash = "#/agents";
   render(<App agents={[AGENT]} archived={[]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
@@ -992,7 +992,7 @@ test("the workspace Apps tab opens the workspace settings", async () => {
 
 test("the workspace Apps tab lists every app and narrows to the member's own", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
-  location.hash = "#/workspace/apps";
+  location.hash = "#/agents";
   render(
     <App
       agents={[AGENT, { ...RESEARCH, mine: true }]}
@@ -1871,7 +1871,7 @@ test("the wizard's bare address founds nothing and forwards to the apps screen",
   location.hash = "#/agents/builder";
   render(<Portal />);
 
-  await screen.findByRole("region", { name: agentName(AGENT.name) });
+  await screen.findByRole("heading", { name: "Apps" });
   await waitFor(() => expect(location.hash).toBe("#/agents"));
   expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull();
   expect(StreamFake.opened.length).toBe(0);

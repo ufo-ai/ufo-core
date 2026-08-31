@@ -23,7 +23,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
 import { AgentSetup } from "@/views/AgentSetup";
 
-import { Agents, AppsIndex } from "@/views/Agents";
+import { AgentBuilder, Agents, AppsIndex } from "@/views/Agents";
 import { AppsProvider } from "@/views/Apps";
 import { Chat } from "@/views/Chat";
 import { ChatPane, ConversationSlot } from "@/views/ChatPane";
@@ -71,12 +71,12 @@ import {
   useRail,
 } from "@/lib/railStore";
 import {
-  forwardAgents,
+  forwardApps,
   heldRoute,
   openAdmin,
   openAgent,
   openAgentPlace,
-  openAgents,
+  openApps,
   openBuilder,
   openChat,
   openHome,
@@ -265,11 +265,11 @@ export function App({
   }, []);
   const exitBuild = useCallback(() => {
     setWantedBuild(false);
-    openAgents();
+    openApps();
   }, []);
   const forwardBuild = useCallback(() => {
     setWantedBuild(false);
-    forwardAgents();
+    forwardApps();
   }, []);
 
   /** The first run draws no shell. It is the one destination a member reaches before the workspace
@@ -369,7 +369,7 @@ export function App({
                     onActive={setActiveLane}
                     onAgents={onAgents}
                     onExitBuilder={exitBuild}
-                    onForwardAgents={forwardBuild}
+                    onForwardApps={forwardBuild}
                     buildWanted={wantedBuild}
                   />
                 </AppsProvider>
@@ -727,7 +727,7 @@ function WorkspaceSidebar({
             <li>
               <NavRow
                 icon={<CreateAppGlyph />}
-                current={route.kind === "agents" && route.build === true}
+                current={route.kind === "builder"}
                 onClick={onBuild}
               >
                 {CREATE_APP}
@@ -753,7 +753,7 @@ function WorkspaceSidebar({
         <AppsIndex
           agents={agents}
           openId={route.kind === "agent" ? route.agentId : null}
-          building={route.kind === "agents" && route.build === true}
+          building={route.kind === "builder"}
           pinned={pinned}
           onPin={(agentId) =>
             pickPinned(
@@ -852,7 +852,7 @@ function RoutedPane({
   onActive,
   onAgents,
   onExitBuilder,
-  onForwardAgents,
+  onForwardApps,
   buildWanted,
 }: {
   route: Route;
@@ -863,7 +863,7 @@ function RoutedPane({
   onActive: (lane: string | undefined) => void;
   onAgents: () => void;
   onExitBuilder: () => void;
-  onForwardAgents: () => void;
+  onForwardApps: () => void;
   buildWanted: boolean;
 }) {
   const rail = useRail();
@@ -922,48 +922,34 @@ function RoutedPane({
         />
       );
     }
-    case "agents":
+    case "builder":
+      return (
+        <Pane>
+          <AgentBuilder
+            member={member}
+            onAgents={onAgents}
+            onExitBuilder={onExitBuilder}
+            onForwardApps={onForwardApps}
+            buildWanted={buildWanted}
+          />
+        </Pane>
+      );
     case "agent": {
-      const selected =
-        route.kind === "agent"
-          ? (agents.find((entry) => entry.id === route.agentId) ?? null)
-          : null;
-      if (route.kind === "agent" && !selected) return <PaneNote>No such app.</PaneNote>;
-      const shown = selected ?? mainAgent;
+      const selected = agents.find((entry) => entry.id === route.agentId);
+      if (!selected) return <PaneNote>No such app.</PaneNote>;
       return (
         <Pane
-          opens={route.kind === "agent" ? (route.place.opens ?? []) : []}
-          onMove={(opens) =>
-            route.kind === "agent"
-              ? placeAgent({ ...route.place, opens }, "replace")
-              : shown
-                ? openAgentPlace(shown.id, { opens })
-                : undefined
-          }
+          opens={route.place.opens ?? []}
+          onMove={(opens) => placeAgent({ ...route.place, opens }, "replace")}
         >
           <Agents
             member={member}
             selected={selected}
-            build={route.kind === "agents" && route.build === true}
             chats={rail.phase === "ready" ? rail.rows : null}
             onCreated={founded}
-            place={route.kind === "agent" ? route.place : {}}
-            /* The bare apps hash shows the main agent without having navigated to it, so a
-               place set from that screen has no agent in the address to hang on: it names the
-               agent it is about and lands on that agent's own address. Answering nothing would
-               leave the pane unable to open anything on the one screen the flyout's own exit
-               opens. */
-            onPlace={(place, step) =>
-              route.kind === "agent"
-                ? placeAgent(place, step)
-                : shown
-                  ? openAgentPlace(shown.id, place)
-                  : undefined
-            }
+            place={route.place}
+            onPlace={placeAgent}
             onAgents={onAgents}
-            onExitBuilder={onExitBuilder}
-            onForwardAgents={onForwardAgents}
-            buildWanted={buildWanted}
           />
         </Pane>
       );

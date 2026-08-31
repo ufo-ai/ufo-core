@@ -718,11 +718,10 @@ Admitting it costs nothing, because a prepared intent runs no model round — th
 verb and terminates — so an overdrawn workspace cannot spend against it, and no other tool is
 exempt.
 
-The agents screen shows one agent's pane whole — the bare route shows the main agent — and
-switching agents is the sidebar's Applications flyout, which lists every app with its live status
-and whose pins place rows in the sidebar. The pane is the agent's homepage — a hosted-site binding
-admitted through the sites surface's per-visit agent-visibility gate, or a deploy-wide app page
-whose public immutable code is routed to a workspace-specific origin — inside the portal's
+The agents screen lists every app and its live status. An agent's route shows that agent's pane
+whole. A pin places an app row in the sidebar. The pane is the agent's homepage — a hosted-site
+binding admitted through the sites surface's per-visit agent-visibility gate, or a deploy-wide app
+page whose public immutable code is routed to a workspace-specific origin — inside the portal's
 sandboxed iframe, with its settings and a chat toggle that opens the conversation beside the page.
 That conversation column
 opens on the conversation that moved last and carries the composer where the portal founded that

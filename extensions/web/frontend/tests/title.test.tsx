@@ -42,7 +42,7 @@ beforeEach(() => {
 test("every page names where the member is, innermost first, then the product", () => {
   expect(titled({ kind: "home", ...PLACE })).toBe("Home · ufo");
   expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New conversation · Second · ufo");
-  expect(titled({ kind: "agents" })).toBe("Apps · ufo");
+  expect(titled({ kind: "builder" })).toBe("App Builder · Apps · Workspace · ufo");
   expect(titled({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBe("Assistant · ufo");
   expect(titled({ kind: "workspace", view: "team", ...PLACE })).toBe("Team · Workspace · ufo");
   expect(titled({ kind: "workspace", view: "credentials", ...PLACE })).toBe(
@@ -85,7 +85,7 @@ test("the crumb is the step the tab title names after the page", () => {
     at: agentHash(AGENT_ID),
   });
   expect(crumbed({ kind: "workspace", view: "team", ...PLACE })).toEqual({ label: "Workspace" });
-  expect(crumbed({ kind: "agents" })).toBeUndefined();
+  expect(crumbed({ kind: "builder" })).toEqual({ label: "Apps", at: "#/agents" });
   expect(crumbed({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBeUndefined();
   expect(crumbed({ kind: "home", ...PLACE })).toBeUndefined();
 });
@@ -120,7 +120,7 @@ test("the tab follows the hash the member opens", async () => {
   await waitFor(() => expect(document.title).toBe("Pick one thread · Assistant · ufo"));
 
   location.hash = "#/agents";
-  await waitFor(() => expect(document.title).toBe("Apps · ufo"));
+  await waitFor(() => expect(document.title).toBe("Apps · Workspace · ufo"));
 });
 
 test("a tab whose email holds no member row says so", async () => {

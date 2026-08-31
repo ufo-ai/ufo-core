@@ -23,6 +23,7 @@ import {
   parseHash,
   routeIs,
   sectionHash,
+  standing,
   workspaceHash,
   type PlaceStep,
   type WorkspacePlace,
@@ -138,6 +139,22 @@ test("a workspace tab and a section carry their place and parse back to it", () 
   expect(parseHash("#/memory")).toEqual({ kind: "bad-link" });
 });
 
+test("the app list writes one address and reads links to its workspace tab", () => {
+  expect(workspaceHash("apps")).toBe(AGENTS_HASH);
+  expect(workspaceHash("apps", { chip: "Archived" })).toBe(AGENTS_HASH + "?chip=Archived");
+  expect(parseHash("#/workspace/apps?chip=Archived")).toEqual({
+    kind: "workspace",
+    view: "apps",
+    place: { chip: "Archived" },
+  });
+});
+
+test("the app list does not mark the Workspace row as current", () => {
+  expect(standing(parseHash(AGENTS_HASH), "workspace")).toBe(false);
+  expect(standing(parseHash("#/workspace/apps"), "workspace")).toBe(false);
+  expect(standing(parseHash("#/workspace/team"), "workspace")).toBe(true);
+});
+
 /** A screen that left the workspace tabs kept its name, and the links members already hold spell
  *  the address it had then. The table reads that address as the section holding the same screen. */
 test("a screen moved off the workspace tabs still answers at the address it had", () => {
@@ -215,8 +232,12 @@ test("a conversation slot has a builder, and it writes the address its own read 
  *  composer instead of the screen the member asked for. */
 test("a screen that carries no place is read whatever the address arrived holding", () => {
   expect(parseHash(ADMIN_HASH + "?x=1")).toEqual({ kind: "admin" });
-  expect(parseHash(AGENTS_HASH + "?x=1")).toEqual({ kind: "agents" });
-  expect(parseHash(BUILDER_HASH + "?x=1")).toEqual({ kind: "agents", build: true });
+  expect(parseHash(AGENTS_HASH + "?x=1")).toEqual({
+    kind: "workspace",
+    view: "apps",
+    place: {},
+  });
+  expect(parseHash(BUILDER_HASH + "?x=1")).toEqual({ kind: "builder" });
   expect(parseHash(FIRST_RUN_HASH + "?x=1")).toEqual({ kind: "first-run" });
 });
 
@@ -511,7 +532,11 @@ test("a hash under the torn-out subagent namespace names no route", () => {
 
 test("a conversation named as a query target boots on that conversation", () => {
   expect(bootRoute("", "?c=" + CONVO_ID)).toEqual({ kind: "chat", conversationId: CONVO_ID });
-  expect(bootRoute("#/agents", "?c=" + CONVO_ID)).toEqual({ kind: "agents" });
+  expect(bootRoute("#/agents", "?c=" + CONVO_ID)).toEqual({
+    kind: "workspace",
+    view: "apps",
+    place: {},
+  });
   expect(bootRoute("", "")).toEqual({ kind: "home", place: {} });
 });
 
@@ -523,7 +548,11 @@ test("the sign-in that founded the workspace boots on its opening chat", () => {
     kind: "chat",
     conversationId: CONVO_ID,
   });
-  expect(bootRoute("#/agents", "?first=1")).toEqual({ kind: "agents" });
+  expect(bootRoute("#/agents", "?first=1")).toEqual({
+    kind: "workspace",
+    view: "apps",
+    place: {},
+  });
   expect(bootRoute("", "")).toEqual({ kind: "home", place: {} });
 });
 

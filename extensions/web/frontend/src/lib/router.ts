@@ -2,7 +2,6 @@ import { useSyncExternalStore } from "react";
 
 import {
   ADMIN_HASH,
-  AGENTS_HASH,
   BUILDER_HASH,
   FIRST_RUN_HASH,
   HOME_NEW_LANE,
@@ -236,14 +235,14 @@ export function openNewChat(agentId: string): void {
   navigate(newChatHash(agentId));
 }
 
-export function openAgents(): void {
-  navigate(AGENTS_HASH);
+export function openApps(): void {
+  navigate(workspaceHash("apps"));
 }
 
 /** Where an unbacked wizard address forwards: the same screen, written over the address rather than
  *  stacked on it, so Back does not land on the forwarder again. */
-export function forwardAgents(): void {
-  navigate(AGENTS_HASH, "replace");
+export function forwardApps(): void {
+  navigate(workspaceHash("apps"), "replace");
 }
 
 export function openBuilder(): void {
@@ -258,8 +257,7 @@ export function openAgent(agentId: string): void {
   navigate(agentHash(agentId));
 }
 
-/** An agent opened at a place rather than at its head — what the bare apps hash, which shows the
- *  main agent without having navigated to it, turns a place change into. */
+/** An agent opened at a place rather than at its head. */
 export function openAgentPlace(agentId: string, place: WorkspacePlace): void {
   navigate(agentHash(agentId, place));
 }

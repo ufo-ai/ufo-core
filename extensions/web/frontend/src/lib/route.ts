@@ -48,7 +48,7 @@ export type Route =
       rootConversationId?: string;
     }
   | { kind: "new-chat"; agentId: string }
-  | { kind: "agents"; build?: boolean }
+  | { kind: "builder" }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "agent-setup"; agentId: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
@@ -334,17 +334,20 @@ const ADMIN = row(
   () => ADMIN_HASH,
 );
 
-const AGENTS = row(
-  "agents",
-  bare(AGENTS_HASH),
-  () => ({ kind: "agents" }),
-  () => AGENTS_HASH,
+const APPS = row<"workspace", [WorkspacePlace?]>(
+  "workspace",
+  new RegExp(`^${AGENTS_HASH}${PLACE_TAIL}`),
+  (match) => {
+    const place = parsePlace(match[1]);
+    return place && { kind: "workspace", view: "apps", place };
+  },
+  (place: WorkspacePlace = {}) => AGENTS_HASH + serializePlace(place),
 );
 
 const BUILDER = row(
-  "agents",
+  "builder",
   bare(BUILDER_HASH),
-  () => ({ kind: "agents", build: true }),
+  () => ({ kind: "builder" }),
   () => BUILDER_HASH,
 );
 
@@ -466,7 +469,7 @@ const ROUTES: readonly RouteReader[] = [
   FIRST_RUN,
   ADMIN,
   BUILDER,
-  AGENTS,
+  APPS,
   CHAT,
   CONVERSATION_SLOT,
   NEW_CHAT,
@@ -516,7 +519,7 @@ const FRAMED: { [Kind in RouteKind]: boolean } = {
   home: false,
   "first-run": false,
   admin: false,
-  agents: false,
+  builder: false,
   chat: true,
   "conversation-slot": false,
   "new-chat": true,
@@ -563,10 +566,10 @@ function stands(route: Route): Stand[] {
     case "agent-setup":
       return [`agent:${route.agentId}`];
     case "workspace":
-      return ["workspace"];
+      return route.view === "apps" ? [] : ["workspace"];
     case "section":
       return [`section:${route.section}`];
-    case "agents":
+    case "builder":
     case "first-run":
     case "admin":
     case "bad-link":
@@ -620,6 +623,8 @@ export const agentHash = AGENT.write;
 /** The address of an agent's setup screen. */
 export const agentSetupHash = AGENT_SETUP.write;
 /** The address of a workspace tab, optionally at a place. */
-export const workspaceHash = WORKSPACE.write;
+export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): string {
+  return view === "apps" ? APPS.write(place) : WORKSPACE.write(view, place);
+}
 /** The address of a section, optionally at a place. */
 export const sectionHash = SECTION.write;
