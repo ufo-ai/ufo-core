@@ -416,6 +416,7 @@ def test_workflow_grades_each_image_before_aggregating_reports(
         "selected_ids": list(SMOKE_CASE_IDS),
         "official_report": str(official),
         "official_resolved": 2,
+        "official_gold_failed": [],
     }
 
 
@@ -455,13 +456,14 @@ def test_gold_mode_uses_official_gold_predictions(
     assert not (workflow.grade_directory / "predictions.jsonl").exists()
 
 
-def test_an_unresolved_prediction_is_rejected_when_the_gold_patch_also_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_gold_invalid_instance_is_recorded_without_aborting_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     snapshot_value = snapshot(tmp_path / "snapshot")
-    case_id = SMOKE_CASE_IDS[0]
-    workflow = grading_workflow(tmp_path, snapshot_value, case_ids=(case_id,))
+    workflow = grading_workflow(tmp_path, snapshot_value)
     accept_test_source(monkeypatch)
+    gold_invalid = SMOKE_CASE_IDS[0]
+    gold_calls: list[tuple[str, ...]] = []
 
     def run(
         command: Sequence[str], *, cwd: Path | None = None, check: bool
@@ -469,40 +471,71 @@ def test_an_unresolved_prediction_is_rejected_when_the_gold_patch_also_fails(
         assert check
         if cwd is None:
             return subprocess.CompletedProcess(command, 0)
-        model = "gold" if command[command.index("--predictions_path") + 1] == "gold" else "ufo"
-        report = report_with_submissions(official_report((case_id,)), (case_id,))
+        gold = command[command.index("--predictions_path") + 1] == "gold"
+        graded = (
+            SMOKE_CASE_IDS
+            if "--rewrite_reports" in command
+            else (command[command.index("--instance_ids") + 1],)
+        )
+        if gold:
+            gold_calls.append(graded)
+        report = report_with_submissions(
+            official_report(
+                graded,
+                resolved_ids=tuple(case_id for case_id in graded if case_id != gold_invalid),
+            ),
+            SMOKE_CASE_IDS,
+        )
+        model = "gold" if gold else "ufo"
         (cwd / f"{model}.official-smoke.json").write_text(json.dumps(report))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(grading.subprocess, "run", run)
 
-    with pytest.raises(RuntimeError, match=f"official gold patch failed for {case_id}"):
-        workflow.run()
-    assert not (workflow.grade_directory / "summary.json").exists()
+    summary_path = workflow.run()
+
+    assert gold_calls == [(gold_invalid,)]
+    summary = json.loads(summary_path.read_bytes())
+    assert summary["official_gold_failed"] == [gold_invalid]
+    assert summary["official_resolved"] == 2
+    assert f"official gold patch failed for {gold_invalid}" in capsys.readouterr().out
 
 
-def test_an_unresolved_gold_run_is_rejected(
+def test_a_failing_gold_patch_is_recorded_in_a_gold_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshot_value = snapshot(tmp_path / "snapshot")
-    case_id = SMOKE_CASE_IDS[0]
-    workflow = grading_workflow(tmp_path, snapshot_value, case_ids=(case_id,), gold=True)
+    workflow = grading_workflow(tmp_path, snapshot_value, gold=True)
     accept_test_source(monkeypatch)
+    gold_invalid = SMOKE_CASE_IDS[0]
 
     def run(
         command: Sequence[str], *, cwd: Path | None = None, check: bool
     ) -> subprocess.CompletedProcess[bytes]:
         assert check
         if cwd is not None:
-            report = report_with_submissions(official_report((case_id,)), (case_id,))
+            graded = (
+                SMOKE_CASE_IDS
+                if "--rewrite_reports" in command
+                else (command[command.index("--instance_ids") + 1],)
+            )
+            report = report_with_submissions(
+                official_report(
+                    graded,
+                    resolved_ids=tuple(case_id for case_id in graded if case_id != gold_invalid),
+                ),
+                SMOKE_CASE_IDS,
+            )
             (cwd / "gold.official-smoke.json").write_text(json.dumps(report))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(grading.subprocess, "run", run)
 
-    with pytest.raises(RuntimeError, match=f"official gold patch failed for {case_id}"):
-        workflow.run()
-    assert not (workflow.grade_directory / "summary.json").exists()
+    summary_path = workflow.run()
+
+    summary = json.loads(summary_path.read_bytes())
+    assert summary["official_gold_failed"] == [gold_invalid]
+    assert summary["official_resolved"] == 2
 
 
 def test_workflow_revalidates_parquet_before_invoking_harness(

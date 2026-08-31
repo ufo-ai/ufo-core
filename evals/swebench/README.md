@@ -93,7 +93,9 @@ official output files are not moved or rewritten. Grading runs on the official p
 images from the `swebench` Docker Hub namespace — the harness's stock source. The wrapper verifies
 an exact `linux/amd64` image with an official repository digest or pulls it, grades that case, then
 aggregates the native reports. An unresolved nonempty prediction runs the official gold patch in
-the same image; if gold also fails, grading stops without a summary. Prediction generation omits
+the same image; if gold also fails, the instance is unmeasurable on this rig — it is listed under
+`official_gold_failed` in `summary.json`, never counted as a model failure — and the remaining
+instances grade normally. A `--gold` run records its failing instances the same way. Prediction generation omits
 candidate changes to files owned by the case's official test patch, so agent-authored tests cannot
 prevent the grader tests from applying;
 the captured patch remains unchanged. Local builds are not an option: the pinned specs have drifted from the world

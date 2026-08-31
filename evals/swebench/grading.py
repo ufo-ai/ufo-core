@@ -210,6 +210,7 @@ class SWEbenchGrading:
                 self.model_name,
             )
         )
+        gold_failed: list[str] = []
         for case in self.selected_cases:
             self._ensure_official_image(case)
             self._invoke_official_harness(
@@ -222,23 +223,26 @@ class SWEbenchGrading:
             )
             if outcomes.resolved:
                 continue
-            if self.gold:
-                raise RuntimeError(f"official gold patch failed for {case.instance_id}")
-            if outcomes.empty or patches is None or not patches[case.instance_id]:
-                continue
-            self._invoke_official_harness(grade_directory, None, (case,), rewrite_reports=False)
-            if not self._validate_official_report(
-                self._official_report_path(grade_directory, gold=True),
-                (case,),
-                gold=True,
-            ).resolved:
-                raise RuntimeError(f"official gold patch failed for {case.instance_id}")
+            if not self.gold:
+                if outcomes.empty or patches is None or not patches[case.instance_id]:
+                    continue
+                self._invoke_official_harness(grade_directory, None, (case,), rewrite_reports=False)
+                if self._validate_official_report(
+                    self._official_report_path(grade_directory, gold=True),
+                    (case,),
+                    gold=True,
+                ).resolved:
+                    continue
+            gold_failed.append(case.instance_id)
+            print(f"official gold patch failed for {case.instance_id}; recorded as gold_failed")
         self._invoke_official_harness(
             grade_directory, predictions_path, self.selected_cases, rewrite_reports=True
         )
         report_path = self._official_report_path(grade_directory, gold=self.gold)
         outcomes = self._validate_official_report(report_path, self.selected_cases, gold=self.gold)
-        summary_path = self._write_summary(grade_directory, report_path, len(outcomes.resolved))
+        summary_path = self._write_summary(
+            grade_directory, report_path, len(outcomes.resolved), tuple(gold_failed)
+        )
         self._prune_official_images()
         return summary_path
 
@@ -398,7 +402,13 @@ class SWEbenchGrading:
             raise ValueError("official SWE-bench report has an unsupported schema version")
         return _OfficialOutcomes(resolved=frozenset(resolved), empty=frozenset(empty))
 
-    def _write_summary(self, grade_directory: Path, report_path: Path, resolved: int) -> Path:
+    def _write_summary(
+        self,
+        grade_directory: Path,
+        report_path: Path,
+        resolved: int,
+        gold_failed: tuple[str, ...],
+    ) -> Path:
         summary = {
             "pins": {
                 "harness": HARNESS_PIN,
@@ -411,6 +421,7 @@ class SWEbenchGrading:
             "selected_ids": [case.instance_id for case in self.selected_cases],
             "official_report": str(report_path),
             "official_resolved": resolved,
+            "official_gold_failed": list(gold_failed),
         }
         summary_path = grade_directory / SUMMARY_FILE
         summary_path.write_text(json.dumps(summary, indent=2) + "\n")
