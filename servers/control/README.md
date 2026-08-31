@@ -3,15 +3,15 @@
 The hosted gateway and database bootstrap for ufo's shared workspace fleet, a standalone Rust crate.
 
 One `ufoctl serve` fleet hosts every workspace. A signed bearer selects the workspace before the
-request reaches core, and Postgres row-level security enforces the same scope on every transaction.
+request reaches the runtime, and Postgres row-level security enforces the same scope on every transaction.
 The gateway verifies an email, gates new workspace creation on a one-time grant to its signup
-subject, has core create the workspace and default agent, and returns the bearer consumed by the
+subject, has the runtime create the workspace and default agent, and returns the bearer consumed by the
 `ufo` surface. A company address's subject is its domain; a personal-mail address's is the full
 normalized address.
 
 **Control's SQL reaches its own tables and nothing else.** Its role is granted the
-`ufo_control` schema and no privilege on any table in `public`, so every read and write of a core
-table goes to core `serve` over `/internal/onboard/*` (RFC 0036). That keeps one home for what a
+`ufo_control` schema and no privilege on any table in `public`, so every read and write of a tenant
+table goes to the runtime over `/internal/onboard/*` (RFC 0036). That keeps one home for what a
 workspace is — `create_member`'s seat semantics, the balance ledger's invariants, the default
 agent's prompt — where they already live.
 
@@ -35,7 +35,7 @@ agent's prompt — where they already live.
 | `src/claim.rs` | Claim time-to-live, verification, and the race each write can lose. |
 | `src/workos.rs` | Magic Auth, the Google hop, and the signed state and cookie seals. |
 | `src/web.rs`, `src/login.html` | The browser's renderer and the page it serves. |
-| `src/shared.rs` | The onboarding RPC client — every core table is reached through it. |
+| `src/shared.rs` | The onboarding RPC client — every tenant table is reached through it. |
 | `src/invite.rs` | One-time signup-grant custody. |
 | `src/store.rs` | The platform onboarding ledger. |
 | `src/slack_connect.rs` | The signup Slack Connect channel and its delivery poller. |
@@ -54,7 +54,7 @@ agent's prompt — where they already live.
 |---|---|
 | `UFO_CONTROL_GATEWAY_DSN` | The gateway's own ledgers. |
 | `UFO_CONTROL_SERVE_INTERNAL_URL` | Where the onboarding RPC is reached. |
-| `UFO_ONBOARD_CONTROL_TOKEN` | Gates `/internal/onboard/*`; core `serve` holds the same value. |
+| `UFO_ONBOARD_CONTROL_TOKEN` | Gates `/internal/onboard/*`; the runtime holds the same value. |
 | `UFO_CONTROL_POSTGRES_OWNER_DSN` | `migrate` and `rls-bootstrap` only — the deploy Jobs, never the gateway pod. |
 | `UFO_CONTROL_PG_ROLE_SEED` | Deterministic `ufo_serve` and `ufo_control` passwords. |
 | `UFO_WORKSPACE_BASE_URL` | Workspace URL returned after sign-in and used by invitation links. |

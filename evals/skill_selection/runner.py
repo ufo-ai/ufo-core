@@ -22,12 +22,12 @@ from evals.harness.registry import EvalTask
 from evals.harness.target import CapabilityTarget
 from evals.skill_loading.runner import fixtures_digest
 from evals.skill_selection.queries import CORPORA, QUERIES
-from ufo.access.credentials import CredentialStore
 from ufo.config import load_config
-from ufo.ext.loader import embed_backend, load_manifests
-from ufo.indexing import EmbedClient
-from ufo.skills.runtime import SkillCard
-from ufo.skills.selection import SKILL_TOP_K, lexical_score, select_top_k
+from ufo.host.ext.loader import embed_backend, load_manifests
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.indexing import EmbedClient
+from ufo.runtime.skills.runtime import SkillCard
+from ufo.runtime.skills.selection import SKILL_TOP_K, lexical_score, select_top_k
 
 EMBED_BATCH = 128
 RRF_K = 60

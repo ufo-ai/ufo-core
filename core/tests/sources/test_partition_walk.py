@@ -14,11 +14,11 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from ufo.access.connectors import Credential
-from ufo.sources import backend as backend_module
-from ufo.sources import connector as connector_module
-from ufo.sources.backend import ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.connector import (
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources import backend as backend_module
+from ufo.runtime.sources import connector as connector_module
+from ufo.runtime.sources.backend import ConnectorBackend, ConnectorSourceConfig
+from ufo.runtime.sources.connector import (
     Connector,
     Ordering,
     PartitionBound,
@@ -28,7 +28,7 @@ from ufo.sources.connector import (
     StreamSpec,
     WalkPage,
 )
-from ufo.sources.sync import SourceAuth, SyncResult
+from ufo.runtime.sources.sync import SourceAuth, SyncResult
 
 
 def _rec(value: str) -> dict[str, Any]:

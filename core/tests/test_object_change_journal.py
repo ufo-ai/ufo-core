@@ -15,12 +15,12 @@ from test_objects import (
     _workspace,
 )
 
-import ufo.objects
+import ufo.runtime.objects
 from ufo.db import workspace_tx
-from ufo.ext.surface import SurfaceContext
-from ufo.objects import UnknownObject
+from ufo.runtime.ext.surface import SurfaceContext
+from ufo.runtime.objects import UnknownObject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 
 async def _changes(workspace_id: object) -> list[sa.Row]:
@@ -111,7 +111,7 @@ async def test_a_journal_failure_precedes_the_mutation(
     async def refuse(*args: object, **kwargs: object) -> UUID:
         raise RuntimeError("journal unavailable")
 
-    monkeypatch.setattr(ufo.objects, "_journal_object_change", refuse)
+    monkeypatch.setattr(ufo.runtime.objects, "_journal_object_change", refuse)
     with ws(workspace_id):
         ctx = _tool_context(workspace_id)
         with pytest.raises(RuntimeError, match="journal unavailable"):

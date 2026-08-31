@@ -22,7 +22,8 @@ EXT_SHIPPED_PACKAGE = Path("extensions/memory/ufo_ext_memory/store.py")
 CORE_MIGRATIONS = Path("core/src/ufo/schema/migrations/versions")
 EXT_MIGRATIONS = Path("extensions/probe/migrations")
 CORE_STAMPS = ("20260801000001", "20260801000002", "20260801000003", "20260801000004")
-INGRESS_FILE = Path("core/src/ufo/sandbox/ingress.py")
+INGRESS_FILE = Path("core/src/ufo/harness/sandbox/ingress.py")
+HARNESS_FILE = Path("core/src/ufo/harness/rounds.py")
 
 
 def _migration(revision: str, down: str, depends: str = "None") -> ast.Module:
@@ -77,6 +78,47 @@ def test_sdk_only_gate_still_binds_the_shipped_extension_package() -> None:
     }
     failures = gates._sdk_import_failures(trees)
     assert len(failures) == 2 and all("ufo.db" in failure for failure in failures)
+
+
+def test_engine_core_gate_rejects_runtime_and_host_dependencies() -> None:
+    for imported in (
+        "from ufo.runtime.billing import accounting",
+        "from ufo.harness.models.registry import ModelRegistry",
+        "from ufo.harness.durability import replay_safe_client",
+        "import ufo_ext_memory",
+        "from dbos import DBOS",
+        "import sqlalchemy",
+        "from fastapi import FastAPI",
+        "import httpx",
+    ):
+        failures = gates._harness_import_failures({HARNESS_FILE: ast.parse(imported)})
+        assert len(failures) == 1 and "engine core" in failures[0]
+
+
+def test_engine_core_gate_allows_standard_library_and_other_core_modules() -> None:
+    tree = ast.parse("import asyncio\nfrom ufo.harness.rounds import ModelRoundRunner\n")
+    assert gates._harness_import_failures({HARNESS_FILE: tree}) == []
+
+
+def test_engine_core_gate_ignores_files_outside_the_core() -> None:
+    trees = {
+        CORE_FILE: ast.parse("from sqlalchemy import select\n"),
+        Path("core/src/ufo/harness/models/registry.py"): ast.parse("import httpx\n"),
+    }
+    assert gates._harness_import_failures(trees) == []
+
+
+def test_core_layout_gate_requires_a_source_or_test_owner() -> None:
+    outside = Path("core/probe.py")
+    trees = {
+        outside: ast.parse("VALUE = 1\n"),
+        CORE_FILE: ast.parse("VALUE = 1\n"),
+        HARNESS_FILE: ast.parse("VALUE = 1\n"),
+    }
+
+    assert gates._core_layout_failures(trees) == [
+        f"{outside}: core Python must live under core/src/ufo or a core test tree"
+    ]
 
 
 def test_conformance_gate_flags_a_manifest_point_the_sample_drops() -> None:
@@ -194,7 +236,7 @@ def test_skill_boundary_gate_allows_stdlib_and_third_party_imports() -> None:
 
 
 def test_naming_gate_flags_a_dash_in_a_registered_name() -> None:
-    from ufo.ext.manifest import CdpProviderSpec, Manifest, Pack
+    from ufo.runtime.ext.manifest import CdpProviderSpec, Manifest, Pack
 
     bad_ext = Manifest(name="bad-ext", version="0")
     assert any("bad-ext" in failure for failure in gates._naming_failures((bad_ext,), ()))
@@ -732,7 +774,8 @@ def test_the_lexical_only_guard_is_not_in_the_guard_vocabulary() -> None:
     it and then opening that name is the gap the gate exists to find — it is allowlisted as a
     deferred site, never counted as a guard."""
     assert "workspace_path" not in gates.CONTAINMENT_GUARDS
-    assert (gates.CORE_SRC / "sandbox" / "session.py", "workspace_path") in gates.DEFERRED_INGRESS
+    session = gates.HARNESS_SRC / "sandbox" / "session.py"
+    assert (session, "workspace_path") in gates.DEFERRED_INGRESS
     trees = {
         INGRESS_FILE: ast.parse(
             "def stage(path):\n"
@@ -830,7 +873,7 @@ PACK_CONFIG = '  serve_config = <<-TOML\n    [pack]\n    name = "assistant_hoste
 
 
 def _declared_keys() -> set[str]:
-    from ufo.ext.loader import load_manifests
+    from ufo.host.ext.loader import load_manifests
 
     return {spec.key for manifest in load_manifests("assistant_hosted") for spec in manifest.flags}
 
@@ -900,3 +943,20 @@ def test_census_period_gate_flags_a_board_that_declares_no_period() -> None:
     failures = gates._census_period_failures({CENSUS_BOARD_TF: 'resource "datadog_dashboard" {}\n'})
 
     assert failures == ["product board: no env root declares product_census_seconds"]
+
+
+def test_layering_gate_rejects_a_host_import_from_runtime_or_harness() -> None:
+    tree = ast.parse("from ufo.host.ext.loader import turn_tools\n")
+    for rel in (Path("core/src/ufo/runtime/queue.py"), Path("core/src/ufo/harness/agent.py")):
+        failures = gates._layering_failures({rel: tree})
+        assert len(failures) == 1 and "composition root" in failures[0]
+
+
+def test_layering_gate_allows_the_named_boot_modules_and_the_host_itself() -> None:
+    tree = ast.parse("from ufo.host.ext.loader import load_manifests\n")
+    trees = {
+        Path("core/src/ufo/harness/sandbox/ingress_serve.py"): tree,
+        Path("core/src/ufo/host/devhost.py"): tree,
+        Path("core/src/ufo/serve.py"): tree,
+    }
+    assert gates._layering_failures(trees) == []

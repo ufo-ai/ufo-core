@@ -19,7 +19,7 @@ superseded_by: 0017
 > export. The same machinery carries member edits, pack installs, system upgrades, agent
 > self-improvement, and (via a new `message_agent` builtin) persistent agents addressing each
 > other. Extends `spec.md` §Workspace model, §Extension system, §Packs; supersedes the
-> prompt-only governance in `core/src/ufo/kinds/governance.py`.
+> prompt-only governance in `core/src/ufo/runtime/kinds/governance.py`.
 
 ## Evidence (why this shape)
 
@@ -37,11 +37,11 @@ Four inputs, audited 2026-07-13:
 | Concern | Today | Gap |
 |---|---|---|
 | Agent definition | `agent(id, workspace_id, name, prompt, model)` — `core/src/ufo/schema/tables.py:57-68`; created only by `ufoctl init` (`core/src/ufo/onboard/onboarding.py:150-160`); runtime record `Agent{prompt, model}` (`core/src/ufo/schema/records.py:138`) | Not the spec's promised bundle; no CRUD after init; one agent per workspace in practice |
-| Governance | `propose_change`/`approve_proposal` CAS on `prompt_digest` (`core/src/ufo/kinds/governance.py:28-115`); `proposal` table (`tables.py:219-234`); `ctx.propose_change` (`core/src/ufo/ext/context.py:441-447`) | Prompt-only (`AgentChange`, `records.py:206`); approval is a bespoke HTTP endpoint (`core/src/ufo/surfaces/cli.py:146-164`) — a member action outside chat |
+| Governance | `propose_change`/`approve_proposal` CAS on `prompt_digest` (`core/src/ufo/runtime/kinds/governance.py:28-115`); `proposal` table (`tables.py:219-234`); `ctx.propose_change` (`core/src/ufo/runtime/ext/context.py:441-447`) | Prompt-only (`AgentChange`, `records.py:206`); approval is a bespoke HTTP endpoint (`core/src/ufo/runtime/surfaces/cli.py:146-164`) — a member action outside chat |
 | History / audit | `proposal` rows, `grant` audit fields (`tables.py:200-217`), `updated_at` | No revision history of anything; no answer to "what changed, who approved, what did they see" |
 | Behavior config | `ufo.toml` frozen at boot (`core/src/ufo/config.py`); `ext_store` per-extension KV (`tables.py:275`) | No typed, explorable, governed runtime config; Slack behavior has no knobs |
-| Subagents | Static `SubagentRegistry` from manifests (`core/src/ufo/loop/subagents.py:58`; profile shape `core/src/ufo/ext/manifest.py:447-464`); child reuses parent `agent_id` (`subagents.py:307`); named profiles only (`builtins.py:180-191`) | No durable, member-authored agent identities; no runtime authoring path |
-| Agent-to-agent | `ctx.invoke(agent, …)` for jobs (`core/src/ufo/surfaces/admission.py:488-510`) | No peer messaging between persistent agents |
+| Subagents | Static `SubagentRegistry` from manifests (`core/src/ufo/runtime/subagents.py:58`; profile shape `core/src/ufo/runtime/ext/manifest.py:447-464`); child reuses parent `agent_id` (`subagents.py:307`); named profiles only (`builtins.py:180-191`) | No durable, member-authored agent identities; no runtime authoring path |
+| Agent-to-agent | `ctx.invoke(agent, …)` for jobs (`core/src/ufo/runtime/surfaces/admission.py:488-510`) | No peer messaging between persistent agents |
 | Packs | Extensions + pack skills + onboarding (`spec.md` §Packs) | Packs cannot ship agent definitions |
 | Export | `ufoctl bundle` (deploy artifact only, `core/src/ufo/bundle.py`) | No workspace definition export/import |
 
@@ -105,7 +105,7 @@ Extension-kind specs live in one **core-owned** table —
 JSON, one function, replacing `prompt_digest`) → write → revision, one transaction. Extensions
 read their kinds through a typed accessor (`ctx.resources(kind)` yields model instances) and
 have no write path: the same unit narrows today's raw `ExtensionContext.transaction()`
-(`core/src/ufo/ext/context.py:387-397`, a whole-database connection) to the extension's own
+(`core/src/ufo/runtime/ext/context.py:387-397`, a whole-database connection) to the extension's own
 operational tables. Both-ends probe: the sample extension declares a kind, drives
 create/propose/approve/history through public surfaces, and asserts no extension-side write path
 exists.
@@ -116,7 +116,7 @@ Two extension kinds land with this RFC:
 content files — text only (§4's review rule), digests in the spec, bytes in the blob store, and
 no `name` field: the ref is the identity, and SKILL.md's declared name must equal it, checked at
 propose. Its `runtime_skills` handler merges workspace skills into the per-turn skill index
-(`core/src/ufo/ext/loader.py:368`), so `load_skill` mounts them like any shipped skill —
+(`core/src/ufo/host/ext/loader.py:368`), so `load_skill` mounts them like any shipped skill —
 agent-authored procedural memory becomes governed: a skill edit is a proposal, not a file write.
 Content stages content-addressed at propose time; an unapplied digest is inert (`load_skill`
 mounts only digests reachable from an applied spec), and the orphan reaper ships with the
@@ -255,7 +255,7 @@ Approval semantics:
   `ProposalRequest` — the fourth terminal request kind beside `AskUserInput` /
   `CredentialRequest` / `ConnectRequest` (RFC 0012) — and the engine accumulates every proposal
   created during the turn, not just a final act (unlike today's single last-tool request,
-  `core/src/ufo/loop/engine.py:329-345`). Surfaces render their own affordance (Slack buttons;
+  `core/src/ufo/runtime/engine.py:329-345`). Surfaces render their own affordance (Slack buttons;
   CLI/web prompt); the signed interaction resolves the acting member, applies the ref's decision
   rule — `owner` everywhere except `grant/<id>` deletes, where the grantor may also decide
   (§6) — and calls `Governance.approve/reject` directly: **the model is never in the approval

@@ -17,12 +17,12 @@ import sqlalchemy as sa
 import ufo_ext_turbopuffer as tpuf
 from cryptography.fernet import Fernet
 
-from ufo.access.credentials import CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.context import CredentialAccess, context_for
-from ufo.indexing import Chunk, IndexScope
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import CredentialAccess, context_for
+from ufo.runtime.indexing import Chunk, IndexScope
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
-from ufo.workspace import init_workspace_credentials, ws
 
 SHARED = "shared"
 OWNER_KIND = "memory_item"

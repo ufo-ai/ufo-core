@@ -1,4 +1,4 @@
-from ufo.indexing import TextChunker
+from ufo.runtime.indexing import TextChunker
 
 
 def test_short_text_is_one_chunk() -> None:

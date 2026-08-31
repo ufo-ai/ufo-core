@@ -8,9 +8,9 @@ from ufo_ext_sites.application_builder import APPLICATION_BUILDER_DELEGATION
 
 from ufo.config import Config, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.ext.context import ScopedStore
+from ufo.runtime.ext.context import ScopedStore
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 WEB_EXTENSION = "web"
 HOMEPAGE_SEED_PREFIX = "homepage-seed/"

@@ -90,11 +90,11 @@ from evals.harness.harness import WAIT_EXPIRED, Json, JsonObject, infra_error
 from evals.harness.judge import fenced_payload
 from evals.harness.registry import narrowed_tasks
 from evals.registry import TASKS
-from ufo.access.credentials import deploy_env
 from ufo.config import Config
-from ufo.models.interface import ModelClient, ModelRequest, TextDelta
-from ufo.models.pricing import Pricing
-from ufo.models.registry import model_registry
+from ufo.harness.models.interface import ModelClient, ModelRequest, TextDelta
+from ufo.harness.models.pricing import Pricing
+from ufo.harness.models.registry import model_registry
+from ufo.runtime.access.credentials import deploy_env
 from ufo.schema.records import ReasoningEffort, Usage
 from ufo.sdk.models import Message
 

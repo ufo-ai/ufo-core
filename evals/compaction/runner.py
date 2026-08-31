@@ -37,7 +37,7 @@ from evals.harness.harness import (
 )
 from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import CapabilityTarget, EvalConversations, TargetResult
-from ufo.loop.compaction import (
+from ufo.runtime.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     FILES_HEADING,

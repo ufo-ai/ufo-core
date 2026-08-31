@@ -25,7 +25,7 @@ from evals.suites.slack_message_block import (
     answers_rather_than_continues,
     inspect,
 )
-from ufo.ext.surface import AMBIENT_CONTEXT_ELEMENT, MEMBER_MESSAGE_ELEMENT
+from ufo.runtime.ext.surface import AMBIENT_CONTEXT_ELEMENT, MEMBER_MESSAGE_ELEMENT
 
 BY_NAME = {case.name: case for case in CASES}
 QUOTED_LINE = "the nightly sync finished but the row count is half what we expected"

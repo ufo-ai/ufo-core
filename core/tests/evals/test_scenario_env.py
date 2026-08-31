@@ -15,8 +15,8 @@ from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.scenario import ScenarioOutcome, ScenarioTurn
 from evals.scenario_env import frontier, lookups, office, restraint, writes
 from ufo.db import workspace_tx
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 DISPATCH = ToolInvocation("call_external_tool", {}, "ok", has_result=True, is_error=False)
 

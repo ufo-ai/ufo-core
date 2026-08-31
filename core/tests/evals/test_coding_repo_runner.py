@@ -51,7 +51,7 @@ from evals.harness.registry import EvalTask
 from evals.harness.scorers import delegation_only_scorer
 from evals.harness.target import TargetResult
 from ufo.config import BlobConfig, Config, DatabaseConfig, PackConfig
-from ufo.tools.builtins import _spawn_handles
+from ufo.host.tools.builtins import _spawn_handles
 
 SURVEY_CASE = next(case for case in CASES if case.deliverable == "document")
 CAPTURED_DOCUMENT = b"- ufo/<deploy>/api-keys\n"

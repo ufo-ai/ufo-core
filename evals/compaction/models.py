@@ -10,13 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ufo.loop.compaction import (
-    CHARS_PER_TOKEN,
-    IMAGE_MARKER,
-    IMAGE_TOKEN_ESTIMATE,
-    REDACTED_REASONING_MARKER,
-)
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ImageBlock,
     Message,
     ReasoningItemBlock,
@@ -25,6 +19,12 @@ from ufo.models.interface import (
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+)
+from ufo.runtime.compaction import (
+    CHARS_PER_TOKEN,
+    IMAGE_MARKER,
+    IMAGE_TOKEN_ESTIMATE,
+    REDACTED_REASONING_MARKER,
 )
 
 type CompactionLeaf = Literal[

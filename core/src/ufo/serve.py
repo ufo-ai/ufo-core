@@ -28,27 +28,6 @@ from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from ufo.access.connectors import (
-    AuthProxy,
-    ConnectorEntry,
-    ConnectorRegistry,
-    SourceCredentialResolver,
-)
-from ufo.access.credentials import (
-    CredentialRequests,
-    CredentialStore,
-    install_credential_requests,
-)
-from ufo.access.egress_control import EgressControl
-from ufo.access.egress_resolver import PerAgentRules
-from ufo.access.egress_rules import (
-    connector_transfer_hosts,
-    derive_artifact_store_rules,
-    derive_manifest_rules,
-)
-from ufo.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
-from ufo.auth.bearer import JOIN_PATH, LOGIN_PATH, LOGOUT_PATH
-from ufo.billing.balance import billing_screen_url
 from ufo.blob import (
     BlobStore,
     FilesystemBlobStore,
@@ -70,14 +49,35 @@ from ufo.db import (
     init_owner_db,
     verify_db_reachable,
 )
-from ufo.durability import ReplaySafeSerializer, replay_safe_client
-from ufo.ext.context import ConversationProbes, CredentialAccess, ModelAccess
-from ufo.ext.context import context_for as extension_context_for
-from ufo.ext.conversation_slots import BoundConversationSlot
-from ufo.ext.loader import (
+from ufo.flags import init_flags
+from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
+from ufo.harness.models.catalog_skill import model_catalog_skill
+from ufo.harness.models.interface import AUTO_MODEL
+from ufo.harness.models.pricing import Pricing
+from ufo.harness.models.registry import model_registry
+from ufo.harness.o11y import init_o11y, init_service_checks, log, warn
+from ufo.harness.sandbox.cache import (
+    CACHE_CONTROL_TOKEN_ENV,
+    CACHE_HOST,
+    CACHE_PKG_HOSTS,
+    parse_cache_daemon,
+)
+from ufo.harness.sandbox.conversation import ConversationSandbox
+from ufo.harness.sandbox.exec_env import ProbeEnv
+from ufo.harness.sandbox.preview import parse_preview_service
+from ufo.harness.sandbox.select import select_carriers
+from ufo.harness.sandbox.session import (
+    EGRESS_CA_CERT_ENV,
+    EGRESS_CONTROL_TOKEN_ENV,
+    ProbeTokenCodec,
+    ProxyEndpoint,
+    RunTokenCodec,
+)
+from ufo.harness.sandbox.terminal import Terminals, TerminalTransport
+from ufo.host.ext.loader import (
     CORE_OBJECT_KINDS,
+    HostEnvironment,
     MemberObjectRegistry,
-    NotRegisteredError,
     connection_hooks,
     connector_clis,
     core_object_kinds,
@@ -95,18 +95,46 @@ from ufo.ext.loader import (
     turn_subagents,
     validate_ext_tools,
 )
-from ufo.ext.manifest import (
+from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV, OnboardControl
+from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
+from ufo.runtime.access.connectors import (
+    AuthProxy,
+    ConnectorEntry,
+    ConnectorRegistry,
+    SourceCredentialResolver,
+)
+from ufo.runtime.access.credentials import (
+    CredentialRequests,
+    CredentialStore,
+    install_credential_requests,
+)
+from ufo.runtime.access.egress_control import EgressControl
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import (
+    connector_transfer_hosts,
+    derive_artifact_store_rules,
+    derive_manifest_rules,
+)
+from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
+from ufo.runtime.auth.bearer import JOIN_PATH, LOGIN_PATH, LOGOUT_PATH
+from ufo.runtime.billing.balance import billing_screen_url
+from ufo.runtime.delivery import DeliverySweep
+from ufo.runtime.ext.context import ConversationProbes, CredentialAccess, ModelAccess
+from ufo.runtime.ext.context import context_for as extension_context_for
+from ufo.runtime.ext.conversation_slots import BoundConversationSlot
+from ufo.runtime.ext.manifest import (
     AuthProxySpec,
     CarrierSpec,
     CdpProviderSpec,
     FlagProviderSpec,
     Manifest,
+    NotRegisteredError,
     SearchProviderSpec,
     conversation_slot_declarations,
     declared_slots,
     open_connector_namespace,
 )
-from ufo.ext.surface import (
+from ufo.runtime.ext.surface import (
     SURFACE_MODEL_JOB_PREFIX,
     DeployExtensionView,
     MidTurnReplyPoller,
@@ -120,26 +148,8 @@ from ufo.ext.surface import (
     mid_turn_reply_workspaces,
     writeback_workspaces,
 )
-from ufo.flags import init_flags
-from ufo.hub import Hub, InProcessHub
-from ufo.indexing import EmbedClient, IndexBackend
-from ufo.loop.delivery import DeliverySweep
-from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
-from ufo.loop.queue import Runtime, init_runtime
-from ufo.loop.steps import DurableTurnSteps
-from ufo.loop.subagents import SubagentRegistry
-from ufo.loop.tool_bridge import ToolBridge
-from ufo.media.document_renderer import DocumentRenderer
-from ufo.media.preview_renderer import PREVIEW_SERVICE_URL_ENV, PREVIEW_TOKEN_ENV, PreviewRenderer
-from ufo.media.site_previewer import SitePreviewer
-from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
-from ufo.models.catalog_skill import model_catalog_skill
-from ufo.models.interface import AUTO_MODEL
-from ufo.models.pricing import Pricing
-from ufo.models.registry import model_registry
-from ufo.o11y import init_o11y, init_service_checks, log, warn
-from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV, OnboardControl
-from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
+from ufo.runtime.hub import Hub, InProcessHub
+from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.jobs import (
     InvokerFactory,
     JobRunner,
@@ -148,6 +158,16 @@ from ufo.runtime.jobs import (
     bindings_from,
     core_jobs,
 )
+from ufo.runtime.media.document_renderer import DocumentRenderer
+from ufo.runtime.media.preview_renderer import (
+    PREVIEW_SERVICE_URL_ENV,
+    PREVIEW_TOKEN_ENV,
+    PreviewRenderer,
+)
+from ufo.runtime.media.site_previewer import SitePreviewer
+from ufo.runtime.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
+from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
+from ufo.runtime.queue import Runtime, init_runtime
 from ufo.runtime.runtime_instance import (
     CancelReconciler,
     ExecutorRecovery,
@@ -155,33 +175,9 @@ from ufo.runtime.runtime_instance import (
     StrandedTurnReconciler,
     record_fleet_seat,
 )
-from ufo.sandbox.cache import (
-    CACHE_CONTROL_TOKEN_ENV,
-    CACHE_HOST,
-    CACHE_PKG_HOSTS,
-    parse_cache_daemon,
-)
-from ufo.sandbox.conversation import ConversationSandbox
-from ufo.sandbox.exec_env import ProbeEnv
-from ufo.sandbox.preview import parse_preview_service
-from ufo.sandbox.select import select_carriers
-from ufo.sandbox.session import (
-    EGRESS_CA_CERT_ENV,
-    EGRESS_CONTROL_TOKEN_ENV,
-    ProbeTokenCodec,
-    ProxyEndpoint,
-    RunTokenCodec,
-)
-from ufo.sandbox.terminal import Terminals, TerminalTransport
-from ufo.schema.records import (
-    DBOS_APP_NAME,
-    DBOS_APP_VERSION,
-    DBOS_MAX_EXECUTOR_THREADS,
-    RuntimeIdentity,
-)
-from ufo.search import SearchProvider
-from ufo.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
-from ufo.sources.sync import (
+from ufo.runtime.search import SearchProvider
+from ufo.runtime.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
+from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
     FolderSource,
@@ -190,19 +186,28 @@ from ufo.sources.sync import (
     SyncDriver,
     register_sources,
 )
-from ufo.surfaces.admission import (
+from ufo.runtime.steps import DurableTurnSteps
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.surfaces.admission import (
     Admission,
     AdmissionInvoker,
     ConnectResume,
     MemberAdmission,
 )
-from ufo.surfaces.artifacts import router as artifacts_router
-from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router
-from ufo.surfaces.hub_tail import HubTailer
-from ufo.surfaces.stop import MemberStop
-from ufo.tools.bridge import bridge_tools
-from ufo.turns.ambient_reply import AMBIENT_REPLY_JOB, AmbientReplyClassifier
-from ufo.workspace import init_workspace_credentials, ws
+from ufo.runtime.surfaces.artifacts import router as artifacts_router
+from ufo.runtime.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router
+from ufo.runtime.surfaces.hub_tail import HubTailer
+from ufo.runtime.surfaces.stop import MemberStop
+from ufo.runtime.tool_bridge import ToolBridge
+from ufo.runtime.tools.bridge import bridge_tools
+from ufo.runtime.turns.ambient_reply import AMBIENT_REPLY_JOB, AmbientReplyClassifier
+from ufo.runtime.workspace import init_workspace_credentials, ws
+from ufo.schema.records import (
+    DBOS_APP_NAME,
+    DBOS_APP_VERSION,
+    DBOS_MAX_EXECUTOR_THREADS,
+    RuntimeIdentity,
+)
 
 RESERVED_HOST_PREFIXES = (LOGIN_PATH, LOGOUT_PATH, JOIN_PATH, "/v1/onboard", "/ufo")
 RUNTIME_REVISION_ENV = "UFO_RUNTIME_REVISION"
@@ -367,6 +372,17 @@ def run() -> None:
         subagents=subagents,
         subagent_grants=subagent_grants,
         manifests=manifests,
+        environment=HostEnvironment(
+            manifests=manifests,
+            credentials=credentials,
+            index=index,
+            embed=embed,
+            blob=blob,
+            tailer=tailer,
+            public_base_url=config.connect.public_base_url,
+            home_surface=browser_home,
+            artifact_token_secret=artifact_secret,
+        ),
         registry=registry,
         skills=skills,
         credentials=credentials,
@@ -487,6 +503,7 @@ def run() -> None:
             public_base_url=config.connect.public_base_url,
             artifact_token_secret=artifact_secret,
         ),
+        environment_host_allowed=config.environment.dev_host_allowed,
     )
     _assert_no_reserved_routes(app)
     log("serve.started", host=config.serve.host, port=config.serve.port)
@@ -1088,6 +1105,7 @@ def _mount_shared_surfaces(
     surface_model: "Callable[[str], SurfaceModel] | None" = None,
     objects: MemberObjectRegistry | None = None,
     key_slot_for: Callable[[str], str | None] | None = None,
+    environment_host_allowed: bool = False,
 ) -> None:
     """Install the fleet-wide `WorkspaceScopeBoundary` and mount each shared-fleet-capable
     surface's routes, resolving the workspace per request instead of pinning one at boot:
@@ -1178,6 +1196,7 @@ def _mount_shared_surfaces(
             _deploy_sandbox_internet=deploy_sandbox_internet,
             _deploy_extensions=deploy_extensions,
             _models=models,
+            _environment_host_allowed=environment_host_allowed,
             _sandbox_sizes=sandbox_sizes,
             _skills=skills,
             _system_skill_bundle=system_skill_bundle,

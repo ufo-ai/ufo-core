@@ -24,12 +24,12 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from ufo.access.connectors import Credential, GrantUnusable
-from ufo.sources import backend as backend_module
-from ufo.sources.backend import BACKFILL_KEY, ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.connector import Connector, StreamPage, StreamSpec
-from ufo.sources.rest import RestConnector
-from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
+from ufo.runtime.access.connectors import Credential, GrantUnusable
+from ufo.runtime.sources import backend as backend_module
+from ufo.runtime.sources.backend import BACKFILL_KEY, ConnectorBackend, ConnectorSourceConfig
+from ufo.runtime.sources.connector import Connector, StreamPage, StreamSpec
+from ufo.runtime.sources.rest import RestConnector
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 Feed = list[list[dict[str, Any]] | StreamPage]

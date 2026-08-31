@@ -209,7 +209,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       # Every shard's workspace is created fresh by `ufoctl init` and holds no BYOK credential row,
-      # so `WorkspaceScope.credential` (core/src/ufo/workspace.py) resolves the `perplexity_api_key`
+      # so `WorkspaceScope.credential` (core/src/ufo/runtime/workspace.py) resolves the `perplexity_api_key`
       # slot from this platform default — the same fallback
       # `test_search_reads_platform_perplexity_api_key` pins. The stack hands its whole environment
       # to serve, so seeding it here seeds the shard and no key is written to disk.

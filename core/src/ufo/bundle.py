@@ -5,16 +5,16 @@ The bundle pins every extension the deploy already runs (the current lockfile, o
 extension when none is pinned yet) plus every catalog entry marked bundle-only — those disabled in
 the store install here, at bundle time, and never at runtime. Each pin hashes the built wheel, so
 the lock names the bytes the image installs even when the local environment holds older source.
-The output directory is a `docker build` context: the Dockerfile installs the one `ufo`
-distribution (core and every first-party extension and pack ship in it), installs the sandbox
-client, and copies the pinned config and lockfile, whose pins narrow the active set and verify each
-digest at boot — so the same artifact boots identically on any machine."""
+The output directory is a `docker build` context: the Dockerfile installs the `ufo` distribution,
+including the harness, runtime, first-party extensions and packs; installs the
+sandbox client, and copies the pinned config and lockfile, whose pins narrow the active set and
+verify each digest at boot — so the same artifact boots identically on any machine."""
 
 from dataclasses import dataclass
 from pathlib import Path
 from zipfile import ZipFile
 
-from ufo.ext.loader import (
+from ufo.host.ext.loader import (
     ExtensionPin,
     Lockfile,
     discovered,
@@ -22,7 +22,7 @@ from ufo.ext.loader import (
     lockfile_path,
     read_lockfile,
 )
-from ufo.ext.store import Catalog, ufo_version
+from ufo.host.ext.store import Catalog, ufo_version
 
 DOCKERFILE_BASE = "python:3.12-slim"
 BUNDLE_CONFIG_NAME = "ufo.toml"
@@ -33,8 +33,7 @@ BUNDLE_CLIENT_INSTALL_PATH = f"/usr/local/bin/{BUNDLE_CLIENT_BINARY_NAME}"
 
 
 def wheel_name() -> str:
-    """The wheel the CLI verb builds beside this context — the closed distribution the Dockerfile
-    installs, since no index carries `ufo`."""
+    """The tenant runtime wheel the CLI builds into the closed bundle."""
     return f"ufo-{ufo_version()}-py3-none-any.whl"
 
 

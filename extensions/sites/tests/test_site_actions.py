@@ -16,23 +16,9 @@ from ufo_ext_sites.objects import SITE_KIND, site_object_name
 from ufo_ext_sites.store import HostedSites, hosted_site
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE
 
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.loader import turn_hooks, turn_tools
-from ufo.hub import InProcessHub
-from ufo.loop.compaction import Compaction
-from ufo.loop.engine import TurnEngine
-from ufo.loop.prompts.render import rendered_prompt
-from ufo.loop.queue import (
-    _agent_actions,
-    _agent_tools,
-    _subagent_actions,
-    _with_action_verbs,
-)
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -41,16 +27,30 @@ from ufo.models.interface import (
     ToolResultBlock,
     Usage,
 )
-from ufo.objects import ObjectVerbs
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import turn_hooks, turn_tools
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.compaction import Compaction
+from ufo.runtime.engine import TurnEngine
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.objects import ObjectVerbs
+from ufo.runtime.prompts.render import rendered_prompt
+from ufo.runtime.queue import (
+    _agent_actions,
+    _agent_tools,
+    _subagent_actions,
+    _with_action_verbs,
+)
+from ufo.runtime.tools.context import SpawnResult
+from ufo.runtime.tools.registry import ToolDef, ToolRegistry
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.activity import ActivitySummarizer
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, SCHEDULED_ADMISSION, Agent, Turn
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.objects import AGENT_KIND
-from ufo.tools.context import SpawnResult
-from ufo.tools.registry import ToolDef, ToolRegistry
-from ufo.turns.activity import ActivitySummarizer
-from ufo.workspace import ws
 
 PUBLIC_BASE_URL = "https://ufo.example.test"
 SITE_ACTIONS = (

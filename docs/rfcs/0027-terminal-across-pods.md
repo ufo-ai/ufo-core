@@ -3,7 +3,7 @@
 ## Problem
 
 Terminal-as-sandbox (RFC 0026) binds a conversation's workspace to the member's own directory by a
-rendezvous (`core/src/ufo/sandbox/terminal.py` `Terminals`) that is correct only while **one
+rendezvous (`core/src/ufo/harness/sandbox/terminal.py` `Terminals`) that is correct only while **one
 process** serves both the member's held connection and their turn's workflow. So it is gated off
 wherever that does not hold: `serve.py` sets `terminals_admissible = config.hub.backend ==
 IN_PROCESS_BACKEND`, and the ufo surface drops `x-ufo-cwd` when terminals are not admissible.

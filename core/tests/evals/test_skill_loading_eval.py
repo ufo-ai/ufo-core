@@ -25,10 +25,10 @@ from evals.skill_loading.runner import (
     skill_load_verdict,
     skill_loading_task,
 )
-from ufo.ext.context import Trajectory
-from ufo.ext.loader import load_manifests, skill_registry
-from ufo.kinds.agent_setup import SETUP_SKILL_NAME
-from ufo.kinds.governance import prompt_digest
+from ufo.host.ext.loader import load_manifests, skill_registry
+from ufo.runtime.ext.context import Trajectory
+from ufo.runtime.kinds.agent_setup import SETUP_SKILL_NAME
+from ufo.runtime.kinds.governance import prompt_digest
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import Message, TextBlock, ToolResultBlock, ToolUseBlock
 

@@ -17,7 +17,7 @@ date: 2026-08-15
 
 ## Current state
 
-Sandbox egress goes through the Python MITM proxy, `core/src/ufo/sandbox/proxy/server.py`
+Sandbox egress goes through the Python MITM proxy, `core/src/ufo/harness/sandbox/proxy/server.py`
 (~1,700 lines). Every `git clone`, `npm ci`, and `pip install` fetches from the origin every time —
 nothing between the sandbox and the internet is cached. The proxy already injects a github.com
 credential for direct clones (the sentinel path) and enforces per-agent egress rules

@@ -16,8 +16,8 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from ufo.config import BlobConfig
-from ufo.sandbox.containment import PathNotFound, configured_root
-from ufo.workspace import ws_current
+from ufo.harness.containment import PathNotFound, configured_root
+from ufo.runtime.workspace import ws_current
 
 MISSING_KEY_CODES = ("404", "NoSuchKey", "NotFound")
 BLOB_STREAM_CHUNK_BYTES = 1024 * 1024

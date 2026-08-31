@@ -13,7 +13,7 @@ The browser wire file checks raw JSON messages arriving from Chrome DevTools Pro
 ### Sandbox bridge contracts
 Shared request, response, and tool-exposure contracts define how live-turn sandbox tools are invoked.
 
-### `core/src/ufo/tools/bridge.py`
+### `core/src/ufo/runtime/tools/bridge.py`
 
 `data_model` · `live sandbox request setup and tool request handling`
 

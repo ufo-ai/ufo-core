@@ -22,8 +22,8 @@ from ufo_ext_memory.store import mem_page, memory_item
 from evals.issue_recall.corpus import Ambient, RenderedPage, corpus_digest
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.sources.sync import FOLDER_BACKEND, SOURCE_BLOB_PREFIX, page_id_for, source_row_id
 from ufo.schema import tables
-from ufo.sources.sync import FOLDER_BACKEND, SOURCE_BLOB_PREFIX, page_id_for, source_row_id
 
 
 class PageOwners(BaseModel):

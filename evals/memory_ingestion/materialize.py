@@ -17,36 +17,30 @@ from pydantic import BaseModel
 
 from evals.budget import EvalRunBudget
 from evals.memory_ingestion.models import IngestionSnapshot, load_snapshot
-from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.loader import embed_backend, index_backend, load_manifests
-from ufo.ext.manifest import Manifest
-from ufo.indexing import (
+from ufo.harness.containment import (
+    ContainmentError,
+    contained_file,
+    contained_root,
+    is_contained_regular,
+)
+from ufo.harness.models.registry import ModelRegistry, model_registry
+from ufo.host.ext.loader import embed_backend, index_backend, load_manifests
+from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import ScopedStore, context_for
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.indexing import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
     EmbedClient,
     IndexBackend,
     TextChunker,
 )
-from ufo.models.registry import ModelRegistry, model_registry
-from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.runtime.jobs import PageChangeRunner
-from ufo.sandbox.containment import (
-    ContainmentError,
-    contained_file,
-    contained_root,
-    is_contained_regular,
-)
-from ufo.schema import tables
-from ufo.schema.records import (
-    DEFAULT_AGENT_NAME,
-    DEFAULT_REASONING_EFFORT,
-    ReasoningEffort,
-)
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
     SOURCE_BLOB_PREFIX,
     CorePageFeed,
@@ -56,7 +50,13 @@ from ufo.sources.sync import (
     register_sources,
     source_row_id,
 )
-from ufo.workspace import init_workspace_credentials, ws
+from ufo.runtime.workspace import init_workspace_credentials, ws
+from ufo.schema import tables
+from ufo.schema.records import (
+    DEFAULT_AGENT_NAME,
+    DEFAULT_REASONING_EFFORT,
+    ReasoningEffort,
+)
 
 index_default = import_module("ufo_ext_index_default")
 memory_manifest = import_module("ufo_ext_memory.manifest")

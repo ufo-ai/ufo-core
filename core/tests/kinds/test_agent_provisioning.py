@@ -22,23 +22,25 @@ from ufo_ext_sample import (
     PROVISIONED_AGENT_PURPOSE,
 )
 
-from ufo.access.credentials import CredentialStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext
-from ufo.ext.manifest import SETUP_TOOLS, AgentProvision, JobSpec, Manifest
-from ufo.kinds.agent_setup import (
+from ufo.onboard.onboarding import Onboarding
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import ExtensionContext
+from ufo.runtime.ext.manifest import SETUP_TOOLS, AgentProvision, JobSpec, Manifest
+from ufo.runtime.jobs import JobRunner, bindings_from
+from ufo.runtime.kinds.agent_setup import (
     SETUP_SKILL_NAME,
     AgentSetup,
     pending_setup,
     setup_skill,
 )
-from ufo.kinds.agents import ARCHIVED_AGENT_NAME_PREFIX, AgentSpec
-from ufo.kinds.provisioning import ADOPTED, CREATED, PRESENT, AgentProvisioning
-from ufo.loop.queue import _agent_tools, _apply_provisions, _provisioned_workspaces
-from ufo.object_name import validate_object_name
-from ufo.onboard.onboarding import Onboarding
-from ufo.runtime.jobs import JobRunner, bindings_from
+from ufo.runtime.kinds.agents import ARCHIVED_AGENT_NAME_PREFIX, AgentSpec
+from ufo.runtime.kinds.provisioning import ADOPTED, CREATED, PRESENT, AgentProvisioning
+from ufo.runtime.object_name import validate_object_name
+from ufo.runtime.queue import _agent_tools, _apply_provisions, _provisioned_workspaces
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     AGENT_ICONS,
@@ -47,8 +49,6 @@ from ufo.schema.records import (
     MAIN_AGENT_ICON,
     MEMBER_ADMISSION,
 )
-from ufo.tools.registry import ToolDef
-from ufo.workspace import ws
 
 OWNER_EMAIL = "owner@example.com"
 DEFAULT_MODEL = "claude-opus-4-8"

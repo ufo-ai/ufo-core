@@ -104,32 +104,36 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.context import context_for
-from ufo.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
-from ufo.ext.loader import member_object_registry, turn_tools
-from ufo.hub import InProcessHub
-from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, verify_artifact_url
-from ufo.media.image_previews import ImagePreviewGrant
-from ufo.media.site_previewer import SitePreviewer
-from ufo.object_scope import ObjectActionTarget
-from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
-from ufo.sandbox import containment
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.ingress_host import site_label
-from ufo.sandbox.ingress_token import (
+from ufo.harness import containment
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.ingress_host import site_label
+from ufo.harness.sandbox.ingress_token import (
     INGRESS_VIEW_KIND,
     INGRESS_VIEW_PATH,
     FramerClaim,
     ShippedClaim,
     verify_ingress_token,
 )
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ExecResult, ProxyEndpoint
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ExecResult, ProxyEndpoint
+from ufo.host.ext.loader import member_object_registry, turn_tools
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX, verify_artifact_url
+from ufo.runtime.media.image_previews import ImagePreviewGrant
+from ufo.runtime.media.site_previewer import SitePreviewer
+from ufo.runtime.object_scope import ObjectActionTarget
+from ufo.runtime.objects import AdminRequired, UnknownObject, VerbNotSupported
+from ufo.runtime.skills.runtime import SkillRegistry
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import (
@@ -143,10 +147,6 @@ from ufo.sdk.sandbox import serve_port, shipped_anchor
 from ufo.sdk.skills import RuntimeSkill
 from ufo.sdk.tools import SpeakerRequired
 from ufo.serve import RESERVED_HOST_PREFIXES, _mount_shared_surfaces
-from ufo.skills.runtime import SkillRegistry
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ToolDef
-from ufo.workspace import ws
 
 TOKEN_SECRET = "sites-surface-token-secret"
 ARTIFACT_SECRET = "sites-artifact-url-secret"

@@ -3,7 +3,7 @@ import json
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from ufo.turns.contracts import (
+from ufo.runtime.turns.contracts import (
     DECLARED_SCHEMA_MAX_CHARS,
     AgentResultOutput,
     JsonContract,

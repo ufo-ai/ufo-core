@@ -16,16 +16,15 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from ufo.media.document_renderer import DOCUMENT_INPUT_MAX_BYTES, DocumentRenderer
-from ufo.sandbox import terminal
-from ufo.sandbox.session import (
+from ufo.harness.sandbox import terminal
+from ufo.harness.sandbox.session import (
     WORKSPACE_DIR,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
     SandboxUnreachable,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     EXEC_TIMEOUT_CODE,
     TerminalAbsent,
     TerminalCarrier,
@@ -34,6 +33,7 @@ from ufo.sandbox.terminal import (
     Terminals,
     TerminalTransport,
 )
+from ufo.runtime.media.document_renderer import DOCUMENT_INPUT_MAX_BYTES, DocumentRenderer
 
 
 def _spec(conversation_id: UUID, cwd: str, public_url: str | None = None) -> SandboxSpec:

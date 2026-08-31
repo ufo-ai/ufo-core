@@ -21,19 +21,19 @@ import ufo_ext_browser_use as browser_use
 from cryptography.fernet import Fernet
 from ufo_ext_browser_use import BrowserTaskInput, WideBrowseInput
 
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.sandbox.containment import ContainmentError
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.containment import ContainmentError
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ExecResult, ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.tools.registry import ToolRegistry
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.context import ToolContext
-from ufo.tools.registry import ToolRegistry
-from ufo.workspace import init_workspace_credentials, ws
 
 API_KEY = "bu_live_secret_0xdeadbeef"
 RUN_ID = "11111111-1111-1111-1111-111111111111"

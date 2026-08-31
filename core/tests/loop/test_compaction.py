@@ -10,10 +10,23 @@ import pytest
 from connector_payload import CONNECTOR_WINDOW_TOKENS, connector_window
 
 from ufo.blob import FilesystemBlobStore
-from ufo.ext.context import context_for
-from ufo.ext.loader import BoundHook, HookChain
-from ufo.ext.manifest import HookContext, HookSpec
-from ufo.loop.compaction import (
+from ufo.harness.models.interface import (
+    ImageBlock,
+    ImageSource,
+    Message,
+    ModelEvent,
+    ModelRequest,
+    ReasoningItemBlock,
+    RedactedThinkingBlock,
+    TextBlock,
+    TextDelta,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
+from ufo.harness.models.spec import ReasoningSupport
+from ufo.host.ext.loader import BoundHook, HookChain
+from ufo.runtime.compaction import (
     ANCHOR_RETRY_INSTRUCTION,
     AUTOCOMPACT_BUFFER_TOKENS,
     CHARS_PER_TOKEN,
@@ -29,25 +42,12 @@ from ufo.loop.compaction import (
     harvest_anchors,
     missing_anchors,
 )
-from ufo.loop.engine import MAX_OUTPUT_TOKENS, OFFLOAD_NOTICE
-from ufo.models.interface import (
-    ImageBlock,
-    ImageSource,
-    Message,
-    ModelEvent,
-    ModelRequest,
-    ReasoningItemBlock,
-    RedactedThinkingBlock,
-    TextBlock,
-    TextDelta,
-    ThinkingBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-)
-from ufo.models.spec import ReasoningSupport
+from ufo.runtime.engine import MAX_OUTPUT_TOKENS, OFFLOAD_NOTICE
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.manifest import HookContext, HookSpec
+from ufo.runtime.skills.runtime import LoadedSkills, RuntimeSkill, SkillRegistry
+from ufo.runtime.turns.transcript import Anchor, CompactionSummary, FileRef
 from ufo.schema.records import Agent, Usage
-from ufo.skills.runtime import LoadedSkills, RuntimeSkill, SkillRegistry
-from ufo.turns.transcript import Anchor, CompactionSummary, FileRef
 
 HEAD_FACT = "the deploy key is rotated every 30 days HEADSECRET"
 TAIL_FACT = "the customer prefers Tuesday demos TAILSECRET"
@@ -1024,7 +1024,7 @@ async def test_a_connector_heavy_window_over_the_real_trigger_compacts(tmp_path:
     )
     window = connector_window()
     assert CONNECTOR_WINDOW_TOKENS > derived
-    assert 0.9 <= compaction._tokens(window) / CONNECTOR_WINDOW_TOKENS <= 1.2
+    assert 0.9 <= compaction.window.tokens(window) / CONNECTOR_WINDOW_TOKENS <= 1.2
     result, usage = await compaction.maybe_compact(window)
     assert len(usage) == 1
     assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)

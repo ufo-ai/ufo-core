@@ -37,15 +37,10 @@ from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from pydantic import ValidationError
 from ufo_ext_openrouter import GenerateImageInput, GenerateVideoInput
 
-from ufo.access.credentials import CredentialStore
-from ufo.billing.accounting import IMAGES_DIMENSION, VIDEOS_DIMENSION
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.loader import turn_tools
-from ufo.loop.queue import _agent_actions
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     IMAGE_UNSUPPORTED_TEXT,
     ImageBlock,
     ImageSource,
@@ -59,16 +54,21 @@ from ufo.models.interface import (
     ToolSchema,
     ToolUseBlock,
 )
-from ufo.models.pricing import ModelPrice
-from ufo.models.registry import model_registry
+from ufo.harness.models.pricing import ModelPrice
+from ufo.harness.models.registry import model_registry
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.billing.accounting import IMAGES_DIMENSION, VIDEOS_DIMENSION
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.queue import _agent_actions
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.tools.registry import ObjectBinding
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn, Usage
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.objects import ARTIFACT_KIND
-from ufo.tools.context import ToolContext
-from ufo.tools.registry import ObjectBinding
-from ufo.workspace import init_workspace_credentials, ws
 
 OPENROUTER_KEY = "sk-or-v1-secret-0xfeedface"
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n-one").decode()

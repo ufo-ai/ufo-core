@@ -16,46 +16,46 @@ Top-level and platform-adjacent package markers establish importable namespaces 
 In Python, a folder can become an importable package by containing an `__init__.py` file. This file is that marker for the `ufo` package. Think of it like a label on a drawer: the drawer may hold many useful tools, but this label simply tells Python, “you can open this as a named package.” Because the file is empty, it does not run setup code, expose shortcuts, or change how imports behave. Its value is structural: without it, some Python environments and tools might not recognize `core/src/ufo` as a package, which could make imports fail or make packaging and test discovery less reliable.
 
 
-### `core/src/ufo/access/__init__.py`
+### `core/src/ufo/runtime/access/__init__.py`
 
 `other` · `import time`
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to things under `ufo.access` using normal import paths.
+This is an empty package initializer. In Python, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to things under `ufo.runtime.access` using normal import paths.
 
-Because the file is empty, it does not run setup code, expose shortcuts, or change how the access-related modules work. Its value is structural: it is like a label on a drawer that says “access-related code lives here.” Without it, depending on the Python version and packaging setup, imports involving `ufo.access` could fail or behave less predictably.
+Because the file is empty, it does not run setup code, expose shortcuts, or change how the access-related modules work. Its value is structural: it is like a label on a drawer that says “access-related code lives here.” Without it, depending on the Python version and packaging setup, imports involving `ufo.runtime.access` could fail or behave less predictably.
 
 
-### `core/src/ufo/auth/__init__.py`
+### `core/src/ufo/runtime/auth/__init__.py`
 
 `other` · `import/package discovery`
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to the authentication area as `ufo.auth` and then import specific modules inside it. Think of it like a label on a drawer: the drawer may contain useful tools, but the label itself does not do the work. If this file were missing in projects or environments that rely on traditional package markers, imports from `ufo.auth` could fail or behave differently. Because the file is empty, it does not set up authentication, define shared objects, or run startup code. Its value is structural: it helps organize the codebase and makes the authentication namespace available.
+This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to the authentication area as `ufo.runtime.auth` and then import specific modules inside it. Think of it like a label on a drawer: the drawer may contain useful tools, but the label itself does not do the work. If this file were missing in projects or environments that rely on traditional package markers, imports from `ufo.runtime.auth` could fail or behave differently. Because the file is empty, it does not set up authentication, define shared objects, or run startup code. Its value is structural: it helps organize the codebase and makes the authentication namespace available.
 
 
-### `core/src/ufo/billing/__init__.py`
-
-`other` · `import time`
-
-This is an empty package initializer. In Python, a folder can be treated as an importable package when it has an `__init__.py` file. That lets the rest of the project refer to code in this directory using names like `ufo.billing.some_module` instead of raw file paths. Think of it like a label on a drawer: the label does not contain the tools, but it tells Python that the drawer belongs to the organized set of project modules. Because this file is empty, it does not create objects, change settings, connect to services, or run billing rules. Its value is structural: without it, some Python environments or packaging tools might not recognize the billing folder as part of the `ufo` code package, and imports could fail or behave inconsistently.
-
-
-### `core/src/ufo/ext/__init__.py`
+### `core/src/ufo/runtime/billing/__init__.py`
 
 `other` · `import time`
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the folder should be treated as an importable package. Here, it makes the `core/src/ufo/ext` directory available as `ufo.ext` to the rest of the project. Think of it like a label on a drawer: the drawer may contain useful tools, but this label mainly lets people find and open it by name. Because the file has no code, it does not run setup steps, create objects, or expose helper functions directly. Its value is structural: without it, depending on the Python version and packaging setup, imports that expect `ufo.ext` to be a regular package could fail or behave differently.
+This is an empty package initializer. In Python, a folder can be treated as an importable package when it has an `__init__.py` file. That lets the rest of the project refer to code in this directory using names like `ufo.runtime.billing.some_module` instead of raw file paths. Think of it like a label on a drawer: the label does not contain the tools, but it tells Python that the drawer belongs to the organized set of project modules. Because this file is empty, it does not create objects, change settings, connect to services, or run billing rules. Its value is structural: without it, some Python environments or packaging tools might not recognize the billing folder as part of the `ufo` code package, and imports could fail or behave inconsistently.
+
+
+### `core/src/ufo/host/ext/__init__.py`
+
+`other` · `import time`
+
+This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the folder should be treated as an importable package. Here, it makes the `core/src/ufo/host/ext` directory available as `ufo.host.ext` to the rest of the project. Think of it like a label on a drawer: the drawer may contain useful tools, but this label mainly lets people find and open it by name. Because the file has no code, it does not run setup steps, create objects, or expose helper functions directly. Its value is structural: without it, depending on the Python version and packaging setup, imports that expect `ufo.host.ext` to be a regular package could fail or behave differently.
 
 
 ### Core concepts
 Concept, loop, prompt, media, and model package markers make the central interaction building blocks importable.
 
-### `core/src/ufo/kinds/__init__.py`
+### `core/src/ufo/runtime/kinds/__init__.py`
 
 `other` · `import/package discovery`
 
-This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Here, it makes the `ufo.kinds` namespace available to the rest of the project.
+This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Here, it makes the `ufo.runtime.kinds` namespace available to the rest of the project.
 
-There is no code inside this file, so it does not create objects, run setup steps, or expose helper functions. Its value is structural: it is like a label on a drawer saying “the files inside belong together.” Without it, depending on the Python version and packaging setup, imports from `ufo.kinds` might fail or behave differently. Keeping the file also gives the project a clear place to add package-level setup later if that ever becomes necessary.
+There is no code inside this file, so it does not create objects, run setup steps, or expose helper functions. Its value is structural: it is like a label on a drawer saying “the files inside belong together.” Without it, depending on the Python version and packaging setup, imports from `ufo.runtime.kinds` might fail or behave differently. Keeping the file also gives the project a clear place to add package-level setup later if that ever becomes necessary.
 
 
 ### `core/src/ufo/loop/__init__.py`
@@ -72,26 +72,26 @@ This is an empty package initializer. In Python, a folder can be treated as an i
 This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. You can think of it like a label on a drawer: the drawer may contain useful prompt-related files, and this label lets the rest of the program find them by name. Because the file has no code, it does not create prompt text, load settings, or run any logic. Its value is structural. Without it, depending on the Python version and packaging setup, imports that expect `ufo.loop.prompts` to be a normal package could fail or behave differently. So this file matters mainly because it keeps the project’s module layout clear and import-friendly.
 
 
-### `core/src/ufo/media/__init__.py`
+### `core/src/ufo/runtime/media/__init__.py`
 
 `other` · `cross-cutting`
 
-In Python, a folder can act like a named package when it has an `__init__.py` file. This file is that marker for the `ufo.media` area of the project. Think of it like a label on a drawer: the label does not store the tools, but it tells Python that the drawer exists and can be opened by name.
+In Python, a folder can act like a named package when it has an `__init__.py` file. This file is that marker for the `ufo.runtime.media` area of the project. Think of it like a label on a drawer: the label does not store the tools, but it tells Python that the drawer exists and can be opened by name.
 
-Because this file is empty, it does not define any classes, functions, settings, or startup behavior. Its value is structural. It lets code elsewhere refer to media-related modules using imports such as `ufo.media.something`, assuming such modules exist alongside it. Without this file, some Python environments or tooling may not treat the folder as a normal package, which could make imports, packaging, or code discovery less predictable.
+Because this file is empty, it does not define any classes, functions, settings, or startup behavior. Its value is structural. It lets code elsewhere refer to media-related modules using imports such as `ufo.runtime.media.something`, assuming such modules exist alongside it. Without this file, some Python environments or tooling may not treat the folder as a normal package, which could make imports, packaging, or code discovery less predictable.
 
 So the important thing to know is what this file does not do: it does not process media, open files, talk to external services, or configure anything. It simply reserves and declares the package namespace for media-related code.
 
 
-### `core/src/ufo/models/__init__.py`
+### `core/src/ufo/harness/models/__init__.py`
 
 `other` · `import time`
 
-This is an empty Python package marker file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to modules under `ufo.models` using normal import paths.
+This is an empty Python package marker file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. Here, that means code elsewhere can refer to modules under `ufo.harness.models` using normal import paths.
 
 There are no functions, classes, settings, or side effects in this file. Its value is structural rather than behavioral: it helps organize the project’s model-related code under one namespace. A namespace is like a labeled drawer in a filing cabinet; even if this particular label contains no instructions, it lets people and tools reliably find the files inside.
 
-Without this file, depending on the Python version and packaging setup, imports involving `ufo.models` might fail or behave differently. Keeping it present makes the package layout explicit and predictable.
+Without this file, depending on the Python version and packaging setup, imports involving `ufo.harness.models` might fail or behave differently. Keeping it present makes the package layout explicit and predictable.
 
 
 ### Execution environment
@@ -115,11 +115,11 @@ Because this file contains no code, it does not start anything, configure anythi
 If this file were removed, imports may still work in some modern Python setups because Python supports some packages without `__init__.py`. However, keeping it makes the package boundary explicit and helps compatibility with tools that expect traditional Python packages.
 
 
-### `core/src/ufo/sandbox/__init__.py`
+### `core/src/ufo/harness/sandbox/__init__.py`
 
 `other` · `import time`
 
-This is an empty Python package file. In Python projects, a file named `__init__.py` tells Python that the folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools, but this label mainly lets the rest of the system find the drawer by name. Here, it makes the `ufo.sandbox` namespace available, so code elsewhere can import modules that live under `core/src/ufo/sandbox/`. Because the file is empty, it does not run setup code, expose shortcuts, or change how sandbox features work. If it were missing in projects or tooling that expect traditional Python packages, imports involving `ufo.sandbox` could fail or become less predictable.
+This is an empty Python package file. In Python projects, a file named `__init__.py` tells Python that the folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools, but this label mainly lets the rest of the system find the drawer by name. Here, it makes the `ufo.harness.sandbox` namespace available, so code elsewhere can import modules that live under `core/src/ufo/harness/sandbox/`. Because the file is empty, it does not run setup code, expose shortcuts, or change how sandbox features work. If it were missing in projects or tooling that expect traditional Python packages, imports involving `ufo.harness.sandbox` could fail or become less predictable.
 
 
 ### `core/src/ufo/schema/__init__.py`
@@ -143,45 +143,45 @@ SDK, skills, sources, surfaces, and tools package markers expose the main extens
 This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools, but this label itself does not do the work. Without this file, depending on the Python version and packaging setup, code that tries to import `ufo.sdk` or modules under it might fail or behave differently. Because it contains no functions, classes, or setup code, importing this package does not trigger any special action here. Its value is structural: it gives the project a clear place for SDK-related code and makes that code reachable through normal Python imports.
 
 
-### `core/src/ufo/skills/__init__.py`
+### `core/src/ufo/runtime/skills/__init__.py`
 
 `other` · `import/package discovery`
 
-This is an empty package marker file. In Python, a folder with an `__init__.py` file is treated as an importable package, meaning code elsewhere can refer to modules inside it using names like `ufo.skills.some_module`. Think of it like putting a label on a drawer: the drawer may contain useful tools, but this label is what lets the rest of the system find it by name.
+This is an empty package marker file. In Python, a folder with an `__init__.py` file is treated as an importable package, meaning code elsewhere can refer to modules inside it using names like `ufo.runtime.skills.some_module`. Think of it like putting a label on a drawer: the drawer may contain useful tools, but this label is what lets the rest of the system find it by name.
 
-Because the file is empty, it does not set up any objects, run startup logic, or expose shortcuts for the modules inside the `skills` folder. Its value is structural rather than behavioral. Without it, depending on the Python version and packaging setup, imports involving `ufo.skills` might fail or behave differently. Keeping it here makes the package boundary explicit and helps tooling, packaging, and readers understand that this directory is meant to hold a coherent group of skill-related code.
-
-
-### `core/src/ufo/sources/__init__.py`
-
-`other` · `import time`
-
-This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools, but the label itself does not do the work. Without this file, depending on the Python version and packaging setup, code elsewhere in the project might not be able to reliably import modules from `ufo.sources`. Because it contains no code, it does not create objects, run setup steps, or change program state. Its main value is structural: it helps organize source-related code under one namespace.
+Because the file is empty, it does not set up any objects, run startup logic, or expose shortcuts for the modules inside the `skills` folder. Its value is structural rather than behavioral. Without it, depending on the Python version and packaging setup, imports involving `ufo.runtime.skills` might fail or behave differently. Keeping it here makes the package boundary explicit and helps tooling, packaging, and readers understand that this directory is meant to hold a coherent group of skill-related code.
 
 
-### `core/src/ufo/surfaces/__init__.py`
+### `core/src/ufo/runtime/sources/__init__.py`
 
 `other` · `import time`
 
-This is an empty package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means code elsewhere can write imports that refer to `ufo.surfaces` and to files inside this directory.
+This is an empty package initializer. In Python, a file named `__init__.py` tells the interpreter that the surrounding folder should be treated as an importable package. Think of it like a label on a drawer: the drawer may contain useful tools, but the label itself does not do the work. Without this file, depending on the Python version and packaging setup, code elsewhere in the project might not be able to reliably import modules from `ufo.runtime.sources`. Because it contains no code, it does not create objects, run setup steps, or change program state. Its main value is structural: it helps organize source-related code under one namespace.
 
-Because the file is empty, it does not set up defaults, expose shortcuts, or run any startup code. Its job is more like putting a label on a drawer: it tells Python, and readers of the project, that the files in this folder belong together under the `ufo.surfaces` namespace.
+
+### `core/src/ufo/runtime/surfaces/__init__.py`
+
+`other` · `import time`
+
+This is an empty package marker file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means code elsewhere can write imports that refer to `ufo.runtime.surfaces` and to files inside this directory.
+
+Because the file is empty, it does not set up defaults, expose shortcuts, or run any startup code. Its job is more like putting a label on a drawer: it tells Python, and readers of the project, that the files in this folder belong together under the `ufo.runtime.surfaces` namespace.
 
 Without this file, depending on the Python version and packaging setup, imports involving this folder might behave differently or fail in some environments. Keeping it here makes the package structure explicit and predictable.
 
 
-### `core/src/ufo/tools/__init__.py`
+### `core/src/ufo/host/tools/__init__.py`
 
 `other` · `cross-cutting`
 
-This is a package marker file. In Python, an `__init__.py` file tells Python that a folder should be treated as an importable package, meaning other code can refer to this area as `ufo.tools`. This particular file does not define any functions or classes. Its only content is a short documentation string explaining the purpose of the package: it contains the pieces used to define and run tools. In this project, “tools” likely means callable abilities the system can expose, organize, and execute, while a registry is like a directory that keeps track of which tools exist. The handler context is the surrounding information a tool needs when it runs, and the built-in tool set is the collection that comes with the project by default. Without this file, depending on the Python packaging setup, imports from `ufo.tools` could be less clear or fail in older tooling. Its main value is structural: it gives this part of the codebase a named home.
+This is a package marker file. In Python, an `__init__.py` file tells Python that a folder should be treated as an importable package, meaning other code can refer to this area as `ufo.host.tools`. This particular file does not define any functions or classes. Its only content is a short documentation string explaining the purpose of the package: it contains the pieces used to define and run tools. In this project, “tools” likely means callable abilities the system can expose, organize, and execute, while a registry is like a directory that keeps track of which tools exist. The handler context is the surrounding information a tool needs when it runs, and the built-in tool set is the collection that comes with the project by default. Without this file, depending on the Python packaging setup, imports from `ufo.host.tools` could be less clear or fail in older tooling. Its main value is structural: it gives this part of the codebase a named home.
 
 
 ### Turn records
 The turns package marker closes the import structure with the namespace for turn-related modules.
 
-### `core/src/ufo/turns/__init__.py`
+### `core/src/ufo/runtime/turns/__init__.py`
 
 `other` · `import/package discovery`
 
-This is an empty package marker file. In Python, a folder with an `__init__.py` file is treated as an importable package, meaning other parts of the project can refer to code inside this directory using names like `ufo.turns.something`. Think of it like a label on a drawer: the label does not contain the tools, but it tells Python that the drawer exists and can be opened in an organized way. Because this file is empty, it does not run setup code, expose shortcut imports, or change how the rest of the package behaves. Its value is structural: without it, depending on the Python version and packaging setup, imports from the `ufo.turns` folder might fail or behave less predictably.
+This is an empty package marker file. In Python, a folder with an `__init__.py` file is treated as an importable package, meaning other parts of the project can refer to code inside this directory using names like `ufo.runtime.turns.something`. Think of it like a label on a drawer: the label does not contain the tools, but it tells Python that the drawer exists and can be opened in an organized way. Because this file is empty, it does not run setup code, expose shortcut imports, or change how the rest of the package behaves. Its value is structural: without it, depending on the Python version and packaging setup, imports from the `ufo.runtime.turns` folder might fail or behave less predictably.

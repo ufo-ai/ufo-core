@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ufo.sandbox.preview import PREVIEW_HOST, PREVIEW_SENTINEL, parse_preview_service
+from ufo.harness.sandbox.preview import PREVIEW_HOST, PREVIEW_SENTINEL, parse_preview_service
 
 
 def test_parse_preview_service_splits_host_and_port() -> None:

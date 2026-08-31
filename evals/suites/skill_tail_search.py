@@ -13,10 +13,10 @@ from evals.harness.capability import CapabilityCase, CapabilitySeed
 from evals.harness.scorers import combine, required_tools_scorer, skill_scorer
 from evals.skill_loading.member import CLEANUP_NOTE, RETENTION_HOLDS, STRESS_SPREAD
 from evals.skill_loading.runner import forget_workspace_skills, seed_member_skills
-from ufo.agent_scope import agent
 from ufo.blob import BlobStore
-from ufo.ext.context import context_for
-from ufo.ext.loader import load_manifests, skill_registry
+from ufo.host.ext.loader import load_manifests, skill_registry
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import context_for
 
 SKILL_SEARCH_ACTION = "action:skill:skill_search"
 LOAD_TOOL = "load_skill"

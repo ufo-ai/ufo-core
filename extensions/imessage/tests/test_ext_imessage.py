@@ -71,26 +71,33 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.loader import turn_tools
-from ufo.ext.surface import (
+from ufo.harness.models.interface import ModelRequest
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import ScopedStore, context_for
+from ufo.runtime.ext.surface import (
     SurfaceAuth,
     SurfaceContext,
     SurfaceListenerContext,
     Writeback,
     member_message_text,
 )
-from ufo.hub import InProcessHub
-from ufo.kinds.surface_kind import SURFACE_KIND
-from ufo.loop.queue import _agent_actions
-from ufo.models.interface import ModelRequest
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.kinds.surface_kind import SURFACE_KIND
+from ufo.runtime.queue import _agent_actions
+from ufo.runtime.surfaces.admission import Admission, MemberAdmission
+from ufo.runtime.surfaces.hub_tail import HubTailer
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.tools.registry import ObjectBinding
+from ufo.runtime.turns.ambient_reply import AmbientReplyClassifier
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     MEMBER_ADMISSION,
@@ -102,13 +109,6 @@ from ufo.schema.records import (
     TerminalFrame,
     Turn,
 )
-from ufo.surfaces.admission import Admission, MemberAdmission
-from ufo.surfaces.hub_tail import HubTailer
-from ufo.tools.context import ToolContext
-from ufo.tools.registry import ObjectBinding
-from ufo.turns.ambient_reply import AmbientReplyClassifier
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
 
 CLAIM_CODE = "ABC234"
 

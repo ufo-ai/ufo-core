@@ -49,7 +49,7 @@ from evals.issue_recall.runner import (
     load_issue_recall,
 )
 from evals.issue_recall.state import AmbientOwner, CorpusReadiness, PageOwners
-from ufo.sources.sync import page_id_for
+from ufo.runtime.sources.sync import page_id_for
 
 SOURCE_ID = UUID("11111111-2222-3333-4444-555555555555")
 WORKSPACE_ID = UUID("66666666-7777-8888-9999-aaaaaaaaaaaa")

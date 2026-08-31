@@ -20,25 +20,23 @@ from evals.budget import EvalRunBudget
 from evals.memory_100.models import Snapshot
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import AudienceBinding, CorpusAttestor, CorpusReadiness
-from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.loader import embed_backend, index_backend, load_manifests
-from ufo.ext.manifest import Manifest
-from ufo.indexing import EmbedClient, IndexBackend, TextChunker
-from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
-from ufo.runtime.jobs import PageChangeRunner
-from ufo.sandbox.containment import (
+from ufo.harness.containment import (
     ContainmentError,
     contained_file,
     contained_root,
     is_contained_regular,
 )
-from ufo.schema import tables
-from ufo.schema.records import DEFAULT_AGENT_NAME
-from ufo.sources.sync import (
+from ufo.host.ext.loader import embed_backend, index_backend, load_manifests
+from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import ScopedStore, context_for
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.indexing import EmbedClient, IndexBackend, TextChunker
+from ufo.runtime.jobs import PageChangeRunner
+from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
     FolderSource,
@@ -46,8 +44,10 @@ from ufo.sources.sync import (
     register_sources,
     source_row_id,
 )
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import init_workspace_credentials, ws
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import init_workspace_credentials, ws
+from ufo.schema import tables
+from ufo.schema.records import DEFAULT_AGENT_NAME
 
 index_default = import_module("ufo_ext_index_default")
 memory_manifest = import_module("ufo_ext_memory.manifest")

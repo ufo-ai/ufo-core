@@ -13,14 +13,14 @@ import json
 import os
 from dataclasses import dataclass
 
-from ufo.loop.prompts.render import (
+from ufo.harness.models.anthropic import AnthropicClient, anthropic_sdk_client
+from ufo.harness.models.interface import Message, ModelRequest, TextDelta
+from ufo.runtime.prompts.render import (
     KNOWLEDGE_CUTOFF_SLOT,
     SHELL,
     render_system_prompt,
     render_template,
 )
-from ufo.models.anthropic import AnthropicClient, anthropic_sdk_client
-from ufo.models.interface import Message, ModelRequest, TextDelta
 
 EVAL_MODEL = "claude-opus-4-8"
 AGENT_PROMPT = "You are the workspace assistant."

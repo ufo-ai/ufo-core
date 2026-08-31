@@ -16,7 +16,7 @@ The many extension manifests are registration cards for specific abilities: brow
 ### Extension loading foundations
 Core startup code discovers extensions, validates what may run, registers skills, and demonstrates the full extension contract with a sample pack.
 
-### `core/src/ufo/ext/loader.py`
+### `core/src/ufo/host/ext/loader.py`
 
 `orchestration` · `startup and per-turn setup, with hook chains active during turns and connection recording`
 
@@ -528,7 +528,7 @@ def connection_hooks(manifests: tuple[Manifest, ...], credential_store: Credenti
 *Call graph*: 3 external calls (__init__, __init__, context_for).
 
 
-### `core/src/ufo/skills/runtime.py`
+### `core/src/ufo/runtime/skills/runtime.py`
 
 `domain_logic` · `startup, skill selection, request handling, sandbox preparation`
 

@@ -13,15 +13,17 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
-from ufo.access.credentials import CredentialStore, deploy_env
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.manifest import Manifest
-from ufo.kinds.provisioning import AgentProvisioning
-from ufo.models.interface import AUTO_MODEL
-from ufo.models.registry import model_registry
-from ufo.o11y import log
+from ufo.harness.models.interface import AUTO_MODEL
+from ufo.harness.models.registry import model_registry
+from ufo.harness.o11y import log
+from ufo.runtime.access.credentials import CredentialStore, deploy_env
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.kinds.provisioning import AgentProvisioning
+from ufo.runtime.seats import create_member
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_AGENT_NAME,
@@ -29,8 +31,6 @@ from ufo.schema.records import (
     MAIN_AGENT_ICON,
     ReasoningEffort,
 )
-from ufo.seats import create_member
-from ufo.workspace import ws
 
 DEFAULT_AGENT_PROMPT = "You are a helpful assistant."
 DEFAULT_AGENT_MODEL = AUTO_MODEL

@@ -47,31 +47,31 @@ from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.surface import MEMORY_RECENT_LIMIT
 from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY
 
-from ufo.access.credentials import CredentialStore, credential_object_name
-from ufo.agent_scope import agent as bind_agent
-from ufo.auth.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.loader import (
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.host.ext.loader import (
     member_object_registry,
     member_skill_listing,
     memory_search,
     skill_registry,
 )
-from ufo.hub import InProcessHub
-from ufo.indexing import TextChunker
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.runtime.access.credentials import CredentialStore, credential_object_name
+from ufo.runtime.agent_scope import agent as bind_agent
+from ufo.runtime.auth.bearer import mint_token
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.indexing import TextChunker
+from ufo.runtime.skills.runtime import RuntimeSkill
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.turns.subjects import member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
 from ufo.sdk.manifest import Manifest
 from ufo.serve import _mount_shared_surfaces
-from ufo.skills.runtime import RuntimeSkill
-from ufo.turns.audience import conversation_audience
-from ufo.turns.subjects import member_subject
-from ufo.workspace import ws
 
 TOKEN_SECRET = "web-token-secret"
 SESSION_COOKIE = "ufo_session"

@@ -22,34 +22,23 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
 
-from ufo.access.connectors import CliCredential, ForwardedResponse
-from ufo.access.credentials import CredentialStore, HostChoice
-from ufo.access.grants import GrantStore, grant_sentinel
-from ufo.agent_scope import agent
 from ufo.db import workspace_tx
-from ufo.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
-from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
-from ufo.loop.queue import (
-    SandboxAuthorizer,
-    _open_sandbox,
-)
-from ufo.loop.subagents import SubagentRegistry, Subagents
-from ufo.sandbox import terminal
-from ufo.sandbox.containment import LocationEscape, NonDirectoryAncestor
-from ufo.sandbox.conversation import (
+from ufo.harness.containment import LocationEscape, NonDirectoryAncestor
+from ufo.harness.sandbox import terminal
+from ufo.harness.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
     WORKSPACE_ROOT_SETTING,
     WORKSPACE_WRITE_MAX_BYTES,
     ConversationSandbox,
 )
-from ufo.sandbox.exec_env import (
+from ufo.harness.sandbox.exec_env import (
     CONVERSATION_ID_ENV,
     GIT_PROXY_AUTH_CONFIG,
     _git_config_env,
     _grant_cli_env,
 )
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import (
     PROXY_PASSWORD,
     Carrier,
     DialTarget,
@@ -63,12 +52,23 @@ from ufo.sandbox.session import (
     _LateSandbox,
     ufo_fs_file_op,
 )
-from ufo.sandbox.terminal import TerminalCarrier, TerminalGone, Terminals
+from ufo.harness.sandbox.terminal import TerminalCarrier, TerminalGone, Terminals
+from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
+from ufo.runtime.access.credentials import CredentialStore, HostChoice
+from ufo.runtime.access.grants import GrantStore, grant_sentinel
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
+from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
+from ufo.runtime.queue import (
+    SandboxAuthorizer,
+    _open_sandbox,
+)
+from ufo.runtime.subagents import SubagentRegistry, Subagents
+from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
+from ufo.runtime.turns.audience import SHARED_AUDIENCE
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Turn
-from ufo.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
-from ufo.turns.audience import SHARED_AUDIENCE
-from ufo.workspace import ws
 
 PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")
 RUN_TOKENS = RunTokenCodec(b"sandbox-handle-test-secret")

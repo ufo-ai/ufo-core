@@ -9,8 +9,9 @@ import re
 
 import pytest
 
-from ufo.ext.loader import load_manifests
-from ufo.loop.prompts.render import (
+from ufo.harness.models.catalog import CORE_MODEL_SPECS
+from ufo.host.ext.loader import load_manifests
+from ufo.runtime.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
     SHELL,
     RenderedPrompt,
@@ -19,11 +20,10 @@ from ufo.loop.prompts.render import (
     render_template,
     rendered_prompt,
 )
-from ufo.models.catalog import CORE_MODEL_SPECS
+from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, SkillCard, SkillRegistry
+from ufo.runtime.skills.selection import prompt_index
+from ufo.runtime.turns.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.sdk.delivery_register import DELIVERY_REGISTER_BLOCK as SDK_DELIVERY_REGISTER_BLOCK
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillCard, SkillRegistry
-from ufo.skills.selection import prompt_index
-from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK
 
 SHELL_FIXTURE = "You are {{agent-prompt}}.\n\n{{skill_index}}\n\n{{sections}}"
 BROWSER_FIXTURE = "You browse the web. Cite what you find.\n\n{{sections}}"

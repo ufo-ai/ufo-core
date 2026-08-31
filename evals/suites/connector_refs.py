@@ -44,11 +44,11 @@ from evals.harness.capability import (
 )
 from evals.harness.harness import Json, JsonObject
 from evals.harness.scorers import answer_text, combine, restraint_scorer
-from ufo.access.grants import GrantStore
-from ufo.agent_scope import agent
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
+from ufo.harness.sandbox.session import TOOL_OUTPUT_DIRNAME
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
 from ufo.schema import tables
 from ufo.sdk.context import ScopedStore
 

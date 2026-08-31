@@ -14,7 +14,7 @@ date: 2026-08-20
 
 ## Current state
 
-`AddMember.add` (`core/src/ufo/kinds/members.py:318`) mints the member row and stamps `invited_by`. That
+`AddMember.add` (`core/src/ufo/runtime/kinds/members.py:318`) mints the member row and stamps `invited_by`. That
 row is the grant — `servers/control/src/shared.rs:125`: "Every workspace this address may enter: its exact
 memberships plus the one its verified domain names." The invitation is therefore a message and
 nothing more. An unread one locks nobody out.

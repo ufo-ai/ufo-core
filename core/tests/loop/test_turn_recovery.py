@@ -29,18 +29,13 @@ from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.invoker import invoker_factory
 
-from ufo import o11y
-from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.loader import skill_registry
-from ufo.hub import InProcessHub
-from ufo.loop import queue as loop_queue
-from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import (
+from ufo.harness import o11y
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -48,10 +43,15 @@ from ufo.models.interface import (
     ToolCallStart,
     ToolResultBlock,
 )
-from ufo.models.registry import ModelRegistry
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ExecResult, ProxyEndpoint, RunTokenCodec
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ExecResult, ProxyEndpoint, RunTokenCodec
+from ufo.host.ext.loader import HostEnvironment, skill_registry
+from ufo.runtime import queue as loop_queue
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.subagents import SubagentRegistry
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
 
@@ -228,6 +228,12 @@ def _install_runtime(config: Config, registry: ModelRegistry, workspace_root: Pa
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(),
+            environment=HostEnvironment(
+                manifests=(),
+                credentials=None,
+                index=DefaultIndex(transaction=workspace_tx),
+                embed=_StubEmbed(),
+            ),
             registry=registry,
             skills=skill_registry(()),
             credentials=None,

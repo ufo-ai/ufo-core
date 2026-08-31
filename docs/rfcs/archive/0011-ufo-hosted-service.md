@@ -84,7 +84,7 @@ here.
 
 | Today | In `ufo` |
 |---|---|
-| package `selfhost` (`core/src/selfhost`) | `ufo` (`core/src/ufo`) |
+| package `selfhost` (`core/runtime/src/selfhost`) | `ufo` (`core/src/ufo`) |
 | `selfhost_ext_<name>` / `selfhost_pack_<name>` | `ufo_ext_<name>` / `ufo_pack_<name>` |
 | entry-point groups `selfhost.extension` / `selfhost.pack` | `ufo.extension` / `ufo.pack` |
 | `selfhost.sdk` (+ the SDK import gate) | `ufo.sdk` (gate constant follows) |

@@ -9,15 +9,15 @@ from uuid import uuid4
 import pytest
 from cryptography.fernet import Fernet
 
-from ufo.access.credentials import CredentialStore
-from ufo.ext.context import ExtensionContext
-from ufo.ext.loader import member_skill_listing, turn_member_skills
-from ufo.ext.manifest import Manifest, MemberSkillsSpec
-from ufo.loop.queue import _without_workspace_skills
-from ufo.sandbox.containment import ContainmentError
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
-from ufo.skills.runtime import (
+from ufo.harness.containment import ContainmentError
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import member_skill_listing, turn_member_skills
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import ExtensionContext
+from ufo.runtime.ext.manifest import Manifest, MemberSkillsSpec
+from ufo.runtime.queue import _without_workspace_skills
+from ufo.runtime.skills.runtime import (
     CORE_SKILL_NAMES,
     CORE_SKILL_REGISTRY,
     CORE_SKILLS,

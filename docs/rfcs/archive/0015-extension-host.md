@@ -23,7 +23,7 @@ An extension is a Python package whose `ufo.extension` entry point returns a `Ma
 extensions keep using, unchanged, after this RFC:
 
 1. **Extension code executes in the serve process, at every boot, before any trust decision.**
-   `discovered()` (`core/src/ufo/ext/loader.py:129-139`) calls `entry.load()()` for **every
+   `discovered()` (`core/src/ufo/host/ext/loader.py:129-139`) calls `entry.load()()` for **every
    installed entry point**, unconditionally — the module's top-level code and its manifest-builder
    function both run in `serve` before `load_manifests()` (`loader.py:215-240`) even checks whether
    the lockfile pins that extension. RFC 0007 already says this plainly: arbitrary code "runs
@@ -33,9 +33,9 @@ extensions keep using, unchanged, after this RFC:
    population RFC 0007's own words describe as carrying real risk: code someone other than this
    repo's maintainers wrote.
 2. **`ExtensionContext` hands out live, unscoped power.** `transaction()`
-   (`core/src/ufo/ext/context.py:387-397`) yields a raw whole-database `AsyncConnection`; `index`,
+   (`core/src/ufo/runtime/ext/context.py:387-397`) yields a raw whole-database `AsyncConnection`; `index`,
    `embed`, `invoker`, `scheduler` are live Protocol objects; every accessor reads the current
-   workspace off an ambient contextvar, `ws_current()` (`core/src/ufo/workspace.py`, used at
+   workspace off an ambient contextvar, `ws_current()` (`core/src/ufo/runtime/workspace.py`, used at
    `context.py:65,141,189,330,…`). This remains exactly as-is for first-party extensions. It is
    the reason a *third-party* extension gets a deliberately narrower context instead (§5) — this
    surface was never designed to be handed to code the operator didn't write.

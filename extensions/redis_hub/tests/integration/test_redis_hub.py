@@ -1,6 +1,7 @@
 """RedisStreamHub end to end against a REAL Redis — the XADD/XREAD path
-`core/tests/test_ext_redis_hub.py` used to claim was "exercised in integration" when no such test
-existed. A container is launched with `docker run -d --rm -p <port>:6379 redis:7-alpine` (the image
+`core/tests/test_ext_redis_hub.py` used to claim was "exercised in integration" when no
+such test existed. A container is launched with
+`docker run -d --rm -p <port>:6379 redis:7-alpine` (the image
 metalcraft's docker-compose already pins for this same live-frame data plane), and the extension's
 own `_build_hub` constructs the hub exactly as `serve` would from `config.hub.url` — no hand-rolled
 redis client. Every LiveFrame kind is published (XADD) and read back (XREAD) over the wire, a
@@ -26,8 +27,8 @@ from redis.exceptions import RedisError
 from ufo_ext_redis_hub.stream_hub import STREAM_PREFIX, RedisStreamHub
 from ufo_testsupport.plugin import integration_dependency_available
 
-from ufo.hub import Activity, CostTick, LiveFrame, Parked, Terminal
-from ufo.models.interface import TextDelta
+from ufo.harness.models.interface import TextDelta
+from ufo.runtime.hub import Activity, CostTick, LiveFrame, Parked, Terminal
 from ufo.schema.records import TerminalFrame
 
 pytestmark = pytest.mark.docker

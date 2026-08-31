@@ -27,14 +27,33 @@ import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
-import ufo.ext.loader as loader
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import CredentialStore
+import ufo.runtime.ext.hooks as hooks_module
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, ScopedStore, context_for
-from ufo.ext.loader import BoundHook, HookChain, load_manifests, turn_hooks, turn_tools
-from ufo.ext.manifest import (
+from ufo.harness.models.interface import (
+    Message,
+    ModelEvent,
+    ModelRequest,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+    ToolResultBlock,
+    Usage,
+)
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import load_manifests, turn_hooks, turn_tools
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.compaction import (
+    COMPACTED_CONTEXT_PREFIX,
+    COMPACTION_KEEP_MESSAGES,
+    Compaction,
+)
+from ufo.runtime.engine import TurnEngine
+from ufo.runtime.ext.context import ExtensionContext, ScopedStore, context_for
+from ufo.runtime.ext.hooks import BoundHook, HookChain
+from ufo.runtime.ext.manifest import (
     Deny,
     HookContext,
     HookOutcome,
@@ -47,36 +66,18 @@ from ufo.ext.manifest import (
     Stop,
     UserPromptSubmit,
 )
-from ufo.hub import Activity, InProcessHub, LiveFrame
-from ufo.loop.compaction import (
-    COMPACTED_CONTEXT_PREFIX,
-    COMPACTION_KEEP_MESSAGES,
-    Compaction,
-)
-from ufo.loop.engine import TurnEngine
-from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import (
-    Message,
-    ModelEvent,
-    ModelRequest,
-    TextDelta,
-    ToolCallDelta,
-    ToolCallStart,
-    ToolResultBlock,
-    Usage,
-)
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.runtime.hub import Activity, InProcessHub, LiveFrame
+from ufo.runtime.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
+from ufo.runtime.surfaces.hub_tail import HubTailer
+from ufo.runtime.tools.context import SpawnResult
+from ufo.runtime.tools.registry import ToolRegistry
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.activity import ActivitySummarizer
+from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
+from ufo.runtime.turns.transcript import CompactionSummary
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn
-from ufo.surfaces.hub_tail import HubTailer
-from ufo.tools.builtins import BUILTIN_TOOLS
-from ufo.tools.context import SpawnResult
-from ufo.tools.registry import ToolRegistry
-from ufo.turns.activity import ActivitySummarizer
-from ufo.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
-from ufo.turns.transcript import CompactionSummary
-from ufo.workspace import ws
 
 REWRITTEN_COMMAND = "echo modified"
 
@@ -101,7 +102,7 @@ def _chain(event: str, ext: ExtensionContext, *specs: HookSpec) -> HookChain:
     return HookChain(hooks={event: bound}, audience=ext.audience)
 
 
-async def _fire(chain: HookChain, event: str, payload: object) -> loader.HookResolution:
+async def _fire(chain: HookChain, event: str, payload: object) -> hooks_module.HookResolution:
     turn = Turn(
         id=uuid4(),
         workspace_id=uuid4(),
@@ -328,7 +329,7 @@ async def test_gating_hook_exceeding_the_timeout_fails_closed(monkeypatch: objec
         await asyncio.sleep(1.0)
         return None
 
-    monkeypatch.setattr(loader, "HOOK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(hooks_module, "HOOK_TIMEOUT_SECONDS", 0.05)
     ext = _ext()
     chain = _chain("user_prompt_submit", ext, HookSpec(event="user_prompt_submit", handler=slow))
     resolution = await _fire(chain, "user_prompt_submit", UserPromptSubmit(text="hi"))
@@ -345,7 +346,7 @@ async def test_best_effort_prompt_hook_exceeding_the_timeout_is_swallowed(
         await asyncio.sleep(1.0)
         return None
 
-    monkeypatch.setattr(loader, "HOOK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(hooks_module, "HOOK_TIMEOUT_SECONDS", 0.05)
     ext = _ext()
     chain = _chain(
         "user_prompt_submit",

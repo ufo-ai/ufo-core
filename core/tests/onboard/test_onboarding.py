@@ -16,24 +16,24 @@ from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
 from ufo import cli
-from ufo.access.credentials import CredentialSlotUnset, CredentialStore
-from ufo.billing.balance import read_balance
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
-from ufo.ext import loader
-from ufo.ext.context import CredentialAccess, ExtensionContext, ScopedStore
-from ufo.ext.loader import load_manifests
-from ufo.ext.manifest import CredentialSlot, Manifest, OnboardingStep
-from ufo.models.interface import AUTO_MODEL
+from ufo.harness.models.interface import AUTO_MODEL
+from ufo.host.ext import loader
+from ufo.host.ext.loader import load_manifests
 from ufo.onboard.onboarding import (
     DEFAULT_AGENT_MODEL,
     DEFAULT_AGENT_PROMPT,
     AlreadyInitialized,
     Onboarding,
 )
+from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.runtime.billing.balance import read_balance
+from ufo.runtime.ext.context import CredentialAccess, ExtensionContext, ScopedStore
+from ufo.runtime.ext.manifest import CredentialSlot, Manifest, OnboardingStep
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, MAIN_AGENT_ICON, ReasoningEffort
-from ufo.workspace import init_workspace_credentials, ws
 
 OWNER_EMAIL = "owner@example.com"
 DEFAULT_MODEL = "claude-opus-4-8"

@@ -215,4 +215,3 @@ jobs:
             Never merge anything; a PR is a proposal for human review.
           claude_args: |
             --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
-

@@ -357,7 +357,7 @@ def ingress() -> None
 
 **Data flow**: It takes no command-line data here. It simply hands control to the sandbox ingress runner.
 
-**Call relations**: This is a top-level operator command. It delegates all real serving behavior to `ufo.sandbox.ingress_serve.run`.
+**Call relations**: This is a top-level operator command. It delegates all real serving behavior to `ufo.harness.sandbox.ingress_serve.run`.
 
 *Call graph*: 1 external calls (run).
 
@@ -1065,7 +1065,7 @@ def _dockerfile(self) -> str
 *Call graph*: calls 1 internal fn (wheel_name); called by 1 (build).
 
 
-### `core/src/ufo/ext/store.py`
+### `core/src/ufo/runtime/ext/store.py`
 
 `domain_logic` · `extension command handling`
 
@@ -1197,7 +1197,7 @@ def _write(self, pins: tuple[ExtensionPin, ...]) -> None
 *Call graph*: calls 1 internal fn (ufo_version); called by 2 (install, remove); 3 external calls (__init__, read_lockfile, write_lockfile).
 
 
-### `core/src/ufo/sandbox/client_binary.py`
+### `core/src/ufo/harness/sandbox/client_binary.py`
 
 `util` · `startup or sandbox image preparation`
 

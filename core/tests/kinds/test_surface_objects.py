@@ -9,19 +9,19 @@ import yaml
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.loader import core_object_kinds, turn_tools
-from ufo.ext.manifest import Manifest
-from ufo.ext.surface import SurfaceSpec
-from ufo.kinds.surface_kind import SURFACE_KIND, SurfaceObjects, registered_surfaces
-from ufo.object_name import InvalidName
-from ufo.objects import ObjectListQuery, UnknownObject, VerbNotSupported
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import core_object_kinds, turn_tools
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.ext.surface import SurfaceSpec
+from ufo.runtime.kinds.surface_kind import SURFACE_KIND, SurfaceObjects, registered_surfaces
+from ufo.runtime.object_name import InvalidName
+from ufo.runtime.objects import ObjectListQuery, UnknownObject, VerbNotSupported
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.turns.audience import Audience, conversation_audience, foreign_room_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ToolDef
-from ufo.turns.audience import Audience, conversation_audience, foreign_room_audience
-from ufo.workspace import ws
 
 BOUND_AT = datetime(2026, 8, 1, tzinfo=UTC)
 REBOUND_AT = datetime(2026, 8, 2, tzinfo=UTC)

@@ -37,9 +37,9 @@ KEY_INPUTS = frozenset(
     {
         "sandbox/build_template.py",
         "client/**",
-        "core/src/ufo/sandbox/client_binary.py",
-        "core/src/ufo/sandbox/containment.py",
-        "core/src/ufo/skills/**",
+        "core/src/ufo/harness/sandbox/client_binary.py",
+        "core/src/ufo/harness/containment.py",
+        "core/src/ufo/runtime/skills/**",
         "extensions/e2b/ufo_ext_e2b.py",
         "extensions/**/skills/**",
         "packs/**/skills/**",
@@ -473,7 +473,7 @@ def test_every_input_that_moves_the_key_triggers_the_publisher() -> None:
     copied = [line.split()[1] for line in pod_dockerfile().splitlines() if line.startswith("COPY ")]
     assert copied
     assert staged <= set(copied)
-    assert {"client/**", "core/src/ufo/skills/**", "extensions/**/skills/**"} <= KEY_INPUTS
+    assert {"client/**", "core/src/ufo/runtime/skills/**", "extensions/**/skills/**"} <= KEY_INPUTS
     for source in copied:
         assert source in staged or source.startswith(prefixes), source
 

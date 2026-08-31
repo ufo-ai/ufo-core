@@ -8,8 +8,8 @@ from base64 import urlsafe_b64decode
 import pytest
 import ufo_ext_documents.manifest as documents
 
-from ufo.ext.loader import skill_registry
-from ufo.skills.runtime import SKILL_MD, install_skill
+from ufo.host.ext.loader import skill_registry
+from ufo.runtime.skills.runtime import SKILL_MD, install_skill
 
 DESIGN_FOUNDATIONS_DEPENDENTS = ("office-docx", "office-pptx", "pdf", "theme-factory")
 HOUSE_STYLE = "ufo-style"

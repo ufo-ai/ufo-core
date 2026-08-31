@@ -44,26 +44,36 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-import ufo.surfaces.hub_tail as hub_tail
-from ufo.access.credentials import (
+import ufo.runtime.surfaces.hub_tail as hub_tail
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.db import current_workspace, workspace_tx
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import Message, ModelEvent, ModelRequest, TextBlock, Usage
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.conversation import (
+    SANDBOX_IMAGE_REF,
+    WORKSPACE_WRITE_MAX_BYTES,
+    ConversationSandbox,
+)
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.host.ext.loader import turn_hooks, turn_tools
+from ufo.runtime.access.credentials import (
     CredentialRequestState,
     CredentialSlotUnset,
     CredentialStore,
     seal_credential_request,
 )
-from ufo.access.grants import (
+from ufo.runtime.access.grants import (
     ConnectFlow,
     ConnectionRecorded,
     GrantStore,
     OAuthAccount,
     install_connect_flow,
 )
-from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.db import current_workspace, workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.loader import turn_hooks, turn_tools
-from ufo.ext.manifest import HookContext, UserPromptSubmit
-from ufo.ext.surface import (
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.manifest import HookContext, UserPromptSubmit
+from ufo.runtime.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT,
     ATTACHMENTS_ELEMENT,
     MEMBER_MESSAGE_ELEMENT,
@@ -75,7 +85,7 @@ from ufo.ext.surface import (
     member_message_text,
     mint_marker,
 )
-from ufo.hub import (
+from ufo.runtime.hub import (
     Absorbed,
     Activity,
     CostTick,
@@ -87,19 +97,13 @@ from ufo.hub import (
     Terminal,
     TextDelta,
 )
-from ufo.kinds.surface_kind import SURFACE_KIND
-from ufo.loop.queue import _load_turn
-from ufo.media.artifact_url import verify_artifact_url
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import Message, ModelEvent, ModelRequest, TextBlock, Usage
-from ufo.models.registry import ModelRegistry
-from ufo.sandbox.conversation import (
-    SANDBOX_IMAGE_REF,
-    WORKSPACE_WRITE_MAX_BYTES,
-    ConversationSandbox,
-)
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.runtime.kinds.surface_kind import SURFACE_KIND
+from ufo.runtime.media.artifact_url import verify_artifact_url
+from ufo.runtime.queue import _load_turn
+from ufo.runtime.seats import UNRESOLVED_SPEAKER_MESSAGE
+from ufo.runtime.turns.ambient_reply import AmbientReplyClassifier
+from ufo.runtime.turns.transcript import Conversation, encode, transcript_key
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import (
     SURFACE_COMMENT_ROUND_INDEX,
@@ -122,11 +126,7 @@ from ufo.sdk.audience import (
 )
 from ufo.sdk.callback_page import CONNECT_LOGO_PATH
 from ufo.sdk.jobs import untitled_conversation_workspaces
-from ufo.seats import UNRESOLVED_SPEAKER_MESSAGE
 from ufo.serve import _mount_shared_surfaces
-from ufo.turns.ambient_reply import AmbientReplyClassifier
-from ufo.turns.transcript import Conversation, encode, transcript_key
-from ufo.workspace import init_workspace_credentials, ws
 
 TEAM_ID = "T0000001"
 BOT_USER_ID = "UBOT00000"

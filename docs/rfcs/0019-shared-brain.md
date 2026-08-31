@@ -38,7 +38,7 @@ Three fragments of one idea, none composing with the others.
 |---|---|---|---|
 | memory ext | 3-leg recall (lexical + vector + unembedded-tail), RRF/cosine blend, per-kind decay, hourly consolidation, `memory_100` evals | write-time classify (identity is `uuid5` over exact body bytes — a reworded duplicate is a new row), typed provenance (`source_ref` is a nullable free-text column **the model itself writes**, `manifest.py:139-141`, and consolidation nulls it, `condenser.py:276`), forget path, index cleanup of superseded rows, durable refs in results | `extensions/memory/ufo_ext_memory/store.py:396-434` |
 | knowledge_graph ext | 2-tier extraction, typed edges with page provenance, stub-on-reference | entity resolution — `entity_type` sits inside the `uuid5` identity (`store.py:433-436`), so an org chart in prose mints `topic` nodes a *person* lookup can never find; a working seed (`context_for` substring-scans the newest 500 entities); any eval | `extensions/knowledge_graph/ufo_ext_knowledge_graph/store.py:425-436,557-574` |
-| objects (RFC 0017) | one address `(kind, name)`, five verbs, per-kind typed storage, `MemberOwnedObjects` | typed links between a memory and its page; durable refs in search results (#613) | `core/src/ufo/objects.py:505-565` |
+| objects (RFC 0017) | one address `(kind, name)`, five verbs, per-kind typed storage, `MemberOwnedObjects` | typed links between a memory and its page; durable refs in search results (#613) | `core/src/ufo/runtime/objects.py:505-565` |
 
 Two gaps are worse than they read. **Recall silently shrinks** — consolidation supersedes rows
 but never prunes their chunks (the only index delete in the repo is page-scoped,

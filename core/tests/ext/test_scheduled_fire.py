@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from ufo.ext.scheduled_fire import scheduled_fire_key, scheduled_fire_task_id
+from ufo.runtime.ext.scheduled_fire import scheduled_fire_key, scheduled_fire_task_id
 
 TASK_ID = UUID("7f3b9c2e-4d18-4a65-8b07-1e92c5d0f4a3")
 

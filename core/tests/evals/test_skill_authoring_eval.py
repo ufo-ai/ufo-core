@@ -23,9 +23,9 @@ from evals.skill_authoring.runner import (
     skill_authoring_task,
 )
 from evals.suites.skill_gtm import CASES as GTM_CASES
-from ufo.ext.loader import load_manifests, skill_registry
+from ufo.host.ext.loader import load_manifests, skill_registry
+from ufo.runtime.skills.runtime import RuntimeSkill, parse_skill_content
 from ufo.schema.records import TurnStatus
-from ufo.skills.runtime import RuntimeSkill, parse_skill_content
 
 CASE = SkillAuthorCase(
     name="escalation-triage",

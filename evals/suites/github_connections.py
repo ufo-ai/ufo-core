@@ -10,19 +10,19 @@ from ufo_ext_coding.github_app import GIT_SLOT
 from evals.driver import EVAL_SURFACE
 from evals.harness.capability import CapabilityCase, CapabilitySeed
 from evals.harness.scorers import attempted_tools_scorer, combine, skill_scorer
-from ufo.access.credentials import (
+from ufo.blob import BlobStore
+from ufo.db import workspace_tx
+from ufo.runtime.access.credentials import (
     CredentialRequestInvalid,
     CredentialSlotUnset,
     installed_credential_requests,
     open_installation,
 )
-from ufo.access.grants import GrantStore
-from ufo.agent_scope import agent
-from ufo.blob import BlobStore
-from ufo.db import workspace_tx
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.sdk.context import CredentialAccess
-from ufo.workspace import ws_current
 
 GITHUB_ACCOUNT_ID = "eval-github-account"
 GITHUB_INSTALLATION_ID = "123456"

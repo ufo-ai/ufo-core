@@ -7,8 +7,9 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo import o11y
-from ufo.billing.balance import (
+from ufo.db import workspace_tx
+from ufo.harness import o11y
+from ufo.runtime.billing.balance import (
     BALANCE_CHARGED_METRIC,
     balance_absent,
     balance_refusal_message,
@@ -22,7 +23,6 @@ from ufo.billing.balance import (
     set_reserve,
     topping_up_workspaces,
 )
-from ufo.db import workspace_tx
 from ufo.schema import tables
 
 

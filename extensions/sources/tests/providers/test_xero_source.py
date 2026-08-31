@@ -11,9 +11,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.xero import XeroConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import SourceAuth, StreamFault, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.sync import SourceAuth, StreamFault, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 TENANT = "11111111-2222-3333-4444-555555555555"

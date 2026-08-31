@@ -6,8 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from ufo.blob import FilesystemBlobStore
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
@@ -15,7 +14,8 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.turns.transcript import (
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
     Conversation,

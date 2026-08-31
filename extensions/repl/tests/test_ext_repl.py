@@ -11,20 +11,20 @@ import ufo_ext_documents.manifest as documents
 import ufo_ext_repl.manifest as repl
 from ufo_ext_repl.manifest import JsReplInput, XlsxReplInput
 
-import ufo.tools.tasks as tasks
+import ufo.runtime.tools.tasks as tasks
 from ufo.blob import FilesystemBlobStore
-from ufo.ext.loader import skill_registry
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import (
     ExecResult,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
+from ufo.host.ext.loader import skill_registry
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.tasks import MAX_COMMAND_TIMEOUT_MS
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.tasks import MAX_COMMAND_TIMEOUT_MS
 
 TOOL_NARRATION = "working through the numbers"
 

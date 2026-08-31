@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ufo.listings import ListingCursor, MalformedCursor, page_of
+from ufo.runtime.listings import ListingCursor, MalformedCursor, page_of
 
 STAMP = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
 ITEM = "11111111-1111-4111-8111-111111111111"

@@ -37,16 +37,20 @@ from ufo_ext_memory.store import (
     store_for,
 )
 
-from ufo.access.credentials import CredentialStore
-from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.ext.loader import turn_tools
-from ufo.indexing import TextChunker
-from ufo.loop.engine import EffectiveCall, _dispatch_segments
-from ufo.models.interface import ToolUseBlock
-from ufo.objects import (
+from ufo.harness.models.interface import ToolUseBlock
+from ufo.harness.tools import dispatch_segments
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.engine import (
+    MAX_PARALLEL_TOOL_CALLS,
+    EffectiveCall,
+)
+from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.indexing import TextChunker
+from ufo.runtime.objects import (
     BoundAction,
     BoundKind,
     ObjectListQuery,
@@ -54,6 +58,10 @@ from ufo.objects import (
     action_registry,
     object_registry,
 )
+from ufo.runtime.tools.context import SpawnResult, ToolContext, ToolResult
+from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import (
@@ -64,10 +72,6 @@ from ufo.sdk.audience import (
     room_audience,
 )
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
-from ufo.tools.context import SpawnResult, ToolContext, ToolResult
-from ufo.tools.registry import ActionPresentation, ObjectBinding, ToolDef
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import ws
 
 TOOL_NARRATION = "remembering what they told me"
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
@@ -116,7 +120,14 @@ def test_memory_search_reads_dispatch_in_one_segment() -> None:
         return EffectiveCall(call=call, tool=tool, call_id=tool.name, ext=None)
 
     calls = (resolved("s1", search), resolved("s2", search), resolved("w1", update))
-    segments = [tuple(item.call.id for item in segment) for segment in _dispatch_segments(calls)]
+    segments = [
+        tuple(item.call.id for item in segment)
+        for segment in dispatch_segments(
+            calls,
+            parallel_safe=lambda item: item.parallel_safe,
+            limit=MAX_PARALLEL_TOOL_CALLS,
+        )
+    ]
     assert segments == [("s1", "s2"), ("w1",)]
 
 

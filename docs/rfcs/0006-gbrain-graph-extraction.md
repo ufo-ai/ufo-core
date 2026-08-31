@@ -70,7 +70,7 @@ positives). The page→memory pipeline is pure chunk+embed RAG.
 
 | Table | Owner | Columns | Ref |
 |---|---|---|---|
-| `page` | core | `id, workspace_id, source_id, digest, body_ref, subject, tombstone, created/updated_at` — thin substrate, body in blob store | `core/src/selfhost/schema/tables.py:277-292` |
+| `page` | core | `id, workspace_id, source_id, digest, body_ref, subject, tombstone, created/updated_at` — thin substrate, body in blob store | `core/runtime/src/selfhost/schema/tables.py:277-292` |
 | `memory_item` | memory ext | `id, workspace_id, subject, body, item_class, memory_kind, confidence, source_ref, embedding_digest, embedding_claimed_at, superseded_by, …` | `extensions/memory/selfhost_ext_memory/store.py:80-96` |
 | `mem_page` | memory ext | `page_id, subject, created_at` — the **only** per-page derived artifact (a mirror for the date-window filter) | `store.py:98-104` |
 
@@ -80,7 +80,7 @@ positives). The page→memory pipeline is pure chunk+embed RAG.
   `PageFeed`, advances its own cursor in `ScopedStore`, and for each change calls
   `chunk_embed_upsert(...)` + upserts a `mem_page` row. Tombstone → delete chunks + mirror.
 - `MemoryIndexer` (`store.py:526-597`): `memory_item` bodies → chunks+embeddings.
-- `chunk_embed_upsert` (`core/src/selfhost/indexing.py:89-114`): recursive-delimiter chunk → embed
+- `chunk_embed_upsert` (`core/runtime/src/selfhost/indexing.py:89-114`): recursive-delimiter chunk → embed
   → index upsert → prune. **No LLM, no extraction of any kind.**
 
 **Facts are not derived from pages at all** — `memory_item` rows are written only by the

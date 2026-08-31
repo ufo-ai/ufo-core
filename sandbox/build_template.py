@@ -42,7 +42,8 @@ from e2b import Sandbox, Template
 from e2b.sandbox.commands.command_handle import CommandExitException
 from e2b.template.main import TemplateBuilder, TemplateFinal
 
-from ufo.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
+from ufo.harness.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
+from ufo.runtime.skills.runtime import SystemSkillBundle, discover_skills
 from ufo.sdk.sandbox import (
     PLAYWRIGHT_BROWSERS_DIR,
     PLAYWRIGHT_VERSION,
@@ -55,15 +56,14 @@ from ufo.sdk.sandbox import (
     SYSTEM_SKILLS_ROOT,
     WORKSPACE_DIR,
 )
-from ufo.skills.runtime import SystemSkillBundle, discover_skills
 
 ROOT = Path(__file__).resolve().parents[1]
 E2B_TEMPLATE_NAME = "ufo-sbx"
 SBX_BIN_DIR = "/usr/local/bin"
 UFO_DIR = "/etc/ufo"
-# The path-containment guard the serve process imports as `ufo.sandbox.containment`, baked so an
+# The path-containment guard the serve process imports as `ufo.harness.containment`, baked so an
 # in-sandbox program confines paths with the same module the host runs, not a second copy.
-MODULE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "sandbox"
+MODULE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "harness"
 # The in-sandbox CLI is the compiled client — `ufo fs` for the file ops, `ufo llm` for egress — so
 # the image bakes one binary where it used to bake two Python scripts. The client crate is built by
 # its own pipeline, never inside this image: a Rust toolchain layer would add minutes and gigabytes
@@ -308,7 +308,7 @@ def system_skill_bundle() -> SystemSkillBundle:
     paths = sorted(
         path
         for path in {
-            *ROOT.glob("core/src/ufo/skills/**/SKILL.md"),
+            *ROOT.glob("core/src/ufo/runtime/skills/**/SKILL.md"),
             *ROOT.glob("extensions/**/skills/**/SKILL.md"),
             *ROOT.glob("packs/**/skills/**/SKILL.md"),
         }

@@ -10,13 +10,13 @@ import ufo_ext_todos as todos
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore, context_for
+from ufo.runtime.ext.context import ScopedStore, context_for
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.manifest import ConversationSlotContext
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.workspace import ws
 
 
 @dataclass

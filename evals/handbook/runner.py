@@ -23,11 +23,11 @@ from evals.harness.capability import (
 )
 from evals.harness.harness import Json, JsonObject
 from evals.harness.registry import EvalTask, capability_task, rewrapped
-from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore
-from ufo.ext.manifest import Manifest
-from ufo.indexing import EmbedClient, IndexBackend
-from ufo.workspace import ws_current
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.indexing import EmbedClient, IndexBackend
+from ufo.runtime.workspace import ws_current
 
 HANDBOOK_PACKS = ("assistant", "assistant_eval")
 # Grading copies the finished conversation workspace into the environment container, so the carrier

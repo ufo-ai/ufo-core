@@ -20,19 +20,21 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
 
-from ufo import o11y
-from ufo.access.grants import GrantStore
-from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.ext.context import (
+from ufo.harness import o11y
+from ufo.product import PRODUCT_CENSUS_JOB
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.delivery import DeliverySweep
+from ufo.runtime.ext.context import (
     ExtensionContext,
     ScopedStore,
     SourceReader,
     context_for,
 )
-from ufo.ext.manifest import (
+from ufo.runtime.ext.manifest import (
     PAGE_CHANGE_CURSOR_KEY,
     HookContext,
     HookOutcome,
@@ -41,10 +43,7 @@ from ufo.ext.manifest import (
     Manifest,
     PageChangeBatch,
 )
-from ufo.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
-from ufo.loop.delivery import DeliverySweep
-from ufo.loop.subagents import SubagentRegistry
-from ufo.product import PRODUCT_CENSUS_JOB
+from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_JOB,
@@ -57,11 +56,9 @@ from ufo.runtime.jobs import (
     bindings_from,
     core_jobs,
 )
-from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
-from ufo.sources import rest, sync
-from ufo.sources.backend import ConnectorSourceConfig
-from ufo.sources.sync import (
+from ufo.runtime.sources import rest, sync
+from ufo.runtime.sources.backend import ConnectorSourceConfig
+from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
     SOURCE_PARK_RETRY_SECONDS,
     SOURCE_REFUSAL_PARK_THRESHOLD,
@@ -86,10 +83,13 @@ from ufo.sources.sync import (
     register_sources,
     source_row_id,
 )
-from ufo.tools.context import SpawnResult, ToolContext, ToolResult
-from ufo.turns.audience import conversation_audience
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import ws, ws_current
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.tools.context import SpawnResult, ToolContext, ToolResult
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import ws, ws_current
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
 
 TOOL_NARRATION = "looking through what they synced"
 

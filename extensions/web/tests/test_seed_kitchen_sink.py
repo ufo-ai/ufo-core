@@ -21,29 +21,29 @@ from httpx import ASGITransport, AsyncClient
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY, no_member_skills
 
-from ufo.access.credentials import CredentialStore
-from ufo.auth.bearer import mint_token
 from ufo.blob import BlobNotFound, FilesystemBlobStore
 from ufo.cli import _seed_target
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore
-from ufo.ext.loader import member_object_registry, skill_registry
-from ufo.hub import InProcessHub
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.host.ext.loader import member_object_registry, skill_registry
 from ufo.onboard.seed import (
     CHAT_ROW_PREFIX,
     KITCHEN_SINK_TITLE,
     WEB_EXTENSION,
     KitchenSink,
 )
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.auth.bearer import mint_token
+from ufo.runtime.ext.context import ScopedStore
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.turns.transcript import transcript_key
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.serve import _mount_shared_surfaces
-from ufo.turns.audience import conversation_audience
-from ufo.turns.transcript import transcript_key
-from ufo.workspace import ws
 
 TOKEN_SECRET = "web-token-secret"
 SESSION_COOKIE = "ufo_session"

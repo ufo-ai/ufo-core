@@ -8,7 +8,7 @@ from __future__ import annotations
 from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.scenario_env.office import dispatched, seed_office, sent_rows
-from ufo.workspace import ws_current
+from ufo.runtime.workspace import ws_current
 
 BUSIEST_DAY_REFS = ("thursday",)
 BUSIEST_DAY_EVENTS = ("interview", "design sync")

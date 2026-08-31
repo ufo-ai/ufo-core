@@ -41,8 +41,8 @@ from ufo_ext_memory.store import (
 )
 
 from ufo.db import workspace_tx
-from ufo.ext.context import PageState, SourceReader, context_for
-from ufo.indexing import (
+from ufo.runtime.ext.context import PageState, SourceReader, context_for
+from ufo.runtime.indexing import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
     Chunk,
@@ -50,11 +50,11 @@ from ufo.indexing import (
     IndexScope,
     TextChunker,
 )
+from ufo.runtime.sources.sync import PageChange
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.audience import conversation_audience
-from ufo.sources.sync import PageChange
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import ws
 
 PAGE_DIGEST = "sha256:page"
 PAGE_REVISION = 1

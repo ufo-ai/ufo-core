@@ -4,12 +4,12 @@ import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict
 
-from ufo.access.credentials import CredentialStore
-from ufo.ext.loader import MemberObjectRegistry, load_manifests, member_object_registry
-from ufo.object_views import action_view, presented_action_views
-from ufo.objects import BoundAction
-from ufo.tools.context import TextContent, ToolContext, ToolResult
-from ufo.tools.registry import ActionPresentation, ObjectBinding, ToolDef
+from ufo.host.ext.loader import MemberObjectRegistry, load_manifests, member_object_registry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.object_views import action_view, presented_action_views
+from ufo.runtime.objects import BoundAction
+from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 
 
 def _sample_registry() -> MemberObjectRegistry:

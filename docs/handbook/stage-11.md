@@ -151,7 +151,7 @@ def _response(self, terminal: TerminalFrame) -> ToolBridgeResponse
 *Call graph*: called by 1 (_terminal); 4 external calls (__init__, __init__, loads, TypeAdapter).
 
 
-### `core/src/ufo/tools/context.py`
+### `core/src/ufo/runtime/tools/context.py`
 
 `data_model` · `tool execution and turn cleanup`
 
@@ -584,7 +584,7 @@ async def _connector_account_tiers(self, provider: str) -> tuple[list[Grant], li
 *Call graph*: called by 2 (connector_accounts, connector_connection); 1 external calls (__init__).
 
 
-### `core/src/ufo/tools/registry.py`
+### `core/src/ufo/runtime/tools/registry.py`
 
 `domain_logic` · `startup and tool lookup`
 
@@ -680,7 +680,7 @@ def get(self, name: str) -> ToolDef[Any]
 **Call relations**: No direct caller is listed in the provided graph, but this is the registry's dispatch-time lookup path: code with a requested tool name can ask the registry for the corresponding definition before running the tool.
 
 
-### `core/src/ufo/turns/activity.py`
+### `core/src/ufo/runtime/turns/activity.py`
 
 `domain_logic` · `during tool-call activity reporting`
 

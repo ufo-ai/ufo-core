@@ -11,9 +11,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.mailchimp import MailchimpConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 BASE_URL = "https://us21.api.mailchimp.com"

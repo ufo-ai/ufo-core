@@ -101,7 +101,7 @@ def _settled_chars(text: str) -> int
 ### Model Provider Adapters
 Core and extension adapters send prepared conversations to providers, translate streamed responses into UFO events, and handle retries, tool calls, reasoning, usage, and provider-specific capabilities.
 
-### `core/src/ufo/models/anthropic.py`
+### `core/src/ufo/harness/models/anthropic.py`
 
 `io_transport` · `request handling during model calls`
 
@@ -190,7 +190,7 @@ async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
 *Call graph*: calls 1 internal fn (anthropic_content); 13 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, sleep (+3 more)).
 
 
-### `core/src/ufo/models/openai.py`
+### `core/src/ufo/harness/models/openai.py`
 
 `io_transport` · `request handling`
 

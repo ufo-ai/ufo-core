@@ -5,8 +5,8 @@ from uuid import uuid4
 import sqlalchemy as sa
 from sqlalchemy.engine.default import DefaultExecutionContext
 
+from ufo.runtime.turns.audience import conversation_audience
 from ufo.schema.records import DEFAULT_AGENT_ICON
-from ufo.turns.audience import conversation_audience
 
 
 def _conversation_audience(context: DefaultExecutionContext) -> str:

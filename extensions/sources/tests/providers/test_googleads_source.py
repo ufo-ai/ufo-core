@@ -13,9 +13,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.googleads import GoogleAdsConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 _DEV_TOKEN_VARS = ("UFO_GOOGLE_ADS_DEVELOPER_TOKEN", "GOOGLE_ADS_DEVELOPER_TOKEN")

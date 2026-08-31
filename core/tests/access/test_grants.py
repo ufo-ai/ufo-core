@@ -14,10 +14,14 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from ufo.access.connectors import CliCredential, ForwardedResponse
-from ufo.access.credentials import CredentialStore
-from ufo.access.egress_resolver import PerAgentRules
-from ufo.access.egress_rules import (
+from ufo.db import workspace_tx
+from ufo.harness.sandbox.session import RunToken
+from ufo.host.ext.loader import connection_hooks
+from ufo.host.tools.builtins import ConnectAccountInput, connect_account_handler
+from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import (
     REQUEST_METER_DIMENSION,
     ConnectorTransferHosts,
     ForwardRule,
@@ -27,7 +31,7 @@ from ufo.access.egress_rules import (
     ScopeRule,
     derive_grant_rules,
 )
-from ufo.access.grants import (
+from ufo.runtime.access.grants import (
     CONNECT_MEMO_SECONDS,
     ConnectFlow,
     ConnectHandoff,
@@ -45,11 +49,13 @@ from ufo.access.grants import (
     grant_summaries,
     install_connect_flow,
 )
-from ufo.agent_scope import AgentUnbound, agent
-from ufo.db import workspace_tx
-from ufo.ext.loader import connection_hooks
-from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
-from ufo.sandbox.session import RunToken
+from ufo.runtime.agent_scope import AgentUnbound, agent
+from ufo.runtime.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
+from ufo.runtime.surfaces.admission import Admission, ConnectResume
+from ufo.runtime.surfaces.cli import CONNECT_LOGO_CACHE, CONNECT_LOGO_FILE, callback_router
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.sdk.callback_page import (
@@ -60,12 +66,6 @@ from ufo.sdk.callback_page import (
     PageLink,
     callback_page,
 )
-from ufo.surfaces.admission import Admission, ConnectResume
-from ufo.surfaces.cli import CONNECT_LOGO_CACHE, CONNECT_LOGO_FILE, callback_router
-from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
-from ufo.tools.context import ToolContext
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
 
 GRANTED_HOST = "api.granted.test"
 UNGRANTED_HOST = "api.ungranted.test"

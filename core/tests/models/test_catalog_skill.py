@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 
 from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.ext.loader import skill_registry
-from ufo.models.catalog_skill import MODEL_CATALOG_SKILL_NAME, model_catalog_skill
-from ufo.models.registry import ModelRegistry, model_registry
+from ufo.harness.models.catalog_skill import MODEL_CATALOG_SKILL_NAME, model_catalog_skill
+from ufo.harness.models.registry import ModelRegistry, model_registry
+from ufo.host.ext.loader import skill_registry
 
 
 def _registry(tmp_path: Path) -> ModelRegistry:

@@ -17,7 +17,7 @@ from pydantic import (
     field_validator,
 )
 
-from ufo.models.interface import MAX_IMAGE_BYTES_PER_REQUEST
+from ufo.harness.models.interface import MAX_IMAGE_BYTES_PER_REQUEST
 from ufo.schema.records import ReasoningEffort
 from ufo.sdk.context import ModelAccess
 from ufo.sdk.models import (

@@ -28,9 +28,7 @@ from ufo_testsupport.surfaces import (
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.hub import InProcessHub
-from ufo.loop.engine import DispatchResult, StreamResult
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     Message,
     ReasoningItemBlock,
     RedactedThinkingBlock,
@@ -39,14 +37,12 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
-from ufo.schema import tables
-from ufo.schema.records import SUBAGENT_SURFACE, TerminalFrame
-from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
-from ufo.serve import _mount_shared_surfaces
-from ufo.turns.transcript import (
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.runtime.engine import DispatchResult, StreamResult
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
     Conversation,
@@ -54,7 +50,11 @@ from ufo.turns.transcript import (
     encode,
     transcript_key,
 )
-from ufo.workspace import ws
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.schema.records import SUBAGENT_SURFACE, TerminalFrame
+from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
+from ufo.serve import _mount_shared_surfaces
 
 SECRET = "debug-token-secret"
 

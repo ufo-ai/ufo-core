@@ -24,16 +24,17 @@ from ufo_ext_slack.attribution import addressing_mention, mention_attributed
 from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
 from ufo_ext_slack.manifest import manifest as slack_manifest
 
-from ufo.access.credentials import CredentialStore
 from ufo.blob import BlobStore, FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
-from ufo.ext.loader import BoundHook, HookChain, HookResolution, turn_hooks
-from ufo.ext.manifest import HookSpec, PreToolUse
-from ufo.ext.surface import AMBIENT_CONTEXT_ELEMENT, SurfaceContext
+from ufo.host.ext.loader import turn_hooks
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
+from ufo.runtime.ext.hooks import BoundHook, HookChain, HookResolution
+from ufo.runtime.ext.manifest import HookSpec, PreToolUse
+from ufo.runtime.ext.surface import AMBIENT_CONTEXT_ELEMENT, SurfaceContext
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.audience import SHARED_AUDIENCE
-from ufo.workspace import ws
 
 BOT_USER_ID = "U0BOTUFO"
 SLACK_SEND_SLUG = "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL"

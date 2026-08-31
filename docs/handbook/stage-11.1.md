@@ -1380,7 +1380,7 @@ async def aclose(self) -> None
 ### Connector tool surfaces
 Shared connector boundaries and agent-facing tools expose safe discovery, execution, file exchange, credential resolution, and MCP server calls.
 
-### `core/src/ufo/access/connectors.py`
+### `core/src/ufo/runtime/access/connectors.py`
 
 `domain_logic` · `cross-cutting: connector discovery, tool execution, and feed-sync credential lookup`
 

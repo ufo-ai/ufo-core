@@ -8,13 +8,12 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 
-import ufo.turns.workspace_changes as workspace_changes_module
+import ufo.runtime.turns.workspace_changes as workspace_changes_module
 from ufo.db import workspace_tx
-from ufo.models.interface import ToolUseBlock
-from ufo.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec, _LateSandbox
-from ufo.sandbox.terminal import TerminalCarrier, TerminalOp, Terminals
-from ufo.schema import tables
-from ufo.turns.workspace_changes import (
+from ufo.harness.models.interface import ToolUseBlock
+from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec, _LateSandbox
+from ufo.harness.sandbox.terminal import TerminalCarrier, TerminalOp, Terminals
+from ufo.runtime.turns.workspace_changes import (
     WORKSPACE_CHANGE_TARGET_DIRS_MAX,
     WorkspaceChange,
     WorkspaceChangeRecorder,
@@ -22,6 +21,7 @@ from ufo.turns.workspace_changes import (
     change_targets,
     recorded_workspace_changes,
 )
+from ufo.schema import tables
 
 RECORDER_READ_TIMEOUT_SECONDS = 1.0
 

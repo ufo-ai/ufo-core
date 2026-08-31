@@ -26,4 +26,4 @@ sandbox = { backend = "local" }
 [[arm]]
 name = "sandbox-tool-list"
 [arm.files]
-"core/src/ufo/skills/sandbox/SKILL.md" = "arms/sandbox-tool-list/SKILL.md"
+"core/src/ufo/runtime/skills/sandbox/SKILL.md" = "arms/sandbox-tool-list/SKILL.md"

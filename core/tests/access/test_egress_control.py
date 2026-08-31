@@ -12,11 +12,22 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.access.connectors import CliCredential, ForwardedResponse
-from ufo.access.credentials import CredentialStore
-from ufo.access.egress_control import EgressControl, rule_json
-from ufo.access.egress_resolver import PerAgentRules
-from ufo.access.egress_rules import (
+from ufo.db import workspace_tx
+from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.sandbox.cache import CACHE_HOST
+from ufo.harness.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
+from ufo.harness.sandbox.session import (
+    SENTINEL_MODEL_KEY,
+    ProbeToken,
+    ProbeTokenCodec,
+    RunToken,
+    RunTokenCodec,
+)
+from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.egress_control import EgressControl, rule_json
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import (
     ForwardRule,
     InjectionRule,
     InternetRule,
@@ -24,28 +35,17 @@ from ufo.access.egress_rules import (
     ScopeRule,
     ServiceRule,
 )
-from ufo.access.grants import GrantStore, grant_sentinel
-from ufo.agent_scope import agent
-from ufo.db import workspace_tx
-from ufo.ext.manifest import CredentialSlot, InjectionTarget
-from ufo.models.catalog import CORE_PRICING
-from ufo.sandbox.cache import CACHE_HOST
-from ufo.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
-from ufo.sandbox.session import (
-    SENTINEL_MODEL_KEY,
-    ProbeToken,
-    ProbeTokenCodec,
-    RunToken,
-    RunTokenCodec,
-)
-from ufo.schema import tables
-from ufo.schema.records import TurnRuntimeConfig
-from ufo.tools.bridge import (
+from ufo.runtime.access.grants import GrantStore, grant_sentinel
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
+from ufo.runtime.tools.bridge import (
     TOOL_BRIDGE_HOST,
     ToolBridgeRequest,
     ToolBridgeSuccess,
 )
-from ufo.workspace import ws
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.schema.records import TurnRuntimeConfig
 
 CONTROL_TOKEN = "egress-control-secret"
 CACHE_TOKEN = "egress-cache-secret"
@@ -545,7 +545,7 @@ async def test_meter_folds_unpriced_cache_write_30m_into_input(monkeypatch, db: 
     async def _capture(_connection, _ws, _turn, model, usage, _pricing):
         captured[model] = usage
 
-    monkeypatch.setattr("ufo.access.egress_control.record_sandbox_tokens", _capture)
+    monkeypatch.setattr("ufo.runtime.access.egress_control.record_sandbox_tokens", _capture)
     usage = {
         "input_tokens": 1000,
         "output_tokens": 500,
@@ -588,7 +588,7 @@ async def test_meter_folds_unpriced_cache_write_30m_into_input(monkeypatch, db: 
 async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(monkeypatch) -> None:
     calls: list[tuple[str, int, str, str]] = []
     monkeypatch.setattr(
-        "ufo.access.egress_control.emit_metric",
+        "ufo.runtime.access.egress_control.emit_metric",
         lambda name, amount, **dims: calls.append((name, amount, dims["host"], dims["dimension"])),
     )
     resolver = PerAgentRules(base=(), grants=None)

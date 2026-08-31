@@ -18,9 +18,9 @@ date: 2026-08-23
 
 ## Current state
 
-- The carrier seam is the `Carrier` protocol (`core/src/ufo/sandbox/session.py:304`) behind
-  `CarrierSpec` on the `carriers` Manifest point (`core/src/ufo/ext/manifest.py:185`).
-  `select_carrier` (`core/src/ufo/sandbox/select.py:12`) builds exactly one backend per deploy.
+- The carrier seam is the `Carrier` protocol (`core/src/ufo/harness/sandbox/session.py:304`) behind
+  `CarrierSpec` on the `carriers` Manifest point (`core/src/ufo/runtime/ext/manifest.py:185`).
+  `select_carrier` (`core/src/ufo/harness/sandbox/select.py:12`) builds exactly one backend per deploy.
 - The durable handle is already scheme-qualified: `<backend>:<container_id>`
   (`SANDBOX_HANDLE_SEP`, `session.py:265`; written at `conversation.py:127`). But a stored handle
   from any backend other than the deploy's resolves to `resume_id=None` — a fresh sandbox on the

@@ -6,8 +6,8 @@ from evals.harness.capability import CapabilityOutput, ToolInvocation, grading_s
 from evals.suites import connector_connections
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 
 async def _workspace() -> tuple[UUID, UUID]:

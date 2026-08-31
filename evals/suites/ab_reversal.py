@@ -27,7 +27,7 @@ from ufo_ext_scheduled_tasks.schedules import ScheduleStore
 
 from evals.harness.arc import ArcCase, ArcObservation, ArcPerturbation, ArcVerdict
 from evals.harness.capability import WorkspaceFile
-from ufo.ext.context import context_for
+from ufo.runtime.ext.context import context_for
 
 STATS_FILE = "experiment/stats.json"
 PROTOCOL_FILE = "experiment/protocol.md"

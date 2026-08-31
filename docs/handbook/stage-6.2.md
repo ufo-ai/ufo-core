@@ -9,7 +9,7 @@ The sandbox ingress pieces let browser pages safely reach work happening inside 
 ### Core sandbox ingress
 Builds signed sandbox access URLs and hostnames, serves public site ingress traffic, and validates short-lived port tokens.
 
-### `core/src/ufo/sandbox/ingress_url.py`
+### `core/src/ufo/harness/sandbox/ingress_url.py`
 
 `domain_logic` · `request handling`
 
@@ -53,7 +53,7 @@ def _framer_claim(base: SplitResult, framed_from: str | None) -> FramerClaim | N
 *Call graph*: called by 1 (mint_ingress_view_url); 3 external calls (__init__, parse_site_label, urlsplit).
 
 
-### `core/src/ufo/sandbox/ingress_host.py`
+### `core/src/ufo/harness/sandbox/ingress_host.py`
 
 `domain_logic` · `request handling and sandbox URL creation`
 
@@ -168,7 +168,7 @@ def _signature(address: bytes) -> bytes
 *Call graph*: called by 2 (parse_site_label, site_label); 2 external calls (new, ingress_secret).
 
 
-### `core/src/ufo/sandbox/ingress_serve.py`
+### `core/src/ufo/harness/sandbox/ingress_serve.py`
 
 `entrypoint` · `startup and request handling`
 
@@ -645,7 +645,7 @@ def run() -> None
 *Call graph*: calls 3 internal fn (ingress_base_host, ingress_frame_ancestor, upstream_client); 14 external calls (__init__, run, blob_store_for, load_config, init_db, verify_db_reachable, load_manifests, init_o11y, log, owner_dsn (+4 more)).
 
 
-### `core/src/ufo/sandbox/ingress_token.py`
+### `core/src/ufo/harness/sandbox/ingress_token.py`
 
 `domain_logic` · `request handling`
 

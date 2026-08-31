@@ -4,8 +4,12 @@ from io import BytesIO
 import pytest
 from PIL import GifImagePlugin, Image
 
-import ufo.media.image_previews as image_previews
-from ufo.media.image_previews import ImagePreviewGrant, InvalidImagePreview, validated_image_preview
+import ufo.runtime.media.image_previews as image_previews
+from ufo.runtime.media.image_previews import (
+    ImagePreviewGrant,
+    InvalidImagePreview,
+    validated_image_preview,
+)
 
 
 def _image(format: str, *, size: tuple[int, int] = (4, 4)) -> bytes:

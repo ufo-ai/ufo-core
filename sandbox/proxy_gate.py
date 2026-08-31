@@ -19,7 +19,7 @@ from ufo_ext_e2b import (
     sandbox_templates,
 )
 
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.session import (
     EGRESS_CA_CERT_ENV,
     PROXY_PASSWORD,
     SANDBOX_SIZES,

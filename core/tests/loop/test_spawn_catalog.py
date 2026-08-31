@@ -9,17 +9,17 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 
 from ufo.db import workspace_tx
-from ufo.ext.loader import skill_registry
-from ufo.ext.manifest import SubagentProfile
-from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
-from ufo.loop.spawn_catalog import (
+from ufo.host.ext.loader import skill_registry
+from ufo.runtime.ext.manifest import SubagentProfile
+from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
+from ufo.runtime.spawn_catalog import (
     SPAWN_CATALOG_DESCRIPTION,
     SPAWN_CATALOG_SKILL_NAME,
     spawn_catalog_skill,
 )
-from ufo.loop.subagents import SubagentRegistry
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 
 async def _catalog_member(workspace_id, admin: bool = False):

@@ -20,16 +20,22 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.slack import SlackConnector
 
-from ufo.access.connectors import (
+from ufo.blob import FilesystemBlobStore
+from ufo.runtime.access.connectors import (
     DIRECT_ACCOUNT,
     ConnectorRegistry,
     Credential,
     SourceCredentialResolver,
 )
-from ufo.blob import FilesystemBlobStore
+from ufo.runtime.sources import backend as backend_module
+from ufo.runtime.sources.sync import (
+    ClaimedSource,
+    SourceAuth,
+    StreamSkipped,
+    SyncDriver,
+    SyncResult,
+)
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from ufo.sources import backend as backend_module
-from ufo.sources.sync import ClaimedSource, SourceAuth, StreamSkipped, SyncDriver, SyncResult
 
 ACCOUNT = "acct-1"
 

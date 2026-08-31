@@ -27,9 +27,9 @@ from evals.harness.capability import WorkspaceFile, source_digest
 from evals.harness.harness import EvalCaseResult, Json, JsonObject
 from evals.harness.target import CapabilityTarget
 from ufo.db import workspace_tx
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
-from ufo.workspace import ws_current
 
 ACTIVITY_POLL_SECONDS = 2.0
 

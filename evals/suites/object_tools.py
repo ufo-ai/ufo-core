@@ -42,13 +42,13 @@ from evals.harness.capability import (
 from evals.harness.harness import JsonObject
 from evals.harness.scenario import ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.harness.scorers import combine, required_tools_scorer, skill_scorer
-from ufo.agent_scope import agent
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.models.interface import AUTO_MODEL
+from ufo.harness.models.interface import AUTO_MODEL
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.schema import tables
-from ufo.turns.subjects import SHARED_SUBJECT
 
 KIND = "scheduled_task"
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})

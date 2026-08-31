@@ -2,8 +2,8 @@ from uuid import uuid4
 
 import pytest
 
-from ufo.agent_scope import AgentUnbound, agent, agent_current
-from ufo.workspace import WorkspaceUnbound, ws
+from ufo.runtime.agent_scope import AgentUnbound, agent, agent_current
+from ufo.runtime.workspace import WorkspaceUnbound, ws
 
 
 def test_agent_requires_workspace() -> None:

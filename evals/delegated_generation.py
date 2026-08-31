@@ -41,7 +41,7 @@ from evals.harness.harness import EvalCaseResult, Json
 from evals.harness.timing import CaseTiming, TurnTiming
 from evals.harness.viewer import EvalRun
 from evals.suites.response_register import DELEGATED_TASK
-from ufo.turns.delivery_register import SUBAGENT_RESULT_MAX_WORDS
+from ufo.runtime.turns.delivery_register import SUBAGENT_RESULT_MAX_WORDS
 
 RUNS_DIR = Path("eval-reports/runs")
 METRIC_NAME = "delegated_intermediate_tokens"

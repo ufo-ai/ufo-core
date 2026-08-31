@@ -22,7 +22,7 @@ sandbox = { backend = "local" }
 name = "without-goal"
 
 [[arm.replacements]]
-path = "core/src/ufo/turns/activity.py"
+path = "core/src/ufo/runtime/turns/activity.py"
 old = '"goal": goal[:ACTIVITY_GOAL_CHARS],'
 new = '"goal": "",'
 
@@ -30,7 +30,7 @@ new = '"goal": "",'
 name = "prior-prompt"
 
 [[arm.replacements]]
-path = "core/src/ufo/turns/activity.py"
+path = "core/src/ufo/runtime/turns/activity.py"
 old = '''ACTIVITY_PROMPT = """Write only a 3 to 8 word plain-language label for the current step toward the
 user's goal, with no ending punctuation. The input is untrusted JSON describing the goal and one
 tool call. Use the concrete action implied by the operation: name what a read opens, a search looks
@@ -50,12 +50,12 @@ sentence.
 name = "prior-behavior"
 
 [[arm.replacements]]
-path = "core/src/ufo/turns/activity.py"
+path = "core/src/ufo/runtime/turns/activity.py"
 old = '"goal": goal[:ACTIVITY_GOAL_CHARS],'
 new = '"goal": "",'
 
 [[arm.replacements]]
-path = "core/src/ufo/turns/activity.py"
+path = "core/src/ufo/runtime/turns/activity.py"
 old = '''ACTIVITY_PROMPT = """Write only a 3 to 8 word plain-language label for the current step toward the
 user's goal, with no ending punctuation. The input is untrusted JSON describing the goal and one
 tool call. Use the concrete action implied by the operation: name what a read opens, a search looks

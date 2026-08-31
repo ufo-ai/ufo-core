@@ -1,12 +1,12 @@
-from ufo.loop.engine import DispatchResult, ImageRef, StreamResult
-from ufo.loop.steps import IMAGE_ATTACHMENT_NOTE, _step_messages
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     Message,
     ReasoningItemBlock,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.runtime.engine import DispatchResult, ImageRef, StreamResult
+from ufo.runtime.steps import IMAGE_ATTACHMENT_NOTE, _step_messages
 
 
 def _one(output: object) -> Message:

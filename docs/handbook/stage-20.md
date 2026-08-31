@@ -7,7 +7,7 @@ This stage is the system’s safety layer. It is not one step in the main work l
 ### Outbound egress policy
 These files derive and expose the per-run network, secret-injection, and billing rules used by the sandbox egress proxy.
 
-### `core/src/ufo/access/egress_resolver.py`
+### `core/src/ufo/runtime/access/egress_resolver.py`
 
 `domain_logic` · `request handling`
 
@@ -111,7 +111,7 @@ async def rules_generation(self, workspace_id: UUID) -> int
 *Call graph*: 3 external calls (select, workspace_tx, ws).
 
 
-### `core/src/ufo/access/egress_control.py`
+### `core/src/ufo/runtime/access/egress_control.py`
 
 `io_transport` · `request handling`
 
@@ -333,7 +333,7 @@ def _principal(self, proxy_auth: str) -> EgressPrincipal | None
 *Call graph*: called by 4 (_authorize, _forward, _resolve, _tool_bridge); 1 external calls (__init__).
 
 
-### `core/src/ufo/access/egress_rules.py`
+### `core/src/ufo/runtime/access/egress_rules.py`
 
 `domain_logic` · `turn setup / request handling`
 
@@ -481,7 +481,7 @@ def connector_transfer_hosts(manifests: tuple[Manifest, ...]) -> ConnectorTransf
 ### Artifact and file safety
 These files protect stored artifacts, uploaded previews, and sandbox file paths from unauthorized access or unsafe content.
 
-### `core/src/ufo/media/artifact_url.py`
+### `core/src/ufo/runtime/media/artifact_url.py`
 
 `domain_logic` · `artifact link creation and download request handling`
 
@@ -660,7 +660,7 @@ def _is_filename(value: str) -> bool
 *Call graph*: called by 2 (_split_key, verify_artifact_url).
 
 
-### `core/src/ufo/media/image_previews.py`
+### `core/src/ufo/runtime/media/image_previews.py`
 
 `domain_logic` · `request handling`
 
@@ -734,7 +734,7 @@ def _validate_container(data: bytes, media_type: RasterImageMediaType) -> None
 *Call graph*: 1 external calls (__init__).
 
 
-### `core/src/ufo/sandbox/containment.py`
+### `core/src/ufo/harness/sandbox/containment.py`
 
 `domain_logic` · `cross-cutting file access`
 
@@ -1139,7 +1139,7 @@ def _descend(descriptor: int, part: str, target: Path) -> int
 ### Workspace actors and credentials
 These files bind work to a workspace and acting agent, then safely store, select, and retrieve workspace or member credentials for provider access.
 
-### `core/src/ufo/workspace.py`
+### `core/src/ufo/runtime/workspace.py`
 
 `orchestration` · `cross-cutting during request, turn, and background job execution`
 
@@ -1425,7 +1425,7 @@ def app_tokens(installation_slot: str, permissions: tuple[tuple[str, str], ...] 
 *Call graph*: 2 external calls (__init__, load_pem_private_key).
 
 
-### `core/src/ufo/access/credentials.py`
+### `core/src/ufo/runtime/access/credentials.py`
 
 `domain_logic` · `cross-cutting: startup setup, credential prompts, provider callbacks, sandbox opening, and proxy rule derivation`
 
@@ -1772,7 +1772,7 @@ async def credential_host(store: CredentialStore, workspace_id: UUID, host: str 
 *Call graph*: calls 1 internal fn (get).
 
 
-### `core/src/ufo/agent_scope.py`
+### `core/src/ufo/runtime/agent_scope.py`
 
 `domain_logic` · `cross-cutting`
 
@@ -2062,7 +2062,7 @@ async def _read_private_transcript(ctx: ToolContext, args: PrivateTranscriptInpu
 *Call graph*: calls 3 internal fn (speaker_is_admin, _refusal, _target_agent); 4 external calls (__init__, __init__, record_transcript_access, UUID).
 
 
-### `core/src/ufo/seats.py`
+### `core/src/ufo/runtime/seats.py`
 
 `domain_logic` · `cross-cutting: onboarding, admission, per-turn checks, admin seat changes, and background candidate selection`
 
@@ -2355,7 +2355,7 @@ def with_a_member() -> sa.Select[tuple[UUID]]
 *Call graph*: 1 external calls (select).
 
 
-### `core/src/ufo/turns/audience.py`
+### `core/src/ufo/runtime/turns/audience.py`
 
 `domain_logic` · `cross-cutting during conversation reads, writes, and audience validation`
 
@@ -2502,7 +2502,7 @@ def narrow_audience(current: Audience, requested: Audience) -> Audience
 *Call graph*: calls 1 internal fn (parse_audience); 1 external calls (partition).
 
 
-### `core/src/ufo/turns/subjects.py`
+### `core/src/ufo/runtime/turns/subjects.py`
 
 `domain_logic` · `cross-cutting`
 
@@ -2540,7 +2540,7 @@ def subject_shared(subject: str) -> bool
 **Call relations**: This function supports code that is deciding whether a piece of content belongs to the workspace-wide shared side of visibility. When other parts of the system need that decision, they can ask this helper instead of repeating the comparison and possibly misunderstanding what counts as shared.
 
 
-### `core/src/ufo/turns/untrusted.py`
+### `core/src/ufo/runtime/turns/untrusted.py`
 
 `util` · `cross-cutting`
 
@@ -2570,7 +2570,7 @@ def wall(source: str, content: str) -> str
 ### Signed sessions and surfaces
 These files create, verify, and safely expose signed tokens for members, link-addressed surfaces, operator tools, and extensions.
 
-### `core/src/ufo/auth/bearer.py`
+### `core/src/ufo/runtime/auth/bearer.py`
 
 `domain_logic` · `login, request handling, and session validation`
 
@@ -2672,7 +2672,7 @@ def _b64url_decode(value: str) -> bytes
 *Call graph*: called by 1 (verified_claims); 1 external calls (urlsafe_b64decode).
 
 
-### `core/src/ufo/auth/surface_token.py`
+### `core/src/ufo/runtime/auth/surface_token.py`
 
 `domain_logic` · `request handling`
 
@@ -2731,7 +2731,7 @@ def _secret() -> str
 *Call graph*: called by 2 (mint_surface_token, verify_surface_token).
 
 
-### `core/src/ufo/auth/token_signing.py`
+### `core/src/ufo/runtime/auth/token_signing.py`
 
 `domain_logic` · `request handling`
 
@@ -2803,7 +2803,7 @@ def verify_token(token: str, secret: bytes) -> bytes
 *Call graph*: calls 1 internal fn (verify_detached); 2 external calls (__init__, b64decode).
 
 
-### `core/src/ufo/ext/operator.py`
+### `core/src/ufo/runtime/ext/operator.py`
 
 `domain_logic` · `operator surface request handling`
 
@@ -2956,7 +2956,7 @@ async def _scoped(self, workspace_id: UUID, last_turn_at: datetime | None, conve
 
 `io_transport` · `request handling`
 
-This file is a small public doorway into the project’s bearer-token authentication code. A bearer token is like a stamped wristband: whoever presents it can be recognized, but the important question is whether the stamp is real. The actual checking logic lives in `ufo.auth.bearer`; this file simply makes the safe parts available under the SDK path for surface extensions to import.
+This file is a small public doorway into the project’s bearer-token authentication code. A bearer token is like a stamped wristband: whoever presents it can be recognized, but the important question is whether the stamp is real. The actual checking logic lives in `ufo.runtime.auth.bearer`; this file simply makes the safe parts available under the SDK path for surface extensions to import.
 
 The key design point is separation of power. Extensions need to verify tokens that the gateway minted, but they should not be able to mint their own tokens. To support that, this module exposes constants such as the login path, logout path, and session cookie name, plus helper functions that verify a token and read trusted claims from it. The comment explains that these helpers resolve `UFO_TOKEN_SECRET` themselves, meaning extension authors do not receive or pass around the signing secret directly.
 

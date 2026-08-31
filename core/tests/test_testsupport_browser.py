@@ -9,7 +9,7 @@ from ufo_testsupport.browser import (
     headless_flags,
 )
 
-from ufo.sandbox.session import PLAYWRIGHT_CHROMIUM_REVISION, PLAYWRIGHT_VERSION
+from ufo.harness.sandbox.session import PLAYWRIGHT_CHROMIUM_REVISION, PLAYWRIGHT_VERSION
 
 
 @pytest.mark.parametrize(

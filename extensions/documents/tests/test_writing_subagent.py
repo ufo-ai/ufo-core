@@ -4,10 +4,10 @@ skill every spawn of it starts with in hand."""
 import ufo_ext_documents.manifest as documents
 import ufo_ext_documents.subagent as subagent
 
-from ufo.ext.loader import skill_registry
-from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
-from ufo.models.catalog import CORE_MODEL_SPECS
-from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.harness.models.catalog import CORE_MODEL_SPECS
+from ufo.host.ext.loader import skill_registry
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.subagents import FINISH_CONTRACT, subagent_system_prompt
 
 FILE_TOOLS = ("read", "write", "edit", "glob", "grep")
 

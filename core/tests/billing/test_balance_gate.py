@@ -11,8 +11,9 @@ from test_spend_caps import (
     _status,
 )
 
-from ufo.billing.accounting import ALLOW, BalanceGate, record_image_usage, record_turn_usage
-from ufo.billing.balance import (
+from ufo.db import workspace_tx
+from ufo.runtime.billing.accounting import ALLOW, BalanceGate, record_image_usage, record_turn_usage
+from ufo.runtime.billing.balance import (
     TOPUP_GRACE_MICRO_USD,
     balance_refusal_message,
     credit,
@@ -21,13 +22,12 @@ from ufo.billing.balance import (
     set_auto_topup,
     set_reserve,
 )
-from ufo.db import workspace_tx
-from ufo.hub import InProcessHub, Parked
+from ufo.runtime.hub import InProcessHub, Parked
+from ufo.runtime.surfaces.admission import Admission
+from ufo.runtime.surfaces.hub_tail import PARK_NOTICE, HubTailer, turn_status_frame
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, ToolIntent, Usage
-from ufo.surfaces.admission import Admission
-from ufo.surfaces.hub_tail import PARK_NOTICE, HubTailer, turn_status_frame
-from ufo.workspace import ws
 
 DOLLAR = 1_000_000
 

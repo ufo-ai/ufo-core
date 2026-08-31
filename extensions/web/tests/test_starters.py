@@ -45,9 +45,8 @@ from ufo_ext_web.surface import (
 )
 
 from ufo.db import workspace_tx
-from ufo.ext.context import ModelAccess, ScopedStore
-from ufo.models.catalog import CORE_PRICING
-from ufo.models.interface import (
+from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.models.interface import (
     Message,
     ModelClient,
     ModelEvent,
@@ -57,11 +56,12 @@ from ufo.models.interface import (
     ToolCallStart,
     ToolUseBlock,
 )
-from ufo.models.pricing import Pricing
+from ufo.harness.models.pricing import Pricing
+from ufo.runtime.ext.context import ModelAccess, ScopedStore
+from ufo.runtime.turns.subjects import member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.turns.subjects import member_subject
-from ufo.workspace import ws
 
 AUTO_MODEL = "claude-opus-5"
 PROVIDER_ANTHROPIC = "anthropic"

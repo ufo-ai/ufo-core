@@ -13,17 +13,21 @@ from opentelemetry import trace
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-import ufo.loop.subagents as subagents_module
-from ufo.billing.balance import BalanceExhausted, credit, set_reserve
+import ufo.runtime.subagents as subagents_module
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
-from ufo.ext.surface import conversation_name
-from ufo.hub import ArrivalQueued, InProcessHub
-from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
-from ufo.loop.queue import _commit_failed_terminal, _load_turn, _subagent_tools
-from ufo.loop.subagents import (
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.o11y import current_traceparent
+from ufo.host.tools.builtins import BUILTIN_TOOLS, SPAWN_BACKGROUND_DIRECTIVE, _spawn_handles
+from ufo.runtime.billing.balance import BalanceExhausted, credit, set_reserve
+from ufo.runtime.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
+from ufo.runtime.ext.surface import conversation_name
+from ufo.runtime.hub import ArrivalQueued, InProcessHub
+from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
+from ufo.runtime.queue import _commit_failed_terminal, _load_turn, _subagent_tools
+from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, RuntimeSkill, SkillCard
+from ufo.runtime.skills.selection import prompt_index
+from ufo.runtime.subagents import (
     FINISH_CONTRACT,
     PRELOAD_PROMPT_CHAR_BOUND,
     SubagentParked,
@@ -32,7 +36,21 @@ from ufo.loop.subagents import (
     Subagents,
     subagent_system_prompt,
 )
-from ufo.o11y import current_traceparent
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.tools.context import (
+    AmbiguousSpawnTarget,
+    UnknownSpawnTarget,
+    UnknownSubagentProfile,
+    UntrustedContentError,
+)
+from ufo.runtime.turns.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
+)
+from ufo.runtime.turns.delivery_register import DELIVERY_REGISTER_BLOCK, SUBAGENT_RESULT_DESCRIPTION
 from ufo.schema import tables
 from ufo.schema.records import (
     AskQuestion,
@@ -42,24 +60,6 @@ from ufo.schema.records import (
     TurnRuntimeConfig,
     turn_id_for,
 )
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, RuntimeSkill, SkillCard
-from ufo.skills.selection import prompt_index
-from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.tools.builtins import BUILTIN_TOOLS, SPAWN_BACKGROUND_DIRECTIVE, _spawn_handles
-from ufo.tools.context import (
-    AmbiguousSpawnTarget,
-    UnknownSpawnTarget,
-    UnknownSubagentProfile,
-    UntrustedContentError,
-)
-from ufo.turns.audience import (
-    SHARED_AUDIENCE,
-    Audience,
-    conversation_audience,
-    foreign_room_audience,
-    room_audience,
-)
-from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK, SUBAGENT_RESULT_DESCRIPTION
 
 
 class _Task(BaseModel):

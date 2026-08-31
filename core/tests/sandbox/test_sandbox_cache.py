@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from ufo.sandbox.cache import CACHE_HOST, CACHE_PKG_HOSTS, cache_git_config, parse_cache_daemon
+from ufo.harness.sandbox.cache import (
+    CACHE_HOST,
+    CACHE_PKG_HOSTS,
+    cache_git_config,
+    parse_cache_daemon,
+)
 
 
 def test_parse_cache_daemon_splits_host_and_port() -> None:

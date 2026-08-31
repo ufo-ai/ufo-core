@@ -30,15 +30,15 @@ from evals.harness.target import (
 from evals.harness.viewer import EvalRun, render_viewer, write_atomic
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.db import workspace_tx
-from ufo.schema import tables
-from ufo.schema.records import TerminalFrame
-from ufo.turns.transcript import (
+from ufo.runtime.turns.transcript import (
     Conversation,
     TranscriptDecodeError,
     decode,
     read_compaction_records,
     transcript_key,
 )
+from ufo.schema import tables
+from ufo.schema.records import TerminalFrame
 
 RECONSTRUCTIONS_DIR = "reconstructions"
 

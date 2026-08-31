@@ -22,14 +22,12 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.typing import Origin, Subprotocol
 
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import dispose_db, workspace_tx
-from ufo.ext.manifest import CarrierSpec
-from ufo.sandbox import ingress_serve
-from ufo.sandbox.ingress_host import serve_port, shipped_anchor, site_label
-from ufo.sandbox.ingress_serve import (
+from ufo.harness.sandbox import ingress_serve
+from ufo.harness.sandbox.ingress_host import serve_port, shipped_anchor, site_label
+from ufo.harness.sandbox.ingress_serve import (
     CACHE_DIRECTIVE_HEADERS,
     CONTENT_SECURITY_POLICY,
     FOREIGN_ORIGIN,
@@ -55,7 +53,7 @@ from ufo.sandbox.ingress_serve import (
     ingress_frame_ancestor,
     upstream_client,
 )
-from ufo.sandbox.ingress_token import (
+from ufo.harness.sandbox.ingress_token import (
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,
     INGRESS_VIEW_PATH,
@@ -66,7 +64,7 @@ from ufo.sandbox.ingress_token import (
     mint_ingress_token,
     verify_ingress_token,
 )
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.session import (
     Carrier,
     DialTarget,
     ExecResult,
@@ -74,6 +72,8 @@ from ufo.sandbox.session import (
     SandboxSpec,
     SandboxUnreachable,
 )
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.runtime.ext.manifest import CarrierSpec
 from ufo.schema import tables
 
 BACKEND = "stub"

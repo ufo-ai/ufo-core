@@ -24,8 +24,8 @@ from evals.harness.harness import JsonObject
 from evals.harness.scorers import combine, exact_scorer, lane_scorer, restraint_scorer
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.skills.runtime import LoadedSkill, loaded_context, parse_skill
 from ufo.schema import tables
-from ufo.skills.runtime import LoadedSkill, loaded_context, parse_skill
 
 BACKGROUND_FLAG = TypeAdapter(bool)
 GITHUB_APP_API_COMMAND = 'GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api'
@@ -85,7 +85,7 @@ STRUCTURED_REVIEW_RESULT: JsonObject = {
     "complete": True,
     "findings": [
         {
-            "path": "core/src/ufo/loop/subagents.py",
+            "path": "core/src/ufo/runtime/subagents.py",
             "line": 210,
             "title": "The handoff word limit truncates the required review JSON object",
             "trigger": (

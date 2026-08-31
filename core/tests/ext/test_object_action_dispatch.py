@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections import namedtuple
 from collections.abc import AsyncIterator
@@ -13,39 +14,9 @@ import yaml
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict
 
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.loader import (
-    BoundHook,
-    HookChain,
-    load_manifests,
-    turn_hooks,
-    turn_tools,
-    validate_ext_tools,
-)
-from ufo.ext.manifest import HookContext, HookOutcome, HookSpec, ModifyOutput, PostToolUse
-from ufo.hub import InProcessHub
-from ufo.loop.compaction import Compaction
-from ufo.loop.engine import (
-    EffectiveCall,
-    TurnEngine,
-    _dispatch_segments,
-    _RejectedToolCall,
-)
-from ufo.loop.prompts.render import rendered_prompt
-from ufo.loop.queue import (
-    IMPLIED_GRANTS,
-    _agent_actions,
-    _agent_tools,
-    _with_action_verbs,
-)
-from ufo.loop.subagents import SubagentRegistry
-from ufo.loop.tool_bridge import ToolBridge
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -54,7 +25,30 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.objects import (
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.harness.tools import dispatch_segments
+from ufo.harness.untrusted import UNTRUSTED_OPEN
+from ufo.host.ext.loader import (
+    BoundHook,
+    HookChain,
+    load_manifests,
+    turn_hooks,
+    turn_tools,
+    validate_ext_tools,
+)
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.compaction import Compaction
+from ufo.runtime.engine import (
+    MAX_PARALLEL_TOOL_CALLS,
+    EffectiveCall,
+    TurnEngine,
+    _RejectedToolCall,
+)
+from ufo.runtime.ext.context import ScopedStore, context_for
+from ufo.runtime.ext.manifest import HookContext, HookOutcome, HookSpec, ModifyOutput, PostToolUse
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.objects import (
     BoundAction,
     BoundKind,
     ObjectActionInput,
@@ -66,7 +60,22 @@ from ufo.objects import (
     action_registry,
     object_registry,
 )
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.runtime.prompts.render import rendered_prompt
+from ufo.runtime.queue import (
+    IMPLIED_GRANTS,
+    _agent_actions,
+    _agent_tools,
+    _with_action_verbs,
+)
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.tool_bridge import ToolBridge
+from ufo.runtime.tools.bridge import ToolBridgeIntent, bridge_tools
+from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import ObjectBinding, ToolDef, ToolRegistry
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.activity import ActivitySummarizer
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     INTENT_ADMISSION,
@@ -79,13 +88,6 @@ from ufo.schema.records import (
     Turn,
     Usage,
 )
-from ufo.tools.bridge import ToolBridgeIntent, bridge_tools
-from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
-from ufo.tools.registry import ObjectBinding, ToolDef, ToolRegistry
-from ufo.turns.activity import ActivitySummarizer
-from ufo.turns.audience import conversation_audience
-from ufo.turns.untrusted import UNTRUSTED_OPEN
-from ufo.workspace import ws
 
 DIVINE_ID = f"action:{sample.WIDGET_KIND}:{sample.DIVINE_ACTION}"
 ENGRAVE_ID = f"action:{sample.WIDGET_KIND}:{sample.ENGRAVE_ACTION}"
@@ -840,7 +842,12 @@ async def test_parallel_safe_actions_batch_and_a_malformed_call_stays_a_barrier(
             )
         )
         segments = [
-            tuple(item.call.id for item in segment) for segment in _dispatch_segments(resolved)
+            tuple(item.call.id for item in segment)
+            for segment in dispatch_segments(
+                resolved,
+                parallel_safe=lambda item: item.parallel_safe,
+                limit=MAX_PARALLEL_TOOL_CALLS,
+            )
         ]
         assert segments == [("c1",), ("c2",), ("c3", "c4"), ("c5",)]
         frame = await engine.run()
@@ -849,6 +856,71 @@ async def test_parallel_safe_actions_batch_and_a_malformed_call_stays_a_barrier(
         assert [result.tool_use_id for result in results] == ["c1", "c2", "c3"]
         assert [result.is_error for result in results] == [False, True, False]
         assert await ScopedStore(extension=sample.NAME).get(sample.DIVINE_KEY) is not None
+
+
+class _MeetSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slot: str
+
+
+async def test_two_bound_action_calls_in_one_round_dispatch_concurrently(
+    db: None, tmp_path: Path
+) -> None:
+    """Each call returns only after the other has started, so serial dispatch would time out and a
+    passing run proves the round's two `object_action` calls overlapped — the engine scheduled them
+    on the resolved action's own `parallel_safe`, never the wire dispatcher's flag."""
+    started = {"a": asyncio.Event(), "b": asyncio.Event()}
+
+    async def meet(ctx: ToolContext, args: _MeetSpec) -> ToolResult:
+        started[args.slot].set()
+        async with asyncio.timeout(5):
+            await started["b" if args.slot == "a" else "a"].wait()
+        return ToolResult(content=(TextContent(text=f"met:{args.slot}"),))
+
+    rendezvous = ToolDef(
+        name="meet",
+        description="d",
+        input_model=_MeetSpec,
+        handler=meet,
+        bound=ObjectBinding(kind="rendezvous", binding="collection"),
+        parallel_safe=True,
+    )
+    kinds = object_registry(
+        (
+            BoundKind(
+                kind=ObjectKind(
+                    name="rendezvous",
+                    description="d",
+                    guidance="g",
+                    spec_model=_MeetSpec,
+                    store=_DownStore(),
+                ),
+                extension=None,
+                context=None,
+            ),
+        )
+    )
+    bound = BoundAction(action=rendezvous, extension=None, context=None)
+    actions = action_registry((bound,), kinds)
+    model = _CallsModel(
+        tuple(
+            ("object_action", {"kind": "rendezvous", "action": "meet", "input": {"slot": slot}})
+            for slot in ("a", "b")
+        )
+    )
+    turn = await _seed_turn()
+    with ws(turn.workspace_id):
+        engine = replace(
+            _engine(turn, model, tmp_path),
+            verbs=ObjectVerbs(kinds, actions),
+            granted_actions=frozenset({rendezvous.canonical_id}),
+        )
+        frame = await engine.run()
+        assert frame is not None and frame.status == "done"
+        results = await _tool_results(engine)
+        assert [result.tool_use_id for result in results] == ["c1", "c2"]
+        assert [result.content for result in results] == ["met:a", "met:b"]
 
 
 async def test_rejections_meter_unregistered_only_before_the_action_resolves(

@@ -19,12 +19,12 @@ date: 2026-08-15
 
 | | Subagent profile | Workspace agent |
 |---|---|---|
-| Registered | boot, from manifests (`core/src/ufo/ext/manifest.py:523`) | `agent` rows: `object_apply agent`, RFC 0030 provisioning |
+| Registered | boot, from manifests (`core/src/ufo/runtime/ext/manifest.py:523`) | `agent` rows: `object_apply agent`, RFC 0030 provisioning |
 | Identity | none — child runs under the spawning turn's `agent_id` | its own: prompt, model, reasoning, tools allowlist, source grants, memory, spend |
-| Input/output schema | `input_model`/`output_model`, payload validated at spawn (`core/src/ufo/loop/subagents.py:184`), output forced through the `finish` tool | none — free-text turns on a surface |
-| Reachable by delegation | `spawn_subagent` (`core/src/ufo/tools/builtins.py:1211`) | not at all |
+| Input/output schema | `input_model`/`output_model`, payload validated at spawn (`core/src/ufo/runtime/subagents.py:184`), output forced through the `finish` tool | none — free-text turns on a surface |
+| Reachable by delegation | `spawn_subagent` (`core/src/ufo/host/tools/builtins.py:1211`) | not at all |
 
-Dispatch already branches on the discriminator (`core/src/ufo/loop/queue.py:412`): a turn with
+Dispatch already branches on the discriminator (`core/src/ufo/runtime/queue.py:412`): a turn with
 `subagent_profile` set runs the profile's prompt, tool subset, and round cap; a turn without runs
 the agent row's own prompt, sections, runtime skills, and allowlist-filtered tools. The agent
 branch is the dispatch path a delegated agent run needs — what it lacks is a way to be admitted

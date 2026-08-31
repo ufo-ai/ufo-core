@@ -12,7 +12,7 @@ from ufo_ext_index_default import (
 )
 
 from ufo.db import current_workspace, workspace_tx
-from ufo.indexing import Chunk, IndexScope
+from ufo.runtime.indexing import Chunk, IndexScope
 
 WORKSPACE = UUID("11111111-1111-1111-1111-111111111111")
 SUBJECT = "member:me"

@@ -40,12 +40,12 @@ from ufo_ext_objectives.store import (
 )
 from ufo_ext_objectives.tools import PlanObjectiveInput, plan_objective
 
-from ufo.agent_scope import agent
 from ufo.db import workspace_tx
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.tools import ToolContext
-from ufo.workspace import ws
 
 
 async def _seeded_conversation() -> tuple[UUID, UUID]:
@@ -257,7 +257,7 @@ async def test_a_revision_cannot_weaken_a_condition_already_attempted(db: None) 
 def test_every_metric_this_extension_emits_is_declared_in_core() -> None:
     """An extension emits a name core declares or fails loud, so an undeclared counter is a runtime
     raise on the first real use rather than a missing dashboard."""
-    from ufo.o11y import METRICS
+    from ufo.harness.o11y import METRICS
 
     for name in (
         "objective_step_recorded_total",

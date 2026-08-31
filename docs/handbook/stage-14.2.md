@@ -11,7 +11,7 @@ The Turbopuffer extension is an alternate backend. Instead of local database sea
 ### Chunking contracts
 Shared chunking and indexing interfaces define how source text becomes searchable chunks and how index and embedding providers plug into the core system.
 
-### `core/src/ufo/indexing.py`
+### `core/src/ufo/runtime/indexing.py`
 
 `domain_logic` · `indexing and retrieval preparation`
 

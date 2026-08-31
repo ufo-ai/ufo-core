@@ -36,16 +36,16 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from evals.budget import EvalRunBudget
 from evals.harness.viewer import load_runs, write_viewer
 from evals.sandbox_image import SandboxImagePlan, sandbox_image_plan
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.billing.accounting import MICRO_USD_PER_USD
 from ufo.config import Config, ConnectConfig, DatabaseConfig, O11yConfig
-from ufo.ext.loader import load_manifests
-from ufo.proxy_serve import OWNER_DSN_ENV
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.session import (
     EGRESS_CA_CERT_ENV,
     EGRESS_CA_KEY_ENV,
     EGRESS_CONTROL_TOKEN_ENV,
 )
+from ufo.host.ext.loader import load_manifests
+from ufo.proxy_serve import OWNER_DSN_ENV
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.runtime.billing.accounting import MICRO_USD_PER_USD
 from ufo.schema.records import ReasoningEffort
 
 RUNS_ROOT = Path(".local/evals")

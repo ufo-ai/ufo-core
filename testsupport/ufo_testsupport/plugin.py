@@ -2,8 +2,9 @@
 
 DBOS is a process singleton — it cannot launch twice in a process. Loading this as an entry-point
 plugin means pytest imports and registers it exactly once at startup, so there is exactly one
-`dbos_launched` FixtureDef across core/tests and every `extensions/*/tests`: one launch per database
-param, never a double-launch. (A per-directory conftest would create a second FixtureDef the moment
+`dbos_launched` FixtureDef across core/tests and every `extensions/*/tests`: one launch per
+database param, never a double-launch. (A per-directory conftest would create a second FixtureDef
+the moment
 two test roots are collected together — the wedge this plugin exists to prevent.)
 
 It also stamps every test under a `tests/integration/` path `integration` + `serial`, so `-m
@@ -46,9 +47,9 @@ from sandbox.build_template import (
 )
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
-from ufo.durability import ReplaySafeSerializer, replay_safe_client
+from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
+from ufo.runtime.workspace import init_workspace_credentials
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
-from ufo.workspace import init_workspace_credentials
 from ufo_testsupport.migrations import apply_cached_migrations
 from ufo_testsupport.tables import reset_workspace_data
 from ufo_testsupport.workflows import drain_workflows

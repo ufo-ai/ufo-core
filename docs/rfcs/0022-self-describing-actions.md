@@ -29,7 +29,7 @@ are not in question:
   (`extensions/web/ufo_ext_web/panels.py:194`) admits it as a turn on the member's durable intent
   conversation (`ctx.admit`, `:227`), so the turn is the audit record and the per-conversation
   partition serializes one member's submits; the engine's `run_intent`
-  (`core/src/ufo/loop/engine.py:868`) dispatches the stored envelope after admission.
+  (`core/src/ufo/runtime/engine.py:868`) dispatches the stored envelope after admission.
 - **Every authority gate is the callee's own** — `AgentObjects`' admin gate, `connector_grant`'s
   owner gate, `memory_update`'s subject rule, `request_credentials`' admin + fillable-slot rule —
   and a refusal reaches the panel as the callee's own words. The surface adds two *non-authority*
@@ -40,10 +40,10 @@ are not in question:
   against `list_credential_slots()` — the member-fillable set only (`panels.py:214-220`, pinned at
   `test_ext_web.py:2748` and `:2777`).
 - **Object kinds already describe themselves** for the model's benefit. `ObjectKind`
-  (`core/src/ufo/objects.py:576`) carries `name`, `description`, `guidance`, `spec_model`,
+  (`core/src/ufo/runtime/objects.py:576`) carries `name`, `description`, `guidance`, `spec_model`,
   `list_fields`, `agent_target_verbs`; `object_explain` returns `spec_model.model_json_schema()`
   (`:898`). `object_registry` (`:603`) is the boot gate over the whole set.
-- **Tools already describe themselves**: `ToolDef` (`core/src/ufo/tools/registry.py:32`) carries
+- **Tools already describe themselves**: `ToolDef` (`core/src/ufo/runtime/tools/registry.py:32`) carries
   `name`, `description`, `input_model`, `handler`, and behavioural flags, and `schema()` projects
   the input model to the wire.
 
@@ -117,7 +117,7 @@ Constraints and where each is enforced — none of them free:
 
 | constraint | site |
 |---|---|
-| `intent` unique across tools *and* kinds | `validate_ext_tools` (`core/src/ufo/ext/loader.py:648`) — the only deploy-boot site that sees both sets; `object_registry` sees only kinds (`objects.py:603`) and `ToolRegistry.__post_init__` only tools (`registry.py:62-71`), and the latter is rebuilt per turn |
+| `intent` unique across tools *and* kinds | `validate_ext_tools` (`core/src/ufo/host/ext/loader.py:648`) — the only deploy-boot site that sees both sets; `object_registry` sees only kinds (`objects.py:603`) and `ToolRegistry.__post_init__` only tools (`registry.py:62-71`), and the latter is rebuilt per turn |
 | `submit_model` JSON-representable, secret-free, `extra="forbid"` | a new check; `_validate_spec_model` (`objects.py:629`) is kind-only and takes `(owner, kind)`, so it is a model to copy, not a function to reuse. The tool registry has no JSON or secret check at all |
 | `label` and `confirm` non-empty when present | the same boot site |
 
@@ -181,13 +181,13 @@ The parse stays text-based, deliberately. `_final_act` reads the payload out of 
 result text* (`engine.py:518-536`) so that "a pre_tool_use hook that folded the args is honored …
 A result a post hook rewrote past recognition carries no payload; the reply's prose still asks" —
 and `post_tool_use`'s `ModifyOutput` replaces that text wholesale
-(`core/src/ufo/ext/manifest.py:417-420`). Two tests pin the suppression directly
+(`core/src/ufo/runtime/ext/manifest.py:417-420`). Two tests pin the suppression directly
 (`core/tests/test_engine.py:1866-1867`, `:2086-2087`). A typed field on `ToolResult` is not part of the text a hook replaces, so a redacted `connect_account` result
 would still emit its OAuth handoff. Making the *lookup* declarative
 while leaving the *parse* where it is keeps the property and still deletes the hardcoded triple.
 `ask_user` is no exception to that reasoning and does not support it either: its payload *is*
 handler-structured (`ask_user_handler` builds the dict and serializes it after the directive,
-`core/src/ufo/tools/builtins.py:618-627`), exactly as connect and credential are, so a handler-set
+`core/src/ufo/host/tools/builtins.py:618-627`), exactly as connect and credential are, so a handler-set
 field could have carried it. The hook-suppression property is the whole argument, and it stands on
 its own.
 
@@ -243,7 +243,7 @@ re-validates a `ToolIntent` whose `input` is already the composed callee input
 `ctx.admit` (`panels.py:227`), which is also what `ActionContext`'s contents imply.
 
 **That resolution site is a new seam, and unit 1 owns it.** `SurfaceContext` carries
-`_objects: Mapping[str, BoundKind]` and no tool registry (`core/src/ufo/ext/surface.py:526-543`),
+`_objects: Mapping[str, BoundKind]` and no tool registry (`core/src/ufo/runtime/ext/surface.py:526-543`),
 while five of the seven callees the lane serves are tools, not kinds — `connect_account`,
 `request_credentials`, `memory_update`, `grant_web_access`, `revoke_web_access`. An
 intent→declaration index spanning both sets has to be built at boot, where `validate_ext_tools`
@@ -289,7 +289,7 @@ not a member's submit.
   audit record, the per-member serialization, and single authority — the three things the turn lane
   buys — and re-creates the bespoke-CRUD surface `spec.md` forbids. The underlying capability is
   already factored out of the chat path (the sealing lives in `CredentialRequests.seal`, called by
-  the `request_credentials` handler at `core/src/ufo/tools/builtins.py:686`, and the panel reaches
+  the `request_credentials` handler at `core/src/ufo/host/tools/builtins.py:686`, and the panel reaches
   it by dispatching that tool), so what the lane adds is audit and ordering, not indirection.
 - **A typed `handoff` field on `ToolResult`.** Rejected on evidence, as above: it bypasses the
   post-hook suppression two tests pin, and cannot carry `ask_user`'s input-model payload.

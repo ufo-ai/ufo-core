@@ -29,10 +29,10 @@ from evals.harness.scorers import (
 )
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.seats import create_member
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
-from ufo.seats import create_member
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws_current
 
 ADD_MEMBER = "action:member:add_member"
 GRANT_WEB_ACCESS = "action:member:grant_web_access"

@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+import uvicorn
+from fastapi import FastAPI
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
@@ -28,26 +30,13 @@ from evals.harness.capability import CapabilityCase
 from evals.harness.scorers import exact_scorer
 from evals.harness.target import InProcessTarget
 from evals.harness.timing import UNNAMED_TOOL
-from ufo import o11y
-from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
-from ufo.config import Config
+from ufo.config import Config, EnvironmentConfig
 from ufo.db import workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.context import context_for
-from ufo.ext.loader import embed_backend, index_backend, skill_registry
-from ufo.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest
-from ufo.hub import CostTick, Hub, InProcessHub, Parked, SubagentActivity, Terminal
-from ufo.loop import queue as loop_queue
-from ufo.loop.engine import (
-    EMPTY_RESPONSE_NUDGE,
-    FINISH_TOOL,
-    TRUNCATION_FEEDBACK,
-)
-from ufo.loop.subagents import SubagentProfile, SubagentRegistry, Subagents
-from ufo.loop.transcript import Transcript
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import (
+from ufo.harness import o11y
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
     ModelResponseTruncated,
@@ -56,15 +45,39 @@ from ufo.models.interface import (
     ToolCallStart,
     ToolResultBlock,
 )
-from ufo.models.registry import ModelRegistry
-from ufo.runtime.jobs import TurnDispatcher
-from ufo.sandbox.conversation import (
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
     UNSIGNED_RUN_TOKEN,
     ConversationSandbox,
 )
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.host.devhost import overrides_app
+from ufo.host.ext.loader import HostEnvironment, embed_backend, index_backend, skill_registry
+from ufo.runtime import queue as loop_queue
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.engine import (
+    EMPTY_RESPONSE_NUDGE,
+    FINISH_TOOL,
+    TRUNCATION_FEEDBACK,
+)
+from ufo.runtime.environment import ENVIRONMENT_PATH, EnvironmentOverrides, EnvironmentRequest
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest
+from ufo.runtime.hub import CostTick, Hub, InProcessHub, Parked, SubagentActivity, Terminal
+from ufo.runtime.jobs import TurnDispatcher
+from ufo.runtime.subagents import FINISH_CONTRACT, SubagentProfile, SubagentRegistry, Subagents
+from ufo.runtime.surfaces import hub_tail
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
+from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.activity import ACTIVITY_PROMPT
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.turns.transcript import Conversation
+from ufo.runtime.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     INTENT_ADMISSION,
@@ -77,15 +90,6 @@ from ufo.schema.records import (
     TurnRuntimeConfig,
     Usage,
 )
-from ufo.surfaces import hub_tail
-from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
-from ufo.tools.context import TextContent, ToolContext, ToolResult
-from ufo.tools.registry import ToolDef
-from ufo.turns.activity import ACTIVITY_PROMPT
-from ufo.turns.audience import conversation_audience
-from ufo.turns.transcript import Conversation
-from ufo.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
-from ufo.workspace import ws
 
 STREAM_TIMEOUT_SECONDS = 30
 HOLD_RELEASE = threading.Event()
@@ -97,6 +101,7 @@ TRUNCATION_MESSAGE = (
 STREAM_GATE = StreamGate()
 SEEN_SYSTEM_PROMPTS: list[str] = []
 SEEN_TOOLS: list[tuple[str, ...]] = []
+SEEN_TOOL_DESCRIPTIONS: list[dict[str, str]] = []
 SEEN_REASONING: list[ReasoningEffort] = []
 
 
@@ -221,6 +226,7 @@ class StandInModel:
             return
         SEEN_SYSTEM_PROMPTS.append(request.system)
         SEEN_TOOLS.append(tuple(tool.name for tool in request.tools))
+        SEEN_TOOL_DESCRIPTIONS.append({tool.name: tool.description for tool in request.tools})
         SEEN_REASONING.append(request.reasoning)
         if "ROUNDTRIP" in request.system:
             if request.messages[-1].content == FOLLOWUP_INBOUND:
@@ -375,7 +381,9 @@ def dbos_runtime(
     dbos_launched: Config,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[Config, GatingHub, FilesystemBlobStore]]:
-    config = dbos_launched
+    config = dbos_launched.model_copy(
+        update={"environment": EnvironmentConfig(dev_host_allowed=True)}
+    )
     hub = GatingHub(InProcessHub(), STREAM_GATE)
     blob = FilesystemBlobStore(root=config.blob.root)
     dbos_client = replay_safe_client(config.database.system_url)
@@ -412,6 +420,13 @@ def dbos_runtime(
             ),
             subagent_grants={},
             manifests=(STUB_BACKENDS,),
+            environment=HostEnvironment(
+                manifests=(STUB_BACKENDS,),
+                credentials=None,
+                index=index,
+                embed=embed,
+                blob=blob,
+            ),
             registry=STANDIN_REGISTRY,
             skills=skill_registry((STUB_BACKENDS,)),
             credentials=None,
@@ -1971,6 +1986,112 @@ async def test_runtime_config_model_overrides_the_parent_and_profile_models(
         ).scalars()
     assert set(models) == {"claude-sonnet-5"}
     assert TurnRuntimeConfig.model_validate(child.runtime_config) == runtime_config
+
+
+OVERRIDDEN_PROMPT = "OVERRIDDEN: answer as the environment host rewrote you."
+OVERRIDDEN_BASH = "OVERRIDDEN: the bash description this arm measures."
+
+
+@asynccontextmanager
+async def _dev_host(app: object) -> AsyncIterator[str]:
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
+    serving = asyncio.create_task(server.serve())
+    while not server.started:
+        if serving.done():
+            serving.result()
+            raise AssertionError("dev host exited before it started")
+        await asyncio.sleep(0.01)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        await serving
+
+
+async def test_environment_host_overrides_the_prompt_and_descriptions_a_turn_runs_with(
+    surface: Turns,
+) -> None:
+    """The whole rail: a turn pins a live environment host, the runtime sends it the assembled
+    prompt and tool offer, and the model round runs with the replacement prompt, the rewritten
+    description, and the withheld tool gone — while the surviving tools keep their runtime-bound
+    handlers (the turn still ends clean)."""
+    seed = await _bootstrap()
+    SEEN_SYSTEM_PROMPTS.clear()
+    SEEN_TOOLS.clear()
+    SEEN_TOOL_DESCRIPTIONS.clear()
+    document = EnvironmentOverrides(
+        system_prompt=OVERRIDDEN_PROMPT,
+        tool_descriptions={"bash": OVERRIDDEN_BASH},
+        disabled_tools=("spawn",),
+    )
+    async with _dev_host(overrides_app(document)) as host:
+        turn = await surface.admit(
+            seed,
+            "hello there",
+            runtime_config=TurnRuntimeConfig(model="claude-sonnet-5", environment_host=host),
+        )
+        text, terminal = await surface.consume(seed, turn)
+    assert terminal["status"] == "done"
+    assert text.startswith("echo:")
+    round_index = SEEN_SYSTEM_PROMPTS.index(OVERRIDDEN_PROMPT)
+    offered = SEEN_TOOLS[round_index]
+    assert "bash" in offered
+    assert "spawn" not in offered
+    assert SEEN_TOOL_DESCRIPTIONS[round_index]["bash"] == OVERRIDDEN_BASH
+
+
+REPLACED_CHILD_PROMPT = "OVERRIDDEN ROUNDTRIP: echo the value back under the arm's prompt."
+
+
+async def test_a_replaced_prompt_on_a_spawned_child_keeps_the_finish_contract(
+    surface: Turns,
+) -> None:
+    """A host that replaces a spawned child's prompt (the reference host declines subagent
+    requests; this one answers them) cannot displace the platform's finish contract: the runtime
+    re-appends it after the override, so the child still ends with a valid finish call."""
+    seed = await _bootstrap()
+    SEEN_SYSTEM_PROMPTS.clear()
+    SEEN_TOOLS.clear()
+    SEEN_TOOL_DESCRIPTIONS.clear()
+    document = EnvironmentOverrides(system_prompt=REPLACED_CHILD_PROMPT)
+    unconditional = FastAPI()
+
+    @unconditional.post(ENVIRONMENT_PATH)
+    async def environment(request: EnvironmentRequest) -> EnvironmentOverrides:
+        if request.subagent_profile is None:
+            return EnvironmentOverrides()
+        return document
+
+    async with _dev_host(unconditional) as host:
+        parent = await surface.admit(
+            seed,
+            "spawn-pinned",
+            runtime_config=TurnRuntimeConfig(model="claude-sonnet-5", environment_host=host),
+        )
+        _text, terminal = await surface.consume(seed, parent)
+    assert terminal["status"] == "done"
+    assert await _child_echo(parent) == 7
+    child_prompts = [
+        prompt for prompt in SEEN_SYSTEM_PROMPTS if prompt.startswith(REPLACED_CHILD_PROMPT)
+    ]
+    assert child_prompts
+    assert all(prompt.endswith(FINISH_CONTRACT) for prompt in child_prompts)
+
+
+async def test_an_override_naming_a_tool_the_turn_does_not_offer_fails_the_turn(
+    surface: Turns,
+) -> None:
+    seed = await _bootstrap()
+    document = EnvironmentOverrides(disabled_tools=("no-such-tool",))
+    async with _dev_host(overrides_app(document)) as host:
+        turn = await surface.admit(
+            seed,
+            "hello there",
+            runtime_config=TurnRuntimeConfig(model="claude-sonnet-5", environment_host=host),
+        )
+        _text, terminal = await surface.consume(seed, turn)
+    assert terminal["status"] == "failed"
 
 
 async def _child_echo(parent: str) -> int:

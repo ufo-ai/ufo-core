@@ -19,16 +19,16 @@ import ufo_ext_browser_use as browser_use
 from cryptography.fernet import Fernet
 from ufo_ext_browser_use import BrowserTaskInput
 
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.sandbox.session import ExecResult
+from ufo.harness.sandbox.session import ExecResult
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.context import ToolContext
-from ufo.workspace import init_workspace_credentials, ws
 
 LIVE_KEY_ENV = "BROWSER_USE_API_KEY"
 LIVE_PAGE_URL = "https://example.com"

@@ -18,7 +18,11 @@ from ufo_ext_connectors.objects import (
     ConnectorGrantSpec,
 )
 
-from ufo.access.grants import (
+from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.grants import (
     ConnectionPermissionDenied,
     GrantStore,
     account_object_name,
@@ -26,13 +30,10 @@ from ufo.access.grants import (
     grant_summaries,
     workspace_grant_summaries,
 )
-from ufo.agent_scope import agent
-from ufo.blob import FilesystemBlobStore
-from ufo.db import workspace_tx
-from ufo.ext.loader import turn_tools
-from ufo.kinds.agents import AGENT_KIND
-from ufo.object_name import OBJECT_NAME_MAX_LENGTH, ObjectRef
-from ufo.objects import (
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.kinds.agents import AGENT_KIND
+from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH, ObjectRef
+from ufo.runtime.objects import (
     AdminRequired,
     GeneratedObjectOwner,
     ObjectDetail,
@@ -40,13 +41,12 @@ from ufo.objects import (
     UnknownObject,
     VerbNotSupported,
 )
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.context import SpawnResult, SpeakerRequired, ToolContext
-from ufo.tools.registry import ToolDef
-from ufo.workspace import ws
 
 TOOL_NARRATION = "checking their connected accounts"
 ADMIN_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)

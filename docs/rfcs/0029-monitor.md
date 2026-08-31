@@ -26,7 +26,7 @@ date: 2026-08-14
 `pause_and_wait` (`extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py:438`) is a passive
 pause: it writes a hidden `@pause:{conversation_id}` row (`ScheduleStore.pause`,
 `core/src/ufo/scheduling.py:357`) and the turn ends. The workflow resumes on whichever comes
-first — a member message (admission consumes the row, `core/src/ufo/surfaces/admission.py:702`;
+first — a member message (admission consumes the row, `core/src/ufo/runtime/surfaces/admission.py:702`;
 a queued timer turn is rewritten in place by a member takeover, `admission.py:373`) or the timer
 (the per-minute runner claims the row and fires it as a scheduled turn,
 `extensions/scheduled_tasks/ufo_ext_scheduled_tasks/runner.py:36`).
@@ -36,9 +36,9 @@ run, a deploy, an inbox — forces a choice between a long wait (slow reaction) 
 (one full model turn per poll, each paying admission, recall, and model rounds to usually find
 nothing changed). There is no mechanism anywhere in the codebase that turns background output into
 a turn: the Carrier protocol is strictly request/response exec
-(`core/src/ufo/sandbox/session.py:235`), the SDK exposes no off-turn sandbox exec
+(`core/src/ufo/harness/sandbox/session.py:235`), the SDK exposes no off-turn sandbox exec
 (`ConversationFiles` deliberately carries only `write`/`prune`,
-`core/src/ufo/ext/context.py:388`), and sandbox egress tokens require their named turn to remain
+`core/src/ufo/runtime/ext/context.py:388`), and sandbox egress tokens require their named turn to remain
 running (spec.md §Sandboxing) — so a process left running in the sandbox loses network the moment
 its arming turn ends, and carriers suspend or stop idle sandboxes regardless.
 
@@ -109,7 +109,7 @@ The layer ufo does not copy is the resident line-granular watch — see Alternat
 
 ### codex's mailbox
 
-One queue per session (`InputQueue`, `codex-rs/core/src/session/input_queue.rs`): a deque of
+One queue per session (`InputQueue`, `codex-rs/core/runtime/src/session/input_queue.rs`): a deque of
 `InterAgentCommunication` mail — author, recipient, content, and one bit, `trigger_turn` — beside
 a `tokio::sync::watch` channel that carries only "activity happened". Enqueue is push then
 `send_replace`, so N mails landing while nobody looks collapse into one wakeup, and the waiter

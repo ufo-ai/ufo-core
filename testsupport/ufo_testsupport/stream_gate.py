@@ -28,8 +28,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from ufo.hub import Activity, InProcessHub, LiveFrame
-from ufo.models.interface import TextDelta
+from ufo.harness.models.interface import TextDelta
+from ufo.runtime.hub import Activity, InProcessHub, LiveFrame
 
 FIRST_DELTA_GATE_TIMEOUT_SECONDS = 20
 

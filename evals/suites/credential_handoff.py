@@ -51,12 +51,12 @@ from evals.harness.capability import (
 )
 from evals.harness.harness import JsonObject
 from evals.harness.scorers import attempted_tools_scorer, combine, restraint_scorer
-from ufo.access.grants import GrantStore
-from ufo.agent_scope import agent
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
-from ufo.workspace import ws_current
 
 REQUEST_CREDENTIALS = "action:credential:request_credentials"
 CONNECT_ACCOUNT = "connect_account"

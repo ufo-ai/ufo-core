@@ -9,20 +9,9 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, ScopedStore, context_for
-from ufo.ext.loader import HookChain, turn_tools, validate_ext_tools
-from ufo.ext.manifest import CredentialSlot, Manifest
-from ufo.ext.surface import SurfaceSpec
-from ufo.hub import InProcessHub
-from ufo.loop.compaction import Compaction
-from ufo.loop.engine import TurnEngine
-from ufo.loop.prompts.render import rendered_prompt
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -31,15 +20,26 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import HookChain, turn_tools, validate_ext_tools
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.compaction import Compaction
+from ufo.runtime.engine import TurnEngine
+from ufo.runtime.ext.context import ExtensionContext, ScopedStore, context_for
+from ufo.runtime.ext.manifest import CredentialSlot, Manifest
+from ufo.runtime.ext.surface import SurfaceSpec
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.prompts.render import rendered_prompt
+from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import ToolDef, ToolRegistry
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.activity import ActivitySummarizer
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
-from ufo.tools.builtins import BUILTIN_TOOLS
-from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
-from ufo.tools.registry import ToolDef, ToolRegistry
-from ufo.turns.activity import ActivitySummarizer
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
 
 EXTENSION = "sample"
 

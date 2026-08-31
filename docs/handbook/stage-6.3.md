@@ -2,16 +2,16 @@
 
 This stage is the system’s set of “open doors” while work is running or while a user is returning from another service. It is not the core thinking loop itself. Instead, it lets browsers, terminals, and external providers stay connected to that loop.
 
-The live-stream pieces work like a news feed for one running turn. core/src/ufo/hub.py publishes text, status, costs, replies, and results, and keeps a short memory so clients can reconnect. extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py moves those updates through Redis Streams, a shared message pipe, so different servers can publish and read them. core/src/ufo/surfaces/hub_tail.py combines live messages with database checks, so late clients still learn when a turn ends or pauses. core/src/ufo/loop/steps.py turns internal workflow records into a readable timeline of model rounds, tool calls, and other steps.
+The live-stream pieces work like a news feed for one running turn. core/src/ufo/runtime/hub.py publishes text, status, costs, replies, and results, and keeps a short memory so clients can reconnect. extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py moves those updates through Redis Streams, a shared message pipe, so different servers can publish and read them. core/src/ufo/runtime/surfaces/hub_tail.py combines live messages with database checks, so late clients still learn when a turn ends or pauses. core/src/ufo/loop/steps.py turns internal workflow records into a readable timeline of model rounds, tool calls, and other steps.
 
-The remaining routes help users get files or finish browser-based setup. core/src/ufo/surfaces/artifacts.py serves artifact downloads through signed links and can refresh expired ones for valid members. core/src/ufo/sdk/callback_page.py shows the final “done” page. core/src/ufo/surfaces/cli.py and extensions/pipedream/ufo_ext_pipedream/provider.py complete OAuth-style account connections, including Pipedream’s extra hosted setup step.
+The remaining routes help users get files or finish browser-based setup. core/src/ufo/runtime/surfaces/artifacts.py serves artifact downloads through signed links and can refresh expired ones for valid members. core/src/ufo/sdk/callback_page.py shows the final “done” page. core/src/ufo/runtime/surfaces/cli.py and extensions/pipedream/ufo_ext_pipedream/provider.py complete OAuth-style account connections, including Pipedream’s extra hosted setup step.
 
 ## Files in this stage
 
 ### Live turn streams
 Live stream surfaces and transports keep clients updated on running turns, reconnects, terminal status, and readable step timelines.
 
-### `core/src/ufo/surfaces/hub_tail.py`
+### `core/src/ufo/runtime/surfaces/hub_tail.py`
 
 `orchestration` · `request handling`
 
@@ -290,7 +290,7 @@ async def latest_activity(self, turn_id: UUID) -> Activity | None
 *Call graph*: calls 3 internal fn (_client, _stream, frame_from_payload); 2 external calls (loads, cast).
 
 
-### `core/src/ufo/hub.py`
+### `core/src/ufo/runtime/hub.py`
 
 `io_transport` · `main loop / live stream delivery`
 
@@ -491,7 +491,7 @@ def _timestamp(epoch_ms: int | None) -> datetime | None
 ### Artifact downloads
 Signed artifact download routes serve shared files and refresh expired links for authorized workspace members.
 
-### `core/src/ufo/surfaces/artifacts.py`
+### `core/src/ufo/runtime/surfaces/artifacts.py`
 
 `io_transport` · `request handling`
 
@@ -578,7 +578,7 @@ def callback_page(*, headline: str, detail: str='', link: PageLink | None=None, 
 *Call graph*: 2 external calls (escape, HTMLResponse).
 
 
-### `core/src/ufo/surfaces/cli.py`
+### `core/src/ufo/runtime/surfaces/cli.py`
 
 `io_transport` · `request handling`
 

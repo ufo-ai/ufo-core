@@ -60,7 +60,7 @@ the `_raw_blob_failures` gate in `gates.py`.
 
 The public path stays `/artifacts/<uuid>/<name>` and remains the workspace-relative blob key. The
 signed query gains `ws`, the workspace whose store holds the bytes, inside the HMAC
-(`core/src/ufo/media/artifact_url.py`); the route binds it and serves DB-free. A URL carrying no `ws`
+(`core/src/ufo/runtime/media/artifact_url.py`); the route binds it and serves DB-free. A URL carrying no `ws`
 claim — the address form living in messages minted before the claim — verifies against its own
 signed message and never serves directly: it takes the member-refresh path, which authorizes
 exactly as an expired link (session member + `shared_artifact` owner, unchanged query) and 303s

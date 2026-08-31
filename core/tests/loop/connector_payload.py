@@ -10,7 +10,7 @@ connector-heavy window is made of. `CONNECTOR_WINDOW_TOKENS` is what Anthropic's
 
 import json
 
-from ufo.models.interface import Message, ToolResultBlock, ToolUseBlock
+from ufo.harness.models.interface import Message, ToolResultBlock, ToolUseBlock
 
 OWNER = "metalcraftai"
 REPOSITORY = "ufo"
@@ -75,15 +75,15 @@ CONNECTOR_SEARCH_RESULT: dict[str, object] = {
         "items": [
             {
                 "name": "compaction.py",
-                "path": "core/src/ufo/loop/compaction.py",
+                "path": "core/src/ufo/runtime/compaction.py",
                 "sha": BLOB,
                 "url": (
                     f"https://api.github.com/repositories/{REPOSITORY_ID}"
-                    f"/contents/core/src/ufo/loop/compaction.py?ref={COMMIT}"
+                    f"/contents/core/src/ufo/runtime/compaction.py?ref={COMMIT}"
                 ),
                 "git_url": f"https://api.github.com/repositories/{REPOSITORY_ID}/git/blobs/{BLOB}",
                 "html_url": (
-                    f"https://github.com/{FULL_NAME}/blob/{COMMIT}/core/src/ufo/loop/compaction.py"
+                    f"https://github.com/{FULL_NAME}/blob/{COMMIT}/core/src/ufo/runtime/compaction.py"
                 ),
                 "repository": {
                     "id": REPOSITORY_ID,

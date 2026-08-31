@@ -8,14 +8,12 @@ from pydantic import ValidationError
 from pytest import raises
 
 from ufo.db import workspace_tx
-from ufo.hub import InProcessHub, Terminal
-from ufo.loop.subagents import SubagentRegistry
-from ufo.loop.tool_bridge import ToolBridge
-from ufo.sandbox.session import RunToken
-from ufo.schema import tables
-from ufo.schema.records import TerminalFrame
-from ufo.surfaces.hub_tail import HubTailer
-from ufo.tools.bridge import (
+from ufo.harness.sandbox.session import RunToken
+from ufo.runtime.hub import InProcessHub, Terminal
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.surfaces.hub_tail import HubTailer
+from ufo.runtime.tool_bridge import ToolBridge
+from ufo.runtime.tools.bridge import (
     ToolBridgeFailure,
     ToolBridgeIntent,
     ToolBridgeRequest,
@@ -23,7 +21,9 @@ from ufo.tools.bridge import (
     ToolBridgeToolList,
     bridge_tools,
 )
-from ufo.workspace import ws
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.schema.records import TerminalFrame
 
 
 @dataclass

@@ -100,6 +100,7 @@ SCRIPT_HEADER = "x-ufo-script"
 TIMEZONE_HEADER = "x-ufo-timezone"
 MODEL_HEADER = "x-ufo-model"
 INTERNET_HEADER = "x-ufo-internet"
+ENVIRONMENT_HEADER = "x-ufo-environment"
 CLIENT_VERSION_ENV = "UFO_CLIENT_VERSION"
 QUEUE_KEY_SEPARATOR = ":"
 RUNTIME_ID_HEX_CHARS = 32
@@ -617,14 +618,21 @@ def _turn_context(email: str, request: Request) -> TurnContext:
 def _runtime_config(ctx: SurfaceContext, request: Request) -> TurnRuntimeConfig | None:
     model = request.headers.get(MODEL_HEADER, "").strip()
     internet = request.headers.get(INTERNET_HEADER, "").strip()
+    environment = request.headers.get(ENVIRONMENT_HEADER, "").strip()
     if internet and internet != "off":
         raise ValueError(f"{INTERNET_HEADER} only narrows: the one value is 'off'")
     if internet and not model:
         raise ValueError(f"{INTERNET_HEADER} requires {MODEL_HEADER}")
+    if environment and not model:
+        raise ValueError(f"{ENVIRONMENT_HEADER} requires {MODEL_HEADER}")
     if not model:
         return None
     try:
-        runtime_config = TurnRuntimeConfig(model=model, internet_access=False if internet else None)
+        runtime_config = TurnRuntimeConfig(
+            model=model,
+            internet_access=False if internet else None,
+            environment_host=environment or None,
+        )
     except ValidationError as error:
         raise ValueError("runtime config is invalid") from error
     ctx.validate_runtime_config(runtime_config)

@@ -46,7 +46,7 @@ is a separate landmine that fails at a different layer.
 
 One frozen `ModelSpec` is the *only* place a model is described. It is an internal value object
 carrying a live dep (the client builder) ⇒ `@dataclass(frozen=True)`, never a `BaseModel` (it holds
-a `Callable`, is never serialized). New home: `core/src/ufo/models/spec.py`.
+a `Callable`, is never serialized). New home: `core/src/ufo/harness/models/spec.py`.
 
 ```python
 @dataclass(frozen=True)

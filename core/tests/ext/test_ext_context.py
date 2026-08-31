@@ -15,36 +15,11 @@ from opentelemetry.sdk.metrics.export import (
     NumberDataPoint,
 )
 
-from ufo import o11y
-from ufo.access.connectors import CliCredential, ForwardedResponse
-from ufo.access.credentials import CredentialSlotUnset, CredentialStore
-from ufo.access.grants import GrantStore, grant_sentinel
-from ufo.agent_scope import agent
-from ufo.billing.balance import credit
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import (
-    PROBE_TIMEOUT_MAX_SECONDS,
-    ConversationFacts,
-    ConversationFiles,
-    ConversationProbes,
-    CredentialAccess,
-    ScopedStore,
-    TurnOutcome,
-    UndeclaredCredentialSlot,
-    context_for,
-    conversation_agent_id,
-    untitled_conversation_workspaces,
-)
-from ufo.ext.manifest import CredentialSlot, InjectionTarget
-from ufo.ext.surface import (
-    AddressClaimState,
-    SurfaceInstallationConflict,
-    UndeclaredSurface,
-    retitle_conversation,
-)
-from ufo.models.catalog import CORE_PRICING
-from ufo.models.interface import (
+from ufo.harness import o11y
+from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.models.interface import (
     PROVIDER_ANTHROPIC,
     Message,
     ModelClient,
@@ -59,20 +34,50 @@ from ufo.models.interface import (
     ToolCallStart,
     ToolUseBlock,
 )
-from ufo.models.pricing import Pricing
-from ufo.o11y import BACKGROUND_PROFILE
-from ufo.sandbox import terminal
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import RUNTIME_DIRNAME, SENTINEL_MODEL_KEY, ProbeTokenCodec, ProxyEndpoint
-from ufo.sandbox.terminal import TerminalGone
+from ufo.harness.models.pricing import Pricing
+from ufo.harness.o11y import BACKGROUND_PROFILE
+from ufo.harness.sandbox import terminal
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import (
+    RUNTIME_DIRNAME,
+    SENTINEL_MODEL_KEY,
+    ProbeTokenCodec,
+    ProxyEndpoint,
+)
+from ufo.harness.sandbox.terminal import TerminalGone
+from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
+from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.runtime.access.grants import GrantStore, grant_sentinel
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.billing.balance import credit
+from ufo.runtime.ext.context import (
+    PROBE_TIMEOUT_MAX_SECONDS,
+    ConversationFacts,
+    ConversationFiles,
+    ConversationProbes,
+    CredentialAccess,
+    ScopedStore,
+    TurnOutcome,
+    UndeclaredCredentialSlot,
+    context_for,
+    conversation_agent_id,
+    untitled_conversation_workspaces,
+)
+from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
+from ufo.runtime.ext.surface import (
+    AddressClaimState,
+    SurfaceInstallationConflict,
+    UndeclaredSurface,
+    retitle_conversation,
+)
+from ufo.runtime.sources.sync import CorePageFeed
+from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import WorkspaceUnbound, init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.sources.sync import CorePageFeed
-from ufo.turns.audience import SHARED_AUDIENCE, conversation_audience
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import WorkspaceUnbound, init_workspace_credentials, ws
 
 MODEL = "claude-opus-4-8"
 JOB = "memory:memory_consolidate"

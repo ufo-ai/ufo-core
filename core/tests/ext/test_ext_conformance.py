@@ -33,11 +33,6 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.access.connectors import UnknownBrokerTool
-from ufo.access.credentials import CredentialSlotUnset, CredentialStore
-from ufo.access.grants import GrantStore
-from ufo.agent_scope import agent
-from ufo.auth.bearer import mint_token
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import (
     BlobConfig,
@@ -52,17 +47,22 @@ from ufo.config import (
     TerminalConfig,
 )
 from ufo.db import workspace_tx
-from ufo.ext.context import (
-    ConversationProbes,
-    ExtensionContext,
-    ScopedStore,
-    SourceReader,
-    TrajectoryCorpus,
-    UndeclaredCredentialSlot,
-    context_for,
+from ufo.harness.models.interface import Message, ModelRequest, TextDelta
+from ufo.harness.models.registry import model_registry
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.exec_env import ProbeEnv
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.select import select_carrier, select_carriers
+from ufo.harness.sandbox.session import (
+    ExecResult,
+    ProbeTokenCodec,
+    ProxyEndpoint,
+    SandboxHandle,
+    SandboxSession,
+    SandboxSpec,
 )
-from ufo.ext.conversation_slots import ConversationSlotContext
-from ufo.ext.loader import (
+from ufo.harness.sandbox.terminal import Terminals
+from ufo.host.ext.loader import (
     discovered_packs,
     embed_backend,
     index_backend,
@@ -74,35 +74,42 @@ from ufo.ext.loader import (
     turn_subagents,
     turn_tools,
 )
-from ufo.ext.manifest import AuthProxySpec, CarrierSpec, Manifest
-from ufo.ext.surface import WRITEBACK_DELIVERED
-from ufo.hub import InProcessHub
-from ufo.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, TextChunker
-from ufo.kinds.governance import prompt_digest
-from ufo.listings import ListingCursor
-from ufo.loop.prompts.render import render_system_prompt
-from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import Message, ModelRequest, TextDelta
-from ufo.models.registry import model_registry
 from ufo.onboard.onboarding import run_onboarding_steps
-from ufo.runtime.jobs import JobRunner, bindings_from
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.exec_env import ProbeEnv
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.select import select_carrier, select_carriers
-from ufo.sandbox.session import (
-    ExecResult,
-    ProbeTokenCodec,
-    ProxyEndpoint,
-    SandboxHandle,
-    SandboxSession,
-    SandboxSpec,
+from ufo.runtime.access.connectors import UnknownBrokerTool
+from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.auth.bearer import mint_token
+from ufo.runtime.ext.context import (
+    ConversationProbes,
+    ExtensionContext,
+    ScopedStore,
+    SourceReader,
+    TrajectoryCorpus,
+    UndeclaredCredentialSlot,
+    context_for,
 )
-from ufo.sandbox.terminal import Terminals
+from ufo.runtime.ext.conversation_slots import ConversationSlotContext
+from ufo.runtime.ext.manifest import AuthProxySpec, CarrierSpec, Manifest
+from ufo.runtime.ext.surface import WRITEBACK_DELIVERED
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.indexing import OWNER_KIND_MEMORY_ITEM, Chunk, TextChunker
+from ufo.runtime.jobs import JobRunner, bindings_from
+from ufo.runtime.kinds.governance import prompt_digest
+from ufo.runtime.listings import ListingCursor
+from ufo.runtime.prompts.render import render_system_prompt
+from ufo.runtime.search import FetchRequest, SearchQuery
+from ufo.runtime.skills.runtime import install_skill
+from ufo.runtime.sources.sync import CorePageFeed, SyncDriver
+from ufo.runtime.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.audience import audience_subjects, conversation_audience
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.turns.transcript import Conversation, transcript_key
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, Turn, Usage
-from ufo.search import FetchRequest, SearchQuery
 from ufo.serve import (
     _connector_registry,
     _mount_ext_routes,
@@ -116,13 +123,6 @@ from ufo.serve import (
     _source_backends,
     _validate_requires,
 )
-from ufo.skills.runtime import install_skill
-from ufo.sources.sync import CorePageFeed, SyncDriver
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.turns.audience import audience_subjects, conversation_audience
-from ufo.turns.subjects import SHARED_SUBJECT
-from ufo.turns.transcript import Conversation, transcript_key
-from ufo.workspace import ws
 
 SANDBOX_UNTOUCHED = "the sample tool records through its store and must not reach the sandbox"
 

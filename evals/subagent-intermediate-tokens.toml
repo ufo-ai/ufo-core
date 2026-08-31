@@ -39,7 +39,7 @@ sandbox = { backend = "local" }
 [[arm]]
 name = "artifact-says-it-once"
 [[arm.replacements]]
-path = "core/src/ufo/turns/delivery_register.md"
+path = "core/src/ufo/runtime/turns/delivery_register.md"
 old = """
 artifact in the inline delivery, and never duplicate its body inline. Write that artifact to
 """
@@ -58,7 +58,7 @@ restating an earlier one in other words is that finding twice. Write that artifa
 [[arm]]
 name = "one-round-per-step"
 [[arm.replacements]]
-path = "core/src/ufo/loop/prompts/subagent_shell.md"
+path = "core/src/ufo/runtime/prompts/subagent_shell.md"
 old = """
 result-only task, give the result directly and create no file.
 """
@@ -78,7 +78,7 @@ named answer it.
 [[arm]]
 name = "one-finish-contract"
 [[arm.replacements]]
-path = "core/src/ufo/loop/prompts/subagent_shell.md"
+path = "core/src/ufo/runtime/prompts/subagent_shell.md"
 old = """
 the `finish` call. Everything outside `finish` is working text and reaches nobody. Choose the
 result's register from <register> and keep it within 20 words. When the result is settled, call
@@ -108,7 +108,7 @@ the `finish` call. Everything outside `finish` is working text and reaches nobod
 [[arm]]
 name = "report-says-it-once"
 [[arm.replacements]]
-path = "core/src/ufo/turns/delivery_register.md"
+path = "core/src/ufo/runtime/turns/delivery_register.md"
 old = """
 - report, when you deliver analysis, comparison, research, or a document: put the full report in
   one Markdown artifact using the carrier in <delivery>. Inline carries its conclusion, key

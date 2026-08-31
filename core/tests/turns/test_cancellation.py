@@ -6,13 +6,13 @@ import sqlalchemy as sa
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
-from ufo import o11y
 from ufo.db import owner_tx, workspace_tx
-from ufo.object_name import ObjectRef
+from ufo.harness import o11y
+from ufo.runtime.object_name import ObjectRef
+from ufo.runtime.turns.cancellation import cancel_one_turn
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
-from ufo.turns.cancellation import cancel_one_turn
-from ufo.workspace import ws
 
 
 @dataclass

@@ -61,13 +61,13 @@ capabilities local to that part, and invokes one through a stable generic transp
 
 ### The static inventory
 
-`turn_tools()` in `core/src/ufo/ext/loader.py` combines:
+`turn_tools()` in `core/src/ufo/host/ext/loader.py` combines:
 
 1. 17 core `BUILTIN_TOOLS`;
 2. every active extension `ToolDef` and connector-provider `ToolDef`;
-3. five `ObjectVerbs` from `core/src/ufo/objects.py`.
+3. five `ObjectVerbs` from `core/src/ufo/runtime/objects.py`.
 
-`_agent_tools()` in `core/src/ufo/loop/queue.py` then removes `profile_only` entries or intersects
+`_agent_tools()` in `core/src/ufo/runtime/queue.py` then removes `profile_only` entries or intersects
 that tuple with an agent allowlist. In `assistant_hosted`, the resulting member-facing static
 registry is 67 schemas before any provider-specific connector tools: 17 core builtins + 45
 extension tools + five object verbs. Seventeen additional raw browser and application-builder

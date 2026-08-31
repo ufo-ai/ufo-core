@@ -30,8 +30,8 @@ import websockets
 from ufo_testsupport.browser import MISSING_BROWSER_REASON, chrome_for_testing
 from ufo_testsupport.plugin import integration_dependency_available
 
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import (
     DialTarget,
     ProxyEndpoint,
     SandboxHandle,

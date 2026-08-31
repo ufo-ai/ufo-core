@@ -11,7 +11,7 @@ from alembic.config import Config
 from sqlalchemy.engine import make_url
 
 from ufo.db import MIGRATIONS_DIR
-from ufo.ext.loader import migration_locations
+from ufo.host.ext.loader import migration_locations
 
 WORKSPACE = uuid4()
 AGENT = uuid4()

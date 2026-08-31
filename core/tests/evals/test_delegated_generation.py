@@ -44,7 +44,7 @@ def child_timing(
     shape a child that stopped on prose leaves behind."""
     steps = tuple(
         TurnStep(
-            function_name=f"ufo.loop.engine.Engine.{MODEL_ROUND_STEP}",
+            function_name=f"ufo.runtime.engine.Engine.{MODEL_ROUND_STEP}",
             started_at_epoch_ms=index * 1_000,
             completed_at_epoch_ms=index * 1_000 + 500,
             output_tokens=tokens,
@@ -53,7 +53,7 @@ def child_timing(
     )
     working = (
         TurnStep(
-            function_name=f"ufo.loop.engine.Engine.{TOOL_CALL_STEP}",
+            function_name=f"ufo.runtime.engine.Engine.{TOOL_CALL_STEP}",
             started_at_epoch_ms=600,
             completed_at_epoch_ms=900,
             call_id="c1",
@@ -64,7 +64,7 @@ def child_timing(
         ordered = (
             *ordered,
             TurnStep(
-                function_name=f"ufo.loop.engine.Engine.{MODEL_ROUND_STEP}",
+                function_name=f"ufo.runtime.engine.Engine.{MODEL_ROUND_STEP}",
                 started_at_epoch_ms=9_000,
                 completed_at_epoch_ms=9_500,
                 output_tokens=50,

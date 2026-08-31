@@ -21,8 +21,8 @@ from ufo.blob import (
     blob_store_for,
 )
 from ufo.config import BlobConfig
-from ufo.sandbox.containment import NonDirectoryAncestor
-from ufo.workspace import WorkspaceUnbound, ws
+from ufo.harness.containment import NonDirectoryAncestor
+from ufo.runtime.workspace import WorkspaceUnbound, ws
 
 
 async def test_filesystem_round_trip(tmp_path: Path) -> None:

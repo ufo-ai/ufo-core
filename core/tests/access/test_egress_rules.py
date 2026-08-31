@@ -5,8 +5,10 @@ from uuid import uuid4
 
 import pytest
 
-from ufo.access.connectors import CliCredential, ForwardedResponse
-from ufo.access.egress_rules import (
+from ufo.blob import FilesystemBlobStore, S3BlobStore
+from ufo.host.ext.loader import connector_clis
+from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
+from ufo.runtime.access.egress_rules import (
     ANTHROPIC_HOST,
     OPENAI_HOST,
     REQUEST_METER_DIMENSION,
@@ -25,10 +27,8 @@ from ufo.access.egress_rules import (
     derive_model_rules,
     provider_host,
 )
-from ufo.access.grants import Grant, grant_sentinel
-from ufo.blob import FilesystemBlobStore, S3BlobStore
-from ufo.ext.loader import connector_clis
-from ufo.ext.manifest import ConnectorProvider, Manifest
+from ufo.runtime.access.grants import Grant, grant_sentinel
+from ufo.runtime.ext.manifest import ConnectorProvider, Manifest
 
 
 def test_provider_host_by_prefix() -> None:

@@ -8,8 +8,8 @@ import sqlalchemy as sa
 
 from ufo.blob import S3BlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.sources.sync import FOLDER_BACKEND
 from ufo.schema import tables
-from ufo.sources.sync import FOLDER_BACKEND
 
 ROOT = Path(__file__).parents[2]
 SCRIPT = ROOT / "infra" / "blob_relayout.py"

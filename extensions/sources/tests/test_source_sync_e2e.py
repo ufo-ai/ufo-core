@@ -31,29 +31,29 @@ from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.providers.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
 from ufo_ext_sources.tools import SourceObjects, SourceSpec
 
-from ufo.access.connectors import (
+from ufo.blob import FilesystemBlobStore
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.runtime.access.connectors import (
     DIRECT_ACCOUNT,
     AuthProxy,
     ConnectorEntry,
     ConnectorRegistry,
     SourceCredentialResolver,
 )
-from ufo.access.credentials import CredentialStore
-from ufo.access.grants import GrantStore
-from ufo.agent_scope import agent
-from ufo.blob import FilesystemBlobStore
-from ufo.config import Config
-from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.indexing import TextChunker
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.indexing import TextChunker
+from ufo.runtime.sources.sync import CorePageFeed, SyncDriver
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.sources import binding_name
 from ufo.serve import _select_auth_proxy, _source_backends
-from ufo.sources.sync import CorePageFeed, SyncDriver
-from ufo.tools.context import ToolContext
-from ufo.workspace import init_workspace_credentials, ws, ws_current
 
 TOOL_NARRATION = "syncing their pages"
 

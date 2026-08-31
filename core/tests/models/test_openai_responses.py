@@ -31,7 +31,7 @@ from openai.types.responses.response_usage import (
     ResponseUsage,
 )
 
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
@@ -48,15 +48,15 @@ from ufo.models.interface import (
     ToolSchema,
     ToolUseBlock,
 )
-from ufo.models.openai import (
+from ufo.harness.models.openai import (
     MAX_EMPTY_PROVIDER_RETRIES,
     MAX_PROVIDER_RETRIES,
     OpenAIClient,
     responses_input,
     responses_request,
 )
-from ufo.models.pricing import ModelPrice
-from ufo.models.spec import ModelSpec, ReasoningSupport
+from ufo.harness.models.pricing import ModelPrice
+from ufo.harness.models.spec import ModelSpec, ReasoningSupport
 from ufo.schema.records import Usage
 
 RESPONSES_SPEC = ModelSpec(
@@ -355,7 +355,7 @@ async def test_responses_reasoning_without_an_answer_is_an_empty_completion() ->
 async def test_responses_stream_dying_after_a_reasoning_item_retries_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr("ufo.harness.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
     scripted = ScriptedResponses(
         ([_reasoning_done("rs_abandoned")], _provider_timeout()),
         (
@@ -546,7 +546,7 @@ async def test_responses_path_fails_loud_on_truncation_and_refusal() -> None:
 async def test_responses_path_retries_status_then_succeeds(
     status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr("ufo.harness.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
     scripted = ScriptedResponses(_provider_error(status), (_completed_events(), None))
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == 2
@@ -569,7 +569,7 @@ async def test_responses_path_uses_exponential_floor_for_retry_after(
     async def sleep(delay: float) -> None:
         waits.append(delay)
 
-    monkeypatch.setattr("ufo.models.openai.asyncio.sleep", sleep)
+    monkeypatch.setattr("ufo.harness.models.openai.asyncio.sleep", sleep)
     scripted = ScriptedResponses(
         _provider_error(429, retry_after=retry_after), (_completed_events(), None)
     )
@@ -588,7 +588,7 @@ async def test_responses_path_does_not_retry_client_error() -> None:
 async def test_responses_path_exhausts_retries(
     error: Exception, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr("ufo.harness.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
     scripted = ScriptedResponses(*([error] * (MAX_PROVIDER_RETRIES + 1)))
     with pytest.raises(type(error)):
         [event async for event in _responses_client(scripted).complete(_request())]
@@ -598,7 +598,7 @@ async def test_responses_path_exhausts_retries(
 async def test_responses_path_retries_timeout_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr("ufo.harness.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
     scripted = ScriptedResponses(_provider_timeout(), (_completed_events(), None))
     events = [event async for event in _responses_client(scripted).complete(_request())]
     assert scripted.calls == 2
@@ -613,7 +613,7 @@ async def test_responses_path_retries_disconnect_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr("ufo.harness.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
     scripted = ScriptedResponses(_remote_protocol_error(), (_completed_events(), None))
     with caplog.at_level(logging.INFO):
         events = [event async for event in _responses_client(scripted).complete(_request())]
@@ -635,7 +635,7 @@ async def test_responses_path_exhausted_disconnect_logs_error_class(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr("ufo.harness.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
     scripted = ScriptedResponses(
         *(_remote_protocol_error() for _ in range(MAX_PROVIDER_RETRIES + 1))
     )

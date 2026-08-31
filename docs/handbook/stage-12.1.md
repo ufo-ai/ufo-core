@@ -542,7 +542,7 @@ async def _logged(self, coro: Coroutine[object, object, None]) -> None
 *Call graph*: called by 1 (_spawn); 1 external calls (warn).
 
 
-### `core/src/ufo/sandbox/terminal.py`
+### `core/src/ufo/harness/sandbox/terminal.py`
 
 `io_transport` · `request handling and tool execution`
 
@@ -1088,7 +1088,7 @@ def _under_root(root: str, path: str) -> str
 ### Local carrier selection
 The host-directory sandbox provides the simplest carrier, while the selector chooses and preserves configured backends.
 
-### `core/src/ufo/sandbox/local.py`
+### `core/src/ufo/harness/sandbox/local.py`
 
 `io_transport` · `cross-cutting`
 
@@ -1443,7 +1443,7 @@ def _contained_name(handle: SandboxHandle, path: str) -> tuple[PurePosixPath, Pa
 *Call graph*: calls 1 internal fn (_root); called by 2 (_contained_source, _write_contained); 2 external calls (Path, PurePosixPath).
 
 
-### `core/src/ufo/sandbox/select.py`
+### `core/src/ufo/harness/sandbox/select.py`
 
 `orchestration` · `startup / sandbox setup`
 

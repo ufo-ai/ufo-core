@@ -35,7 +35,7 @@ sandbox = { backend = "local" }
 name = "no-guard"
 
 [[arm.replacements]]
-path = "core/src/ufo/tools/builtins.py"
+path = "core/src/ufo/host/tools/builtins.py"
 old = '''    if padded := flat_sleeps(args.command):
         return ToolResult(
             content=(TextContent(text=FLAT_SLEEP_REFUSAL.format(seconds=max(padded))),),

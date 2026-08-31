@@ -19,9 +19,9 @@ from evals.harness.capability import (
 )
 from evals.suites import new_application
 from ufo.db import workspace_tx
-from ufo.models.interface import AUTO_MODEL
+from ufo.harness.models.interface import AUTO_MODEL
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 MEMBER_EMAIL = "owner@evalco.test"
 LEFTOVER_APPLICATION = "support-desk"

@@ -23,101 +23,102 @@ into a `SyncResult`. The pagination helpers (`get_path`, `list_or_empty`, `recor
 `with_context`) are the shared record-shaping primitives a provider reaches for. A stream that fans
 out over partitions (one cursor per repo, channel) drives `PartitionWalk` with an `Ordering` and a
 per-partition page factory, so the per-partition cursor-map codec and bounded-backfill resume live
-once here, not in each connector. The concrete shapes live in `ufo.sources`, reached only here."""
+once here, not in each connector. The concrete shapes live in `ufo.runtime.sources`, reached only
+here."""
 
-from ufo.sources.backend import (
+from ufo.runtime.sources.backend import (
     ConnectorBackend as ConnectorBackend,
 )
-from ufo.sources.backend import (
+from ufo.runtime.sources.backend import (
     ConnectorSourceConfig as ConnectorSourceConfig,
 )
-from ufo.sources.backend import (
+from ufo.runtime.sources.backend import (
     binding_name as binding_name,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     CHAT_BACKFILL_WINDOW_DAYS as CHAT_BACKFILL_WINDOW_DAYS,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     MAIL_BACKFILL_WINDOW_DAYS as MAIL_BACKFILL_WINDOW_DAYS,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     REPO_BACKFILL_WINDOW_DAYS as REPO_BACKFILL_WINDOW_DAYS,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     Connector as Connector,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     Ordering as Ordering,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     Pagination as Pagination,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     PaginationStrategy as PaginationStrategy,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     PartitionBound as PartitionBound,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     PartitionSkipped as PartitionSkipped,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     PartitionWalk as PartitionWalk,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     StreamPage as StreamPage,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     StreamSpec as StreamSpec,
 )
-from ufo.sources.connector import (
+from ufo.runtime.sources.connector import (
     WalkPage as WalkPage,
 )
-from ufo.sources.rest import (
+from ufo.runtime.sources.rest import (
     RestConnector as RestConnector,
 )
-from ufo.sources.rest import (
+from ufo.runtime.sources.rest import (
     dict_or_empty as dict_or_empty,
 )
-from ufo.sources.rest import (
+from ufo.runtime.sources.rest import (
     get_path as get_path,
 )
-from ufo.sources.rest import (
+from ufo.runtime.sources.rest import (
     list_or_empty as list_or_empty,
 )
-from ufo.sources.rest import (
+from ufo.runtime.sources.rest import (
     records_at as records_at,
 )
-from ufo.sources.rest import (
+from ufo.runtime.sources.rest import (
     with_context as with_context,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     CursorExpired as CursorExpired,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     Page as Page,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     PageBatch as PageBatch,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     PageChange as PageChange,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     PageFeed as PageFeed,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     SourceAuth as SourceAuth,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     SourceBackend as SourceBackend,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     StreamFault as StreamFault,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     StreamSkipped as StreamSkipped,
 )
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     SyncResult as SyncResult,
 )

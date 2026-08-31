@@ -20,9 +20,9 @@ from alembic import command
 from alembic.config import Config
 
 from ufo.db import MIGRATIONS_DIR, dispose_db, init_db
-from ufo.ext.context import SourceReader, context_for
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import ws
+from ufo.runtime.ext.context import SourceReader, context_for
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import ws
 
 
 @dataclass(frozen=True)

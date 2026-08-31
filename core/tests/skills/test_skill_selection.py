@@ -5,22 +5,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from ufo.indexing import Hit
-from ufo.loop.queue import (
+from ufo.runtime.indexing import Hit
+from ufo.runtime.queue import (
     _member_skill_block,
     _prompt_skill_index,
     _shadow_skill_selection,
 )
-from ufo.schema.records import (
-    INTENT_ADMISSION,
-    INTERNAL_ADMISSION,
-    MEMBER_ADMISSION,
-    SCHEDULED_ADMISSION,
-    Turn,
-    TurnAdmissionSource,
-)
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, SkillCard
-from ufo.skills.selection import (
+from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, SkillCard
+from ufo.runtime.skills.selection import (
     MEMBER_BLOCK_CLOSE,
     MEMBER_BLOCK_OPEN,
     SKILL_LINE_MAX_CHARS,
@@ -37,6 +29,14 @@ from ufo.skills.selection import (
     prompt_index,
     select_top_k,
     skill_line,
+)
+from ufo.schema.records import (
+    INTENT_ADMISSION,
+    INTERNAL_ADMISSION,
+    MEMBER_ADMISSION,
+    SCHEDULED_ADMISSION,
+    Turn,
+    TurnAdmissionSource,
 )
 
 

@@ -144,9 +144,9 @@ from evals.suites.ufo_app_bench import (
 )
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.context import ScopedStore
-from ufo.workspace import ws
 
 REVENUE = (120, 135, 142, 160)
 STABLE_APPLICATION_LIFECYCLE = b"""<script>
@@ -429,8 +429,8 @@ def test_style_divergence_regression_materializes_one_wording_difference(
     repo = Path(__file__).parents[3]
     reference = load_experiment(repo / "evals/app-builder-secondary-text-contrast.toml")
     spec = load_experiment(repo / "evals/app-builder-style-divergence-wording.toml")
-    skill_path = "core/src/ufo/skills/ufo-style/SKILL.md"
-    tokens_path = "core/src/ufo/skills/ufo-style/references/tokens.css"
+    skill_path = "core/src/ufo/runtime/skills/ufo-style/SKILL.md"
+    tokens_path = "core/src/ufo/runtime/skills/ufo-style/references/tokens.css"
     paths = (skill_path, tokens_path)
     source = {path: (repo / path).read_text() for path in paths}
     base = subprocess.run(

@@ -20,9 +20,9 @@ date: 2026-08-13
 |---|---|
 | The sh client renders directives and relays ops; 1090 lines | `servers/control/src/ufo_control/client/ufo` |
 | One `curl` process — TCP + TLS handshake — per request, ~1/85 s plus one per op reply | `servers/control/src/ufo_control/client/ufo:654` |
-| Op logic is ~1600 lines of JS in 7 programs × 2 runtimes, injected into the served script | `core/src/ufo/sandbox/terminal.py:754`, `servers/control/src/ufo_control/gateway.py:106` |
+| Op logic is ~1600 lines of JS in 7 programs × 2 runtimes, injected into the served script | `core/src/ufo/harness/sandbox/terminal.py:754`, `servers/control/src/ufo_control/gateway.py:106` |
 | `osascript` spawn per op is 10–180 ms; params relay through `op.json` temp files | RFC 0026, measured |
-| exec replies carry stdout/stderr hex-doubled because a shell variable cannot hold NUL | `core/src/ufo/sandbox/client/exec.js` |
+| exec replies carry stdout/stderr hex-doubled because a shell variable cannot hold NUL | `core/src/ufo/harness/sandbox/client/exec.js` |
 | A held stream lasts 85 s, then `poll`; the tail resumes from the `since` cursor | `extensions/ufo/ufo_ext_ufo/surface.py:70`, `:364` |
 | A machine with neither `osascript` nor `node` runs no ops; Windows runs nothing at all | `servers/control/src/ufo_control/client/ufo:1016` |
 

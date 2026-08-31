@@ -11,7 +11,7 @@ Flagship connects feature flags to Cloudflare so behavior can be switched on or 
 ### Model and embedding providers
 Registers the central model catalog, Bedrock-hosted model clients, and OpenAI-backed embedding generation.
 
-### `core/src/ufo/models/registry.py`
+### `core/src/ufo/harness/models/registry.py`
 
 `domain_logic` · `startup for building and validation; request handling whenever model facts or clients are needed`
 

@@ -30,7 +30,6 @@ from ufo_testsupport.migrations import TEMPLATE_CACHE_OFF_ENV, apply_cached_migr
 from ufo_testsupport.tables import POSTGRES_TABLES, reset_workspace_data
 
 import ufo.db
-from ufo import o11y
 from ufo.db import (
     MIGRATIONS_DIR,
     STATEMENT_LOG_MAX_CHARS,
@@ -46,10 +45,11 @@ from ufo.db import (
     verify_db_reachable,
     workspace_tx,
 )
-from ufo.ext.loader import migration_locations
+from ufo.harness import o11y
+from ufo.host.ext.loader import migration_locations
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.sources import binding_name
-from ufo.workspace import ws
 
 
 class _UndefinedColumn(Exception):
@@ -464,7 +464,7 @@ def test_apply_migrations_rejects_duplicate_revision_ids(
     probe.mkdir()
     for name in ("first", "second"):
         (probe / f"{name}.py").write_text(DUPLICATE_PROBE)
-    monkeypatch.setattr("ufo.ext.loader.migration_locations", lambda pack: (str(probe),))
+    monkeypatch.setattr("ufo.host.ext.loader.migration_locations", lambda pack: (str(probe),))
     with pytest.raises(RuntimeError, match="collapses into one node"):
         apply_migrations(f"sqlite+aiosqlite:///{tmp_path / 'probe.db'}")
 
@@ -498,7 +498,7 @@ def test_apply_migrations_rejects_forked_heads(
         (probe / f"{name}.py").write_text(
             FORK_PROBE.format(revision=name, down_revision='"probe_base"')
         )
-    monkeypatch.setattr("ufo.ext.loader.migration_locations", lambda pack: (str(probe),))
+    monkeypatch.setattr("ufo.host.ext.loader.migration_locations", lambda pack: (str(probe),))
     with pytest.raises(RuntimeError, match="forked"):
         apply_migrations(f"sqlite+aiosqlite:///{tmp_path / 'probe.db'}")
 

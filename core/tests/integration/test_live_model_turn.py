@@ -20,24 +20,24 @@ import pytest
 import sqlalchemy as sa
 from ufo_testsupport.invoker import invoker_factory
 
-from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.loader import skill_registry
-from ufo.hub import Hub, InProcessHub, Terminal, TextDelta
-from ufo.loop import queue as loop_queue
-from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.registry import ModelRegistry
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.host.ext.loader import HostEnvironment, skill_registry
+from ufo.runtime import queue as loop_queue
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.hub import Hub, InProcessHub, Terminal, TextDelta
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.surfaces.admission import Admission, MemberAdmission
+from ufo.runtime.surfaces.hub_tail import tail_frames
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.surfaces.admission import Admission, MemberAdmission
-from ufo.surfaces.hub_tail import tail_frames
-from ufo.workspace import ws
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("ANTHROPIC_API_KEY"), reason="needs ANTHROPIC_API_KEY for a live model turn"
@@ -87,6 +87,7 @@ async def live_runtime(
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(),
+            environment=HostEnvironment(manifests=(), credentials=None),
             registry=ModelRegistry(
                 specs={spec.id: spec for spec in CORE_MODEL_SPECS},
                 pricing=CORE_PRICING,

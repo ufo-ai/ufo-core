@@ -62,14 +62,14 @@ from evals.harness.target import CapabilityTarget
 from evals.suites.app_audit_probe import app_audit_command
 from evals.suites.ufo_app_bench import APP_WORKSPACE_FILES
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore
-from ufo.kinds.agents import AGENT_KIND
-from ufo.models.interface import AUTO_MODEL
-from ufo.objects import ENVELOPE_KEYS
+from ufo.harness.models.interface import AUTO_MODEL
+from ufo.runtime.ext.context import ScopedStore
+from ufo.runtime.kinds.agents import AGENT_KIND
+from ufo.runtime.objects import ENVELOPE_KEYS
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import auto_agent_icon
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws_current
 
 SKILL = "create-application"
 PREVIEW_TOOL = f"action:site:{APPLICATION_BUILDER_WIREFRAME_TOOL}"

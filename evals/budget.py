@@ -3,11 +3,11 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from ufo.billing.balance import credit
 from ufo.db import workspace_tx
 from ufo.onboard.onboard_control import SIGNUP_GRANT_MICRO_USD, SIGNUP_RESERVE_MICRO_USD
+from ufo.runtime.billing.balance import credit
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 
 @dataclass(frozen=True)

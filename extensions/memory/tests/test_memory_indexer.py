@@ -22,13 +22,13 @@ from ufo_ext_memory.store import (
 )
 
 from ufo.db import workspace_tx
-from ufo.ext.context import PageState, SourceReader, context_for
-from ufo.indexing import OWNER_KIND_MEMORY_ITEM, TextChunker
+from ufo.runtime.ext.context import PageState, SourceReader, context_for
+from ufo.runtime.indexing import OWNER_KIND_MEMORY_ITEM, TextChunker
 from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.audience import conversation_audience
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import ws
 
 
 def _reader(subjects: frozenset[str]) -> SourceReader:

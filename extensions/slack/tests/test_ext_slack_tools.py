@@ -42,25 +42,9 @@ from ufo_ext_slack.tools import (
     SlackManifestInput,
 )
 
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import (
-    CREDENTIAL_REQUEST_PURPOSE,
-    CredentialRequests,
-    CredentialStore,
-    open_credential_request,
-)
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext
-from ufo.ext.loader import skill_registry, turn_hooks, turn_tools
-from ufo.hub import InProcessHub
-from ufo.kinds.surface_kind import SURFACE_KIND
-from ufo.loop.compaction import Compaction
-from ufo.loop.engine import TurnEngine
-from ufo.loop.prompts.render import rendered_prompt
-from ufo.loop.queue import _agent_actions, _agent_tools, _with_action_verbs
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -68,7 +52,27 @@ from ufo.models.interface import (
     ToolCallStart,
     ToolResultBlock,
 )
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import skill_registry, turn_hooks, turn_tools
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import (
+    CREDENTIAL_REQUEST_PURPOSE,
+    CredentialRequests,
+    CredentialStore,
+    open_credential_request,
+)
+from ufo.runtime.compaction import Compaction
+from ufo.runtime.engine import TurnEngine
+from ufo.runtime.ext.context import ExtensionContext
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.kinds.surface_kind import SURFACE_KIND
+from ufo.runtime.prompts.render import rendered_prompt
+from ufo.runtime.queue import _agent_actions, _agent_tools, _with_action_verbs
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ObjectBinding, ToolDef, ToolRegistry
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.activity import ActivitySummarizer
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn, Usage
 from ufo.sdk.audience import conversation_audience
@@ -79,10 +83,6 @@ from ufo.sdk.surfaces import (
     TerminalFrame,
     Writeback,
 )
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ObjectBinding, ToolDef, ToolRegistry
-from ufo.turns.activity import ActivitySummarizer
-from ufo.workspace import init_workspace_credentials, ws
 
 TOOL_NARRATION = "getting Slack connected"
 
@@ -974,8 +974,8 @@ async def test_slack_channels_needs_the_bot_token(db: None, tmp_path: Path) -> N
 @dataclass(frozen=True)
 class _PortalCtx:
     """Stands in for the surface context's one collaborator this rendering reads. `home_url`'s own
-    format is proved against the real context in `core/tests/ext/test_surface.py`; what is asserted
-    here is what Slack does with the address it is handed, and what it says without one."""
+    format is proved against the real context in `core/tests/ext/test_surface.py`; what is
+    asserted here is what Slack does with the address it is handed, and what it says without one."""
 
     base: str | None
 

@@ -19,7 +19,7 @@ The direct source files provide the system’s rulebooks. model spec defines wha
 ### Model definitions and catalog
 Core model records and the built-in catalog define provider, pricing, routing, limits, and reasoning capabilities for AI model selection and billing.
 
-### `core/src/ufo/models/catalog.py`
+### `core/src/ufo/harness/models/catalog.py`
 
 `config` · `startup / config load`
 
@@ -108,7 +108,7 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
 *Call graph*: calls 2 internal fn (_anthropic, _openai); 1 external calls (__init__).
 
 
-### `core/src/ufo/models/spec.py`
+### `core/src/ufo/harness/models/spec.py`
 
 `data_model` · `model lookup and request setup`
 
@@ -316,7 +316,7 @@ def owner_dsn(config: Config) -> str
 ### Sandbox endpoints and limits
 Sandbox-facing configuration defines cache and preview service addresses plus shared limits used by file change tracking.
 
-### `core/src/ufo/sandbox/cache.py`
+### `core/src/ufo/harness/sandbox/cache.py`
 
 `config` · `startup and sandbox configuration`
 
@@ -354,7 +354,7 @@ def parse_cache_daemon(value: str | None) -> tuple[str, int] | None
 **Call relations**: During deployment or startup configuration, other code can call this function when reading the cache daemon setting. It acts as a gatekeeper before the rest of the system tries to contact the daemon, ensuring later code receives either a clean address or a clear failure.
 
 
-### `core/src/ufo/sandbox/preview.py`
+### `core/src/ufo/harness/sandbox/preview.py`
 
 `config` · `startup / config load`
 
@@ -379,7 +379,7 @@ def parse_preview_service(value: str | None) -> tuple[str, int] | None
 **Call relations**: This function sits at the boundary between deploy configuration and the rest of the preview plumbing. When configuration code needs to understand the preview service address, it can call this function to get a clean `(host, port)` result or a clear failure. The constants in this file then give other parts of the system the matching internal host name and token placeholder used by the proxy and sandbox.
 
 
-### `core/src/ufo/tools/file_changes.py`
+### `core/src/ufo/runtime/tools/file_changes.py`
 
 `config` · `cross-cutting`
 

@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from ufo.sandbox.session import PLAYWRIGHT_CHROMIUM_REVISION, PLAYWRIGHT_VERSION
+from ufo.harness.sandbox.session import PLAYWRIGHT_CHROMIUM_REVISION, PLAYWRIGHT_VERSION
 
 PLAYWRIGHT_PATH_ENV = "PLAYWRIGHT_BROWSERS_PATH"
 MISSING_BROWSER_REASON = (

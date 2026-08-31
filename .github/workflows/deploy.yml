@@ -222,7 +222,7 @@ jobs:
               --client-binary "$SANDBOX_CLIENT_BINARY"
             docker build -t "$ECR_REGISTRY/ufo:$IMAGE_TAG" bundle
             docker run --rm --entrypoint python "$ECR_REGISTRY/ufo:$IMAGE_TAG" \
-              -c 'from ufo.ext.loader import load_manifests; load_manifests("assistant_hosted")'
+              -c 'from ufo.host.ext.loader import load_manifests; load_manifests("assistant_hosted")'
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"
           fi
 

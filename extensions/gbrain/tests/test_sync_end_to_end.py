@@ -23,20 +23,20 @@ from ufo_ext_memory.store import MemoryStore, PageIndexer
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.ext.context import CredentialAccess, ExtensionContext, SourceReader, context_for
-from ufo.ext.manifest import JobSpec
-from ufo.indexing import TextChunker
+from ufo.runtime.ext.context import CredentialAccess, ExtensionContext, SourceReader, context_for
+from ufo.runtime.ext.manifest import JobSpec
+from ufo.runtime.indexing import TextChunker
 from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
-from ufo.schema import tables
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     SOURCE_SYNC_JOB,
     CorePageFeed,
     SyncDriver,
     page_id_for,
     register_sources,
 )
-from ufo.turns.subjects import SHARED_SUBJECT
-from ufo.workspace import ws
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
 
 VECTOR = tuple([1.0] + [0.0] * (EMBED_DIM - 1))
 TARBALL_SHA = "a1b2c3"

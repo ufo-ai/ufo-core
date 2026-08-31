@@ -5,8 +5,8 @@ from typing import cast
 
 from evals.harness.target import CapabilityTarget
 from evals.suites.tool_activity import tool_activity_task
-from ufo.models.interface import Message
-from ufo.turns.activity import ACTIVITY_PROMPT
+from ufo.harness.models.interface import Message
+from ufo.runtime.turns.activity import ACTIVITY_PROMPT
 
 
 @dataclass

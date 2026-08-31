@@ -52,12 +52,12 @@ from evals.handbook.runner import (
     load_handbook,
 )
 from evals.harness.capability import CapabilityOutput
-from ufo.access.credentials import CredentialStore
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore
-from ufo.ext.manifest import PAGE_CHANGE_CURSOR_KEY
-from ufo.indexing import (
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import ScopedStore
+from ufo.runtime.ext.manifest import PAGE_CHANGE_CURSOR_KEY
+from ufo.runtime.indexing import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
     Chunk,
@@ -65,8 +65,8 @@ from ufo.indexing import (
     IndexBackend,
     IndexScope,
 )
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 WORKSPACE = UUID("11111111-2222-3333-4444-555555555555")
 CANCELLED_ABANDON_DEADLINE = 5.0

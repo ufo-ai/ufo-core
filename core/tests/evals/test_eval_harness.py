@@ -214,16 +214,6 @@ from evals.suites.response_register import (
 )
 from evals.suites.tool_activity import ACTIVITY_MODEL
 from evals.suites.ufo_app_bench import WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
-from ufo.access.credentials import (
-    CredentialRequests,
-    CredentialSlotUnset,
-    CredentialStore,
-    install_credential_requests,
-    open_installation,
-    seal_installation,
-)
-from ufo.billing.accounting import BalanceGate, Pricing, record_workspace_usage
-from ufo.billing.balance import credit, set_reserve
 from ufo.blob import BlobNotFound, FilesystemBlobStore, S3BlobStore
 from ufo.config import (
     DEFAULT_AMBIENT_REPLY_MODEL,
@@ -233,22 +223,8 @@ from ufo.config import (
     DatabaseConfig,
 )
 from ufo.db import workspace_tx
-from ufo.ext.context import (
-    ConversationProbes,
-    ExtensionContext,
-    ModelAccess,
-    Trajectory,
-    context_for,
-)
-from ufo.ext.loader import load_manifests, skill_registry
-from ufo.kinds.agents import AGENT_KIND
-from ufo.kinds.governance import Governance, prompt_digest
-from ufo.loop.delivery import DeliverySweep
-from ufo.loop.engine import FINISH_PROMPT, DispatchResult, StreamResult
-from ufo.loop.subagents import SubagentRegistry, SubagentResult
-from ufo.loop.transcript import Transcript
-from ufo.models.catalog import CORE_PRICING
-from ufo.models.interface import (
+from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.models.interface import (
     MAX_IMAGE_BYTES_PER_REQUEST,
     PROVIDER_ANTHROPIC,
     ImageBlock,
@@ -266,9 +242,45 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.models.pricing import ModelPrice, pricing_from
-from ufo.models.registry import ModelRegistry
-from ufo.object_name import ObjectRef, validate_object_name
+from ufo.harness.models.pricing import ModelPrice, pricing_from
+from ufo.harness.models.registry import ModelRegistry
+from ufo.host.ext.loader import load_manifests, skill_registry
+from ufo.runtime.access.credentials import (
+    CredentialRequests,
+    CredentialSlotUnset,
+    CredentialStore,
+    install_credential_requests,
+    open_installation,
+    seal_installation,
+)
+from ufo.runtime.billing.accounting import BalanceGate, Pricing, record_workspace_usage
+from ufo.runtime.billing.balance import credit, set_reserve
+from ufo.runtime.delivery import DeliverySweep
+from ufo.runtime.engine import FINISH_PROMPT, DispatchResult, StreamResult
+from ufo.runtime.ext.context import (
+    ConversationProbes,
+    ExtensionContext,
+    ModelAccess,
+    Trajectory,
+    context_for,
+)
+from ufo.runtime.kinds.agents import AGENT_KIND
+from ufo.runtime.kinds.governance import Governance, prompt_digest
+from ufo.runtime.object_name import ObjectRef, validate_object_name
+from ufo.runtime.seats import signup_workspace_id
+from ufo.runtime.subagents import SubagentRegistry, SubagentResult
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.transcript import (
+    CompactionSummary,
+    CompactionWindow,
+    Conversation,
+    compaction_key,
+    decode,
+    encode,
+    transcript_key,
+)
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_SANDBOX_SIZE,
@@ -285,18 +297,6 @@ from ufo.schema.records import (
     TurnStatus,
     Usage,
 )
-from ufo.seats import signup_workspace_id
-from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.turns.transcript import (
-    CompactionSummary,
-    CompactionWindow,
-    Conversation,
-    compaction_key,
-    decode,
-    encode,
-    transcript_key,
-)
-from ufo.workspace import init_workspace_credentials, ws
 
 CHILD_SETTLE_SECONDS = 0.02
 MODEL = "claude-opus-4-8"
@@ -7550,7 +7550,7 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
     dbos = CancellingDbos(
         steps=(
             {
-                "function_name": "ufo.loop.engine.Engine._stream_once",
+                "function_name": "ufo.runtime.engine.Engine._stream_once",
                 "started_at_epoch_ms": 1_000,
                 "completed_at_epoch_ms": 2_000,
                 "output": StreamResult(
@@ -7560,7 +7560,7 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
                 ),
             },
             {
-                "function_name": "ufo.loop.engine.Engine._dispatch_step",
+                "function_name": "ufo.runtime.engine.Engine._dispatch_step",
                 "started_at_epoch_ms": 2_100,
                 "completed_at_epoch_ms": 3_200,
                 "output": DispatchResult(
@@ -7570,7 +7570,7 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
                 ),
             },
             {
-                "function_name": "ufo.loop.engine.Engine._stream_once",
+                "function_name": "ufo.runtime.engine.Engine._stream_once",
                 "started_at_epoch_ms": 3_300,
             },
         )
@@ -10063,7 +10063,7 @@ async def test_run_builds_the_compaction_client_inside_the_workspace_scope(
 
     monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setattr("ufo.workspace._store", None)
+    monkeypatch.setattr("ufo.runtime.workspace._store", None)
     monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
     monkeypatch.setattr("evals.__main__.dispose_db", dispose)
     monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)

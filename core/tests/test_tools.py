@@ -13,28 +13,26 @@ from pydantic import BaseModel, ValidationError
 
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.loader import skill_registry
-from ufo.ext.manifest import SubagentProfile
-from ufo.loop.subagents import SubagentRegistry, Subagents
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import (
     ExecResult,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
     workspace_path,
 )
-from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillCard, SkillRegistry
-from ufo.tools.builtins import (
+from ufo.host.ext.loader import skill_registry
+from ufo.host.tools.builtins import (
     BUILTIN_TOOLS,
     FILE_TOOL_RESULT_MAX_CHARS,
     REQUEST_CREDENTIALS_TOOL_DEF,
     SHARE_PREFLIGHT_CMD,
     _file_tool_result,
 )
-from ufo.tools.context import (
+from ufo.runtime.ext.manifest import SubagentProfile
+from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillCard, SkillRegistry
+from ufo.runtime.subagents import SubagentRegistry, Subagents
+from ufo.runtime.tools.context import (
     SHARED_BYTES_LIMIT,
     Spawn,
     SpawnResult,
@@ -42,16 +40,18 @@ from ufo.tools.context import (
     ToolContext,
     ToolResult,
 )
-from ufo.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
-from ufo.turns.audience import (
+from ufo.runtime.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
+from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
     Audience,
     conversation_audience,
     foreign_room_audience,
     room_audience,
 )
-from ufo.turns.subjects import member_subject
-from ufo.workspace import ws
+from ufo.runtime.turns.subjects import member_subject
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.schema.records import Agent, Turn
 
 REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 ARTIFACT_SECRET = "tools-test-secret"

@@ -39,9 +39,9 @@ from evals.memory_ingestion.runner import (
 )
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import ModelEvent, ModelRequest, ToolCallDelta, ToolCallStart
-from ufo.models.registry import ModelRegistry
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import ModelEvent, ModelRequest, ToolCallDelta, ToolCallStart
+from ufo.harness.models.registry import ModelRegistry
 from ufo.schema import tables
 from ufo.schema.records import Usage
 

@@ -10,24 +10,24 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from ufo import o11y
 from ufo.db import workspace_tx
-from ufo.ext.context import AgentArchived
-from ufo.ext.surface import Admitted, conversation_name, fence_member_message, mint_marker
-from ufo.hub import ArrivalQueued, InProcessHub, Reply
-from ufo.loop.engine import _claim_turn
+from ufo.harness import o11y
+from ufo.runtime.engine import _claim_turn
+from ufo.runtime.ext.context import AgentArchived
+from ufo.runtime.ext.surface import Admitted, conversation_name, fence_member_message, mint_marker
+from ufo.runtime.hub import ArrivalQueued, InProcessHub, Reply
+from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
+from ufo.runtime.surfaces.admission import (
+    ADMITTED_TURN_METRIC,
+    ARCHIVED_REFUSAL_MESSAGE,
+    Admission,
+)
 from ufo.schema import tables
 from ufo.schema.records import (
     SURFACE_COMMENT_ROUND_INDEX,
     TerminalFrame,
     TurnContext,
     TurnRuntimeConfig,
-)
-from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
-from ufo.surfaces.admission import (
-    ADMITTED_TURN_METRIC,
-    ARCHIVED_REFUSAL_MESSAGE,
-    Admission,
 )
 
 
@@ -1716,7 +1716,7 @@ async def test_an_admission_that_rolls_back_counts_nothing_and_its_retry_counts_
     workspace_id, member_id, _agent_id, conversation_id = await _seed()
     reader = _in_memory_metrics(monkeypatch)
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    monkeypatch.setattr("ufo.surfaces.admission.conversation_name", _refuse_title)
+    monkeypatch.setattr("ufo.runtime.surfaces.admission.conversation_name", _refuse_title)
 
     with pytest.raises(_TitleFailed):
         await admission.admit_member(
@@ -1726,7 +1726,7 @@ async def test_an_admission_that_rolls_back_counts_nothing_and_its_retry_counts_
     assert await _turn_count(conversation_id) == 0
     assert _admitted_points(reader) == []
 
-    monkeypatch.setattr("ufo.surfaces.admission.conversation_name", conversation_name)
+    monkeypatch.setattr("ufo.runtime.surfaces.admission.conversation_name", conversation_name)
     await admission.admit_member(
         workspace_id, conversation_id, "first", member_id, idempotency_key="send-1"
     )

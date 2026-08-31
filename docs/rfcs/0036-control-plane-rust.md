@@ -28,9 +28,9 @@ Two things make it more than an HTTP server.
 
 | Site | Imports |
 |---|---|
-| `gateway_shared.py:10-17` | `ufo.billing.balance.credit`/`set_reserve`, `ufo.db.workspace_tx`, `ufo.onboard.onboarding` defaults, `ufo.schema.tables`, `ufo.schema.records.DEFAULT_AGENT_NAME`, `ufo.seats.create_member`/`email_domain`, `ufo.turns.untrusted.wall`, `ufo.workspace.ws` |
-| `gateway.py:24-26` | `ufo.db.init_db`/`dispose_db`/`workspace_tx`, `ufo.ext.surface.OPERATOR_EMAIL_DOMAIN`, `ufo.sdk.http.set_session_cookie` |
-| `gateway_token.py:7` | `ufo.auth.bearer.mint_token` |
+| `gateway_shared.py:10-17` | `ufo.runtime.billing.balance.credit`/`set_reserve`, `ufo.db.workspace_tx`, `ufo.onboard.onboarding` defaults, `ufo.schema.tables`, `ufo.schema.records.DEFAULT_AGENT_NAME`, `ufo.runtime.seats.create_member`/`email_domain`, `ufo.harness.untrusted.wall`, `ufo.runtime.workspace.ws` |
+| `gateway.py:24-26` | `ufo.db.init_db`/`dispose_db`/`workspace_tx`, `ufo.runtime.ext.surface.OPERATOR_EMAIL_DOMAIN`, `ufo.sdk.http.set_session_cookie` |
+| `gateway_token.py:7` | `ufo.runtime.auth.bearer.mint_token` |
 
 This is why `servers/control/Dockerfile` is `FROM ${UFO_IMAGE}` — the control image exists only as a layer on
 the full Python runtime distribution.
@@ -57,7 +57,7 @@ Core already runs both halves this RFC needs.
 
 | Existing path | Cited |
 |---|---|
-| An internal RPC router behind a bearer control token | `core/src/ufo/access/egress_control.py:170`, with a second router on its own token at line 180 |
+| An internal RPC router behind a bearer control token | `core/src/ufo/runtime/access/egress_control.py:170`, with a second router on its own token at line 180 |
 | The RLS-bypassing cross-workspace read | `owner_tx` (`core/src/ufo/db.py:357`), opened from `UFO_OWNER_DSN` by `serve` (`serve.py:412`, `compose.yaml:116`) and named at `db.py:11` as the one exception — "the RLS-bypassing read the cross-workspace background sweeps" use |
 
 ## Proposal
@@ -178,7 +178,7 @@ Neither needs a vendor SDK, because neither meaningfully uses one today.
 
 ### The bearer codec
 
-`core/src/ufo/auth/bearer.py` is a 115-line self-contained HMAC codec whose wire format its own docstring
+`core/src/ufo/runtime/auth/bearer.py` is a 115-line self-contained HMAC codec whose wire format its own docstring
 spells out. Rust mints it; core keeps the verify half every surface uses. Golden vectors —
 `(secret, workspace_id, email, exp) → token` — are asserted from both sides, the shape
 `servers/egress/tests/contract.rs` and `rule_contract.json` already established.

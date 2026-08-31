@@ -18,13 +18,13 @@ date: 2026-08-12
 
 | Fact | Where |
 |---|---|
-| The carrier seam: create/attach/exec/write/read/dial | `core/src/ufo/sandbox/session.py:206` |
-| Every file tool goes through one in-sandbox CLI | `core/src/ufo/sandbox/session.py:382` (`run_ufo_fs`) |
+| The carrier seam: create/attach/exec/write/read/dial | `core/src/ufo/harness/sandbox/session.py:206` |
+| Every file tool goes through one in-sandbox CLI | `core/src/ufo/harness/sandbox/session.py:382` (`run_ufo_fs`) |
 | That CLI was 1190 lines of Python — pdf/pptx/image reads, multi-edit, `changes` over git. It is now the `ufo fs` verb on the compiled client | `client/src/cmd/fscli.rs` |
-| One carrier per process, chosen by `[sandbox] backend` | `core/src/ufo/sandbox/select.py:13` |
-| The turn builds its session off that one carrier | `core/src/ufo/loop/queue.py:367` |
-| A conversation's workspace is `workspace_root/<conversation-id>` | `core/src/ufo/sandbox/conversation.py:121` |
-| The durable handle already carries its backend: `<backend>:<id>` | `core/src/ufo/sandbox/session.py:176` |
+| One carrier per process, chosen by `[sandbox] backend` | `core/src/ufo/harness/sandbox/select.py:13` |
+| The turn builds its session off that one carrier | `core/src/ufo/runtime/queue.py:367` |
+| A conversation's workspace is `workspace_root/<conversation-id>` | `core/src/ufo/harness/sandbox/conversation.py:121` |
+| The durable handle already carries its backend: `<backend>:<id>` | `core/src/ufo/harness/sandbox/session.py:176` |
 | The shell client is a pure directive renderer; the server drives every screen | `servers/control/src/ufo_control/client/ufo:617` |
 | The one out-of-band POST: a privately entered secret, answered by header | client `:486`, surface `:310` |
 | A held stream lasts 85s, then `poll` and the client reconnects | `extensions/ufo/ufo_ext_ufo/surface.py:54` |
@@ -70,7 +70,7 @@ hand-written client update.
 a shared `ufo_fs_file_op(...)` holding the `("ufo", "fs", op, json)` exec; `SandboxSession.run_ufo_fs`
 calls the carrier instead of composing that argv itself. The client carrier answers per op:
 
-- **read, edit, write, grep, glob** — a JS program per op in `core/src/ufo/sandbox/client/`, the
+- **read, edit, write, grep, glob** — a JS program per op in `core/src/ufo/harness/sandbox/client/`, the
   same result shapes and caps the in-sandbox file CLI returns, held to them by a differential test
   against that real CLI over one fixture tree. Nothing crosses but the op's own result: a `read` sends back only
   its window, an `edit` runs whole on the member's machine — byte-exact on `Uint8Array`, staged

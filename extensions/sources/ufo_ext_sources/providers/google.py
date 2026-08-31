@@ -2,7 +2,8 @@
 
 Every Google API answers a refusal in one envelope, and the status alone does not separate them. A
 grant that lacks the scope is settled: no retry widens it, so the stream is skipped, and the driver
-parks the source once it has counted enough of those refusals (`ufo.sources.sync`). A usage limit is
+parks the source once it has counted enough of those refusals (`ufo.runtime.sources.sync`). A usage
+limit is
 the opposite — `RESOURCE_EXHAUSTED`, or one of Google's `usageLimits` reasons, on that same `403` —
 and it clears as the quota window rolls, so it fails the run and takes the error backoff, which
 retries and recovers with nobody in it. Skipping on one would spend the park threshold on a stream

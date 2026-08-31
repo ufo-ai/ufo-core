@@ -27,11 +27,6 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.access.credentials import CredentialStore
-from ufo.access.grants import GrantSummary, workspace_grant_summaries
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.billing.accounting import SpendReport, SpendRollup
-from ufo.billing.balance import Balance, credit, read_balance, set_reserve
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.bundle import Bundle, wheel_name
 from ufo.config import Config, config_path, load_config
@@ -45,28 +40,34 @@ from ufo.db import (
     owner_tx,
     workspace_tx,
 )
-from ufo.durability import replay_safe_client
-from ufo.ext.loader import load_manifests, lockfile_path
-from ufo.ext.store import ExtensionStore, read_catalog
-from ufo.ext.surface import TurnStep
-from ufo.loop.steps import DurableTurnSteps
-from ufo.models.interface import TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.harness.containment import contained_file
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.interface import TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.harness.sandbox.ingress_serve import run as ingress_run
+from ufo.host.devhost import serve_dev_host
+from ufo.host.ext.loader import load_manifests, lockfile_path
+from ufo.host.ext.store import ExtensionStore, read_catalog
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
 from ufo.onboard.seed import KitchenSink
 from ufo.proxy_serve import OWNER_DSN_ENV
-from ufo.sandbox.containment import contained_file
-from ufo.sandbox.ingress_serve import run as ingress_run
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.grants import GrantSummary, workspace_grant_summaries
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.runtime.billing.accounting import SpendReport, SpendRollup
+from ufo.runtime.billing.balance import Balance, credit, read_balance, set_reserve
+from ufo.runtime.ext.surface import TurnStep
+from ufo.runtime.seats import email_domain
+from ufo.runtime.steps import DurableTurnSteps
+from ufo.runtime.turns.cancellation import cancel_one_turn
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_AGENT_NAME,
     DEFAULT_REASONING_EFFORT,
     ReasoningEffort,
 )
-from ufo.seats import email_domain
 from ufo.serve import home_surface
 from ufo.serve import run as serve_run
-from ufo.turns.cancellation import cancel_one_turn
-from ufo.workspace import ws
 
 UFOCTL_DIR_ENV = "UFOCTL_DIR"
 RESERVED_DOTENV_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
@@ -372,6 +373,15 @@ def new_migration(slug: str) -> None:
         click.echo(f"wrote {target.path} — revision {stamp}, down_revision {head}")
     with contained_file(MIGRATION_HEAD_FILENAME, CORE_VERSIONS_DIR) as head_file:
         head_file.replace_text(f"{stamp}\n", MIGRATION_FILE_MODE)
+
+
+@main.command(name="dev-host")
+@click.argument("overrides", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8377, show_default=True, type=int)
+def dev_host(overrides: Path, host: str, port: int) -> None:
+    """Serve one environment-overrides document to every turn that pins this host."""
+    serve_dev_host(overrides, host, port)
 
 
 @main.command()
@@ -1077,7 +1087,15 @@ def bundle(out: Path, client_binary: Path) -> None:
     config = load_config()
     catalog = read_catalog(config.ext.store) if config.ext.store is not None else None
     subprocess.run(
-        ("uv", "build", "--wheel", str(_ufo_project_dir()), "--out-dir", str(out)),
+        (
+            "uv",
+            "build",
+            "--wheel",
+            "--all-packages",
+            str(_ufo_project_dir()),
+            "--out-dir",
+            str(out),
+        ),
         check=True,
     )
     wheel = out / wheel_name()

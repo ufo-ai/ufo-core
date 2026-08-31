@@ -39,8 +39,8 @@ from evals.swebench.snapshot import (
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, PackConfig
 from ufo.db import workspace_tx
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 SUBSETS = SWEBENCH_UPSTREAM.subsets
 ALL_IDS = SUBSETS.all_ids

@@ -46,7 +46,18 @@ from ufo_testsupport.stream_gate import GatingHub, release_when_running
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.ext.surface import (
+from ufo.harness.models.interface import (
+    ModelEvent,
+    ModelRequest,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+    Usage,
+)
+from ufo.harness.replies import MarkedReply
+from ufo.runtime import queue as loop_queue
+from ufo.runtime.engine import FORCE_FINAL_PROMPT
+from ufo.runtime.ext.surface import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_MAX_AGE_SECONDS,
@@ -58,23 +69,12 @@ from ufo.ext.surface import (
     mid_turn_reply_workspaces,
     writeback_workspaces,
 )
-from ufo.hub import Reply
-from ufo.loop import queue as loop_queue
-from ufo.loop.engine import FORCE_FINAL_PROMPT
-from ufo.loop.replies import MarkedReply
-from ufo.models.interface import (
-    ModelEvent,
-    ModelRequest,
-    TextDelta,
-    ToolCallDelta,
-    ToolCallStart,
-    Usage,
-)
+from ufo.runtime.hub import Reply
+from ufo.runtime.surfaces import hub_tail
+from ufo.runtime.surfaces.admission import Admission
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Turn, mid_turn_reply_id_for
-from ufo.surfaces import hub_tail
-from ufo.surfaces.admission import Admission
-from ufo.workspace import ws
 
 ANSWERED = UUID("a532d68a-6724-5bd3-b34f-3ec90a57db80")
 SPAN_TEXT = "Filed the launch issue as metalcraftai/ufo#1801."

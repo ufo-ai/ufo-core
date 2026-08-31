@@ -12,11 +12,11 @@ from uuid import UUID, uuid4
 
 import pytest
 
-import ufo.tools.tasks as tasks_module
+import ufo.runtime.tools.tasks as tasks_module
 from ufo.blob import FilesystemBlobStore
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import (
     CA_SANDBOX_PATH,
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     DOCUMENT_READ_EXEC_TIMEOUT_SECONDS,
@@ -46,11 +46,10 @@ from ufo.sandbox.session import (
     shell_path,
     ufo_fs_file_op,
 )
-from ufo.schema.records import Agent, Turn
-from ufo.skills.runtime import RuntimeSkill, SystemSkillBundle
-from ufo.tools.builtins import BashInput, bash_handler
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.tasks import (
+from ufo.host.tools.builtins import BashInput, bash_handler
+from ufo.runtime.skills.runtime import RuntimeSkill, SystemSkillBundle
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.tasks import (
     BACKGROUND_DIRECTIVE,
     BACKGROUND_TASKS_DIR,
     DETACHED_LEAD,
@@ -58,7 +57,8 @@ from ufo.tools.tasks import (
     EXEC_TIMEOUT_VITALS_CMD,
     TASK_PROBE,
 )
-from ufo.turns.audience import conversation_audience
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.schema.records import Agent, Turn
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
 PROBE_TOKENS = ProbeTokenCodec(b"run-token-test-secret")

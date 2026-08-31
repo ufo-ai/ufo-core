@@ -5,7 +5,7 @@ from uuid import UUID
 from dbos import DBOSClient
 
 from ufo.runtime.jobs import InvokerFactory
-from ufo.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 
 
 def invoker_factory(dbos: DBOSClient) -> InvokerFactory:

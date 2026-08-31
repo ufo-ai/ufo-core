@@ -16,10 +16,10 @@ from ufo_ext_debugger.report import (
 )
 
 from ufo.blob import FilesystemBlobStore
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.workspace import ws
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.workspace import ws
 
 BASE_URL = "https://fleet.example.com/"
 

@@ -19,13 +19,13 @@ flowchart TD
 
 | Layer | Question | Mechanism | Home |
 |---|---|---|---|
-| Tenancy | which workspace | `ws()` / `agent()` contextvars + Postgres RLS + blob key prefix | `core/src/ufo/workspace.py`, `db.py`, `blob.py`, `servers/control/src/rls.rs` |
-| Identity | which human | `surface_identity` row + HMAC bearer (`ufo_session` cookie / CLI token) | `core/src/ufo/ext/surface.py`, `core/src/ufo/auth/bearer.py` |
-| Admission | may this turn start | membership, agent-binding assertion, seat gate, spend preflight | `core/src/ufo/surfaces/admission.py`, `core/src/ufo/seats.py` |
-| Authority | who does this act speak for | `speaker_member_id` per message, `on_behalf_of_member_id` for background work, `requested_by` per tool call | `core/src/ufo/loop/engine.py`, `tools/context.py` |
-| Grants | which external capability | `connector_grant`, `source_grant`, `credential`, web-audience grant, agent tool set | `core/src/ufo/access/grants.py`, `credentials.py` |
-| Wire | what leaves the sandbox | egress proxy rules derived from manifests and grants, keyed by a signed run token | `core/src/ufo/sandbox/proxy/` |
-| Reads | who may see it | the conversation `Audience` atom, per-kind gates | `core/src/ufo/turns/audience.py`, `objects.py` |
+| Tenancy | which workspace | `ws()` / `agent()` contextvars + Postgres RLS + blob key prefix | `core/src/ufo/runtime/workspace.py`, `db.py`, `blob.py`, `servers/control/src/rls.rs` |
+| Identity | which human | `surface_identity` row + HMAC bearer (`ufo_session` cookie / CLI token) | `core/src/ufo/runtime/ext/surface.py`, `core/src/ufo/runtime/auth/bearer.py` |
+| Admission | may this turn start | membership, agent-binding assertion, seat gate, spend preflight | `core/src/ufo/runtime/surfaces/admission.py`, `core/src/ufo/runtime/seats.py` |
+| Authority | who does this act speak for | `speaker_member_id` per message, `on_behalf_of_member_id` for background work, `requested_by` per tool call | `core/src/ufo/runtime/engine.py`, `tools/context.py` |
+| Grants | which external capability | `connector_grant`, `source_grant`, `credential`, web-audience grant, agent tool set | `core/src/ufo/runtime/access/grants.py`, `credentials.py` |
+| Wire | what leaves the sandbox | egress proxy rules derived from manifests and grants, keyed by a signed run token | `core/src/ufo/harness/sandbox/proxy/` |
+| Reads | who may see it | the conversation `Audience` atom, per-kind gates | `core/src/ufo/runtime/turns/audience.py`, `objects.py` |
 
 ## Principals
 
@@ -45,7 +45,7 @@ flowchart TD
 The engine builds each turn's tool context with **no speaker**. A tool call names the member it
 acts for via `requested_by` — a message ref the model copies from a visible, absorbed member
 inbound — and the engine re-binds the call's context and sandbox run token to that member
-(`_bind_requester`, `core/src/ufo/loop/engine.py`). In a member's own conversation — the
+(`_bind_requester`, `core/src/ufo/runtime/engine.py`). In a member's own conversation — the
 audience is theirs — an omitted ref binds that member while one of their messages is active, since
 nobody else can be asking there, and the schema does not offer the field; a denied message is absent
 from those, so a denial withholds that member's authority here exactly as it does for a named ref.
@@ -74,14 +74,14 @@ The asymmetry is the doctrine: **granting gates on the live speaker; use gates o
 member.** A scheduled run may *use* its creator's private connection but can never connect,
 share, revoke, or fill a credential — each granting verb gates on the live speaker, the kinds
 that disclose or revoke access declare speaker-required mutation on the shared object base
-(`core/src/ufo/objects.py`), and `speaker_is_admin` is false whenever `speaker_member_id` is None
-(`core/src/ufo/tools/context.py`), so background work can never exercise admin authority either.
+(`core/src/ufo/runtime/objects.py`), and `speaker_is_admin` is false whenever `speaker_member_id` is None
+(`core/src/ufo/runtime/tools/context.py`), so background work can never exercise admin authority either.
 
 ## Tenancy
 
 `with ws(workspace_id)` binds a contextvar every scoped capability reads; `with agent(agent_id)`
 requires a bound workspace, refuses an in-place switch, and re-checks the pair on every read
-(`core/src/ufo/workspace.py`, `agent_scope.py`). Every trusted boundary binds scope from its own
+(`core/src/ufo/runtime/workspace.py`, `agent_scope.py`). Every trusted boundary binds scope from its own
 durable record or signed claims: turn workflows from the queue row, surface requests from the
 verified session, OAuth callbacks from Fernet-sealed state, the egress proxy from run-token
 claims, jobs from their candidate row.
@@ -124,7 +124,7 @@ same `surface_identity → member` row:
 | Hosted sites | email | same session cookie; the site's own visibility rule gates the render |
 | Debug / memory explorer | operator bearer | email domain must equal `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace |
 
-Admission (`core/src/ufo/surfaces/admission.py`) then holds four gates:
+Admission (`core/src/ufo/runtime/surfaces/admission.py`) then holds four gates:
 
 - A caller-supplied agent id is an assertion: the conversation is permanently bound to one agent
   at creation, and a mismatch is refused. Surfaces cannot admit as an agent of their choosing —
@@ -165,7 +165,7 @@ main agent changing a prompt.
 ## Audience — who may read
 
 A conversation's persisted `Audience` atom is set at creation, narrows as its surface learns
-more, and is carried unchanged into every turn (`core/src/ufo/turns/audience.py`):
+more, and is carried unchanged into every turn (`core/src/ufo/runtime/turns/audience.py`):
 
 | Atom | Assigned to | Content readable by |
 |---|---|---|

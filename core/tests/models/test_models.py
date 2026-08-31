@@ -14,7 +14,6 @@ from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from pydantic import ValidationError
 
-from ufo.access.credentials import CredentialValueInvalid
 from ufo.config import (
     DEFAULT_BACKGROUND_JOBS_MODEL,
     BlobConfig,
@@ -22,12 +21,11 @@ from ufo.config import (
     DatabaseConfig,
     ModelsConfig,
 )
-from ufo.ext.manifest import Manifest
-from ufo.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
-from ufo.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
-from ufo.models.anthropic import AnthropicClient, anthropic_sdk_client
-from ufo.models.catalog import core_model_specs
-from ufo.models.interface import (
+from ufo.harness.models.anthropic import MAX_EMPTY_PROVIDER_RETRIES as ANTHROPIC_MAX_EMPTY_RETRIES
+from ufo.harness.models.anthropic import MAX_PROVIDER_RETRIES as ANTHROPIC_MAX_RETRIES
+from ufo.harness.models.anthropic import AnthropicClient, anthropic_sdk_client
+from ufo.harness.models.catalog import core_model_specs
+from ufo.harness.models.interface import (
     IMAGE_OMITTED_TEXT,
     IMAGE_UNSUPPORTED_TEXT,
     ImageBlock,
@@ -49,20 +47,22 @@ from ufo.models.interface import (
     omit_images,
     trim_images,
 )
-from ufo.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
-from ufo.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
-from ufo.models.openai import (
+from ufo.harness.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
+from ufo.harness.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
+from ufo.harness.models.openai import (
     OpenAIClient,
     openai_messages,
     openai_sdk_client,
     responses_input,
     responses_request,
 )
-from ufo.models.pricing import ModelPrice
-from ufo.models.registry import model_registry
-from ufo.models.spec import ModelSpec, ReasoningSupport
+from ufo.harness.models.pricing import ModelPrice
+from ufo.harness.models.registry import model_registry
+from ufo.harness.models.spec import ModelSpec, ReasoningSupport
+from ufo.runtime.access.credentials import CredentialValueInvalid
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.workspace import ws
 from ufo.schema.records import Usage
-from ufo.workspace import ws
 
 REQUEST = ModelRequest(
     model="claude-opus-4-8",
@@ -298,8 +298,8 @@ def provider_timeout(timeout_type: type[Exception]) -> Exception:
 
 
 def zero_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("ufo.models.anthropic.INITIAL_RETRY_DELAY_SECONDS", 0.0)
-    monkeypatch.setattr("ufo.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr("ufo.harness.models.anthropic.INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr("ufo.harness.models.openai.INITIAL_RETRY_DELAY_SECONDS", 0.0)
 
 
 async def collect(client: AnthropicClient | OpenAIClient) -> list[ModelEvent]:
@@ -734,8 +734,8 @@ async def test_retryable_status_retries_then_succeeds(
     def meter(name: str, **dimensions: str) -> None:
         emitted.append((name, dimensions))
 
-    monkeypatch.setattr("ufo.models.anthropic.emit_metric", meter)
-    monkeypatch.setattr("ufo.models.openai.emit_metric", meter)
+    monkeypatch.setattr("ufo.harness.models.anthropic.emit_metric", meter)
+    monkeypatch.setattr("ufo.harness.models.openai.emit_metric", meter)
     create = ScriptedCreate(provider_error(harness.error_type, status), (harness.ok_events(), None))
     client = harness.build(create)
     with caplog.at_level(logging.INFO):
@@ -783,7 +783,7 @@ async def test_bedrock_retry_is_attributed_to_bedrock(
     def meter(name: str, **dimensions: str) -> None:
         emitted.append((name, dimensions))
 
-    monkeypatch.setattr("ufo.models.anthropic.emit_metric", meter)
+    monkeypatch.setattr("ufo.harness.models.anthropic.emit_metric", meter)
     create = ScriptedCreate(
         provider_error(anthropic.APIStatusError, 429),
         (
@@ -1620,8 +1620,10 @@ async def test_registry_builds_core_clients_from_their_specs(
 ) -> None:
     anthropic_wire = object()
     openai_wire = object()
-    monkeypatch.setattr("ufo.models.catalog.anthropic_sdk_client", lambda key: anthropic_wire)
-    monkeypatch.setattr("ufo.models.catalog.openai_sdk_client", lambda key: openai_wire)
+    monkeypatch.setattr(
+        "ufo.harness.models.catalog.anthropic_sdk_client", lambda key: anthropic_wire
+    )
+    monkeypatch.setattr("ufo.harness.models.catalog.openai_sdk_client", lambda key: openai_wire)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     registry = model_registry(_config(tmp_path), ())
@@ -1642,7 +1644,9 @@ async def test_registry_resolves_the_ufo_prefixed_key_over_the_bare_name(
     """`UFO_ANTHROPIC_API_KEY` scopes a key to ufo alone and wins over the bare upstream name; with
     only the bare name set, it still serves."""
     seen: list[str] = []
-    monkeypatch.setattr("ufo.models.catalog.anthropic_sdk_client", lambda key: seen.append(key))
+    monkeypatch.setattr(
+        "ufo.harness.models.catalog.anthropic_sdk_client", lambda key: seen.append(key)
+    )
     monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ufo-scoped")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ambient")
     registry = model_registry(_config(tmp_path), ())

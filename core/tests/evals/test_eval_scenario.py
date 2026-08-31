@@ -40,12 +40,12 @@ from evals.harness.scenario import (
 from evals.harness.target import CapabilityTarget, InProcessTarget
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.loop.transcript import Transcript
+from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.transcript import Conversation
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
-from ufo.turns.transcript import Conversation
-from ufo.workspace import ws
 
 MODEL = "claude-opus-4-8"
 PROMPT = "You are a helpful assistant."

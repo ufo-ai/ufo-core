@@ -28,8 +28,8 @@ from evals.swebench.models import SUBSET_SIZES, Subset, SWEbenchCase
 from evals.swebench.snapshot import load_snapshot
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
-from ufo.workspace import ws_current
 
 SUITE_NAME = "swebench_verified"
 SUBSETS: tuple[Subset, ...] = tuple(SUBSET_SIZES)

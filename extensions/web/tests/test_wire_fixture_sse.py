@@ -5,7 +5,7 @@ from typing import get_args
 
 from ufo_testsupport.sse_fixture import SSE_FIXTURE_PATH, rendered_sse, sse_frames
 
-from ufo.hub import LiveFrame
+from ufo.runtime.hub import LiveFrame
 
 
 def test_sse_fixture_is_fresh() -> None:

@@ -14,9 +14,9 @@ from ufo_ext_brief_pipeline.pipeline import (
     DraftRequest,
 )
 
-from ufo.ext.loader import skill_registry, turn_subagents
-from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
-from ufo.loop.subagents import SubagentRegistry, subagent_system_prompt
+from ufo.host.ext.loader import skill_registry, turn_subagents
+from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
+from ufo.runtime.subagents import SubagentRegistry, subagent_system_prompt
 
 
 def test_profiles_register_beside_core_without_collision() -> None:

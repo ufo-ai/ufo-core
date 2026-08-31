@@ -14,7 +14,7 @@ from re import IGNORECASE, MULTILINE, findall, search
 
 import yaml
 
-from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.host.tools.builtins import BUILTIN_TOOLS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORPUS = REPO_ROOT / "packs/assistant_hosted/skills/customer-onboarding-help"
@@ -28,19 +28,19 @@ ONBOARD_CONTROL = "core/src/ufo/onboard/onboard_control.py"
 INVITES = "servers/control/src/invite.rs"
 INVITE_DELIVERY = "servers/control/src/invite_delivery.rs"
 SLACK_CONNECT = "servers/control/src/slack_connect.rs"
-AUDIENCE = "core/src/ufo/turns/audience.py"
-MEMBERS = "core/src/ufo/kinds/members.py"
-BALANCE = "core/src/ufo/billing/balance.py"
-SEATS = "core/src/ufo/seats.py"
+AUDIENCE = "core/src/ufo/runtime/turns/audience.py"
+MEMBERS = "core/src/ufo/runtime/kinds/members.py"
+BALANCE = "core/src/ufo/runtime/billing/balance.py"
+SEATS = "core/src/ufo/runtime/seats.py"
 TABLES = "core/src/ufo/schema/tables.py"
-WORKSPACE_KIND = "core/src/ufo/kinds/workspace_kind.py"
+WORKSPACE_KIND = "core/src/ufo/runtime/kinds/workspace_kind.py"
 SCHEDULED_TASKS = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py"
 SCHEDULING = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py"
 SLACK_SURFACE = "extensions/slack/ufo_ext_slack/surface.py"
-BUILTIN_TOOLS_SOURCE = "core/src/ufo/tools/builtins.py"
+BUILTIN_TOOLS_SOURCE = "core/src/ufo/host/tools/builtins.py"
 SITES_TOOLS = "extensions/sites/ufo_ext_sites/tools.py"
-TOOLS_CONTEXT = "core/src/ufo/tools/context.py"
-STOP = "core/src/ufo/surfaces/stop.py"
+TOOLS_CONTEXT = "core/src/ufo/runtime/tools/context.py"
+STOP = "core/src/ufo/runtime/surfaces/stop.py"
 WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
 WEB_AUDIENCE = "extensions/web/ufo_ext_web/audience.py"
 WEB_BILLING_VIEW = "extensions/web/frontend/src/views/Billing.tsx"
@@ -49,7 +49,7 @@ SPEC = "spec.md"
 TASK_SCHEDULING_SKILL_MD = (
     "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/skills/task-scheduling/SKILL.md"
 )
-CREATE_APPLICATION_SKILL_MD = "core/src/ufo/skills/create-application/SKILL.md"
+CREATE_APPLICATION_SKILL_MD = "core/src/ufo/runtime/skills/create-application/SKILL.md"
 RADAR_HOME = "extensions/app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx"
 ARTIFACTS_HOME = "extensions/app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx"
 TASKS_VIEW = "extensions/web/frontend/src/views/Tasks.tsx"

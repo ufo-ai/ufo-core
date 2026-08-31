@@ -1,0 +1,145 @@
+"""A signed, expiring token for sandbox ingress: authenticated port access.
+
+A token claims a workspace, conversation, port, optional enclosing site, and expiry. The ingress
+verifies it against the deploy secret — a tampered, stale, or malformed token yields nothing, and a
+token claiming a port outside the addressable range is refused even with a valid signature.
+`mint_ingress_token` signs and `verify_ingress_token` checks the same body, so a round-trip agrees
+by construction, and both read the one deploy secret rather than taking it as a parameter.
+
+A visit has two hops and each carries its own kind, named at both the mint and the verify. A
+**view** token is what `SurfaceContext.ingress_url` puts in the link the frame opens at
+`INGRESS_VIEW_PATH`; a **session** token is what the ingress binds as that origin's cookie
+afterwards. Neither passes where the other is expected, so a cookie cannot be replayed at the view
+path to mint itself a successor, and a view token pasted into the cookie jar opens nothing. A view
+token is usable until it expires and may open several sessions in that window — a reload is a
+second one; each session then runs its own TTL from the moment it was minted, and nothing extends
+it."""
+
+import json
+import os
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal
+from uuid import UUID
+
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.runtime.auth.token_signing import SignedTokenError, sign_token, verify_token
+
+IngressTokenKind = Literal["sandbox-ingress-view", "sandbox-ingress-session"]
+INGRESS_VIEW_KIND: IngressTokenKind = "sandbox-ingress-view"
+INGRESS_SESSION_KIND: IngressTokenKind = "sandbox-ingress-session"
+INGRESS_VIEW_PATH = "/~t"
+INGRESS_VIEW_TTL_SECONDS = 900
+INGRESS_SESSION_ENDED_MESSAGE = "site-session-ended"
+
+
+class IngressTokenError(ValueError):
+    """An ingress token is malformed, tampered, expired, or not an ingress token at all."""
+
+
+@dataclass(frozen=True)
+class ShippedClaim:
+    """A token's optional shipped-bundle reference: the app slug and current bundle digest whose
+    precompiled bytes this origin serves, from the fleet store rather than any workspace's own. The
+    conversation and port the claims also carry are the page's synthetic per-workspace anchor —
+    they scope the origin and cookie to the workspace; these name the deploy-wide bytes."""
+
+    slug: str
+    digest: str
+
+
+@dataclass(frozen=True)
+class FramerClaim:
+    """The one sibling site origin enclosing a view behind the app-origin frame page."""
+
+    conversation_id: UUID
+    port: int
+
+
+@dataclass(frozen=True)
+class IngressClaims:
+    """What a verified token grants: one workspace's conversation, and the one sandbox port its
+    bearer may reach, until it expires. `framer`, when present, names the enclosing sibling site
+    the ingress verifies inside the workspace before adding its origin to `frame-ancestors`.
+    `shipped`, when present, redirects the serve from the conversation's own stored/dialed bytes to
+    a deploy-wide precompiled app bundle in the fleet store — the anchor and port still scope the
+    origin and its session cookie to the workspace."""
+
+    workspace_id: UUID
+    conversation_id: UUID
+    port: int
+    expires_at: int
+    shipped: ShippedClaim | None = None
+    framer: FramerClaim | None = None
+
+
+def mint_ingress_token(claims: IngressClaims, kind: IngressTokenKind) -> str:
+    """Sign `claims` as one hop's token. The kind is signed with them, so the hop a token was minted
+    for is the only hop that accepts it."""
+    body: dict[str, object] = {
+        "kind": kind,
+        "ws": str(claims.workspace_id),
+        "conversation": str(claims.conversation_id),
+        "port": claims.port,
+        "exp": claims.expires_at,
+    }
+    if claims.shipped is not None:
+        body["shipped"] = {"slug": claims.shipped.slug, "digest": claims.shipped.digest}
+    if claims.framer is not None:
+        body["framer"] = {
+            "conversation": str(claims.framer.conversation_id),
+            "port": claims.framer.port,
+        }
+    return sign_token(ingress_secret().encode(), json.dumps(body).encode())
+
+
+def verify_ingress_token(token: str, now: datetime, kind: IngressTokenKind) -> IngressClaims:
+    """The claims of a live token of exactly `kind`, or `IngressTokenError`. A valid token of the
+    other kind is refused as firmly as a forged one — the caller states which hop it is serving."""
+    try:
+        payload = json.loads(verify_token(token, ingress_secret().encode()))
+    except (SignedTokenError, ValueError) as error:
+        raise IngressTokenError("ingress token is invalid") from error
+    if not isinstance(payload, dict) or payload.get("kind") != kind:
+        raise IngressTokenError("ingress token is invalid")
+    try:
+        shipped = payload.get("shipped")
+        framer = payload.get("framer")
+        claims = IngressClaims(
+            workspace_id=UUID(str(payload.get("ws"))),
+            conversation_id=UUID(str(payload.get("conversation"))),
+            port=int(payload.get("port", 0)),
+            expires_at=int(payload.get("exp", 0)),
+            shipped=(
+                ShippedClaim(slug=str(shipped["slug"]), digest=str(shipped["digest"]))
+                if isinstance(shipped, dict)
+                else None
+            ),
+            framer=(
+                FramerClaim(
+                    conversation_id=UUID(str(framer["conversation"])),
+                    port=int(framer["port"]),
+                )
+                if isinstance(framer, dict)
+                else None
+            ),
+        )
+    except (TypeError, ValueError, KeyError) as error:
+        raise IngressTokenError("ingress token is invalid") from error
+    if not 0 < claims.port < 65536:
+        raise IngressTokenError("ingress token is invalid")
+    if claims.framer is not None and not 0 < claims.framer.port < 65536:
+        raise IngressTokenError("ingress token is invalid")
+    if claims.expires_at <= int(now.timestamp()):
+        raise IngressTokenError("ingress token is expired")
+    return claims
+
+
+def ingress_secret() -> str:
+    """The deploy secret both ends read. Public so the ingress process resolves it at boot: a
+    missing secret is a misconfigured deploy, and resolving it only on the first request would bind
+    the port, pass the readiness probe, and 500 every viewer."""
+    value = os.environ.get(UFO_TOKEN_SECRET_ENV)
+    if not value:
+        raise RuntimeError(f"{UFO_TOKEN_SECRET_ENV} must be set to mint or verify ingress tokens")
+    return value

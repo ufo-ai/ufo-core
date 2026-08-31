@@ -11,30 +11,30 @@ from ufo.blob import (
 from ufo.blob import (
     BlobStore as BlobStore,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     ARRIVAL_GRACE_SECONDS as ARRIVAL_GRACE_SECONDS,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     OP_DEADLINE_SLACK_SECONDS as OP_DEADLINE_SLACK_SECONDS,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     TerminalAbsent as TerminalAbsent,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     TerminalGone as TerminalGone,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     TerminalOp as TerminalOp,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     TerminalOpFailed as TerminalOpFailed,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     Terminals as Terminals,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     TerminalTransport as TerminalTransport,
 )
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.terminal import (
     TerminalWorkspace as TerminalWorkspace,
 )

@@ -266,7 +266,12 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 mypy_path = "core/src"
 files = ["core/src/ufo", "extensions", "evals", "gates.py"]
-exclude = ["extensions/.*/skills/", "extensions/.*/tests/", "extensions/imessage/.*/proto/"]
+exclude = [
+    "extensions/.*/skills/",
+    "extensions/.*/tests/",
+    "extensions/imessage/.*/proto/",
+    "evals/coding_repo/held_out/",
+]
 
 [[tool.mypy.overrides]]
 module = [
@@ -283,8 +288,8 @@ module = [
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["core/tests", "extensions/*/tests"]
-pythonpath = ["."]
+testpaths = ["core/tests", "core/harness/tests", "extensions/*/tests"]
+pythonpath = [".", "core/src"]
 asyncio_mode = "auto"
 addopts = "--strict-markers"
 markers = [
@@ -292,5 +297,3 @@ markers = [
     "docker: needs a working Docker daemon (builds and runs a real container)",
     "serial: shares the process-singleton DBOS executor, a live container, or one database — must not run in parallel",
 ]
-
-[tool.uv.sources]

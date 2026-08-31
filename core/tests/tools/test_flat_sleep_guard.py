@@ -1,4 +1,4 @@
-from ufo.tools.tasks import FLAT_SLEEP_REFUSAL, flat_sleeps
+from ufo.runtime.tools.tasks import FLAT_SLEEP_REFUSAL, flat_sleeps
 
 
 def test_a_long_flat_sleep_is_padding() -> None:
@@ -26,7 +26,8 @@ def test_nested_loops_track_depth() -> None:
 
 
 def test_mentioning_a_sleep_as_data_is_not_padding() -> None:
-    assert flat_sleeps('grep -n "sleep 30" core/tests/sandbox/test_sandbox_session.py') == ()
+    command = 'grep -n "sleep 30" core/tests/sandbox/test_sandbox_session.py'
+    assert flat_sleeps(command) == ()
     assert flat_sleeps("printf 'sleep 60\\n' >> job.sh") == ()
     assert flat_sleeps("cat > job.sh <<EOF\nsleep 60\nEOF\nchmod +x job.sh") == ()
 

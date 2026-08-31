@@ -19,7 +19,7 @@ date: 2026-08-16
 
 ## Current state
 
-Sandbox egress goes through the Python MITM proxy: `core/src/ufo/sandbox/proxy/server.py` (1,947 lines,
+Sandbox egress goes through the Python MITM proxy: `core/src/ufo/harness/sandbox/proxy/server.py` (1,947 lines,
 the wire + the policy), `rules.py` (292, the `Rule` derivations), `proxy_serve.py` (220, the standalone
 composition root), `credential_callback.py` (123, the cache daemon's git-credential callback). It boots
 standalone (`ufoctl proxy`) and in-process inside `serve.py`. It opens the RLS-bypassing **owner DSN**

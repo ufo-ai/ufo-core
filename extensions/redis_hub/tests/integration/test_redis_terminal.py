@@ -28,8 +28,8 @@ from ufo_ext_redis_hub.stream_terminal import REPLY_INLINE_MAX_BYTES, RedisTermi
 from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.blob import BlobEntry, FilesystemBlobStore
-from ufo.sandbox.session import ProxyEndpoint, SandboxSpec
-from ufo.sandbox.terminal import (
+from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSpec
+from ufo.harness.sandbox.terminal import (
     TerminalAbsent,
     TerminalCarrier,
     TerminalGone,

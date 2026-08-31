@@ -5,9 +5,9 @@ from uuid import uuid4
 
 import pytest
 
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.auth.surface_token import mint_surface_token, verify_surface_token
-from ufo.auth.token_signing import sign_token
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.runtime.auth.surface_token import mint_surface_token, verify_surface_token
+from ufo.runtime.auth.token_signing import sign_token
 
 
 def test_roundtrip_returns_the_minted_claims(monkeypatch: pytest.MonkeyPatch) -> None:

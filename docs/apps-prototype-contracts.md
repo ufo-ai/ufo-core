@@ -70,7 +70,7 @@ Field name is exactly `generation` everywhere.
 
 ## Contract 3 — direct object writes + journal
 
-**Core** (`core/src/ufo/objects.py`): expose an async function the web surface calls to apply or
+**Core** (`core/src/ufo/runtime/objects.py`): expose an async function the web surface calls to apply or
 delete an object under a member's authority WITHOUT a turn — the object verb path constructs a
 tool context whose speaker/acting-member is the passed member id. Signature (lock the names):
 
@@ -131,7 +131,7 @@ Apps and their pages (prototype):
 
 | Workstream | Owns (only) | Implements |
 |---|---|---|
-| WS-Writes | `core/src/ufo/objects.py`, a core migration, `extensions/web/ufo_ext_web/surface.py` | Contract 3 (journal + `write_object` + endpoints) AND Contract 2's `generation` field in the homepage read |
+| WS-Writes | `core/src/ufo/runtime/objects.py`, a core migration, `extensions/web/ufo_ext_web/surface.py` | Contract 3 (journal + `write_object` + endpoints) AND Contract 2's `generation` field in the homepage read |
 | WS-Sites | `extensions/sites/ufo_ext_sites/` | Contract 2's `hosted_site.generation` column + register bump + migration |
 | WS-Frontend | `extensions/web/frontend/` | Contract 1 (the bridge module, the kit's transport, and the AgentPane wiring) + Contract 2's iframe remount + flyout showing apps + vitest |
 | WS-Apps | `extensions/app_*/` (not pyproject) | Contract 4 (4 new app extensions + homepage skills + the app_chat page) |
@@ -159,7 +159,7 @@ that the contracts above do NOT reflect (the code is authoritative):
 | C4 radar "Rebuild → write/intent" | the page's rebuild control posts **the intents lane's fenced verb** (`RebuildDialog`, `verb="rebuild_reports"`), never an object write | a rebuild is a tool act, so it rides the lane that carries tool acts; the fence admits only the verbs the shipped pages carry as controls |
 | C4 skill assets under `assets/` | the page at the **skill folder root** (`$UFO_HOME/skills/app-<slug>-home/app.tsx`) | the loader treats every non-`SKILL.md` file as an asset, and a flat path is the one both the build and the editing agent name |
 | C1 `ready` once | client **retries `ready`** (≤30×, 100ms) until `init`, then stops | the shell attaches its listener after mount; a single `ready` races and is lost |
-| local carrier `dial` raised | returns `DialTarget("127.0.0.1:<port>", tls=False)` (`core/src/ufo/sandbox/local.py:267`) | local sandboxes are host subprocesses sharing the host network, so an in-sandbox port is a loopback port; cost: one port namespace for every conversation — the newest deploy's server owns a contended port |
+| local carrier `dial` raised | returns `DialTarget("127.0.0.1:<port>", tls=False)` (`core/src/ufo/harness/sandbox/local.py:267`) | local sandboxes are host subprocesses sharing the host network, so an in-sandbox port is a loopback port; cost: one port namespace for every conversation — the newest deploy's server owns a contended port |
 | ingress base https-only | `http://localhost[:port]` admitted, that host alone (`core/src/ufo/config.py:224`); `ufoctl init` writes `ingress_public_url = "http://localhost:8100"` (`core/src/ufo/cli.py:88`) | a zero-services dev run serves sites with no certificate; every other host still requires https |
 | ingress cookie always `Secure` | `Secure` follows the configured base scheme — `IngressServe.cookie_secure` (`core/src/ufo/ingress_serve.py:207,740`), `set_session_cookie(secure=...)` (`core/src/ufo/sdk/http.py:29`) | browsers refuse to store a `Secure` cookie set by an http `*.localhost` origin, so every local site visit 403'd "needs a fresh link" |
 
@@ -228,7 +228,7 @@ Where the build diverged from the intended design (the code is authoritative):
 
 | Design | As built | Why |
 |---|---|---|
-| the extension mints the shipped ingress token | the **producer lives in core**: `SurfaceContext.ingress_url` gains `shipped_slug`/`shipped_digest` | the SDK gate (`gates.py`) forbids an extension importing `ufo.sandbox.ingress_token`, so the token can only be minted through a core surface. `WorkspaceAgent.provisioned_by` identifies the app extension |
+| the extension mints the shipped ingress token | the **producer lives in core**: `SurfaceContext.ingress_url` gains `shipped_slug`/`shipped_digest` | the SDK gate (`gates.py`) forbids an extension importing `ufo.harness.sandbox.ingress_token`, so the token can only be minted through a core surface. `WorkspaceAgent.provisioned_by` identifies the app extension |
 | shipped url resolves direct-to-ingress | the homepage read hands a **portal embed link** (`shipped_homepage_url` → a `SURFACE_SITES` token carrying `{ws, slug, digest, portal_embed}`); the sites surface uses it without a viewer or agent read to mint the shipped-claim ingress URL | the stable sites link refreshes the 900s routing token per visit; the digest becomes the document's cache key, the versioned document and hashed assets are public immutable code, and ingress `frame-ancestors` admits only the portal and the workspace's app origins |
 | a `current` pointer file names the live tree | **no pointer** — the digest travels in the frame token, and the fleet keys are the whole record | a pointer with no reader is a declared surface with one end; the digest a page's link carries is what says which tree serves it |
 | fork = anchor-continuity upsert; reset = delete row | `deploy_website` builds and persists the page's source, `set_homepage` binds it, and `object_get` materialises that source for another edit; object-`delete` unhosts the row back to the built page | the standing tools own the fork and reset; a first fork uses its deploying conversation's origin |

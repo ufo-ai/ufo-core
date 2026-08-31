@@ -53,15 +53,15 @@ copies. Nothing records what a task must be true for, and nothing can contradict
 it finished.
 
 **The doctrine is customer-facing and reaches one agent.**
-`core/src/ufo/loop/prompts/shell.md:67` carries the portfolio rules in full. `SHELL` renders into the
-main agent's prompt alone (`core/src/ufo/loop/prompts/render.py:34`); a subagent is built from
-`subagent_shell.md` (`core/src/ufo/loop/subagents.py:62-67`), which carries none of it.
+`core/src/ufo/runtime/prompts/shell.md:67` carries the portfolio rules in full. `SHELL` renders into the
+main agent's prompt alone (`core/src/ufo/runtime/prompts/render.py:34`); a subagent is built from
+`subagent_shell.md` (`core/src/ufo/runtime/subagents.py:62-67`), which carries none of it.
 
 **Workers share files and nothing else.** `spawn_subagent`
-(`core/src/ufo/tools/builtins.py:600`) mints the child a fresh conversation
-(`core/src/ufo/loop/subagents.py:163-170`) while inheriting the parent's sandbox
+(`core/src/ufo/host/tools/builtins.py:600`) mints the child a fresh conversation
+(`core/src/ufo/runtime/subagents.py:163-170`) while inheriting the parent's sandbox
 (`subagents.py:370`), so `/workspace` is the only shared channel — untyped bytes, no ids
-(`core/src/ufo/skills/delegation/SKILL.md:14-23`).
+(`core/src/ufo/runtime/skills/delegation/SKILL.md:14-23`).
 
 **Nothing says whether a unit is converging.** A worker can iterate indefinitely with no reading of
 whether the work is closing. The one loop in this repository that has such a reading —
@@ -89,13 +89,13 @@ starting point should treat it as an unfinished sketch, not a specification.
 One extension, `deep_work`, replacing `todos`, with tables of its own through its own migration —
 the pattern `memory_item` establishes (`spec.md:62`) and
 `extensions/sample/migrations/0001_sample_ext_note.py` shows, reached through
-`ExtensionContext.transaction()` (`core/src/ufo/ext/context.py:649`).
+`ExtensionContext.transaction()` (`core/src/ufo/runtime/ext/context.py:649`).
 
 ### The record
 
 Every table carries `workspace_id`: `bootstrap_policies` raises on a public table without one
 (`servers/control/src/ufo_control/rls.py:187-191`), and `transaction()` enforces no scoping of its own
-(`core/src/ufo/ext/context.py:655`), so the column is both the RLS requirement and the tenant fence.
+(`core/src/ufo/runtime/ext/context.py:655`), so the column is both the RLS requirement and the tenant fence.
 
 | Table | Columns |
 |---|---|
@@ -159,7 +159,7 @@ anything. Anything with a dependent takes one of the three forms above, whatever
 
 **Nothing wedges.** If no second actor is available, the task takes a `blocked` event whose evidence
 is the open question, and the parent escalates with `ask_user` — a subagent cannot ask
-(`core/src/ufo/loop/profiles.py:5-8`). A task never waits forever on a confirmer that cannot exist.
+(`core/src/ufo/runtime/profiles.py:5-8`). A task never waits forever on a confirmer that cannot exist.
 
 Confirmation is an act, not a task: it takes no row in `deep_work_task` and nothing confirms a
 confirmation.
@@ -183,8 +183,8 @@ of it — which is why neither exists here.
 
 ### Tools
 
-Each declares `subagent_default=True` (`core/src/ufo/tools/registry.py:39`) — the flag
-`core/src/ufo/loop/queue.py:288` filters on, without which a child holds none of them.
+Each declares `subagent_default=True` (`core/src/ufo/runtime/tools/registry.py:39`) — the flag
+`core/src/ufo/runtime/queue.py:288` filters on, without which a child holds none of them.
 
 | Tool | Does |
 |---|---|
@@ -301,7 +301,7 @@ fields. Delegation was undiscoverable and is not any more.
 ## Doctrine fit
 
 **Not core** — `tools`, `skills`, `prompt_sections`, and a migration shipping inside the extension
-package (the loader finds `migrations/` by convention, `core/src/ufo/ext/loader.py:88`; it is not a `Manifest`
+package (the loader finds `migrations/` by convention, `core/src/ufo/host/ext/loader.py:88`; it is not a `Manifest`
 field).
 
 **Both ends.** `unit`/`title` → the projection; `accepts` → the closure evaluation and the unmet-condition list;

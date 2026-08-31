@@ -25,7 +25,7 @@ ours end to end: `ClaimWorkflow` mints `secrets.randbelow(10**6)` (`gateway_clai
 only the sha256 (`:27`), caps attempts at 5 (`:18`) under an optimistic-concurrency CAS, and
 `SesEmailSender` delivers it over a hand-rolled SigV4 signer (`gateway_email.py:184`). A verified
 claim resolves a workspace (`gateway_shared.py`), passes the invite gate (`gateway_invite.py`),
-and mints the 30-day stateless HMAC bearer (`gateway_token.py` → `core/src/ufo/auth/bearer.py:33`)
+and mints the 30-day stateless HMAC bearer (`gateway_token.py` → `core/src/ufo/runtime/auth/bearer.py:33`)
 that is the `ufo_session` cookie, the CLI credential, and the terminal's `Authorization: Bearer`,
 verbatim. Self-hosted deploys have no gateway: `ufoctl init` mints the token directly
 (`core/src/ufo/cli.py:150`).
@@ -124,7 +124,7 @@ on the email step. Because the gateway now owns that step (`Onboarding._collect_
 has one home: a submitted address whose domain has a WorkOS SSO connection redirects to that
 organization's `authorize` with `organization_id` instead of calling Magic Auth, and the callback
 and everything downstream are unchanged. A workspace's domain — today derived as the first member's
-email domain (`core/src/ufo/seats.py:340`) — maps to a WorkOS Organization with a verified domain.
+email domain (`core/src/ufo/runtime/seats.py:340`) — maps to a WorkOS Organization with a verified domain.
 Nothing of it lands now: no discovery call, no `workos_user_id` column, no organization sync — a
 column without a reader fails both-ends — but the email-submit path is structured so the branch
 slots in ahead of the code send.

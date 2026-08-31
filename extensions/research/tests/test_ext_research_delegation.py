@@ -25,16 +25,16 @@ from ufo_ext_research.delegation import (
 )
 
 from ufo.blob import FilesystemBlobStore
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import (
     ExecResult,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
 )
+from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.context import SpawnResult, ToolContext
 
 
 class _Result(BaseModel):

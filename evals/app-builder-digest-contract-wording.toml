@@ -20,7 +20,7 @@ research = { search_provider = "perplexity" }
 name = "digest-contract"
 
 [[arm.replacements]]
-path = "core/src/ufo/skills/create-application/SKILL.md"
+path = "core/src/ufo/runtime/skills/create-application/SKILL.md"
 old = '''On `Change the design`, call the same action once with the same name and application prompt, and put
 the member's requested change in `revision`. One page and at most two wireframes are the whole
 design pass. Create the application with the exact prompt paired with the accepted wireframe. Its

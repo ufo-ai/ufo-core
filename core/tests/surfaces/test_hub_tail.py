@@ -14,12 +14,12 @@ import pytest
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
-from ufo.hub import ArrivalQueued, HubFrame, InProcessHub, LiveFrame, Terminal
-from ufo.models.interface import TextDelta
+from ufo.harness.models.interface import TextDelta
+from ufo.runtime.hub import ArrivalQueued, HubFrame, InProcessHub, LiveFrame, Terminal
+from ufo.runtime.surfaces import hub_tail
+from ufo.runtime.surfaces.hub_tail import tail_frames
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
-from ufo.surfaces import hub_tail
-from ufo.surfaces.hub_tail import tail_frames
 
 
 async def _drain(stream: AsyncIterator[tuple[str, HubFrame]]) -> None:

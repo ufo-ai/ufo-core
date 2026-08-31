@@ -11,7 +11,7 @@ stop.py covers the stop button. It confirms the running turn belongs to the conv
 ### Conversation admission
 Rules for deciding when messages or wake-ups may become durable, queued conversation turns.
 
-### `core/src/ufo/surfaces/admission.py`
+### `core/src/ufo/runtime/surfaces/admission.py`
 
 `domain_logic` · `request handling and background job admission`
 
@@ -169,7 +169,7 @@ async def resume(self, conversation_id: UUID, message: str, *, speaker_member_id
 *Call graph*: 4 external calls (select, workspace_tx, log, ws_current).
 
 
-### `core/src/ufo/turns/ambient_reply.py`
+### `core/src/ufo/runtime/turns/ambient_reply.py`
 
 `domain_logic` · `request handling, before admitting a new chat turn`
 
@@ -255,7 +255,7 @@ def _payload(self, message: AmbientMessage, history: tuple[AmbientMessage, ...])
 ### Turn stopping
 Workflows and shared primitives for safely stopping or cancelling running conversation turns.
 
-### `core/src/ufo/surfaces/stop.py`
+### `core/src/ufo/runtime/surfaces/stop.py`
 
 `orchestration` · `request handling`
 
@@ -284,7 +284,7 @@ async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -
 *Call graph*: 6 external calls (__init__, __init__, __init__, select, workspace_tx, cancel_one_turn).
 
 
-### `core/src/ufo/turns/cancellation.py`
+### `core/src/ufo/runtime/turns/cancellation.py`
 
 `domain_logic` · `during cancellation requests and cancel reconciliation`
 

@@ -16,21 +16,21 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import blob_store_for
 from ufo.config import BlobConfig
 from ufo.db import current_workspace, workspace_tx
-from ufo.ext.loader import load_manifests
-from ufo.ext.manifest import Manifest
-from ufo.ext.surface import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
-from ufo.hub import InProcessHub
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.ingress_host import parse_site_label
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.ingress_host import parse_site_label
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.host.ext.loader import load_manifests
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.ext.surface import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.serve import _mount_shared_surfaces
-from ufo.workspace import ws
 
 PROBE_SURFACE = "probe"
 

@@ -10,9 +10,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.docusign import EPOCH_FROM_DATE, DocuSignConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import SourceAuth, StreamFault, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.sync import SourceAuth, StreamFault, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 BASE_URI = "https://na3.docusign.net"

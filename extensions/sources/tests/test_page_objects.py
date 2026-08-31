@@ -23,12 +23,16 @@ from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import PAGE_BODY_MAX_BYTES, PAGE_KIND, PageObjects, _page_timestamp
 from ufo_ext_sources.registry import CONNECTORS
 
-from ufo.access.credentials import CredentialStore
 from ufo.blob import BlobStore, FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.loader import turn_tools
-from ufo.loop.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.sources.sync import SyncDriver
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.turns.subjects import member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import Audience, conversation_audience, foreign_room_audience, room_audience
@@ -36,10 +40,6 @@ from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.objects import AdminRequired, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult, binding_name
 from ufo.sdk.tools import ToolContext
-from ufo.sources.sync import SyncDriver
-from ufo.tools.registry import ToolDef
-from ufo.turns.subjects import member_subject
-from ufo.workspace import ws
 
 TOOL_NARRATION = "looking through the synced pages"
 

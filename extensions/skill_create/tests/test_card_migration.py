@@ -18,7 +18,7 @@ from pytest import fixture
 from sqlalchemy.engine import make_url
 
 from ufo.db import MIGRATIONS_DIR
-from ufo.ext.loader import migration_locations
+from ufo.host.ext.loader import migration_locations
 
 SKILL_MD = (
     "---\n"

@@ -1,16 +1,17 @@
 ---
 rfc: 0041
-title: "Core in Rust, extensions as components"
+title: "Harness and runtime in Rust, extensions as components"
 status: proposed
 date: 2026-08-23
 ---
 
-# Core in Rust, extensions as components
+# Harness and runtime in Rust, extensions as components
 
-> Port `core/` to Rust. Move every extension to one of two tiers: infrastructure extensions
-> become Rust crates linked into the one `ufoctl` binary; capability extensions become JS/TS
-> WebAssembly components that run under wasmtime. The result is one language across the whole
-> server, a real ABI where live Python objects cross a re-export facade today, and third-party
+> Port `ufo-harness` and `ufo-runtime` to Rust. Move every extension to one of two tiers:
+> infrastructure extensions become Rust crates linked into the one `ufoctl` binary; capability
+> extensions become JS/TS WebAssembly components that run under wasmtime. The result is one
+> language across the whole server, a real ABI where live Python objects cross a re-export facade
+> today, and third-party
 > extensions that are safe to run. **The measured cost is 10–14 months.** Read the Cost section
 > before the rest.
 
@@ -72,7 +73,7 @@ Facts the port builds on, each measured:
   past which the row dead-letters and releases its dedup id — a second release path, and the guard
   that stops the 5-second recovery sweep re-dispatching a crash-looping turn forever.
 - **The packages do not separate.** 25 of core's 35 packages are one 44,142-line strongly
-  connected component on top-level imports. `ufo-engine` and `ufo-serve` are mutually dependent
+  connected component on top-level imports. `ufo-harness` and `ufo-runtime` are mutually dependent
   across 48 and 46 module edges; merged they are 41,989 lines. `db.py:423` and `db.py:316` hide
   cycles behind function-local imports, which Rust cannot express. `ufo-sdk` is today the *top* of
   the stack — a 36,571-line closure with 315 import sites — not the leaf the port needs.
@@ -106,8 +107,10 @@ callers as packages stand.
 | `ufo-access` | `access/` (3,042) — grants, credentials, egress rules and resolver, the egress-control RPC |
 | `ufo-sandbox-host` | `sandbox/` host half, ingress serve, `proxy_serve.py` |
 | `ufo-ext-host` | The wasmtime host: component loading against `ufo.lock` digests, per-dispatch instantiation, epoch deadlines, host functions |
-| `ufo-engine` | `loop/`, `tools/`, `skills/`, `turns/` |
-| `ufo-serve` | `serve.py`, `surfaces/`, `objects.py`, `kinds/`, the `ext/` loader and surface seam, `runtime/`, `onboard/`, `billing/`, the `sources/` sync driver |
+| `ufo-harness` | Product-neutral model streaming, round progression, context-window and compaction decisions, and sandbox execution protocols. No tenant, database, billing, extension-host, or DBOS dependency (RFC 0043). |
+| `ufo-runtime` | DBOS workflow adapters and the durable agent host in Python's `ufo.runtime`. It composes authorized effects from the domain crates and supplies them to `ufo-harness`. |
+| `ufo-onboard` | Workspace onboarding from Python's `ufo.onboard`; separate from agent execution. |
+| `ufo-billing` | Balance, accounting, and spend policy from Python's `ufo.runtime.billing`; separate from agent execution. |
 | `ufoctl` (bin) | `cli.py`. clap verbs over the crates above. The one shipped binary. |
 
 A static extension crate lives where its extension lives today, depends on `ufo-sdk` alone, and
@@ -331,7 +334,7 @@ diff would violate `docs/plan.md` and would answer a question nobody doubts.
 | R0a | ABI world design | RFC amendment only: the `ufo:ext` world drawn against the ~81 measured `ctx.*` entry points; homes for `JobSpec.candidates`, route and surface `identify`, conversation slots, onboarding steps, member skills; tier answers for `connectors`, `sources`, the packs, and the declaration-only eight; the component-SQL mechanism | Every call site in the component-tier sources maps to a named import, a static trait, or a recorded refusal; no `ctx.` verb is unassigned; the Open decisions it settles are struck |
 | R0b | Seam cut | `ufo-foundation`; the ten symbol moves; `ufo-sdk` inverted into a real leaf trait crate, implementations left above the engine | Every crate builds alone; `cargo metadata` is a DAG with `ufo-sdk` a leaf; a crate naming any core crate but `ufo-sdk` fails the gate |
 | R1 | Spine | The `crates/` nested workspace, pinned toolchain, scoped `clippy.toml`; `ufo-config`; `ufo-db` with `encode.rs` | Rust reads and writes a Python-migrated database byte-identically on both dialects; a uuid Rust writes is the 32-char dashless hex SQLAlchemy wrote and a JSON `None` round-trips as literal `null`; Python reads back every row Rust wrote |
-| R2 | Heartbeat | `ufo-blob`; `ufo-durable` replay subset; `ufo-models` Anthropic half; `ufo-engine`'s zero-tool path; `ufo-serve` + the `ufo` surface; the seat and heartbeat halves of `runtime/` | `ufoctl init` in Python, then Rust `serve` on that SQLite file: the unmodified release client streams a real answer and returns to its prompt; the same exchange on Postgres under the non-superuser `ufo_serve` role; Python decodes the `messages.json.lz4` Rust wrote and `ledger_id_for` names its ledger row; a second message admits at seq 2 under the conversation row lock; `kill -9` in a two-process fleet leaves the survivor's sweep re-dispatching with exactly one completion call recorded across both |
+| R2 | Heartbeat | `ufo-blob`; `ufo-durable` replay subset; `ufo-models` Anthropic half; `ufo-harness`'s zero-tool path; `ufo-runtime` + the `ufo` surface; the seat and heartbeat halves of `runtime/` | `ufoctl init` in Python, then Rust `serve` on that SQLite file: the unmodified release client streams a real answer and returns to its prompt; the same exchange on Postgres under the non-superuser `ufo_serve` role; Python decodes the `messages.json.lz4` Rust wrote and `ledger_id_for` names its ledger row; a second message admits at seq 2 under the conversation row lock; `kill -9` in a two-process fleet leaves the survivor's sweep re-dispatching with exactly one completion call recorded across both |
 | R3 | Durable, complete | Partitioned dequeue on both dialects; all three queues; dedup with both release paths; `recovery_attempts`, the cap and the dead-letter terminal; app-version rules; schedules with list and delete; cancel **including the preemptible-step poller**; two list shapes | Two Rust `serve` processes on one `_dbos` store, both dialects: a second workflow on partition A stays enqueued until A's first commits while B's starts at once, and the losing dequeue claims nothing; a fault-killed row keeps its recorded step outputs and the peer's sweep returns it to enqueued with the loopback model's counter showing round one never re-ran; crash-looped past the cap it dead-letters and releases its dedup id; a duplicate id raises typed while the same workflow id re-enqueued is a silent no-op; one fire id collapses two processes' tick; cancelling mid-preemptible-step aborts within the poll interval and commits the terminal |
 | R4 | Model wire | The OpenAI half, the byte-level SSE decoder, a tagged `ModelEvent` encoding, image trimming and budgets, the retry and fault policy, pricing, catalog, a manifest-free registry | A checked-in fixture synthesized from the same vendor objects today's 105 tests build: Python's shipped client and Rust decode it to the same tagged event list, with thinking signature and redacted data verbatim in block order; request bodies compare as parsed JSON trees; each fault shape gives the same prefix, retry count and terminal; one live sample per provider refreshed nightly proves the synthesized shapes and a real signature round-trip |
 | R5 | Credential plane | `access/credentials.py`, workspace scope, `media/`, `runtime/candidates.py`; **Rust Fernet**; the ambient-workspace decision (threaded scope vs task-local) | A Fernet value Python sealed decrypts in Rust and back; a sealed credential request past its ttl is refused by both; an unset slot raises where a set slot resolves; a model call under a Rust workspace scope books its usage to that workspace and none other |
@@ -346,7 +349,7 @@ diff would violate `docs/plan.md` and would answer a question nobody doubts.
 | R14 | Static infra | Carriers, hubs, indexes, embeds, models, cdp, brokers, connectors, memory; the sample split and the two-sided conformance gate | Per-extension suites land. Memory-recall evals hold. |
 | R15 | Components | The component-tier extensions | Each lands with tests. The floor test runs over every installed component. |
 | R16 | Operator surface and schema handover | `ufoctl` verbs, the onboarding RPC, bundle, store installs of `.wasm`; the migration runner, baseline, comparator; per-extension SQL role enforcement | init → serve → portal on SQLite, zero services. A bundle boots. The baseline equals the alembic head on both dialects, and Python stops owning the schema. |
-| R17 | Cutover + tear-out | dev, testing, prod swaps; delete `core/src` **except the permanent Python residue**; the spec.md + AGENTS.md rewrite | Full eval suites at parity or better on Rust before prod. The Python shape greps to zero, save the named residue. |
+| R17 | Cutover + tear-out | dev, testing, prod swaps; delete the ported packages under `core/src/ufo` **except the permanent Python residue**; the spec.md + AGENTS.md rewrite | Full eval suites at parity or better on Rust before prod. The Python shape greps to zero, save the named residue. |
 
 Newly placed prerequisites that previously lived in no unit: `access/`, `sources/`, `billing/`,
 `runtime/` and fourteen smaller modules — about 11,500 lines. The permanent Python residue is

@@ -9,7 +9,7 @@ The tasks file is the safety clerk for shell commands, especially slow ones. Som
 ### Built-in tool execution
 Defines the agent-facing built-in tools and the task-journal support that keeps long-running shell commands safe across retries.
 
-### `core/src/ufo/tools/builtins.py`
+### `core/src/ufo/host/tools/builtins.py`
 
 `domain_logic` · `request handling`
 
@@ -398,7 +398,7 @@ async def message_spawn_handler(ctx: ToolContext, args: MessageSpawnInput) -> To
 *Call graph*: 4 external calls (__init__, __init__, dumps, UUID).
 
 
-### `core/src/ufo/tools/tasks.py`
+### `core/src/ufo/runtime/tools/tasks.py`
 
 `domain_logic` · `tool execution and timeout handling`
 

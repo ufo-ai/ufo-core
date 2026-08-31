@@ -20,7 +20,7 @@ The sandbox and browser contracts define the exact messages used to request tool
 ### Shared service contracts
 Provider-facing interfaces define how memory, model, and search implementations plug into the core system.
 
-### `core/src/ufo/memory.py`
+### `core/src/ufo/runtime/memory.py`
 
 `data_model` · `cross-cutting memory recall and browsing`
 
@@ -112,7 +112,7 @@ def listable_kinds(self) -> tuple[str, ...]
 **Call relations**: This is the wrapper side of the listable-kinds flow. Consumers call it on `MemorySearch`, and it delegates directly to `MemorySearchProvider.listable_kinds` so the answer comes from the active provider.
 
 
-### `core/src/ufo/models/interface.py`
+### `core/src/ufo/harness/models/interface.py`
 
 `data_model` · `request preparation and model streaming`
 
@@ -227,7 +227,7 @@ def _trim_message(message_index: int, message: Message, drop: set[tuple[int, int
 *Call graph*: called by 2 (omit_images, trim_images); 2 external calls (__init__, model_copy).
 
 
-### `core/src/ufo/search.py`
+### `core/src/ufo/runtime/search.py`
 
 `data_model` · `startup and request handling`
 
@@ -281,7 +281,7 @@ async def fetch(self, request: FetchRequest) -> FetchedPage
 ### Object identity
 Common object naming rules provide stable references that other contracts can safely share.
 
-### `core/src/ufo/object_name.py`
+### `core/src/ufo/runtime/object_name.py`
 
 `data_model` · `cross-cutting`
 
@@ -352,7 +352,7 @@ def __str__(self) -> str
 ### Subagent contracts
 Spawned-agent input and output schemas define the validated data boundary for delegated work.
 
-### `core/src/ufo/turns/contracts.py`
+### `core/src/ufo/runtime/turns/contracts.py`
 
 `domain_logic` · `spawn, dispatch, delivery, and schema write-time validation`
 

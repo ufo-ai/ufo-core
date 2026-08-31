@@ -21,7 +21,7 @@ from evals.suites.ufo_app_qa_replay import (
     _prepare_kit,
     _repair_followup,
 )
-from ufo.sandbox.session import SANDBOX_GID, SANDBOX_UID
+from ufo.harness.sandbox.session import SANDBOX_GID, SANDBOX_UID
 
 pytestmark = pytest.mark.docker
 

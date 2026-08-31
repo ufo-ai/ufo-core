@@ -20,7 +20,7 @@ research = { search_provider = "perplexity" }
 name = "no-skill-call"
 
 [[arm.replacements]]
-path = "core/src/ufo/skills/create-application/SKILL.md"
+path = "core/src/ufo/runtime/skills/create-application/SKILL.md"
 old = '''Finish the name and complete application prompt,
 then call the `site` collection's `design_ufo_application` action with that exact `application_name` and
 `application_prompt`. Omit `revision` on the first call.'''

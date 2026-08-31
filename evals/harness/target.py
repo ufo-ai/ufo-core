@@ -43,7 +43,16 @@ from evals.harness.judge import JudgeLeg
 from evals.harness.timing import CaseTiming, TurnSteps, TurnTiming, case_timing, turn_timing
 from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ConversationProbes
+from ufo.runtime.ext.context import ConversationProbes
+from ufo.runtime.tools.registry import OBJECT_ACTION_TOOL
+from ufo.runtime.turns.transcript import (
+    CompactionRecord,
+    TranscriptDecodeError,
+    decode,
+    read_compaction_records,
+    transcript_key,
+)
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     DELIVERY_PENDING,
@@ -63,15 +72,6 @@ from ufo.sdk.models import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.tools.registry import OBJECT_ACTION_TOOL
-from ufo.turns.transcript import (
-    CompactionRecord,
-    TranscriptDecodeError,
-    decode,
-    read_compaction_records,
-    transcript_key,
-)
-from ufo.workspace import ws_current
 
 if TYPE_CHECKING:
     from evals.compaction.target import CompactionTarget

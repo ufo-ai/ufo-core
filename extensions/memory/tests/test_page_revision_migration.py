@@ -20,9 +20,9 @@ from ufo_ext_memory.store import (
 )
 
 from ufo.db import MIGRATIONS_DIR, dispose_db, init_db, workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.loader import migration_locations
-from ufo.workspace import ws
+from ufo.host.ext.loader import migration_locations
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.workspace import ws
 
 DERIVED_BODY = "the acme renewal closes on september 30"
 MANUAL_BODY = "the office wifi password rotates monthly"

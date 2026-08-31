@@ -47,10 +47,13 @@ from evals.suites.onboarding_help import (
     slack_rotated_secret_scorer,
     slack_setup_scorer,
 )
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.loader import load_manifests, skill_registry
+from ufo.host.ext.loader import load_manifests, skill_registry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.turns.activity import SKILL_LOAD_TOOL
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.sdk.context import (
     CredentialAccess,
@@ -58,9 +61,6 @@ from ufo.sdk.context import (
     ScopedStore,
     SurfaceInstallationAccess,
 )
-from ufo.tools.context import ToolContext
-from ufo.turns.activity import SKILL_LOAD_TOOL
-from ufo.workspace import init_workspace_credentials, ws
 
 GETTING_STARTED = "getting-started.md"
 BILLING = "billing-and-seats.md"

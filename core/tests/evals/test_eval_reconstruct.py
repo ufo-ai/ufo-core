@@ -15,16 +15,16 @@ from evals.harness.viewer import EvalRun, load_runs
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import Message, ToolResultBlock, ToolUseBlock
-from ufo.schema import tables
-from ufo.turns.transcript import (
+from ufo.harness.models.interface import Message, ToolResultBlock, ToolUseBlock
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
     Conversation,
     compaction_key,
 )
-from ufo.workspace import ws
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
 
 MODEL = "claude-opus-4-8"
 CASE_NAME = "hle_gold.sandbox_compute.abc123"

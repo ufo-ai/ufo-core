@@ -6,11 +6,11 @@ import pytest
 import ufo_ext_bedrock as bedrock
 
 from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.models.anthropic import AnthropicClient
-from ufo.models.openai import OpenAIClient
-from ufo.models.registry import model_registry
+from ufo.harness.models.anthropic import AnthropicClient
+from ufo.harness.models.openai import OpenAIClient
+from ufo.harness.models.registry import model_registry
+from ufo.runtime.workspace import ws
 from ufo.sdk.credentials import CredentialValueInvalid
-from ufo.workspace import ws
 
 
 def _spec(model_id: str) -> bedrock.ModelSpec:

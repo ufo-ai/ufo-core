@@ -49,7 +49,7 @@ from evals.harness.capability import (
     UndeliveredRound,
 )
 from evals.harness.scorers import attempted_tools_scorer, combine
-from ufo.kinds.surface_kind import SURFACE_KIND
+from ufo.runtime.kinds.surface_kind import SURFACE_KIND
 from ufo.sdk.tools import ToolDef
 
 OBJECT_ACTION = "object_action"

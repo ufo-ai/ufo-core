@@ -12,8 +12,8 @@ from evals.harness.harness import EvalCaseResult, EvalReport, JsonObject, digest
 from evals.harness.judge import JudgeLeg
 from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import CapabilityTarget
-from ufo.models.interface import ModelRequest, ToolUseBlock
-from ufo.turns.activity import ActivitySummarizer
+from ufo.harness.models.interface import ModelRequest, ToolUseBlock
+from ufo.runtime.turns.activity import ActivitySummarizer
 
 ACTIVITY_MODEL = "gpt-5.6-luna"
 ACTIVITY_REVISION = "2026-08-26-goal-scoped-tool-step"

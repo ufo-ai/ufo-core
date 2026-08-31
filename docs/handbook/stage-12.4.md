@@ -455,7 +455,7 @@ def viewport_to_model(coord: Coord, viewport: Size, model_size: Size | None=None
 ### Rendered content capture
 Documents and live browser tabs are transformed into safe, readable content for model consumption.
 
-### `core/src/ufo/media/document_renderer.py`
+### `core/src/ufo/runtime/media/document_renderer.py`
 
 `io_transport` · `request handling`
 

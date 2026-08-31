@@ -15,7 +15,7 @@ Stable SDK doorways for authentication, identity, credentials, grants, HTTP rout
 
 This file exists to make authentication extension points easier and safer to use. In this project, a feed-sync connector sometimes needs a credential, such as a token or account secret, before it can talk to an outside provider. An extension can provide an “auth proxy,” meaning a small backend whose job is to turn a source’s stored account choice into the actual credential the connector should use.
 
-The file does not implement that process itself. Instead, it publicly re-exports the important names from their internal homes: `AuthProxy`, `Credential`, and `DIRECT_ACCOUNT` from `ufo.access.connectors`, plus `AuthProxySpec` from `ufo.ext.manifest`. Re-exporting means this module acts like a shop window: outsiders can take the approved items from here without walking through the warehouse behind it.
+The file does not implement that process itself. Instead, it publicly re-exports the important names from their internal homes: `AuthProxy`, `Credential`, and `DIRECT_ACCOUNT` from `ufo.runtime.access.connectors`, plus `AuthProxySpec` from `ufo.runtime.ext.manifest`. Re-exporting means this module acts like a shop window: outsiders can take the approved items from here without walking through the warehouse behind it.
 
 The docstring explains the intended flow. An extension declares an `AuthProxySpec`, gives its backend a name, and implements `AuthProxy`. If there is only one backend, it is chosen automatically. If there are several, configuration chooses one through `config.connectors.auth_backend`. Sources marked with `DIRECT_ACCOUNT` use the selected backend directly. Sources connected through a broker get their credential from that broker instead.
 
@@ -41,7 +41,7 @@ What matters is the separation. Extensions depend on this SDK-facing file, not o
 
 This file does not define new behavior. Its job is to make the connector system easier and safer to use from outside the core codebase. A connector is an add-on that lets the system talk to an outside brokered service, such as a search provider, file provider, or tool provider. OAuth is the common web sign-in flow where a user grants access without sharing their password.
 
-The concrete code lives deeper inside the project, mainly in `ufo.access.connectors` and `ufo.access.grants`. This file re-exports the important public names from those modules. In everyday terms, it works like a reception desk: instead of sending every visitor through the building to find the right office, it gives them the approved public forms and contacts in one place.
+The concrete code lives deeper inside the project, mainly in `ufo.runtime.access.connectors` and `ufo.runtime.access.grants`. This file re-exports the important public names from those modules. In everyday terms, it works like a reception desk: instead of sending every visitor through the building to find the right office, it gives them the approved public forms and contacts in one place.
 
 That matters because extensions need a stable contract. They can build a `ConnectorProvider`-style integration using the broker interfaces, OAuth provider interfaces, registry types, catalog entries, request forwarding pieces, and stale-grant guidance exposed here. Meanwhile, the core system can keep its internal layout flexible. If outside code imported directly from internal modules, future refactors could break extensions more easily.
 
@@ -56,7 +56,7 @@ This file does not define new behavior of its own. Instead, it acts like a front
 
 The re-exported items describe and provide access to things an extension may need while it is running: the current agent identity, conversation facts, page and source records, model and credential access, scoped storage, trajectory information, and references to agent or proposal changes. A “scoped” context means information is limited to the current agent, conversation, request, or workspace rather than being global everywhere.
 
-This matters because internal project structure can change over time. Without a file like this, extension authors would have to import directly from many lower-level modules such as `ufo.ext.context`, `ufo.agent_scope`, or `ufo.schema.records`. That would make extensions more fragile. By re-exporting the public pieces here, the project gives outside users a clearer and more stable import path.
+This matters because internal project structure can change over time. Without a file like this, extension authors would have to import directly from many lower-level modules such as `ufo.runtime.ext.context`, `ufo.runtime.agent_scope`, or `ufo.schema.records`. That would make extensions more fragile. By re-exporting the public pieces here, the project gives outside users a clearer and more stable import path.
 
 There is one important behavior to notice: each import uses `as` with the same name. That is not changing the value; it is making the re-export explicit for type checkers and documentation tools, so these names are clearly part of this module’s public surface.
 
@@ -67,7 +67,7 @@ There is one important behavior to notice: each import uses `as` with the same n
 
 This file does not create new credential behavior itself. Its job is to make a safe, stable public surface for extensions. Instead of asking extension authors to import from deeper internal modules, it re-exports the credential objects, errors, and helper functions they are allowed to touch.
 
-Think of it like a reception desk in a large office building. The real work happens in offices deeper inside, but visitors are directed to one clear desk where the approved forms and contacts are available. Here, the deeper office is `ufo.access.credentials`, and this SDK file is the public desk.
+Think of it like a reception desk in a large office building. The real work happens in offices deeper inside, but visitors are directed to one clear desk where the approved forms and contacts are available. Here, the deeper office is `ufo.runtime.access.credentials`, and this SDK file is the public desk.
 
 The names it exposes include error types for failed or invalid credential operations, a credential store abstraction, and helper values or functions related to deployment environments, installation access, workspace authorization, and credential object naming. The repeated `as same_name` imports make the re-export explicit: these names are intentionally part of this module’s public contract.
 
@@ -78,7 +78,7 @@ Without this file, extension authors would need to depend directly on internal p
 
 `io_transport` · `cross-cutting`
 
-This module is like a clearly marked service counter in front of a back office. The real work for tracking connection permissions and grant summaries lives in `ufo.access.grants`, but outside code should not need to know that internal path. Instead, this file exposes the approved public names through `ufo.sdk.grants`.
+This module is like a clearly marked service counter in front of a back office. The real work for tracking connection permissions and grant summaries lives in `ufo.runtime.access.grants`, but outside code should not need to know that internal path. Instead, this file exposes the approved public names through `ufo.sdk.grants`.
 
 That matters because extensions need a safe way to inspect things such as which connections were recorded, which permissions were denied, and how grants can be summarized. If every extension imported directly from the internal package, the project would be harder to reorganize later without breaking users. By re-exporting only selected classes and functions here, the project creates a small public contract: these are the grant-related tools extension code is meant to use.
 
@@ -149,7 +149,7 @@ This file does not create new behavior. Its job is to make the project easier an
 
 Think of it like a hotel front desk. The rooms and staff are elsewhere in the building, but guests should go to one clear place for help. In the same way, this file re-exports selected names from internal modules under a public, stable address.
 
-That matters because internal code can move around over time. If every extension imported directly from `ufo.ext.manifest`, `ufo.media.image_previews`, or other internal locations, a harmless cleanup could break outside users. By routing imports through this file, the project can keep a cleaner boundary: extension authors use the SDK path, while maintainers can reorganize internals more freely.
+That matters because internal code can move around over time. If every extension imported directly from `ufo.runtime.ext.manifest`, `ufo.runtime.media.image_previews`, or other internal locations, a harmless cleanup could break outside users. By routing imports through this file, the project can keep a cleaner boundary: extension authors use the SDK path, while maintainers can reorganize internals more freely.
 
 The repeated `as Name` imports are intentional. They make the public exported names explicit and clear to readers and tools. There are no functions here because the file is a catalog, not a machine that performs work.
 
@@ -158,7 +158,7 @@ The repeated `as Name` imports are intentional. They make the public exported na
 
 `other` · `import time / cross-cutting public API`
 
-This module is like a clearly labeled front desk for the skill system. The real skill logic lives in internal packages such as `ufo.skills.runtime` and `ufo.skills.selection`, but callers using the public `ufo.sdk` interface should not need to know that internal layout. Instead, they can import skill-related pieces from `ufo.sdk.skills`.
+This module is like a clearly labeled front desk for the skill system. The real skill logic lives in internal packages such as `ufo.runtime.skills.runtime` and `ufo.runtime.skills.selection`, but callers using the public `ufo.sdk` interface should not need to know that internal layout. Instead, they can import skill-related pieces from `ufo.sdk.skills`.
 
 It exposes the main value objects used to describe skills, such as `RuntimeSkill` and `SkillCard`. It also exposes `parse_skill_content`, which turns in-memory skill text into structured skill data, and `skill_root`, which points to the root location used for skills. From the selection side, it exposes `SKILL_LINE_MAX_CHARS`, a limit used when reading or scoring skill text, and `lexical_score`, a simple text-matching scorer used when ranking skill search results.
 
@@ -187,7 +187,7 @@ SDK import points for indexing, memory search, model clients, and general search
 
 This file exists to give extension authors a stable, simple place to import the pieces needed to build an index backend. An index backend is the part of the system that stores searchable chunks of text and later finds matching chunks, using ordinary keyword-style search, vector search, or both. A vector is a list of numbers that represents the meaning of text, so similar ideas can be found even when the words are different.
 
-The file does not define new behavior itself. Instead, it re-exports selected names from `ufo.indexing`. This is like a reception desk: outsiders come here for the approved forms and tools, while the internal office layout can change behind the scenes.
+The file does not define new behavior itself. Instead, it re-exports selected names from `ufo.runtime.indexing`. This is like a reception desk: outsiders come here for the approved forms and tools, while the internal office layout can change behind the scenes.
 
 The exported pieces include the main shapes used for indexing, such as `Chunk` for text pieces, `Hit` for search results, `IndexScope` for deciding what to delete or limit, and `IndexBackend` for the backend interface an extension must implement. It also exposes `EmbedClient`, the interface for turning batches of text into vectors, plus `TextChunker` and `chunk_embed_upsert`, which help split text, embed it, and store it.
 
@@ -198,7 +198,7 @@ Without this file, extension code would have to depend directly on internal modu
 
 `data_model` · `cross-cutting`
 
-This file is like a front desk for memory-search features. The real definitions live elsewhere, in `ufo.memory`, but outside code should not need to know that internal location. Instead, provider extensions can import from this SDK file, which is meant to be the public, supported doorway.
+This file is like a front desk for memory-search features. The real definitions live elsewhere, in `ufo.runtime.memory`, but outside code should not need to know that internal location. Instead, provider extensions can import from this SDK file, which is meant to be the public, supported doorway.
 
 It exposes three things: `MemorySearchProvider`, which describes the shape of a component that can search memory; `MemoryMatch`, which represents one search result; and `DEFAULT_MEMORY_SEARCH_PROVIDER`, which names the built-in default provider. By re-exporting them here, the project can keep a cleaner boundary between internal code and extension-facing code.
 
@@ -222,7 +222,7 @@ In short, this is an SDK seam. It keeps extension code cleaner, gives the projec
 
 `other` · `cross-cutting`
 
-This file is a small public bridge for the search system. In this project, an extension can provide a search backend: a piece of code that receives a search request and returns search results, and sometimes can also fetch a full page afterward. The actual definitions live in `ufo.search`, but this file re-exports them through `ufo.sdk.search`, which is the safer public path for outside code to use.
+This file is a small public bridge for the search system. In this project, an extension can provide a search backend: a piece of code that receives a search request and returns search results, and sometimes can also fetch a full page afterward. The actual definitions live in `ufo.runtime.search`, but this file re-exports them through `ufo.sdk.search`, which is the safer public path for outside code to use.
 
 Think of it like a reception desk. The real offices are elsewhere, but visitors are told to come through one clear entrance. That matters because the project can reorganize its internal modules later while keeping this public import path the same.
 
@@ -247,7 +247,7 @@ Without this file, extension authors would need to import from many lower-level 
 
 `util` · `cross-cutting: used when extensions are imported and when source backends are built`
 
-This file does not implement source syncing itself. Instead, it acts like a clearly labeled toolbox shelf for extension developers. Rather than asking an extension to import pieces from many internal modules, it re-exports the approved building blocks from `ufo.sources` under the SDK path `ufo.sdk.sources`.
+This file does not implement source syncing itself. Instead, it acts like a clearly labeled toolbox shelf for extension developers. Rather than asking an extension to import pieces from many internal modules, it re-exports the approved building blocks from `ufo.runtime.sources` under the SDK path `ufo.sdk.sources`.
 
 The main idea is that an extension can provide a `SourceBackend`, which knows how to fetch records from an outside provider and turn them into `Page` documents. Core can then poll that source, store the fetched pages in memory, and decide what changed. The file also exposes the result and error shapes that let a backend explain what happened: a full snapshot, an incremental update, deleted pages, an expired cursor, a skipped stream, or a provider response that could not be understood.
 

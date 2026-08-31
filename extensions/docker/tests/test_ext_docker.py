@@ -19,8 +19,9 @@ from ufo_ext_docker import DockerCarrier
 
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import workspace_tx
-from ufo.sandbox.conversation import ConversationSandbox
-from ufo.sandbox.select import select_carrier
+from ufo.harness.sandbox.conversation import ConversationSandbox
+from ufo.harness.sandbox.select import select_carrier
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.sandbox import (
     NO_PROXY_HOSTS,
@@ -33,7 +34,6 @@ from ufo.sdk.sandbox import (
     SandboxSpec,
     sandbox_runtime_root,
 )
-from ufo.workspace import ws
 
 
 async def test_running_id_raises_on_docker_ps_failure_instead_of_reporting_not_running(

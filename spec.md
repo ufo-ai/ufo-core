@@ -1,9 +1,10 @@
 # Ufo Spec
 
-Ufo is an agent runtime a developer can run, read, and extend: a hard-to-vary **core**
-(sandboxed agent loop, memory, surfaces, accounting, model abstraction, the extension system) plus
-**extensions** through which nearly every easy-to-vary capability is built — connectors, data
-sources, tools, subagents, onboarding. A **workspace** hosts one team and its agents.
+Ufo is a tenant runtime a developer can run, read, and extend. It composes the product-neutral
+**`ufo.harness`** agent executor with workspace identity, durable scheduling, authorization,
+accounting, surfaces, and an **extension** system through which nearly every easy-to-vary
+capability is built — connectors, data sources, tools, subagents, onboarding. A **workspace** hosts
+one team and its agents.
 Agents accumulate capabilities through **grants made in chat** — never borrowed from whoever is
 speaking.
 
@@ -13,29 +14,80 @@ Long-term product principles (the destination all design serves):
 
 1. Multiplayer / permissioned.
 2. Open source / on-prem / hosted.
-3. Agents build with real infrastructure (Kubernetes is the enterprise upgrade, wrapping this core).
+3. Agents build with real infrastructure (Kubernetes is the enterprise upgrade, wrapping this runtime).
 4. Agents are granted access via connectors through chat — never via caller identity.
 
-Core doctrine: **if a capability can be an extension, it is not core.** Core earns a module only
-when extensions cannot express it: the loop, the sandbox, persistence, surfaces, accounting, model
-access, and the extension system itself. The example-extension list at the bottom is the acceptance
-test for the extension API — every entry must be expressible without touching core.
+Runtime doctrine: **if a capability can be an extension, it is not runtime.** The harness contains
+only product-neutral execution. The runtime earns a module only when an extension cannot express
+it: tenant identity and authorization, durable persistence, surfaces, accounting, extension
+hosting, and the adapters that bind those concerns to the harness. The example-extension list at
+the bottom is the acceptance test for the extension API — every entry must be expressible without
+touching runtime internals.
 
 ## Fixed decisions
 
 | Decision | Value |
 |---|---|
-| Language | Python 3.12+, uv. Monorepo: `core/` + `extensions/*` + `packs/*` + the top-level `evals/` operator package, built and shipped as one pip-installable distribution (`ufo`). `pip install ufo` brings core and evals directly; first-party extensions and packs register through entry points. Rust was considered and rejected for core: the salvage is Python, DBOS has no Rust SDK, the loop is I/O-bound, and extensions must be writable by users and agents in the AI ecosystem's default language. The one hot data plane, the egress proxy, is a standalone Rust service (`ufo-egress`, RFC 0035) that resolves policy and keys through core over an internal RPC — the data plane in Rust, the control plane in Python — without changing this. File rasterization and hosted-site capture are the second such service (`ufo-preview`, RFC 0037): LibreOffice, pdfium, ffmpeg, and Chromium behind one HTTP verb, no storage credentials, no state. Share and hosted-read bytes go directly from sandbox or object store to the service; hosted sites arrive through a core-minted ingress view and leave through a preview-key PUT; a connected terminal, which cannot resolve the synthetic service host, relays one contained and bounded document through the deploy. |
+| Language | Python 3.12+, uv. One `ufo` distribution contains the source packages under `core/src/ufo`: `harness` owns agent execution, `runtime` owns the durable tenant host and the platform contracts — access, billing, identity, turns, surfaces, the extension API, tools, prompts, skills — and `host` provides the environment from above: extension discovery, builtin tools, the injected per-turn binding, the dev host. Onboarding, the SDK, and shared persistence remain siblings. `extensions/*`, `packs/*`, and the top-level `evals/` operator package compose around them; first-party extensions and packs register through entry points. Rust was considered and rejected for the active runtime: the salvage is Python, DBOS has no Rust SDK, the loop is I/O-bound, and extensions must be writable by users and agents in the AI ecosystem's default language. RFC 0041 specifies a whole-runtime Rust port against the same harness/runtime boundary. The existing Rust `ufo-control` service is the hosted identity and onboarding gateway, never the tenant runtime (RFC 0036). The one hot data plane, the egress proxy, is a standalone Rust service (`ufo-egress`, RFC 0035) that resolves policy and keys through the runtime over an internal RPC. File rasterization and hosted-site capture are the second such service (`ufo-preview`, RFC 0037): LibreOffice, pdfium, ffmpeg, and Chromium behind one HTTP verb, no storage credentials, no state. Share and hosted-read bytes go directly from sandbox or object store to the service; hosted sites arrive through a runtime-minted ingress view and leave through a preview-key PUT; a connected terminal, which cannot resolve the synthetic service host, relays one contained and bounded document through the deploy. |
 | Persistence | One async-SQLAlchemy schema over **SQLite by default** (aiosqlite, WAL — zero services for dev) and **Postgres for deploys** (asyncpg); alembic migrations are the single schema source, dialect-neutral (integers for money/tokens; dialect-only types live inside IndexBackend impls). Plus a pluggable blob store (transcripts, compaction records, sandbox workspaces, shared artifacts): **local filesystem by default**, S3-compatible for deploys — the S3 API is the cloud-portability seam. Every row carries `workspace_id`; one shared fleet serves every workspace, scoping each request and turn to its `workspace_id` under row-level security. Blob keys are workspace-relative: the store prepends `workspaces/<id>/` from the ambient `ws(...)` scope (RFC 0032), and deploy-owned data (`static/`, `term/`) rides a fleet store whose namespace is closed. |
 | Durable execution | DBOS on the same database as the schema (SQLite dev / Postgres deploys): a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. Shutdown stops admission, gives requests `[serve].request_shutdown_seconds`, waits `[serve].graceful_shutdown_seconds` for active workflows (the standalone `ufo-egress` proxy drains its own live tunnels for that same window on its own SIGTERM), then retires the executor heartbeat only if no workflow remains active — a workflow that outlives the drain keeps the seat, so no peer re-dispatches work this process still executes; the seat ages out with the process. The supervisor's termination budget exceeds the sequential drains. DBOS-on-SQLite is verified in U1 — fail loud, never silently fall back to requiring Postgres. Dequeue poll interval and system-DB retention are configured from day one. |
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
-| Topology | `ufoctl serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
-| Sandbox | A local temp-dir carrier is the core default: no kernel isolation (a raw shell reaches the host FS — file-tool arguments are confined to the workspace, the current read-only `$UFO_HOME/runs/<id>`, and read-only `$UFO_HOME/skills`), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. A conversation opened from a connected CLI terminal takes the `client` carrier instead — its workspace is the member's own `$PWD`, its ops the member's own subprocesses — same trust posture as local, offered only to a terminal the member connected. |
-| Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. Bedrock Mantle and OpenRouter ship as extensions. |
-| Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in core. The portal's browser bundle carries the one vendor SDK in the tree (`@datadog/browser-rum`): a session recording is a stream of DOM changes made in the member's browser, which no OTel signal carries and no server can reconstruct. It stays in `extensions/web`, records only where the deploy names a RUM application, and masks every field a member types into. The operator debugger projects an opened turn's DBOS steps with their timestamps and durations, and links its `traceparent` to the deploy's trace and log explorers. A workspace condition no turn can repair — a connection that stopped authenticating, an empty credential slot, a task that faults every run — reaches the engineers the same way: the debugger extension's `report_problem` emits one record carrying the agent's own account of the problem, its category, its impact, and a link into that surface scoped to the reporting turn, and the turns dashboard lists them and counts them by category and impact off a log-based metric, since a log widget groups only by a facet no terraform resource creates. Nothing pages: a report is read, not alerted on. Output the process did not write never crosses — it echoes the environment the failing command ran under, and the transcript the link opens holds it. One call is one event, and how long a condition lasts is read off the reports standing in that list. |
-| Kubernetes | Absent from core by construction. The enterprise offering later wraps core with k8s (principle 3); nothing in core may assume or import it. |
+| Topology | `ufoctl serve` is one process on one event loop: surfaces + DBOS workers + jobs, with `ufo.harness` called in-process through typed ports. The package seam is not an HTTP seam. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
+| Sandbox | A local temp-dir carrier is the runtime default: no kernel isolation (a raw shell reaches the host FS — file-tool arguments are confined to the workspace, the current read-only `$UFO_HOME/runs/<id>`, and read-only `$UFO_HOME/skills`), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. A conversation opened from a connected CLI terminal takes the `client` carrier instead — its workspace is the member's own `$PWD`, its ops the member's own subprocesses — same trust posture as local, offered only to a terminal the member connected. |
+| Models | Model providers are an extension point; the runtime ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. Bedrock Mantle and OpenRouter ship as extensions. |
+| Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in the runtime. The portal's browser bundle carries the one vendor SDK in the tree (`@datadog/browser-rum`): a session recording is a stream of DOM changes made in the member's browser, which no OTel signal carries and no server can reconstruct. It stays in `extensions/web`, records only where the deploy names a RUM application, and masks every field a member types into. The operator debugger projects an opened turn's DBOS steps with their timestamps and durations, and links its `traceparent` to the deploy's trace and log explorers. A workspace condition no turn can repair — a connection that stopped authenticating, an empty credential slot, a task that faults every run — reaches the engineers the same way: the debugger extension's `report_problem` emits one record carrying the agent's own account of the problem, its category, its impact, and a link into that surface scoped to the reporting turn, and the turns dashboard lists them and counts them by category and impact off a log-based metric, since a log widget groups only by a facet no terraform resource creates. Nothing pages: a report is read, not alerted on. Output the process did not write never crosses — it echoes the environment the failing command ran under, and the transcript the link opens holds it. One call is one event, and how long a condition lasts is read off the reports standing in that list. |
+| Kubernetes | Absent from the runtime by construction. The enterprise offering wraps the runtime with k8s (principle 3); no runtime module may assume or import it. |
 | Runtime authorization rollout | Deploys are serialized. A whole new IAM grant lands with its consumers: terraform creates it before the roll, and the rollout-health gate catches a consumer that cannot yet assume it. Narrowing or removing an existing grant does not: expand IAM, roll and drain the runtime, then contract IAM. CI rejects a contraction that spans that boundary, and reads as a contraction any authorization diff that touches an existing grant: a line added inside a block already there, a Deny, or a policy bound to a principal the diff does not itself declare. |
 | CLI | One CLI: `ufo` (`serve`, `bundle`, `ext`, admin verbs). |
+
+## Harness, runtime, and host
+
+`core/src/ufo/harness` owns agent execution. Its engine core — the concrete agent engine with
+canonical in-memory messages, reasoning, tool calls, tool results and schemas; immutable agent
+definitions; model requests; round progression; tool scheduling and ordered result assembly;
+finish and recovery behavior; round budgets; context-window decisions; the sandbox command/file
+protocol; path containment; reply interpretation; and untrusted-content framing — imports only the
+standard library and other engine-core modules (gated), so an outside runner executes it with no
+tenant runtime, extensions, HTTP, database, or durable executor. Around that core the package
+carries the rest of execution machinery: model provider clients, sandbox carriers, the replay-safe
+DBOS serializer, and observability plumbing. The engine's four ports are model, tools,
+conversation, and events.
+
+`core/src/ufo/runtime` owns the durable tenant host and the platform's contracts: the turn
+workflow that establishes workspace and agent scope from the durable turn record and adapts
+product effects to the four harness ports; the tenant domains it composes — access, auth, billing,
+seats, workspace scope, turns, surfaces, sources, kinds, and media; and everything its machinery
+consumes — the extension API (`runtime.ext`: manifest schema, capability contexts, hooks), the
+tool contract (`runtime.tools`), prompts, skills, and the environment override rail. It cannot
+supply whole-round close, dispatch, recovery, or exhaustion implementations. DBOS workflows and
+steps remain runtime-owned; their arguments and outputs are pickle records, so a class that moves
+lands with its `MOVED_MODULES` entry in the replay serializer and each step converts a harness
+value to its runtime boundary type before returning. RFC 0043 defines the ports, ownership table,
+landing order, and the matching Rust crate boundary.
+
+`core/src/ufo/host` provides the environment from above: extension discovery (entry points,
+lockfile, catalog), the first-party builtin tools, the default per-turn binding (`HostEnvironment`,
+the runtime's `TurnEnvironment` port), and the dev host. The layering is one-way and gated —
+host imports runtime and harness; the runtime and harness never import `ufo.host` — so host
+contributions reach the runtime only as values a composition root injects (`Runtime.manifests`,
+`Runtime.environment`). A turn admitted with an environment host pinned
+(`TurnRuntimeConfig.environment_host`, the `x-ufo-environment` header beside `x-ufo-model`) has
+its assembled prompt and authorized tool offer finalized by that locally running host before the
+engine runs: a replacement system prompt, rewritten descriptions for offered tools, withheld
+tools. Overrides narrow and cannot grant — a name outside the authorized offer fails the turn — so
+prompt and tool-description experiments run against a shared stack, one overrides document per arm
+(`ufoctl dev-host`), without expanding any member's access. The rail is off unless the deployment
+sets `environment.dev_host_allowed`.
+
+Prompt and schema configuration finishes before execution starts. `AgentDefinition` holds the
+system prompt and execution limits; `AgentTools` supplies the exact definitions offered each round
+and the tool-call effect. `AgentEngine.run` never loads extensions or speaks an extension
+protocol; the host layer and the environment rail consume this seam from outside the engine.
+
+Rust `ufo-control` remains the hosted gateway. Its SQL reaches only its `ufo_control` ledgers; it
+calls the runtime's `/internal/onboard/*` routes for workspace choices, membership, seats, and fleet
+state. Rust `ufo-egress` remains the wire proxy; it calls the runtime's `/internal/egress/*` routes
+for policy, credentials, and metering. Neither service links or hosts the agent harness.
 
 ## Workspace model
 
@@ -72,8 +124,9 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 
 ## Agent loop
 
-One workflow: inbound → admission (identity, spend preflight) → queue row → worker turn → steps →
-terminal frame. A client's wait always ends — the terminal state commits on the failure path too.
+One runtime workflow: inbound → admission (identity, spend preflight) → queue row → harness-backed
+worker turn → runtime effect steps → terminal frame. A client's wait always ends — the terminal
+state commits on the failure path too.
 
 - **Tool calling** — typed registry; per-call metering; results bounded before hitting the model.
   Every member inbound carries a stable `message_ref` from its existing turn/message id. A tool
@@ -500,7 +553,7 @@ rationale, alternatives, and open questions; this section is the settled model.
 | Scope integrity | `runner` authenticates to core as the fleet, so a callback's claimed `(workspace_id, extension_name, extension_digest)` isn't taken on faith. Core mints an opaque dispatch capability at `dispatch_tool` time, scoped to that call and valid for its whole duration (one call makes several callbacks); every callback must present it, and core accepts one only while that dispatch is open. |
 | Module distribution | Compiled at `ufoctl ext publish` (JS → WASM); content-addressed like `ExtensionPin.digest` and stored in the existing S3-compatible blob store. `runner` fetches and caches by digest on first use. |
 | Deployment | Plain stateless processes behind a load balancer — an autoscaling group, VM scale set, on-prem pool, or a container scheduler if one is already in play. No Kubernetes requirement, matching core's own. |
-| Local dev / test mode | `ufoctl ext dev [--remote <url>]` runs the extension as a plain local Node process (WASM only enters at `ext publish`) against a disposable workspace with real grants. Every credentialed call routes over the channel through the same host/header-checked injection `runner` uses; no live workspace's data is ever reachable. |
+| Local dev / test mode | `ufoctl ext dev [--remote <url>]` runs the extension as a plain local Node process (WASM only enters at `ext publish`) against a disposable workspace with real grants. The host may assemble a test-only system-prompt replacement, tool-description overrides, and added tools through the harness's immutable definition and tool port; these are not production manifest points. Every credentialed call routes over the channel through the same host/header-checked injection `runner` uses; no live workspace's data is ever reachable. |
 
 ## Surfaces
 
@@ -1198,14 +1251,14 @@ Misconfiguration fails loud at boot: the shared owner DSN must be set and no sur
 reserved onboarding route. Instances heartbeat a `runtime_instance` row so the fleet tracks its live
 executors; a peer that stops heartbeating has its in-flight turns recovered by the survivors.
 
-### Roles — the split that's already paid for
+### Runtime roles
 
-An instance logically comprises three in-process roles — **surfaces** (HTTP in, streams out),
+An instance logically comprises three in-process runtime roles — **surfaces** (HTTP in, streams out),
 **workers** (turn workflows), **jobs** (sync, derivation) — plus the **egress data plane**
 (`ufo-egress`, RFC 0035), a standalone Rust process that holds no keys and resolves every policy and
-secret through the egress-control RPC these roles serve. Core runs the three in-process roles in
+secret through the egress-control RPC these roles serve. The runtime runs the three roles in
 every instance and defines no per-role deployment — mapping processes now would be speculation. What
-core does fix is the seam that makes the eventual split free: **roles share nothing in memory** —
+the runtime does fix is the seam that makes the process split free: **roles share nothing in memory** —
 cross-role communication is only Postgres/DBOS queues, the blob store, the hub, and the
 egress-control RPC (any instance answers identical rules from DB state; sandboxes are co-located
 with the instance that created them). An import-boundary gate enforces the in-process seam. The

@@ -19,8 +19,8 @@ from alembic.config import Config
 from sqlalchemy.engine import make_url
 
 from ufo.db import MIGRATIONS_DIR
-from ufo.ext.loader import migration_locations
-from ufo.skills.runtime import parse_skill_content
+from ufo.host.ext.loader import migration_locations
+from ufo.runtime.skills.runtime import parse_skill_content
 
 MOMENT = datetime(2026, 8, 22, tzinfo=UTC)
 WORKSPACE = uuid4()

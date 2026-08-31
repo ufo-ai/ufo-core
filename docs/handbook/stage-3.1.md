@@ -11,7 +11,7 @@ The catalog_skill file is different: it builds a live “model catalog” skill,
 ### Model catalog skill
 Core built-in skill registration starts with the live model catalog users and agents can consult.
 
-### `core/src/ufo/models/catalog_skill.py`
+### `core/src/ufo/harness/models/catalog_skill.py`
 
 `domain_logic` · `startup`
 

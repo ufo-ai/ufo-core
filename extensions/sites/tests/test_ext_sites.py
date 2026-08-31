@@ -184,18 +184,9 @@ from ufo_ext_sites.tools import (
     website,
 )
 
-from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.ext.loader import HookChain, skill_registry
-from ufo.hub import InProcessHub
-from ufo.loop.compaction import Compaction
-from ufo.loop.engine import TurnEngine
-from ufo.loop.prompts.render import rendered_prompt
-from ufo.loop.subagents import subagent_system_prompt
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -204,14 +195,30 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.object_name import OBJECT_NAME_MAX_LENGTH
-from ufo.object_scope import ObjectActionTarget
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.session import (
     SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
     ExecResult,
     SandboxHandle,
 )
+from ufo.host.ext.loader import skill_registry
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.compaction import Compaction
+from ufo.runtime.engine import TurnEngine
+from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.ext.hooks import HookChain
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH
+from ufo.runtime.object_scope import ObjectActionTarget
+from ufo.runtime.prompts.render import rendered_prompt
+from ufo.runtime.skills.runtime import install_skill
+from ufo.runtime.subagents import subagent_system_prompt
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ToolRegistry
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.activity import ActivitySummarizer
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
@@ -219,12 +226,6 @@ from ufo.sdk.manifest import Deny, HookContext, PreToolUse
 from ufo.sdk.objects import AGENT_KIND
 from ufo.sdk.sandbox import WORKSPACE_DIR
 from ufo.sdk.tools import ObjectBinding, TextContent, ToolResult
-from ufo.skills.runtime import install_skill
-from ufo.tools.builtins import BUILTIN_TOOLS
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ToolRegistry
-from ufo.turns.activity import ActivitySummarizer
-from ufo.workspace import ws
 
 TOOL_NARRATION = "building the site"
 RUNTIME_ROOT = "/home/user/.ufo/runs/test"
@@ -1987,7 +1988,7 @@ def test_application_delegation_claim_publishes_one_safe_complete_key(tmp_path: 
     root = tmp_path / "runtime"
     root.mkdir()
     target = root / "tool-output" / "application-builder" / "turn.delegated"
-    containment_dir = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+    containment_dir = Path(__file__).parents[3] / "core" / "src" / "ufo" / "harness"
 
     def claim(key: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -4184,7 +4185,7 @@ async def test_write_application_design_recovers_each_partial_pair_and_passes_qa
                     f"{program}"
                 )
             self.acceptance_calls += 1
-            containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+            containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "harness"
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-c",
@@ -4359,7 +4360,7 @@ async def test_application_design_pair_rejects_mismatched_partial(
                 "    os.fsync(target.parent_fd)\n"
                 f"{program}"
             )
-            containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+            containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "harness"
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-c",
@@ -4588,7 +4589,7 @@ def test_application_design_release_deletes_the_owned_pair_and_claim(tmp_path: P
     design.write_bytes(b"design")
     evidence.write_bytes(b"evidence")
     claim.write_bytes(b"call-1")
-    containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+    containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "harness"
 
     completed = subprocess.run(
         (
@@ -4620,7 +4621,7 @@ def test_application_design_release_deletes_the_owned_pair_and_claim(tmp_path: P
 def test_application_design_release_deletes_the_owned_claim(tmp_path: Path) -> None:
     claim = tmp_path / "design.claim"
     claim.write_bytes(b"call-1")
-    containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+    containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "harness"
 
     completed = subprocess.run(
         (
@@ -5355,7 +5356,9 @@ def test_application_builder_design_requires_individual_kit_components(
 
 
 def test_ufo_style_uses_the_application_audit_narrow_width() -> None:
-    skill = (Path(__file__).parents[3] / "core/src/ufo/skills/ufo-style/SKILL.md").read_text()
+    skill = (
+        Path(__file__).parents[3] / "core/src/ufo/runtime/skills/ufo-style/SKILL.md"
+    ).read_text()
 
     assert f"narrow width checked at {NARROW_WIDTH}px" in skill
     assert "narrow width checked at 390px" not in skill

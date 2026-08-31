@@ -16,7 +16,7 @@ date: 2026-07-12
 Slack resolves a member only for DMs (`extensions/slack/ufo_ext_slack/surface.py:603`), while the
 turn engine loads `ToolContext.member_id` from `conversation.member_id`. Channel conversations
 therefore have no speaking member, so `connect_account` refuses them
-(`core/src/ufo/tools/builtins.py:591`). Filling the conversation field with the sender would expose
+(`core/src/ufo/host/tools/builtins.py:591`). Filling the conversation field with the sender would expose
 their personal recall to every participant. Returning the OAuth URL as tool text would also let the
 model post it publicly.
 
@@ -65,7 +65,7 @@ use scoping narrows use, never widens grant authority.
 
 Interactive continuations find their existing conversation before admission. A DM click may then
 bind a newly resolved member to that private conversation; a channel click never calls
-`conversation_for`, so it cannot claim a shared thread (`core/src/ufo/ext/surface.py:410`).
+`conversation_for`, so it cannot claim a shared thread (`core/src/ufo/runtime/ext/surface.py:410`).
 
 **Proof:** a linked member asks to connect Google Calendar in a public channel, receives the OAuth
 URL privately, completes the grant, returns to chat, and asks the agent to use it in that channel.

@@ -29,10 +29,10 @@ One flat index, one full-corpus read, both per turn.
 
 | Site | What it does |
 |---|---|
-| `SkillRegistry.index()` (`core/src/ufo/skills/runtime.py:281`) | Every top-level skill's `(name, description)`, no cap, no ranking |
-| `render_skill_index` (`core/src/ufo/loop/prompts/render.py:98`) | Renders them as `<available_skills>` into the **system prompt** |
+| `SkillRegistry.index()` (`core/src/ufo/runtime/skills/runtime.py:281`) | Every top-level skill's `(name, description)`, no cap, no ranking |
+| `render_skill_index` (`core/src/ufo/runtime/prompts/render.py:98`) | Renders them as `<available_skills>` into the **system prompt** |
 | `UserSkillStore.load_all` (`extensions/skill_create/ufo_ext_skill_create/store.py:128`) | `SELECT name, content` for every row of the bound agent — `content` is base64 JSON of every file — then base64 + YAML + pydantic per skill |
-| `turn_runtime_skills` → `merged_with` (`core/src/ufo/loop/queue.py:434`) | Calls `load_all` on **every turn** and merges the parsed result |
+| `turn_runtime_skills` → `merged_with` (`core/src/ufo/runtime/queue.py:434`) | Calls `load_all` on **every turn** and merges the parsed result |
 | `SkillObjects._rows` (`extensions/skill_create/ufo_ext_skill_create/manifest.py:172`) | Calls `load_all`, then `object_page` paginates in Python afterwards |
 
 Measured against a synthetic 5,000-skill corpus (two files, 11.7 KB/skill) through the real code:
@@ -45,10 +45,10 @@ Measured against a synthetic 5,000-skill corpus (two files, 11.7 KB/skill) throu
 | Cache tax (opus-5: `cache_read` $0.50/Mtok, `cache_write_1h` $10/Mtok) | ~**$0.09/turn** to re-read the index; ~**$1.82** per skill save, which rewrites the block and invalidates the cached prefix of every conversation of that agent |
 
 The window math is the hard failure. `ANTHROPIC_CONTEXT_WINDOW = 200_000` for every Anthropic model
-but `claude-opus-5` (`core/src/ufo/models/catalog.py:17`); compaction fires at 150k and
+but `claude-opus-5` (`core/src/ufo/harness/models/catalog.py:17`); compaction fires at 150k and
 `Compaction._tokens` counts **messages only, never the system prompt** — so the compactor believes
 it has room while the request is already 182k. Every turn ends in an unrecoverable overflow after
-one wasted forced summarize (`core/src/ufo/loop/engine.py:1896`). On opus-5's 1M window it runs,
+one wasted forced summarize (`core/src/ufo/runtime/engine.py:1896`). On opus-5's 1M window it runs,
 but the index alone puts every request past the 200k long-context threshold, doubling input price
 on the whole turn.
 

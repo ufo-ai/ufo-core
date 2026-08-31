@@ -28,17 +28,22 @@ import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput, SetEnqueueOptions
 from dbos import error as dbos_error
 
-from ufo.billing.accounting import ALLOW, BalanceGate, SpendEvaluator
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import failed_statement, owner_tx, workspace_tx
-from ufo.ext.context import (
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.o11y import emit_metric, formatted_stack, log, log_error, warn
+from ufo.harness.sandbox.conversation import ConversationSandbox
+from ufo.product import PRODUCT_CENSUS_JOB, PRODUCT_CENSUS_SCHEDULE, product_census
+from ufo.runtime.billing.accounting import ALLOW, BalanceGate, SpendEvaluator
+from ufo.runtime.candidates import WorkspaceCandidates
+from ufo.runtime.ext.context import (
     ConversationProbes,
     ExtensionContext,
     TurnInvoker,
     context_for,
     seated_member_workspaces,
 )
-from ufo.ext.manifest import (
+from ufo.runtime.ext.manifest import (
     PAGE_CHANGE_CURSOR_KEY,
     HookContext,
     HookSpec,
@@ -46,14 +51,18 @@ from ufo.ext.manifest import (
     Manifest,
     PageChangeBatch,
 )
-from ufo.indexing import EmbedClient, IndexBackend
-from ufo.kinds.provisioning import AgentProvisioning
-from ufo.media.preview_renderer import PreviewRenderer
-from ufo.models.registry import ModelRegistry
-from ufo.o11y import emit_metric, formatted_stack, log, log_error, warn
-from ufo.product import PRODUCT_CENSUS_JOB, PRODUCT_CENSUS_SCHEDULE, product_census
-from ufo.runtime.candidates import WorkspaceCandidates
-from ufo.sandbox.conversation import ConversationSandbox
+from ufo.runtime.indexing import EmbedClient, IndexBackend
+from ufo.runtime.kinds.provisioning import AgentProvisioning
+from ufo.runtime.media.preview_renderer import PreviewRenderer
+from ufo.runtime.seats import Seats, gate_member
+from ufo.runtime.sources.sync import (
+    SOURCE_SYNC_JOB,
+    SOURCE_SYNC_SCHEDULE,
+    PageFeed,
+    SyncDriver,
+    page_cursor,
+)
+from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -63,15 +72,6 @@ from ufo.schema.records import (
     TurnAdmissionSource,
     TurnStatus,
 )
-from ufo.seats import Seats, gate_member
-from ufo.sources.sync import (
-    SOURCE_SYNC_JOB,
-    SOURCE_SYNC_SCHEDULE,
-    PageFeed,
-    SyncDriver,
-    page_cursor,
-)
-from ufo.workspace import ws, ws_current
 
 
 class ResultDeliverer(Protocol):

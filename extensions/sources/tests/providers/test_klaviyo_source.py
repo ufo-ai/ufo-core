@@ -11,9 +11,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 

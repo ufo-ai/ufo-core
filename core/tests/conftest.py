@@ -16,8 +16,8 @@ from ufo_testsupport.plugin import (
 )
 
 from ufo.blob import S3BlobStore
-from ufo.sandbox.client_binary import client_binary
-from ufo.sandbox.session import SANDBOX_GID, SANDBOX_UID
+from ufo.harness.sandbox.client_binary import client_binary
+from ufo.harness.sandbox.session import SANDBOX_GID, SANDBOX_UID
 
 MINIO_IMAGE = "minio/minio"
 MINIO_CREDENTIAL = "minioadmin"

@@ -36,18 +36,18 @@ from evals.suites.connector_refs import (
     TELEMETRY,
     token,
 )
-from ufo.access.connectors import ConnectorEntry, ConnectorRegistry, UnknownBrokerTool
-from ufo.access.grants import Grant, GrantStore
 from ufo.db import workspace_tx
-from ufo.loop.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
+from ufo.host.tools.builtins import EditInput, FileEdit, ReadInput
+from ufo.runtime.access.connectors import ConnectorEntry, ConnectorRegistry, UnknownBrokerTool
+from ufo.runtime.access.grants import Grant, GrantStore
+from ufo.runtime.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.sdk.manifest import HookContext, PreToolUse
-from ufo.tools.builtins import EditInput, FileEdit, ReadInput
-from ufo.tools.context import ToolContext
-from ufo.workspace import ws
 
 TOOL_NARRATION = "using the connected account"
 

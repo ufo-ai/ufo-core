@@ -28,15 +28,15 @@ from fastmcp.server.dependencies import get_http_headers
 from mcp.types import TextContent
 from mcp.types import Tool as McpTool
 
-from ufo.access.credentials import CredentialStore
 from ufo.db import current_workspace, workspace_tx
-from ufo.ext.loader import turn_tools
-from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.engine import MAX_TOOL_RESULT_CHARS
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.workspace import init_workspace_credentials
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.context import ToolContext
-from ufo.workspace import init_workspace_credentials
 
 TOOL_NARRATION = "using the connected system"
 

@@ -21,14 +21,14 @@ from uuid import uuid4
 
 import pytest
 
-from ufo.sandbox.containment import ContainmentError, LocationEscape, NotRegularFile
-from ufo.sandbox.local import (
+from ufo.harness.containment import ContainmentError, LocationEscape, NotRegularFile
+from ufo.harness.sandbox.local import (
     EXEC_TIMEOUT_CODE,
     LOCAL_CONTAINER_ID,
     READ_CHUNK_BYTES,
     LocalCarrier,
 )
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.session import (
     COPY_IN_PROG,
     SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
@@ -39,7 +39,7 @@ from ufo.sandbox.session import (
     SandboxSession,
     SandboxSpec,
 )
-from ufo.skills.runtime import RuntimeSkill, SystemSkillBundle
+from ufo.runtime.skills.runtime import RuntimeSkill, SystemSkillBundle
 
 ROOT = Path(__file__).parents[3]
 RUN_TOKEN = "run-token-abc"

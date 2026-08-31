@@ -43,7 +43,8 @@ from sandbox.build_template import (
     system_skill_bundle,
     template_name,
 )
-from ufo.sandbox.session import SYSTEM_SKILLS_BAKED_ENV
+from ufo.harness.sandbox.session import SYSTEM_SKILLS_BAKED_ENV
+from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY
 from ufo.sdk.sandbox import (
     PLAYWRIGHT_VERSION,
     SANDBOX_GID,
@@ -52,7 +53,6 @@ from ufo.sdk.sandbox import (
     SANDBOX_UID,
     SYSTEM_SKILLS_ROOT,
 )
-from ufo.skills.runtime import CORE_SKILL_REGISTRY
 
 
 @pytest.fixture(autouse=True)
@@ -259,7 +259,7 @@ def test_the_baked_in_sandbox_cli_is_the_compiled_client() -> None:
 def test_the_containment_guard_is_baked_beside_the_client() -> None:
     """An in-sandbox python program imports the guard as the sibling module `containment`, and the
     bin dir is `sys.path[0]` for a program run from there — so the image carries the same file the
-    serve process imports as `ufo.sandbox.containment`, never a second copy of the checks."""
+    serve process imports as `ufo.harness.containment`, never a second copy of the checks."""
     assert tuple(name for name, _ in SANDBOX_MODULES) == ("containment.py",)
     assert "/usr/local/bin/containment.py" in pod_dockerfile()
 
@@ -282,7 +282,7 @@ def test_system_skills_are_baked_into_each_sandbox_image() -> None:
         == CORE_SKILL_REGISTRY.named("sandbox").content_digest()
     )
     assert "office-docx" in manifest["skills"]
-    assert "core/src/ufo/skills/sandbox" not in manifest["skills"]
+    assert "core/src/ufo/runtime/skills/sandbox" not in manifest["skills"]
     assert bundle.archive == SYSTEM_SKILLS_STAGE_PATH.read_bytes()
     assert f'test -f "{SYSTEM_SKILLS_ROOT}/.system-manifest.json"' in SANDBOX_TEMPLATE_READY_COMMAND
 

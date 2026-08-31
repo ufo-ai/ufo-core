@@ -27,7 +27,7 @@ from evals.stack import (
 )
 from sandbox.build_template import SANDBOX_CLIENT_TARGET
 from ufo.config import Config
-from ufo.sandbox.client_binary import CLIENT_BINARY_NAME
+from ufo.harness.sandbox.client_binary import CLIENT_BINARY_NAME
 from ufo.schema.records import DEFAULT_REASONING_EFFORT
 
 ROOT = Path(__file__).parents[3]

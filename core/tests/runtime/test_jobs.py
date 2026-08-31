@@ -12,14 +12,12 @@ from dbos import DBOS
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
-from ufo import o11y
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, ScopedStore
-from ufo.ext.manifest import JobSpec
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import Message, ModelEvent, ModelRequest, TextDelta
-from ufo.models.registry import ModelRegistry
-from ufo.o11y import BACKGROUND_PROFILE
+from ufo.harness import o11y
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import Message, ModelEvent, ModelRequest, TextDelta
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.o11y import BACKGROUND_PROFILE
 from ufo.product import (
     ADDRESS_KIND,
     APP_KIND,
@@ -32,10 +30,12 @@ from ufo.product import (
 )
 from ufo.runtime import jobs as jobs_module
 from ufo.runtime.candidates import owner_candidates
+from ufo.runtime.ext.context import ExtensionContext, ScopedStore
+from ufo.runtime.ext.manifest import JobSpec
 from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
+from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, TerminalFrame, Usage
-from ufo.workspace import ws, ws_current
 
 FIRE_TIMEOUT_SECONDS = 25
 MARKER_KEY = "fired"

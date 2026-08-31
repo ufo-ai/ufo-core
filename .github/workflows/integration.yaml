@@ -147,7 +147,7 @@ jobs:
       - name: Install Chrome for Testing
         run: >-
           npx --yes "playwright@$(uv run python -c
-          'from ufo.sandbox.session import PLAYWRIGHT_VERSION; print(PLAYWRIGHT_VERSION)')"
+          'from ufo.harness.sandbox.session import PLAYWRIGHT_VERSION; print(PLAYWRIGHT_VERSION)')"
           install --with-deps chromium
       - name: Reuse the published sandbox image
         if: env.SANDBOX_PULL_IMAGE != ''

@@ -26,7 +26,8 @@ from ufo_ext_redis_hub.stream_hub import (
 from ufo_ext_redis_hub.stream_terminal import RedisTerminals
 
 from ufo.blob import FilesystemBlobStore
-from ufo.hub import (
+from ufo.harness.models.interface import TextDelta
+from ufo.runtime.hub import (
     Absorbed,
     Activity,
     ArrivalQueued,
@@ -36,7 +37,6 @@ from ufo.hub import (
     SubagentActivity,
     Terminal,
 )
-from ufo.models.interface import TextDelta
 from ufo.schema.records import TerminalFrame
 
 REDIS_TEST_URL = os.environ.get("UFO_TEST_REDIS_URL", "redis://127.0.0.1:5543/0")

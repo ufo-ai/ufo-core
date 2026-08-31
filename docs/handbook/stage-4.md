@@ -218,7 +218,7 @@ def _origin(url: str) -> str
 *Call graph*: called by 2 (authorize_url, oauth_route); 1 external calls (urlparse).
 
 
-### `core/src/ufo/access/grants.py`
+### `core/src/ufo/runtime/access/grants.py`
 
 `domain_logic` · `request handling, OAuth callback, permission changes`
 
@@ -843,7 +843,7 @@ async def main_agent_connections() -> tuple[MainAgentConnection, ...]
 ### Agent setup readiness
 Agent setup checks describe the remaining credentials, account connections, or schedules needed before installed agents can run.
 
-### `core/src/ufo/kinds/agent_setup.py`
+### `core/src/ufo/runtime/kinds/agent_setup.py`
 
 `domain_logic` · `setup screens and member turns`
 
@@ -961,7 +961,7 @@ async def setup_skill(agent_id: UUID, is_main: bool, speaker_member_id: UUID | N
 ### Provisioning and onboarding content
 Provisioning, trusted onboarding control rules, and demo seeding turn extension declarations and signup decisions into workspace state.
 
-### `core/src/ufo/kinds/provisioning.py`
+### `core/src/ufo/runtime/kinds/provisioning.py`
 
 `domain_logic` · `workspace setup and extension provisioning`
 
@@ -983,7 +983,7 @@ async def apply(self, workspace_id: UUID) -> tuple[ProvisionOutcome, ...]
 
 **Data flow**: It receives a workspace ID and reads the manifests stored inside the AgentProvisioning object. It enters that workspace’s context, walks through every manifest and every agent provision in each manifest, and sends each one to the per-agent provisioning routine. It returns a tuple of outcomes saying, for each declared agent, whether it was created, adopted, or was already present.
 
-**Call relations**: This is the public starting point for the file’s work. It sets the workspace context with ufo.workspace.ws, then repeatedly calls AgentProvisioning._one to do the detailed database work for each declared agent.
+**Call relations**: This is the public starting point for the file’s work. It sets the workspace context with ufo.runtime.workspace.ws, then repeatedly calls AgentProvisioning._one to do the detailed database work for each declared agent.
 
 *Call graph*: calls 1 internal fn (_one); 1 external calls (ws).
 

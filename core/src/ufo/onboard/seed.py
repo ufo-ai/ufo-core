@@ -15,9 +15,10 @@ import sqlalchemy as sa
 
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore
-from ufo.ext.surface import retitle_conversation
-from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.harness.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.runtime.ext.context import ScopedStore
+from ufo.runtime.ext.surface import retitle_conversation
+from ufo.runtime.turns.transcript import Conversation, encode, transcript_key
 from ufo.schema import tables
 from ufo.schema.records import (
     SUBAGENT_SURFACE,
@@ -26,7 +27,6 @@ from ufo.schema.records import (
     QuestionOption,
     TerminalFrame,
 )
-from ufo.turns.transcript import Conversation, encode, transcript_key
 
 KITCHEN_SINK_TITLE = "Kitchen sink"
 

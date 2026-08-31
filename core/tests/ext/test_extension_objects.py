@@ -14,21 +14,21 @@ import ufo_ext_sample as sample
 import yaml
 from cryptography.fernet import Fernet
 
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.extension_kind import EXTENSION_KIND, ExtensionObjects, named_extensions
-from ufo.ext.loader import core_object_kinds, load_manifests, turn_tools
-from ufo.ext.manifest import CredentialSlot, Manifest
-from ufo.object_name import OBJECT_NAME_MAX_LENGTH, InvalidName
-from ufo.objects import UnknownObject, VerbNotSupported
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import core_object_kinds, load_manifests, turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.extension_kind import EXTENSION_KIND, ExtensionObjects, named_extensions
+from ufo.runtime.ext.manifest import CredentialSlot, Manifest
+from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH, InvalidName
+from ufo.runtime.objects import UnknownObject, VerbNotSupported
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ToolDef
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
 
 TOOL_NARRATION = "checking what this deploy is running"
 

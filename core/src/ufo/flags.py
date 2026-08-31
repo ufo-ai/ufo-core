@@ -19,8 +19,8 @@ from openfeature import api
 from openfeature.evaluation_context import EvaluationContext
 from openfeature.provider import FeatureProvider
 
-from ufo.o11y import warn
-from ufo.workspace import ws_current
+from ufo.harness.o11y import warn
+from ufo.runtime.workspace import ws_current
 
 FLAG_TIMEOUT_SECONDS = 2.0
 

@@ -29,9 +29,9 @@ def step(name: str, started: int, completed: int, call_id: str = "") -> TurnStep
 
 def test_a_turn_divides_its_span_into_model_rounds_tools_and_the_rest() -> None:
     steps = (
-        step(f"ufo.loop.engine.Engine.{MODEL_ROUND_STEP}", 1_000, 3_000),
-        step(f"ufo.loop.engine.Engine.{TOOL_CALL_STEP}", 3_100, 9_100, "call-1"),
-        step(f"ufo.loop.engine.Engine.{MODEL_ROUND_STEP}", 9_500, 10_000),
+        step(f"ufo.runtime.engine.Engine.{MODEL_ROUND_STEP}", 1_000, 3_000),
+        step(f"ufo.runtime.engine.Engine.{TOOL_CALL_STEP}", 3_100, 9_100, "call-1"),
+        step(f"ufo.runtime.engine.Engine.{MODEL_ROUND_STEP}", 9_500, 10_000),
     )
     timing = turn_timing(
         TURN, "evaluated", steps, {"call-1": "bash"}, tokens=1_234, cost_micro_usd=9

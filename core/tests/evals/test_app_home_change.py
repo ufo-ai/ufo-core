@@ -6,9 +6,9 @@ import sqlalchemy as sa
 from evals.suites import app_home_change
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.context import ScopedStore
-from ufo.workspace import ws
 
 
 async def _workspace() -> tuple[UUID, tuple[UUID, UUID]]:

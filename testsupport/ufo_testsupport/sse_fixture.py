@@ -12,7 +12,8 @@ from uuid import UUID
 
 from ufo_ext_web.surface import _event, _sse
 
-from ufo.hub import (
+from ufo.harness.models.interface import TextDelta
+from ufo.runtime.hub import (
     Absorbed,
     Activity,
     CostTick,
@@ -23,7 +24,6 @@ from ufo.hub import (
     SubagentActivity,
     Terminal,
 )
-from ufo.models.interface import TextDelta
 from ufo.schema.records import TerminalFrame
 
 SSE_FIXTURE_PATH = (

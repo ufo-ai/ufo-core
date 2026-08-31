@@ -199,7 +199,7 @@ Small and owned centrally, because these are exactly the things that must not be
   again; the 19 hand-written copies become one.
 - **The primitives, eight of them** — `Table` (rows and cells are its props, not primitives of
   their own, once a component takes columns and data), `Empty`, `ErrorLine`, `Notice`, `Pager` (over
-  `ListingCursor`, already on `main` at `core/src/ufo/listings.py` and re-exported through
+  `ListingCursor`, already on `main` at `core/src/ufo/runtime/listings.py` and re-exported through
   `ufo.sdk.listings`), `Drawer` (the artifact viewer's pinned panel, generalized over shadcn's
   sheet), `FormFromSchema` (generalizing `specField`, `portal.html:1663-1692`, whose choices come from
   **two** sources it must keep — `options || prop.enum` at `:1670`, where `reasoning` selects from

@@ -1,13 +1,15 @@
 import base64
+import importlib
 import sys
+import types
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel, ValidationError, create_model
 
-from ufo.durability import ReplaySafeSerializer
-from ufo.loop.engine import Arrival, DispatchResult
+from ufo.harness.durability import MOVED_MODULES, ReplaySafeSerializer
+from ufo.runtime.engine import Arrival, DispatchResult
 from ufo.schema.records import MEMBER_ADMISSION
 
 SERIALIZER = ReplaySafeSerializer()
@@ -95,5 +97,48 @@ def test_the_name_is_not_the_default_serializers() -> None:
 
 def test_recordings_reference_rebuild_at_its_permanent_address() -> None:
     raw = base64.b64decode(SERIALIZER.serialize(RECORDED_SHAPE(id=7)))
-    assert b"ufo.durability" in raw
+    assert b"ufo.harness.durability" in raw
     assert b"_rebuild" in raw
+
+
+def test_a_recording_from_a_moved_module_replays_through_the_current_path() -> None:
+    """A recording made by the release before a module move names the old path; replay on this
+    build must land on the class at its current home."""
+    recorded_class = type("DispatchResult", (DispatchResult,), {})
+    recorded_class.__module__ = "ufo.loop.engine"
+    legacy = types.ModuleType("ufo.loop.engine")
+    legacy.DispatchResult = recorded_class
+    sys.modules["ufo.loop.engine"] = legacy
+    try:
+        recording = SERIALIZER.serialize(
+            recorded_class(tool_use_id="c1", text="done", is_error=False)
+        )
+    finally:
+        del sys.modules["ufo.loop.engine"]
+    assert b"ufo.loop.engine" in base64.b64decode(recording)
+    replayed = SERIALIZER.deserialize(recording)
+    assert type(replayed) is DispatchResult
+    assert replayed == DispatchResult(tool_use_id="c1", text="done", is_error=False)
+
+
+def test_a_rebuild_reference_from_before_its_move_still_resolves() -> None:
+    from ufo.harness import durability
+
+    legacy = types.ModuleType("ufo.durability")
+    legacy._rebuild = durability._rebuild
+    sys.modules["ufo.durability"] = legacy
+    original = durability._rebuild.__module__
+    durability._rebuild.__module__ = "ufo.durability"
+    try:
+        recording = SERIALIZER.serialize(RECORDED_SHAPE(id=7))
+    finally:
+        durability._rebuild.__module__ = original
+        del sys.modules["ufo.durability"]
+    assert b"\x8c\x0eufo.durability" in base64.b64decode(recording)
+    replayed = SERIALIZER.deserialize(recording)
+    assert replayed.id == 7
+
+
+def test_every_moved_module_maps_to_a_module_that_imports() -> None:
+    for new in MOVED_MODULES.values():
+        importlib.import_module(new)

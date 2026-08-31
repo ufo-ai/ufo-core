@@ -18,9 +18,9 @@ from ufo_ext_sites.manifest import NAME
 from ufo_ext_sites.store import hosted_site
 
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 CHAT_EXTENSION = "app_chat"
 CHAT_DECLARED = "chat"

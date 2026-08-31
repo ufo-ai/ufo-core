@@ -139,9 +139,23 @@ main-merged offline-replay loop 8e20fa70 onto
 security review pack · websites extension (serve tool + routes) · startup + support-bot packs ·
 eval harness port · enterprise k8s layer (apiserver rewriter module, multi-workspace hosting).
 
+## Harness/runtime boundary
+
+| Execution concern | Owner | Runtime responsibility |
+|---|---|---|
+| Provider streams, tool ordering, rounds, and round budgets | `ufo.harness` | Typed model/tool effects and DBOS adapters. |
+| Context selection and compaction sequencing | `ufo.harness` | Summary effects, typed verification, metering, hooks, and durable checkpoints. |
+| Sandbox command/file protocol, path containment | `ufo.harness` | Carrier selection, authorization, and egress policy. |
+| Durable turn host and harness adapters | `ufo.runtime` | Complete ownership. |
+| Workspace identity, grants, billing, extensions, and surfaces | Sibling `ufo` domain packages | Supply scoped effects to `ufo.runtime`. |
+| WorkOS, sessions, invitations, and onboarding gateway | Rust `ufo-control` | Calls runtime onboarding RPCs; no tenant-table SQL. |
+
+RFC 0043 fixes this ownership and durable compatibility.
+
 ## Standing gates (legibility gates from U1; sdk gates from U3)
 
-sdk-only imports in `extensions/` · no k8s imports anywhere · no vendor o11y SDKs (OTel APIs only) ·
+sdk-only imports in `extensions/` · no runtime, extension, DBOS, SQLAlchemy, or FastAPI imports in
+`ufo.harness` · no k8s imports anywhere · no vendor o11y SDKs (OTel APIs only) ·
 Redis only inside the hubs extension · engine/`begin()` only inside `db.py` · no proxy-rule
 registration API (derivation only) · tool-count budget (a new tool must prove no existing tool
 subsumes it) · **legibility (AST gate)**: a module-level single-return function with exactly one

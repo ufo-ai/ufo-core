@@ -19,16 +19,16 @@ date: 2026-07-28
   serve `http://localhost:<port>` inside the sandbox — reachable by the browser tools for
   validation, by nobody else. Files leave only through `share_file`.
 - The one externally reachable delivery path is the artifact route
-  (`core/src/ufo/surfaces/artifacts.py:25`): token-gated single-file download, TTL 1h. No
+  (`core/src/ufo/runtime/surfaces/artifacts.py:25`): token-gated single-file download, TTL 1h. No
   multi-request browsing, no viewer identity, no visibility.
 - Creation context is already modeled: `conversation.audience`
-  (`core/src/ufo/turns/audience.py`) is `member:<id>` (DM/CLI/web), `room:<surface>:<room>` (channel),
+  (`core/src/ufo/runtime/turns/audience.py`) is `member:<id>` (DM/CLI/web), `room:<surface>:<room>` (channel),
   `foreign:<surface>:<room>` (Slack Connect), or `shared`.
-- Viewer identity is already modeled: the HMAC bearer `{ws, email, exp}` (`core/src/ufo/auth/bearer.py`),
+- Viewer identity is already modeled: the HMAC bearer `{ws, email, exp}` (`core/src/ufo/runtime/auth/bearer.py`),
   minted by the gateway after an emailed code, carried by the web surface's `ufo_session` cookie;
   `SurfaceContext.linked_member(email)` resolves it to a member.
 - The sandbox is reachable from the host: `Carrier.dial(handle, port)`
-  (`core/src/ufo/sandbox/session.py:223`) maps an in-sandbox port to an externally dialable
+  (`core/src/ufo/harness/sandbox/session.py:223`) maps an in-sandbox port to an externally dialable
   `DialTarget`, reading whatever the wire requires (e2b's traffic-access header) off the live
   container rather than the handle, so a handle rebuilt from the durable row reaches a port exactly
   as the process that created it does. The conversation row persists
@@ -79,10 +79,10 @@ token secret, and the core `conversation.sandbox_handle` column — and it knows
 sites. It is a generic token-gated reverse proxy to a conversation's sandbox port; the sites pack
 is its first minter.
 
-- `core/src/ufo/sandbox/ingress_token.py`: `mint_ingress_token(claims, kind)` /
+- `core/src/ufo/harness/sandbox/ingress_token.py`: `mint_ingress_token(claims, kind)` /
   `verify_ingress_token(token, now, kind)` over `token_signing`, claims
   `{kind, ws, conversation_id, port, exp}`. The deploy secret is resolved inside core exactly as
-  `ufo.auth.bearer` resolves it, so neither end takes it as a parameter and no caller holds it. The two
+  `ufo.runtime.auth.bearer` resolves it, so neither end takes it as a parameter and no caller holds it. The two
   hops of a visit are two kinds — `view` for the link the frame opens, `session` for the cookie the
   ingress binds — named at the mint and at the verify, so neither passes where the other is
   expected: a cookie replayed at the view path mints no successor, and a view token pasted into a
@@ -94,7 +94,7 @@ is its first minter.
   guessing), and whatever the backend requires on the wire (e2b: the traffic-token header, as
   `sandbox_chrome` already sends; docker and local: bare `host:port`, no TLS). All three carriers
   implement it in the same change.
-- `core/src/ufo/sandbox/ingress_host.py`: `site_label(conversation_id, port)` /
+- `core/src/ufo/harness/sandbox/ingress_host.py`: `site_label(conversation_id, port)` /
   `parse_site_label(label)` — the DNS label codec, base32 over the conversation, the port, and a
   truncated HMAC of the same deploy secret. It refuses to import if the signed bytes would outgrow
   DNS's 63-character label bound, and parses only the one canonical spelling of a label: 22 bytes
@@ -161,9 +161,9 @@ argument: one deploy has one answer for how long a link may sit in a frame.
 
 The permanent site link needs the workspace resolvable from the URL alone (a public viewer has no
 cookie; `SurfaceSpec.identify` must return the workspace before any DB binding).
-`core/src/ufo/auth/surface_token.py` + `ufo.sdk.surface_token`: `mint_surface_token(surface, payload)` /
+`core/src/ufo/runtime/auth/surface_token.py` + `ufo.sdk.surface_token`: `mint_surface_token(surface, payload)` /
 `verify_surface_token(surface, token)`, HMAC over `UFO_TOKEN_SECRET` resolved inside core exactly
-as `ufo.auth.bearer` does, namespaced by surface so one surface's token never replays at another. The
+as `ufo.runtime.auth.bearer` does, namespaced by surface so one surface's token never replays at another. The
 site link is `{public_base_url}/surface/sites/{site_token}` with payload `{ws, conversation, name}` —
 the site's own identity, so the link is derivable wherever a site is registered and a re-deploy
 reproduces it exactly. It is an address, not an authorization: it never expires, and every request

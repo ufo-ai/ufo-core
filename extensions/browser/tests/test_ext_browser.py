@@ -40,26 +40,26 @@ from ufo_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
 from ufo.blob import FilesystemBlobStore
 from ufo.browser import CdpEndpoint, CdpLease, CdpProvider, FileBytes, SessionGone
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore
-from ufo.ext.loader import skill_registry, turn_subagents
-from ufo.ext.manifest import SUBAGENT_ROUND_LIMIT
-from ufo.loop.engine import MAIN_ROUND_LIMIT
-from ufo.loop.prompts.render import render_system_prompt
-from ufo.loop.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
-from ufo.models.catalog import CORE_MODEL_SPECS
-from ufo.sandbox.session import (
+from ufo.harness.models.catalog import CORE_MODEL_SPECS
+from ufo.harness.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     ExecResult,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
 )
+from ufo.host.ext.loader import skill_registry, turn_subagents
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.engine import MAIN_ROUND_LIMIT
+from ufo.runtime.ext.context import ScopedStore
+from ufo.runtime.ext.manifest import SUBAGENT_ROUND_LIMIT
+from ufo.runtime.prompts.render import render_system_prompt
+from ufo.runtime.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
+from ufo.runtime.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.builtins import BUILTIN_TOOLS
-from ufo.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
-from ufo.workspace import ws
 
 TOOL_NARRATION = "clicking through the page"
 

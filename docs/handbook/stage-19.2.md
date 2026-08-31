@@ -13,18 +13,18 @@ Public facades for spend reporting, prepaid balance, feature gating, and seat ma
 
 `data_model` · `cross-cutting`
 
-This file does not calculate spending itself. Instead, it re-exports selected accounting objects from `ufo.billing.accounting`, which is where the real billing definitions live. A re-export is like putting commonly needed tools on the front counter of a shop: the tools may be stored in the back room, but visitors can reliably pick them up from one clear public place.
+This file does not calculate spending itself. Instead, it re-exports selected accounting objects from `ufo.runtime.billing.accounting`, which is where the real billing definitions live. A re-export is like putting commonly needed tools on the front counter of a shop: the tools may be stored in the back room, but visitors can reliably pick them up from one clear public place.
 
 The objects exposed here describe workspace spending: totals by dimension, member and agent spend reports, usage exports, and the conversion constant for micro-dollars. These are the same kinds of values used when a surface shows `SurfaceContext.spend_rollup` or when the `ufoctl spend` command prints a spend summary.
 
-This matters because `ufo.sdk` is meant to be the stable public interface for SDK users. If callers had to import directly from `ufo.billing.accounting`, internal reorganizations could break them. By importing through this file, users get a named, intentional API surface. The file also makes clear which accounting pieces are meant to be public and which remain internal details.
+This matters because `ufo.sdk` is meant to be the stable public interface for SDK users. If callers had to import directly from `ufo.runtime.billing.accounting`, internal reorganizations could break them. By importing through this file, users get a named, intentional API surface. The file also makes clear which accounting pieces are meant to be public and which remain internal details.
 
 
 ### `core/src/ufo/sdk/balance.py`
 
 `other` · `cross-cutting SDK import`
 
-This file is like a labeled service window for the billing balance part of the system. The real work lives in `ufo.billing.balance`, where the rules for prepaid balances, credits, purchases, headroom, and auto top-ups are defined. This SDK file re-exports those names so outside extensions can import them from a safer public path instead of reaching directly into the internal billing module.
+This file is like a labeled service window for the billing balance part of the system. The real work lives in `ufo.runtime.billing.balance`, where the rules for prepaid balances, credits, purchases, headroom, and auto top-ups are defined. This SDK file re-exports those names so outside extensions can import them from a safer public path instead of reaching directly into the internal billing module.
 
 That matters because extensions may need to read a workspace’s prepaid balance, show billing information, credit the balance when a payment settles, or configure automatic top-ups. By gathering those imports here, the project can present a clear public contract: “these are the balance-related tools extensions may use.”
 
@@ -46,7 +46,7 @@ Without this file, extension authors might depend on internal module paths. That
 
 `other` · `import time / SDK use`
 
-This module is like a clearly labeled shelf in a workshop. The real tools live elsewhere, in `ufo.seats`, but this file makes the seat-related ones easy and safe for outside code to find through `ufo.sdk.seats`.
+This module is like a clearly labeled shelf in a workshop. The real tools live elsewhere, in `ufo.runtime.seats`, but this file makes the seat-related ones easy and safe for outside code to find through `ufo.sdk.seats`.
 
 The problem it solves is public API clarity. Extensions should not need to know the internal layout of the core package. They can import `Seats`, `SeatEntry`, and helper functions such as `member_by_email` or `member_is_admin` from this SDK-facing module instead. That gives the project room to reorganize its internal files later without forcing every extension to change its imports.
 
@@ -62,7 +62,7 @@ Stable imports for conversation audiences, subject visibility labels, and untrus
 
 `data_model` · `cross-cutting import-time API exposure`
 
-This file exists to make the project easier to use from the outside. Instead of asking users to know that audience logic lives under `ufo.turns.audience`, it re-exports the important names through `ufo.sdk.audience`, which is a clearer public location for SDK consumers.
+This file exists to make the project easier to use from the outside. Instead of asking users to know that audience logic lives under `ufo.runtime.turns.audience`, it re-exports the important names through `ufo.sdk.audience`, which is a clearer public location for SDK consumers.
 
 An “audience” here means who a conversation turn is meant for or visible to, such as a shared room, a specific room, a foreign room, or individual audience members. The actual rules and helper functions are not implemented in this file. They are imported from the internal audience module and exposed again under this SDK-facing module.
 
@@ -77,7 +77,7 @@ If this file were removed, code that depends on the SDK audience API could break
 
 This is a small public doorway into the project’s subject system. In this codebase, a “subject” means an audience: for example, something shared with the whole workspace, or something visible to a specific member. Other parts of the system use these subject labels when deciding whether a row of data, or a conversation audience, is tied to a shared source or to an individual thread.
 
-The file does not define new behavior itself. Instead, it re-exports a few names from the deeper internal module `ufo.turns.subjects`. That means outside code can import `SHARED_SUBJECT`, `MEMBER_SUBJECT_PREFIX`, `member_subject`, and `subject_shared` from the SDK path without needing to know where the internal implementation lives.
+The file does not define new behavior itself. Instead, it re-exports a few names from the deeper internal module `ufo.runtime.turns.subjects`. That means outside code can import `SHARED_SUBJECT`, `MEMBER_SUBJECT_PREFIX`, `member_subject`, and `subject_shared` from the SDK path without needing to know where the internal implementation lives.
 
 The practical value is stability and clarity. It is like a front desk that points callers to the right office: users of the SDK get one simple address, while the project remains free to reorganize its internal files later. Without this file, callers might depend directly on internal modules, making future changes more likely to break them.
 
@@ -86,7 +86,7 @@ The practical value is stability and clarity. It is like a front desk that point
 
 `util` · `cross-cutting`
 
-This file is a small bridge between the public SDK area and the core turn-handling code. Its job is to expose one shared definition called `wall`, imported from `ufo.turns.untrusted`. That `wall` represents the boundary used for content the system should not fully trust, such as text produced by an external probe, a provider, or another agent.
+This file is a small bridge between the public SDK area and the core turn-handling code. Its job is to expose one shared definition called `wall`, imported from `ufo.runtime.turns.untrusted`. That `wall` represents the boundary used for content the system should not fully trust, such as text produced by an external probe, a provider, or another agent.
 
 The idea is like putting questionable papers into the same clearly labeled folder no matter who received them. If an extension needs to pass along outside output, it can use this SDK import and mark that output the same way the core system marks tool results and subagent hand-backs. Without this file, extension authors might invent their own markers or import from deeper internal modules, which could lead to inconsistent safety boundaries.
 
@@ -100,7 +100,7 @@ SDK doorways for delivery-register prompt constants and shared hub, listing, and
 
 `other` · `cross-cutting: used when extensions or prompt-building code need the public delivery-register constants`
 
-This module is like a labeled shelf in a public toolbox. The real delivery-register text lives elsewhere, inside `ufo.turns.delivery_register`, but outside code should not have to know that internal path. Instead, extensions can import it from `ufo.sdk.delivery_register`, which is part of the project’s public software development kit, or SDK: the supported set of tools other code is meant to use.
+This module is like a labeled shelf in a public toolbox. The real delivery-register text lives elsewhere, inside `ufo.runtime.turns.delivery_register`, but outside code should not have to know that internal path. Instead, extensions can import it from `ufo.sdk.delivery_register`, which is part of the project’s public software development kit, or SDK: the supported set of tools other code is meant to use.
 
 The delivery register is a block of prompt text that gets prepended to direct model calls so those calls write their results into the same shared register used by the shell and by subagent prompts. In plain terms, it helps different parts of the system leave their answers in the same agreed-upon place, rather than each writing notes in a different notebook.
 
@@ -113,7 +113,7 @@ The file also re-exports the description used for subagent results. This keeps p
 
 This file is like a labeled shelf at the front of a workshop. The real tools live deeper inside the project, but users of the SDK should not need to know exactly which internal drawer each tool comes from. Instead, they can import hub concepts from `ufo.sdk.hub`.
 
-The “hub” appears to be the part of the system that carries live activity frames: messages such as arrivals, replies, parked work, resumed work, terminal states, activity updates, and cost ticks. This file re-exports those public names from `ufo.hub`, plus `TextDelta` from `ufo.models.interface`, so extension authors can build against the intended public interface.
+The “hub” appears to be the part of the system that carries live activity frames: messages such as arrivals, replies, parked work, resumed work, terminal states, activity updates, and cost ticks. This file re-exports those public names from `ufo.runtime.hub`, plus `TextDelta` from `ufo.harness.models.interface`, so extension authors can build against the intended public interface.
 
 This matters because the package deliberately keeps `__init__.py` empty. In Python, `__init__.py` often exposes a package’s public API, but this project avoids putting code there. So named modules like this one become the official import locations.
 
@@ -126,7 +126,7 @@ Nothing is transformed here. Importing from this file is the same as importing t
 
 This file is a small public doorway into the project’s listing system. A “listing” here means a paged set of results, like showing search results one screen at a time instead of all at once. Paging matters because portals or extensions may need to return many items, and sending them in controlled chunks is faster, safer, and easier for callers to navigate.
 
-The actual listing logic lives elsewhere, in `ufo.listings`. This SDK file imports selected names from that internal module and exposes them under `ufo.sdk.listings`. That matters because outside extension code can depend on the SDK path without needing to know where the project keeps its internal implementation. It is like a shop counter: the goods may be stored in the back room, but customers use the counter because it is the agreed public place.
+The actual listing logic lives elsewhere, in `ufo.runtime.listings`. This SDK file imports selected names from that internal module and exposes them under `ufo.sdk.listings`. That matters because outside extension code can depend on the SDK path without needing to know where the project keeps its internal implementation. It is like a shop counter: the goods may be stored in the back room, but customers use the counter because it is the agreed public place.
 
 The exported pieces include cursor and page types, an error for bad cursors, and helper functions for creating or reading paged results. If the internal module moves or changes, this file can preserve the public import path for extensions. Without it, extension authors might import internal modules directly, making their code more likely to break when the project is reorganized.
 
@@ -151,18 +151,18 @@ Public utility facades for observability and scheduled-fire key handling.
 
 `util` · `cross-cutting`
 
-This file is a public wrapper around UFO's observability tools. Observability means the clues a running system leaves behind, such as logs and metrics, so people can understand what happened later. Instead of making extensions import from the deeper internal module `ufo.o11y`, this file re-exports the safe public pieces under the SDK path.
+This file is a public wrapper around UFO's observability tools. Observability means the clues a running system leaves behind, such as logs and metrics, so people can understand what happened later. Instead of making extensions import from the deeper internal module `ufo.harness.o11y`, this file re-exports the safe public pieces under the SDK path.
 
 The important idea is control. Extensions can call functions such as `log`, `warn`, `emit_metric`, and `turn_profile`, but the actual metric registry stays in core. That means an extension can only emit a metric name the core system already knows about. If it tries to invent a new one, it fails loudly instead of quietly creating an untracked metric. This keeps the system's metric list like a shared scoreboard with fixed labels, rather than a wall where every extension can scribble new counters.
 
-There is no new behavior implemented here. Its job is to define a stable public surface: extension code imports from `ufo.sdk.o11y`, while the real work remains centralized in `ufo.o11y`. That separation matters because it lets the project change internal organization later without breaking extension authors.
+There is no new behavior implemented here. Its job is to define a stable public surface: extension code imports from `ufo.sdk.o11y`, while the real work remains centralized in `ufo.harness.o11y`. That separation matters because it lets the project change internal organization later without breaking extension authors.
 
 
 ### `core/src/ufo/sdk/scheduled_fire.py`
 
 `util` · `cross-cutting`
 
-This file is a small public doorway. The real scheduled-fire logic lives elsewhere, in `ufo.ext.scheduled_fire`, but users of the SDK should not have to know that internal path. Instead, they can import from `ufo.sdk.scheduled_fire`, which is a cleaner and more stable public address.
+This file is a small public doorway. The real scheduled-fire logic lives elsewhere, in `ufo.runtime.ext.scheduled_fire`, but users of the SDK should not have to know that internal path. Instead, they can import from `ufo.sdk.scheduled_fire`, which is a cleaner and more stable public address.
 
 Scheduled fires are runs that happen on a schedule, like a cron job. To track them, the system needs a consistent “admission key”: a structured identifier that says which scheduled task a run belongs to. Think of it like a luggage tag for a scheduled run. One helper builds that tag, and the other reads the tag later to find the original task.
 
@@ -178,7 +178,7 @@ Stable SDK imports for operator-only sessions and surface-token authentication h
 
 This file is like a clearly labeled front desk for operator-only web tools. Operator tools are special pages or endpoints meant only for trusted operators, not ordinary users. To keep those tools from each importing authentication pieces from scattered internal locations, this file gathers the public names they need in one place.
 
-It re-exports three things from `ufo.ext.operator`: `FleetDirectory`, `bind_operator_session`, and `resolve_operator_workspace`. In plain terms, these cover the shared directory where operator surfaces can register or look themselves up, the logic that ties an operator session to the shared session cookie, and the resolver that checks an operator request and figures out which workspace is being asked for through the `?ws=` query value.
+It re-exports three things from `ufo.runtime.ext.operator`: `FleetDirectory`, `bind_operator_session`, and `resolve_operator_workspace`. In plain terms, these cover the shared directory where operator surfaces can register or look themselves up, the logic that ties an operator session to the shared session cookie, and the resolver that checks an operator request and figures out which workspace is being asked for through the `?ws=` query value.
 
 The important point is stability and consistency. If every debug or operator surface uses this file as its import path, they all rely on the same gatekeeping rules and session behavior. Without this kind of public wrapper, those surfaces could drift apart, import deeper private modules directly, or become harder to change safely later.
 
@@ -187,7 +187,7 @@ The important point is stability and consistency. If every debug or operator sur
 
 `other` · `cross-cutting import-time API exposure`
 
-This module is like a labeled doorway into a deeper part of the project. The real work of creating and checking surface tokens lives in `ufo.auth.surface_token`, but callers who use the public SDK should not need to know that internal path. Instead, they can import `mint_surface_token` and `verify_surface_token` from this named SDK module.
+This module is like a labeled doorway into a deeper part of the project. The real work of creating and checking surface tokens lives in `ufo.runtime.auth.surface_token`, but callers who use the public SDK should not need to know that internal path. Instead, they can import `mint_surface_token` and `verify_surface_token` from this named SDK module.
 
 A surface token is described here as a permanent link address that a “surface” can mint and verify without directly holding the deployment’s secret token key. In plain terms, it lets one part of the system create and validate special links while keeping the most sensitive secret somewhere else.
 

@@ -10,8 +10,7 @@ import ufo_ext_sample as sample
 
 from ufo.bundle import Bundle
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore
-from ufo.ext.loader import (
+from ufo.host.ext.loader import (
     LOCKFILE_PATH_ENV,
     ExtensionPin,
     Lockfile,
@@ -20,10 +19,11 @@ from ufo.ext.loader import (
     load_manifests,
     write_lockfile,
 )
-from ufo.ext.store import Catalog, CatalogEntry, ExtensionStore, ufo_version
+from ufo.host.ext.store import Catalog, CatalogEntry, ExtensionStore, ufo_version
+from ufo.runtime.ext.context import ScopedStore
 from ufo.runtime.jobs import JobRunner, bindings_from
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 CONFIG_TOML = """\
 [database]

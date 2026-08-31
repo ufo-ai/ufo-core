@@ -44,31 +44,31 @@ from ufo_ext_connectors.tools import (
     search_connector_tools,
 )
 
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import CredentialStore
-from ufo.access.egress_rules import connector_transfer_hosts
-from ufo.access.grants import (
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.host.ext.loader import turn_tools
+from ufo.host.tools.builtins import ConnectAccountInput, connect_account_handler
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.egress_rules import connector_transfer_hosts
+from ufo.runtime.access.grants import (
     ConnectHandoff,
     GrantStore,
     UnknownProvider,
     install_connect_flow,
 )
-from ufo.agent_scope import agent
-from ufo.config import Config
-from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.loader import turn_tools
-from ufo.ext.manifest import open_connector_namespace
-from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.engine import MAX_TOOL_RESULT_CHARS
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.manifest import open_connector_namespace
+from ufo.runtime.surfaces.cli import callback_router
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.connectors import GrantUnusable
 from ufo.serve import _connect_flow, _connector_registry, _mount_ext_routes
-from ufo.surfaces.cli import callback_router
-from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
-from ufo.tools.context import ToolContext
-from ufo.workspace import ws
 
 TOOL_NARRATION = "using the connected account"
 

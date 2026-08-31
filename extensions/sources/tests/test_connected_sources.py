@@ -25,22 +25,22 @@ from cryptography.fernet import Fernet
 from ufo_ext_sources import manifest as sources_manifest
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
 
-from ufo.access.credentials import CredentialStore
-from ufo.access.grants import ConnectFlow, GrantStore, OAuthAccount
-from ufo.agent_scope import agent
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.ext.loader import connection_hooks, turn_tools
+from ufo.host.ext.loader import connection_hooks, turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthAccount
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.jobs import JobRunner, bindings_from
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.sources import ConnectorSourceConfig, binding_name
 from ufo.sdk.tools import ToolContext
-from ufo.tools.registry import ToolDef
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import ws
 
 ASANA = "asana"
 GMAIL = "gmail"

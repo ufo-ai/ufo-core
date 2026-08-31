@@ -23,9 +23,9 @@ import sqlalchemy as sa
 import ufo_ext_metronome as metronome
 
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.workspace import ws
 
 REQUIRED = (
     metronome.STRIPE_SECRET_KEY_ENV,

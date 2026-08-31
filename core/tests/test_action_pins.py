@@ -4,10 +4,10 @@ import pytest
 import ufo_ext_sample as sample
 from pydantic import BaseModel, ConfigDict
 
-from ufo.object_views import frame_admissible_ids, presented_action_views
-from ufo.objects import BoundAction, ObjectActionInput, ObjectVerbs
-from ufo.tools.context import TextContent, ToolContext, ToolResult
-from ufo.tools.registry import (
+from ufo.runtime.object_views import frame_admissible_ids, presented_action_views
+from ufo.runtime.objects import BoundAction, ObjectActionInput, ObjectVerbs
+from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import (
     ActionPresentation,
     ObjectBinding,
     ToolDef,

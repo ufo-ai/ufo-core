@@ -41,12 +41,12 @@ from evals.suites.ufo_app_prepare import (
     prepare_app_eval,
     prepare_creation_eval,
 )
-from ufo.billing.accounting import BalanceGate, record_probe_egress_request
-from ufo.billing.balance import credit, debit, set_reserve
 from ufo.config import Config
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.ext.loader import load_manifests
+from ufo.host.ext.loader import load_manifests
 from ufo.proxy_serve import OWNER_DSN_ENV
+from ufo.runtime.billing.accounting import BalanceGate, record_probe_egress_request
+from ufo.runtime.billing.balance import credit, debit, set_reserve
 from ufo.runtime.jobs import bindings_from
 from ufo.schema import tables
 

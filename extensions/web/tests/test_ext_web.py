@@ -107,33 +107,65 @@ from ufo_testsupport.surfaces import (
 )
 
 import ufo.db
-import ufo.kinds.conversations as conversations_kind
-import ufo.objects as objects_module
-from ufo.access.connectors import CatalogEntry, CatalogPage, ConnectorEntry, ConnectorRegistry
-from ufo.access.credentials import (
+import ufo.runtime.kinds.conversations as conversations_kind
+import ufo.runtime.objects as objects_module
+from ufo.blob import FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.flags import init_flags
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import (
+    Message,
+    ModelEvent,
+    ModelRequest,
+    TextBlock,
+    TextDelta,
+    ToolResultBlock,
+    ToolUseBlock,
+)
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.conversation import (
+    SANDBOX_IMAGE_REF,
+    WORKSPACE_WRITE_MAX_BYTES,
+    ConversationSandbox,
+)
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.untrusted import wall
+from ufo.host.ext.loader import (
+    HostEnvironment,
+    member_object_registry,
+    member_skill_listing,
+    skill_registry,
+)
+from ufo.runtime import queue as loop_queue
+from ufo.runtime.access.connectors import (
+    CatalogEntry,
+    CatalogPage,
+    ConnectorEntry,
+    ConnectorRegistry,
+)
+from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_TTL_SECONDS,
     CredentialRequestState,
     CredentialSlotUnset,
     CredentialStore,
     seal_credential_request,
 )
-from ufo.access.grants import (
+from ufo.runtime.access.grants import (
     ConnectFlow,
     GrantStore,
     OAuthAccount,
     account_object_name,
     install_connect_flow,
 )
-from ufo.agent_scope import agent as bind_agent
-from ufo.auth.bearer import mint_token
-from ufo.billing.accounting import record_egress_request, record_turn_usage
-from ufo.blob import FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
-from ufo.config import Config
-from ufo.db import workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.loader import member_object_registry, member_skill_listing, skill_registry
-from ufo.ext.surface import (
+from ufo.runtime.agent_scope import agent as bind_agent
+from ufo.runtime.auth.bearer import mint_token
+from ufo.runtime.billing.accounting import record_egress_request, record_turn_usage
+from ufo.runtime.engine import FINISH_PROMPT
+from ufo.runtime.ext.context import ScopedStore, context_for
+from ufo.runtime.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT,
     CONVERSATION_TITLE_CHARS,
     SurfaceContext,
@@ -141,8 +173,7 @@ from ufo.ext.surface import (
     member_message_text,
     mint_marker,
 )
-from ufo.flags import init_flags
-from ufo.hub import (
+from ufo.runtime.hub import (
     Absorbed,
     Activity,
     CostTick,
@@ -154,32 +185,27 @@ from ufo.hub import (
     SubagentActivity,
     Terminal,
 )
-from ufo.kinds.members import ADD_MEMBER_GATE
-from ufo.loop import queue as loop_queue
-from ufo.loop.engine import FINISH_PROMPT
-from ufo.loop.subagents import SubagentRegistry
-from ufo.loop.transcript import Transcript
-from ufo.media.image_previews import IMAGE_PREVIEW_MAX_BYTES
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import (
-    Message,
-    ModelEvent,
-    ModelRequest,
-    TextBlock,
-    TextDelta,
-    ToolResultBlock,
-    ToolUseBlock,
+from ufo.runtime.kinds.members import ADD_MEMBER_GATE
+from ufo.runtime.media.image_previews import IMAGE_PREVIEW_MAX_BYTES
+from ufo.runtime.object_name import ObjectRef
+from ufo.runtime.objects import OBJECT_LIST_PAGE
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.surfaces import hub_tail
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.surfaces.artifacts import router as artifacts_router
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.turns.transcript import (
+    CompactionSummary,
+    CompactionWindow,
+    Conversation,
+    compaction_key,
+    decode,
+    encode,
 )
-from ufo.models.registry import ModelRegistry
-from ufo.object_name import ObjectRef
-from ufo.objects import OBJECT_LIST_PAGE
-from ufo.sandbox.conversation import (
-    SANDBOX_IMAGE_REF,
-    WORKSPACE_WRITE_MAX_BYTES,
-    ConversationSandbox,
-)
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.runtime.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     MEMBER_ADMISSION,
@@ -212,22 +238,6 @@ from ufo.sdk.manifest import (
 )
 from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
-from ufo.surfaces import hub_tail
-from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.surfaces.artifacts import router as artifacts_router
-from ufo.tools.context import ToolContext
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.turns.transcript import (
-    CompactionSummary,
-    CompactionWindow,
-    Conversation,
-    compaction_key,
-    decode,
-    encode,
-)
-from ufo.turns.untrusted import wall
-from ufo.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
-from ufo.workspace import ws
 
 SECRET = "artifact-signing-secret"
 
@@ -1094,6 +1104,19 @@ async def _write_compaction(
         )
 
 
+PORTAL_MANIFESTS = (
+    web_manifest(),
+    connectors_manifest(),
+    imessage_manifest(),
+    SCHEDULED_TASK_KIND_ONLY,
+    skill_create_manifest(),
+    slack_manifest(),
+    sources_manifest(),
+    todos.manifest(),
+    SLOTTED,
+)
+
+
 @pytest.fixture(scope="session")
 def dbos_runtime(
     dbos_launched: Config,
@@ -1125,16 +1148,12 @@ def dbos_runtime(
             invoker_for=invoker_factory(dbos_client),
             subagents=PORTAL_SUBAGENTS,
             subagent_grants={},
-            manifests=(
-                web_manifest(),
-                connectors_manifest(),
-                imessage_manifest(),
-                SCHEDULED_TASK_KIND_ONLY,
-                skill_create_manifest(),
-                slack_manifest(),
-                sources_manifest(),
-                todos.manifest(),
-                SLOTTED,
+            manifests=PORTAL_MANIFESTS,
+            environment=HostEnvironment(
+                manifests=PORTAL_MANIFESTS,
+                credentials=CredentialStore(fernet=CREDENTIAL_FERNET),
+                index=DefaultIndex(transaction=workspace_tx),
+                embed=StubEmbed(),
             ),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),

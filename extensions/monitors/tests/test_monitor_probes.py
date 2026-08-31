@@ -24,20 +24,20 @@ from ufo_ext_monitors.monitor_runner import (
 from ufo_ext_monitors.monitors import Monitor, MonitorStore, due_monitor_workspaces
 from ufo_ext_monitors.monitors import monitor as monitor_table
 
-from ufo.agent_scope import agent
 from ufo.db import workspace_tx
-from ufo.ext.context import ConversationProbes, ExtensionContext, context_for
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.exec_env import ProbeEnv
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import SANDBOX_HANDLE_SEP, ProbeTokenCodec, ProxyEndpoint
-from ufo.sandbox.terminal import CLIENT_BACKEND
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.exec_env import ProbeEnv
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import SANDBOX_HANDLE_SEP, ProbeTokenCodec, ProxyEndpoint
+from ufo.harness.sandbox.terminal import CLIENT_BACKEND
+from ufo.harness.untrusted import UNTRUSTED_OPEN
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, context_for
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.turns.audience import SHARED_AUDIENCE
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
-from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.turns.audience import SHARED_AUDIENCE
-from ufo.turns.untrusted import UNTRUSTED_OPEN
-from ufo.workspace import ws
 
 TOOL_NARRATION = "watching the run"
 MARKER = "probe-state.txt"

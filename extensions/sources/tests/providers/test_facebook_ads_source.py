@@ -11,9 +11,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.facebook_ads import FacebookAdsConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import SourceAuth, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.sync import SourceAuth, SyncResult
 
 ACCOUNT = "acct-1"
 

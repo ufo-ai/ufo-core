@@ -17,10 +17,10 @@ import ufo_pack_assistant_hosted as assistant_hosted
 import ufo_pack_dsqa_eval as dsqa_eval
 import ufo_pack_gdpval_eval as gdpval
 
-import ufo.ext.loader as loader
-from ufo.ext.loader import discovered_packs, load_manifests, skill_registry
-from ufo.ext.manifest import Pack
-from ufo.skills.runtime import CORE_SKILL_REGISTRY, parse_skill
+import ufo.host.ext.loader as loader
+from ufo.host.ext.loader import discovered_packs, load_manifests, skill_registry
+from ufo.runtime.ext.manifest import Pack
+from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, parse_skill
 
 SKILL_DESCRIPTION_MAX_WORDS = 50
 

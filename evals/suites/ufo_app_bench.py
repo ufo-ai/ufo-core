@@ -100,15 +100,15 @@ from evals.harness.scorers import combine, content_words, skill_scorer
 from evals.harness.target import CapabilityTarget
 from evals.suites.app_audit_probe import AUDIT_CONTENT as AUDIT_CONTENT
 from evals.suites.app_audit_probe import AUDIT_DIGEST, app_audit_command
-from ufo.access.grants import GrantStore
-from ufo.agent_scope import agent
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.sandbox.session import SANDBOX_GID, SANDBOX_UID
+from ufo.harness.sandbox.session import SANDBOX_GID, SANDBOX_UID
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.sdk.context import ScopedStore
-from ufo.workspace import ws
 
 COPY_CAPTURE_CONTENT = Path(__file__).with_name("ufo_app_copy_capture.cjs").read_bytes()
 COPY_CAPTURE_DIGEST = sha256(COPY_CAPTURE_CONTENT).hexdigest()

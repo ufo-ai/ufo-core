@@ -52,7 +52,7 @@ from ufo_ext_sites.share_card import (
 from ufo_ext_sites.tools import PREVIEW_HEIGHT, PREVIEW_WIDTH
 from ufo_testsupport.browser import chrome_for_testing
 
-from ufo.sandbox.session import SANDBOX_MODULE_BOOTSTRAP, SANDBOX_PYTHON_FLAG
+from ufo.harness.sandbox.session import SANDBOX_MODULE_BOOTSTRAP, SANDBOX_PYTHON_FLAG
 
 CARD_BYTES_MAX = 5 * 1024 * 1024
 """What every platform will draw: a card above this is dropped rather than shown."""

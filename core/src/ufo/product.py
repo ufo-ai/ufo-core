@@ -27,10 +27,10 @@ from datetime import UTC, datetime, timedelta
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
-from ufo.o11y import emit_metric
+from ufo.harness.o11y import emit_metric
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION
-from ufo.workspace import ws_current
 
 PRODUCT_CENSUS_JOB = "product_census"
 PRODUCT_CENSUS_SECONDS = 600

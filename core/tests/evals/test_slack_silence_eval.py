@@ -28,15 +28,15 @@ from evals.suites.slack_silence import (
     SlackSilenceSuite,
     slack_silence_task,
 )
-from ufo.billing.accounting import record_workspace_usage
 from ufo.config import DEFAULT_AMBIENT_REPLY_MODEL
 from ufo.db import workspace_tx
-from ufo.models.catalog import CORE_PRICING
-from ufo.models.interface import ModelRequest
+from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.models.interface import ModelRequest
+from ufo.runtime.billing.accounting import record_workspace_usage
+from ufo.runtime.turns.ambient_reply import AmbientDecision, AmbientMessage
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.turns.ambient_reply import AmbientDecision, AmbientMessage
-from ufo.workspace import ws
 
 BY_NAME = {case.name: case for case in CASES}
 SILENT_CASES = (

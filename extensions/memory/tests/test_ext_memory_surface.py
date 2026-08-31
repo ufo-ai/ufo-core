@@ -29,14 +29,14 @@ from ufo_testsupport.surfaces import (
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.hub import InProcessHub
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.schema import tables
 from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import _mount_shared_surfaces
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
 
 SECRET = "memory-token-secret"
 BASE_TIME = datetime(2026, 7, 1, tzinfo=UTC)

@@ -16,13 +16,13 @@ import sqlalchemy as sa
 import ufo_ext_browserbase as browserbase
 from cryptography.fernet import Fernet
 
-from ufo.access.credentials import CredentialSlotUnset, CredentialStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.sandbox.session import SandboxHandle, SandboxSession
+from ufo.harness.sandbox.session import SandboxHandle, SandboxSession
+from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.sdk.browser import SessionGone
-from ufo.workspace import init_workspace_credentials, ws
 
 API_KEY = "bb-live-secret-0xfeedface"
 SESSION_ID = "0f9d1c22-4d0a-4a1e-9a4a-9c3d9f1b7a01"

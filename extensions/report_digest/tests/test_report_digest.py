@@ -42,15 +42,15 @@ from ufo_ext_report_digest.writer import (
 
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.loader import skill_registry
+from ufo.host.ext.loader import skill_registry
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.sdk.models import Message, ToolUseBlock
-from ufo.tools.context import ToolContext
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
 
 
 def test_the_skill_parses_into_the_registry() -> None:

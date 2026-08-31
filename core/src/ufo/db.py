@@ -67,7 +67,7 @@ WORKSPACE_GUC = "app.workspace_id"
 # sized to how the pool is actually used: every checkout here is transaction-scoped and no
 # transaction spans a non-database await (a scan the review gate keeps true), so a demand burst
 # queues for milliseconds and drains. What the pool cannot absorb is a starved event loop
-# stretching checkout-to-release cycles, and `MEMBER_TURN_CONCURRENCY` in `ufo.loop.queue` bounds
+# stretching checkout-to-release cycles, and `MEMBER_TURN_CONCURRENCY` in `ufo.runtime.queue` bounds
 # that at its source by capping the model loops one process runs at once.
 #
 # `db_connections_high` brackets these two numbers: it warns above what the fleet is entitled to and
@@ -323,7 +323,7 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
 
     `emit_metric` is imported here because `o11y` reads this module's ambient workspace, the same
     cycle `apply_migrations` breaks the same way."""
-    from ufo.o11y import emit_histogram, emit_metric
+    from ufo.harness.o11y import emit_histogram, emit_metric
 
     lock = None
     if engine.dialect.name == "sqlite":
@@ -454,7 +454,7 @@ def apply_migrations(url: str, pack: str | None = None) -> None:
     Two files claiming one revision id are one graph node, and a location with two heads is a fork
     that would stamp both and wedge every migrate after the fork is linearized — so the graph is
     validated before any DDL runs."""
-    from ufo.ext.loader import migration_locations
+    from ufo.host.ext.loader import migration_locations
 
     config = AlembicConfig()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))

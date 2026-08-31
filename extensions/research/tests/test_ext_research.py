@@ -30,15 +30,12 @@ from ufo_ext_research.subagent import (
 )
 from ufo_ext_research.tools import RESEARCH_TOOLS
 
-from ufo.access.credentials import CredentialStore
-from ufo.ext.loader import skill_registry, turn_tools
-from ufo.loop.prompts.render import render_system_prompt
-from ufo.loop.queue import _subagent_actions, _subagent_tools, _with_action_verbs
-from ufo.loop.subagents import subagent_system_prompt
-from ufo.models.catalog import CORE_MODEL_SPECS
-from ufo.schema.records import Agent, Turn
-from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
-from ufo.search import (
+from ufo.harness.models.catalog import CORE_MODEL_SPECS
+from ufo.host.ext.loader import skill_registry, turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.prompts.render import render_system_prompt
+from ufo.runtime.queue import _subagent_actions, _subagent_tools, _with_action_verbs
+from ufo.runtime.search import (
     FetchedPage,
     FetchRequest,
     SearchHit,
@@ -46,7 +43,10 @@ from ufo.search import (
     SearchQuery,
     SearchResults,
 )
-from ufo.tools.context import ToolContext
+from ufo.runtime.subagents import subagent_system_prompt
+from ufo.runtime.tools.context import ToolContext
+from ufo.schema.records import Agent, Turn
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 
 TOOL_NARRATION = "looking it up"
 

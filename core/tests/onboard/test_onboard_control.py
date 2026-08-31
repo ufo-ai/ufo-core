@@ -15,7 +15,6 @@ import sqlalchemy as sa
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from ufo.billing.balance import read_balance
 from ufo.db import owner_tx, workspace_tx
 from ufo.onboard.onboard_control import (
     CROSS_WORKSPACE_READ,
@@ -26,10 +25,11 @@ from ufo.onboard.onboard_control import (
     agent_prompt,
 )
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.runtime.billing.balance import read_balance
+from ufo.runtime.seats import create_member, signup_workspace_id
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
-from ufo.seats import create_member, signup_workspace_id
-from ufo.workspace import ws
 
 CONTROL_TOKEN = "onboard-control-token"
 
@@ -236,7 +236,7 @@ async def test_the_intake_profile_opens_the_main_agents_prompt(
 def test_a_form_answer_cannot_brick_the_workspace_it_describes() -> None:
     """`render_system_prompt` substitutes against an empty mapping, so one live `{{var}}` in the
     prompt raises on every turn. A public form must not be able to plant one."""
-    from ufo.loop.prompts.render import PROMPT_VAR_RE
+    from ufo.runtime.prompts.render import PROMPT_VAR_RE
 
     for hostile in ["{{name}}", "{{{{name}}}}", "{{{{{{deep}}}}}}", "a {{b}} c {{d}}"]:
         prompt = agent_prompt(SignupProfile(business=hostile, goals=hostile))

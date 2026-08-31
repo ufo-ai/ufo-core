@@ -16,12 +16,10 @@ from alembic.config import Config as AlembicConfig
 from dbos import EnqueueOptions
 
 from ufo.db import MIGRATIONS_DIR, owner_tx, workspace_tx
-from ufo.ext.loader import migration_locations
-from ufo.hub import Parked
+from ufo.host.ext.loader import migration_locations
+from ufo.runtime.hub import Parked
 from ufo.runtime.jobs import TurnDispatcher
-from ufo.schema import tables
-from ufo.schema.records import INTERNAL_ADMISSION, MEMBER_ADMISSION, SCHEDULED_ADMISSION
-from ufo.seats import (
+from ufo.runtime.seats import (
     SEAT_REVOKED_MESSAGE,
     LastAdminSeatRevocation,
     Seats,
@@ -34,8 +32,10 @@ from ufo.seats import (
     workspace_by_domain,
     workspace_domain,
 )
-from ufo.surfaces.hub_tail import PARK_NOTICE, turn_status_frame
-from ufo.workspace import ws
+from ufo.runtime.surfaces.hub_tail import PARK_NOTICE, turn_status_frame
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.schema.records import INTERNAL_ADMISSION, MEMBER_ADMISSION, SCHEDULED_ADMISSION
 
 ADMIN_EMAIL = "owner@example.com"
 TEAMMATE_EMAIL = "teammate@example.com"

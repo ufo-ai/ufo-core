@@ -3,8 +3,7 @@ from uuid import uuid4
 
 import pytest
 
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.sandbox.ingress_host import (
+from ufo.harness.sandbox.ingress_host import (
     ADDRESS_BYTES,
     BASE32_BITS_PER_CHAR,
     DNS_LABEL_MAX_CHARS,
@@ -17,6 +16,7 @@ from ufo.sandbox.ingress_host import (
     shipped_app_slug,
     site_label,
 )
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
 
 
 def test_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:

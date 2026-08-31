@@ -3408,7 +3408,7 @@ async def system_skills(ctx: SurfaceContext, request: Request) -> Response
 *Call graph*: calls 1 internal fn (_authenticated_email); 2 external calls (PlainTextResponse, Response).
 
 
-### `core/src/ufo/ext/surface.py`
+### `core/src/ufo/runtime/ext/surface.py`
 
 `orchestration` · `request handling, background delivery, and cross-cutting surface access`
 

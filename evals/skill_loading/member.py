@@ -25,8 +25,8 @@ from evals.skill_loading.catalog import (
 )
 from evals.skill_loading.corpus import CORPUS_P99, CORPUS_STRESS, crowd_corpus, spread_corpus
 from evals.skill_loading.runner import SkillFixture, SkillLoadCase
-from ufo.skills.runtime import SkillCard
-from ufo.skills.selection import catalog_fits, folds_into_prompt, member_block, skill_line
+from ufo.runtime.skills.runtime import SkillCard
+from ufo.runtime.skills.selection import catalog_fits, folds_into_prompt, member_block, skill_line
 
 FULL = "full"
 NAME = "name"

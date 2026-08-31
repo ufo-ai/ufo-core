@@ -7,7 +7,7 @@ The file `workspace_changes.py` handles one important piece of that story: it re
 ## Files in this stage
 
 ### Teardown, cancellation, retry recovery, and resource cleanup
-### `core/src/ufo/turns/workspace_changes.py`
+### `core/src/ufo/runtime/turns/workspace_changes.py`
 
 `domain_logic` · `turn-end background refresh`
 

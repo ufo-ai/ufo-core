@@ -18,7 +18,7 @@ Below that, carrier and terminal code chooses where work runs: locally, in Docke
 ### Sandbox workspace core
 Conversation sandboxes are opened or reconnected, prepared with safe execution environments, and backed by a consistent session boundary for files, commands, skills, and services.
 
-### `core/src/ufo/sandbox/conversation.py`
+### `core/src/ufo/harness/sandbox/conversation.py`
 
 `orchestration` · `request handling and turn setup`
 
@@ -285,7 +285,7 @@ async def _claim(self, conversation_id: UUID, stored: str | None, handle: str) -
 *Call graph*: calls 1 internal fn (_stored); called by 2 (claim_terminal, open); 3 external calls (update, workspace_tx, ws_current).
 
 
-### `core/src/ufo/sandbox/exec_env.py`
+### `core/src/ufo/harness/sandbox/exec_env.py`
 
 `domain_logic` · `sandbox open for probe execution`
 
@@ -374,7 +374,7 @@ async def _grant_cli_env(grants: GrantStore | None, clis: Mapping[str, CliCreden
 *Call graph*: calls 1 internal fn (active_grants); called by 1 (exports); 2 external calls (grant_sentinel, log).
 
 
-### `core/src/ufo/sandbox/session.py`
+### `core/src/ufo/harness/sandbox/session.py`
 
 `domain_logic` · `cross-cutting during sandbox open, command execution, file access, skill loading, and proxy authorization`
 
@@ -1080,7 +1080,7 @@ async def load_skills(self, payload: Mapping[str, object]) -> dict[str, str]
 
 **Data flow**: It receives a skill payload. It binds the sandbox, uses native carrier loading if available or stages and executes the loader, validates the JSON response, refreshes system skills if needed, and returns a name-to-root mapping.
 
-**Call relations**: `core/src/ufo/skills/runtime.install_skill` and `core/src/ufo/skills/runtime.load_skills` call this when preparing skills for execution.
+**Call relations**: `core/src/ufo/runtime/skills/runtime.install_skill` and `core/src/ufo/runtime/skills/runtime.load_skills` call this when preparing skills for execution.
 
 *Call graph*: calls 3 internal fn (_bound, _run_staged_skill_load, _sync_system_skills); called by 2 (install_skill, load_skills); 1 external calls (loads).
 

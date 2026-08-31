@@ -165,35 +165,39 @@ from evals.wandr.runner import (
 from evals.wandr.runner import (
     load_boundary as load_wandr_boundary,
 )
-from ufo.access.credentials import CredentialRequests, CredentialStore, install_credential_requests
-from ufo.agent_scope import agent
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.billing.accounting import MICRO_USD_PER_USD
 from ufo.blob import S3BlobStore, WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.context import context_for
-from ufo.ext.loader import (
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.catalog_skill import model_catalog_skill
+from ufo.harness.models.registry import ModelRegistry, model_registry
+from ufo.host.ext.loader import (
     embed_backend,
     index_backend,
     load_manifests,
     skill_registry,
     turn_subagents,
 )
-from ufo.kinds.agent_setup import setup_skill
-from ufo.kinds.governance import prompt_digest
-from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
-from ufo.loop.prompts.render import render_system_prompt
-from ufo.loop.spawn_catalog import spawn_catalog_skill
-from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog_skill import model_catalog_skill
-from ufo.models.registry import ModelRegistry, model_registry
 from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV
+from ufo.runtime.access.credentials import (
+    CredentialRequests,
+    CredentialStore,
+    install_credential_requests,
+)
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.runtime.billing.accounting import MICRO_USD_PER_USD
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.kinds.agent_setup import setup_skill
+from ufo.runtime.kinds.governance import prompt_digest
+from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
+from ufo.runtime.prompts.render import render_system_prompt
+from ufo.runtime.spawn_catalog import spawn_catalog_skill
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, ReasoningEffort
-from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.workspace import init_workspace_credentials, ws
 
 DEFAULT_OUT = Path("eval-reports")
 REMOTE_HOME_ROOT = Path(".local/eval-ufo")

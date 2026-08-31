@@ -12,9 +12,9 @@ from pydantic import BaseModel
 from evals.memory_100.models import Snapshot, SnapshotPage
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, TextChunker
+from ufo.runtime.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, TextChunker
+from ufo.runtime.sources.sync import FOLDER_BACKEND, SOURCE_BLOB_PREFIX, page_id_for, source_row_id
 from ufo.schema import tables
-from ufo.sources.sync import FOLDER_BACKEND, SOURCE_BLOB_PREFIX, page_id_for, source_row_id
 
 memory_store = import_module("ufo_ext_memory.store")
 

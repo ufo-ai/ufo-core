@@ -14,7 +14,7 @@ const KIT = join(HERE, "src/apps/kit.ts");
 // deployed: an agent editing an app's page reads it while it writes. That skill is core, always
 // loadable, and every app-home skill depends on it. It is committed, and a gate holds it to what
 // this writes.
-const SKILL = resolve(HERE, "../../../core/src/ufo/skills/ufo-style/references/kit.md");
+const SKILL = resolve(HERE, "../../../core/src/ufo/runtime/skills/ufo-style/references/kit.md");
 
 const kit = readFileSync(KIT, "utf8");
 

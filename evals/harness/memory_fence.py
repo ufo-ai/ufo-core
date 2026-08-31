@@ -8,7 +8,7 @@ import sqlalchemy as sa
 from ufo_ext_memory.store import memory_item, memory_source
 
 from ufo.db import workspace_tx
-from ufo.workspace import ws_current
+from ufo.runtime.workspace import ws_current
 
 
 async def forget_workspace_memory() -> None:

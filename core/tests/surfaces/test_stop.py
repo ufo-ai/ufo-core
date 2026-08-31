@@ -10,12 +10,12 @@ import pytest
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
-from ufo.hub import Absorbed, InProcessHub, Terminal
+from ufo.runtime.hub import Absorbed, InProcessHub, Terminal
+from ufo.runtime.surfaces.admission import Admission
+from ufo.runtime.surfaces.stop import MemberStop
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, TerminalFrame
-from ufo.surfaces.admission import Admission
-from ufo.surfaces.stop import MemberStop
-from ufo.workspace import ws
 
 
 @dataclass

@@ -13,7 +13,6 @@ import pytest
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
-from ufo.access.credentials import CredentialStore
 from ufo.cli import (
     CORE_VERSIONS_DIR,
     DEFAULT_CONFIG,
@@ -26,9 +25,10 @@ from ufo.cli import (
 )
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import core_migration_head
-from ufo.ext.loader import load_manifests
-from ufo.ext.manifest import Manifest
-from ufo.ext.surface import SurfaceSpec
+from ufo.host.ext.loader import load_manifests
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.ext.surface import SurfaceSpec
 from ufo.serve import _connect_redirect_uri, _validate_requires
 
 BROWSER_JOIN_SECONDS = 5.0
@@ -254,8 +254,8 @@ def test_turn_steps_echo_renders_each_step_and_its_rebuilt_messages(
     from datetime import UTC, datetime
 
     from ufo.cli import _echo_turn_steps
-    from ufo.ext.surface import TurnStep
-    from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+    from ufo.harness.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+    from ufo.runtime.ext.surface import TurnStep
 
     steps = (
         TurnStep(

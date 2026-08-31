@@ -31,8 +31,9 @@ The carried `files.get` projects `trashed`, so a carried id the member trashes l
 one Drive answers `404` for does.
 
 A carried retry's record count is a function of the grant, not of a stable enumeration, so it cannot
-sit inside a skip count (`core/src/ufo/sources/backend.py`: "the connector must reproduce the same
-record sequence for the skip count to be sound"). Hence `retried` and one page per carried id: every
+sit inside a skip count (`core/src/ufo/runtime/sources/backend.py`: "the connector must reproduce
+the same record sequence for the skip count to be sound"). Hence `retried` and one page per carried
+id: every
 carried page reports a cursor the page before it did not, which is what ends a run past the cap at
 that page rather than counting on through the tail, and the count such a run stores spans listed
 records. A run resuming on a stored count re-drives the listing prefix it discards and lands the

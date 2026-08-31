@@ -15,15 +15,15 @@ from ufo_ext_eval_env.manifest import CODE_FIXTURE_PREFIX, CODE_PROVIDER, NAME
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.suites import connector_refs
-from ufo.access.grants import GrantStore
-from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.loop.engine import OFFLOAD_NOTICE
-from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
+from ufo.harness.sandbox.session import TOOL_OUTPUT_DIRNAME
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.engine import OFFLOAD_NOTICE
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.context import ScopedStore
-from ufo.workspace import ws
 
 FLEET_LICENSE = connector_refs.token("LIC", connector_refs.FLEET)
 LEGACY_LICENSE = connector_refs.token("LIC", connector_refs.LEGACY)

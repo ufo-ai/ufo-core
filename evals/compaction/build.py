@@ -30,15 +30,7 @@ from evals.compaction.models import (
     message_text,
 )
 from evals.compaction.snapshot import write_snapshot
-from ufo.loop.compaction import (
-    AUTOCOMPACT_BUFFER_TOKENS,
-    COMPACTION_KEEP_MESSAGES,
-    COMPACTION_SUMMARY_MAX_TOKENS,
-    DEFAULT_CONTEXT_WINDOW_TOKENS,
-    IMAGE_MARKER,
-)
-from ufo.loop.engine import OFFLOAD_NOTICE
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ContentBlock,
     ImageBlock,
     ImageSource,
@@ -47,7 +39,15 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.turns.transcript import decode
+from ufo.runtime.compaction import (
+    AUTOCOMPACT_BUFFER_TOKENS,
+    COMPACTION_KEEP_MESSAGES,
+    COMPACTION_SUMMARY_MAX_TOKENS,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    IMAGE_MARKER,
+)
+from ufo.runtime.engine import OFFLOAD_NOTICE
+from ufo.runtime.turns.transcript import decode
 
 TRIGGER_MARGIN_TOKENS = 2_000
 DEFAULT_TARGET_TOKENS = (

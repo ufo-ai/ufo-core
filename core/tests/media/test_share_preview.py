@@ -9,13 +9,13 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from ufo.blob import S3BlobStore, WorkspaceBlobStore
-from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX
-from ufo.sandbox.session import ExecResult
+from ufo.harness.sandbox.session import ExecResult
+from ufo.host.tools import builtins
+from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema.records import Agent, Turn
-from ufo.tools import builtins
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
 
 
 @dataclass

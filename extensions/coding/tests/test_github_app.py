@@ -20,7 +20,9 @@ from ufo_ext_coding.github_app import (
     GitHubAppTokens,
 )
 
-from ufo.access.credentials import (
+from ufo.db import workspace_tx
+from ufo.harness.sandbox.exec_env import ProbeEnv
+from ufo.runtime.access.credentials import (
     CredentialMintFailed,
     CredentialRequestInvalid,
     CredentialRequests,
@@ -29,13 +31,11 @@ from ufo.access.credentials import (
     install_credential_requests,
     seal_installation,
 )
-from ufo.access.egress_rules import InjectionRule, ScopeRule, derive_credential_rules
-from ufo.db import workspace_tx
-from ufo.ext.context import CredentialAccess
-from ufo.ext.manifest import CredentialSlot, InjectionTarget
-from ufo.sandbox.exec_env import ProbeEnv
+from ufo.runtime.access.egress_rules import InjectionRule, ScopeRule, derive_credential_rules
+from ufo.runtime.ext.context import CredentialAccess
+from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
-from ufo.workspace import init_workspace_credentials, ws
 
 APP_ID = "4396470"
 INSTALLATION = "149082716"

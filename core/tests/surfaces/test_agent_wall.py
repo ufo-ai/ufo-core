@@ -19,23 +19,23 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.manifest import SubagentProfile
-from ufo.ext.surface import SurfaceContext
-from ufo.hub import InProcessHub
-from ufo.loop.subagents import SubagentRegistry, Subagents
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.manifest import SubagentProfile
+from ufo.runtime.ext.surface import SurfaceContext
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.subagents import SubagentRegistry, Subagents
+from ufo.runtime.surfaces.admission import Admission, MemberAdmission
+from ufo.runtime.surfaces.hub_tail import HubTailer
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Turn
-from ufo.surfaces.admission import Admission, MemberAdmission
-from ufo.surfaces.hub_tail import HubTailer
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
 
 
 class _StubDbos:

@@ -143,7 +143,7 @@ def _undrawn(name: str, detail: object) -> None
 *Call graph*: called by 3 (_compose, _shoot, draw_from_stored_shot); 1 external calls (log).
 
 
-### `core/src/ufo/media/site_previewer.py`
+### `core/src/ufo/runtime/media/site_previewer.py`
 
 `domain_logic` · `request handling`
 
@@ -167,7 +167,7 @@ async def render(self, conversation_id: UUID, port: int, name: str, width: int, 
 
 **Data flow**: It starts with a conversation id, sandbox port, desired filename, and target width and height. It validates the filename and dimensions, builds a public sandbox page URL, chooses a storage path, and sends a JSON request to the preview service. If the storage backend can accept a direct upload, the preview service uploads the image and sends back metadata; otherwise, the service returns the PNG bytes and this function writes them to blob storage. Before returning, it checks size limits, content type, PNG signature, and image dimensions. The result is either a `StoredPreview` containing the blob key and byte size, or `None` after logging what went wrong.
 
-**Call relations**: When some higher-level part of the media system needs a site preview, it calls this method. The method asks `ws_current` for the current workspace, uses `mint_ingress_view_url` to create a reachable URL for the sandbox page, uses `json.dumps` to package the render request, and sends it through `httpx.AsyncClient` with an `httpx.Timeout`. On success it creates a `StoredPreview`; on network or validation failure it reports the problem through `ufo.o11y.log` and hands back `None` so the rest of the system can continue without a preview.
+**Call relations**: When some higher-level part of the media system needs a site preview, it calls this method. The method asks `ws_current` for the current workspace, uses `mint_ingress_view_url` to create a reachable URL for the sandbox page, uses `json.dumps` to package the render request, and sends it through `httpx.AsyncClient` with an `httpx.Timeout`. On success it creates a `StoredPreview`; on network or validation failure it reports the problem through `ufo.harness.o11y.log` and hands back `None` so the rest of the system can continue without a preview.
 
 *Call graph*: 9 external calls (__init__, AsyncClient, Timeout, dumps, PurePosixPath, log, mint_ingress_view_url, ws_current, uuid4).
 

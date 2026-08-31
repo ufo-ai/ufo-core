@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from ufo.object_name import ObjectRef
+from ufo.runtime.object_name import ObjectRef
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
 TerminalStatus = Literal["done", "failed", "cancelled"]
@@ -434,17 +434,23 @@ class RuntimeIdentity(BaseModel):
 
 class TurnRuntimeConfig(BaseModel):
     """The runtime choices one turn tree pins without changing its deployed runtime: a concrete
-    model, and optionally narrowed sandbox internet access."""
+    model, optionally narrowed sandbox internet access, and optionally an environment host the
+    runtime sends the assembled prompt and tool offer to before the engine runs."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     model: str = Field(min_length=1)
     internet_access: Literal[False] | None = None
+    environment_host: str | None = None
 
     @model_validator(mode="after")
     def _concrete_model(self) -> "TurnRuntimeConfig":
         if self.model == "auto":
             raise ValueError("a turn pins a concrete model id, not 'auto'")
+        if self.environment_host is not None and not self.environment_host.startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError("environment_host is an http(s) URL the runtime dials")
         return self
 
 

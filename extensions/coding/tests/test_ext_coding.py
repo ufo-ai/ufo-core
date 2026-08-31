@@ -6,13 +6,13 @@ import ufo_ext_coding.manifest as coding
 from ufo_ext_objectives.tools import PLAN_OBJECTIVE_TOOL, READ_OBJECTIVE_TOOL, RECORD_STEP_TOOL
 from ufo_ext_research.tools import RESEARCH_TOOLS
 
-from ufo.ext.loader import load_manifests, skill_registry
-from ufo.ext.manifest import SubagentProfile
-from ufo.loop.queue import _subagent_tools
-from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
-from ufo.models.catalog import CORE_MODEL_SPECS
-from ufo.sandbox.exec_env import CONVERSATION_ID_ENV
-from ufo.tools.builtins import BUILTIN_TOOLS
+from ufo.harness.models.catalog import CORE_MODEL_SPECS
+from ufo.harness.sandbox.exec_env import CONVERSATION_ID_ENV
+from ufo.host.ext.loader import load_manifests, skill_registry
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.ext.manifest import SubagentProfile
+from ufo.runtime.queue import _subagent_tools
+from ufo.runtime.subagents import FINISH_CONTRACT, subagent_system_prompt
 
 TOOL_NARRATION = "connecting their GitHub"
 # The escalation prompt is hard-wrapped, so a whole sentence spans a line break.

@@ -11,13 +11,13 @@ from ufo_ext_report_digest.writer import report_digest_entry
 from ufo_ext_scheduled_tasks.schedules import scheduled_task
 
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.object_scope import ObjectAgent, object_agent
-from ufo.objects import ObjectListQuery, VerbNotSupported
+from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.object_scope import ObjectAgent, object_agent
+from ufo.runtime.objects import ObjectListQuery, VerbNotSupported
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.audience import SHARED_AUDIENCE
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
 
 PORTAL = "https://portal.test"
 SECRET = "0123456789abcdef0123456789abcdef"

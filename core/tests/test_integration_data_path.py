@@ -22,24 +22,24 @@ from ufo_ext_memory.store import (
     recall_subjects,
 )
 
-from ufo.billing.accounting import SpendEvaluator, record_sandbox_tokens
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.ext.context import SourceReader, context_for
-from ufo.indexing import TextChunker
-from ufo.schema import tables
-from ufo.schema.records import Usage
-from ufo.sources.sync import (
+from ufo.runtime.billing.accounting import SpendEvaluator, record_sandbox_tokens
+from ufo.runtime.ext.context import SourceReader, context_for
+from ufo.runtime.indexing import TextChunker
+from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
     FolderSource,
     SyncDriver,
     register_sources,
 )
-from ufo.turns.audience import conversation_audience
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import ws
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.schema.records import Usage
 
 pytestmark = pytest.mark.integration
 

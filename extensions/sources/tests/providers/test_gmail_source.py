@@ -16,9 +16,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.gmail import GmailConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import CursorExpired, SourceAuth, StreamSkipped
 from ufo.sdk.sources import MAIL_BACKFILL_WINDOW_DAYS, ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.sync import CursorExpired, SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 PINNED_CUTOFF = datetime(2026, 1, 15, 9, 30, tzinfo=UTC)

@@ -26,17 +26,12 @@ from dbos import DBOS, EnqueueOptions
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.invoker import invoker_factory
 
-from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import init_db, workspace_tx
-from ufo.durability import ReplaySafeSerializer, replay_safe_client
-from ufo.ext.loader import skill_registry
-from ufo.hub import InProcessHub
-from ufo.loop import queue as loop_queue
-from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import (
+from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -44,11 +39,16 @@ from ufo.models.interface import (
     ToolCallStart,
     ToolResultBlock,
 )
-from ufo.models.registry import ModelRegistry
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.host.ext.loader import HostEnvironment, skill_registry
+from ufo.runtime import queue as loop_queue
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.hub import InProcessHub
 from ufo.runtime.runtime_instance import ExecutorRecovery, Heartbeat
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.runtime.subagents import SubagentRegistry
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_NAME,
@@ -226,6 +226,12 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(),
+            environment=HostEnvironment(
+                manifests=(),
+                credentials=None,
+                index=DefaultIndex(transaction=workspace_tx),
+                embed=_StubEmbed(),
+            ),
             registry=registry,
             skills=skill_registry(()),
             credentials=None,

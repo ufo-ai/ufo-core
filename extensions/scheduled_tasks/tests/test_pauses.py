@@ -28,18 +28,18 @@ from ufo_ext_scheduled_tasks.tools import (
     pause_and_wait,
 )
 
-from ufo.agent_scope import agent
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.ext.loader import turn_tools
-from ufo.loop.engine import FRESH_CLAIM, _claim_turn
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.engine import FRESH_CLAIM, _claim_turn
+from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn
-from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ToolDef
-from ufo.turns.audience import SHARED_AUDIENCE, conversation_audience
-from ufo.workspace import ws
 
 
 @dataclass(frozen=True)

@@ -44,8 +44,8 @@ from evals.harness.target import (
     trajectory_snapshot,
 )
 from evals.harness.timing import TurnSteps
+from ufo.runtime.skills.runtime import SKILL_MD, RuntimeSkill, parse_skill_content
 from ufo.sdk.context import ExtensionContext
-from ufo.skills.runtime import SKILL_MD, RuntimeSkill, parse_skill_content
 
 SUITE = "skill_authoring"
 GRADER_REVISION = "authored-then-loaded-instructions-only-2"

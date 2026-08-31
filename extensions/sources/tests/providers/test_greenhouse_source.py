@@ -11,9 +11,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.greenhouse import GreenhouseConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 NEXT_JOBS_PAGE = "https://harvest.greenhouse.io/v1/jobs?per_page=500&page=2"

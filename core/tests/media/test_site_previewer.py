@@ -4,10 +4,10 @@ from uuid import uuid4
 import httpx
 from PIL import Image
 
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
-from ufo.media.site_previewer import SitePreviewer
-from ufo.workspace import ws
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.runtime.media.site_previewer import SitePreviewer
+from ufo.runtime.workspace import ws
 
 
 def _png() -> bytes:

@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
-from ufo.kinds.governance import Governance, prompt_digest
+from ufo.runtime.kinds.governance import Governance, prompt_digest
 from ufo.schema import tables
 from ufo.schema.records import AgentChange
 

@@ -2366,7 +2366,7 @@ def _text(self, message: Message) -> str
 ### Prompt context inputs
 These files assemble the auxiliary context shown to the model, including skills, delivery rules, and hosted site links.
 
-### `core/src/ufo/skills/selection.py`
+### `core/src/ufo/runtime/skills/selection.py`
 
 `domain_logic` · `per-turn prompt construction`
 
@@ -2573,7 +2573,7 @@ def _render(lines: tuple[str, ...]) -> str
 *Call graph*: called by 1 (member_visibility).
 
 
-### `core/src/ufo/turns/delivery_register.py`
+### `core/src/ufo/runtime/turns/delivery_register.py`
 
 `config` · `startup and prompt assembly`
 

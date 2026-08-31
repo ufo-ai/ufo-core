@@ -5,20 +5,20 @@ from uuid import uuid4
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
-from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.loader import turn_tools
-from ufo.kinds.agents import AGENT_KIND, RestoreApplication, RestoreApplicationInput
-from ufo.kinds.credential_kind import CREDENTIAL_KIND
-from ufo.kinds.members import MEMBER_KIND
-from ufo.object_scope import ObjectActionTarget
-from ufo.sandbox.session import Sandbox
+from ufo.harness.sandbox.session import Sandbox
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.kinds.agents import AGENT_KIND, RestoreApplication, RestoreApplicationInput
+from ufo.runtime.kinds.credential_kind import CREDENTIAL_KIND
+from ufo.runtime.kinds.members import MEMBER_KIND
+from ufo.runtime.object_scope import ObjectActionTarget
+from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, Agent, CredentialRequest, Turn
-from ufo.tools.context import SpawnResult, TextContent, ToolContext
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
 
 ADD_MEMBER_ID = f"action:{MEMBER_KIND}:add_member"
 RESTORE_ID = f"action:{AGENT_KIND}:restore_application"

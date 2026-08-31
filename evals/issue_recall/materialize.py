@@ -42,18 +42,17 @@ from evals.issue_recall.corpus import (
     rendered_pages,
 )
 from evals.issue_recall.state import CorpusAttestor, CorpusReadiness
-from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.loader import embed_backend, index_backend, load_manifests
-from ufo.ext.manifest import Manifest
-from ufo.indexing import EmbedClient, IndexBackend, TextChunker
-from ufo.models.registry import ModelRegistry, model_registry
+from ufo.harness.models.registry import ModelRegistry, model_registry
+from ufo.host.ext.loader import embed_backend, index_backend, load_manifests
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.indexing import EmbedClient, IndexBackend, TextChunker
 from ufo.runtime.jobs import PageChangeRunner
-from ufo.schema import tables
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
     FolderSource,
@@ -62,8 +61,9 @@ from ufo.sources.sync import (
     register_sources,
     source_row_id,
 )
-from ufo.turns.subjects import SHARED_SUBJECT
-from ufo.workspace import init_workspace_credentials, ws, ws_current
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
+from ufo.schema import tables
 
 PAGE_CONSUMERS = frozenset({("memory", "index_pages"), ("memory", "derive_facts")})
 

@@ -58,7 +58,7 @@ sandbox = { backend = "local" }
 [[arm]]
 name = "finish-not-an-account"
 [[arm.replacements]]
-path = "core/src/ufo/loop/prompts/subagent_shell.md"
+path = "core/src/ufo/runtime/prompts/subagent_shell.md"
 old = """
 result's register from <register> and keep it within 20 words. When the result is settled, call
 `finish` directly; never write the result as assistant prose first or alongside the call. For a

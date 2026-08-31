@@ -32,11 +32,11 @@ from ufo_ext_sources.providers.googlesheets import (
     _quoted_sheet_range,
 )
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources import backend as connector_backend
+from ufo.runtime.sources.backend import BACKFILL_KEY
+from ufo.runtime.sources.sync import SourceAuth, StreamFault, StreamSkipped
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamPage
-from ufo.sources import backend as connector_backend
-from ufo.sources.backend import BACKFILL_KEY
-from ufo.sources.sync import SourceAuth, StreamFault, StreamSkipped
 
 ACCOUNT = "acct-1"
 

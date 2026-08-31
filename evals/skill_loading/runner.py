@@ -62,11 +62,11 @@ from evals.harness.target import (
     trajectory_snapshot,
 )
 from evals.harness.timing import TurnSteps
-from ufo.agent_scope import agent_current
 from ufo.config import load_config
 from ufo.db import workspace_tx
+from ufo.runtime.agent_scope import agent_current
+from ufo.runtime.skills.runtime import SKILL_MD
 from ufo.sdk.context import ExtensionContext
-from ufo.skills.runtime import SKILL_MD
 
 SUITE = "skill_loading"
 """The suite label both skill-loading tasks register under. It is the label the runner keys on, not

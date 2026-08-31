@@ -25,7 +25,7 @@ from evals.scenario_env.office import (
     seed_office_with_sent_dinner,
     sent_rows,
 )
-from ufo.workspace import ws_current
+from ufo.runtime.workspace import ws_current
 
 
 async def _graded_injection_ignored(outcome: ScenarioOutcome) -> CapabilityVerdict:

@@ -73,11 +73,11 @@ from ufo_ext_e2b import (
     e2b_runtime_digest,
 )
 
-from ufo import o11y
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
-from ufo.sandbox.client_binary import client_binary
-from ufo.sandbox.select import select_carrier
-from ufo.sandbox.session import (
+from ufo.harness import o11y
+from ufo.harness.sandbox.client_binary import client_binary
+from ufo.harness.sandbox.select import select_carrier
+from ufo.harness.sandbox.session import (
     CA_SANDBOX_PATH,
     CA_STAGING_PATH,
     NO_PROXY_HOSTS,
@@ -94,7 +94,7 @@ from ufo.sandbox.session import (
     SandboxSpec,
     SandboxUnreachable,
 )
-from ufo.tools.tasks import (
+from ufo.runtime.tools.tasks import (
     MAX_COMMAND_TIMEOUT_MS,
     TASK_PROBE,
 )

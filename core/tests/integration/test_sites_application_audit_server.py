@@ -9,7 +9,7 @@ from ufo_testsupport.plugin import docker_or_fail
 
 from evals.sandbox_image import SandboxImagePlan
 from sandbox.build_template import build_definition_digest
-from ufo.sandbox.session import SANDBOX_GID, SANDBOX_UID
+from ufo.harness.sandbox.session import SANDBOX_GID, SANDBOX_UID
 
 pytestmark = pytest.mark.docker
 

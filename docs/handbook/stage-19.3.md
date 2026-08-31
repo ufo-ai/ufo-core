@@ -13,7 +13,7 @@ The conversation slots file defines what extensions may show inside conversation
 ### Extension API contracts
 Defines the scoped runtime context extensions receive, the conversation slot data/provider shapes they can expose, and the manifest contract for declaring extension capabilities.
 
-### `core/src/ufo/ext/context.py`
+### `core/src/ufo/runtime/ext/context.py`
 
 `orchestration` · `cross-cutting: active whenever an extension, background job, surface handler, or off-turn helper runs`
 
@@ -1409,7 +1409,7 @@ def context_for(extension: str, declared: frozenset[str], index: IndexBackend | 
 *Call graph*: 7 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__).
 
 
-### `core/src/ufo/ext/conversation_slots.py`
+### `core/src/ufo/runtime/ext/conversation_slots.py`
 
 `data_model` · `conversation slot validation and extension read/summarize calls`
 
@@ -1494,7 +1494,7 @@ def http_url(cls, value: str) -> str
 *Call graph*: 1 external calls (urlsplit).
 
 
-### `core/src/ufo/ext/manifest.py`
+### `core/src/ufo/runtime/ext/manifest.py`
 
 `data_model` · `extension loading and startup, with the declared shapes reused during turns, jobs, routes, and hooks`
 

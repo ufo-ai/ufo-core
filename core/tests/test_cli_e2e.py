@@ -41,24 +41,24 @@ from ufo_testsupport.surfaces import (
 )
 from ufo_testsupport.tables import reset_workspace_data
 
-from ufo import cli
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import CredentialSlotUnset, CredentialStore
-from ufo.auth.bearer import mint_token
+from ufo import bundle, cli
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config, DatabaseConfig, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.loader import skill_registry
-from ufo.hub import InProcessHub
-from ufo.loop import queue as loop_queue
-from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
-from ufo.models.registry import ModelRegistry
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.host.ext.loader import HostEnvironment, skill_registry
+from ufo.runtime import queue as loop_queue
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.runtime.auth.bearer import mint_token
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.subagents import SubagentRegistry
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, Usage
 from ufo.serve import _mount_shared_surfaces
@@ -418,7 +418,8 @@ def test_bundle_writes_a_runnable_artifact(cli_home: CliRunner) -> None:
     assert "extension(s) pinned" in result.output
     out = Path("bundle")
     dockerfile = (out / "Dockerfile").read_text()
-    assert "ufo" in dockerfile
+    assert (out / bundle.wheel_name()).is_file()
+    assert bundle.wheel_name() in dockerfile
     assert 'ENTRYPOINT ["ufoctl"]' in dockerfile
     assert 'CMD ["serve"]' in dockerfile
     assert (out / "ufo.toml").read_text()
@@ -662,6 +663,12 @@ def wire_server(
                 subagents=SubagentRegistry(()),
                 subagent_grants={},
                 manifests=(),
+                environment=HostEnvironment(
+                    manifests=(),
+                    credentials=None,
+                    index=DefaultIndex(transaction=workspace_tx),
+                    embed=StubEmbed(),
+                ),
                 registry=STANDIN_REGISTRY,
                 skills=skill_registry(()),
                 credentials=None,

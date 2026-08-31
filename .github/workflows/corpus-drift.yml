@@ -64,7 +64,7 @@ jobs:
                `gateway_invite.py`, `gateway_slack_connect.py`); the Slack install states, their
                hints and the shared channel in `extensions/slack/`; billing, plan activation, seats
                and overage in `extensions/metronome/`; memory scopes and the foreign-room seal in
-               `core/src/ufo/turns/audience.py` and the memory extension; connectors, credentials, sources
+               `core/src/ufo/runtime/turns/audience.py` and the memory extension; connectors, credentials, sources
                and scheduling in their own extensions. Check `git log -20 --oneline` for what moved
                since the corpus was last touched, and read those diffs.
             2. A claim is drifted only when you can name the code that contradicts it. Quote the file

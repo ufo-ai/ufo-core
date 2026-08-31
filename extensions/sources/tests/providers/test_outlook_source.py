@@ -14,9 +14,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.outlook import CONVERSATIONS, MESSAGES, OutlookConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
 from ufo.sdk.sources import MAIL_BACKFILL_WINDOW_DAYS, ConnectorBackend, ConnectorSourceConfig
-from ufo.sources.sync import SourceAuth, StreamSkipped
 
 ACCOUNT = "acct-1"
 DELTA_LINK = "https://graph.microsoft.com/v1.0/me/mailFolders/delta?$deltatoken=abc"

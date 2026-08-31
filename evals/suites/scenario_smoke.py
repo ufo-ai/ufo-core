@@ -10,7 +10,7 @@ from ufo_ext_memory.store import memory_item
 from evals.harness.capability import CapabilityVerdict, DescribedGrader
 from evals.harness.scenario import ScenarioCase, ScenarioGrader, ScenarioOutcome, ScenarioUser
 from ufo.db import workspace_tx
-from ufo.workspace import ws_current
+from ufo.runtime.workspace import ws_current
 
 MIN_EXCHANGES = 2
 REVIEW_DAY = "thursday"

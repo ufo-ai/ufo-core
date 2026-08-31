@@ -23,12 +23,12 @@ from ufo_ext_gbrain.git import (
     GbrainGitSource,
 )
 
-from ufo.access.credentials import CredentialStore
 from ufo.db import workspace_tx
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.sdk.context import CredentialAccess
 from ufo.sdk.sources import SourceAuth, StreamFault, SyncResult
-from ufo.workspace import init_workspace_credentials, ws
 
 REPO = "acme/brain"
 SHA = "a" * 40

@@ -1,8 +1,8 @@
 from cryptography.fernet import Fernet
 
-from ufo.access.credentials import CredentialStore
-from ufo.ext.loader import load_manifests, turn_tools
-from ufo.turns.audience import conversation_audience
+from ufo.host.ext.loader import load_manifests, turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.turns.audience import conversation_audience
 
 HOSTED_PACK = "assistant_hosted"
 

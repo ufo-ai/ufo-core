@@ -132,7 +132,7 @@ jobs:
       # 404s the names it dropped, with the suite green because the suite reads the repo tree.
       - name: Gate production wheel
         run: |
-          uv build --wheel --out-dir /tmp/ufo-wheel
+          uv build --wheel --all-packages --out-dir /tmp/ufo-wheel
           python3 - /tmp/ufo-wheel/ufo-*.whl <<'PY'
           import sys
           import zipfile
@@ -160,11 +160,20 @@ jobs:
               raise SystemExit("built but absent from the wheel:\n" + "\n".join(sorted(missing)))
           PY
           uv venv --python 3.12 /tmp/ufo-wheel-venv
-          uv pip install --python /tmp/ufo-wheel-venv/bin/python /tmp/ufo-wheel/ufo-*.whl
+          uv pip install --python /tmp/ufo-wheel-venv/bin/python \
+            /tmp/ufo-wheel/ufo-*.whl
           /tmp/ufo-wheel-venv/bin/ufoctl --help >/dev/null
           /tmp/ufo-wheel-venv/bin/python - <<'PY'
           import os
           from importlib.metadata import entry_points
+
+          from ufo.harness.agent import AgentDefinition, AgentEngine, Message, ToolDefinition
+          from ufo.harness.context import CompactionHarness
+          from ufo.harness.rounds import ModelRoundRunner
+          from ufo.harness.sandbox.protocol import SandboxCommands
+
+          assert AgentDefinition and AgentEngine and Message and ToolDefinition
+          assert CompactionHarness and ModelRoundRunner and SandboxCommands
 
           os.chdir("/tmp")
           import evals.registry

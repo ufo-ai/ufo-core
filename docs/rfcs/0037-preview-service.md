@@ -86,7 +86,7 @@ There is no service→core call: bytes in, bytes-or-a-store out, one hop each wa
 `put_url` is a **plain** (unmeasured) presigned PUT: core cannot sign the output's size or checksum
 into the URL before the render exists, and it need not — the agent already controls its own preview
 content (the torn-out in-sandbox renderer had the same property), and a bad PNG is caught by the
-read-time image validator (`core/src/ufo/media/image_previews.py`). Whoever mints the URL fixes its key,
+read-time image validator (`core/src/ufo/runtime/media/image_previews.py`). Whoever mints the URL fixes its key,
 so a request cannot store anywhere else. The capability gates the *write*, not the compute: the
 render runs before any store, bounded by the request deadline and the concurrency permit cap.
 
@@ -155,7 +155,7 @@ caps), `fetch` (SSRF-guarded GET and PUT), `convert` (the soffice spawn), `worke
   composing the command; the tool parses the metadata reply and fills the same three columns at the
   same moment it does today. The render recipe, the in-container preflight, and `pdftoppm` leave
   core — the tear-out grep is `pdftoppm`.
-- A `render_previews` core job (`core/src/ufo/media/preview_renderer.py`) for `shared_artifact` rows whose
+- A `render_previews` core job (`core/src/ufo/runtime/media/preview_renderer.py`) for `shared_artifact` rows whose
   preview never landed — the retry for a share-time service outage, and the producer for composer
   uploads once they persist. It is a core-level workflow like `delivery_sweep`, not an
   extension-context handler: it presigns a GET of the source and a plain presigned PUT of the

@@ -33,15 +33,10 @@ from ufo_ext_self_improvement.model import ModelAccessLeg
 from ufo_ext_self_improvement.proposer import PromptProposer
 from ufo_ext_self_improvement.replay import ReplayEvaluation, replay_head
 
-from ufo.billing.accounting import TOKENS_DIMENSION, Pricing
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ModelAccess, Trajectory, context_for
-from ufo.ext.loader import load_manifests
-from ufo.kinds.governance import prompt_digest
-from ufo.loop.transcript import Transcript
-from ufo.models.catalog import CORE_PRICING
-from ufo.models.interface import (
+from ufo.harness.models.catalog import CORE_PRICING
+from ufo.harness.models.interface import (
     PROVIDER_ANTHROPIC,
     Message,
     ModelClient,
@@ -58,10 +53,15 @@ from ufo.models.interface import (
     ToolSchema,
     ToolUseBlock,
 )
+from ufo.host.ext.loader import load_manifests
+from ufo.runtime.billing.accounting import TOKENS_DIMENSION, Pricing
+from ufo.runtime.ext.context import ModelAccess, Trajectory, context_for
+from ufo.runtime.kinds.governance import prompt_digest
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.transcript import Conversation
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.turns.transcript import Conversation
-from ufo.workspace import ws
 
 SEED_PROMPT = "You are a helpful assistant."
 IMPROVED_MARKER = "IMPROVED"

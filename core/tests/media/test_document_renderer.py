@@ -5,7 +5,7 @@ from base64 import b64decode
 
 import httpx
 
-from ufo.media.document_renderer import DocumentRenderer
+from ufo.runtime.media.document_renderer import DocumentRenderer
 
 
 def _bundle(

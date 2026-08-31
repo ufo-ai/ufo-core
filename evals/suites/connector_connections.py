@@ -15,12 +15,12 @@ from evals.harness.capability import (
     DescribedGrader,
     ToolInvocation,
 )
-from ufo.access.grants import GrantStore
-from ufo.agent_scope import agent
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
-from ufo.workspace import ws_current
 
 ASKER_EMAIL = "founder@evalco.test"
 OWNER_EMAIL = "dana@evalco.test"

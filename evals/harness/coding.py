@@ -12,7 +12,7 @@ from evals.harness.capability import (
     grading_statement,
 )
 from evals.harness.harness import JsonObject
-from ufo.tools.builtins import SPAWN_DETACHED_LEAD, SPAWN_MOVED_LEAD
+from ufo.host.tools.builtins import SPAWN_DETACHED_LEAD, SPAWN_MOVED_LEAD
 
 CODING_LANE = "coding"
 BACKGROUND_ACKS = (SPAWN_DETACHED_LEAD, SPAWN_MOVED_LEAD)

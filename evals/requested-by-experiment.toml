@@ -34,7 +34,7 @@ research = { search_provider = "perplexity" }
 name = "no-hint"
 
 [[arm.replacements]]
-path = "core/src/ufo/loop/engine.py"
+path = "core/src/ufo/runtime/engine.py"
 old = """REQUESTED_BY_HINT = (
     " Set requested_by to the message_ref of the member who asked; active member messages: {refs}."
 )"""
@@ -47,7 +47,7 @@ new = """REQUESTED_BY_HINT = ""
 name = "offer-ref-always"
 
 [[arm.replacements]]
-path = "core/src/ufo/loop/engine.py"
+path = "core/src/ufo/runtime/engine.py"
 old = """        if self._own_member(requesters) is not None:
             return ()
         return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""
@@ -59,14 +59,14 @@ new = """        return tuple(ref for ref, message in requesters.items() if mess
 name = "no-own-binding"
 
 [[arm.replacements]]
-path = "core/src/ufo/loop/engine.py"
+path = "core/src/ufo/runtime/engine.py"
 old = """        elif (member := self._own_member(requesters)) is not None:
             requester = member
 """
 new = ""
 
 [[arm.replacements]]
-path = "core/src/ufo/loop/engine.py"
+path = "core/src/ufo/runtime/engine.py"
 old = """        if self._own_member(requesters) is not None:
             return ()
         return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""

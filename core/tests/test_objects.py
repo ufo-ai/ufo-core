@@ -33,16 +33,27 @@ from ufo_ext_skill_create.manifest import SKILL_OBJECT
 from ufo_ext_sources.pages import PAGE_OBJECT
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
-import ufo.kinds.artifacts as artifacts
-import ufo.kinds.conversations as conversations
-from ufo.access.credentials import CredentialStore
-from ufo.agent_scope import agent
+import ufo.runtime.kinds.artifacts as artifacts
+import ufo.runtime.kinds.conversations as conversations
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, JsonValue, context_for
-from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
-from ufo.ext.manifest import Manifest
-from ufo.kinds.agents import (
+from ufo.harness.models.catalog import core_model_specs
+from ufo.harness.models.interface import Message, TextBlock, ToolUseBlock
+from ufo.harness.models.spec import ModelSpec, ReasoningSupport
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import (
+    ExecResult,
+    ProxyEndpoint,
+    SandboxHandle,
+    SandboxSession,
+    SandboxSpec,
+)
+from ufo.host.ext.loader import load_manifests, turn_tools, validate_ext_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import ExtensionContext, JsonValue, context_for
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.kinds.agents import (
     AGENT_ALREADY_ARCHIVED,
     AGENT_CREATE_GATE,
     AGENT_EDIT_GATE,
@@ -54,27 +65,23 @@ from ufo.kinds.agents import (
     AgentObjects,
     AgentSpec,
 )
-from ufo.kinds.artifacts import (
+from ufo.runtime.kinds.artifacts import (
     ARTIFACT_KIND,
     ArtifactObjects,
     artifact_object,
     artifact_object_names,
 )
-from ufo.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
-from ufo.kinds.credential_kind import CredentialObjects
-from ufo.kinds.members import MEMBER_OBJECT
-from ufo.loop.transcript import Transcript
-from ufo.media.artifact_url import verify_artifact_url
-from ufo.models.catalog import core_model_specs
-from ufo.models.interface import Message, TextBlock, ToolUseBlock
-from ufo.models.spec import ModelSpec, ReasoningSupport
-from ufo.object_name import (
+from ufo.runtime.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
+from ufo.runtime.kinds.credential_kind import CredentialObjects
+from ufo.runtime.kinds.members import MEMBER_OBJECT
+from ufo.runtime.media.artifact_url import verify_artifact_url
+from ufo.runtime.object_name import (
     OBJECT_NAME_MAX_LENGTH,
     OBJECT_NAME_PATTERN,
     InvalidName,
 )
-from ufo.object_scope import ObjectActionTarget
-from ufo.objects import (
+from ufo.runtime.object_scope import ObjectActionTarget
+from ufo.runtime.objects import (
     MATERIALIZE_MAX_BYTES,
     OBJECT_LIST_PAGE,
     AdminRequired,
@@ -98,28 +105,27 @@ from ufo.objects import (
     object_page,
     object_registry,
 )
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import (
-    ExecResult,
-    ProxyEndpoint,
-    SandboxHandle,
-    SandboxSession,
-    SandboxSpec,
+from ufo.runtime.tools.context import (
+    SpawnResult,
+    SpeakerRequired,
+    TextContent,
+    ToolContext,
+    ToolResult,
 )
-from ufo.schema import tables
-from ufo.schema.records import MAIN_AGENT_ICON, SCHEDULED_ADMISSION, Agent, Turn
-from ufo.sdk.objects import AgentTargetVerb
-from ufo.tools.context import SpawnResult, SpeakerRequired, TextContent, ToolContext, ToolResult
-from ufo.tools.registry import ToolDef
-from ufo.turns.audience import (
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
     Audience,
     conversation_audience,
     foreign_room_audience,
     room_audience,
 )
-from ufo.turns.transcript import Conversation, transcript_key
-from ufo.workspace import ws
+from ufo.runtime.turns.transcript import Conversation, transcript_key
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.schema.records import MAIN_AGENT_ICON, SCHEDULED_ADMISSION, Agent, Turn
+from ufo.sdk.objects import AgentTargetVerb
 
 SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sandbox"
 OBJECT_NARRATION = "checking the workspace records"

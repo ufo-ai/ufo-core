@@ -28,15 +28,15 @@ from ufo_ext_sources.pages import PAGE_KIND, PAGE_OBJECT
 from ufo_ext_sources.registry import SOURCE_KIND
 from ufo_ext_sources.tools import SOURCE_OBJECT
 
-from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.kinds.agents import AGENT_KIND, AGENT_OBJECT
-from ufo.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
-from ufo.models.interface import Message, ToolUseBlock
-from ufo.object_name import ObjectRef
-from ufo.objects import (
+from ufo.harness.models.interface import Message, ToolUseBlock
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.kinds.agents import AGENT_KIND, AGENT_OBJECT
+from ufo.runtime.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
+from ufo.runtime.object_name import ObjectRef
+from ufo.runtime.objects import (
     BoundKind,
     ObjectLink,
     ObjectVerbs,
@@ -45,15 +45,15 @@ from ufo.objects import (
     VerbNotSupported,
     object_registry,
 )
+from ufo.runtime.sources.sync import PageChange
+from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.sources import binding_name
-from ufo.sources.sync import PageChange
-from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
-from ufo.tools.registry import ToolDef
-from ufo.turns.audience import conversation_audience
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import ws
 
 MEMORY_TOOLS = {tool.name: tool for tool in memory_manifest().tools}
 SEARCH_REF = re.compile(r"\((memory|page)/([0-9a-f-]{36})")

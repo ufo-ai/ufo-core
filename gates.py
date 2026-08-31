@@ -7,21 +7,52 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+from sys import stdlib_module_names
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ufo.ext.manifest import Manifest, Pack
+    from ufo.runtime.ext.manifest import Manifest, Pack
 
 ROOT = Path(__file__).parent
 SOURCE_ROOTS = ("core", "extensions", "packs", "evals")
+CORE_ROOT = Path("core")
 CORE_SRC = Path("core/src/ufo")
+CORE_TEST_ROOTS = (Path("core/tests"), Path("core/harness/tests"))
+HARNESS_SRC = Path("core/src/ufo/harness")
+RUNTIME_SRC = Path("core/src/ufo/runtime")
+HOST_SRC = Path("core/src/ufo/host")
+ENGINE_CORE_FILES = (
+    "agent.py",
+    "containment.py",
+    "context.py",
+    "replies.py",
+    "rounds.py",
+    "tools.py",
+    "untrusted.py",
+    "sandbox/protocol.py",
+)
 FORBIDDEN_MODULE_NAMES = {"utils", "helpers", "common"}
 DB_MODULE = CORE_SRC / "db.py"
 ENGINE_TOKENS = ("create_async_engine", "async_sessionmaker", ".begin(")
 SDK_EXEMPT_PART = "sdk"
 SESSION_COOKIE_FACTORY = CORE_SRC / "sdk" / "http.py"
 COMPOSITION_ROOTS = (CORE_SRC / "serve.py", CORE_SRC / "proxy_serve.py", CORE_SRC / "cli.py")
-ROLE_PACKAGES = ("ufo.surfaces", "ufo.loop", "ufo.runtime.jobs")
+ROLE_PACKAGES = (
+    "ufo.runtime.surfaces",
+    "ufo.runtime.jobs",
+    "ufo.runtime.compaction",
+    "ufo.runtime.delivery",
+    "ufo.runtime.engine",
+    "ufo.runtime.profiles",
+    "ufo.runtime.queue",
+    "ufo.runtime.runtime_instance",
+    "ufo.runtime.spawn_catalog",
+    "ufo.runtime.steps",
+    "ufo.runtime.subagents",
+    "ufo.runtime.tool_bridge",
+    "ufo.runtime.transcript",
+)
+LOOP_ROLE = frozenset(ROLE_PACKAGES[2:])
 BLOB_MODULE = CORE_SRC / "blob.py"
 RAW_BLOB_CONSTRUCTORS = frozenset({"FilesystemBlobStore", "S3BlobStore"})
 RAW_BLOB_BOOT_MODULES = frozenset(
@@ -29,7 +60,7 @@ RAW_BLOB_BOOT_MODULES = frozenset(
         CORE_SRC / "serve.py",
         CORE_SRC / "cli.py",
         CORE_SRC / "proxy_serve.py",
-        CORE_SRC / "sandbox" / "ingress_serve.py",
+        HARNESS_SRC / "sandbox" / "ingress_serve.py",
         Path("evals/__main__.py"),
         Path("evals/issue_recall/materialize.py"),
         Path("evals/memory_100/materialize.py"),
@@ -47,7 +78,7 @@ APP_HOME_SKILL = "app-{slug}-home"
 APPS_CONFIG = PORTAL_SOURCE.parent / "vite.apps.config.ts"
 APPS_TYPECHECK = PORTAL_SOURCE.parent / "tsconfig.apps.json"
 APP_HOME_SKILL_FILE = "SKILL.md"
-KIT_CATALOGUE = Path("core/src/ufo/skills/ufo-style/references/kit.md")
+KIT_CATALOGUE = Path("core/src/ufo/runtime/skills/ufo-style/references/kit.md")
 KIT_CATALOGUE_SCRIPT = Path("extensions/web/frontend/kit-catalogue.mjs")
 KIT_EXPORT = re.compile(r"^  ([A-Za-z][A-Za-z0-9]*),$", re.M)
 KIT_DESCRIBED = re.compile(r"^- \*\*`([A-Za-z][A-Za-z0-9]*)`\*\*", re.M)
@@ -109,9 +140,9 @@ EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
 EXT_SCAFFOLD_DIRS = frozenset({"tests"})
 SDK_PUBLIC_PREFIX = "ufo.sdk"
-MANIFEST_MODULE = CORE_SRC / "ext" / "manifest.py"
+MANIFEST_MODULE = RUNTIME_SRC / "ext" / "manifest.py"
 SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "ufo_ext_sample.py"
-CORE_SKILLS_DIR = CORE_SRC / "skills"
+CORE_SKILLS_DIR = RUNTIME_SRC / "skills"
 CORE_SKILL_NAMES = frozenset({"sandbox", "create-application", "ufo-style"})
 SKILL_MANIFEST = "SKILL.md"
 HOUSE_STYLE_TOKENS = CORE_SKILLS_DIR / "ufo-style/references/tokens.css"
@@ -148,8 +179,8 @@ GRANDFATHERED_CORE_REVISIONS = frozenset({"knowledge_graph_0001", "sweep_0001", 
 NAME_SEPARATOR = "-"
 CANDIDATES_FIELD = "candidates"
 ENV_ROOTS = Path("infra/envs")
-CONTAINMENT_MODULE = CORE_SRC / "sandbox" / "containment.py"
-CONTAINMENT_IMPORT_PATH = "ufo.sandbox.containment"
+CONTAINMENT_MODULE = HARNESS_SRC / "containment.py"
+CONTAINMENT_IMPORT_PATH = "ufo.harness.containment"
 CONTAINMENT_IMPORT = "containment"
 CONTAINMENT_GUARDS = frozenset(
     {
@@ -240,13 +271,16 @@ LEXICAL_CHECK_METHODS = frozenset({"is_absolute", "normpath"})
 SANDBOX_PROGRAM_SUFFIX = "_PROG"
 PROGRAM_FILESYSTEM_TOKENS = ("open(", "os.", "Path(", "shutil.")
 DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
-    (CORE_SRC / "media" / "artifact_url.py", "verify_artifact_url"): (
+    (RUNTIME_SRC / "media" / "artifact_url.py", "verify_artifact_url"): (
         "the claim is a blob key, not a host path: the store contains keys at its own root"
     ),
     (CORE_SRC / "blob.py", "_walk"): (
         "the walk starts from _resolve, which contains the key under the lstat'ed store root"
     ),
     (CORE_SRC / "config.py", "load_config"): "the config file is deploy input, read before a turn",
+    (HOST_SRC / "devhost.py", "serve_dev_host"): (
+        "the overrides document is operator CLI input, read once at process start"
+    ),
     (Path(EXTENSIONS_ROOT) / "web" / "ufo_ext_web" / "surface.py", "load_assets"): (
         "the portal's built asset directory is deploy input, listed at boot"
     ),
@@ -257,23 +291,26 @@ DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
         "the fixed Linux proc tables identify the process listening on a validated integer port"
     ),
     (
-        CORE_SRC / "ext" / "loader.py",
+        HOST_SRC / "ext" / "loader.py",
         "extension_digest",
     ): "installed package files, not agent input",
-    (CORE_SRC / "ext" / "loader.py", "read_lockfile"): "UFO_EXT_LOCKFILE is deploy input",
-    (CORE_SRC / "ext" / "loader.py", "write_lockfile"): "UFO_EXT_LOCKFILE is deploy input",
-    (CORE_SRC / "ext" / "store.py", "read_catalog"): "the catalog path is deploy input",
+    (HOST_SRC / "ext" / "loader.py", "read_lockfile"): "UFO_EXT_LOCKFILE is deploy input",
+    (HOST_SRC / "ext" / "loader.py", "write_lockfile"): "UFO_EXT_LOCKFILE is deploy input",
+    (HOST_SRC / "ext" / "store.py", "read_catalog"): "the catalog path is deploy input",
     (
-        CORE_SRC / "skills" / "runtime.py",
+        RUNTIME_SRC / "skills" / "runtime.py",
         "_child_skill_dirs",
     ): "skill dirs ship in the package tree",
-    (CORE_SRC / "skills" / "runtime.py", "_load_core_skills"): "core's own skills ship in the tree",
-    (CORE_SRC / "skills" / "runtime.py", "parse_skill"): "skill dirs ship in the package tree",
-    (CORE_SRC / "sandbox" / "session.py", "workspace_path"): (
+    (
+        RUNTIME_SRC / "skills" / "runtime.py",
+        "_load_core_skills",
+    ): "core's own skills ship in the tree",
+    (RUNTIME_SRC / "skills" / "runtime.py", "parse_skill"): "skill dirs ship in the package tree",
+    (HARNESS_SRC / "sandbox" / "session.py", "workspace_path"): (
         "issue #1112: the logical guard for a container path this process cannot stat; it must"
         " accept /workspace itself, so it stays beside the canonical guard rather than inside it"
     ),
-    (CORE_SRC / "sources" / "sync.py", "_read"): (
+    (RUNTIME_SRC / "sources" / "sync.py", "_read"): (
         "issue #1112 row F10: a folder source's root is operator config; deferred with the"
         " symlink-following read it does under that root"
     ),
@@ -374,9 +411,10 @@ def _module_name(rel: Path) -> str:
 
 
 def _role_of(module: str) -> str | None:
-    return next(
+    matched = next(
         (pkg for pkg in ROLE_PACKAGES if module == pkg or module.startswith(pkg + ".")), None
     )
+    return "loop" if matched in LOOP_ROLE else matched
 
 
 def _imported_modules(tree: ast.Module) -> list[str]:
@@ -463,6 +501,56 @@ def _sdk_import_failures(trees: dict[Path, ast.Module]) -> list[str]:
                     f"(found {imported!r})"
                 )
     return failures
+
+
+LAYERED_BOOT_MODULES = frozenset({HARNESS_SRC / "sandbox" / "ingress_serve.py"})
+
+
+def _layering_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """host → runtime → harness is one-way: the runtime and the harness never import `ufo.host` —
+    the host layer's discovered contributions reach them as injected values (`Runtime.manifests`,
+    `Runtime.environment`) bound at a composition root. The named boot modules are process entry
+    points that compose the layers themselves."""
+    return [
+        f"{rel}: the runtime and harness never import ufo.host — host contributions arrive "
+        f"through the composition root"
+        for rel, tree in trees.items()
+        if (rel.is_relative_to(RUNTIME_SRC) or rel.is_relative_to(HARNESS_SRC))
+        and rel not in LAYERED_BOOT_MODULES
+        for imported in _imported_modules(tree)
+        if imported == "ufo.host" or imported.startswith("ufo.host.")
+    ]
+
+
+def _harness_import_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """The engine core is product-neutral: stdlib plus other engine-core modules, so an outside
+    host can run it without the tenant runtime, extensions, HTTP, database, or durable executor.
+    The rest of ufo.harness (model providers, sandbox carriers, durability, o11y) is execution
+    machinery with real dependencies; only the engine core carries the purity property."""
+    core_paths = {HARNESS_SRC / name for name in ENGINE_CORE_FILES}
+    allowed = {"ufo.harness", "ufo.harness.sandbox"} | {
+        "ufo.harness." + name.removesuffix(".py").replace("/", ".") for name in ENGINE_CORE_FILES
+    }
+    failures = []
+    for rel, tree in trees.items():
+        if rel not in core_paths:
+            continue
+        for imported in _imported_modules(tree):
+            root = imported.split(".", 1)[0]
+            if imported not in allowed and root not in stdlib_module_names:
+                failures.append(f"{rel}: the engine core cannot import {imported!r}")
+    return failures
+
+
+def _core_layout_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """Core Python is source under `ufo` or a test of that source."""
+    return [
+        f"{path}: core Python must live under core/src/ufo or a core test tree"
+        for path in trees
+        if path.is_relative_to(CORE_ROOT)
+        and not path.is_relative_to(CORE_SRC)
+        and not any(path.is_relative_to(root) for root in CORE_TEST_ROOTS)
+    ]
 
 
 def _manifest_point_fields(trees: dict[Path, ast.Module]) -> set[str]:
@@ -665,7 +753,7 @@ def _wiring_failures(trees: dict[Path, ast.Module]) -> list[str]:
 
 
 def _live_frame_kinds(trees: dict[Path, ast.Module]) -> list[str]:
-    hub = trees.get(CORE_SRC / "hub.py")
+    hub = trees.get(RUNTIME_SRC / "hub.py")
     if hub is None:
         return []
     members: list[str] = []
@@ -680,7 +768,7 @@ def _live_frame_failures(trees: dict[Path, ast.Module]) -> list[str]:
     calls = {
         name
         for rel, tree in trees.items()
-        if str(rel).startswith(str(CORE_SRC)) and rel != CORE_SRC / "hub.py"
+        if str(rel).startswith(str(CORE_SRC)) and rel != RUNTIME_SRC / "hub.py"
         for name in _call_names(tree)
     }
     return [
@@ -722,7 +810,7 @@ def _live_frame_consumer_failures(trees: dict[Path, ast.Module]) -> list[str]:
     failures: list[str] = []
     kinds = set(_live_frame_kinds(trees))
     if not kinds:
-        return ["hub: LiveFrame union not found in core/src/ufo/hub.py"]
+        return ["hub: LiveFrame union not found in core/src/ufo/runtime/hub.py"]
 
     web = trees.get(WEB_SURFACE_MODULE)
     debugger = trees.get(DEBUGGER_SURFACE_MODULE)
@@ -899,7 +987,7 @@ def _drawn_mark_failures() -> list[str]:
         f"mark: {copy} is not {portal} byte for byte — a logo is copied, never rewritten"
         for copy in (
             Path("servers/control/src/assets/ufo-logo.svg"),
-            Path("core/src/ufo/surfaces/assets/ufo-logo.svg"),
+            Path("core/src/ufo/runtime/surfaces/assets/ufo-logo.svg"),
         )
         if not copy.exists() or copy.read_bytes() != drawn
     ]
@@ -1156,7 +1244,7 @@ def _filesystem_calls(
 
 
 def _ingress_containment_failures(trees: dict[Path, ast.Module]) -> list[str]:
-    """A file ingress opens a path it was handed only through `ufo.sandbox.containment`. Validating
+    """A file ingress opens a path it was handed only through `ufo.harness.containment`. Validating
     the name and then resolving it leaves the resolution following symlinks, which is how an agent
     plants a link in its own writable directory and reads a host file (CVE-2026-56692) — so a new
     site that builds a host path from agent, model, connector, or provider input and reaches the
@@ -1521,7 +1609,7 @@ def _registered_naming_failures() -> list[str]:
     """Load the installed manifests and packs the way the loader does — every `ufo.extension` and
     `ufo.pack` entry point resolved to the value object it declares — and scan their registered
     names for `-`."""
-    from ufo.ext.loader import discovered, discovered_packs
+    from ufo.host.ext.loader import discovered, discovered_packs
 
     manifests = tuple(manifest for manifest, _ in discovered().values())
     packs = tuple(discovered_packs().values())
@@ -1539,7 +1627,7 @@ def _declared_flag_failures(terraform: dict[Path, str]) -> list[str]:
     The two lists are in different languages, so nothing but this holds them together. The pack is
     read from each environment root's own serve config, and the flags from the edge root, which is
     where every Cloudflare resource for both environments lives."""
-    from ufo.ext.loader import load_manifests
+    from ufo.host.ext.loader import load_manifests
 
     packs = {
         path.parent.name: found.group(1)
@@ -2009,6 +2097,9 @@ def main() -> int:
     failures.extend(_raw_blob_failures(trees))
     failures.extend(_boundary_failures(trees))
     failures.extend(_sdk_import_failures(trees))
+    failures.extend(_core_layout_failures(trees))
+    failures.extend(_harness_import_failures(trees))
+    failures.extend(_layering_failures(trees))
     failures.extend(_conformance_failures(trees))
     failures.extend(_job_selector_failures(trees))
     failures.extend(_schedule_authority_failures(trees))

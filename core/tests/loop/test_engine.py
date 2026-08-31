@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -28,15 +29,64 @@ from opentelemetry.sdk.metrics.export import (
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo import o11y
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import (
+from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.harness import o11y
+from ufo.harness.agent import ToolCall as HarnessToolCall
+from ufo.harness.models.interface import (
+    ConversationCacheTtl,
+    ImageBlock,
+    ImageSource,
+    Message,
+    ModelEvent,
+    ModelRequest,
+    ModelResponseTruncated,
+    ModelStreamStart,
+    ReasoningItemBlock,
+    RedactedThinkingBlock,
+    TextBlock,
+    TextDelta,
+    ThinkingBlock,
+    ToolCallDelta,
+    ToolCallStart,
+    ToolResultBlock,
+    ToolSchema,
+    ToolUseBlock,
+)
+from ufo.harness.models.spec import ReasoningSupport
+from ufo.harness.sandbox.session import (
+    RUNTIME_DIRNAME,
+    SANDBOX_UFO_HOME,
+    TOOL_OUTPUT_DIRNAME,
+    UFO_HOME_ENV,
+    ExecResult,
+    ProxyEndpoint,
+    SandboxHandle,
+    SandboxSession,
+    SandboxSpec,
+)
+from ufo.harness.sandbox.terminal import TerminalAbsent, TerminalCarrier, TerminalGone, Terminals
+from ufo.harness.tools import dispatch_segments
+from ufo.harness.untrusted import (
+    UNTRUSTED_CLOSE,
+    UNTRUSTED_CLOSE_ESCAPE,
+    UNTRUSTED_NOTICE,
+    UNTRUSTED_OPEN,
+)
+from ufo.host.ext.loader import BoundHook, HookChain, turn_tools
+from ufo.host.tools.builtins import (
+    BUILTIN_TOOLS,
+    RequestCredentialsInput,
+    request_credentials_handler,
+)
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CredentialRequests,
     CredentialStore,
     open_credential_request,
 )
-from ufo.access.grants import (
+from ufo.runtime.access.grants import (
     ConnectFlow,
     ConnectHandoff,
     ConnectRequestInvalid,
@@ -44,26 +94,13 @@ from ufo.access.grants import (
     OAuthAccount,
     install_connect_flow,
 )
-from ufo.billing.accounting import TurnUsageConflict, record_turn_usage
-from ufo.billing.balance import credit, debit, set_reserve
-from ufo.blob import FilesystemBlobStore
-from ufo.db import workspace_tx
-from ufo.ext.context import SourceReader, context_for
-from ufo.ext.loader import BoundHook, HookChain, turn_tools
-from ufo.ext.manifest import (
-    Deny,
-    HookContext,
-    HookOutcome,
-    HookSpec,
-    InjectContext,
-    UserPromptSubmit,
-)
-from ufo.hub import Absorbed, Activity, InProcessHub, LiveFrame, Resumed, Terminal
-from ufo.loop.compaction import (
+from ufo.runtime.billing.accounting import TurnUsageConflict, record_turn_usage
+from ufo.runtime.billing.balance import credit, debit, set_reserve
+from ufo.runtime.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     Compaction,
 )
-from ufo.loop.engine import (
+from ufo.runtime.engine import (
     ADOPTED_CLAIM,
     FINISH_ALONE,
     FINISH_DESCRIPTION,
@@ -100,59 +137,66 @@ from ufo.loop.engine import (
     _claim_turn,
     _claim_turn_with_handoff,
     _created_refs,
-    _dispatch_segments,
     _final_act,
     _loaded_skill_closures,
     _pending_act,
     _RejectedToolCall,
     _RoundInput,
+    _RuntimeTools,
+    _RuntimeToolState,
     _TurnMeter,
 )
-from ufo.loop.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
-from ufo.loop.queue import (
+from ufo.runtime.ext.context import SourceReader, context_for
+from ufo.runtime.ext.manifest import (
+    Deny,
+    HookContext,
+    HookOutcome,
+    HookSpec,
+    InjectContext,
+    UserPromptSubmit,
+)
+from ufo.runtime.hub import Absorbed, Activity, InProcessHub, LiveFrame, Resumed, Terminal
+from ufo.runtime.memory import MemoryMatch, MemorySearch
+from ufo.runtime.object_name import ObjectRef
+from ufo.runtime.object_scope import ObjectActionTarget
+from ufo.runtime.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
+from ufo.runtime.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
+from ufo.runtime.queue import (
     _agent_actions,
     _agent_tools,
     _previous_turn_ended_at,
     _with_action_verbs,
 )
-from ufo.loop.transcript import Transcript
-from ufo.memory import MemoryMatch, MemorySearch
-from ufo.models.interface import (
-    ConversationCacheTtl,
-    ImageBlock,
-    ImageSource,
-    Message,
-    ModelEvent,
-    ModelRequest,
-    ModelResponseTruncated,
-    ModelStreamStart,
-    ReasoningItemBlock,
-    RedactedThinkingBlock,
-    TextBlock,
-    TextDelta,
-    ThinkingBlock,
-    ToolCallDelta,
-    ToolCallStart,
-    ToolResultBlock,
-    ToolSchema,
-    ToolUseBlock,
+from ufo.runtime.skills.runtime import (
+    CORE_SKILL_REGISTRY,
+    LoadedSkills,
+    RuntimeSkill,
+    SkillCard,
+    SkillRegistry,
+    loaded_context,
 )
-from ufo.models.spec import ReasoningSupport
-from ufo.object_name import ObjectRef
-from ufo.object_scope import ObjectActionTarget
-from ufo.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
-from ufo.sandbox.session import (
-    RUNTIME_DIRNAME,
-    SANDBOX_UFO_HOME,
-    TOOL_OUTPUT_DIRNAME,
-    UFO_HOME_ENV,
-    ExecResult,
-    ProxyEndpoint,
-    SandboxHandle,
-    SandboxSession,
-    SandboxSpec,
+from ufo.runtime.tools.bridge import ToolBridgeIntent
+from ufo.runtime.tools.context import (
+    ImageContent,
+    SpawnResult,
+    SpeakerRequired,
+    TextContent,
+    ToolContext,
+    ToolResult,
+    UntrustedContentError,
 )
-from ufo.sandbox.terminal import TerminalAbsent, TerminalCarrier, TerminalGone, Terminals
+from ufo.runtime.tools.registry import ActionPresentation, ToolDef, ToolRegistry
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.activity import ActivitySummarizer
+from ufo.runtime.turns.audience import Audience, audience_subjects, conversation_audience
+from ufo.runtime.turns.contracts import AgentResultOutput, ResultOutput
+from ufo.runtime.turns.transcript import CompactionSummary, Conversation
+from ufo.runtime.turns.workspace_changes import (
+    WorkspaceChange,
+    WorkspaceChanges,
+    recorded_workspace_changes,
+)
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
@@ -171,46 +215,6 @@ from ufo.schema.records import (
     TurnContext,
     Usage,
 )
-from ufo.skills.runtime import (
-    CORE_SKILL_REGISTRY,
-    LoadedSkills,
-    RuntimeSkill,
-    SkillCard,
-    SkillRegistry,
-    loaded_context,
-)
-from ufo.tools.bridge import ToolBridgeIntent
-from ufo.tools.builtins import (
-    BUILTIN_TOOLS,
-    RequestCredentialsInput,
-    request_credentials_handler,
-)
-from ufo.tools.context import (
-    ImageContent,
-    SpawnResult,
-    SpeakerRequired,
-    TextContent,
-    ToolContext,
-    ToolResult,
-    UntrustedContentError,
-)
-from ufo.tools.registry import ActionPresentation, ToolDef, ToolRegistry
-from ufo.turns.activity import ActivitySummarizer
-from ufo.turns.audience import Audience, audience_subjects, conversation_audience
-from ufo.turns.contracts import AgentResultOutput, ResultOutput
-from ufo.turns.transcript import CompactionSummary, Conversation
-from ufo.turns.untrusted import (
-    UNTRUSTED_CLOSE,
-    UNTRUSTED_CLOSE_ESCAPE,
-    UNTRUSTED_NOTICE,
-    UNTRUSTED_OPEN,
-)
-from ufo.turns.workspace_changes import (
-    WorkspaceChange,
-    WorkspaceChanges,
-    recorded_workspace_changes,
-)
-from ufo.workspace import init_workspace_credentials, ws
 
 HISTORY_PAD = "y" * 600
 
@@ -2248,7 +2252,7 @@ async def test_a_metered_round_separates_provider_start_visible_output_and_round
 ) -> None:
     """The three histograms locate provider admission, visible output, and stream completion."""
     clock = ManualClock()
-    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    monkeypatch.setattr("ufo.runtime.engine.time", clock)
     reader = _metric_capture(monkeypatch)
     turn = await _seed_turn("queued", None)
     frame = await _engine(turn, ClockedModel(clock), tmp_path).run()
@@ -3081,7 +3085,7 @@ async def test_a_tool_calls_metered_wall_is_the_time_the_round_waited_on_it(
 ) -> None:
     """The observation is the handler's own wall clock, not the zero an instant fake records."""
     clock = ManualClock()
-    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    monkeypatch.setattr("ufo.runtime.engine.time", clock)
     reader = _metric_capture(monkeypatch)
 
     async def slow(ctx: ToolContext, args: BaseModel) -> ToolResult:
@@ -3110,7 +3114,7 @@ async def test_a_finished_turn_meters_its_wall_clock_its_rounds_and_its_outcome(
     rounds it took to get there, and how it ended. The turn runs under its workspace scope, as a
     dispatched turn does, and none of the three carries it."""
     clock = ManualClock()
-    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    monkeypatch.setattr("ufo.runtime.engine.time", clock)
     reader = _metric_capture(monkeypatch)
     turn = await _seed_turn("queued", None)
     carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
@@ -3260,7 +3264,7 @@ async def test_a_parked_attempt_meters_its_own_wall_clock(
     execution and enter no observation. The park itself is counted under the profile that hit the
     cap, so a cap holding one profile's work is readable as that profile's."""
     clock = ManualClock()
-    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    monkeypatch.setattr("ufo.runtime.engine.time", clock)
     reader = _metric_capture(monkeypatch)
     turn = await _seed_turn("queued", None)
     async with workspace_tx() as connection:
@@ -3297,7 +3301,7 @@ async def test_a_park_that_wrote_no_row_still_meters_the_execution(
     The execution ran a round and ended at that cap all the same — the wall clock belongs to the
     execution, not to the write, so only `turn_parked_total` stays behind the transition guard."""
     clock = ManualClock()
-    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    monkeypatch.setattr("ufo.runtime.engine.time", clock)
     reader = _metric_capture(monkeypatch)
     turn = await _seed_turn("queued", None)
     async with workspace_tx() as connection:
@@ -3363,7 +3367,7 @@ async def test_a_cancelled_execution_meters_before_the_writes_that_can_fail(
     async def blob_fault(*args: object, **kwargs: object) -> None:
         raise RuntimeError("blob store down")
 
-    monkeypatch.setattr("ufo.loop.engine.TranscriptRepair.persist_interrupted", blob_fault)
+    monkeypatch.setattr("ufo.runtime.engine.TranscriptRepair.persist_interrupted", blob_fault)
     with pytest.raises(RuntimeError, match="blob store down"):
         await _engine(turn, WorkflowCancelModel(), tmp_path).run()
     points = _exported_metrics(reader)
@@ -3395,7 +3399,7 @@ def test_an_execution_that_unwinds_past_its_exit_records_one_observation(
     there re-enters the commit. The execution ended at the first exit it reached; what unwinds past
     it is not a second turn."""
     clock = ManualClock()
-    monkeypatch.setattr("ufo.loop.engine.time", clock)
+    monkeypatch.setattr("ufo.runtime.engine.time", clock)
     reader = _metric_capture(monkeypatch)
     meter = _TurnMeter(started=clock.now, profile="main", rounds=3)
     clock.now += ROUND_SECONDS
@@ -4581,6 +4585,36 @@ async def test_ask_user_as_the_final_tool_call_rides_the_terminal_frame(
             )
         ).scalar_one()
     assert TerminalFrame.model_validate(stored).question == frame.question
+
+
+@dataclass(frozen=True)
+class AskThenFinishModel:
+    """Ends one round on ask_user, then answers its output contract with a lone finish — the shape a
+    spawned turn takes when it asks and then answers itself."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if _tool_results(request):
+            yield ToolCallStart(id="f1", name=FINISH_TOOL)
+            yield ToolCallDelta(id="f1", partial_json=json.dumps({"summary": "answered"}))
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="q1", name="ask_user")
+        yield ToolCallDelta(id="q1", partial_json=json.dumps(ASK_INPUT))
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+async def test_a_structured_finish_answers_instead_of_carrying_an_earlier_question(
+    db: None, tmp_path: Path
+) -> None:
+    """The contract's payload is the whole terminal: a question the finishing round did not ask is
+    the earlier round's, and carrying it would tell the parent its child is asking while the
+    validated result it waits for is dropped."""
+    turn = await _seed_turn("queued", None)
+    engine = replace(_engine(turn, AskThenFinishModel(), tmp_path), output_model=_Report)
+    frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == _Report(summary="answered").model_dump_json()
+    assert frame.question is None
 
 
 @dataclass(frozen=True)
@@ -7853,6 +7887,22 @@ def test_dispatch_segments_batch_safe_runs_and_barrier_the_rest() -> None:
             )
         return EffectiveCall(call=block, tool=tool, call_id=tool.name, ext=None)
 
+    def runtime_tools(blocks: tuple[ToolUseBlock, ...]) -> _RuntimeTools:
+        state = _RuntimeToolState()
+        state.resolutions.update((block.id, resolve(block)) for block in blocks)
+        return _RuntimeTools(
+            engine=cast("TurnEngine", None),
+            context=cast(ToolContext, None),
+            usage_events=[],
+            requesters={},
+            change_paths={},
+            created={},
+            state=state,
+        )
+
+    def harness_call(block: ToolUseBlock) -> HarnessToolCall:
+        return HarnessToolCall(id=block.id, name=block.name, input=dict(block.input))
+
     calls = (
         call("s1", "safe"),
         call("s2", "safe"),
@@ -7861,12 +7911,23 @@ def test_dispatch_segments_batch_safe_runs_and_barrier_the_rest() -> None:
         call("x1", "unknown"),
     )
     segments = [
-        tuple(item.call.id for item in segment)
-        for segment in _dispatch_segments(tuple(resolve(block) for block in calls))
+        tuple(item.id for item in segment)
+        for segment in dispatch_segments(
+            tuple(harness_call(block) for block in calls),
+            parallel_safe=runtime_tools(calls).parallel_safe,
+            limit=MAX_PARALLEL_TOOL_CALLS,
+        )
     ]
     assert segments == [("s1", "s2"), ("u1",), ("s3",), ("x1",)]
-    burst = tuple(resolve(call(f"s{n}", "safe")) for n in range(MAX_PARALLEL_TOOL_CALLS + 3))
-    sizes = [len(segment) for segment in _dispatch_segments(burst)]
+    burst = tuple(call(f"s{n}", "safe") for n in range(MAX_PARALLEL_TOOL_CALLS + 3))
+    sizes = [
+        len(segment)
+        for segment in dispatch_segments(
+            tuple(harness_call(block) for block in burst),
+            parallel_safe=runtime_tools(burst).parallel_safe,
+            limit=MAX_PARALLEL_TOOL_CALLS,
+        )
+    ]
     assert sizes == [MAX_PARALLEL_TOOL_CALLS, 3]
 
 
@@ -7974,7 +8035,7 @@ async def test_commit_retries_a_transient_failure_and_keeps_the_error(
             raise outages.pop()
         await record_turn_usage(*args, **kwargs)
 
-    monkeypatch.setattr("ufo.loop.engine.record_turn_usage", flaky_record_turn_usage)
+    monkeypatch.setattr("ufo.runtime.engine.record_turn_usage", flaky_record_turn_usage)
     with ws(turn.workspace_id):
         async with asyncio.timeout(10):
             frame = await engine._commit(
@@ -8035,7 +8096,7 @@ async def test_billing_conflict_does_not_retry_the_terminal_commit(
         calls += 1
         raise TurnUsageConflict("crossed snapshots")
 
-    monkeypatch.setattr("ufo.loop.engine.record_turn_usage", conflicting_record_turn_usage)
+    monkeypatch.setattr("ufo.runtime.engine.record_turn_usage", conflicting_record_turn_usage)
     with ws(turn.workspace_id), caplog.at_level(logging.ERROR, logger="ufo"):
         async with asyncio.timeout(2):
             frame = await engine._commit(

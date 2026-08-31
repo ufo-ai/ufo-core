@@ -8,14 +8,14 @@ from pathlib import Path
 from uuid import UUID
 
 from ufo.blob import WorkspaceBlobStore
-from ufo.loop.compaction import (
+from ufo.harness.models.interface import Message, ModelClient
+from ufo.runtime.compaction import (
     AUTOCOMPACT_BUFFER_TOKENS,
     COMPACTION_SUMMARY_MAX_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     Compaction,
 )
-from ufo.models.interface import Message, ModelClient
-from ufo.turns.transcript import Conversation, encode, transcript_key
+from ufo.runtime.turns.transcript import Conversation, encode, transcript_key
 
 WORKSPACE_PREFIX = "/workspace/"
 

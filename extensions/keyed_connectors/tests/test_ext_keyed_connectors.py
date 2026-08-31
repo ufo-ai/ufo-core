@@ -11,20 +11,20 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_ext_keyed_connectors import KEYED_PROVIDERS, KeyedSecret, manifest
 
-from ufo.access.credentials import CredentialStore, HostChoice
-from ufo.access.egress_rules import (
+from ufo.db import workspace_tx
+from ufo.host.ext.loader import core_object_kinds, injecting_slots
+from ufo.runtime.access.credentials import CredentialStore, HostChoice
+from ufo.runtime.access.egress_rules import (
     InjectionRule,
     MeterRule,
     ScopeRule,
     derive_credential_rules,
 )
-from ufo.db import workspace_tx
-from ufo.ext.loader import core_object_kinds, injecting_slots
-from ufo.ext.manifest import Manifest
-from ufo.kinds.credential_kind import CREDENTIAL_KIND
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.kinds.credential_kind import CREDENTIAL_KIND
+from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.tools.context import ToolContext
-from ufo.workspace import ws
 
 DATADOG = next(provider for provider in KEYED_PROVIDERS if provider.provider == "datadog")
 US5_HOST = "api.us5.datadoghq.com"

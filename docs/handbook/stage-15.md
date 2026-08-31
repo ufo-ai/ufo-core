@@ -666,7 +666,7 @@ async def _woken_since(self, cutoff: datetime, conversations: tuple[UUID, ...]) 
 *Call graph*: called by 1 (run); 2 external calls (select, workspace_tx).
 
 
-### `core/src/ufo/media/preview_renderer.py`
+### `core/src/ufo/runtime/media/preview_renderer.py`
 
 `orchestration` · `background scheduled preview retry job`
 
@@ -871,7 +871,7 @@ async def _fire(self, store: ScheduleStore, task: ScheduledTask, tick_at: dateti
 *Call graph*: calls 4 internal fn (fire_body, claim_holds, reschedule, retire_if_expired); called by 1 (run); 1 external calls (next_fire).
 
 
-### `core/src/ufo/ext/scheduled_fire.py`
+### `core/src/ufo/runtime/ext/scheduled_fire.py`
 
 `domain_logic` · `scheduled task admission and run lookup`
 

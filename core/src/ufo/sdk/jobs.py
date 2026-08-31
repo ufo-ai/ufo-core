@@ -12,30 +12,30 @@ declaring extension's own ScopedStore, `{prefix}:{handler name}`. An extension t
 consumer back over pages it already drained clears that key rather than spelling core's format
 itself."""
 
-from ufo.ext.context import (
-    agent_is_live as agent_is_live,
-)
-from ufo.ext.context import (
-    connection_workspaces as connection_workspaces,
-)
-from ufo.ext.context import (
-    seated_member_workspaces as seated_member_workspaces,
-)
-from ufo.ext.context import (
-    unseeded_agent_workspaces as unseeded_agent_workspaces,
-)
-from ufo.ext.context import (
-    untitled_conversation_workspaces as untitled_conversation_workspaces,
-)
-from ufo.ext.manifest import (
-    PAGE_CHANGE_CURSOR_KEY as PAGE_CHANGE_CURSOR_KEY,
-)
-from ufo.ext.manifest import (
-    JobSpec as JobSpec,
-)
 from ufo.runtime.candidates import (
     WorkspaceCandidates as WorkspaceCandidates,
 )
 from ufo.runtime.candidates import (
     owner_candidates as owner_candidates,
+)
+from ufo.runtime.ext.context import (
+    agent_is_live as agent_is_live,
+)
+from ufo.runtime.ext.context import (
+    connection_workspaces as connection_workspaces,
+)
+from ufo.runtime.ext.context import (
+    seated_member_workspaces as seated_member_workspaces,
+)
+from ufo.runtime.ext.context import (
+    unseeded_agent_workspaces as unseeded_agent_workspaces,
+)
+from ufo.runtime.ext.context import (
+    untitled_conversation_workspaces as untitled_conversation_workspaces,
+)
+from ufo.runtime.ext.manifest import (
+    PAGE_CHANGE_CURSOR_KEY as PAGE_CHANGE_CURSOR_KEY,
+)
+from ufo.runtime.ext.manifest import (
+    JobSpec as JobSpec,
 )

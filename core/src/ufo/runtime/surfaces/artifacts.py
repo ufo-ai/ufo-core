@@ -1,0 +1,179 @@
+"""The artifact download route: core-mounted, signed-URL file delivery — no signature, no bytes.
+
+A shared file's bytes serve only for a URL minted with the deploy's artifact secret, the same URL
+the `share_file` builtin mints and `SurfaceContext.artifact_link` hands a member. An expired URL
+keeps one way back in: a signed-in member of the workspace that shared the file, proven by the
+portal's session cookie, is redirected to the same path under a fresh grant — so a link in a
+day-old thread self-heals for a teammate while it stays dead for anyone else; a browser with no
+session is sent to sign in carrying the link as its target. The route is core and always mounted,
+so it stays reachable whether or not a chat surface is installed — the web surface links to it,
+Slack links to it for an oversize attachment, and it verifies with the one deploy secret it reads
+off `app.state`."""
+
+from datetime import UTC, datetime
+from typing import Annotated
+from urllib.parse import quote
+from uuid import UUID
+
+import sqlalchemy as sa
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
+
+from ufo.blob import WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.runtime.auth.bearer import LOGIN_PATH, SESSION_COOKIE, verified_claims
+from ufo.runtime.media.artifact_url import (
+    ARTIFACT_KEY_PREFIX,
+    ArtifactClaims,
+    ArtifactUrlError,
+    ArtifactUrlExpired,
+    artifact_media_type,
+    artifact_url_expiry,
+    mint_artifact_url,
+    verify_artifact_url,
+)
+from ufo.runtime.media.image_previews import InvalidImagePreview, validated_image_preview
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+
+router = APIRouter()
+
+ARTIFACT_TARGET_PARAM = "a"
+EXPIRED_DETAIL = "The download link expired. Ask the agent to share the file again."
+ARTIFACT_CACHE_SECONDS = 600
+SERVED_HEADERS = {
+    "x-content-type-options": "nosniff",
+    # The grant is the whole gate: a signed URL serves whoever holds it, so a cache keyed on the
+    # exact URL — query and all — answers only what the signature already grants, and the window
+    # sits well inside the shortest remaining validity a bucketed mint can carry. `public` is what
+    # licenses the edge worker's stored copy; a refusal or redirect never says it.
+    "cache-control": f"public, max-age={ARTIFACT_CACHE_SECONDS}",
+    # An app page — a framed site on its own origin — reads artifact bytes with fetch, which needs
+    # the origin stated where a plain download does not.
+    "access-control-allow-origin": "*",
+}
+UNCACHED = "private, no-store"
+
+
+@router.get("/" + ARTIFACT_KEY_PREFIX + "{artifact_id}/{filename}")
+async def download(
+    request: Request,
+    artifact_id: str,
+    filename: str,
+    exp: str = "",
+    sig: str = "",
+    preview: str = "",
+    workspace: Annotated[str, Query(alias="ws")] = "",
+) -> Response:
+    """Serve the URL's blob as a streamed download or a bounded validated raster preview. The
+    signed `ws` claim names the workspace whose store holds the bytes; the read binds it, and the
+    stream's key resolves inside the binding so the body serves after it releases. A download
+    streams out in bounded chunks — the bytes never buffer whole, so a large or concurrent fetch
+    can't spike memory — under the real media type its filename names, always as an attachment;
+    only a signed preview claim renders inline, after the bytes prove to be the raster type and
+    size it declares. `nosniff` holds the browser to the declared type. Served bytes are briefly
+    publicly cacheable: the signed URL is itself the whole grant, so a cache answering a repeat of
+    the exact URL answers only what the signature grants, for a window inside the grant's remaining
+    validity — refusals and redirects stay `no-store`."""
+    blob: WorkspaceBlobStore = request.app.state.blob
+    secret: str = request.app.state.artifact_token_secret
+    try:
+        claims = verify_artifact_url(
+            secret, artifact_id, filename, exp, sig, preview, workspace, datetime.now(UTC)
+        )
+    except ArtifactUrlExpired as expired:
+        return await _refreshed_for_member(request, expired.claims, secret)
+    except ArtifactUrlError as error:
+        raise HTTPException(403, str(error)) from error
+    if claims.workspace_id is None:
+        raise HTTPException(403, "artifact url grants no workspace scope")
+    with ws(claims.workspace_id):
+        if not await blob.exists(claims.blob_key):
+            raise HTTPException(404, "artifact not found")
+        if claims.preview is not None:
+            try:
+                data = await validated_image_preview(
+                    blob.get_stream(claims.blob_key), claims.preview
+                )
+            except InvalidImagePreview as error:
+                raise HTTPException(415, str(error)) from error
+            return Response(
+                content=data, media_type=claims.preview.media_type, headers=SERVED_HEADERS
+            )
+        body = blob.get_stream(claims.blob_key)
+    encoded = quote(claims.filename, safe="")
+    headers = {
+        "content-disposition": (
+            f'attachment; filename="{claims.filename}"'
+            if encoded == claims.filename
+            else f"attachment; filename*=UTF-8''{encoded}"
+        ),
+        **SERVED_HEADERS,
+    }
+    return StreamingResponse(
+        body,
+        media_type=artifact_media_type(claims.filename),
+        headers=headers,
+    )
+
+
+async def _refreshed_for_member(
+    request: Request, claims: ArtifactClaims, secret: str
+) -> RedirectResponse:
+    """An expired URL is still an authentic grant record: its signature named the blob it granted.
+    A signed-in member of the workspace that shared it — the teammate opening a day-old thread —
+    is redirected to the same path under a fresh grant, so the link in their address bar works for
+    another hour and bytes only ever serve under a live signature. The session bearer rides the
+    same `ufo_session` cookie the portal authenticates by, and the membership and ownership reads
+    run under that bearer's own workspace scope. A refused browser is sent to sign in with this
+    link as its target, so signing in lands back here and the grant refreshes; any other client
+    gets the 403 that names the next step."""
+    bearer = request.cookies.get(SESSION_COOKIE, "")
+    session = verified_claims(bearer) if bearer else None
+    if session is None:
+        raise _refusal(request)
+    workspace_raw, email = session
+    try:
+        workspace = UUID(workspace_raw)
+    except ValueError:
+        raise _refusal(request) from None
+    with ws(workspace):
+        async with workspace_tx() as connection:
+            member = (
+                await connection.execute(
+                    sa.select(tables.member.c.id).where(
+                        tables.member.c.workspace_id == workspace,
+                        tables.member.c.email == email,
+                    )
+                )
+            ).scalar_one_or_none()
+            owner = (
+                await connection.execute(
+                    sa.select(tables.shared_artifact.c.workspace_id)
+                    .where(
+                        sa.or_(
+                            tables.shared_artifact.c.blob_key == claims.blob_key,
+                            tables.shared_artifact.c.preview_blob_key == claims.blob_key,
+                        )
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+    if member is None or owner != workspace:
+        raise _refusal(request)
+    expires_at = artifact_url_expiry(datetime.now(UTC))
+    return RedirectResponse(
+        mint_artifact_url(
+            secret, claims.blob_key, expires_at, workspace_id=workspace, preview=claims.preview
+        ),
+        status_code=303,
+        headers={"cache-control": UNCACHED},
+    )
+
+
+def _refusal(request: Request) -> HTTPException:
+    if "text/html" in request.headers.get("accept", ""):
+        target = quote(f"{request.url.path}?{request.url.query}", safe="")
+        location = f"{LOGIN_PATH}?{ARTIFACT_TARGET_PARAM}={target}"
+        return HTTPException(303, EXPIRED_DETAIL, headers={"location": location})
+    return HTTPException(403, EXPIRED_DETAIL)

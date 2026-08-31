@@ -24,7 +24,7 @@ from evals.scenario_env.office import (
     seed_office,
     sent_rows,
 )
-from ufo.workspace import ws_current
+from ufo.runtime.workspace import ws_current
 
 FOCUS_DATE = FRIDAY
 SYNC_MINUTES = 45

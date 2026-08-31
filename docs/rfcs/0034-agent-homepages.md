@@ -20,7 +20,7 @@ date: 2026-08-16
 |---|---|---|
 | Agents page | one table (agents + subagent profiles merged) with a List \| Graph toggle (`views/Agents.tsx`); per-agent detail is a drawer over the list (`views/AgentPane.tsx:33`) | no per-agent place that says what the agent is doing |
 | Agent-authored pages | `deploy_website`/`publish_website` host a sandbox port at a permanent link (`extensions/sites/ufo_ext_sites/tools.py`) | site identity is `(conversation, name)` (`store.py:46`) — nothing names one site as *the agent's* |
-| Site liveness | on e2b, idle pauses unbilled and the ingress `dial` is a `connect` that resumes in ~110–360ms with the server still running (`extensions/e2b/ufo_ext_e2b.py:110`); a sandbox the provider lost answers 503 (`core/src/ufo/sandbox/ingress_serve.py`) | acceptable: the dash's frame pays a sub-second resume, and 503 is the rare lost-sandbox case (and single-shape dev carriers) |
+| Site liveness | on e2b, idle pauses unbilled and the ingress `dial` is a `connect` that resumes in ~110–360ms with the server still running (`extensions/e2b/ufo_ext_e2b.py:110`); a sandbox the provider lost answers 503 (`core/src/ufo/harness/sandbox/ingress_serve.py`) | acceptable: the dash's frame pays a sub-second resume, and 503 is the rare lost-sandbox case (and single-shape dev carriers) |
 | Rewrites | any member request in chat; a re-deploy of the same name updates behind the same link | a rewrite from another conversation is a *different site* — the binding must be movable |
 
 ## The homepage is a hosted site
@@ -102,7 +102,7 @@ extension's store:
 
 1. Write the marker — once ever, written at admit.
 2. `ctx.open_conversation(agent_id, f"homepage/{agent_id}")` — agent-held, no member,
-   `SHARED_AUDIENCE` (`core/src/ufo/ext/context.py:1643`), so the deploy's default visibility is
+   `SHARED_AUDIENCE` (`core/src/ufo/runtime/ext/context.py:1643`), so the deploy's default visibility is
    `workspace` and the room never reaches a rail.
 3. Admit one turn: `ctx.invoke(conversation, agent_id, SEED_PROMPT, "homepage-seed:<agent_id>",
    on_behalf_of_member_id=..., as_scheduled=True)` — the pause-runner pattern
@@ -113,7 +113,7 @@ extension's store:
   member, who becomes the site's creator and visibility owner.
 - **One core addition.** No `ExtensionContext` accessor answers the workspace's agent roster; the
   sweep needs `(agent_id, owner_member_id)` rows and the earliest-seated admin. Extensions cannot
-  express this, and `invoke_agent_for_member` (`core/src/ufo/ext/context.py:939`) is the
+  express this, and `invoke_agent_for_member` (`core/src/ufo/runtime/ext/context.py:939`) is the
   precedent for mediating core tables behind the context — the unit adds the read accessor there.
 - **Once ever.** A failed seed turn does not retry; the absent state names the recovery (ask in
   chat). An agent that already built a homepage before its marker exists gets one redundant seed

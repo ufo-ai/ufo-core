@@ -49,17 +49,17 @@ from evals.issue_recall.state import CorpusAttestor
 from ufo.blob import FilesystemBlobStore
 from ufo.config import ModelsConfig
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.ext.context import ScopedStore, SourceReader, context_for
-from ufo.indexing import TextChunker
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import ModelEvent, ModelRequest, ToolCallDelta, ToolCallStart
-from ufo.models.registry import ModelRegistry
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import ModelEvent, ModelRequest, ToolCallDelta, ToolCallStart
+from ufo.harness.models.registry import ModelRegistry
+from ufo.runtime.ext.context import ScopedStore, SourceReader, context_for
+from ufo.runtime.indexing import TextChunker
+from ufo.runtime.sources.sync import page_id_for
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
-from ufo.sources.sync import page_id_for
-from ufo.turns.audience import conversation_audience
-from ufo.turns.subjects import SHARED_SUBJECT
-from ufo.workspace import ws
 
 AUTO_MODEL = "claude-opus-4-8"
 BACKGROUND_MODEL = ModelsConfig().background_jobs_model

@@ -15,14 +15,7 @@ from evals.compaction.target import CompactionTarget
 from evals.harness.capability import CapabilityOutput, EvalTrajectory, ToolInvocation
 from evals.harness.target import TargetResult
 from ufo.blob import FilesystemBlobStore
-from ufo.loop.compaction import (
-    AUTOCOMPACT_BUFFER_TOKENS,
-    COMPACTION_SUMMARY_MAX_TOKENS,
-    MAX_REFERENCE_PATHS,
-    TOOL_OUTPUT_PATH_RE,
-    Compaction,
-)
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ImageBlock,
     ImageSource,
     Message,
@@ -36,8 +29,21 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.runtime.compaction import (
+    AUTOCOMPACT_BUFFER_TOKENS,
+    COMPACTION_SUMMARY_MAX_TOKENS,
+    MAX_REFERENCE_PATHS,
+    TOOL_OUTPUT_PATH_RE,
+    Compaction,
+)
+from ufo.runtime.turns.transcript import (
+    CompactionSummary,
+    Conversation,
+    decode,
+    encode,
+    transcript_key,
+)
 from ufo.schema.records import Usage
-from ufo.turns.transcript import CompactionSummary, Conversation, decode, encode, transcript_key
 
 TEST_TARGET_TOKENS = 9_000
 TEST_TRIGGER_TOKENS = int(TEST_TARGET_TOKENS * 0.9)
@@ -172,7 +178,7 @@ async def test_the_estimator_mirror_matches_the_live_compaction(tmp_path: Path) 
     assert [message_text(message) for message in window] == [
         live._text(message) for message in window
     ]
-    assert estimate_tokens(window) == live._tokens(window)
+    assert estimate_tokens(window) == live.window.tokens(window)
 
 
 async def test_build_is_deterministic(tmp_path: Path) -> None:

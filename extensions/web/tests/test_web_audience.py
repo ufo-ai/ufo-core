@@ -27,26 +27,26 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.surface import SurfaceContext
-from ufo.hub import InProcessHub
-from ufo.kinds.conversations import CONVERSATION_KIND
-from ufo.kinds.members import MEMBER_KIND
-from ufo.object_scope import ObjectActionTarget, ObjectAgent
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.surface import SurfaceContext
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.kinds.conversations import CONVERSATION_KIND
+from ufo.runtime.kinds.members import MEMBER_KIND
+from ufo.runtime.object_scope import ObjectActionTarget, ObjectAgent
+from ufo.runtime.surfaces.admission import Admission, MemberAdmission
+from ufo.runtime.surfaces.hub_tail import HubTailer
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ObjectBinding
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience, foreign_room_audience
-from ufo.surfaces.admission import Admission, MemberAdmission
-from ufo.surfaces.hub_tail import HubTailer
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ObjectBinding
-from ufo.workspace import ws
 
 GRANT = WEB_ACCESS_TOOLS[0]
 REVOKE = WEB_ACCESS_TOOLS[1]

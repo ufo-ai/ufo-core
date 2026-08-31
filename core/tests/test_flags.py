@@ -23,7 +23,7 @@ from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvid
 
 from ufo import flags
 from ufo.flags import flag_enabled, init_flags
-from ufo.workspace import ws
+from ufo.runtime.workspace import ws
 
 FLAG = "probe-flag"
 

@@ -10,11 +10,11 @@ import pytest
 from ufo_ext_sites.tools import SOURCE_SKIP_NAMES, _source_listing
 
 from ufo.blob import FilesystemBlobStore
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import WORKSPACE_DIR, ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import WORKSPACE_DIR, ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.tools.context import SpawnResult, ToolContext
 
 PAGE = "<!doctype html><title>hello</title>"
 STYLE = "body{background:#000;color:#fff}"

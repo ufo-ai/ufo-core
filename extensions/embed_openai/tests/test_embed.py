@@ -14,7 +14,7 @@ from ufo_ext_embed_openai import (
     plan_embed_batches,
 )
 
-from ufo.ext.context import CredentialAccess, ExtensionContext, ScopedStore
+from ufo.runtime.ext.context import CredentialAccess, ExtensionContext, ScopedStore
 
 
 def _ctx() -> ExtensionContext:

@@ -96,7 +96,7 @@ async def _register(self, connection: MainAgentConnection, connector: Connector,
 *Call graph*: calls 1 internal fn (streams); called by 1 (register); 6 external calls (__init__, model_validate, now, timedelta, member_subject, effective_days).
 
 
-### `core/src/ufo/sources/backend.py`
+### `core/src/ufo/runtime/sources/backend.py`
 
 `orchestration` · `source sync run`
 
@@ -213,7 +213,7 @@ def _max_str(current: str | None, value: Any) -> str | None
 *Call graph*: called by 1 (fetch).
 
 
-### `core/src/ufo/sources/rest.py`
+### `core/src/ufo/runtime/sources/rest.py`
 
 `io_transport` · `request handling during source sync reads`
 
@@ -729,7 +729,7 @@ def _validate_page(self, page: Any, stream: StreamSpec) -> None
 *Call graph*: called by 1 (fetch_page).
 
 
-### `core/src/ufo/sources/connector.py`
+### `core/src/ufo/runtime/sources/connector.py`
 
 `domain_logic` · `source registration and sync runs`
 
@@ -894,7 +894,7 @@ def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | Non
 ### Source sync storage
 The sync engine stores incoming documents, tracks deletions and cursors, and exposes changed pages for downstream indexing.
 
-### `core/src/ufo/sources/sync.py`
+### `core/src/ufo/runtime/sources/sync.py`
 
 `orchestration` · `scheduled source sync and downstream page-feed replay`
 

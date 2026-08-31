@@ -4,7 +4,7 @@
 #
 # A tag configuration also pins which tags stay queryable: a dimension the fleet emits but this list
 # omits aggregates away silently. Each list is therefore the dimensions its name declares in
-# `HISTOGRAMS` (`core/src/ufo/o11y.py`) plus what the pipeline stamps on every metric — `env` from
+# `HISTOGRAMS` (`core/src/ufo/harness/o11y.py`) plus what the pipeline stamps on every metric — `env` from
 # the collector's resource processor, `service` from the OTLP resource, `host` from the exporter.
 # The tag keys Datadog currently reports are not the source: those show only the dimensions some
 # turn already produced inside the lookback window.

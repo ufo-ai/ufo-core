@@ -10,40 +10,40 @@ import yaml
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict, SecretStr
 
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
-from ufo.ext.manifest import AgentProvision, Manifest, SubagentProfile, SubagentToolGrant
-from ufo.kinds.agents import AgentSpec
-from ufo.loop.queue import (
-    IMPLIED_GRANTS,
-    _agent_actions,
-    _agent_tools,
-    _subagent_actions,
-    _with_action_verbs,
-)
-from ufo.objects import (
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import load_manifests, turn_tools, validate_ext_tools
+from ufo.host.tools.builtins import BUILTIN_ACTIONS
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.manifest import AgentProvision, Manifest, SubagentProfile, SubagentToolGrant
+from ufo.runtime.kinds.agents import AgentSpec
+from ufo.runtime.objects import (
     BoundAction,
     BoundKind,
     ObjectVerbs,
     action_registry,
     object_registry,
 )
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
-from ufo.schema import tables
-from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION, Agent, Turn
-from ufo.tools.bridge import bridge_tools
-from ufo.tools.builtins import BUILTIN_ACTIONS
-from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
-from ufo.tools.registry import (
+from ufo.runtime.queue import (
+    IMPLIED_GRANTS,
+    _agent_actions,
+    _agent_tools,
+    _subagent_actions,
+    _with_action_verbs,
+)
+from ufo.runtime.tools.bridge import bridge_tools
+from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import (
     ActionPresentation,
     ObjectBinding,
     ToolDef,
     ToolRegistry,
 )
-from ufo.turns.audience import conversation_audience
-from ufo.workspace import ws
+from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION, Agent, Turn
 
 AUDIT_ID = f"action:{sample.WORKSPACE_KIND}:{sample.AUDIT_ACTION}"
 POLISH_ID = f"action:{sample.WIDGET_KIND}:{sample.POLISH_ACTION}"

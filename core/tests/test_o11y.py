@@ -34,15 +34,15 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic import ValidationError
 
 from evals.harness.harness import TRANSIENT_ERROR_CLASSES
-from ufo import o11y
-from ufo.access.credentials import CredentialValueInvalid
-from ufo.loop.engine import IntentRefused
-from ufo.models import anthropic as anthropic_models
-from ufo.models import openai as openai_models
-from ufo.models.interface import ModelRefusal, ModelResponseTruncated
-from ufo.sources.sync import CursorExpired
-from ufo.tools.context import UntrustedContentError
-from ufo.workspace import ws
+from ufo.harness import o11y
+from ufo.harness.models import anthropic as anthropic_models
+from ufo.harness.models import openai as openai_models
+from ufo.harness.models.interface import ModelRefusal, ModelResponseTruncated
+from ufo.runtime.access.credentials import CredentialValueInvalid
+from ufo.runtime.engine import IntentRefused
+from ufo.runtime.sources.sync import CursorExpired
+from ufo.runtime.tools.context import UntrustedContentError
+from ufo.runtime.workspace import ws
 
 
 @pytest.fixture(autouse=True)

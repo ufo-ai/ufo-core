@@ -16,7 +16,7 @@ from pathlib import Path
 from sqlalchemy.engine import make_url
 
 from ufo.db import MIGRATIONS_DIR, apply_migrations
-from ufo.ext.loader import migration_locations
+from ufo.host.ext.loader import migration_locations
 
 SQLITE_TEMPLATE_DIR = Path(tempfile.gettempdir()) / "ufo-sqlite-templates"
 TEMPLATE_CACHE_OFF_ENV = "UFO_TEST_SQLITE_TEMPLATE_CACHE_OFF"

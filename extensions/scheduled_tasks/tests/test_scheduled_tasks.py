@@ -63,15 +63,20 @@ from evals.suites.object_tools import (
     _graded_run_count,
     _remember_cadence,
 )
-from ufo.agent_scope import AgentUnbound, agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
-from ufo.ext.loader import skill_registry, turn_tools
-from ufo.loop.queue import _load_turn
-from ufo.objects import AdminRequired, ObjectListQuery, UnknownObject, VerbNotSupported
+from ufo.host.ext.loader import skill_registry, turn_tools
+from ufo.runtime.agent_scope import AgentUnbound, agent
+from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
 from ufo.runtime.jobs import JobRunner, bindings_from
+from ufo.runtime.objects import AdminRequired, ObjectListQuery, UnknownObject, VerbNotSupported
+from ufo.runtime.queue import _load_turn
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
 from ufo.sdk.audience import (
@@ -80,11 +85,6 @@ from ufo.sdk.audience import (
     foreign_room_audience,
     room_audience,
 )
-from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ToolDef
-from ufo.turns.subjects import SHARED_SUBJECT
-from ufo.workspace import ws
 
 TOOL_NARRATION = "setting up the reminder"
 

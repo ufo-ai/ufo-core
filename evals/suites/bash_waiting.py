@@ -1,8 +1,8 @@
 """Waiting on sandbox commands: the completion signal is a foreground return, a poll loop, or the
 task's exit file, never a padded sleep. The runtime refuses foreground flat sleeps with the same
-detector these graders read (`ufo.tools.tasks.flat_sleeps`), so the suite grades exactly what the
-guard enforces. Workload pauses are Python sleeps the shell detector cannot see, so a case's
-workload runs under the guard while any shell-level padding around it still fails the case."""
+detector these graders read (`ufo.runtime.tools.tasks.flat_sleeps`), so the suite grades exactly
+what the guard enforces. Workload pauses are Python sleeps the shell detector cannot see, so a
+case's workload runs under the guard while shell-level padding around it still fails the case."""
 
 from asyncio import create_subprocess_exec
 from asyncio.subprocess import DEVNULL, Process
@@ -18,7 +18,7 @@ from evals.harness.capability import (
     WorkspaceFile,
 )
 from evals.harness.harness import JsonObject
-from ufo.tools.tasks import flat_sleeps
+from ufo.runtime.tools.tasks import flat_sleeps
 
 FOREGROUND_WORKLOAD = "python3 -c \"import time; time.sleep(40); print('BUILD-OK-7391')\""
 BACKGROUND_WORKLOAD = (

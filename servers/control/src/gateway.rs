@@ -49,7 +49,7 @@ pub const DEBUG_SURFACE_PATH: &str = "/surface/debug";
 /// the browser's own session may not prove.
 pub const INVITATION_LOGIN_PATH: &str = "/login?invite=1";
 
-/// The operator session cookie, core's `ufo.ext.operator.OPERATOR_COOKIE` under the name it binds.
+/// The operator session cookie, core's `ufo.runtime.ext.operator.OPERATOR_COOKIE` under the name it binds.
 /// The operator surfaces are served on this host, so a sign-out here is what clears it.
 pub const OPERATOR_COOKIE: &str = "ufo_debug";
 
@@ -642,8 +642,8 @@ async fn login(
 /// whenever the query names one. Each reaches this door from exactly one caller — so its presence,
 /// not its value, is the whole signal — and each is a caller a forward would send straight back to.
 ///
-/// `debug` comes from `ufo.ext.operator.OPERATOR_LOGIN_PATH`, and the operator surfaces read
-/// `ufo_debug`, which only the page's POST binds. `a` comes from `ufo.surfaces.artifacts._refusal`,
+/// `debug` comes from `ufo.runtime.ext.operator.OPERATOR_LOGIN_PATH`, and the operator surfaces read
+/// `ufo_debug`, which only the page's POST binds. `a` comes from `ufo.runtime.surfaces.artifacts._refusal`,
 /// which refused this very session the artifact, so it would refuse the forward too. `invite` comes
 /// from `INVITATION_LOGIN_PATH`, and the mail names an address this session may not prove, whose
 /// seat is claimed in the walk the page runs. `error` comes from `auth_callback`, and the sentence it

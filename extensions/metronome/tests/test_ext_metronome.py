@@ -23,15 +23,21 @@ import ufo_ext_bedrock as bedrock
 import ufo_ext_metronome as metronome
 from cryptography.fernet import Fernet
 
-from ufo.access.credentials import CredentialRequests, CredentialStore
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.billing.accounting import (
+from ufo.blob import FilesystemBlobStore
+from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.db import workspace_tx
+from ufo.harness.models.registry import ModelRegistry, model_registry
+from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.credentials import CredentialRequests, CredentialStore
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.runtime.billing.accounting import (
     record_egress_request,
     record_sandbox_tokens,
     record_turn_usage,
     record_workspace_usage,
 )
-from ufo.billing.balance import (
+from ufo.runtime.billing.balance import (
     BILLING_SCREEN_FRAGMENT,
     TOPUP_GRACE_MICRO_USD,
     credit,
@@ -42,23 +48,17 @@ from ufo.billing.balance import (
     set_auto_topup,
     set_reserve,
 )
-from ufo.blob import FilesystemBlobStore
-from ufo.config import BlobConfig, Config, DatabaseConfig
-from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.ext.loader import turn_tools
-from ufo.kinds.workspace_kind import WORKSPACE_KIND
-from ufo.models.registry import ModelRegistry, model_registry
+from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.jobs import JobRunner, bindings_from
-from ufo.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
+from ufo.runtime.kinds.workspace_kind import WORKSPACE_KIND
+from ufo.runtime.surfaces.admission import Admission
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
 from ufo.sdk.audience import Audience, conversation_audience
 from ufo.sdk.http import Request
-from ufo.surfaces.admission import Admission
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ToolDef
-from ufo.workspace import init_workspace_credentials, ws
 
 DOLLAR = 1_000_000
 TOOL_NARRATION = "checking their billing"

@@ -27,12 +27,17 @@ import ufo_ext_sample as sample
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
-from ufo import o11y
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore
-from ufo.ext.loader import load_manifests
-from ufo.ext.manifest import (
+from ufo.harness import o11y
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import Message, ModelEvent, ModelRequest, TextDelta
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.o11y import BACKGROUND_PROFILE
+from ufo.host.ext.loader import load_manifests
+from ufo.runtime.delivery import DeliverySweep
+from ufo.runtime.ext.context import ScopedStore
+from ufo.runtime.ext.manifest import (
     PAGE_CHANGE_CURSOR_KEY,
     HookContext,
     HookOutcome,
@@ -40,12 +45,6 @@ from ufo.ext.manifest import (
     Manifest,
     PageChangeBatch,
 )
-from ufo.loop.delivery import DeliverySweep
-from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import Message, ModelEvent, ModelRequest, TextDelta
-from ufo.models.registry import ModelRegistry
-from ufo.o11y import BACKGROUND_PROFILE
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_BATCH,
@@ -55,9 +54,7 @@ from ufo.runtime.jobs import (
     bindings_from,
     core_jobs,
 )
-from ufo.schema import tables
-from ufo.schema.records import Usage
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     CorePageFeed,
     FolderSource,
     PageBatch,
@@ -65,8 +62,11 @@ from ufo.sources.sync import (
     SyncDriver,
     page_cursor,
 )
-from ufo.turns.subjects import SHARED_SUBJECT
-from ufo.workspace import ws
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
+from ufo.schema.records import Usage
 
 BACKGROUND_MODEL = "gpt-5.6-luna"
 RACER_EXTENSION = "racer_ext"

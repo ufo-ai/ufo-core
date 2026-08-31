@@ -46,23 +46,23 @@ from ufo_ext_monitors.monitors import (
 )
 from ufo_ext_monitors.monitors import monitor as monitor_table
 
-from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import ExtensionContext, context_for
-from ufo.ext.loader import turn_tools
-from ufo.objects import AdminRequired, VerbNotSupported
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.objects import AdminRequired, VerbNotSupported
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.registry import ObjectBinding, ToolDef
+from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.surfaces.admission import Admission, AdmissionInvoker
-from ufo.tools.context import SpawnResult, ToolContext
-from ufo.tools.registry import ObjectBinding, ToolDef
-from ufo.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
-from ufo.turns.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
-from ufo.workspace import ws
 
 TOOL_NARRATION = "watching the run"
 ALPHA = "printf 'alpha\\n'"

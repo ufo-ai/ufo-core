@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from ufo.models.interface import ModelRequest
-from ufo.turns.ambient_reply import (
+from ufo.harness.models.interface import ModelRequest
+from ufo.runtime.turns.ambient_reply import (
     AMBIENT_HISTORY_MESSAGES,
     AMBIENT_MESSAGE_CHARS,
     AMBIENT_PAYLOAD_FENCE,

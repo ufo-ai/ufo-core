@@ -2,4 +2,4 @@
 extension fencing third-party output (a probe's stdout, a provider response) says exactly what
 core's own tool-result and subagent hand-back paths say."""
 
-from ufo.turns.untrusted import wall as wall
+from ufo.harness.untrusted import wall as wall

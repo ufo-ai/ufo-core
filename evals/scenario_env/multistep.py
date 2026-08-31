@@ -20,7 +20,7 @@ from evals.scenario_env.office import (
     seed_office,
     sent_rows,
 )
-from ufo.workspace import ws_current
+from ufo.runtime.workspace import ws_current
 
 INTERVIEW_DATE = THURSDAY
 ONE_ON_ONE_DATE = WEDNESDAY

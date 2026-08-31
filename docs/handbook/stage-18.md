@@ -9,7 +9,7 @@ Several files handle durable content. turns/transcript.py defines the saved form
 ### Conversation blob formats
 Shared transcript storage conventions and blob access establish durable, workspace-safe conversation data.
 
-### `core/src/ufo/turns/transcript.py`
+### `core/src/ufo/runtime/turns/transcript.py`
 
 `io_transport` · `cross-cutting transcript persistence and readback`
 
@@ -1106,7 +1106,7 @@ def _sqlite_begin_immediate(connection: sa.Connection) -> None
 *Call graph*: 1 external calls (exec_driver_sql).
 
 
-### `core/src/ufo/durability.py`
+### `core/src/ufo/harness/durability.py`
 
 `io_transport` · `cross-cutting persistence and replay`
 
@@ -1247,7 +1247,7 @@ async def write(self, conversation: Conversation) -> None
 *Call graph*: calls 1 internal fn (read); 2 external calls (encode, transcript_key).
 
 
-### `core/src/ufo/media/previews.py`
+### `core/src/ufo/runtime/media/previews.py`
 
 `data_model` · `cross-cutting`
 
@@ -1450,7 +1450,7 @@ def _conversation_audience(context: DefaultExecutionContext) -> str
 
 **Data flow**: It receives a SQLAlchemy execution context, which is the database library’s snapshot of the values currently being inserted. It reads the current `member_id`, passes that value to `conversation_audience`, then turns the result into text. The returned text becomes the conversation row’s `audience` value.
 
-**Call relations**: SQLAlchemy calls this function automatically when inserting a conversation row that needs a Python-side default for `audience`. The function asks `ufo.turns.audience.conversation_audience` to apply the project’s audience rule, so this schema file does not duplicate that decision logic.
+**Call relations**: SQLAlchemy calls this function automatically when inserting a conversation row that needs a Python-side default for `audience`. The function asks `ufo.runtime.turns.audience.conversation_audience` to apply the project’s audience rule, so this schema file does not duplicate that decision logic.
 
 *Call graph*: 2 external calls (get_current_parameters, conversation_audience).
 

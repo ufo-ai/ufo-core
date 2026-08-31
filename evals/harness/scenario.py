@@ -30,8 +30,8 @@ from evals.harness.harness import (
 from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, JudgeLeg, rubric_pass
 from evals.harness.target import CapabilityTarget, TargetResult
 from evals.harness.timing import CaseTiming, case_timing
+from ufo.runtime.workspace import ws_current
 from ufo.sdk.models import Message
-from ufo.workspace import ws_current
 
 STOP_TOKEN = "###STOP###"
 OPENING_NUDGE = "[The conversation is starting. Send your first message.]"

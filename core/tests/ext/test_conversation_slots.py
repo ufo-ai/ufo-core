@@ -4,7 +4,7 @@ from typing import cast
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from ufo.ext.conversation_slots import (
+from ufo.runtime.ext.conversation_slots import (
     CONVERSATION_ARTIFACTS_MAX,
     CONVERSATION_TASKS_MAX,
     ArtifactsSlotPayload,
@@ -16,9 +16,13 @@ from ufo.ext.conversation_slots import (
     ImagePreview,
     TasksSlotPayload,
 )
-from ufo.ext.manifest import Manifest, conversation_slot_declarations
-from ufo.media.image_previews import raster_image_media_type
-from ufo.turns.workspace_changes import WORKSPACE_CHANGES_MAX, WorkspaceChange, WorkspaceChanges
+from ufo.runtime.ext.manifest import Manifest, conversation_slot_declarations
+from ufo.runtime.media.image_previews import raster_image_media_type
+from ufo.runtime.turns.workspace_changes import (
+    WORKSPACE_CHANGES_MAX,
+    WorkspaceChange,
+    WorkspaceChanges,
+)
 
 
 async def _summary(_ctx: ConversationSlotContext) -> int:

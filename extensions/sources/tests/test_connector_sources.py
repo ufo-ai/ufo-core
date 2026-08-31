@@ -28,17 +28,21 @@ from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.providers.asana import AsanaConnector
 from ufo_ext_sources.providers.github import GitHubConnector
 
-from ufo.access.connectors import (
+from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.runtime.access.connectors import (
     DIRECT_ACCOUNT,
     ConnectorRegistry,
     Credential,
     SourceCredentialResolver,
 )
-from ufo.access.credentials import CredentialStore
-from ufo.blob import FilesystemBlobStore
-from ufo.db import workspace_tx
-from ufo.ext.context import CredentialAccess, SourceReader, context_for
-from ufo.indexing import TextChunker
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import CredentialAccess, SourceReader, context_for
+from ufo.runtime.indexing import TextChunker
+from ufo.runtime.sources import rest
+from ufo.runtime.sources.sync import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.sdk.sources import (
     Connector,
@@ -50,10 +54,6 @@ from ufo.sdk.sources import (
     StreamPage,
     StreamSpec,
 )
-from ufo.sources import rest
-from ufo.sources.sync import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
-from ufo.turns.subjects import SHARED_SUBJECT
-from ufo.workspace import init_workspace_credentials, ws
 
 ACCOUNT = "acct-1"
 QUOTA_WINDOW_SECONDS = 60.0
@@ -255,7 +255,7 @@ def _record_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     async def fake_sleep(seconds: float) -> None:
         waits.append(seconds)
 
-    monkeypatch.setattr("ufo.sources.rest.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("ufo.runtime.sources.rest.asyncio.sleep", fake_sleep)
     return waits
 
 
@@ -378,7 +378,7 @@ async def test_the_retry_envelope_outlasts_a_per_minute_quota_window(
 
     Jitter is pinned to its floor so the ladder is asserted exactly; the property under test is the
     total."""
-    monkeypatch.setattr("ufo.sources.rest.random.uniform", lambda low, high: low)
+    monkeypatch.setattr("ufo.runtime.sources.rest.random.uniform", lambda low, high: low)
     waits = _record_waits(monkeypatch)
     calls = 0
 
@@ -403,7 +403,7 @@ async def test_the_retry_budget_stops_a_long_retry_after_before_the_attempt_cap(
     """Two bounds, not one: a provider naming a 60-second reset on every attempt would otherwise
     spend the attempt cap on minutes of waiting for a single request. The budget ends the envelope
     first, before the attempts are used up."""
-    monkeypatch.setattr("ufo.sources.rest.random.uniform", lambda low, high: low)
+    monkeypatch.setattr("ufo.runtime.sources.rest.random.uniform", lambda low, high: low)
     waits = _record_waits(monkeypatch)
     calls = 0
 
@@ -755,7 +755,7 @@ async def test_direct_backend_returns_a_bearer_read_from_the_credential_store(db
 
 
 async def test_direct_backend_refuses_a_provider_slot_it_never_declared() -> None:
-    from ufo.ext.context import UndeclaredCredentialSlot
+    from ufo.runtime.ext.context import UndeclaredCredentialSlot
 
     access = CredentialAccess(declared=frozenset())
     with pytest.raises(UndeclaredCredentialSlot):

@@ -15,7 +15,7 @@ import yaml
 
 from infra.testing_secrets import SECRET_INPUTS
 from ufo.product import PRODUCT_CENSUS_SECONDS
-from ufo.sources.sync import SOURCE_SYNC_CHECK
+from ufo.runtime.sources.sync import SOURCE_SYNC_CHECK
 
 ROOT = Path(__file__).parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -754,7 +754,8 @@ def test_authorization_expansions_co_deploy_but_contractions_split() -> None:
     gate.validate_deploy_change(("infra/modules/platform/iam.tf",), _ADDITIVE_AUTH_DIFF)
     gate.validate_deploy_change(("core/src/ufo/serve.py",))
     gate.validate_deploy_change(
-        ("infra/modules/platform/iam.tf", "core/tests/test_deploy_workflow.py"), _ADDITIVE_AUTH_DIFF
+        ("infra/modules/platform/iam.tf", "core/tests/test_deploy_workflow.py"),
+        _ADDITIVE_AUTH_DIFF,
     )
     # A whole new role, its policy and the attachment that binds them co-deploy: no live principal
     # holds the new grant, so the roll cannot break on it.
@@ -912,7 +913,7 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
             "infra/modules/platform/iam.tf": keep_grant
             + drop_grant
             + 'module "new" {\n  role_policy_arns = { s3 = "arn" }\n}\n',
-            "core/src/ufo/loop/engine.py": "x = 1\n",
+            "core/src/ufo/runtime/engine.py": "x = 1\n",
         },
         "expand",
     )
@@ -926,7 +927,7 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
     contract_head = commit_content(
         {
             "infra/modules/platform/iam.tf": keep_grant,
-            "core/src/ufo/loop/engine.py": "x = 1\n",
+            "core/src/ufo/runtime/engine.py": "x = 1\n",
         },
         "contract",
     )
@@ -943,7 +944,7 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
             "infra/modules/platform/iam.tf": 'module "keep" {\n'
             '  assume_role_condition_test = "StringEquals"\n'
             '  role_policy_arns = { s3 = "arn" }\n}\n' + drop_grant,
-            "core/src/ufo/loop/engine.py": "x = 1\n",
+            "core/src/ufo/runtime/engine.py": "x = 1\n",
         },
         "narrow",
     )
@@ -964,7 +965,7 @@ def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
             '  statement {\n    effect = "Deny"\n  }\n}\n'
             'resource "aws_iam_role_policy_attachment" "no_delete" {\n'
             "  role = module.keep.iam_role_name\n}\n",
-            "core/src/ufo/loop/engine.py": "x = 1\n",
+            "core/src/ufo/runtime/engine.py": "x = 1\n",
         },
         "deny",
     )

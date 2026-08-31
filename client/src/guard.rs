@@ -1,6 +1,6 @@
 //! The containment guard for a path built from model, agent, or script input.
 //!
-//! Checks 2 to 4 of `core/src/ufo/sandbox/containment.py`, in Rust, for the paths the `ufo fs`
+//! Checks 2 to 4 of `core/src/ufo/harness/containment.py`, in Rust, for the paths the `ufo fs`
 //! verb takes: the canonical parent asserted inside the root, a per-component `O_NOFOLLOW` descent
 //! from a root fd so every operation names its target relative to a pinned parent fd, and the
 //! target's own `lstat` that never follows a final link. A write stages a sibling

@@ -6,10 +6,10 @@ import asyncio
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from ufo.ext.surface import Stopped, TurnStep
-from ufo.models.interface import Message, ModelRequest
-from ufo.skills.runtime import RuntimeSkill, SkillRegistry
-from ufo.turns.ambient_reply import AmbientDecision, AmbientReplyClassifier
+from ufo.harness.models.interface import Message, ModelRequest
+from ufo.runtime.ext.surface import Stopped, TurnStep
+from ufo.runtime.skills.runtime import RuntimeSkill, SkillRegistry
+from ufo.runtime.turns.ambient_reply import AmbientDecision, AmbientReplyClassifier
 
 EMPTY_SKILL_REGISTRY = SkillRegistry({})
 

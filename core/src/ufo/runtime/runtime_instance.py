@@ -22,11 +22,11 @@ from dbos import DBOS, DBOSClient
 from dbos import error as dbos_error
 
 from ufo.db import owner_tx
-from ufo.o11y import log
+from ufo.harness.o11y import log
+from ufo.runtime.turns.cancellation import cancel_one_turn
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import CANCELLED, INTENT_ADMISSION, NON_TERMINAL_STATUSES, RUNNING
-from ufo.turns.cancellation import cancel_one_turn
-from ufo.workspace import ws
 
 HEARTBEAT_INTERVAL_SECONDS = 2
 STALE_AFTER_SECONDS = 10

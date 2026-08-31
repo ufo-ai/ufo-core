@@ -36,7 +36,7 @@ request has never had the asset.
 The necessary store is available. The `BlobStore` protocol (`core/src/ufo/blob.py:44`) has
 `put`, `get`, and `exists`. Deploys use the S3 store. Local development uses the filesystem
 store (`core/src/ufo/config.py:55`). The surface already holds the store as
-`SurfaceContext.blob` (`core/src/ufo/ext/surface.py:1021`).
+`SurfaceContext.blob` (`core/src/ufo/runtime/ext/surface.py:1021`).
 
 ## Proposal
 
@@ -55,7 +55,7 @@ The page request gives the correct order without a boot hook. A browser can requ
 that it read from a page. A pod serves a page only after its publish task is complete. Thus each
 requested hash is in the store before the request, for each pod that gets the request. A
 `JobSpec` with `schedule=None` is not the correct seam, because jobs apply to one workspace
-(`core/src/ufo/ext/manifest.py:100`) and the publish task applies to the deploy. A new boot
+(`core/src/ufo/runtime/ext/manifest.py:100`) and the publish task applies to the deploy. A new boot
 callback on `SurfaceSpec` is not necessary, because the page request gives the same order.
 
 **Part 2 — read the store when the build does not have the asset.** The route `static_asset`

@@ -45,19 +45,27 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import (
+from ufo.blob import FilesystemBlobStore
+from ufo.config import Config
+from ufo.db import workspace_tx
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.sandbox.terminal import TerminalOpFailed
+from ufo.host.ext.loader import HostEnvironment, skill_registry
+from ufo.runtime import queue as loop_queue
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import (
     CredentialRequestState,
     CredentialStore,
     seal_credential_request,
 )
-from ufo.access.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
-from ufo.blob import FilesystemBlobStore
-from ufo.config import Config
-from ufo.db import workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.loader import skill_registry
-from ufo.hub import (
+from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthAccount, install_connect_flow
+from ufo.runtime.hub import (
     Absorbed,
     Activity,
     CostTick,
@@ -68,16 +76,9 @@ from ufo.hub import (
     SubagentActivity,
     Terminal,
 )
-from ufo.loop import queue as loop_queue
-from ufo.loop.subagents import SubagentRegistry
-from ufo.media.artifact_url import verify_artifact_url
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
-from ufo.models.registry import ModelRegistry
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
-from ufo.sandbox.terminal import TerminalOpFailed
+from ufo.runtime.media.artifact_url import verify_artifact_url
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.surfaces import hub_tail
 from ufo.schema import tables
 from ufo.schema.records import (
     CredentialPrompt,
@@ -90,7 +91,6 @@ from ufo.schema.records import (
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth
 from ufo.serve import _mount_shared_surfaces
-from ufo.surfaces import hub_tail
 
 SECRET = "ufo-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
@@ -776,6 +776,12 @@ def runtime(
             subagents=SubagentRegistry(()),
             subagent_grants={},
             manifests=(),
+            environment=HostEnvironment(
+                manifests=(),
+                credentials=None,
+                index=DefaultIndex(transaction=workspace_tx),
+                embed=StubEmbed(),
+            ),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
             credentials=None,
@@ -947,6 +953,9 @@ async def test_a_runtime_config_that_cannot_run_or_would_widen_is_refused(
         {"x-ufo-model": "no-such-model"},
         {"x-ufo-internet": "off"},
         {"x-ufo-model": "claude-sonnet-5", "x-ufo-internet": "on"},
+        {"x-ufo-environment": "http://127.0.0.1:9"},
+        {"x-ufo-model": "claude-sonnet-5", "x-ufo-environment": "http://127.0.0.1:9"},
+        {"x-ufo-model": "claude-sonnet-5", "x-ufo-environment": "not-a-url"},
     )
 
     for headers in refused:
@@ -966,6 +975,73 @@ async def test_a_runtime_config_that_cannot_run_or_would_widen_is_refused(
             )
         ).scalar_one()
     assert turns == 0
+
+
+@pytest.fixture
+async def ufo_environment_allowed(
+    db: None,
+    stream_gate: None,
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[tuple[AsyncClient, UUID]]:
+    """The `ufo` fixture on a deployment that allows an environment host, so the header admits."""
+    config, hub, blob, sandboxes = runtime
+    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
+    dbos_client = replay_safe_client(config.database.system_url)
+    workspace_id = await _seed_workspace()
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (ufo_manifest(),),
+        None,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        "",
+        None,
+        None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
+        skills=EMPTY_SKILL_REGISTRY,
+        member_skill_listing=no_member_skills,
+        environment_host_allowed=True,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
+        yield client, workspace_id
+    dbos_client.destroy()
+
+
+async def test_an_environment_header_pins_the_host_where_the_deployment_allows_it(
+    ufo_environment_allowed: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo_environment_allowed
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        response = await client.post(
+            "/surface/ufo/pinned-environment",
+            content=b"use the pinned environment",
+            headers={
+                "authorization": f"Bearer {token}",
+                "x-ufo-model": "claude-sonnet-5",
+                "x-ufo-environment": "http://127.0.0.1:9",
+            },
+        )
+
+    assert response.status_code == 200
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.runtime_config).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).one()
+    assert TurnRuntimeConfig.model_validate(row.runtime_config) == TurnRuntimeConfig(
+        model="claude-sonnet-5", environment_host="http://127.0.0.1:9"
+    )
 
 
 async def test_shared_fleet_rejects_a_forged_or_missing_bearer(shared_ufo: AsyncClient) -> None:
@@ -2160,8 +2236,8 @@ async def test_an_op_error_reply_fails_the_op_with_the_terminals_words(
 
 
 def test_history_replays_member_and_agent_lines_leaving_the_tail_its_reply() -> None:
-    from ufo.models.interface import Message, TextBlock
-    from ufo.turns.transcript import Conversation
+    from ufo.harness.models.interface import Message, TextBlock
+    from ufo.runtime.turns.transcript import Conversation
 
     marker = "00aabbcc"
     fenced = f"<member_message_{marker}>\nwhat is up\n</member_message_{marker}>"
@@ -2183,8 +2259,8 @@ def test_history_replays_member_and_agent_lines_leaving_the_tail_its_reply() -> 
 
 
 def test_history_strips_the_prompt_envelope_from_member_lines() -> None:
-    from ufo.models.interface import Message, TextBlock
-    from ufo.turns.transcript import Conversation
+    from ufo.harness.models.interface import Message, TextBlock
+    from ufo.runtime.turns.transcript import Conversation
 
     composed = (
         "<context>\n"
@@ -2214,8 +2290,8 @@ def test_history_strips_the_prompt_envelope_from_member_lines() -> None:
 
 
 def test_history_states_a_turns_steps_over_the_reply_they_produced() -> None:
-    from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
-    from ufo.turns.transcript import Conversation
+    from ufo.harness.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+    from ufo.runtime.turns.transcript import Conversation
 
     marker = "00aabbcc"
     fenced = f"<member_message_{marker}>\nwhen is the meeting\n</member_message_{marker}>"
@@ -2252,8 +2328,8 @@ def test_history_states_a_turns_steps_over_the_reply_they_produced() -> None:
 
 
 def test_history_says_no_words_for_a_turn_cut_after_its_narration() -> None:
-    from ufo.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
-    from ufo.turns.transcript import Conversation
+    from ufo.harness.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
+    from ufo.runtime.turns.transcript import Conversation
 
     conversation = Conversation(
         seq=1,
@@ -2282,8 +2358,8 @@ def test_history_says_no_words_for_a_turn_cut_after_its_narration() -> None:
 
 
 def test_history_counts_no_step_for_a_call_that_never_dispatched() -> None:
-    from ufo.models.interface import Message, TextBlock, ToolUseBlock
-    from ufo.turns.transcript import Conversation
+    from ufo.harness.models.interface import Message, TextBlock, ToolUseBlock
+    from ufo.runtime.turns.transcript import Conversation
 
     conversation = Conversation(
         seq=1,
@@ -2310,8 +2386,8 @@ def test_history_counts_no_step_for_a_call_that_never_dispatched() -> None:
 
 
 def test_history_budget_keeps_the_newest_messages() -> None:
-    from ufo.models.interface import Message
-    from ufo.turns.transcript import Conversation
+    from ufo.harness.models.interface import Message
+    from ufo.runtime.turns.transcript import Conversation
 
     old = Message(role="user", content="a" * 30_000)
     new = Message(role="user", content="the recent one")
@@ -2324,8 +2400,8 @@ async def test_a_fresh_resume_replays_history_and_a_poll_does_not(
     ufo: tuple[AsyncClient, UUID],
     runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    from ufo.models.interface import Message, TextBlock
-    from ufo.turns.transcript import Conversation, encode, transcript_key
+    from ufo.harness.models.interface import Message, TextBlock
+    from ufo.runtime.turns.transcript import Conversation, encode, transcript_key
 
     client, workspace_id = ufo
     _config, _hub, blob, _sandboxes = runtime

@@ -10,10 +10,10 @@ from ufo_ext_slack.surface import (
     bot_token_fingerprint,
 )
 
-from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.workspace import ws
 from ufo.serve import _source_identity_resolvers
-from ufo.workspace import ws
 
 
 class _Credentials:

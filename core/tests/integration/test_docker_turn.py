@@ -18,16 +18,9 @@ import pytest
 import sqlalchemy as sa
 from ufo_ext_docker import DockerCarrier
 
-from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.loader import HookChain
-from ufo.hub import InProcessHub
-from ufo.loop.compaction import Compaction
-from ufo.loop.engine import TurnEngine
-from ufo.loop.prompts.render import rendered_prompt
-from ufo.loop.transcript import Transcript
-from ufo.models.interface import (
+from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
     TextDelta,
@@ -36,14 +29,21 @@ from ufo.models.interface import (
     ToolResultBlock,
     Usage,
 )
-from ufo.sandbox.session import SandboxHandle, SandboxSession
+from ufo.harness.sandbox.session import SandboxHandle, SandboxSession
+from ufo.host.ext.loader import HookChain
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.compaction import Compaction
+from ufo.runtime.engine import TurnEngine
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.prompts.render import rendered_prompt
+from ufo.runtime.tools.context import SpawnResult
+from ufo.runtime.tools.registry import ToolRegistry
+from ufo.runtime.transcript import Transcript
+from ufo.runtime.turns.activity import ActivitySummarizer
+from ufo.runtime.turns.audience import conversation_audience
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.tools.builtins import BUILTIN_TOOLS
-from ufo.tools.context import SpawnResult
-from ufo.tools.registry import ToolRegistry
-from ufo.turns.activity import ActivitySummarizer
-from ufo.turns.audience import conversation_audience
 
 pytestmark = pytest.mark.docker
 

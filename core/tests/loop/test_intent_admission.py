@@ -1,9 +1,9 @@
 import ufo_ext_sample as sample
 
-from ufo.loop.engine import _intent_admits
-from ufo.objects import ObjectVerbs
-from ufo.tools.builtins import BUILTIN_TOOLS
-from ufo.tools.registry import ToolDef
+from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.runtime.engine import _intent_admits
+from ufo.runtime.objects import ObjectVerbs
+from ufo.runtime.tools.registry import ToolDef
 
 
 def _named(name: str, tools: tuple[ToolDef, ...]) -> ToolDef:

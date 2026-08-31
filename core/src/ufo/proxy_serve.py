@@ -6,9 +6,9 @@ the same resolution; the egress wire itself is the standalone Rust `ufo-egress` 
 
 import os
 
-from ufo.access.credentials import deploy_env
-from ufo.access.egress_rules import Rule, ScopeRule, derive_model_rules
 from ufo.config import Config
+from ufo.runtime.access.credentials import deploy_env
+from ufo.runtime.access.egress_rules import Rule, ScopeRule, derive_model_rules
 
 MODEL_PROBES = ("claude-opus-4-8", "gpt-5")
 OWNER_DSN_ENV = "UFO_OWNER_DSN"

@@ -11,7 +11,7 @@ The external billing bridge is metronome.py, which reports usage to Metronome an
 ### Billing ledger and credit
 Core billing code records usage, manages prepaid balance, applies model pricing, and produces spend information.
 
-### `core/src/ufo/billing/accounting.py`
+### `core/src/ufo/runtime/billing/accounting.py`
 
 `domain_logic` · `request handling, billing writes, reporting, and background usage export`
 
@@ -520,7 +520,7 @@ async def _turn_has_debited(self, connection: AsyncConnection, turn_id: UUID | N
 *Call graph*: called by 2 (admits, sustains); 2 external calls (execute, select).
 
 
-### `core/src/ufo/billing/balance.py`
+### `core/src/ufo/runtime/billing/balance.py`
 
 `domain_logic` · `cross-cutting: used during billing setup, admin reads, payment fulfillment, and before paid model work starts`
 
@@ -770,7 +770,7 @@ async def set_reserve(connection: AsyncConnection, workspace_id: UUID, reserve_m
 *Call graph*: 2 external calls (execute, update).
 
 
-### `core/src/ufo/models/pricing.py`
+### `core/src/ufo/harness/models/pricing.py`
 
 `domain_logic` · `billing/accounting`
 
@@ -882,7 +882,7 @@ async def flag_enabled(flag: str, *, default: bool) -> bool
 
 **Data flow**: It takes a flag name and a required default boolean value. It reads the current workspace ID, builds an evaluation context from it, asks the OpenFeature client for the flag’s boolean value, and gives that answer back. If the lookup times out or raises any error, it logs a warning with the flag name, default, and error details, then returns the default instead.
 
-**Call relations**: Runtime code calls this whenever it needs to decide whether to offer a feature. The function gathers the current workspace through `ufo.workspace.ws_current`, creates an OpenFeature `EvaluationContext` so the backend knows who the question is about, asks `openfeature.api.get_client` for the flag value, limits the wait with `asyncio.timeout`, and reports failures through `ufo.o11y.warn` before falling back safely.
+**Call relations**: Runtime code calls this whenever it needs to decide whether to offer a feature. The function gathers the current workspace through `ufo.runtime.workspace.ws_current`, creates an OpenFeature `EvaluationContext` so the backend knows who the question is about, asks `openfeature.api.get_client` for the flag value, limits the wait with `asyncio.timeout`, and reports failures through `ufo.harness.o11y.warn` before falling back safely.
 
 *Call graph*: 5 external calls (timeout, get_client, EvaluationContext, warn, ws_current).
 
@@ -890,7 +890,7 @@ async def flag_enabled(flag: str, *, default: bool) -> bool
 ### Observability and operator inspection
 Operational tooling provides tracing, metrics, safe logging, service checks, and trusted read-only debugging views.
 
-### `core/src/ufo/o11y.py`
+### `core/src/ufo/harness/o11y.py`
 
 `io_transport` · `startup and cross-cutting runtime observability`
 

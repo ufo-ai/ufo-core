@@ -12,8 +12,8 @@ from evals.harness.capability import (
 )
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
-from ufo.workspace import ws_current
 
 ASKER_EMAIL = "alex@evalco.test"
 

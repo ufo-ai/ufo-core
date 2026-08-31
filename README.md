@@ -1,16 +1,22 @@
 # ufo
 
-ufo is an agent runtime. You can run it, read it, and extend it.
+ufo is a tenant agent runtime. You can run it, read it, and extend it.
 
-The core supplies:
+`ufo.harness` supplies product-neutral agent execution. The host supplies:
 
-- the agent loop, in a sandbox
-- memory
+- workspace, member, and agent identity
+- durable turn execution and sandbox authorization
 - the Slack, CLI, and web surfaces
-- accounting
+- grants, credentials, and accounting
 - model access: Anthropic, OpenAI, Bedrock Mantle
 
 Extensions supply all other functions: connectors, data sources, tools, subagents, and onboarding.
+
+`ufo.harness` has no host dependencies. Its concrete `AgentEngine` owns canonical messages,
+model requests, tool exchanges, finish/recovery behavior, and round budgets. Runtime and local
+extension hosts configure its immutable agent definition and effect ports before a run; the engine
+knows neither. Its other public modules own context management, sandbox mechanics, reply
+interpretation, and untrusted-content framing. `core/harness/tests` verifies that API directly.
 
 ## Quick start
 
@@ -48,7 +54,9 @@ not type the token. The token is not part of a URL.
 | `evals/README.md` | The eval suites, stacks, ablations, and GEPA. |
 | `evals/swebench/README.md` | SWE-bench Verified: local generation and official grading. |
 | `evals/terminal_bench/README.md` | Terminal-Bench 2.1: the pinned official roster through the native client in Harbor. |
-| `core/` | The base unit. |
+| `core/src/ufo/harness/` | Product-neutral agent execution. |
+| `core/src/ufo/runtime/` | Durable agent host and harness adapters. |
+| `core/src/ufo/onboard/` | Workspace onboarding. |
 | `extensions/` | First-party extensions. |
 | `packs/` | Skill packs. |
 
@@ -57,7 +65,7 @@ not type the token. The token is not part of a URL.
 Use this mode to run the full hosted topology on your machine. One command starts:
 
 - Postgres
-- the onboarding gateway (`/login`)
+- the Rust `ufo-control` onboarding gateway (`/login`)
 - the serve fleet: surfaces, DBOS workers, and the egress-control RPC
 - the sandbox ingress for hosted sites
 - the ufo-egress data plane: the Rust egress proxy, in the network namespace of serve
@@ -110,7 +118,7 @@ slot after slot 1 adds 100 to each port. To change the host ports, set `UFO_PG_P
 - The tests use this Postgres, or an existing instance, for the Postgres half of the test matrix.
   `make db` starts only that service. Sandboxes (U2 and later) need Docker.
 - Live browser tests require the pinned Chrome for Testing: `npx playwright@$(uv run python -c
-  'from ufo.sandbox.session import PLAYWRIGHT_VERSION; print(PLAYWRIGHT_VERSION)') install chromium`.
+  'from ufo.harness.sandbox.session import PLAYWRIGHT_VERSION; print(PLAYWRIGHT_VERSION)') install chromium`.
 
 ## Evals
 

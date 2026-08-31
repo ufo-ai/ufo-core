@@ -28,9 +28,33 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-import ufo.ext.surface as surface_module
-from ufo.access.connectors import DIRECT_ACCOUNT, ConnectorRegistry
-from ufo.access.credentials import (
+import ufo.runtime.ext.surface as surface_module
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.harness.containment import ContainmentError
+from ufo.harness.models.interface import (
+    Message,
+    ModelRequest,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.ingress_host import parse_site_label, site_label
+from ufo.harness.sandbox.ingress_token import (
+    INGRESS_SESSION_KIND,
+    INGRESS_VIEW_KIND,
+    INGRESS_VIEW_PATH,
+    INGRESS_VIEW_TTL_SECONDS,
+    FramerClaim,
+    IngressTokenError,
+    ShippedClaim,
+    verify_ingress_token,
+)
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint
+from ufo.runtime.access.connectors import DIRECT_ACCOUNT, ConnectorRegistry
+from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
     CREDENTIAL_REQUEST_TTL_SECONDS,
@@ -41,10 +65,9 @@ from ufo.access.credentials import (
     open_credential_request,
     seal_credential_request,
 )
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
-from ufo.db import workspace_tx
-from ufo.ext.surface import (
+from ufo.runtime.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.runtime.engine import INJECTED_CONTEXT, _context_tag
+from ufo.runtime.ext.surface import (
     CONVERSATION_TITLE_CHARS,
     MAX_CONVERSATION_SPEAKERS,
     NOTHING_DELIVERED,
@@ -80,25 +103,29 @@ from ufo.ext.surface import (
     scheduled_runs,
     writeback_workspaces,
 )
-from ufo.hub import InProcessHub
-from ufo.loop.engine import INJECTED_CONTEXT, _context_tag
-from ufo.loop.queue import _load_turn
-from ufo.models.interface import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
-from ufo.sandbox.containment import ContainmentError
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.ingress_host import parse_site_label, site_label
-from ufo.sandbox.ingress_token import (
-    INGRESS_SESSION_KIND,
-    INGRESS_VIEW_KIND,
-    INGRESS_VIEW_PATH,
-    INGRESS_VIEW_TTL_SECONDS,
-    FramerClaim,
-    IngressTokenError,
-    ShippedClaim,
-    verify_ingress_token,
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.queue import _load_turn
+from ufo.runtime.seats import signup_workspace_id
+from ufo.runtime.sources.backend import binding_name
+from ufo.runtime.surfaces.admission import Admission, MemberAdmission
+from ufo.runtime.surfaces.hub_tail import HubTailer
+from ufo.runtime.turns.ambient_reply import AmbientMessage, AmbientReplyClassifier, MeteredModel
+from ufo.runtime.turns.audience import (
+    SHARED_AUDIENCE,
+    conversation_audience,
+    foreign_room_audience,
+    room_audience,
 )
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.turns.transcript import (
+    CompactionSummary,
+    CompactionWindow,
+    Conversation,
+    compaction_key,
+    encode,
+    transcript_key,
+)
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     MAIN_AGENT_ICON,
@@ -109,27 +136,6 @@ from ufo.schema.records import (
     ToolIntent,
     TurnContext,
 )
-from ufo.seats import signup_workspace_id
-from ufo.sources.backend import binding_name
-from ufo.surfaces.admission import Admission, MemberAdmission
-from ufo.surfaces.hub_tail import HubTailer
-from ufo.turns.ambient_reply import AmbientMessage, AmbientReplyClassifier, MeteredModel
-from ufo.turns.audience import (
-    SHARED_AUDIENCE,
-    conversation_audience,
-    foreign_room_audience,
-    room_audience,
-)
-from ufo.turns.subjects import SHARED_SUBJECT
-from ufo.turns.transcript import (
-    CompactionSummary,
-    CompactionWindow,
-    Conversation,
-    compaction_key,
-    encode,
-    transcript_key,
-)
-from ufo.workspace import ws
 
 SURFACE = "test_surface"
 OPENING_PERMALINK = (
@@ -4390,7 +4396,7 @@ async def _seed_pending_arrival(
 
 
 def _preview_service(handler, monkeypatch):
-    from ufo.ext import surface as ext_surface
+    from ufo.runtime.ext import surface as ext_surface
 
     real = httpx.AsyncClient
 

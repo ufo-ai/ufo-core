@@ -17,9 +17,9 @@ from evals.suites.member_add_notify import (
 )
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.seats import create_member
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.seats import create_member
-from ufo.workspace import ws
 
 
 def _add_member(notify: bool | None, is_error: bool = False) -> ToolInvocation:

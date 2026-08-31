@@ -13,13 +13,13 @@ import sqlalchemy as sa
 
 from ufo.blob import S3BlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.loop.delivery import DeliverySweep
-from ufo.loop.subagents import SubagentRegistry
-from ufo.media.preview_renderer import PreviewRenderer
+from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.jobs import RENDER_PREVIEWS_JOB, core_jobs
+from ufo.runtime.media.preview_renderer import PreviewRenderer
+from ufo.runtime.sources.sync import FolderSource, SyncDriver
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.sources.sync import FolderSource, SyncDriver
-from ufo.workspace import ws
 
 
 def _renderer(blob: WorkspaceBlobStore) -> PreviewRenderer:
@@ -124,7 +124,7 @@ async def _preview_columns(workspace_id, blob_key: str) -> sa.Row:
 
 
 def _service(handler, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ufo.media import preview_renderer
+    from ufo.runtime.media import preview_renderer
 
     real = httpx.AsyncClient
 

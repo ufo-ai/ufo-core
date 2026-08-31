@@ -31,7 +31,7 @@ from evals.scenario_env.office import (
     seed_office_with_conflicting_review,
     sent_rows,
 )
-from ufo.workspace import ws_current
+from ufo.runtime.workspace import ws_current
 
 ONE_ON_ONE_MINUTES = 30
 BUFFER = timedelta(minutes=15)

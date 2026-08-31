@@ -11,7 +11,7 @@ Support files make the machine smooth: listings gives stable next/previous pages
 ### Built-in workspace kinds
 Core built-in object kinds expose extensions, files, conversations, credentials, members, surfaces, and workspace facts with the appropriate read-only or administrative constraints.
 
-### `core/src/ufo/ext/extension_kind.py`
+### `core/src/ufo/runtime/ext/extension_kind.py`
 
 `domain_logic` · `startup and object request handling`
 
@@ -126,7 +126,7 @@ def _spec(self, manifest: Manifest) -> ExtensionSpec
 *Call graph*: called by 2 (get, list); 1 external calls (__init__).
 
 
-### `core/src/ufo/kinds/artifacts.py`
+### `core/src/ufo/runtime/kinds/artifacts.py`
 
 `domain_logic` · `request handling for artifact object list/get/status/delete operations`
 
@@ -543,7 +543,7 @@ def artifact_object(*, public_base_url: str | None=None, artifact_token_secret: 
 *Call graph*: 2 external calls (__init__, __init__).
 
 
-### `core/src/ufo/kinds/conversations.py`
+### `core/src/ufo/runtime/kinds/conversations.py`
 
 `domain_logic` · `request handling`
 
@@ -842,7 +842,7 @@ def _detail(row: sa.Row) -> ObjectDetail[ConversationSpec]
 *Call graph*: called by 2 (get, member_detail); 4 external calls (__init__, __init__, __init__, __init__).
 
 
-### `core/src/ufo/kinds/credential_kind.py`
+### `core/src/ufo/runtime/kinds/credential_kind.py`
 
 `domain_logic` · `request handling`
 
@@ -1021,7 +1021,7 @@ async def _filled_slots(self) -> frozenset[str]
 *Call graph*: called by 1 (_rows); 3 external calls (select, workspace_tx, ws_current).
 
 
-### `core/src/ufo/kinds/members.py`
+### `core/src/ufo/runtime/kinds/members.py`
 
 `domain_logic` · `request handling`
 
@@ -1258,7 +1258,7 @@ async def _absent(self, connection: AsyncConnection, email: str) -> None
 *Call graph*: called by 1 (add); 3 external calls (execute, select, ws_current).
 
 
-### `core/src/ufo/kinds/surface_kind.py`
+### `core/src/ufo/runtime/kinds/surface_kind.py`
 
 `domain_logic` · `startup and request handling`
 
@@ -1452,7 +1452,7 @@ async def _installations(self) -> dict[str, _BoundInstallation]
 *Call graph*: called by 5 (get, list, member_detail, member_page, status); 4 external calls (__init__, select, workspace_tx, ws_current).
 
 
-### `core/src/ufo/kinds/workspace_kind.py`
+### `core/src/ufo/runtime/kinds/workspace_kind.py`
 
 `domain_logic` · `request handling`
 
@@ -4476,7 +4476,7 @@ async def agent_settings(ctx: SurfaceContext, agent_id: UUID, member_id: UUID, *
 *Call graph*: calls 2 internal fn (agent_detail, _update_schema); 5 external calls (__init__, JSONResponse, Response, granted_emails, web_extension).
 
 
-### `core/src/ufo/kinds/agents.py`
+### `core/src/ufo/runtime/kinds/agents.py`
 
 `domain_logic` · `request handling`
 
@@ -4513,7 +4513,7 @@ def _declared_schema(cls, value: dict[str, JsonValue] | None, info: ValidationIn
 
 **Data flow**: It receives a proposed schema value during AgentSpec validation. If there is no schema, it leaves it alone; if there is one, it passes it to the shared contract checker and returns it only after that checker accepts it.
 
-**Call relations**: This runs automatically when an AgentSpec is built. It hands schema validation to ufo.turns.contracts.check_declared_schema so bad spawn contracts are rejected before they are stored on an agent.
+**Call relations**: This runs automatically when an AgentSpec is built. It hands schema validation to ufo.runtime.turns.contracts.check_declared_schema so bad spawn contracts are rejected before they are stored on an agent.
 
 *Call graph*: 1 external calls (check_declared_schema).
 
@@ -4744,7 +4744,7 @@ async def restore(self, ctx: ToolContext, args: RestoreApplicationInput) -> Tool
 ### Object infrastructure and controls
 The central object system validates and dispatches object operations, with supporting controls for prompt governance, pagination, action scope, and action views.
 
-### `core/src/ufo/objects.py`
+### `core/src/ufo/runtime/objects.py`
 
 `domain_logic` · `startup validation and request handling`
 
@@ -5604,7 +5604,7 @@ def _json_result(payload: Mapping[str, object]) -> ToolResult
 *Call graph*: called by 4 (_apply, _delete, _explain, _list); 3 external calls (__init__, __init__, dumps).
 
 
-### `core/src/ufo/kinds/governance.py`
+### `core/src/ufo/runtime/kinds/governance.py`
 
 `domain_logic` · `request handling`
 
@@ -5661,7 +5661,7 @@ async def approve_proposal(self, proposal_id: UUID) -> None
 *Call graph*: calls 1 internal fn (prompt_digest); 4 external calls (select, update, workspace_tx, log).
 
 
-### `core/src/ufo/listings.py`
+### `core/src/ufo/runtime/listings.py`
 
 `domain_logic` · `request handling`
 
@@ -5748,7 +5748,7 @@ def at(source: SourceT, *, newer: bool) -> ListingCursor
 *Call graph*: 1 external calls (__init__).
 
 
-### `core/src/ufo/object_scope.py`
+### `core/src/ufo/runtime/object_scope.py`
 
 `data_model` · `object action dispatch and handler execution`
 
@@ -5783,12 +5783,12 @@ def object_agent_id() -> UUID
 
 **Data flow**: It reads the task-local object agent value. If that value exists, it returns that agent’s UUID. If no object-specific target is active, it asks `agent_current()` for the broader current agent and returns that agent’s ID.
 
-**Call relations**: Handler or audit code can call this when it needs to know which agent the current object action belongs to. Its fallback path calls `ufo.agent_scope.agent_current`, so object-scoped dispatch can layer on top of the general agent scope instead of replacing it.
+**Call relations**: Handler or audit code can call this when it needs to know which agent the current object action belongs to. Its fallback path calls `ufo.runtime.agent_scope.agent_current`, so object-scoped dispatch can layer on top of the general agent scope instead of replacing it.
 
 *Call graph*: 1 external calls (agent_current).
 
 
-### `core/src/ufo/object_views.py`
+### `core/src/ufo/runtime/object_views.py`
 
 `domain_logic` · `model discovery and portal rendering`
 

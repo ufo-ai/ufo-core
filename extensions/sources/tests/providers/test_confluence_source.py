@@ -13,9 +13,9 @@ import httpx
 import pytest
 from ufo_ext_sources.providers.confluence import CONFLUENCE_STREAMS, ConfluenceConnector
 
-from ufo.access.connectors import Credential
+from ufo.runtime.access.connectors import Credential
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamSpec
-from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 RESOURCES = "/oauth/token/accessible-resources"

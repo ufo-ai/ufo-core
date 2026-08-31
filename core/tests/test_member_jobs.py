@@ -8,13 +8,13 @@ import sqlalchemy as sa
 from ufo_ext_memory.store import memory_item
 from ufo_ext_objectives.store import objective, objective_event, objective_step
 
-from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.ext.context import _member_blob_text, context_for
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import _member_blob_text, context_for
+from ufo.runtime.turns.audience import conversation_audience, foreign_room_audience
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.turns.audience import conversation_audience, foreign_room_audience
-from ufo.workspace import ws
 
 
 async def _seed() -> tuple[UUID, UUID, UUID, UUID]:

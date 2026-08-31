@@ -158,7 +158,7 @@ which is no waitlist object, so it carries no number. Its `--business` and `--go
 options carry what the intake form collected — what their company does, and what they want an agent
 to do; they are given together or not at all,
 and they open the main agent's prompt in the workspace that grant creates. They arrive through
-`ufo.turns.untrusted.wall`, attributed to the form and never as instructions: the form is public, whoever
+`ufo.harness.untrusted.wall`, attributed to the form and never as instructions: the form is public, whoever
 filled it proved nothing, and the employee who later signs in never typed a word of it — so the
 prompt states that the member is believed over it wherever the two differ. A grant minted without
 them leaves a workspace reading exactly as one `ufoctl init` seats. The flow burns the domain's
@@ -401,8 +401,8 @@ own handoff would have posted it to, so `?c=` and `?first=1` still land where th
 than asked again for an address it has proved. Four asks are the page's alone (`FORM_ONLY_ASKS`), and
 the form is drawn for them however live the session is: each reaches this door from a caller a forward
 would send straight back to, or carries a sentence the page alone states. `?debug=1` comes from
-`ufo.ext.operator.OPERATOR_LOGIN_PATH`, and the operator surfaces read `ufo_debug`, which only the
-page's POST binds. `?a=` comes from `ufo.surfaces.artifacts._refusal`, which refused this very
+`ufo.runtime.ext.operator.OPERATOR_LOGIN_PATH`, and the operator surfaces read `ufo_debug`, which only the
+page's POST binds. `?a=` comes from `ufo.runtime.surfaces.artifacts._refusal`, which refused this very
 session the artifact, so it would refuse the forward too. `?invite=1` is what the invitation mail
 links to, and that mail names an address this session may not prove, whose seat is claimed in the
 walk the page runs. `?error=` comes from the auth callback, and the sentence it carries is one the

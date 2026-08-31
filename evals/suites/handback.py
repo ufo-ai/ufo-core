@@ -27,7 +27,7 @@ from evals.harness.arc import (
     ArcVerdict,
 )
 from evals.harness.capability import WorkspaceFile
-from ufo.ext.context import context_for
+from ufo.runtime.ext.context import context_for
 
 HEARTBEAT_NONCE = "NONCE-8f2ac41d"
 ASSIGNMENT_NONCE = "NONCE-5b73e0c9"

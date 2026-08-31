@@ -41,9 +41,9 @@ from evals.handbook.corpus import HandbookTask
 from ufo.blob import WorkspaceBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.ext.context import ScopedStore
-from ufo.ext.manifest import Manifest
-from ufo.indexing import (
+from ufo.runtime.ext.context import ScopedStore
+from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.indexing import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
     EmbedClient,
@@ -51,14 +51,14 @@ from ufo.indexing import (
     IndexScope,
 )
 from ufo.runtime.jobs import PAGE_CHANGE_CURSOR_KEY, PageChangeRunner
-from ufo.schema import tables
-from ufo.sources.sync import (
+from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
     FolderSource,
     SyncDriver,
     register_sources,
 )
+from ufo.schema import tables
 
 DOCUMENT_SUFFIXES = (".pdf", ".html", ".htm", ".docx")
 MEMORY_EXTENSION = "memory"

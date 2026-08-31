@@ -28,4 +28,4 @@ sandbox = { backend = "local" }
 [[arm]]
 name = "sandbox-cli"
 [arm.files]
-"core/src/ufo/skills/sandbox/SKILL.md" = "arms/sandbox-cli/SKILL.md"
+"core/src/ufo/runtime/skills/sandbox/SKILL.md" = "arms/sandbox-cli/SKILL.md"

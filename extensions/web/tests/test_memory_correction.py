@@ -39,30 +39,35 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
-from ufo.access.connectors import ConnectorRegistry
-from ufo.access.credentials import CredentialStore
-from ufo.auth.bearer import mint_token
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.durability import replay_safe_client
-from ufo.ext.context import ScopedStore, context_for
-from ufo.ext.loader import member_object_registry, memory_search, skill_registry
-from ufo.hub import InProcessHub
-from ufo.indexing import TextChunker
-from ufo.loop import queue as loop_queue
-from ufo.loop.subagents import SubagentRegistry
-from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
-from ufo.models.interface import ModelEvent, ModelRequest, TextDelta
-from ufo.models.registry import ModelRegistry
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.durability import replay_safe_client
+from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
+from ufo.harness.models.registry import ModelRegistry
+from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.local import LocalCarrier
+from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.host.ext.loader import (
+    HostEnvironment,
+    member_object_registry,
+    memory_search,
+    skill_registry,
+)
+from ufo.runtime import queue as loop_queue
+from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.auth.bearer import mint_token
+from ufo.runtime.ext.context import ScopedStore, context_for
+from ufo.runtime.hub import InProcessHub
+from ufo.runtime.indexing import TextChunker
+from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.turns.subjects import member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.serve import _mount_shared_surfaces
-from ufo.turns.subjects import member_subject
-from ufo.workspace import ws
 
 TOKEN_SECRET = "web-token-secret"
 
@@ -153,6 +158,9 @@ async def _seed_member(workspace_id: UUID, email: str) -> tuple[UUID, str]:
     return member_id, token
 
 
+CORRECTION_MANIFESTS = (sources_manifest_module.manifest(), memory_manifest_module.manifest())
+
+
 @pytest.fixture
 def memory_runtime(
     dbos_launched: Config, tmp_path_factory: pytest.TempPathFactory
@@ -188,7 +196,13 @@ def memory_runtime(
             invoker_for=invoker_factory(dbos_client),
             subagents=SubagentRegistry(()),
             subagent_grants={},
-            manifests=(sources_manifest_module.manifest(), memory_manifest_module.manifest()),
+            manifests=CORRECTION_MANIFESTS,
+            environment=HostEnvironment(
+                manifests=CORRECTION_MANIFESTS,
+                credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),
+                index=DefaultIndex(transaction=workspace_tx),
+                embed=StubEmbed(),
+            ),
             registry=STANDIN_REGISTRY,
             skills=skill_registry(()),
             credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),

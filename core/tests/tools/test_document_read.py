@@ -2,8 +2,8 @@ import base64
 
 import pytest
 
-from ufo.tools.builtins import _document_result
-from ufo.tools.context import ImageContent, TextContent
+from ufo.host.tools.builtins import _document_result
+from ufo.runtime.tools.context import ImageContent, TextContent
 
 PNG = b"\x89PNG\r\n\x1a\nrendered"
 

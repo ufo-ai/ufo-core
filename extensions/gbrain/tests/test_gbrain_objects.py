@@ -21,22 +21,22 @@ from ufo_ext_gbrain.git import GIT_BACKEND, GITHUB_TOKEN_SLOT
 from ufo_ext_gbrain.manifest import NAME, manifest
 from ufo_ext_gbrain.objects import GBRAIN_KIND, gbrain_source_name
 
-from ufo.access.credentials import CredentialStore
-from ufo.agent_scope import agent
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
-from ufo.ext.context import context_for
-from ufo.ext.loader import turn_tools
-from ufo.objects import UnknownObject
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.ext.context import context_for
+from ufo.runtime.objects import UnknownObject
+from ufo.runtime.sources.sync import register_sources
+from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.objects import VerbNotSupported
 from ufo.sdk.tools import ToolContext
-from ufo.sources.sync import register_sources
-from ufo.tools.registry import ToolDef
-from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.workspace import ws
 
 TOOL_NARRATION = "setting up the gbrain source"
 REPO = "octo/wiki"

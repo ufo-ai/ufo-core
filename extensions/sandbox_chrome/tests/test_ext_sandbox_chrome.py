@@ -17,7 +17,7 @@ import pytest
 import ufo_ext_sandbox_chrome as ext
 
 from ufo.browser import SessionGone
-from ufo.sandbox.session import (
+from ufo.harness.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     DialTarget,
     ExecResult,
