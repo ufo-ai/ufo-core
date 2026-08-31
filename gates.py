@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 import sys
 from collections import defaultdict
@@ -1639,6 +1640,7 @@ def _declared_flag_failures(terraform: dict[Path, str]) -> list[str]:
     )
     if flags_source is None:
         return ["flags: no env root declares flags.tf"]
+    tombstones = frozenset(json.loads((ROOT / "infra" / "flag_tombstones.json").read_text()))
     failures = []
     for environment, pack in sorted(packs.items()):
         declared = {spec.key for manifest in load_manifests(pack) for spec in manifest.flags}
@@ -1649,6 +1651,8 @@ def _declared_flag_failures(terraform: dict[Path, str]) -> list[str]:
             failures.append(f"flags: no portal_flags map for {environment}")
             continue
         keys = set(re.findall(r'"([a-z0-9-]+)"\s*=\s*(?:true|false)', block.group(1)))
+        for key in sorted((keys | declared) & tombstones):
+            failures.append(f"flags: {environment} uses tombstoned key {key!r}")
         for key in sorted(keys - declared):
             failures.append(
                 f"flags: {environment} declares {key!r}, which no extension in {pack} reads"

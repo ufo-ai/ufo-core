@@ -1198,7 +1198,6 @@ PORTAL_SURFACES = {
     "memory": "enable-memory-tab",
     "community-skills": "enable-community-skills",
     "installed-skills": "enable-installed-skills",
-    "usage": "enable-usage-tab",
 }
 # The flags that read closed. A flag withholding one of the portal's own screens reads open, so no
 # outage, no unseeded deploy and no key an operator has yet to create takes away what a member

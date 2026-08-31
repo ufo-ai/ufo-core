@@ -92,7 +92,7 @@ test("an empty conversation states it, and the composer sends a message and stre
     tokens: 12,
     cost_micro_usd: 2_000_000,
   });
-  expect(await screen.findByText("opus · 12 tok")).toBeTruthy();
+  expect(await screen.findByText("opus · 12 tok · $2.00")).toBeTruthy();
   expect(StreamFake.last().closed).toBe(true);
 });
 

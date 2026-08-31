@@ -745,7 +745,7 @@ async def _mount(
     )
 
 
-FOOTER_LABEL = "1,234 tokens, 42% cached · claude-opus-4-8-[high]"
+FOOTER_LABEL = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
 
 
 async def _debug_footer(
@@ -845,7 +845,7 @@ async def test_raw_request_body_stops_on_the_first_chunk_past_one_mib() -> None:
 
 
 def test_block_kit_reply_body_renders_markdown_and_bounds_each_part() -> None:
-    metadata = "1,234 tokens, 42% cached · claude-opus-4-8-[high]"
+    metadata = "$0.001234 (1,234 tokens, 42% cached) · claude-opus-4-8-[high]"
     body = json.loads(slack.slack_reply_body("C5", "200.0", "hi **there**", metadata))
     assert body["channel"] == "C5"
     assert body["thread_ts"] == "200.0"
@@ -5597,26 +5597,6 @@ async def test_footer_stays_plain_without_a_public_base_url(
     assert footer == {"type": "context", "elements": [{"type": "mrkdwn", "text": FOOTER_LABEL}]}
 
 
-async def test_the_reply_footer_states_no_price_in_the_operator_workspace(
-    db: None, tmp_path, monkeypatch
-) -> None:
-    """A price reaches no thread. The operator workspace reads the accounting footer and the
-    debugger link, and that footer states tokens, the cache share and the model — never dollars,
-    which are read in the ledger."""
-    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
-    recorder: list[httpx.Request] = []
-    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
-    turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "hi", blob, artifact=False)
-
-    await app.state.writeback_poller.drain()
-
-    posts = [r for r in recorder if str(r.url) == slack.SLACK_CHAT_POST_MESSAGE_URL]
-    assert len(posts) == 1
-    text = json.loads(posts[0].content)["blocks"][-1]["elements"][0]["text"]
-    assert text == await _debug_footer(workspace_id, "C5:200.0", turn_id)
-    assert "$" not in text
-
-
 @pytest.mark.parametrize("member_email", ["owner@customer.example", None])
 async def test_footer_links_to_web_outside_the_operator_workspace(
     db: None, tmp_path, monkeypatch, member_email: str | None
@@ -5656,9 +5636,8 @@ async def test_footer_only_links_to_web_on_a_shared_channel_in_the_operator_work
     db: None, tmp_path, monkeypatch, info_response: httpx.Response
 ) -> None:
     """The operator workspace withholds the accounting footer and debugger link on a Slack Connect
-    or org-shared thread, where an outside guest would otherwise see the turn's accounting — and
-    fails closed, leaving only the web link when conversations.info cannot prove the channel
-    internal."""
+    or org-shared thread, where an outside guest would otherwise see the turn's cost — and fails
+    closed, leaving only the web link when conversations.info cannot prove the channel internal."""
     workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
     recorder: list[httpx.Request] = []
 
@@ -8421,7 +8400,9 @@ async def test_a_turns_first_progress_post_carries_the_footer_and_no_later_one_r
         await asyncio.sleep(0.01)
 
     footers = _footers(_progress_posts(recorder))
-    assert footers[0] == await _debug_footer(workspace_id, "C1:100.5", turn_id, "567 tokens")
+    assert footers[0] == await _debug_footer(
+        workspace_id, "C1:100.5", turn_id, "$0.001234 (567 tokens)"
+    )
     assert all(footer is None for footer in footers[1:])
 
     await _finish_turn(turn_id, "migrated")

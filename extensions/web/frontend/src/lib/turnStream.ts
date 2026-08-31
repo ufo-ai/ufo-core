@@ -1,5 +1,6 @@
 import { BASE, getJson } from "@/lib/api";
 import { holdTurn, moveTurnHold, releaseTurn } from "@/lib/appStatusStore";
+import { money } from "@/lib/money";
 import {
   chatState,
   liveTurn,
@@ -457,7 +458,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
     const frame = JSON.parse((event as MessageEvent).data);
     onLive((live) => ({
       ...live,
-      meter: tokens(frame.tokens) + " tok",
+      meter: tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd),
     }));
   });
 
@@ -475,7 +476,7 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
       let meta = live.meta;
       if (frame.status === "done") {
         if (frame.text) text = frame.text;
-        meta = frame.model + " · " + tokens(frame.tokens) + " tok";
+        meta = frame.model + " · " + tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd);
         if (frame.question) {
           handoffs.question = { turn_id: turnId, ...frame.question };
         } else if (!answering) {

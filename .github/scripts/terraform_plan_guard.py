@@ -3,6 +3,13 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+
+FLAG_TOMBSTONES = frozenset(
+    json.loads((Path(__file__).parents[2] / "infra" / "flag_tombstones.json").read_text())
+)
+FLAG_RESOURCE_TYPE = "cloudflare_flagship_flag"
+FLAG_ENVIRONMENTS = ("testing", "prod")
 
 REGENERABLE_RESOURCE_TYPES = frozenset(
     {
@@ -81,6 +88,23 @@ def _is_regenerable(address: str, resource_type: str) -> bool:
     )
 
 
+def _is_tombstoned_flag(
+    address: str, resource_type: str, actions: list[str], before: object
+) -> bool:
+    if resource_type != FLAG_RESOURCE_TYPE or actions != ["delete"] or not isinstance(before, dict):
+        return False
+    flag_key = before.get("flag_key")
+    return (
+        isinstance(flag_key, str)
+        and flag_key in FLAG_TOMBSTONES
+        and address
+        in {
+            f'{FLAG_RESOURCE_TYPE}.{environment}_portal["{flag_key}"]'
+            for environment in FLAG_ENVIRONMENTS
+        }
+    )
+
+
 def rejected_deletions(plan: object) -> list[str]:
     match plan:
         case {"resource_changes": list(changes)}:
@@ -98,14 +122,18 @@ def rejected_deletions(plan: object) -> list[str]:
             case {
                 "address": str(address),
                 "type": str(resource_type),
-                "change": {"actions": list(actions)},
+                "change": {"actions": list(actions)} as change,
             }:
                 pass
             case _:
                 raise ValueError("Terraform resource change has an invalid shape")
         if any(type(action) is not str for action in actions):
             raise ValueError("Terraform resource actions must be strings")
-        if "delete" in actions and not _is_regenerable(address, resource_type):
+        if (
+            "delete" in actions
+            and not _is_regenerable(address, resource_type)
+            and not _is_tombstoned_flag(address, resource_type, actions, change.get("before"))
+        ):
             rejected.append(f"{address} ({'/'.join(actions)})")
     return sorted(rejected)
 

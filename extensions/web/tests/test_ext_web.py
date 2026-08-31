@@ -2739,7 +2739,6 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
                 "enable-community-skills": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-installed-skills": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-memory-tab": InMemoryFlag(default_variant="on", variants=variants),
-                "enable-usage-tab": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-wiki-app": InMemoryFlag(default_variant="off", variants=variants),
             }
         )
@@ -2754,7 +2753,6 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
         "memory": True,
         "community-skills": False,
         "installed-skills": False,
-        "usage": False,
     }
     assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [
         (None, False),

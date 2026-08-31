@@ -903,6 +903,13 @@ def test_flag_gate_names_a_key_the_environment_declares_and_nothing_reads() -> N
     assert not [failure for failure in failures if "omits" in failure]
 
 
+def test_flag_gate_refuses_a_tombstoned_key() -> None:
+    failures = gates._declared_flag_failures(
+        {ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: _flags_tf(*_declared_keys(), "enable-usage-tab")}
+    )
+    assert any("tombstoned key 'enable-usage-tab'" in failure for failure in failures)
+
+
 def test_flag_gate_passes_where_the_two_lists_agree() -> None:
     declared = _flags_tf(*_declared_keys())
     assert gates._declared_flag_failures({ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: declared}) == []

@@ -180,11 +180,16 @@ def _guard():
     return module
 
 
-def _change(address: str, resource_type: str, actions: list[object]) -> dict[str, object]:
+def _change(
+    address: str, resource_type: str, actions: list[object], before: object | None = None
+) -> dict[str, object]:
+    change: dict[str, object] = {"actions": actions}
+    if before is not None:
+        change["before"] = before
     return {
         "address": address,
         "type": resource_type,
-        "change": {"actions": actions},
+        "change": change,
     }
 
 
@@ -212,6 +217,56 @@ def test_rejects_persistent_deletions(address: str, resource_type: str, actions:
 def test_allows_regenerable_deletions(address: str, resource_type: str, actions: list[str]) -> None:
     plan = {"resource_changes": [_change(address, resource_type, actions)]}
     assert _guard().rejected_deletions(plan) == []
+
+
+@pytest.mark.parametrize(
+    "address",
+    (
+        'cloudflare_flagship_flag.testing_portal["enable-usage-tab"]',
+        'cloudflare_flagship_flag.prod_portal["enable-usage-tab"]',
+    ),
+)
+def test_allows_a_tombstoned_flag_deletion(address: str) -> None:
+    plan = {
+        "resource_changes": [
+            _change(
+                address,
+                "cloudflare_flagship_flag",
+                ["delete"],
+                before={"flag_key": "enable-usage-tab"},
+            )
+        ]
+    }
+    assert _guard().rejected_deletions(plan) == []
+
+
+@pytest.mark.parametrize(
+    ("address", "actions", "before"),
+    (
+        (
+            'cloudflare_flagship_flag.testing_portal["enable-memory-tab"]',
+            ["delete"],
+            {"flag_key": "enable-memory-tab"},
+        ),
+        (
+            'cloudflare_flagship_flag.testing_portal["enable-usage-tab"]',
+            ["delete", "create"],
+            {"flag_key": "enable-usage-tab"},
+        ),
+        (
+            'cloudflare_flagship_flag.testing_portal["enable-memory-tab"]',
+            ["delete"],
+            {"flag_key": "enable-usage-tab"},
+        ),
+    ),
+)
+def test_rejects_other_flag_deletions(
+    address: str, actions: list[str], before: dict[str, str]
+) -> None:
+    plan = {
+        "resource_changes": [_change(address, "cloudflare_flagship_flag", actions, before=before)]
+    }
+    assert _guard().rejected_deletions(plan) == [f"{address} ({'/'.join(actions)})"]
 
 
 def test_regenerable_cases_cover_the_guard_tables() -> None:

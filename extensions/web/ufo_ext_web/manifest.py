@@ -57,7 +57,6 @@ FLAGS = (
         key=PORTAL_SURFACES["installed-skills"],
         what="The Skills tab offers the workspace's own skills.",
     ),
-    FlagSpec(key=PORTAL_SURFACES["usage"], what="The workspace Usage tab is drawn."),
     FlagSpec(key=IMESSAGE_STEP_FLAG, what="The first run offers the iMessage step."),
 )
 

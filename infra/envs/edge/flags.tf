@@ -44,7 +44,6 @@ locals {
       "enable-memory-tab"       = true
       "enable-metrics-app"      = false
       "enable-radar-app"        = false
-      "enable-usage-tab"        = true
       "enable-wiki-app"         = false
     }
     prod = {
@@ -59,7 +58,6 @@ locals {
       "enable-memory-tab"       = false
       "enable-metrics-app"      = false
       "enable-radar-app"        = false
-      "enable-usage-tab"        = false
       "enable-wiki-app"         = false
     }
   }
