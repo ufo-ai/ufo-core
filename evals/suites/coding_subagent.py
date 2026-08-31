@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -47,14 +48,6 @@ TIMEOUT_ACTION_NEGATION = re.compile(
     r"(?:\b(?:do|will|would|should|must|can)\s+not\b|"
     r"\b(?:don't|won't|wouldn't|shouldn't|mustn't|can't|never|avoid|without)\b|"
     r"\bno need to\b)[^.;\n]{0,64}$"
-)
-SCOPE_INFLATION_ACTION = re.compile(
-    r"\b(?:change|edit|update|modify|patch|alter)\b|\badd\b[^.;\n]{0,48}\bto\b"
-)
-SCOPE_INFLATION_NEGATION = re.compile(
-    r"(?:\b(?:do|will|would|should|must|can)\s+not\b|"
-    r"\b(?:don't|won't|wouldn't|shouldn't|mustn't|can't|never|avoid|without)\b)"
-    r"[^.;\n]{0,64}$"
 )
 GENERIC_ADD_LAYERS = (
     "matadd",
@@ -150,8 +143,13 @@ def _same_transport_objective(expected: str, observed: str) -> bool:
     return normalized(expected) == normalized(observed)
 
 
-def profile_proxy_scorer(objective: str, grader: Grader) -> Grader:
-    """Grade the validated result of one exact coding-profile spawn, never the proxy's answer."""
+def profile_proxy_scorer(objective: str, grader: Grader, *, relayed_answer: bool = False) -> Grader:
+    """Grade the validated result of one exact coding-profile spawn, never the proxy's answer.
+
+    `relayed_answer` additionally requires the proxy's reply to BE the child result, token for
+    token across transport whitespace. A decision case's rubric is judged over the reply, so this
+    equality is what makes that judgment a judgment of the child's decision — a proxy that
+    paraphrases or summarizes fails here before any criterion is read."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         spawns = tuple(call for call in output.own_calls if call.name == "spawn")
@@ -173,6 +171,8 @@ def profile_proxy_scorer(objective: str, grader: Grader) -> Grader:
             return CapabilityVerdict(False, "the coding spawn returned malformed JSON")
         if not isinstance(result, dict) or not isinstance(response := result.get("result"), str):
             return CapabilityVerdict(False, "the coding spawn returned no result field")
+        if relayed_answer and not _same_transport_objective(response, output.response):
+            return CapabilityVerdict(False, "the proxy did not relay the child result verbatim")
         parent_calls = {call.call_id for call in output.own_calls if call.call_id}
         child_calls = tuple(call for call in output.calls if call.call_id not in parent_calls)
         return await grader(CapabilityOutput(response, child_calls, tool_errors=output.tool_errors))
@@ -720,38 +720,47 @@ One focused contract test proves the new wire shape. Choose the remaining valida
 this cross-package public contract change."""
 
 
-def _response_evidence_scorer(
-    statement: str,
-    required: tuple[tuple[str, tuple[str, ...]], ...],
-    forbidden: tuple[str, ...] = (),
-) -> Grader:
-    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        if output.calls:
-            return CapabilityVerdict(False, "used tools at the isolated decision step")
-        text = output.response.casefold().replace("`", "").replace("**", "").replace("()", "")
-        missing = [label for label, choices in required if not any(x in text for x in choices)]
-        expanded = [symbol for symbol in forbidden if symbol in text]
-        if missing or expanded:
-            reasons = [*(f"missing {label}" for label in missing)]
-            if expanded:
-                reasons.append("expanded to " + ", ".join(expanded))
-            return CapabilityVerdict(False, "; ".join(reasons))
-        return CapabilityVerdict(True, "all decision evidence present")
+@dataclass(frozen=True)
+class DecisionEvidence:
+    """A decision case's criteria: what the answer must establish and what its chosen approach
+    must avoid. The requirements are judged semantically over the relayed decision text — a
+    substring match under-credits a correct answer phrased in words the variant list lacks, which
+    a manual review of a 30-case baseline measured at six of twenty-one completed decisions. Each
+    `required` entry keeps its variant list as the judge's example phrasings; `forbidden` names
+    approaches the answer must not adopt, where naming one only to reject it still passes. The
+    deterministic half that remains is the tool ban: the decision step is judged on reasoning
+    alone, so any tool call fails before the judge reads a word."""
 
-    return DescribedGrader(statement, grade)
+    statement: str
+    required: tuple[tuple[str, tuple[str, ...]], ...]
+    forbidden: tuple[str, ...] = ()
+
+    @property
+    def rubric(self) -> tuple[str, ...]:
+        criteria = tuple(
+            f"the answer establishes {label} (for example: {'; '.join(choices[:2])})"
+            for label, choices in self.required
+        )
+        if self.forbidden:
+            criteria += (
+                "the approach the answer commits to avoids "
+                + ", ".join(self.forbidden)
+                + " — naming one of these only to reject it still passes",
+            )
+        return criteria
+
+    def grader(self) -> Grader:
+        async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+            if output.calls:
+                return CapabilityVerdict(False, "used tools at the isolated decision step")
+            return CapabilityVerdict(True, "decision produced without tools")
+
+        return DescribedGrader(self.statement, grade)
 
 
-def _rejects_validation(text: str, targets: tuple[str, ...]) -> bool:
-    rejection = ("skip", "do not run", "not to run", "do not widen", "out of scope", "not the")
-    return any(
-        any(term in clause for term in rejection) and any(target in clause for target in targets)
-        for clause in re.split(r"[.\n]", text)
-    )
-
-
-def cross_layer_error_emitter_scorer() -> Grader:
+def cross_layer_error_emitter_evidence() -> DecisionEvidence:
     """The NaN path must repair the first error emitter or restore the shared validator path."""
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer traces the active NaN emitter, repairs its value params, and tests the "
         "public value placeholder",
         (
@@ -789,9 +798,9 @@ def cross_layer_error_emitter_scorer() -> Grader:
     )
 
 
-def direct_error_emitter_scorer() -> Grader:
+def direct_error_emitter_evidence() -> DecisionEvidence:
     """The bad-scheme neighbor stays at its direct emitter instead of expanding across layers."""
-    evidence = _response_evidence_scorer(
+    evidence = DecisionEvidence(
         "the answer fixes the direct URLValidator bad-scheme emitter without field or model edits",
         (
             ("URLValidator.__call__", ("urlvalidator.__call__",)),
@@ -815,32 +824,20 @@ def direct_error_emitter_scorer() -> Grader:
             ),
             ("the failing URL", ("ftp://example.com",)),
         ),
+        (
+            "edits to DecimalField",
+            "edits to field.clean",
+            "edits to run_validators",
+            "edits to to_python",
+            "model field changes",
+        ),
     )
-
-    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        verdict = await evidence(output)
-        if not verdict.passed:
-            return verdict
-        text = output.response.casefold().replace("`", "").replace("**", "")
-        targets = ("decimalfield", "field.clean", "run_validators", "to_python", "model field")
-        for clause in re.split(r"\.(?:\s|$)|[;\n]", text):
-            if not any(target in clause for target in targets):
-                continue
-            for action in SCOPE_INFLATION_ACTION.finditer(clause):
-                prefix = clause[max(0, action.start() - 64) : action.start()]
-                if SCOPE_INFLATION_NEGATION.search(prefix) is None:
-                    return CapabilityVerdict(False, "expanded beyond URLValidator.__call__")
-        return verdict
-
-    return DescribedGrader(
-        "the answer fixes the direct URLValidator bad-scheme emitter without field or model edits",
-        grade,
-    )
+    return evidence
 
 
-def composite_modulus_boundary_scorer() -> Grader:
+def composite_modulus_boundary_evidence() -> DecisionEvidence:
     """The requested solver spans composite factors; a correct prime-zero shortcut is incomplete."""
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer decomposes the full composite nth-root solver and tests its public boundary",
         (
             ("prime-power factorization", ("prime-power", "prime power", "factorint")),
@@ -873,9 +870,9 @@ def composite_modulus_boundary_scorer() -> Grader:
     )
 
 
-def prime_zero_boundary_scorer() -> Grader:
+def prime_zero_boundary_evidence() -> DecisionEvidence:
     """A prime-only request stays at the zero branch and does not grow a composite solver."""
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer fixes only the prime zero-residue path and preserves return-shape behavior",
         (
             (
@@ -931,9 +928,9 @@ def prime_zero_boundary_scorer() -> Grader:
     )
 
 
-def middleware_override_scorer(*, repository_wide: bool) -> Grader:
+def middleware_override_evidence(*, repository_wide: bool) -> DecisionEvidence:
     if repository_wide:
-        return _response_evidence_scorer(
+        return DecisionEvidence(
             "the answer repairs every constructor that bypasses the shared middleware contract",
             (
                 (
@@ -990,7 +987,7 @@ def middleware_override_scorer(*, repository_wide: bool) -> Grader:
                 ),
             ),
         )
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer keeps a proven shared contract local to the one violating subclass",
         (
             ("the local class", ("customauditmiddleware",)),
@@ -1007,9 +1004,9 @@ def middleware_override_scorer(*, repository_wide: bool) -> Grader:
     )
 
 
-def annotation_state_scorer(*, referenced: bool) -> Grader:
+def annotation_state_evidence(*, referenced: bool) -> DecisionEvidence:
     if referenced:
-        return _response_evidence_scorer(
+        return DecisionEvidence(
             "the answer retains an unselected alias when an active predicate references it",
             (
                 ("the HAVING dependency", ("having", "filter")),
@@ -1019,7 +1016,7 @@ def annotation_state_scorer(*, referenced: bool) -> Grader:
             ),
             ("prune every unselected", "prune all unselected", "unconditionally prune"),
         )
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer distinguishes registered annotations from the active selected state",
         (
             ("the active source of truth", ("annotation_select",)),
@@ -1050,9 +1047,9 @@ def annotation_state_scorer(*, referenced: bool) -> Grader:
     )
 
 
-def pyreverse_consumer_scorer(*, public_output: bool) -> Grader:
+def pyreverse_consumer_evidence(*, public_output: bool) -> DecisionEvidence:
     if public_output:
-        return _response_evidence_scorer(
+        return DecisionEvidence(
             "the answer wires the declared helper boundary through the rendered output consumer",
             (
                 ("the public helper module", ("pylint.pyreverse.utils", "pyreverse/utils.py")),
@@ -1081,7 +1078,7 @@ def pyreverse_consumer_scorer(*, public_output: bool) -> Grader:
                 ),
             ),
         )
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer keeps a proven private branch and its test in the inspector",
         (
             ("the local implementation", ("inspector.py",)),
@@ -1118,9 +1115,9 @@ def pyreverse_consumer_scorer(*, public_output: bool) -> Grader:
     )
 
 
-def discovery_boundary_scorer(*, public_discovery: bool) -> Grader:
+def discovery_boundary_evidence(*, public_discovery: bool) -> DecisionEvidence:
     if public_discovery:
-        return _response_evidence_scorer(
+        return DecisionEvidence(
             "the answer repairs public member discovery through the existing renderer",
             (
                 ("the public collection boundary", ("autoclass", ":members:", "member discovery")),
@@ -1158,7 +1155,7 @@ def discovery_boundary_scorer(*, public_discovery: bool) -> Grader:
                 ),
             ),
         )
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer keeps proven discovery unchanged and repairs only the direct renderer",
         (
             ("the renderer owner", ("propertydocumenter",)),
@@ -1186,9 +1183,9 @@ def discovery_boundary_scorer(*, public_discovery: bool) -> Grader:
     )
 
 
-def precedence_scorer(*, python_mro: bool) -> Grader:
+def precedence_evidence(*, python_mro: bool) -> DecisionEvidence:
     if python_mro:
-        return _response_evidence_scorer(
+        return DecisionEvidence(
             "the answer preserves Python MRO precedence without inheriting state during reads",
             (
                 ("Python MRO traversal", ("c.__mro__", "obj.__mro__")),
@@ -1226,7 +1223,7 @@ def precedence_scorer(*, python_mro: bool) -> Grader:
                 ),
             ),
         )
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer preserves an explicit base-first merge contract",
         (
             (
@@ -1244,9 +1241,9 @@ def precedence_scorer(*, python_mro: bool) -> Grader:
     )
 
 
-def transform_state_scorer(*, stateful: bool) -> Grader:
+def transform_state_evidence(*, stateful: bool) -> DecisionEvidence:
     if stateful:
-        return _response_evidence_scorer(
+        return DecisionEvidence(
             "the answer gives location one frame owner and propagates it through every transform "
             "edge that consumes it",
             (
@@ -1271,7 +1268,7 @@ def transform_state_scorer(*, stateful: bool) -> Grader:
                 ("public round-trip coverage", ("round trip", "round-trip")),
             ),
         )
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer keeps a proven stateless transform local",
         (
             ("the local conversions", ("pixel", "normalized")),
@@ -1290,9 +1287,9 @@ def transform_state_scorer(*, stateful: bool) -> Grader:
     )
 
 
-def derived_state_scorer(*, surviving_owner: bool) -> Grader:
+def derived_state_evidence(*, surviving_owner: bool) -> DecisionEvidence:
     if surviving_owner:
-        return _response_evidence_scorer(
+        return DecisionEvidence(
             "the answer derives dimensions from surviving variables and retains live owners",
             (
                 ("the surviving value variable", ("value variable", "data variable")),
@@ -1324,7 +1321,7 @@ def derived_state_scorer(*, surviving_owner: bool) -> Grader:
                 "clamp the length",
             ),
         )
-    return _response_evidence_scorer(
+    return DecisionEvidence(
         "the answer reconstructs derived dimensions after the last canonical owner is removed",
         (
             ("the wrong _replace path", ("_replace",)),
@@ -1362,9 +1359,9 @@ def derived_state_scorer(*, surviving_owner: bool) -> Grader:
     )
 
 
-def validation_scope_scorer(*, cross_cutting: bool) -> Grader:
+def validation_scope_evidence(*, cross_cutting: bool) -> DecisionEvidence:
     if cross_cutting:
-        return _response_evidence_scorer(
+        return DecisionEvidence(
             "the answer validates every consumer of a cross-cutting public contract",
             (
                 (
@@ -1424,7 +1421,7 @@ def validation_scope_scorer(*, cross_cutting: bool) -> Grader:
                 "full repository suite out of scope",
             ),
         )
-    evidence = _response_evidence_scorer(
+    evidence = DecisionEvidence(
         "the answer stops validation at the changed rule and nearest public regression",
         (
             ("the changed inference rule", ("inference rule", "infer_node", "typealias")),
@@ -1440,29 +1437,26 @@ def validation_scope_scorer(*, cross_cutting: bool) -> Grader:
                 "a stop condition",
                 ("stop there", "once both pass", "when both pass", "stop condition"),
             ),
+            (
+                "rejection of the full suite",
+                (
+                    "skip the full suite",
+                    "do not run the full core suite",
+                    "the full suite is out of scope",
+                ),
+            ),
+            (
+                "rejection of the broad file sweep",
+                (
+                    "skip the ten-file inference sweep",
+                    "do not run the inference sweep",
+                    "the file sweep is out of scope",
+                ),
+            ),
         ),
     )
 
-    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        verdict = await evidence(output)
-        if not verdict.passed:
-            return verdict
-        text = output.response.casefold().replace("`", "").replace("**", "")
-        rejects_both = "skip both wide runs" in text or "skip both broad runs" in text
-        missing = []
-        if not rejects_both and not _rejects_validation(text, ("full suite", "core suite")):
-            missing.append("rejection of the full suite")
-        if not rejects_both and not _rejects_validation(
-            text, ("ten-file", "inference sweep", "file sweep")
-        ):
-            missing.append("rejection of the broad file sweep")
-        if missing:
-            return CapabilityVerdict(False, "; ".join(f"missing {item}" for item in missing))
-        return verdict
-
-    return DescribedGrader(
-        "the answer stops validation at the changed rule and nearest public regression", grade
-    )
+    return evidence
 
 
 def github_app_api_scorer() -> Grader:
@@ -1891,6 +1885,27 @@ CASES = (
     ),
 )
 
+
+def decision_case(
+    name: str,
+    message: str,
+    evidence: DecisionEvidence,
+    *,
+    digest_tag: str,
+    samples: int = 1,
+) -> CapabilityCase:
+    """A decision case judged on its relayed answer: the proxy contract and the tool ban stay
+    deterministic, and the decision content is the case rubric."""
+    return CapabilityCase(
+        name,
+        profile_proxy_message(message),
+        profile_proxy_scorer(message, evidence.grader(), relayed_answer=True),
+        rubric=evidence.rubric,
+        samples=samples,
+        digest_tag=digest_tag,
+    )
+
+
 PROFILE_CASES = (
     CapabilityCase(
         "coding-profile-existing-checkout-no-url",
@@ -1923,136 +1938,112 @@ PROFILE_CASES = (
         ),
         digest_tag="coding-profile:structured-review-result:v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-middleware-override-contract",
-        profile_proxy_message(MIDDLEWARE_OVERRIDE_MESSAGE),
-        profile_proxy_scorer(
-            MIDDLEWARE_OVERRIDE_MESSAGE, middleware_override_scorer(repository_wide=True)
-        ),
+        MIDDLEWARE_OVERRIDE_MESSAGE,
+        middleware_override_evidence(repository_wide=True),
         digest_tag="coding-profile:middleware-override-contract:v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-middleware-proven-local",
-        profile_proxy_message(MIDDLEWARE_LOCAL_MESSAGE),
-        profile_proxy_scorer(
-            MIDDLEWARE_LOCAL_MESSAGE, middleware_override_scorer(repository_wide=False)
-        ),
+        MIDDLEWARE_LOCAL_MESSAGE,
+        middleware_override_evidence(repository_wide=False),
         digest_tag="coding-profile:middleware-override-contract:proven-local-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-annotation-active-state",
-        profile_proxy_message(ANNOTATION_ACTIVE_STATE_MESSAGE),
-        profile_proxy_scorer(
-            ANNOTATION_ACTIVE_STATE_MESSAGE, annotation_state_scorer(referenced=False)
-        ),
+        ANNOTATION_ACTIVE_STATE_MESSAGE,
+        annotation_state_evidence(referenced=False),
         digest_tag="coding-profile:annotation-active-state:v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-annotation-referenced-state",
-        profile_proxy_message(ANNOTATION_REFERENCED_MESSAGE),
-        profile_proxy_scorer(
-            ANNOTATION_REFERENCED_MESSAGE, annotation_state_scorer(referenced=True)
-        ),
+        ANNOTATION_REFERENCED_MESSAGE,
+        annotation_state_evidence(referenced=True),
         digest_tag="coding-profile:annotation-active-state:referenced-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-pyreverse-consumer-boundary",
-        profile_proxy_message(PYREVERSE_CONSUMER_MESSAGE),
-        profile_proxy_scorer(
-            PYREVERSE_CONSUMER_MESSAGE, pyreverse_consumer_scorer(public_output=True)
-        ),
+        PYREVERSE_CONSUMER_MESSAGE,
+        pyreverse_consumer_evidence(public_output=True),
         digest_tag="coding-profile:pyreverse-consumer-boundary:v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-pyreverse-proven-local",
-        profile_proxy_message(PYREVERSE_LOCAL_MESSAGE),
-        profile_proxy_scorer(
-            PYREVERSE_LOCAL_MESSAGE, pyreverse_consumer_scorer(public_output=False)
-        ),
+        PYREVERSE_LOCAL_MESSAGE,
+        pyreverse_consumer_evidence(public_output=False),
         digest_tag="coding-profile:pyreverse-consumer-boundary:proven-local-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-autodoc-discovery-boundary",
-        profile_proxy_message(AUTODOC_DISCOVERY_MESSAGE),
-        profile_proxy_scorer(
-            AUTODOC_DISCOVERY_MESSAGE, discovery_boundary_scorer(public_discovery=True)
-        ),
+        AUTODOC_DISCOVERY_MESSAGE,
+        discovery_boundary_evidence(public_discovery=True),
         digest_tag="coding-profile:autodoc-discovery-boundary:v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-autodoc-direct-renderer",
-        profile_proxy_message(AUTODOC_DIRECT_MESSAGE),
-        profile_proxy_scorer(
-            AUTODOC_DIRECT_MESSAGE, discovery_boundary_scorer(public_discovery=False)
-        ),
+        AUTODOC_DIRECT_MESSAGE,
+        discovery_boundary_evidence(public_discovery=False),
         digest_tag="coding-profile:autodoc-discovery-boundary:direct-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-mro-precedence",
-        profile_proxy_message(MRO_PRECEDENCE_MESSAGE),
-        profile_proxy_scorer(MRO_PRECEDENCE_MESSAGE, precedence_scorer(python_mro=True)),
+        MRO_PRECEDENCE_MESSAGE,
+        precedence_evidence(python_mro=True),
         digest_tag="coding-profile:mro-precedence:v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-base-first-precedence",
-        profile_proxy_message(BASE_FIRST_PRECEDENCE_MESSAGE),
-        profile_proxy_scorer(BASE_FIRST_PRECEDENCE_MESSAGE, precedence_scorer(python_mro=False)),
+        BASE_FIRST_PRECEDENCE_MESSAGE,
+        precedence_evidence(python_mro=False),
         digest_tag="coding-profile:mro-precedence:base-first-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-stateful-transform-boundary",
-        profile_proxy_message(STATEFUL_TRANSFORM_MESSAGE),
-        profile_proxy_scorer(STATEFUL_TRANSFORM_MESSAGE, transform_state_scorer(stateful=True)),
+        STATEFUL_TRANSFORM_MESSAGE,
+        transform_state_evidence(stateful=True),
         digest_tag="coding-profile:transform-state:stateful-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-stateless-transform-boundary",
-        profile_proxy_message(STATELESS_TRANSFORM_MESSAGE),
-        profile_proxy_scorer(STATELESS_TRANSFORM_MESSAGE, transform_state_scorer(stateful=False)),
+        STATELESS_TRANSFORM_MESSAGE,
+        transform_state_evidence(stateful=False),
         digest_tag="coding-profile:transform-state:stateless-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-derived-state-last-owner",
-        profile_proxy_message(DERIVED_STATE_REMOVAL_MESSAGE),
-        profile_proxy_scorer(
-            DERIVED_STATE_REMOVAL_MESSAGE, derived_state_scorer(surviving_owner=False)
-        ),
+        DERIVED_STATE_REMOVAL_MESSAGE,
+        derived_state_evidence(surviving_owner=False),
         digest_tag="coding-profile:derived-state:last-owner-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-derived-state-surviving-owner",
-        profile_proxy_message(DERIVED_STATE_SURVIVOR_MESSAGE),
-        profile_proxy_scorer(
-            DERIVED_STATE_SURVIVOR_MESSAGE, derived_state_scorer(surviving_owner=True)
-        ),
+        DERIVED_STATE_SURVIVOR_MESSAGE,
+        derived_state_evidence(surviving_owner=True),
         digest_tag="coding-profile:derived-state:surviving-owner-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-local-validation-scope",
-        profile_proxy_message(LOCAL_VALIDATION_MESSAGE),
-        profile_proxy_scorer(
-            LOCAL_VALIDATION_MESSAGE, validation_scope_scorer(cross_cutting=False)
-        ),
+        LOCAL_VALIDATION_MESSAGE,
+        validation_scope_evidence(cross_cutting=False),
         digest_tag="coding-profile:validation-scope:local-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-cross-cutting-validation-scope",
-        profile_proxy_message(CROSS_CUTTING_VALIDATION_MESSAGE),
-        profile_proxy_scorer(
-            CROSS_CUTTING_VALIDATION_MESSAGE, validation_scope_scorer(cross_cutting=True)
-        ),
+        CROSS_CUTTING_VALIDATION_MESSAGE,
+        validation_scope_evidence(cross_cutting=True),
         digest_tag="coding-profile:validation-scope:cross-cutting-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-composite-modulus-boundary",
-        profile_proxy_message(COMPOSITE_MODULUS_MESSAGE),
-        profile_proxy_scorer(COMPOSITE_MODULUS_MESSAGE, composite_modulus_boundary_scorer()),
+        COMPOSITE_MODULUS_MESSAGE,
+        composite_modulus_boundary_evidence(),
         digest_tag="coding-profile:composite-modulus-boundary:v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-prime-zero-boundary",
-        profile_proxy_message(PRIME_ZERO_MESSAGE),
-        profile_proxy_scorer(PRIME_ZERO_MESSAGE, prime_zero_boundary_scorer()),
+        PRIME_ZERO_MESSAGE,
+        prime_zero_boundary_evidence(),
         digest_tag="coding-profile:prime-zero-boundary:v1",
     ),
     CapabilityCase(
@@ -2069,16 +2060,16 @@ PROFILE_CASES = (
         ),
         digest_tag="coding-profile:root-location:proven-operator-v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-cross-layer-error-emitter",
-        profile_proxy_message(CROSS_LAYER_ERROR_MESSAGE),
-        profile_proxy_scorer(CROSS_LAYER_ERROR_MESSAGE, cross_layer_error_emitter_scorer()),
+        CROSS_LAYER_ERROR_MESSAGE,
+        cross_layer_error_emitter_evidence(),
         digest_tag="coding-profile:cross-layer-error-emitter:v1",
     ),
-    CapabilityCase(
+    decision_case(
         "coding-subagent-direct-error-emitter",
-        profile_proxy_message(DIRECT_ERROR_MESSAGE),
-        profile_proxy_scorer(DIRECT_ERROR_MESSAGE, direct_error_emitter_scorer()),
+        DIRECT_ERROR_MESSAGE,
+        direct_error_emitter_evidence(),
         digest_tag="coding-profile:direct-error-emitter:v1",
     ),
     CapabilityCase(

@@ -429,6 +429,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["wiki_generation"].simulator_model == DEFAULT_BACKGROUND_JOBS_MODEL
     assert tasks["tool_activity"].judge_model == ACTIVITY_MODEL
     assert tasks["tool_activity"].simulator_model is None
+    assert tasks["coding_profile"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["coding_profile"].simulator_model is None
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
@@ -441,6 +443,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "scenario_smoke",
             "scenario_env",
             "authority_handoff",
+            "coding_profile",
             "object_tools",
             "object_tools_flows",
             "new_application",
@@ -3610,245 +3613,6 @@ async def test_foreground_timeout_scorer_requires_fail_open_without_more_tools()
         assert not (await grader(CapabilityOutput(unsafe, (), own_calls=()))).passed
 
 
-async def test_cross_layer_error_emitter_scorer_requires_the_active_public_path() -> None:
-    response = (
-        "Causal path: forms.DecimalField.clean() calls DecimalField.validate() before "
-        "DecimalValidator, and that override directly raises for NaN without params, bypassing "
-        "the changed validator. Remove the DecimalField.validate override and let "
-        "DecimalValidator own the non-finite check. Add a public form test that submits NaN with "
-        "the %(value)s placeholder and expects NaN in form.errors."
-    )
-    grader = coding_subagent.cross_layer_error_emitter_scorer()
-    tool = ToolInvocation("grep", {"pattern": "DecimalField"}, "match", True)
-
-    assert (await grader(CapabilityOutput(response, ()))).passed
-    assert (
-        await grader(
-            CapabilityOutput(
-                response.replace(
-                    "DecimalField.validate() before DecimalValidator, and that override directly "
-                    "raises for NaN without params, bypassing the changed validator.",
-                    "DecimalField.validate() raises for NaN, so run_validators never runs and "
-                    "DecimalValidator is unreachable.",
-                ),
-                (),
-            )
-        )
-    ).passed
-    assert not (await grader(CapabilityOutput(response, (tool,)))).passed
-    assert not (
-        await grader(
-            CapabilityOutput(response.replace("DecimalField.validate", "the form field"), ())
-        )
-    ).passed
-    assert (
-        await grader(
-            CapabilityOutput(
-                response.replace(
-                    "Remove the DecimalField.validate override and let DecimalValidator own "
-                    "the non-finite check.",
-                    "Add params={'value': value} to the ValidationError raised by "
-                    "DecimalField.validate.",
-                ),
-                (),
-            )
-        )
-    ).passed
-    assert not (
-        await grader(
-            CapabilityOutput(
-                response.replace(
-                    "Remove the DecimalField.validate override and let DecimalValidator own "
-                    "the non-finite check.",
-                    "Keep DecimalField.validate unchanged.",
-                ),
-                (),
-            )
-        )
-    ).passed
-    assert not (
-        await grader(
-            CapabilityOutput(
-                response.replace(
-                    "Add a public form test that submits NaN with the %(value)s placeholder and "
-                    "expects NaN in form.errors.",
-                    "Keep the direct DecimalValidator unit test.",
-                ),
-                (),
-            )
-        )
-    ).passed
-
-
-async def test_direct_error_emitter_scorer_rejects_cross_layer_scope_inflation() -> None:
-    response = (
-        "URLValidator.__call__ directly raises on its bad scheme before regex validation. Add "
-        "params={'value': value} at that raise. Test URLValidator directly with "
-        "ftp://example.com and assert that the custom value placeholder renders the URL."
-    )
-    grader = coding_subagent.direct_error_emitter_scorer()
-
-    assert (await grader(CapabilityOutput(response, ()))).passed
-    assert (
-        await grader(
-            CapabilityOutput(
-                response + " Do not touch DecimalField, Field.clean, or model fields.", ()
-            )
-        )
-    ).passed
-    assert not (
-        await grader(
-            CapabilityOutput(response.replace("URLValidator.__call__", "RegexValidator"), ())
-        )
-    ).passed
-    assert not (
-        await grader(CapabilityOutput(response + " Also change Field.clean for consistency.", ()))
-    ).passed
-    for expansion in (
-        "Also update Field.clean to pass value.",
-        "Also modify Field.clean to pass value.",
-        "Also patch DecimalField for consistency.",
-        "Also add params to DecimalField.to_python.",
-    ):
-        assert not (await grader(CapabilityOutput(f"{response} {expansion}", ()))).passed
-    assert (await grader(CapabilityOutput(response + " Do not update Field.clean.", ()))).passed
-    assert not (
-        await grader(
-            CapabilityOutput(
-                response.replace(
-                    "Test URLValidator directly with ftp://example.com and assert that the custom "
-                    "value placeholder renders the URL.",
-                    "Run the existing broad suite.",
-                ),
-                (),
-            )
-        )
-    ).passed
-
-
-@pytest.mark.parametrize(
-    "response",
-    (
-        "Exact error emitter: URLValidator.__call__ raises ValidationError in the bad-scheme "
-        'branch. Add params={"value": value}. Call URLValidator(schemes=["http"]) with '
-        '"ftp://example.com" '
-        "and assert the custom message renders the URL.",
-        "URLValidator.__call__ bad-scheme branch owns the error. Raise with "
-        "params={'value': value}. Call URLValidator with ftp://example.com and check the message.",
-        "URLValidator.__call__ owns the bad-scheme branch. Raise with "
-        'params={"value": value}. Set validator = URLValidator(schemes=["http"]), then assert '
-        'validator("ftp://example.com") raises the rendered custom message.',
-        "URLValidator.__call__ raises the bad-scheme error. Add params={'value': value}. Call "
-        "URLValidator with ftp://example.com and assert the rendered message.",
-        "URLValidator.__call__ has a scheme check that runs before the regex. This raise returns "
-        "first, so add params={'value': value}. Call URLValidator with ftp://example.com and "
-        "assert the rendered message.",
-    ),
-)
-async def test_direct_error_emitter_scorer_accepts_explicit_direct_calls(response: str) -> None:
-    assert (
-        await coding_subagent.direct_error_emitter_scorer()(CapabilityOutput(response, ()))
-    ).passed
-
-
-async def test_composite_modulus_boundary_scorer_requires_the_full_decomposition() -> None:
-    response = (
-        "The prime-only patch is incomplete and does not complete the composite modulus request. "
-        "Factor the modulus into prime powers with factorint. Find roots modulo each prime, then "
-        "Hensel lift roots through each prime power. Branch over singular roots when the "
-        "derivative is zero. Take the Cartesian product of per-factor roots and combine each "
-        "tuple with CRT. Test nthroot_mod(29, 31, 74), the prime-power examples, and "
-        "nthroot_mod(0, 7, 100)."
-    )
-    grader = coding_subagent.composite_modulus_boundary_scorer()
-    tool = ToolInvocation("grep", {"pattern": "nthroot_mod"}, "match", True)
-
-    assert (await grader(CapabilityOutput(response, ()))).passed
-    assert (
-        await grader(
-            CapabilityOutput(
-                "The prime-only patch does not complete the request. Use factorint for each "
-                "prime power, lift unit roots, and include a singular lift when f'(x) == 0. "
-                "Take the Cartesian product and combine every tuple with CRT. Test 29, 31, 74 "
-                "and 0, 7, 100.",
-                (),
-            )
-        )
-    ).passed
-    assert not (await grader(CapabilityOutput(response, (tool,)))).passed
-    assert not (
-        await grader(
-            CapabilityOutput(
-                "The prime modulus zero shortcut is sufficient. Test 17*17, 5, 17.", ()
-            )
-        )
-    ).passed
-
-
-@pytest.mark.parametrize(
-    "response",
-    (
-        "The prime-only patch is insufficient for the composite-modulus request. Factor into "
-        "prime powers, lift unit roots, branch when the derivative is zero for singular roots, "
-        "then combine every tuple with CRT. Test 29, 31, 74 and 0, 7, 100.",
-        "The shortcut does not complete the composite modulus algorithm. Use factorint, Hensel "
-        "lift each root including every non-invertible derivative branch, take the Cartesian "
-        "product, and use the Chinese remainder theorem. Test modulus 74 and modulus 100.",
-        "The patch does not complete the request. Factor the modulus with factorint, solve each "
-        "prime power, Hensel lift roots with a singular-root branch when the derivative is zero, "
-        "then take the Cartesian product and combine every tuple with CRT. Test 29, 31, 74 and "
-        "0, 7, 100.",
-    ),
-)
-async def test_composite_modulus_boundary_scorer_accepts_equivalent_decompositions(
-    response: str,
-) -> None:
-    assert (
-        await coding_subagent.composite_modulus_boundary_scorer()(CapabilityOutput(response, ()))
-    ).passed
-
-
-async def test_prime_zero_boundary_scorer_rejects_composite_scope_growth() -> None:
-    response = (
-        "Keep the prime modulus boundary. Add `if a % p == 0` before is_nthpow_residue and "
-        "return [0] if all_roots else 0. Test nthroot_mod(17*17, 5, 17) with both return shapes."
-    )
-    grader = coding_subagent.prime_zero_boundary_scorer()
-
-    assert (await grader(CapabilityOutput(response, ()))).passed
-    assert not (
-        await grader(CapabilityOutput(response + " Add Hensel lifting and CRT too.", ()))
-    ).passed
-    assert not (
-        await grader(CapabilityOutput(response.replace("return [0] if all_roots else 0. ", ""), ()))
-    ).passed
-
-
-@pytest.mark.parametrize(
-    "response",
-    (
-        "Keep `if not isprime(p): raise NotImplementedError`. Guard the rejection with "
-        "`if a and not is_nthpow_residue`, then use `if not a: return [0] if all_roots else 0`. "
-        "Test nthroot_mod(17*17, 5, 17).",
-        "For the prime-modulus path, handle `a % p == 0` before the prime-modulus residue test. "
-        "Return 0 when all_roots=False and [0] when all_roots=True. Keep composite behavior "
-        "unchanged. Test nthroot_mod(17 * 17, 5, 17).",
-        "Keep composite behavior unchanged with if not isprime(p). Handle the zero case ahead of "
-        "that test because a % p == 0. Return [0] if all_roots else 0. Test "
-        "nthroot_mod(17*17, 5, 17).",
-        "Keep the prime modulus and composite exception boundary. Handle a % p == 0 before the "
-        "is_nthpow_residue gate. Return [0] if all_roots else 0. Test "
-        "nthroot_mod(17*17, 5, 17).",
-    ),
-)
-async def test_prime_zero_boundary_scorer_accepts_guard_and_early_return_forms(
-    response: str,
-) -> None:
-    assert (
-        await coding_subagent.prime_zero_boundary_scorer()(CapabilityOutput(response, ()))
-    ).passed
-
-
 def test_modular_boundary_cases_are_single_sample_target_and_scope_neighbor() -> None:
     names = {
         "coding-subagent-composite-modulus-boundary",
@@ -4006,6 +3770,34 @@ async def test_profile_proxy_scorer_accepts_only_formatting_transport_changes(
     )
 
     assert verdict.passed is passed
+
+
+@pytest.mark.parametrize(
+    ("reply", "passed"),
+    (
+        ("ANSWER: NARROW", True),
+        ("ANSWER:\n\tNARROW", True),
+        ("The child decided: ANSWER: NARROW", False),
+        ("A summary of the decision.", False),
+    ),
+)
+async def test_a_relayed_answer_must_be_the_child_result(reply: str, passed: bool) -> None:
+    objective = "Choose the narrow fix."
+    spawn = ToolInvocation(
+        "spawn",
+        {"target": "profile:coding", "payload": {"objective": objective}},
+        dumps({"result": "ANSWER: NARROW"}),
+        has_result=True,
+        call_id="proxy-spawn",
+    )
+
+    verdict = await coding_subagent.profile_proxy_scorer(
+        objective, exact_scorer("NARROW"), relayed_answer=True
+    )(CapabilityOutput(reply, (spawn,), own_calls=(spawn,)))
+
+    assert verdict.passed is passed
+    if not passed:
+        assert "relay" in verdict.reason
 
 
 async def test_github_app_api_scorer_requires_the_skill_command_and_no_connector() -> None:

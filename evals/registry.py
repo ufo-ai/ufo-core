@@ -129,6 +129,7 @@ TASKS: tuple[EvalTask, ...] = (
         "coding_profile",
         coding_subagent.PROFILE_CASES,
         agent="profile:coding",
+        judge_model=SEMANTIC_JUDGE_MODEL,
     ),
     capability_task(
         "coding_caveat_completeness",
