@@ -36,7 +36,7 @@ from ufo_ext_memory.condenser import (
     FACT_EXTRACT_TOOL_DESCRIPTION,
     ExtractedFacts,
 )
-from ufo_ext_memory.store import OVERVIEW_BODY_MAX_CHARS
+from ufo_ext_memory.store import MEMORY_BODY_MAX_CHARS
 from ufo_ext_report_digest.digest import (
     FINISH_DESCRIPTION,
     FINISH_TOOL,
@@ -1331,7 +1331,7 @@ class AsdWritingSuite:
             conversation_cache_ttl="5m",
             reasoning=CONSOLIDATE_REASONING,
         )
-        return (await writer.complete(request)).strip()[:OVERVIEW_BODY_MAX_CHARS]
+        return (await writer.complete(request)).strip()[:MEMORY_BODY_MAX_CHARS]
 
     def _scored(self, case: AsdCase, dimension: str, written: list[Written]) -> EvalCaseResult:
         attempts: list[Json] = []

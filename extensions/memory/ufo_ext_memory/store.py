@@ -79,14 +79,12 @@ TYPE_DIVERSITY_RATIO = 0.6
 MAX_CONFIDENCE = 10
 DEFAULT_CONFIDENCE = 5
 MEMORY_INVENTORY_LIMIT = 500
-MEMORY_BODY_MAX_CHARS = 115
-"""How long a committed row runs: one row of the member's wiki. A subject they recognise takes 30
-characters, the statement about it 85. Every object index in this repo renders a row at 120, so a
-body written to this budget reaches them whole and the ellipsis never appears."""
-OVERVIEW_BODY_MAX_CHARS = 900
-"""How long a written paragraph runs: the memory text a member reads whole rather than scans, so
-what bounds it is a paragraph and not the row the wiki's lists are scanned as. 900 characters is
-what the 150 words every paragraph prompt asks for measure."""
+MEMORY_BODY_MAX_CHARS = 2_000
+"""How long a committed body runs. A memory is one self-contained statement a reader meets alone,
+months later; 2,000 characters holds the longest statement still worth keeping whole, and a body
+past it is a document, which lives as a page. Shape is the writer's brief, never this bound's: the
+extraction prompt holds a fact to a scannable row, the consolidator's word and sentence budgets
+hold a paragraph."""
 HALFLIFE_DAYS: dict[str, float] = {
     "fact": 365.0,
     "preference": 180.0,
@@ -103,18 +101,6 @@ EPISODIC: ItemClass = "episodic"
 SEMANTIC: ItemClass = "semantic"
 SECTION: ItemClass = "section"
 OVERVIEW: ItemClass = "overview"
-
-BODY_MAX_CHARS: dict[ItemClass, int] = {
-    FACT: MEMORY_BODY_MAX_CHARS,
-    EPISODIC: MEMORY_BODY_MAX_CHARS,
-    SEMANTIC: OVERVIEW_BODY_MAX_CHARS,
-    SECTION: OVERVIEW_BODY_MAX_CHARS,
-    OVERVIEW: OVERVIEW_BODY_MAX_CHARS,
-}
-"""What each class of body is written to be, which is what the commit holds it to. A fact and an
-episodic breadcrumb are rows in a list a member scans; the consolidator's summary, the paragraph
-that opens a wiki section and the one that opens the whole page are read whole. One bound over both
-shapes is one of them measured against the other's budget."""
 
 MemoryKind = Literal["fact", "preference", "decision", "event", "task"]
 KIND_FACT: MemoryKind = "fact"
@@ -335,10 +321,9 @@ class MemoryWrite(BaseModel):
     information was current, `memory_kind` selects the recency half-life
     (fact/preference/decision/event/task), and `confidence` (1..10) scales a fact's decayed rank.
 
-    The body is held to its own class's budget in `BODY_MAX_CHARS`, since what a member does with a
-    row and what they do with the Overview paragraph are different acts with different lengths. It
-    is a bound and never a cut: every writer on this path is told its budget, so a body that ran
-    past it is a writer that ignored one, and `clip_to_word` is where a caller decides to trim."""
+    The body is held to `MEMORY_BODY_MAX_CHARS`. It is a bound and never a cut: every writer on
+    this path is told its budget, so a body that ran past it is a writer that ignored one, and
+    `clip_to_word` is where a caller decides to trim."""
 
     subject: str
     body: str
@@ -352,11 +337,11 @@ class MemoryWrite(BaseModel):
     as_of: datetime | None = None
 
     @model_validator(mode="after")
-    def body_is_within_its_class_budget(self) -> Self:
-        limit = BODY_MAX_CHARS[self.item_class]
-        if len(self.body) > limit:
+    def body_is_within_budget(self) -> Self:
+        if len(self.body) > MEMORY_BODY_MAX_CHARS:
             raise ValueError(
-                f"a {self.item_class} body runs to {limit} characters, not {len(self.body)}"
+                f"a {self.item_class} body runs to {MEMORY_BODY_MAX_CHARS} characters,"
+                f" not {len(self.body)}"
             )
         return self
 

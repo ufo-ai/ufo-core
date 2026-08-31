@@ -65,7 +65,7 @@ from ufo_ext_memory.condenser import (
     MAX_SUMMARY_WORDS,
     ExtractedFacts,
 )
-from ufo_ext_memory.store import MEMORY_BODY_MAX_CHARS, OVERVIEW_BODY_MAX_CHARS
+from ufo_ext_memory.store import MEMORY_BODY_MAX_CHARS
 
 from evals.harness.harness import (
     EvalCaseResult,
@@ -327,8 +327,8 @@ class OverviewCase:
             reasons.append(f"{words} words over the {MAX_SUMMARY_WORDS} the prompt asks for")
         if sentences > MAX_SUMMARY_SENTENCES:
             reasons.append(f"{sentences} sentences over the {MAX_SUMMARY_SENTENCES} allowed")
-        if len(summary) > OVERVIEW_BODY_MAX_CHARS:
-            reasons.append(f"{len(summary)} characters over the {OVERVIEW_BODY_MAX_CHARS} stored")
+        if len(summary) > MEMORY_BODY_MAX_CHARS:
+            reasons.append(f"{len(summary)} characters over the {MEMORY_BODY_MAX_CHARS} stored")
         return Failures(
             tuple(reasons), {"words": words, "sentences": sentences, "characters": len(summary)}
         )

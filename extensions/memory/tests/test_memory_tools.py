@@ -26,7 +26,6 @@ from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, SUMMARY_MAX, MemoryObjects
 from ufo_ext_memory.store import (
     MEMORY_BODY_MAX_CHARS,
-    OVERVIEW_BODY_MAX_CHARS,
     SEMANTIC,
     MemoryIndexer,
     MemoryStore,
@@ -494,11 +493,9 @@ async def test_recall_hook_observes_search_failure_without_denial(
     assert record.ufo["error_class"] == error_name[: memory.MAX_RECALL_ERROR_CLASS_CHARS]
 
 
-async def test_a_body_commits_to_the_budget_of_its_own_class(db: None) -> None:
-    """A wiki row and a paragraph the page opens a band on are read in different ways and written
-    to different lengths, so the commit seam bounds a body by the class it carries. One number over
-    both measures a paragraph against a row, and the paragraph is what it refuses — the band of the
-    wiki that would then stand empty however often the writing pass ran."""
+async def test_a_body_commits_at_the_budget_and_is_refused_past_it(db: None) -> None:
+    """One bound over every class, at the commit seam: a body at the budget lands whole whatever
+    class it carries, and one character past it is refused with the budget in the message."""
     workspace_id = await _workspace()
     with ws(workspace_id):
         store = _store(StubEmbed(vec((0, 1.0))))
@@ -506,13 +503,13 @@ async def test_a_body_commits_to_the_budget_of_its_own_class(db: None) -> None:
         await store.commit(
             MemoryWrite(
                 subject=SHARED_SUBJECT,
-                body="o" * OVERVIEW_BODY_MAX_CHARS,
+                body="o" * MEMORY_BODY_MAX_CHARS,
                 item_class=SEMANTIC,
             )
         )
         assert sorted(len(body) for body in await _live_bodies(SHARED_SUBJECT)) == [
             MEMORY_BODY_MAX_CHARS,
-            OVERVIEW_BODY_MAX_CHARS,
+            MEMORY_BODY_MAX_CHARS,
         ]
 
     with pytest.raises(ValidationError) as long_row:
@@ -522,12 +519,10 @@ async def test_a_body_commits_to_the_budget_of_its_own_class(db: None) -> None:
     with pytest.raises(ValidationError) as long_overview:
         MemoryWrite(
             subject=SHARED_SUBJECT,
-            body="o" * (OVERVIEW_BODY_MAX_CHARS + 1),
+            body="o" * (MEMORY_BODY_MAX_CHARS + 1),
             item_class=SEMANTIC,
         )
-    assert f"a semantic body runs to {OVERVIEW_BODY_MAX_CHARS} characters" in str(
-        long_overview.value
-    )
+    assert f"a semantic body runs to {MEMORY_BODY_MAX_CHARS} characters" in str(long_overview.value)
 
 
 def test_memory_update_input_rejects_an_oversized_body() -> None:

@@ -66,7 +66,6 @@ from ufo_ext_memory.store import (
     MAX_CONFIDENCE,
     MEMORY_BODY_MAX_CHARS,
     OVERVIEW,
-    OVERVIEW_BODY_MAX_CHARS,
     SECTION,
     SEMANTIC,
     ItemClass,
@@ -146,8 +145,7 @@ MAX_SUMMARY_WORDS = 150
 MAX_SUMMARY_SENTENCES = 5
 """The shape of a written paragraph, the memory text a member reads whole rather than scans: at most
 150 words in at most 5 sentences, where the plain-language guidance the comps study collected
-settles. What those words measure is `OVERVIEW_BODY_MAX_CHARS`, which sits with the commit that
-holds a body to it."""
+settles."""
 CONSOLIDATE_MAX_TOKENS = 1_024
 CONSOLIDATE_REASONING: Literal["low"] = "low"
 CONSOLIDATE_SYSTEM = (
@@ -715,10 +713,10 @@ def _to_overview_budget(summary: str) -> str:
     kept: list[str] = []
     for sentence in SENTENCE_END.split(summary)[:MAX_SUMMARY_SENTENCES]:
         candidate = " ".join((*kept, sentence))
-        if len(candidate) > OVERVIEW_BODY_MAX_CHARS or len(candidate.split()) > MAX_SUMMARY_WORDS:
+        if len(candidate) > MEMORY_BODY_MAX_CHARS or len(candidate.split()) > MAX_SUMMARY_WORDS:
             break
         kept.append(sentence)
-    return " ".join(kept) if kept else clip_to_word(summary, OVERVIEW_BODY_MAX_CHARS)
+    return " ".join(kept) if kept else clip_to_word(summary, MEMORY_BODY_MAX_CHARS)
 
 
 def _recency(fact: _AgedFact) -> tuple[datetime, UUID]:
@@ -1730,7 +1728,7 @@ class PagePass:
             "sections": [
                 {
                     "section": band.heading,
-                    "summary": band.summary[:OVERVIEW_BODY_MAX_CHARS],
+                    "summary": band.summary[:MEMORY_BODY_MAX_CHARS],
                     "rows": [
                         {"id": row.index, "body": row.body[:PAGE_PASS_ROW_CHARS]}
                         for row in band.rows

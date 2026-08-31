@@ -62,12 +62,10 @@ from ufo_ext_memory.objects import (
     ProfileObjects,
 )
 from ufo_ext_memory.store import (
-    BODY_MAX_CHARS,
     FACT,
     KIND_FACT,
     MEMORY_BODY_MAX_CHARS,
     OVERVIEW,
-    OVERVIEW_BODY_MAX_CHARS,
     SECTION,
     SEMANTIC,
     MemoryIndexer,
@@ -899,7 +897,7 @@ def test_an_overview_entry_inside_the_budget_stands_and_one_past_it_loses_whole_
 
     over = " ".join(f"Sentence number {index} carries its own clause." for index in range(20))
     kept = _to_overview_budget(over)
-    assert len(kept) <= OVERVIEW_BODY_MAX_CHARS
+    assert len(kept) <= MEMORY_BODY_MAX_CHARS
     assert len(kept.split()) <= MAX_SUMMARY_WORDS
     assert len(SENTENCE_END.split(kept)) <= MAX_SUMMARY_SENTENCES
     assert over.startswith(kept)
@@ -911,7 +909,7 @@ def test_an_overview_entry_of_one_unbroken_sentence_falls_back_to_the_word() -> 
     still reads a paragraph that ends on a word."""
     unbroken = "the launch slipped again " * 100
     kept = _to_overview_budget(unbroken)
-    assert len(kept) <= OVERVIEW_BODY_MAX_CHARS
+    assert len(kept) <= MEMORY_BODY_MAX_CHARS
     assert kept.endswith("…")
     assert unbroken.startswith(kept.removesuffix("…"))
     assert kept.removesuffix("…")[-1].isalpha()
@@ -950,8 +948,10 @@ async def test_derive_facts_cuts_an_oversized_model_body_back_to_a_whole_word(
     rows = [row for row in await _facts(workspace_id) if row.item_class == FACT]
     assert len(rows) == 1
     assert len(rows[0].body) <= MEMORY_BODY_MAX_CHARS
-    assert rows[0].body.endswith("ships…")
-    assert oversized.startswith(rows[0].body.removesuffix("…"))
+    assert rows[0].body.endswith("…")
+    clipped = rows[0].body.removesuffix("…")
+    assert oversized.startswith(clipped)
+    assert oversized[len(clipped)] == " "
 
 
 async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
@@ -1901,8 +1901,8 @@ OVERVIEW_PARAGRAPH = " ".join(
         " rotation, so the shortened window stands as the default for every new deployment.",
     )
 )
-"""A summary written to the whole of the Overview budget: the paragraph shape the consolidation
-prompt asks a model for, at the exact length the commit admits."""
+"""A summary written to the whole of the paragraph shape the consolidation prompt asks a model
+for: five sentences at the word budget."""
 
 
 async def test_consolidation_commits_a_summary_written_to_the_whole_overview_budget(
@@ -1912,7 +1912,7 @@ async def test_consolidation_commits_a_summary_written_to_the_whole_overview_bud
     write, so the job is run over a model returning one at the full budget and the row is read back
     whole. Clipping the summary to the budget proves nothing about that: the clipper answers the
     prompt, and the commit is what decides whether a member ever sees the answer."""
-    assert len(OVERVIEW_PARAGRAPH) == OVERVIEW_BODY_MAX_CHARS
+    assert len(OVERVIEW_PARAGRAPH) <= MEMORY_BODY_MAX_CHARS
     assert len(OVERVIEW_PARAGRAPH.split()) <= MAX_SUMMARY_WORDS
     assert len(SENTENCE_END.split(OVERVIEW_PARAGRAPH)) <= MAX_SUMMARY_SENTENCES
 
@@ -2981,17 +2981,16 @@ def test_every_memory_kind_names_the_band_a_member_reads() -> None:
     assert set(MEMBER_SECTION_HEADINGS) == set(get_args(MemoryKind))
 
 
-def test_a_section_body_is_admitted_at_the_paragraph_budget_and_refused_past_it() -> None:
-    """A section paragraph is read whole, like the Overview summary — so the budget it is held to
-    is the paragraph's, never the 115 characters a row of a scanned list is written to."""
-    assert BODY_MAX_CHARS[SECTION] == OVERVIEW_BODY_MAX_CHARS
+def test_a_section_body_is_admitted_at_the_budget_and_refused_past_it() -> None:
+    """A section paragraph commits under the one bound every class shares: the budget bounds what
+    a statement may run to, never which class carries it."""
     written = MemoryWrite(
-        subject=SHARED_SUBJECT, body="x" * OVERVIEW_BODY_MAX_CHARS, item_class=SECTION
+        subject=SHARED_SUBJECT, body="x" * MEMORY_BODY_MAX_CHARS, item_class=SECTION
     )
-    assert len(written.body) == OVERVIEW_BODY_MAX_CHARS
+    assert len(written.body) == MEMORY_BODY_MAX_CHARS
     with pytest.raises(ValidationError):
         MemoryWrite(
-            subject=SHARED_SUBJECT, body="x" * (OVERVIEW_BODY_MAX_CHARS + 1), item_class=SECTION
+            subject=SHARED_SUBJECT, body="x" * (MEMORY_BODY_MAX_CHARS + 1), item_class=SECTION
         )
 
 
