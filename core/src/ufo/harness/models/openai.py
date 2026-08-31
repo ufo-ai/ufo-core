@@ -79,6 +79,7 @@ from ufo.harness.models.interface import (
 )
 from ufo.harness.models.spec import KEY_REJECTED_STATUS, ModelSpec
 from ufo.harness.o11y import emit_metric, log
+from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.schema.records import Usage
 
 PROVIDER_TIMEOUT_SECONDS = 60.0
@@ -501,10 +502,14 @@ class OpenAIClient:
         429/5xx responses retry with retry-after-aware exponential backoff, and request timeouts
         or a dropped connection (a raw httpx error the SDK does not wrap once streaming starts)
         retry on the same backoff and shared attempt budget (each retry logged, exhaustion logged
-        and re-raising the fault) — both only until visible output is yielded; any failure after
-        that raises immediately. A 401 is the provider refusing the key this spec resolved, so it
-        raises that spec's credential fault instead of the SDK's auth error — the round says which
-        slot or env to replace, and the verdict is deterministic per key, so nothing retries it.
+        and re-raising the fault) — both only until visible output is yielded; the same fault after
+        that raises ModelStreamInterrupted so the engine discards the partial round and re-runs it
+        once. An error frame injected into the live SSE stream surfaces as the exact APIError class
+        and interrupts the round the same way, since the stream is already 200 and the fault is the
+        upstream's, not the request's. A 401 is the provider refusing the key this spec resolved:
+        it raises that spec's credential fault instead of the SDK's auth error — the round says
+        which slot or env to replace, and the verdict is deterministic per key, so nothing retries
+        it.
         finish_reason=length is a truncated completion and raises ModelResponseTruncated.
         finish_reason=tool_calls is a normal stop. An empty completion (no event,
         finish_reason=stop) is a retryable provider failure, re-issued up to
@@ -582,6 +587,11 @@ class OpenAIClient:
                         attempts=attempt,
                         error_class=type(error).__name__,
                     )
+                    if yielded:
+                        raise ModelStreamInterrupted(
+                            "stream_transport",
+                            f"OpenAI stream died mid-round ({type(error).__name__}): {error}",
+                        ) from error
                     raise
                 log(
                     "model.provider_transport_retry",
@@ -622,6 +632,11 @@ class OpenAIClient:
                         attempts=attempt,
                         status_code=error.status_code,
                     )
+                    if yielded and retryable:
+                        raise ModelStreamInterrupted(
+                            "stream_error",
+                            f"OpenAI errored the stream mid-round ({error.status_code}): {error}",
+                        ) from error
                     raise
                 wait = _status_retry_wait(error, delay)
                 log(
@@ -641,6 +656,15 @@ class OpenAIClient:
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
+            except openai.APIError as error:
+                if type(error) is not openai.APIError:
+                    raise
+                if usage is not None:
+                    yield usage
+                raise ModelStreamInterrupted(
+                    "stream_error",
+                    f"OpenAI injected an error into the stream: {error}",
+                ) from error
             if finish_reason == "length":
                 if usage is not None:
                     yield usage
@@ -788,6 +812,11 @@ class OpenAIClient:
                         attempts=attempt,
                         error_class=type(error).__name__,
                     )
+                    if yielded:
+                        raise ModelStreamInterrupted(
+                            "stream_transport",
+                            f"OpenAI stream died mid-round ({type(error).__name__}): {error}",
+                        ) from error
                     raise
                 log(
                     "model.provider_transport_retry",
@@ -828,6 +857,11 @@ class OpenAIClient:
                         attempts=attempt,
                         status_code=error.status_code,
                     )
+                    if yielded and retryable:
+                        raise ModelStreamInterrupted(
+                            "stream_error",
+                            f"OpenAI errored the stream mid-round ({error.status_code}): {error}",
+                        ) from error
                     raise
                 wait = _status_retry_wait(error, delay)
                 log(
@@ -847,6 +881,15 @@ class OpenAIClient:
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
+            except openai.APIError as error:
+                if type(error) is not openai.APIError:
+                    raise
+                if usage is not None:
+                    yield usage
+                raise ModelStreamInterrupted(
+                    "stream_error",
+                    f"OpenAI injected an error into the stream: {error}",
+                ) from error
             if terminal_error is not None:
                 if usage is not None:
                     yield usage

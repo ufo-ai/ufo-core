@@ -68,6 +68,7 @@ from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn, Usage
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.credentials import CredentialValueInvalid
+from ufo.sdk.models import ModelStreamInterrupted
 from ufo.sdk.objects import ARTIFACT_KIND
 
 OPENROUTER_KEY = "sk-or-v1-secret-0xfeedface"
@@ -243,37 +244,34 @@ async def test_gemini_flash_abort_retries_immediately_once(
     }
 
 
-async def test_second_gemini_flash_abort_reraises() -> None:
-    second = _api_error()
-    create = ScriptedCreate(_api_error(), second)
+async def test_second_gemini_flash_abort_interrupts_the_round() -> None:
+    create = ScriptedCreate(_api_error(), _api_error())
 
-    with pytest.raises(openai.APIError) as raised:
+    with pytest.raises(ModelStreamInterrupted) as raised:
         async for _ in _client(create).complete(GEMINI_FLASH_REQUEST):
             pass
 
-    assert raised.value is second
+    assert raised.value.kind == "stream_error"
     assert len(create.calls) == 2
 
 
-async def test_gemini_flash_abort_after_text_does_not_retry() -> None:
-    error = _api_error()
+async def test_gemini_flash_abort_after_text_interrupts_the_round() -> None:
     create = ScriptedCreate(
-        [_chunk(content="partial"), error],
+        [_chunk(content="partial"), _api_error()],
         [_chunk(content="wrong"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
     )
     events = []
 
-    with pytest.raises(openai.APIError) as raised:
+    with pytest.raises(ModelStreamInterrupted) as raised:
         async for event in _client(create).complete(GEMINI_FLASH_REQUEST):
             events.append(event)
 
-    assert raised.value is error
+    assert raised.value.kind == "stream_error"
     assert events == [ModelStreamStart(), TextDelta(text="partial")]
     assert len(create.calls) == 1
 
 
-async def test_gemini_flash_abort_after_tool_call_start_does_not_retry() -> None:
-    error = _api_error()
+async def test_gemini_flash_abort_after_tool_call_start_interrupts_the_round() -> None:
     create = ScriptedCreate(
         [
             ChatCompletionChunk(
@@ -300,17 +298,17 @@ async def test_gemini_flash_abort_after_tool_call_start_does_not_retry() -> None
                     )
                 ],
             ),
-            error,
+            _api_error(),
         ],
         [_chunk(content="wrong"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
     )
     events = []
 
-    with pytest.raises(openai.APIError) as raised:
+    with pytest.raises(ModelStreamInterrupted) as raised:
         async for event in _client(create).complete(GEMINI_FLASH_REQUEST):
             events.append(event)
 
-    assert raised.value is error
+    assert raised.value.kind == "stream_error"
     assert events == [ModelStreamStart(), openrouter.ToolCallStart(id="call-1", name="inspect")]
     assert len(create.calls) == 1
 
@@ -318,10 +316,6 @@ async def test_gemini_flash_abort_after_tool_call_start_does_not_retry() -> None
 @pytest.mark.parametrize(
     ("model_request", "error"),
     [
-        pytest.param(REQUEST, _api_error(), id="other-model"),
-        pytest.param(
-            GEMINI_FLASH_REQUEST, _api_error("The operation was aborted."), id="near-message"
-        ),
         pytest.param(
             GEMINI_FLASH_REQUEST,
             _status_error(400, "The operation was aborted"),
@@ -344,7 +338,7 @@ async def test_gemini_flash_abort_after_tool_call_start_does_not_retry() -> None
         ),
     ],
 )
-async def test_abort_retry_excludes_other_failures(
+async def test_api_error_subclasses_keep_raising_raw(
     model_request: ModelRequest, error: openai.APIError
 ) -> None:
     create = ScriptedCreate(
@@ -357,6 +351,62 @@ async def test_abort_retry_excludes_other_failures(
             pass
 
     assert raised.value is error
+    assert len(create.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "message", ["Upstream idle timeout exceeded", "JSON error injected into SSE stream"]
+)
+async def test_an_error_injected_mid_stream_interrupts_the_round(message: str) -> None:
+    """OpenRouter reports an upstream stall or fault as an error frame on the live stream — the
+    exact APIError class — after output already yielded. The client raises the typed interruption
+    so the engine discards the partial round and re-runs it once."""
+    create = ScriptedCreate([_chunk(content="partial"), _api_error(message)])
+    events = []
+
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for event in _client(create).complete(REQUEST):
+            events.append(event)
+
+    assert raised.value.kind == "stream_error"
+    assert message in str(raised.value)
+    assert events == [ModelStreamStart(), TextDelta(text="partial")]
+    assert len(create.calls) == 1
+
+
+async def test_an_interrupted_stream_still_yields_its_consumed_usage() -> None:
+    create = ScriptedCreate([_chunk(content="partial"), _chunk(usage=_usage(7, 1)), _api_error()])
+    events = []
+
+    with pytest.raises(ModelStreamInterrupted):
+        async for event in _client(create).complete(REQUEST):
+            events.append(event)
+
+    assert events == [
+        ModelStreamStart(),
+        TextDelta(text="partial"),
+        Usage(input_tokens=7, output_tokens=1),
+    ]
+
+
+async def test_a_peer_disconnect_mid_stream_interrupts_the_round() -> None:
+    create = ScriptedCreate(
+        [
+            _chunk(content="partial"),
+            httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body"
+            ),
+        ]
+    )
+    events = []
+
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for event in _client(create).complete(REQUEST):
+            events.append(event)
+
+    assert raised.value.kind == "stream_transport"
+    assert "peer closed connection" in str(raised.value)
+    assert events == [ModelStreamStart(), TextDelta(text="partial")]
     assert len(create.calls) == 1
 
 
@@ -474,9 +524,12 @@ async def test_generation_recovery_retries_past_the_ledgers_indexing_window(
     assert len(requests) == 3
 
 
-async def test_generation_recovery_fails_loud_on_a_persistent_404(
+async def test_an_exhausted_generation_lookup_interrupts_the_round(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A 404 that survives the whole indexing window is a generation the upstream never finalized:
+    the round is interrupted for the engine's single whole-round retry instead of failing the turn
+    on raise_for_status. A second exhaustion exceeds the engine's budget and fails loud."""
     monkeypatch.setattr(openrouter, "GENERATION_404_RETRY_SECONDS", 0.0)
     requests: list[httpx.Request] = []
 
@@ -491,11 +544,33 @@ async def test_generation_recovery_fails_loud_on_a_persistent_404(
         generation_transport=httpx.MockTransport(generation),
     )
 
-    with pytest.raises(httpx.HTTPStatusError, match="404"):
+    with pytest.raises(ModelStreamInterrupted) as raised:
         async for _ in client.complete(REQUEST):
             pass
 
+    assert raised.value.kind == "generation_missing"
+    assert "never indexed generation c" in str(raised.value)
     assert len(requests) == openrouter.GENERATION_404_RETRIES + 1
+
+
+async def test_a_non_404_generation_error_still_fails_loud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(openrouter, "GENERATION_404_RETRY_SECONDS", 0.0)
+
+    def generation(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)
+
+    create = ScriptedCreate([_chunk(content="ok"), _chunk(finish="tool_calls")])
+    client = replace(
+        _client(create),
+        key=OPENROUTER_KEY,
+        generation_transport=httpx.MockTransport(generation),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError, match="403"):
+        async for _ in client.complete(REQUEST):
+            pass
 
 
 async def test_complete_does_not_recover_an_unfinished_stream() -> None:

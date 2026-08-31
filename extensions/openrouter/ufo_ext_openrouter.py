@@ -42,6 +42,7 @@ from ufo.sdk.models import (
     ModelRequest,
     ModelResponseTruncated,
     ModelSpec,
+    ModelStreamInterrupted,
     ModelStreamStart,
     ReasoningSupport,
     TextDelta,
@@ -85,8 +86,9 @@ GENERATION_404_RETRIES = 5
 GENERATION_404_RETRY_SECONDS = 2.0
 """The generation ledger is eventually consistent: a lookup right after the stream ends can 404
 before the row is indexed, and a turn that already streamed its output must not die on that
-window. A 404 that survives the bounded retries is a generation that is not coming back, and
-fails loud."""
+window. A 404 that survives the bounded retries is a generation the upstream never finalized —
+raised as ModelStreamInterrupted so the engine re-runs the round once; a second exhaustion fails
+the turn."""
 
 OPENROUTER_CONTEXT_WINDOW = 200_000
 _REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
@@ -390,7 +392,11 @@ class OpenRouterModelClient:
     """The OpenRouter backend behind the `ModelClient` protocol: it streams ModelEvents from the
     Chat Completions wire, ending with one Usage, exactly as core's OpenAIClient does, and adds
     OpenRouter's own behavior. 429/5xx retry with retry-after-aware backoff but only until visible
-    output yields; finish_reason=length raises ModelResponseTruncated. A normal completion that
+    output yields; finish_reason=length raises ModelResponseTruncated. A fault on the live stream —
+    an error frame OpenRouter injects when its upstream stalls or dies (the exact APIError class), a
+    peer disconnect mid-body, or a generation the usage ledger never indexes — raises
+    ModelStreamInterrupted whether or not output already yielded: the engine discards the partial
+    round and re-runs it once, and a second interruption fails the turn. A normal completion that
     returned no text and no tool calls is a dead upstream — the client re-issues excluding that
     provider up to MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's
     nudge. Gemini 3.7 Flash's exact no-output abort retries once immediately. The request's
@@ -499,31 +505,40 @@ class OpenRouterModelClient:
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
-            except openai.APIError as error:
-                is_gemini_abort = (
-                    type(error) is openai.APIError
-                    and str(error) == GEMINI_ABORT_ERROR
-                    and request.model == GEMINI_ABORT_RETRY_MODEL
-                )
-                if is_gemini_abort and usage is not None:
+            except httpx.RemoteProtocolError as error:
+                if usage is not None:
                     yield usage
-                retryable = is_gemini_abort and not yielded and not abort_retried
-                if not retryable:
+                raise ModelStreamInterrupted(
+                    "stream_transport",
+                    f"OpenRouter stream disconnected mid-round: {error}",
+                ) from error
+            except openai.APIError as error:
+                if type(error) is not openai.APIError:
                     raise
-                abort_retried = True
-                log(
-                    "model.provider_abort_retry",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    attempt=1,
+                if usage is not None:
+                    yield usage
+                is_gemini_abort = (
+                    str(error) == GEMINI_ABORT_ERROR and request.model == GEMINI_ABORT_RETRY_MODEL
                 )
-                emit_metric(
-                    "model_provider_retry_total",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    kind="abort",
-                )
-                continue
+                if is_gemini_abort and not yielded and not abort_retried:
+                    abort_retried = True
+                    log(
+                        "model.provider_abort_retry",
+                        provider=self.spec.provider,
+                        model=request.model,
+                        attempt=1,
+                    )
+                    emit_metric(
+                        "model_provider_retry_total",
+                        provider=self.spec.provider,
+                        model=request.model,
+                        kind="abort",
+                    )
+                    continue
+                raise ModelStreamInterrupted(
+                    "stream_error",
+                    f"OpenRouter injected an error into the SSE stream: {error}",
+                ) from error
             if finish_reason == "length":
                 if usage is not None:
                     yield usage
@@ -568,6 +583,12 @@ class OpenRouterModelClient:
                     kind="generation_404",
                 )
                 await asyncio.sleep(GENERATION_404_RETRY_SECONDS)
+        if response.status_code == 404:
+            raise ModelStreamInterrupted(
+                "generation_missing",
+                f"OpenRouter never indexed generation {generation_id}: still 404 after "
+                f"{GENERATION_404_RETRIES + 1} lookups",
+            )
         response.raise_for_status()
         generation = _GenerationResponse.model_validate(response.json()).data
         if generation.cancelled or generation.finish_reason != finish_reason:

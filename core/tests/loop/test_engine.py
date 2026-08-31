@@ -54,6 +54,7 @@ from ufo.harness.models.interface import (
     ToolUseBlock,
 )
 from ufo.harness.models.spec import ReasoningSupport
+from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.harness.sandbox.session import (
     RUNTIME_DIRNAME,
     SANDBOX_UFO_HOME,
@@ -110,6 +111,7 @@ from ufo.runtime.engine import (
     FORCE_FINISH_PROMPT,
     FRESH_CLAIM,
     INTERRUPTED_TURN_NOTICE,
+    MAX_MIDSTREAM_ROUND_RETRIES,
     MAX_PARALLEL_TOOL_CALLS,
     MAX_TOOL_RESULT_CHARS,
     MODEL_TRUNCATED_ERROR_CLASS,
@@ -779,6 +781,51 @@ class UsageThenErrorModel:
         yield TextDelta(text="partial")
         yield Usage(input_tokens=9, output_tokens=2, cache_read_tokens=6, cache_write_5m_tokens=4)
         raise RuntimeError("stream boom")
+
+
+@dataclass
+class InterruptedThenAnswerModel:
+    """Yields partial deltas then dies to a transient provider fault on its first `interruptions`
+    calls, then answers — so the engine's whole-round retry (discard the partial round, re-run it)
+    runs end to end."""
+
+    interruptions: int
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        if self.calls <= self.interruptions:
+            yield TextDelta(text="partial output the fault killed")
+            yield Usage(input_tokens=5, output_tokens=1)
+            raise ModelStreamInterrupted("stream_error", "Upstream idle timeout exceeded")
+        yield TextDelta(text="recovered")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+@dataclass
+class InterruptedEachRoundModel:
+    """Interrupted once in the tool round and once in the answering round, so the turn finishes
+    only if the whole-round retry budget resets at the round boundary."""
+
+    calls: int = 0
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
+        if self.calls in (1, 3):
+            yield TextDelta(text="dying")
+            raise ModelStreamInterrupted("stream_transport", "peer closed connection")
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if not answered:
+            yield ToolCallStart(id="c1", name="bash")
+            yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        yield TextDelta(text="recovered")
+        yield Usage(input_tokens=1, output_tokens=1)
 
 
 @dataclass
@@ -6262,6 +6309,86 @@ async def test_a_non_truncation_stream_error_still_fails_the_turn_immediately(
         ).one()
     assert row.status == "failed"
     assert TerminalFrame.model_validate(row.terminal).error_class == "RuntimeError"
+
+
+async def test_a_mid_stream_interruption_discards_the_partial_round_and_retries_once(
+    db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A provider stream dying mid-round after visible output re-runs the round once: the partial
+    round never reaches the transcript, the retried round's answer is the turn's answer, and the
+    retry is metered and logged under the fault's kind (never its message, which is provider
+    text)."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("queued", None)
+    model = InterruptedThenAnswerModel(interruptions=1)
+    engine = _engine(turn, model, tmp_path)
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        frame = await engine.run()
+    assert frame.status == "done"
+    assert frame.text == "recovered"
+    assert model.calls == 2
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert stored.messages[-1] == Message(role="assistant", content="recovered")
+    assert not any("partial output" in str(message.content) for message in stored.messages)
+    points = _exported_metrics(reader)
+    assert [
+        (point.value, dict(point.attributes)) for point in points["ufo.model_provider_retry_total"]
+    ] == [(1, {"provider": "anthropic", "model": "claude-opus-4-8", "kind": "stream_error"})]
+    retry = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "model.round_interrupted_retry"
+    )
+    assert retry.ufo == {
+        "turn_id": str(turn.id),
+        "provider": "anthropic",
+        "model": "claude-opus-4-8",
+        "kind": "stream_error",
+        "attempt": 1,
+    }
+
+
+async def test_a_second_interruption_of_the_same_round_fails_the_turn(
+    db: None, tmp_path: Path
+) -> None:
+    """The whole-round retry is bounded by MAX_MIDSTREAM_ROUND_RETRIES: a round interrupted twice
+    in a row fails the turn on the typed error class, exactly as an unretried stream fault does."""
+    turn = await _seed_turn("queued", None)
+    model = InterruptedThenAnswerModel(interruptions=2)
+    engine = _engine(turn, model, tmp_path)
+    with pytest.raises(ModelStreamError) as caught:
+        await engine.run()
+    assert caught.value.model_error_class == "ModelStreamInterrupted"
+    assert model.calls == MAX_MIDSTREAM_ROUND_RETRIES + 1
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn.id
+                )
+            )
+        ).one()
+    assert row.status == "failed"
+    frame = TerminalFrame.model_validate(row.terminal)
+    assert frame.error_class == "ModelStreamInterrupted"
+    assert frame.error_message is not None
+    assert "Upstream idle timeout exceeded" in frame.error_message
+
+
+async def test_the_interruption_retry_budget_resets_each_round(db: None, tmp_path: Path) -> None:
+    """One retry per round, not per turn: a tool round and the answering round each interrupted
+    once both recover, so a long turn survives independent transient faults."""
+    turn = await _seed_turn("queued", None)
+    model = InterruptedEachRoundModel()
+    carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+    frame = await _engine(turn, model, tmp_path, carrier=carrier).run()
+    assert frame.status == "done"
+    assert frame.text == "recovered"
+    assert model.calls == 4
 
 
 async def test_the_terminal_log_carries_the_error_class_and_never_the_message(

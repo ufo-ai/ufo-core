@@ -125,6 +125,9 @@ from ufo.harness.models.spec import (
 from ufo.harness.models.spec import (
     ReasoningSupport as ReasoningSupport,
 )
+from ufo.harness.rounds import (
+    ModelStreamInterrupted as ModelStreamInterrupted,
+)
 from ufo.schema.records import (
     Usage as Usage,
 )

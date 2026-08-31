@@ -57,6 +57,7 @@ from ufo.harness.models.openai import (
 )
 from ufo.harness.models.pricing import ModelPrice
 from ufo.harness.models.spec import ModelSpec, ReasoningSupport
+from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.schema.records import Usage
 
 RESPONSES_SPEC = ModelSpec(
@@ -663,15 +664,41 @@ async def test_responses_path_exhausted_disconnect_logs_error_class(
     assert failure.ufo["error_class"] == "RemoteProtocolError"
 
 
-@pytest.mark.parametrize("tail", [_provider_error(500), _provider_timeout()])
-async def test_responses_path_does_not_retry_after_first_yield(tail: Exception) -> None:
+@pytest.mark.parametrize(
+    ("tail", "kind"),
+    [(_provider_error(500), "stream_error"), (_provider_timeout(), "stream_transport")],
+)
+async def test_responses_path_fault_after_first_yield_interrupts_the_round(
+    tail: Exception, kind: str
+) -> None:
     scripted = ScriptedResponses(
         (_completed_events(text="partial")[:1], tail), (_completed_events(), None)
     )
     received = []
-    with pytest.raises(type(tail)):
+    with pytest.raises(ModelStreamInterrupted) as raised:
         async for event in _responses_client(scripted).complete(_request()):
             received.append(event)
+    assert raised.value.kind == kind
+    assert received == [ModelStreamStart(), TextDelta(text="partial")]
+    assert scripted.calls == 1
+
+
+async def test_responses_path_sse_injected_error_interrupts_the_round() -> None:
+    """An error frame on the live stream surfaces as the exact APIError class and interrupts the
+    round whatever the stream yielded so far."""
+    error = openai.APIError(
+        "Upstream idle timeout exceeded",
+        request=httpx.Request("POST", "https://provider.invalid/v1"),
+        body=None,
+    )
+    scripted = ScriptedResponses(
+        (_completed_events(text="partial")[:1], error), (_completed_events(), None)
+    )
+    received = []
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for event in _responses_client(scripted).complete(_request()):
+            received.append(event)
+    assert raised.value.kind == "stream_error"
     assert received == [ModelStreamStart(), TextDelta(text="partial")]
     assert scripted.calls == 1
 

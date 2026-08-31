@@ -23,6 +23,19 @@ class TextFilter(Protocol):
     def feed(self, chunk: str) -> str: ...
 
 
+class ModelStreamInterrupted(RuntimeError):
+    """A provider stream died mid-round to a transient provider or transport fault — an error frame
+    injected into the live stream, a dropped connection, a usage ledger that never indexed the
+    generation. Any model client raises it, whether or not the round has already yielded visible
+    output: the partial round is discardable because the engine commits a round only when its
+    stream completes. The runner records `kind` on the collected round, and the engine re-runs the
+    round once on it; a second interruption of the same round fails the turn."""
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
 class _TextEvent(Protocol):
     text: str
 
@@ -51,7 +64,9 @@ class RoundEventTypes:
 
 @dataclass(frozen=True)
 class CollectedRound[ToolCallT, ReasoningT, UsageT]:
-    """One consumed provider stream before the runtime records it durably."""
+    """One consumed provider stream before the runtime records it durably. `error_kind` is set
+    exactly when the stream died to a `ModelStreamInterrupted` — the caller's signal to discard
+    this round and re-run it."""
 
     text: str = ""
     tool_calls: tuple[ToolCallT, ...] = ()
@@ -59,6 +74,7 @@ class CollectedRound[ToolCallT, ReasoningT, UsageT]:
     usages: tuple[UsageT, ...] = ()
     error_class: str | None = None
     error_message: str | None = None
+    error_kind: str | None = None
     partial_output: str = ""
     wall_ms: int = 0
     provider_start_ms: int | None = None
@@ -180,6 +196,7 @@ class ModelRoundRunner[RequestT, ToolCallT, ReasoningT, UsageT]:
                 usages=tuple(usages),
                 error_class=type(error).__name__,
                 error_message=str(error),
+                error_kind=error.kind if isinstance(error, ModelStreamInterrupted) else None,
                 partial_output="\n\n".join(
                     segment for segment in ("".join(parts), *partial_calls) if segment
                 ),

@@ -70,6 +70,7 @@ from ufo.harness.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
 from ufo.harness.models.pricing import ModelPrice
 from ufo.harness.models.registry import model_registry
 from ufo.harness.models.spec import ModelSpec, ReasoningSupport
+from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.runtime.access.credentials import CredentialValueInvalid
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.workspace import ws
@@ -1014,15 +1015,18 @@ async def test_retries_exhaust_after_max(
 
 
 @pytest.mark.parametrize("harness", PROVIDERS)
-async def test_no_retry_after_first_yield(harness: ProviderHarness) -> None:
+async def test_a_status_fault_after_first_yield_interrupts_the_round(
+    harness: ProviderHarness,
+) -> None:
     create = ScriptedCreate(
         (harness.partial_events(), provider_error(harness.error_type, 500)),
         (harness.ok_events(), None),
     )
     received = []
-    with pytest.raises(harness.error_type):
+    with pytest.raises(ModelStreamInterrupted) as raised:
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
+    assert raised.value.kind == "stream_error"
     expected: list[ModelEvent] = [ModelStreamStart(), TextDelta(text="partial")]
     if harness.partial_usage is not None:
         expected.append(harness.partial_usage)
@@ -1075,15 +1079,18 @@ async def test_timeout_exhaustion_logs_and_reraises(
 
 
 @pytest.mark.parametrize("harness", PROVIDERS)
-async def test_timeout_after_first_yield_does_not_retry(harness: ProviderHarness) -> None:
+async def test_a_timeout_after_first_yield_interrupts_the_round(
+    harness: ProviderHarness,
+) -> None:
     create = ScriptedCreate(
         (harness.partial_events(), provider_timeout(harness.timeout_type)),
         (harness.ok_events(), None),
     )
     received = []
-    with pytest.raises(harness.timeout_type):
+    with pytest.raises(ModelStreamInterrupted) as raised:
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
+    assert raised.value.kind == "stream_transport"
     expected: list[ModelEvent] = [ModelStreamStart(), TextDelta(text="partial")]
     if harness.partial_usage is not None:
         expected.append(harness.partial_usage)
@@ -1121,7 +1128,7 @@ async def test_remote_protocol_error_retries_then_succeeds(
 
 
 @pytest.mark.parametrize("harness", PROVIDERS)
-async def test_remote_protocol_error_after_first_yield_does_not_retry(
+async def test_a_disconnect_after_first_yield_interrupts_the_round(
     harness: ProviderHarness,
 ) -> None:
     create = ScriptedCreate(
@@ -1129,9 +1136,11 @@ async def test_remote_protocol_error_after_first_yield_does_not_retry(
         (harness.ok_events(), None),
     )
     received = []
-    with pytest.raises(httpx.RemoteProtocolError):
+    with pytest.raises(ModelStreamInterrupted) as raised:
         async for event in harness.build(create).complete(REQUEST):
             received.append(event)
+    assert raised.value.kind == "stream_transport"
+    assert "peer closed connection" in str(raised.value)
     expected: list[ModelEvent] = [ModelStreamStart(), TextDelta(text="partial")]
     if harness.partial_usage is not None:
         expected.append(harness.partial_usage)
@@ -1243,7 +1252,7 @@ async def test_anthropic_mid_stream_server_error_retries_then_succeeds(
     ]
 
 
-async def test_anthropic_iteration_timeout_after_first_event_raises() -> None:
+async def test_anthropic_iteration_timeout_after_first_event_interrupts_the_round() -> None:
     create = ScriptedCreate(
         (
             [anthropic_message_start(input_tokens=1), anthropic_text("partial")],
@@ -1259,16 +1268,66 @@ async def test_anthropic_iteration_timeout_after_first_event_raises() -> None:
         ),
     )
     received = []
-    with pytest.raises(httpx.ReadTimeout):
+    with pytest.raises(ModelStreamInterrupted) as raised:
         async for event in AnthropicClient(
             client=anthropic_sdk(create), spec=ANTHROPIC_SPEC
         ).complete(REQUEST):
             received.append(event)
+    assert raised.value.kind == "stream_transport"
     assert received == [
         ModelStreamStart(),
         TextDelta(text="partial"),
         Usage(input_tokens=1),
     ]
+    assert create.calls == 1
+
+
+async def test_an_anthropic_mid_stream_error_after_first_yield_interrupts_the_round() -> None:
+    """The GLM idle-stall shape on the Anthropic wire: a 200-coded error event on the live stream
+    after visible output. Not deterministic, so it interrupts the round instead of failing the
+    turn."""
+    create = ScriptedCreate(
+        (
+            [anthropic_message_start(input_tokens=1), anthropic_text("partial")],
+            anthropic_mid_stream_error(),
+        ),
+    )
+    received = []
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for event in AnthropicClient(
+            client=anthropic_sdk(create), spec=ANTHROPIC_SPEC
+        ).complete(REQUEST):
+            received.append(event)
+    assert raised.value.kind == "stream_error"
+    assert received == [
+        ModelStreamStart(),
+        TextDelta(text="partial"),
+        Usage(input_tokens=1),
+    ]
+    assert create.calls == 1
+
+
+async def test_an_openai_sse_injected_error_interrupts_the_round() -> None:
+    """A mid-stream error frame: the SDK raises the exact APIError class when an SSE data chunk
+    carries an error body on the already-200 stream."""
+    sse_error = openai.APIError(
+        "Upstream idle timeout exceeded",
+        request=httpx.Request("POST", "https://provider.invalid/v1"),
+        body=None,
+    )
+    create = ScriptedCreate(
+        ([openai_text("partial")], sse_error),
+        ([openai_text("ok"), openai_usage(prompt=1, completion=1)], None),
+    )
+    received = []
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for event in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(
+            REQUEST
+        ):
+            received.append(event)
+    assert raised.value.kind == "stream_error"
+    assert "Upstream idle timeout exceeded" in str(raised.value)
+    assert received == [ModelStreamStart(), TextDelta(text="partial")]
     assert create.calls == 1
 
 

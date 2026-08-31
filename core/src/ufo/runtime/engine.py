@@ -225,6 +225,7 @@ CACHE_5M_SECONDS = 5 * 60
 CACHE_1H_SECONDS = 60 * 60
 EMPTY_RESPONSE_NUDGE = "Previous model response was empty. Answer now."
 MODEL_TRUNCATED_ERROR_CLASS = ModelResponseTruncated.__name__
+MAX_MIDSTREAM_ROUND_RETRIES = 1
 TRUNCATION_FEEDBACK = (
     "Your previous response exceeded the output budget and was cut off. Produce large content "
     "by writing files with sandbox code or by emitting it in small parts across calls; keep any "
@@ -361,7 +362,9 @@ class StreamResult(BaseModel):
     them — preserving the model's own error class and its message for context-overflow detection.
     `partial_output` rides an errored round for the same reason: the deltas the stream yielded
     before dying are already paid for, so they survive in the recorded output for the truncation
-    recovery to salvage into a workspace file. `reasoning` is the round's reasoning blocks in the
+    recovery to salvage into a workspace file. `error_kind` is set exactly when the stream died to
+    a `ModelStreamInterrupted` — the transient-fault signal the round retry keys on, named so the
+    retry metric can say which fault shape it recovered. `reasoning` is the round's blocks in the
     provider's own order: the assistant message that carries this round's tool calls must open with
     that whole sequence, echoed unchanged, for the provider to accept and resume the reasoning when
     the tool results come back — memoized here, so a crash-recovery replay echoes the blocks the
@@ -373,6 +376,7 @@ class StreamResult(BaseModel):
     usages: tuple[Usage, ...] = ()
     error_class: str | None = None
     error_message: str | None = None
+    error_kind: str | None = None
     partial_output: str = ""
 
 
@@ -2314,7 +2318,7 @@ class TurnEngine:
         to summarize), the overflow is unrecoverable and re-raises rather than retrying a doomed
         call; a non-overflow error re-raises unchanged."""
         try:
-            result = await self._stream_once(
+            result = await self._stream_retrying_interruption(
                 _RoundInput(
                     messages=messages,
                     system=system,
@@ -2324,9 +2328,9 @@ class TurnEngine:
                     include_requested_by=include_requested_by,
                     tool_schemas=tool_schemas,
                     tool_choice=tool_choice,
-                )
+                ),
+                usage_events,
             )
-            usage_events.extend(result.usages)
             if result.error_class is not None:
                 raise ModelStreamError(
                     result.error_class, result.error_message or "", result.partial_output
@@ -2346,7 +2350,7 @@ class TurnEngine:
             self._reseed_loaded_skills(compacted)
             emit_metric("turn_context_overflow_recovered_total", profile=self.profile)
             log("turn.context_overflow_recovered", turn_id=str(self.turn.id))
-            result = await self._stream_once(
+            result = await self._stream_retrying_interruption(
                 _RoundInput(
                     messages=compacted,
                     system=system,
@@ -2356,14 +2360,46 @@ class TurnEngine:
                     include_requested_by=include_requested_by,
                     tool_schemas=tool_schemas,
                     tool_choice=tool_choice,
-                )
+                ),
+                usage_events,
             )
-            usage_events.extend(result.usages)
             if result.error_class is not None:
                 raise ModelStreamError(
                     result.error_class, result.error_message or "", result.partial_output
                 ) from None
             return compacted, result
+
+    async def _stream_retrying_interruption(
+        self, round_input: _RoundInput, usage_events: list[Usage]
+    ) -> StreamResult:
+        """Run one model round, re-running it once when the provider stream died mid-round to a
+        transient fault — a `ModelStreamInterrupted` from the client, carried on the result as
+        `error_kind`. The engine commits a round only when its stream completes, so the interrupted
+        attempt's partial output was never persisted and is discarded whole; its usage still bills.
+        A second interruption of the same round returns the errored result for the normal failure
+        path. The retry logs only the fault kind: the message is provider text and `log` redacts by
+        field name, so it stays on the persisted frame."""
+        interruptions = 0
+        while True:
+            result = await self._stream_once(round_input)
+            usage_events.extend(result.usages)
+            if result.error_kind is None or interruptions >= MAX_MIDSTREAM_ROUND_RETRIES:
+                return result
+            interruptions += 1
+            emit_metric(
+                "model_provider_retry_total",
+                provider=self.provider,
+                model=self.agent.model,
+                kind=result.error_kind,
+            )
+            log(
+                "model.round_interrupted_retry",
+                turn_id=str(self.turn.id),
+                provider=self.provider,
+                model=self.agent.model,
+                kind=result.error_kind,
+                attempt=interruptions,
+            )
 
     async def _enforce_spend(
         self,
@@ -2596,6 +2632,7 @@ class TurnEngine:
             usages=result.usages,
             error_class=result.error_class,
             error_message=result.error_message,
+            error_kind=result.error_kind,
             partial_output=result.partial_output,
         )
 

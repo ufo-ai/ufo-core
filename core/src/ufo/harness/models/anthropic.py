@@ -31,6 +31,7 @@ from ufo.harness.models.interface import (
 )
 from ufo.harness.models.spec import KEY_REJECTED_STATUS, ModelSpec
 from ufo.harness.o11y import emit_metric, log
+from ufo.harness.rounds import ModelStreamInterrupted
 from ufo.schema.records import Usage
 
 PROVIDER_TIMEOUT_SECONDS = 60.0
@@ -148,7 +149,8 @@ class AnthropicClient:
         retries with retry-after-aware exponential backoff, and request timeouts or a dropped
         connection retry on the same backoff and shared attempt budget (each retry logged,
         exhaustion logged and re-raising the fault) — both only until visible output is yielded;
-        any failure after that raises immediately. A streamed request surfaces its timeout or a
+        the same fault after that raises ModelStreamInterrupted so the engine discards the partial
+        round and re-runs it once. A streamed request surfaces its timeout or a
         peer disconnect as a raw httpx error during iteration (the SDK wraps only the create
         call), so the retry catches both. A mid-stream
         error event (overloaded, or a transient api_error) arrives on the already-200 stream
@@ -320,6 +322,11 @@ class AnthropicClient:
                         attempts=attempt,
                         error_class=type(error).__name__,
                     )
+                    if yielded:
+                        raise ModelStreamInterrupted(
+                            "stream_transport",
+                            f"Anthropic stream died mid-round ({type(error).__name__}): {error}",
+                        ) from error
                     raise
                 log(
                     "model.provider_transport_retry",
@@ -373,6 +380,12 @@ class AnthropicClient:
                         attempts=attempt,
                         status_code=error.status_code,
                     )
+                    if yielded and not deterministic_client_error:
+                        raise ModelStreamInterrupted(
+                            "stream_error",
+                            f"Anthropic errored the stream mid-round "
+                            f"({error.status_code}): {error}",
+                        ) from error
                     raise
                 header = error.response.headers.get("retry-after")
                 try:
