@@ -31,6 +31,7 @@ DEFAULT_GRADES_ROOT = Path(".local/swebench/grades")
 PREDICTIONS_FILE = "predictions.jsonl"
 SUMMARY_FILE = "summary.json"
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+SUSPECT_GOLD_OVERLAP = 0.9
 GradingSubset = Literal["smoke", "hillclimb", "holdout", "hard", "all"]
 
 
@@ -68,6 +69,22 @@ def _remove_official_test_changes(case: SWEbenchCase, patch: str) -> str:
     if not test_paths or not sections:
         return patch
     return "".join(section for section in sections if _diff_paths(section).isdisjoint(test_paths))
+
+
+def _changed_lines(patch: str) -> frozenset[str]:
+    return frozenset(
+        line
+        for line in patch.splitlines()
+        if line[:1] in {"+", "-"} and not line.startswith(("+++", "---")) and line[1:].strip()
+    )
+
+
+def gold_overlap(gold_patch: str, submission: str) -> float:
+    """Share of the gold patch's changed lines the submitted patch reproduces."""
+    gold_lines = _changed_lines(gold_patch)
+    if not gold_lines:
+        return 0.0
+    return len(_changed_lines(submission) & gold_lines) / len(gold_lines)
 
 
 def official_instance_image(instance_id: str) -> str:
@@ -240,8 +257,9 @@ class SWEbenchGrading:
         )
         report_path = self._official_report_path(grade_directory, gold=self.gold)
         outcomes = self._validate_official_report(report_path, self.selected_cases, gold=self.gold)
+        overlaps = {} if patches is None else self._gold_overlaps(patches)
         summary_path = self._write_summary(
-            grade_directory, report_path, len(outcomes.resolved), tuple(gold_failed)
+            grade_directory, report_path, len(outcomes.resolved), tuple(gold_failed), overlaps
         )
         self._prune_official_images()
         return summary_path
@@ -402,12 +420,25 @@ class SWEbenchGrading:
             raise ValueError("official SWE-bench report has an unsupported schema version")
         return _OfficialOutcomes(resolved=frozenset(resolved), empty=frozenset(empty))
 
+    def _gold_overlaps(self, patches: dict[str, str]) -> dict[str, float]:
+        overlaps: dict[str, float] = {}
+        for case in self.selected_cases:
+            overlap = gold_overlap(case.patch, patches[case.instance_id])
+            overlaps[case.instance_id] = overlap
+            if overlap >= SUSPECT_GOLD_OVERLAP:
+                print(
+                    f"SWE-bench patch for {case.instance_id} reproduces "
+                    f"{overlap:.0%} of gold changed lines"
+                )
+        return overlaps
+
     def _write_summary(
         self,
         grade_directory: Path,
         report_path: Path,
         resolved: int,
         gold_failed: tuple[str, ...],
+        overlaps: dict[str, float],
     ) -> Path:
         summary = {
             "pins": {
@@ -422,6 +453,10 @@ class SWEbenchGrading:
             "official_report": str(report_path),
             "official_resolved": resolved,
             "official_gold_failed": list(gold_failed),
+            "gold_overlap": {case_id: round(overlap, 4) for case_id, overlap in overlaps.items()},
+            "suspect_retrieval": [
+                case_id for case_id, overlap in overlaps.items() if overlap >= SUSPECT_GOLD_OVERLAP
+            ],
         }
         summary_path = grade_directory / SUMMARY_FILE
         summary_path.write_text(json.dumps(summary, indent=2) + "\n")

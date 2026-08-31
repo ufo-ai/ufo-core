@@ -9,6 +9,7 @@ import pytest
 from evals.swebench import grading
 from evals.swebench.grading import (
     SWEbenchGrading,
+    gold_overlap,
     load_submission_patches,
     official_instance_image,
     write_predictions,
@@ -27,7 +28,14 @@ def row(instance_id: str, index: int) -> dict[str, str]:
         "repo": f"{owner}/{repository}",
         "instance_id": instance_id,
         "base_commit": f"{index + 1:040x}",
-        "patch": f"diff --git a/reference{index}.py b/reference{index}.py\n",
+        "patch": (
+            f"diff --git a/reference{index}.py b/reference{index}.py\n"
+            f"--- a/reference{index}.py\n"
+            f"+++ b/reference{index}.py\n"
+            "@@ -1 +1 @@\n"
+            f"-reference = {index}\n"
+            f"+reference = {index + 1}\n"
+        ),
         "test_patch": f"diff --git a/test{index}.py b/test{index}.py\n",
         "problem_statement": f"Fix regression {index}.",
         "hints_text": f"Hint {index}",
@@ -238,6 +246,27 @@ def test_non_utf8_patch_becomes_an_empty_submission(
     assert "not UTF-8" in capsys.readouterr().out
 
 
+def test_gold_overlap_counts_only_nonblank_changed_lines() -> None:
+    gold = (
+        "diff --git a/src/value.py b/src/value.py\n"
+        "--- a/src/value.py\n"
+        "+++ b/src/value.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        "-old = 1\n"
+        "+\n"
+        "+new = 2\n"
+    )
+    headers_only = (
+        "diff --git a/src/value.py b/src/value.py\n--- a/src/value.py\n+++ b/src/value.py\n"
+    )
+    partial = "diff --git a/other.py b/other.py\n+new = 2\n"
+
+    assert gold_overlap(gold, gold) == 1.0
+    assert gold_overlap(gold, partial) == 0.5
+    assert gold_overlap(gold, headers_only) == 0.0
+    assert gold_overlap(headers_only, gold) == 0.0
+
+
 def test_official_instance_images_are_the_pinned_harness_names() -> None:
     assert tuple(official_instance_image(case_id) for case_id in SMOKE_CASE_IDS) == (
         "swebench/sweb.eval.x86_64.django_1776_django-10097:latest",
@@ -417,7 +446,59 @@ def test_workflow_grades_each_image_before_aggregating_reports(
         "official_report": str(official),
         "official_resolved": 2,
         "official_gold_failed": [],
+        "gold_overlap": {case_id: 0.0 for case_id in SMOKE_CASE_IDS},
+        "suspect_retrieval": [],
     }
+
+
+def test_summary_flags_submissions_that_reproduce_gold_changed_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snapshot_value = snapshot(tmp_path / "snapshot")
+    workflow = grading_workflow(tmp_path, snapshot_value)
+    accept_test_source(monkeypatch)
+    retrieved, original, untouched = SMOKE_CASE_IDS
+    cases = {case.instance_id: case for case in workflow.selected_cases}
+    submissions = tmp_path / "submissions"
+    (submissions / retrieved / f"{retrieved}.patch").write_bytes(cases[retrieved].patch.encode())
+    (submissions / original / f"{original}.patch").write_bytes(
+        (
+            f"diff --git a/{original}.py b/{original}.py\n"
+            f"--- a/{original}.py\n"
+            f"+++ b/{original}.py\n"
+            "@@ -1 +1 @@\n"
+            "-before\n"
+            "+after\n"
+        ).encode()
+    )
+
+    def run(
+        command: Sequence[str], *, cwd: Path | None = None, check: bool
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert check
+        if cwd is not None:
+            graded = (
+                SMOKE_CASE_IDS
+                if "--rewrite_reports" in command
+                else (command[command.index("--instance_ids") + 1],)
+            )
+            report = report_with_submissions(
+                official_report(graded, resolved_ids=graded), SMOKE_CASE_IDS
+            )
+            (cwd / "ufo.official-smoke.json").write_text(json.dumps(report))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(grading.subprocess, "run", run)
+
+    summary_path = workflow.run()
+
+    summary = json.loads(summary_path.read_bytes())
+    assert summary["official_resolved"] == 3
+    assert summary["gold_overlap"] == {retrieved: 1.0, original: 0.0, untouched: 0.0}
+    assert summary["suspect_retrieval"] == [retrieved]
+    output = capsys.readouterr().out
+    assert f"SWE-bench patch for {retrieved} reproduces 100% of gold changed lines" in output
+    assert f"SWE-bench patch for {original}" not in output
 
 
 def test_gold_mode_uses_official_gold_predictions(

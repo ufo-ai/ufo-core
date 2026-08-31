@@ -98,7 +98,10 @@ applicable, native `logs/run_evaluation/`, the official aggregate report, and `s
 official output files are not moved or rewritten. Grading runs on the official prebuilt evaluation
 images from the `swebench` Docker Hub namespace — the harness's stock source. The wrapper verifies
 an exact `linux/amd64` image with an official repository digest or pulls it, grades that case, then
-aggregates the native reports. An unresolved nonempty prediction runs the official gold patch in
+aggregates the native reports. Beside the official verdict, `summary.json` records each
+submission's `gold_overlap` — the share of the gold patch's changed lines it reproduces — and
+lists cases at or above 0.9 under `suspect_retrieval`, the tripwire for a patch retrieved from the
+gold fix rather than authored. An unresolved nonempty prediction runs the official gold patch in
 the same image; if gold also fails, the instance is unmeasurable on this rig — it is listed under
 `official_gold_failed` in `summary.json`, never counted as a model failure — and the remaining
 instances grade normally. A `--gold` run records its failing instances the same way. Prediction generation omits
