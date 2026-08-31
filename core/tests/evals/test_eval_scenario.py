@@ -148,6 +148,7 @@ class ScriptedWorker:
         on_behalf_of_member_id: UUID | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
+        standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
     ) -> UUID | None:
@@ -446,7 +447,7 @@ async def test_scenario_followup_merges_one_internal_flow(db: None, tmp_path) ->
             agent_id,
             "Build the homepage.",
             "homepage-seed",
-            on_behalf_of_member_id=uuid4(),
+            acting_member_id=uuid4(),
             as_scheduled=True,
         )
 
@@ -506,7 +507,7 @@ async def test_scenario_followup_retains_offline_artifacts(db: None, tmp_path) -
             agent_id,
             "Build the homepage.",
             "homepage-seed",
-            on_behalf_of_member_id=None,
+            acting_member_id=None,
             as_scheduled=True,
         )
 
@@ -643,7 +644,7 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
             agent_id,
             "Build the homepage without authority.",
             "homepage-seed:first",
-            on_behalf_of_member_id=None,
+            acting_member_id=None,
             as_scheduled=True,
         )
         second = await target.invoke(
@@ -651,7 +652,7 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
             agent_id,
             "Repair the homepage with authority.",
             "homepage-seed:second",
-            on_behalf_of_member_id=uuid4(),
+            acting_member_id=uuid4(),
             as_scheduled=True,
         )
         return first, second
@@ -730,7 +731,7 @@ async def test_failed_scenario_followup_retains_its_evidence(db: None, tmp_path)
             agent_id,
             "Build the homepage.",
             "homepage-seed",
-            on_behalf_of_member_id=None,
+            acting_member_id=None,
             as_scheduled=True,
         )
 

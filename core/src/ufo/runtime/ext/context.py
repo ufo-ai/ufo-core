@@ -737,6 +737,7 @@ class TurnInvoker(Protocol):
         on_behalf_of_member_id: UUID | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
+        standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
@@ -1790,17 +1791,20 @@ class ExtensionContext:
         message: str,
         idempotency_key: str,
         *,
-        on_behalf_of_member_id: UUID | None = None,
+        acting_member_id: UUID | None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
+        standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
     ) -> UUID | None:
         """Kick an internal turn in `conversation_id`, asserting the conversation is bound to
         `agent_id` — admission refuses a mismatch, so a stored binding can never fire into another
-        agent's conversation. `on_behalf_of_member_id` is the member the woken turn acts on behalf
-        of; `holds_work_already_done` parks the turn on a spend breach instead of cancelling it,
-        for work already performed and metered; `as_scheduled` stamps the turn as a scheduled
+        agent's conversation. `acting_member_id` is required so every automatic caller states whose
+        authority it carries; core stores it on the turn as `on_behalf_of_member_id`.
+        `holds_work_already_done` parks the turn on a spend breach instead of cancelling work
+        already performed and metered; `standalone` founds a new turn instead of folding into one
+        already running; `as_scheduled` stamps the turn as a scheduled
         fire — its own turn, never folded, seat-gated on the on-behalf member;
         `unless_member_since` and `unless_member_arrival_since` — a pair, refused half-set —
         refuse the admission with None when a member turn past the turn watermark exists or a
@@ -1815,9 +1819,10 @@ class ExtensionContext:
             agent_id,
             message,
             idempotency_key,
-            on_behalf_of_member_id=on_behalf_of_member_id,
+            on_behalf_of_member_id=acting_member_id,
             holds_work_already_done=holds_work_already_done,
             as_scheduled=as_scheduled,
+            standalone=standalone,
             unless_member_since=unless_member_since,
             unless_member_arrival_since=unless_member_arrival_since,
         )

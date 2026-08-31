@@ -42,6 +42,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from ufo.sdk.audience import Audience, conversation_audience
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import (
@@ -69,6 +70,7 @@ from ufo.sdk.objects import (
     VerbNotSupported,
     owner_emails,
 )
+from ufo.sdk.seats import Seats
 from ufo.sdk.sources import (
     ConnectorSourceConfig,
     PageChange,
@@ -1000,6 +1002,9 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
         woken = await triggers.waking(binding.name)
         if not woken:
             continue
+        facts = await ctx.ext.conversation_facts(
+            tuple(trigger.conversation_id for trigger in woken)
+        )
         shared = [change for change in binding_changes if change.subject == SHARED_SUBJECT]
         if not shared:
             continue
@@ -1015,18 +1020,34 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
             if not authorized:
                 continue
             with suppress(AgentArchived):
-                await _fire_trigger(ctx.ext, binding, trigger, authorized)
+                await _fire_trigger(
+                    ctx.ext,
+                    binding,
+                    trigger,
+                    facts[trigger.conversation_id].audience,
+                    authorized,
+                )
     return None
 
 
 async def _fire_trigger(
-    ext: ExtensionContext, binding: _Binding, trigger: SourceTrigger, authorized: list[PageChange]
+    ext: ExtensionContext,
+    binding: _Binding,
+    trigger: SourceTrigger,
+    audience: Audience,
+    authorized: list[PageChange],
 ) -> None:
     """Deliver one trigger's changes. An archived app raises `AgentArchived` out of the first
     invoke, which drops the rest of this trigger's changes with it — none of them can be answered
     until the app is restored."""
     match trigger.delivery:
         case "current":
+            acting_member_id = (
+                await _seated_creator(ext, trigger)
+                if trigger.created_by_member_id is not None
+                and audience == conversation_audience(trigger.created_by_member_id)
+                else None
+            )
             latest = max(change.changed_at for change in authorized).isoformat()
             path = await _write_change_log(
                 ext, trigger.conversation_id, binding, latest, authorized
@@ -1038,12 +1059,22 @@ async def _fire_trigger(
                 idempotency_key=(
                     f"source-trigger:{binding.name}:{trigger.conversation_id.hex}:{latest}"
                 ),
+                acting_member_id=acting_member_id,
+                holds_work_already_done=True,
+                standalone=True,
             )
         case "per_page":
+            acting_member_id = await _seated_creator(ext, trigger)
+            member_key = (
+                "shared"
+                if trigger.created_by_member_id is None
+                else trigger.created_by_member_id.hex
+            )
             for change in authorized:
                 conversation_id = await ext.open_conversation(
                     trigger.agent_id,
-                    f"source-trigger:{trigger.id.hex}:page:{change.page_id.hex}",
+                    f"source-trigger:{trigger.id.hex}:{member_key}:page:{change.page_id.hex}",
+                    member_id=trigger.created_by_member_id,
                 )
                 revision = f"{change.changed_at.isoformat()}-{change.revision}"
                 path = await _write_change_log(ext, conversation_id, binding, revision, [change])
@@ -1052,9 +1083,21 @@ async def _fire_trigger(
                     trigger.agent_id,
                     _alert_message(binding, [change], path),
                     idempotency_key=(
-                        f"source-trigger:{trigger.id.hex}:{change.page_id.hex}:{change.revision}"
+                        f"source-trigger:{trigger.id.hex}:{member_key}:"
+                        f"{change.page_id.hex}:{change.revision}"
                     ),
+                    acting_member_id=acting_member_id,
+                    holds_work_already_done=True,
+                    standalone=True,
                 )
+
+
+async def _seated_creator(ext: ExtensionContext, trigger: SourceTrigger) -> UUID | None:
+    member_id = trigger.created_by_member_id
+    if member_id is None:
+        return None
+    async with ext.transaction() as connection:
+        return member_id if await Seats(ext.workspace_id).admits(connection, member_id) else None
 
 
 async def _write_change_log(

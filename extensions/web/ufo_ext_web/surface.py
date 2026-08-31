@@ -991,7 +991,7 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
             agent.id,
             SEED_PROMPT,
             f"homepage-seed:{agent.id}:{bucket}",
-            on_behalf_of_member_id=acting,
+            acting_member_id=acting,
             as_scheduled=True,
         )
         if turn_id is None:

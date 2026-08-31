@@ -784,7 +784,7 @@ async def _build_created_homepage(outcome: ScenarioOutcome, target: CapabilityTa
         application.id,
         SEED_PROMPT,
         f"homepage-seed:{application.id}:{datetime.now(UTC).date().isoformat()}",
-        on_behalf_of_member_id=application.owner_member_id,
+        acting_member_id=application.owner_member_id,
         as_scheduled=True,
     )
 
@@ -796,7 +796,7 @@ async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityT
         application.id,
         SEED_PROMPT,
         f"homepage-seed:{application.id}:without-authority",
-        on_behalf_of_member_id=None,
+        acting_member_id=None,
         as_scheduled=True,
     )
     workspace = target.conversations.workspace_path(conversation_id, "")
@@ -824,7 +824,7 @@ async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityT
         application.id,
         SEED_PROMPT,
         f"homepage-seed:{application.id}:with-authority",
-        on_behalf_of_member_id=application.owner_member_id,
+        acting_member_id=application.owner_member_id,
         as_scheduled=True,
     )
     return first, second

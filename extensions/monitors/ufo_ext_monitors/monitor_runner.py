@@ -143,7 +143,7 @@ class MonitorRunner:
                 row.agent_id,
                 await self._body(row, cause, payload, spill, probes_run),
                 f"{FIRE_KEY_PREFIX}{row.id}",
-                on_behalf_of_member_id=acts_for,
+                acting_member_id=acts_for,
                 holds_work_already_done=True,
             )
         except AgentArchived:

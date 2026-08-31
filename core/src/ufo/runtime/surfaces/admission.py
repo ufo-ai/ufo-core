@@ -230,6 +230,7 @@ class Admission:
         on_behalf_of_member_id: UUID | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
+        standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
@@ -248,6 +249,10 @@ class Admission:
         `as_scheduled` gives the turn a scheduled fire's meaning without a scheduled row: it founds
         its own turn beside a live one instead of folding, and it is seat-gated on the member it
         acts for, so an unseated member's fire is refused wherever it lands.
+
+        `standalone` also founds its own turn beside a live one, but keeps an internal admission's
+        meaning. Event delivery uses it when folding would discard that event's authority or
+        idempotency boundary.
 
         The two `unless_member_*` watermarks refuse the admission and answer None when a member has
         spoken since a caller began waiting on them — the question asked under admission's own lock,
@@ -290,6 +295,7 @@ class Admission:
                 on_behalf_of_member_id=on_behalf_of_member_id,
                 holds_work_already_done=holds_work_already_done,
                 as_scheduled=as_scheduled,
+                standalone=standalone,
                 unless_member_since=unless_member_since,
                 unless_member_arrival_since=unless_member_arrival_since,
                 runtime_config=runtime_config,
@@ -312,6 +318,7 @@ class Admission:
         intent: ToolIntent | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
+        standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         comment: str | None = None,
@@ -490,7 +497,7 @@ class Admission:
                 ).scalar_one()
                 if superseded:
                     raise _SupersededByMember
-            if deduped is None and not as_scheduled and intent is None:
+            if deduped is None and not as_scheduled and not standalone and intent is None:
                 live_turn = (
                     await connection.execute(
                         sa.select(
@@ -956,6 +963,7 @@ class AdmissionInvoker:
         on_behalf_of_member_id: UUID | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
+        standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
@@ -970,6 +978,7 @@ class AdmissionInvoker:
             on_behalf_of_member_id=on_behalf_of_member_id,
             holds_work_already_done=holds_work_already_done,
             as_scheduled=as_scheduled,
+            standalone=standalone,
             unless_member_since=unless_member_since,
             unless_member_arrival_since=unless_member_arrival_since,
             runtime_config=runtime_config,

@@ -50,7 +50,7 @@ class PauseRunner:
                 row.agent_id,
                 row.prompt,
                 f"{FIRE_KEY_PREFIX}{row.id}",
-                on_behalf_of_member_id=row.created_by_member_id,
+                acting_member_id=row.created_by_member_id,
                 as_scheduled=True,
                 unless_member_since=row.origin_seq,
                 unless_member_arrival_since=row.origin_arrival_seq,

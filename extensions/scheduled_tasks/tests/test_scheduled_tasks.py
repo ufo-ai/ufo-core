@@ -876,6 +876,8 @@ async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
             "</scheduled_task_instruction>"
         )
         assert turns[0]["admission_source"] == "scheduled"
+        assert turns[0]["speaker_member_id"] is None
+        assert turns[0]["on_behalf_of_member_id"] == creator
         assert turns[0]["status"] == "queued"
         assert dbos.enqueued == [str(turns[0]["id"])]
         advanced = (await store.list())[0]

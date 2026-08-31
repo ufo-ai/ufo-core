@@ -102,7 +102,7 @@ class ScheduledTaskRunner:
                 task.agent_id,
                 inbound,
                 key,
-                on_behalf_of_member_id=task.created_by_member_id,
+                acting_member_id=task.created_by_member_id,
                 as_scheduled=True,
             )
         except AgentArchived:

@@ -232,7 +232,7 @@ class CapabilityTarget(Protocol):
         message: str,
         idempotency_key: str,
         *,
-        on_behalf_of_member_id: UUID | None,
+        acting_member_id: UUID | None,
         as_scheduled: bool,
     ) -> TargetResult: ...
 
@@ -773,7 +773,7 @@ class InProcessTarget:
         message: str,
         idempotency_key: str,
         *,
-        on_behalf_of_member_id: UUID | None,
+        acting_member_id: UUID | None,
         as_scheduled: bool,
     ) -> TargetResult:
         """Drive and reconstruct one internal turn admitted by a multi-flow eval case."""
@@ -784,7 +784,7 @@ class InProcessTarget:
                 agent_id,
                 message,
                 idempotency_key,
-                on_behalf_of_member_id=on_behalf_of_member_id,
+                acting_member_id=acting_member_id,
                 as_scheduled=as_scheduled,
             )
         except Exception as error:

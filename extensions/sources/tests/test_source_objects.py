@@ -57,7 +57,7 @@ from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.manifest import HookContext, PageChangeBatch
@@ -2429,24 +2429,85 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
         ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        await ext.invoke(
+            state.conversation_id,
+            state.agent_id,
+            "Existing work.",
+            "existing-work",
+            acting_member_id=state.owner_id,
+        )
         shipped = _change(source_id, "# asana tasks: Ship the launch list")
         legal = _change(source_id, "# asana tasks: Follow up with legal")
         stray = _change(uuid4(), "# folder: untracked")
         batch = PageChangeBatch(changes=(shipped, legal, stray))
         await on_page_change(HookContext(ext=ext, payload=batch))
-        (turn,) = await _turns(state.conversation_id)
+        turns = await _turns(state.conversation_id)
+        assert len(turns) == 2
+        turn = next(row for row in turns if name in row["inbound"])
+        assert turn["speaker_member_id"] is None
+        assert turn["on_behalf_of_member_id"] == state.owner_id
         assert name in turn["inbound"]
         assert "tasks: 2 added" in turn["inbound"]
         assert f"{PAGE_KIND}/{shipped.page_id}" in turn["inbound"]
         assert f"{PAGE_KIND}/{legal.page_id}" in turn["inbound"]
 
         await on_page_change(HookContext(ext=ext, payload=batch))
-        assert len(await _turns(state.conversation_id)) == 1
+        assert len(await _turns(state.conversation_id)) == 2
+
+
+async def test_shared_trigger_conversation_carries_no_member_authority(db: None) -> None:
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(tables.conversation.c.id == state.conversation_id)
+            .values(member_id=None, audience=str(SHARED_AUDIENCE))
+        )
+    ctx = replace(_context(state, None), audience=SHARED_AUDIENCE)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(ctx, _trigger_manifest(name, state.conversation_id))
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        await on_page_change(
+            HookContext(
+                ext=ext,
+                payload=PageChangeBatch(changes=(_change(source_id, "# shared"),)),
+            )
+        )
+
+    [turn] = await _turns(state.conversation_id)
+    assert turn["speaker_member_id"] is None
+    assert turn["on_behalf_of_member_id"] is None
+
+
+async def test_unseated_trigger_creator_downgrades_without_losing_the_alert(db: None) -> None:
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.member_id)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == state.owner_id)
+            .values(seated_at=None)
+        )
+    with ws(state.workspace_id), agent(state.agent_id):
+        await on_page_change(
+            HookContext(
+                ext=context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id)),
+                payload=PageChangeBatch(changes=(_change(source_id, "# still delivered"),)),
+            )
+        )
+
+    [turn] = await _turns(state.conversation_id)
+    assert turn["status"] == "queued"
+    assert turn["on_behalf_of_member_id"] is None
+    assert "still delivered" in turn["inbound"]
 
 
 async def test_per_page_delivery_keeps_one_conversation_per_page(db: None) -> None:
     state = await _workspace()
-    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.member_id)
     first_page = uuid4()
     second_page = uuid4()
     with ws(state.workspace_id), agent(state.agent_id):
@@ -2498,12 +2559,22 @@ async def test_per_page_delivery_keeps_one_conversation_per_page(db: None) -> No
     assert len(conversations) == 2
     turns_by_page = {}
     for conversation in conversations:
+        assert conversation["member_id"] == state.owner_id
+        assert conversation["audience"] == str(conversation_audience(state.owner_id))
         [turn] = await _turns(conversation["id"])
+        assert turn["speaker_member_id"] is None
+        assert turn["on_behalf_of_member_id"] == state.owner_id
         if str(first_page) in turn["inbound"]:
             turns_by_page[first_page] = turn
         if str(second_page) in turn["inbound"]:
             turns_by_page[second_page] = turn
     assert set(turns_by_page) == {first_page, second_page}
+    assert turns_by_page[first_page]["idempotency_key"] == (
+        f"source-trigger:{trigger.id.hex}:{state.owner_id.hex}:{first_page.hex}:1"
+    )
+    assert turns_by_page[second_page]["idempotency_key"] == (
+        f"source-trigger:{trigger.id.hex}:{state.owner_id.hex}:{second_page.hex}:1"
+    )
     assert (
         turns_by_page[first_page]["conversation_id"]
         != turns_by_page[second_page]["conversation_id"]

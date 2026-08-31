@@ -415,6 +415,8 @@ async def test_an_internal_arrival_does_not_supersede_the_timer(db: None) -> Non
     assert any(turn["admission_source"] == "scheduled" for turn in turns)
     fired = next(turn for turn in turns if turn["admission_source"] == "scheduled")
     assert fired["inbound"] == row["prompt"]
+    assert fired["speaker_member_id"] is None
+    assert fired["on_behalf_of_member_id"] == member_id
 
 
 async def test_a_redelivered_older_message_does_not_supersede_a_later_pause(db: None) -> None:
