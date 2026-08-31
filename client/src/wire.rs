@@ -214,6 +214,7 @@ pub struct Session {
     pub tty: bool,
     model: Option<String>,
     no_internet: bool,
+    environment: Option<String>,
     agent: OnceCell<ureq::Agent>,
     last_post: std::time::Instant,
 }
@@ -262,14 +263,21 @@ impl Session {
             tty,
             model: None,
             no_internet: false,
+            environment: None,
             agent: OnceCell::new(),
             last_post: std::time::Instant::now(),
         }
     }
 
-    pub fn with_runtime_config(mut self, model: Option<String>, no_internet: bool) -> Session {
+    pub fn with_runtime_config(
+        mut self,
+        model: Option<String>,
+        no_internet: bool,
+        environment: Option<String>,
+    ) -> Session {
         self.model = model;
         self.no_internet = no_internet;
+        self.environment = environment;
         self
     }
 
@@ -347,6 +355,7 @@ impl Session {
             token: self.token.clone(),
             model: self.model.clone(),
             no_internet: self.no_internet,
+            environment: self.environment.clone(),
         })
     }
 
@@ -498,6 +507,9 @@ impl Session {
         if self.no_internet {
             request = request.set("x-ufo-internet", "off");
         }
+        if let Some(environment) = &self.environment {
+            request = request.set("x-ufo-environment", environment);
+        }
         request
     }
 }
@@ -520,6 +532,7 @@ pub struct SendLane {
     token: Option<String>,
     model: Option<String>,
     no_internet: bool,
+    environment: Option<String>,
 }
 
 impl SendLane {
@@ -543,6 +556,9 @@ impl SendLane {
         }
         if self.no_internet {
             request = request.set("x-ufo-internet", "off");
+        }
+        if let Some(environment) = &self.environment {
+            request = request.set("x-ufo-environment", environment);
         }
         let response = match request.send_string(text) {
             Ok(response) => response,
@@ -1106,8 +1122,11 @@ mod tests {
     #[test]
     fn a_runtime_config_is_sent_with_a_message() {
         let (base, serving) = served("200 OK", "ask\t>\n");
-        let mut session =
-            stopping(base).with_runtime_config(Some("z-ai/glm-5.3-flash".into()), true);
+        let mut session = stopping(base).with_runtime_config(
+            Some("z-ai/glm-5.3-flash".into()),
+            true,
+            Some("http://127.0.0.1:8377".into()),
+        );
 
         session
             .post(PostBody::Message("run it".into()))
@@ -1119,6 +1138,10 @@ mod tests {
             "{request}"
         );
         assert!(request.contains("x-ufo-internet: off"), "{request}");
+        assert!(
+            request.contains("x-ufo-environment: http://127.0.0.1:8377"),
+            "{request}"
+        );
         assert!(request.ends_with("\r\n\r\nrun it"), "{request}");
     }
 

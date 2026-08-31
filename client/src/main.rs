@@ -23,7 +23,8 @@ use ufo::{config, jsonio, pr};
 const HELP: &str = "\
 Opens a conversation with your workspace assistant.
 
-Usage: ufo [--resume [id]] [--remote] [--model MODEL] [--no-internet] [--json] [message...]
+Usage: ufo [--resume [id]] [--remote] [--model MODEL] [--no-internet] [--environment URL] [--json]
+           [message...]
        ufo login | logout
        ufo fs {read|write|edit|grep|glob|changes} <json>
        ufo llm [--model MODEL] [--max-tokens N] PROMPT
@@ -43,6 +44,7 @@ Options:
   --remote       Run in the workspace's sandbox instead of the current directory.
   --model MODEL  Run each turn on this model.
   --no-internet  Run each turn without public internet access; requires --model.
+  --environment URL  Pin this environment host for each turn; requires --model.
   --json         Read and write JSON events on stdin and stdout.
   -h, --help     Show this help.
 ";
@@ -74,6 +76,7 @@ fn main() {
     let mut json = false;
     let mut model: Option<String> = None;
     let mut no_internet = false;
+    let mut environment: Option<String> = None;
     loop {
         match rest.first().map(String::as_str) {
             Some("--help") | Some("-h") => {
@@ -110,6 +113,14 @@ fn main() {
                 no_internet = true;
                 rest = &rest[1..];
             }
+            Some("--environment") => {
+                let url = rest
+                    .get(1)
+                    .filter(|url| !url.starts_with("--"))
+                    .unwrap_or_else(|| die("--environment requires a url"));
+                environment = Some(url.clone());
+                rest = &rest[2..];
+            }
             Some("--resume") => match rest.get(1) {
                 Some(id) if !id.starts_with("--") => {
                     resumed = Some(id.clone());
@@ -129,6 +140,9 @@ fn main() {
     }
     if no_internet && model.is_none() {
         die("--no-internet requires --model");
+    }
+    if environment.is_some() && model.is_none() {
+        die("--environment requires --model");
     }
     let message = rest.join(" ");
     let workspace_url = if login {
@@ -173,7 +187,7 @@ fn main() {
         installed,
         tty && !json,
     )
-    .with_runtime_config(model, no_internet);
+    .with_runtime_config(model, no_internet, environment);
     #[cfg(unix)]
     interrupt::install();
     update_resume(&session, tty && !json);
