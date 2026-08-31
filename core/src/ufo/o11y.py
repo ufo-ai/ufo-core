@@ -98,6 +98,7 @@ BACKGROUND_PROFILE = "background"
 JOB_DIMENSION = "job"
 HISTOGRAMS = {
     "db_tx_acquire_ms": ("path",),
+    "turn_slot_wait_ms": (),
     "model_round_ms": (
         "model",
         "provider",

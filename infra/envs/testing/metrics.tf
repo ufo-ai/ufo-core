@@ -19,6 +19,13 @@ resource "datadog_metric_tag_configuration" "db_tx_acquire_ms" {
   tags                = ["env", "host", "path", "service"]
 }
 
+resource "datadog_metric_tag_configuration" "turn_slot_wait_ms" {
+  metric_name         = "ufo.turn_slot_wait_ms"
+  metric_type         = "distribution"
+  include_percentiles = true
+  tags                = ["env", "host", "service"]
+}
+
 resource "datadog_metric_tag_configuration" "turn_ms" {
   metric_name         = "ufo.turn_ms"
   metric_type         = "distribution"
@@ -78,6 +85,12 @@ resource "datadog_metric_tag_configuration" "tool_call_ms" {
 # this settles the plan without touching what Datadog stores.
 resource "datadog_metric_metadata" "db_tx_acquire_ms" {
   metric = "ufo.db_tx_acquire_ms"
+  type   = "gauge"
+  unit   = "millisecond"
+}
+
+resource "datadog_metric_metadata" "turn_slot_wait_ms" {
+  metric = "ufo.turn_slot_wait_ms"
   type   = "gauge"
   unit   = "millisecond"
 }

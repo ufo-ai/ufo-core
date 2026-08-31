@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import time
 from collections.abc import Callable, Mapping
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID
@@ -64,6 +66,7 @@ from ufo.models.interface import AUTO_MODEL
 from ufo.models.pricing import ModelPrice, Pricing
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import (
+    emit_histogram,
     emit_metric,
     formatted_stack,
     log,
@@ -139,6 +142,43 @@ from ufo.turns.contracts import Contract, output_contract
 from ufo.workspace import ws
 
 TURN_QUEUE_POLL_SECONDS = 0.1
+MEMBER_TURN_CONCURRENCY = 8
+SCHEDULED_TURN_CONCURRENCY = 4
+_turn_slot_registry: dict[tuple[asyncio.AbstractEventLoop, str], asyncio.Semaphore] = {}
+
+
+def _turn_gates(
+    parent_turn_id: UUID | None, admission_source: TurnAdmissionSource
+) -> tuple[asyncio.Semaphore, ...]:
+    """The slots a turn must hold to run, held per event loop the way `db.py` holds its engines.
+    DBOS cannot bound this: `worker_concurrency` is refused beside the turns queue's
+    per-conversation `concurrency=1` and would count per partition if it stood, so an executor
+    claims every due turn and a 66-turn wave lands whole on one loop — the CPU saturation that
+    starves the connection pools. Root turns hold one of `MEMBER_TURN_CONCURRENCY` slots for their
+    model loop. A scheduled turn first holds one of `SCHEDULED_TURN_CONCURRENCY` — acquired before
+    the shared slot, so at most that many scheduled turns ever compete for shared slots and one
+    workspace's scheduled wave cannot park a member's message behind a full process. Two kinds of
+    turn hold nothing. A spawned turn's slot is held by its ancestors: a foreground parent waits
+    inside its own slot for the child, so a gated child could wait forever. A prepared intent runs
+    one typed verb with no model round while a portal panel waits a bounded 120 seconds on it —
+    parked behind eight chat turns' model loops, every intent would time out exactly when the
+    fleet is busiest."""
+    if parent_turn_id is not None or admission_source == INTENT_ADMISSION:
+        return ()
+    loop = asyncio.get_running_loop()
+
+    def slots(name: str, limit: int) -> asyncio.Semaphore:
+        gate = _turn_slot_registry.get((loop, name))
+        if gate is None:
+            gate = _turn_slot_registry[(loop, name)] = asyncio.Semaphore(limit)
+        return gate
+
+    shared = slots("member", MEMBER_TURN_CONCURRENCY)
+    if admission_source == SCHEDULED_ADMISSION:
+        return (slots("scheduled", SCHEDULED_TURN_CONCURRENCY), shared)
+    return (shared,)
+
+
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
 FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
 SKILL_OWNER_KIND = "skill"
@@ -478,24 +518,32 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                             tables.turn.c.traceparent,
                             tables.turn.c.subagent_profile,
                             tables.turn.c.parent_turn_id,
+                            tables.turn.c.admission_source,
                         ).where(
                             tables.turn.c.id == turn_uuid,
                             tables.turn.c.workspace_id == workspace_uuid,
                         )
                     )
                 ).one()
-            await _apply_provisions(runtime, workspace_uuid)
-            with (
-                agent(row.agent_id),
-                turn_span(
-                    turn_uuid,
-                    row.conversation_id,
-                    row.traceparent,
-                    row.subagent_profile,
-                    row.parent_turn_id,
-                ),
-            ):
-                status = await _run_turn(runtime, turn_id)
+            gates = _turn_gates(row.parent_turn_id, row.admission_source)
+            queued = time.monotonic()
+            async with AsyncExitStack() as held:
+                for gate in gates:
+                    await held.enter_async_context(gate)
+                if gates:
+                    emit_histogram("turn_slot_wait_ms", round((time.monotonic() - queued) * 1000))
+                await _apply_provisions(runtime, workspace_uuid)
+                with (
+                    agent(row.agent_id),
+                    turn_span(
+                        turn_uuid,
+                        row.conversation_id,
+                        row.traceparent,
+                        row.subagent_profile,
+                        row.parent_turn_id,
+                    ),
+                ):
+                    status = await _run_turn(runtime, turn_id)
         except asyncio.CancelledError:
             raise
         except Exception as error:

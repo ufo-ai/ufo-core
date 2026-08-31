@@ -189,12 +189,12 @@ resource "datadog_monitor" "db_memory_low" {
 resource "datadog_monitor" "db_connections_high" {
   name    = "ufo prod database is holding too many connections"
   type    = "query alert"
-  query   = "avg(last_15m):avg:aws.rds.database_connections{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 300"
-  message = "The database is holding more connections than the fleet's 268 pooled slots. Something is opening connections outside that budget, or engines outlived the loop that built them. @ops@flyingobject.ai @slack-alerts"
+  query   = "avg(last_15m):avg:aws.rds.database_connections{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 250"
+  message = "The database is holding more connections than the fleet's 208 pooled slots. Something is opening connections outside that budget, or engines outlived the loop that built them. @ops@flyingobject.ai @slack-alerts"
 
   monitor_thresholds {
-    critical = 300
-    warning  = 268
+    critical = 250
+    warning  = 208
   }
 
   evaluation_delay = 900

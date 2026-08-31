@@ -230,20 +230,20 @@ resource "datadog_monitor" "db_storage_low" {
 
 # Pools make this threshold arithmetic rather than a multiple of an observed peak. `show
 # max_connections` on this instance is 400 with 3 superuser-reserved, and the pool ceilings in
-# `core/src/ufo/db.py` add to 268 across every `init_db` root plus DBOS's own pools — so the fleet is
-# entitled to 268 and Postgres starts refusing at 397. Warning at 300 is the fleet holding more than
-# its own budget allows, which means connections opened outside it (a PR preview against this
-# instance, a pool that outlived its loop). Critical at 350 is that, still climbing, with the refusal
-# in sight.
+# `core/src/ufo/db.py` add to 348 across every `init_db` root plus DBOS's own pools (serve at 4
+# replicas) — so the fleet is entitled to 348 and Postgres starts refusing at 397. Warning at 350
+# is the fleet holding more than its own budget allows, which means connections opened outside it
+# (a PR preview against this instance, a pool that outlived its loop). Critical at 380 is that,
+# still climbing, with the refusal in sight.
 resource "datadog_monitor" "db_connections_high" {
   name    = "ufo testing database is holding too many connections"
   type    = "query alert"
-  query   = "avg(last_15m):avg:aws.rds.database_connections{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 350"
+  query   = "avg(last_15m):avg:aws.rds.database_connections{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 380"
   message = "The database is holding more connections than the fleet's pool ceilings add up to. Something is opening connections outside that budget — a preview environment on this instance, or engines outliving the loop that built them. Postgres refuses new connections at 397. @ops@flyingobject.ai @slack-alerts"
 
   monitor_thresholds {
-    critical = 350
-    warning  = 300
+    critical = 380
+    warning  = 350
   }
 
   evaluation_delay = 900

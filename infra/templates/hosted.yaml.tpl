@@ -656,7 +656,7 @@ metadata:
   namespace: ${namespace}
   labels: {app: ufo-serve}
 spec:
-  replicas: 2
+  replicas: ${serve_replicas}
   strategy:
     rollingUpdate:
       maxSurge: 100%

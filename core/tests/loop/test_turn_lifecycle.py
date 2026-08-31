@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -66,6 +67,9 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import (
+    INTENT_ADMISSION,
+    MEMBER_ADMISSION,
+    SCHEDULED_ADMISSION,
     ReasoningEffort,
     TerminalFrame,
     Turn,
@@ -84,6 +88,9 @@ from ufo.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
 from ufo.workspace import ws
 
 STREAM_TIMEOUT_SECONDS = 30
+HOLD_RELEASE = threading.Event()
+HOLD_TWO_STARTED = threading.Event()
+HOLD_STARTED: list[str] = []
 TRUNCATION_MESSAGE = (
     "Anthropic completion truncated at the max_tokens budget (stop_reason=max_tokens)"
 )
@@ -323,6 +330,14 @@ class StandInModel:
                 '{"value": 5, "preload_skills": ["sandbox"]}}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
+            return
+        if isinstance(inbound, str) and "hold-slot" in inbound:
+            HOLD_STARTED.append(inbound)
+            if len(HOLD_STARTED) >= 2:
+                HOLD_TWO_STARTED.set()
+            await asyncio.to_thread(HOLD_RELEASE.wait)
+            yield TextDelta(text="held")
+            yield Usage(input_tokens=2, output_tokens=1)
             return
         if "explode-after-usage" in inbound:
             yield TextDelta(text="partial")
@@ -2085,3 +2100,54 @@ async def test_profile_only_tools_stay_out_of_main_agent_turns(surface: Turns) -
     assert all("hidden_probe" not in names for names in main_offers)
     assert child_offers
     assert all("spawn" not in names for names in child_offers)
+
+
+async def test_spawned_children_run_outside_the_member_slot(
+    surface: Turns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(loop_queue, "MEMBER_TURN_CONCURRENCY", 1)
+    loop_queue._turn_slot_registry.clear()
+    try:
+        seed = await _bootstrap()
+        parent = await surface.admit(seed, "spawn-subagent")
+        _, terminal = await surface.consume(seed, parent)
+        assert terminal["status"] == "done"
+    finally:
+        loop_queue._turn_slot_registry.clear()
+
+
+async def test_member_turns_hold_to_the_slot_bound(
+    surface: Turns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(loop_queue, "MEMBER_TURN_CONCURRENCY", 2)
+    loop_queue._turn_slot_registry.clear()
+    HOLD_STARTED.clear()
+    HOLD_RELEASE.clear()
+    HOLD_TWO_STARTED.clear()
+    try:
+        seeds = [await _bootstrap() for _ in range(3)]
+        turn_ids = [
+            await surface.admit(seed, f"hold-slot {index}") for index, seed in enumerate(seeds)
+        ]
+        assert await asyncio.to_thread(HOLD_TWO_STARTED.wait, STREAM_TIMEOUT_SECONDS)
+        await asyncio.sleep(0.5)
+        assert len(HOLD_STARTED) == 2
+        HOLD_RELEASE.set()
+        results = await asyncio.gather(
+            *(surface.consume(seed, turn_id) for seed, turn_id in zip(seeds, turn_ids, strict=True))
+        )
+        assert len(HOLD_STARTED) == 3
+        assert all(terminal["status"] == "done" for _, terminal in results)
+    finally:
+        HOLD_RELEASE.set()
+        loop_queue._turn_slot_registry.clear()
+
+
+async def test_the_member_slot_gates_only_model_loop_turns() -> None:
+    member = loop_queue._turn_gates(None, MEMBER_ADMISSION)
+    assert len(member) == 1 and isinstance(member[0], asyncio.Semaphore)
+    assert loop_queue._turn_gates(uuid4(), MEMBER_ADMISSION) == ()
+    assert loop_queue._turn_gates(None, INTENT_ADMISSION) == ()
+    scheduled = loop_queue._turn_gates(None, SCHEDULED_ADMISSION)
+    assert len(scheduled) == 2 and scheduled[1] is member[0]
+    assert scheduled[0]._value == loop_queue.SCHEDULED_TURN_CONCURRENCY

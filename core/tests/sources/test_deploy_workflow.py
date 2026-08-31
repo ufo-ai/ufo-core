@@ -4504,9 +4504,9 @@ def test_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
             "testing",
             "db_connections_high",
             "avg(last_15m):avg:aws.rds.database_connections"
-            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 350",
+            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 380",
+            "380",
             "350",
-            "300",
         ),
         (
             "prod",
@@ -4520,9 +4520,9 @@ def test_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
             "prod",
             "db_connections_high",
             "avg(last_15m):avg:aws.rds.database_connections"
-            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 300",
-            "300",
-            "268",
+            "{dbinstanceidentifier:${module.platform.db_instance_identifier}} > 250",
+            "250",
+            "208",
         ),
     ],
 )
