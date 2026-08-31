@@ -1108,10 +1108,22 @@ CASES: tuple[SkillLoadCase, ...] = (
         expected="website-building",
         forbidden=("website-building/webapp",),
     ),
-    # "App" is the word two skills answer to. Here it is a workspace agent — something that holds a
-    # prompt and answers members — and the pair below is the confusion that decides it: an app the
-    # member will talk to routes to `create-application`, an app the member will open in a browser
-    # routes to `website-building`, and each names the other as the wrong pick.
+    # "App" is the word two skills answer to, and the pairs below are the confusion that decides
+    # it: one sentence differing in that word alone, and an app the member will open in a browser
+    # (`webapp-inventory`, which forbids `create-application`) against an app they will talk to.
+    SkillLoadCase(
+        "application-world-clock",
+        "lets build an app that displays the current time across pacific, eastern, and utc time.",
+        expected="create-application",
+        forbidden=("website-building", "website-building/webapp"),
+    ),
+    SkillLoadCase(
+        "site-world-clock",
+        "lets build a website that displays the current time across pacific, eastern, and utc "
+        "time.",
+        expected="website-building",
+        forbidden=("create-application", "website-building/webapp"),
+    ),
     SkillLoadCase(
         "application-new-app",
         "Build me a new app.",

@@ -2284,6 +2284,50 @@ async def test_in_process_target_runs_an_artifact_probe_after_the_turn(db: None,
     assert commands[0][1:] == ("capture app", 17)
 
 
+async def test_artifact_probe_deduplicates_a_shared_artifact(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(blob, workspace_id, _research_transcript())
+    design = SharedArtifact("design.svg", b"<svg/>")
+
+    class Probes:
+        async def run(
+            self,
+            conversation_id: UUID,
+            command: str,
+            timeout_s: int,
+            acting_member_id: UUID | None = None,
+        ) -> SimpleNamespace:
+            raise AssertionError("the artifact probe does not run a command")
+
+    async def capture(output: CapabilityOutput, probe: WorkspaceProbe) -> ArtifactProbeResult:
+        return ArtifactProbeResult(artifacts=(design,))
+
+    ctx = context_for(
+        EXTENSION,
+        frozenset(),
+        blob=blob,
+        invoker=worker,
+        probes=cast(ConversationProbes, Probes()),
+    )
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id, worker),
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+
+    with ws(workspace_id):
+        output = await target.capture_artifacts(
+            uuid4(), CapabilityOutput("", (), artifacts=(design,)), capture
+        )
+
+    assert output.artifacts == (design,)
+    assert output.artifact_error == ""
+
+
 async def test_a_capability_seed_establishes_state_before_the_conversation_opens(
     db: None, tmp_path
 ) -> None:
@@ -4533,6 +4577,35 @@ async def test_target_loads_the_successfully_shared_artifact_for_grading(
     assert oversized.output.artifacts == ()
     assert oversized.output.artifact_references[0].digest == artifact_references[0]["digest"]
     assert oversized.output.artifact_error == "artifact 'site.tar.gz' exceeds 1 bytes"
+
+
+async def test_scenario_step_loads_the_successfully_shared_artifact(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    transcript = (
+        Message(role="user", content="show the design"),
+        Message(role="assistant", content="The design is attached."),
+    )
+    worker = StubWorker(blob, workspace_id, transcript, artifact=("design.svg", b"<svg/>"))
+    ctx = _context(blob, worker)
+    conversations = DbConversations(workspace_id, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=conversations,
+        outcome=CorpusOutcome(ctx),
+        blob=blob,
+    )
+
+    with ws(workspace_id):
+        conversation_id = await conversations.open("shared-design")
+        result = await target.step(conversation_id, "show the design", "shared-design:1")
+
+    assert [(artifact.name, artifact.content) for artifact in result.output.artifacts] == [
+        ("design.svg", b"<svg/>")
+    ]
+    assert result.output.artifact_references[0].name == "design.svg"
 
 
 async def test_target_stages_case_references_before_admission(db: None, tmp_path) -> None:

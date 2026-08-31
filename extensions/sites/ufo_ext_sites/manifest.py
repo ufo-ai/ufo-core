@@ -35,6 +35,7 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_WIREFRAME,
     APPLICATION_BUILDER_WRITE,
     enforce_application_builder_phase,
+    enforce_application_creation_route,
     limit_application_builder_repair_reads,
     require_application_builder_qa,
 )
@@ -81,6 +82,7 @@ def manifest() -> Manifest:
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         skills=(SkillSpec(path=SKILLS_ROOT / SKILL_NAME),),
         hooks=(
+            HookSpec(event="pre_tool_use", handler=enforce_application_creation_route),
             HookSpec(
                 event="pre_tool_use",
                 handler=enforce_application_builder_phase,

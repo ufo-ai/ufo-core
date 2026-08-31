@@ -49,6 +49,7 @@ from ufo.sdk.http import PlainTextResponse, Request, Response, StreamingResponse
 from ufo.sdk.hub import (
     Absorbed,
     Activity,
+    ArtifactsChanged,
     CostTick,
     LiveFrame,
     Parked,
@@ -273,6 +274,8 @@ def directives_for(
             return (directive("txt", frame.text),) if frame.text else ()
         case Activity():
             return (directive("note", frame.text, "activity"),)
+        case ArtifactsChanged():
+            return ()
         case SubagentActivity():
             return _subagent_note(frame)
         case CostTick():

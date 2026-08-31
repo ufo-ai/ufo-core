@@ -33,6 +33,7 @@ from ufo.sdk.http import (
 from ufo.sdk.hub import (
     Absorbed,
     Activity,
+    ArtifactsChanged,
     CostTick,
     LiveFrame,
     Parked,
@@ -201,6 +202,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             kind, payload = b"cost", frame.model_dump_json()
         case Activity():
             kind, payload = b"activity", frame.model_dump_json()
+        case ArtifactsChanged():
+            kind, payload = b"artifacts_changed", frame.model_dump_json()
         case SubagentActivity():
             kind, payload = b"subagent_activity", frame.model_dump_json()
         case Absorbed():

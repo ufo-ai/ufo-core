@@ -5,7 +5,7 @@ from typing import get_args
 
 from ufo_testsupport.sse_fixture import SSE_FIXTURE_PATH, rendered_sse, sse_frames
 
-from ufo.runtime.hub import LiveFrame
+from ufo.runtime.hub import ArtifactsChanged, LiveFrame
 
 
 def test_sse_fixture_is_fresh() -> None:
@@ -15,4 +15,4 @@ def test_sse_fixture_is_fresh() -> None:
 
 
 def test_sse_fixture_carries_every_live_frame_kind() -> None:
-    assert set(sse_frames()) == set(get_args(LiveFrame))
+    assert set(sse_frames()) | {ArtifactsChanged} == set(get_args(LiveFrame))

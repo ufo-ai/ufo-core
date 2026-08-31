@@ -95,7 +95,7 @@ function FileBody({ file }: { file: SharedFile }) {
       />
     );
   }
-  const pictured = file.preview_url ?? (file.media_type.startsWith("image/") ? file.url : null);
+  const pictured = file.preview_url;
   if (pictured === null) {
     return <FileNote>No preview for this file type. Download it to open it.</FileNote>;
   }

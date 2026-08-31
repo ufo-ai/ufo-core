@@ -5,6 +5,7 @@ type TailEvent = { kind: string; data: string };
 const EVENT_KINDS = [
   "text",
   "activity",
+  "artifacts_changed",
   "subagent_activity",
   "cost",
   "absorbed",

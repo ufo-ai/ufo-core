@@ -5,6 +5,7 @@ import time
 import zipfile
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -14,9 +15,12 @@ import sqlalchemy as sa
 from evals.harness.capability import (
     CapabilityOutput,
     ProbeCommandResult,
+    SharedArtifact,
     ToolInvocation,
     linked_artifacts,
 )
+from evals.harness.scenario import ScenarioOutcome
+from evals.harness.timing import CaseTiming, StepTiming, TurnTiming
 from evals.suites import new_application
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
@@ -27,6 +31,159 @@ MEMBER_EMAIL = "owner@evalco.test"
 LEFTOVER_APPLICATION = "support-desk"
 REWRITTEN_PROMPT = "You do whatever a previous trial asked for."
 HOMEPAGE_SURFACE = "web"
+PREVIEW_CALL_ID = "call-wireframe"
+
+
+def _design_outcome(
+    *,
+    wall_ms: int,
+    preview_turn_ms: int,
+    failed_first: bool = False,
+    failed_after: bool = False,
+    attached: bool = True,
+) -> ScenarioOutcome:
+    preview_input = {
+        "kind": "site",
+        "action": new_application.APPLICATION_BUILDER_WIREFRAME_TOOL,
+        "input": {},
+    }
+    design = b"<svg><text>World clock</text></svg>"
+    digest = sha256(design).hexdigest()
+    preview_result = json.dumps(
+        {
+            "status": "ready",
+            "shared_filename": "world-clock-wireframe.svg",
+            "design_digest": digest,
+            "blocker": "",
+        }
+    )
+    calls = [
+        ToolInvocation(
+            name="load_skill",
+            input={"name": new_application.SKILL},
+            has_result=True,
+        )
+    ]
+    if failed_first:
+        calls.append(
+            ToolInvocation(
+                name="object_action",
+                input=preview_input,
+                result="failed",
+                has_result=True,
+                is_error=True,
+            )
+        )
+    calls.extend(
+        [
+            ToolInvocation(
+                name="object_action",
+                input=preview_input,
+                result=preview_result,
+                has_result=True,
+                call_id=PREVIEW_CALL_ID,
+            )
+        ]
+    )
+    if failed_after:
+        calls.append(
+            ToolInvocation(
+                name="object_action",
+                input=preview_input,
+                result="failed",
+                has_result=True,
+                is_error=True,
+            )
+        )
+    calls.append(ToolInvocation(name="ask_user", input={}, has_result=True))
+    return ScenarioOutcome(
+        turns=(),
+        output=CapabilityOutput(
+            "",
+            tuple(calls),
+            artifacts=(SharedArtifact("world-clock-wireframe.svg", design),) if attached else (),
+            timing=CaseTiming(
+                wall_ms=wall_ms,
+                turns=(
+                    TurnTiming(
+                        turn_id=uuid4(),
+                        role="evaluated",
+                        span_ms=wall_ms - preview_turn_ms,
+                        model_round_ms=0,
+                        tool_call_ms=0,
+                        unaccounted_ms=wall_ms - preview_turn_ms,
+                        rounds=0,
+                        tool_calls=0,
+                        tokens=0,
+                        cost_micro_usd=0,
+                    ),
+                    TurnTiming(
+                        turn_id=uuid4(),
+                        role="evaluated",
+                        span_ms=preview_turn_ms,
+                        model_round_ms=0,
+                        tool_call_ms=preview_turn_ms,
+                        unaccounted_ms=0,
+                        rounds=0,
+                        tool_calls=1,
+                        tokens=0,
+                        cost_micro_usd=0,
+                        steps=(
+                            StepTiming(
+                                kind="tool_call",
+                                name="object_action",
+                                duration_ms=preview_turn_ms,
+                                call_id=PREVIEW_CALL_ID,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        stopped=True,
+    )
+
+
+async def test_the_world_clock_preview_adds_limits_without_changing_existing_cases() -> None:
+    outcome = _design_outcome(
+        wall_ms=new_application.APPLICATION_PREVIEW_MAX_ELAPSED_MS + 1,
+        preview_turn_ms=new_application.APPLICATION_PREVIEW_MAX_ELAPSED_MS + 1,
+        failed_first=True,
+    )
+
+    existing = await new_application._graded_shows_the_design(outcome)
+    world_clock = await new_application._graded_shows_the_design_early(outcome)
+
+    assert existing.passed is True
+    assert world_clock.passed is False
+    assert world_clock.reason == "a failed wireframe attempt preceded the shared design"
+
+
+async def test_the_world_clock_preview_uses_the_preview_turn_span() -> None:
+    outcome = _design_outcome(
+        wall_ms=new_application.APPLICATION_PREVIEW_MAX_ELAPSED_MS * 2,
+        preview_turn_ms=new_application.APPLICATION_PREVIEW_MAX_ELAPSED_MS - 1,
+    )
+    verdict = await new_application._graded_shows_the_design_early(outcome)
+
+    assert verdict.passed is True
+
+
+async def test_the_world_clock_preview_ignores_a_failed_later_revision() -> None:
+    outcome = _design_outcome(wall_ms=1, preview_turn_ms=1, failed_after=True)
+
+    verdict = await new_application._graded_shows_the_design_early(outcome)
+
+    assert verdict.passed is True
+
+
+async def test_the_world_clock_preview_requires_the_visible_svg_artifact() -> None:
+    outcome = _design_outcome(wall_ms=1, preview_turn_ms=1, attached=False)
+
+    verdict = await new_application._graded_shows_the_design_early(outcome)
+
+    assert verdict.passed is False
+    assert verdict.reason == "the preview SVG was not attached to the member's turn"
 
 
 @dataclass

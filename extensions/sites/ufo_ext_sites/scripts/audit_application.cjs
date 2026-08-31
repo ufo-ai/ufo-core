@@ -1683,7 +1683,7 @@ async function acceptedDesignHeight(browser, svgPath) {
   }
 }
 
-async function designOnly(svgPath) {
+async function designOnly(svgPath, previewPath) {
   const browser = await chromium.launch();
   const context = await browser.newContext({
     viewport: DESIGN_INITIAL_VIEWPORT,
@@ -1703,6 +1703,7 @@ async function designOnly(svgPath) {
     const geometry = await nativeDesignGeometry(page);
     const regions = await renderedDesignRegions(page, geometry);
     if (blockedRequests) throw new Error('application design must not contain active or external content');
+    if (previewPath) await page.screenshot({ path: previewPath });
     process.stdout.write(JSON.stringify(regions));
   } finally {
     await context.close();
@@ -1894,11 +1895,11 @@ async function interactiveDocument(frame) {
 
 async function main() {
   if (process.argv[2] === '--design') {
-    if (!process.argv[3] || process.argv.length !== 4) {
-      console.error('usage: node app-audit.cjs --design <application-design.svg>');
+    if (!process.argv[3] || process.argv.length < 4 || process.argv.length > 5) {
+      console.error('usage: node app-audit.cjs --design <application-design.svg> [preview.png]');
       process.exit(2);
     }
-    await designOnly(process.argv[3]);
+    await designOnly(process.argv[3], process.argv[4]);
     return;
   }
   const [

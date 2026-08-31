@@ -87,6 +87,20 @@ APPLICATION_ARTIFACT_TIMEOUT_SECONDS = 120
 APPLICATION_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
 APPLICATION_BUNDLE_MAX_BYTES = 2 * 1024 * 1024
 APPLICATION_BUNDLE_MAX_FILES = 1_000
+APPLICATION_PREVIEW_MAX_ELAPSED_MS = 180_000
+APPLICATION_PREVIEW_FORBIDDEN_TOOLS = frozenset(
+    {
+        "bash",
+        "edit",
+        "share_file",
+        "start_server",
+        "website",
+        "write",
+        "action:site:build_website",
+        "action:site:deploy_website",
+        "action:site:publish_website",
+    }
+)
 EXISTING_APPLICATION = "invoice-intake"
 EXISTING_PROMPT = "You file invoices for the finance team. Ask before paying anything."
 SATISFIED_INSTRUCTION = (
@@ -998,6 +1012,73 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
     )
 
 
+async def _graded_shows_the_design_early(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    visible = await _graded_shows_the_design(outcome)
+    if not visible.passed:
+        return visible
+    calls = outcome.output.calls
+    preview_index = next(
+        index for index, call in enumerate(calls) if call.call == PREVIEW_TOOL and call.succeeded
+    )
+    if any(call.call == PREVIEW_TOOL and not call.succeeded for call in calls[:preview_index]):
+        return CapabilityVerdict(False, "a failed wireframe attempt preceded the shared design")
+    preview = calls[preview_index]
+    try:
+        result = ApplicationWireframeResult.model_validate_json(preview.result)
+    except ValueError:
+        return CapabilityVerdict(False, "the wireframe returned no share evidence")
+    content = next(
+        (
+            artifact.content
+            for artifact in outcome.output.artifacts
+            if artifact.name == result.shared_filename
+        ),
+        None,
+    )
+    reference = next(
+        (
+            artifact
+            for artifact in outcome.output.artifact_references
+            if artifact.name == result.shared_filename
+        ),
+        None,
+    )
+    if content is None and reference is None:
+        return CapabilityVerdict(False, "the preview SVG was not attached to the member's turn")
+    if content is not None:
+        digest = sha256(content).hexdigest()
+    elif reference is not None:
+        digest = reference.digest.removeprefix("sha256:")
+    else:
+        raise AssertionError("the attached preview has no artifact evidence")
+    if digest != result.design_digest:
+        return CapabilityVerdict(False, "the attached preview differs from the accepted SVG")
+    prework = tuple(
+        call.call
+        for call in calls[:preview_index]
+        if call.call in APPLICATION_PREVIEW_FORBIDDEN_TOOLS
+    )
+    if prework:
+        return CapabilityVerdict(False, f"worked before the preview: {', '.join(prework)}")
+    timing = outcome.output.timing
+    preview_turn_ms = (
+        next(
+            (
+                turn.span_ms
+                for turn in timing.turns
+                if any(step.call_id == preview.call_id for step in turn.steps)
+            ),
+            None,
+        )
+        if timing is not None and preview.call_id
+        else None
+    )
+    if preview_turn_ms is None or preview_turn_ms > APPLICATION_PREVIEW_MAX_ELAPSED_MS:
+        elapsed = "unknown" if preview_turn_ms is None else str(preview_turn_ms)
+        return CapabilityVerdict(False, f"the preview turn took {elapsed} ms")
+    return visible
+
+
 async def _graded_carries_the_design(outcome: ScenarioOutcome) -> CapabilityVerdict:
     """The accepted design reaches the correctly named application before its build."""
     applies = _agent_applies(outcome.output)
@@ -1537,5 +1618,26 @@ SCENARIOS = (
         ),
         seed=_seeded(),
         digest_tag="new-application:carries-the-design",
+    ),
+    ScenarioCase(
+        "A14-world-clock-shows-the-design",
+        ScenarioUser(
+            reason_for_call="You want a private application that shows the current time in "
+            "Pacific, Eastern, and UTC.",
+            known_info="Only you use it.",
+            task_instructions=(
+                "Send exactly 'lets build an app that displays the current time across pacific, "
+                "eastern, and utc time.' Answer the interview. Stop after the assistant shares "
+                "the design and asks whether to build or change it. Do not approve the build."
+            ),
+        ),
+        DescribedGrader(
+            "the exact reported request loads the application workflow and shares its SVG within "
+            "three minutes before any file, server, website, deploy, or create work",
+            _graded_shows_the_design_early,
+        ),
+        seed=_seeded(),
+        digest_tag="new-application:actions:world-clock-shows-the-design",
+        max_turns=3,
     ),
 )

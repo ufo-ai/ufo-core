@@ -30,6 +30,8 @@ from ufo.host.tools.builtins import (
     _file_tool_result,
 )
 from ufo.runtime.ext.manifest import SubagentProfile
+from ufo.runtime.media.image_previews import IMAGE_PREVIEW_MAX_BYTES
+from ufo.runtime.media.previews import StoredPreview
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, RuntimeSkill, SkillCard, SkillRegistry
 from ufo.runtime.subagents import SubagentRegistry, Subagents
 from ufo.runtime.tools.context import (
@@ -1010,6 +1012,12 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
     at the call and the row is the same one `share_file` writes — which is what every surface
     already uploads from."""
     workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
+    published = 0
+
+    async def publish_artifacts() -> None:
+        nonlocal published
+        published += 1
+
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -1069,11 +1077,26 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
         speaker_member_id=None,
         audience=conversation_audience(None),
         artifact_token_secret="secret",
+        publish_artifacts=publish_artifacts,
     )
+    preview = b"\x89PNG the preview"
+    preview_key = f"artifacts/{uuid4()}/design-preview.png"
     with ws(workspace_id):
-        await ctx.share_artifact("card.png", b"\x89PNG the bytes", "A caption.")
+        await ctx.blob.put(preview_key, preview)
+        await ctx.share_artifact(
+            "design.svg",
+            b"<svg></svg>",
+            "A caption.",
+            preview=StoredPreview(blob_key=preview_key, size_bytes=len(preview)),
+        )
         with pytest.raises(ValueError, match="exceeds"):
             await ctx.share_artifact("huge.png", b"x" * (SHARED_BYTES_LIMIT + 1))
+        with pytest.raises(ValueError, match=r"preview.*exceeds"):
+            await ctx.share_artifact(
+                "design.svg",
+                b"<svg></svg>",
+                preview=StoredPreview(blob_key=preview_key, size_bytes=IMAGE_PREVIEW_MAX_BYTES + 1),
+            )
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -1084,13 +1107,21 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
                         tables.shared_artifact.c.media_type,
                         tables.shared_artifact.c.size_bytes,
                         tables.shared_artifact.c.blob_key,
+                        tables.shared_artifact.c.preview_blob_key,
+                        tables.shared_artifact.c.preview_media_type,
+                        tables.shared_artifact.c.preview_size_bytes,
                     )
                 )
             ).one()
         stored = await ctx.blob.get(row.blob_key)
+        stored_preview = await ctx.blob.get(row.preview_blob_key)
     assert row.turn_id == turn_id
-    assert row.filename == "card.png"
+    assert row.filename == "design.svg"
     assert row.subject == "A caption."
-    assert row.media_type == "image/png"
-    assert row.size_bytes == len(b"\x89PNG the bytes")
-    assert stored == b"\x89PNG the bytes"
+    assert row.media_type == "image/svg+xml"
+    assert row.size_bytes == len(b"<svg></svg>")
+    assert row.preview_media_type == "image/png"
+    assert row.preview_size_bytes == len(preview)
+    assert stored == b"<svg></svg>"
+    assert stored_preview == preview
+    assert published == 1

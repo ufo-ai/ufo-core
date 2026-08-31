@@ -146,6 +146,7 @@ from ufo.runtime.ext.surface import member_message_text
 from ufo.runtime.hub import (
     Absorbed,
     Activity,
+    ArtifactsChanged,
     CostTick,
     Hub,
     LiveFrame,
@@ -1605,6 +1606,7 @@ class TurnEngine:
             models=self.models,
             model_specs=self.model_specs,
             auto_model=self.auto_model,
+            publish_artifacts=lambda: self._publish(ArtifactsChanged()),
         )
         created: dict[ObjectRef, None] = dict.fromkeys(self.turn.created_refs)
         messages: tuple[Message, ...] = ()
@@ -1792,6 +1794,7 @@ class TurnEngine:
             models=self.models,
             model_specs=self.model_specs,
             auto_model=self.auto_model,
+            publish_artifacts=lambda: self._publish(ArtifactsChanged()),
         )
         try:
             if not await self._mark_running():

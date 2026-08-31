@@ -656,7 +656,9 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   as the surface's own answer affordance under the same idempotent admit (first answer wins,
   `admitted_body` confirming which landed), credential prompts collect privately through the
   sealed handoff gated per slot by `credential_prompt_pending`, and the turn's shared files
-  deliver as TTL `artifact_link` downloads read off `shared_artifacts`. The held stream is also
+  deliver as TTL `artifact_link` downloads read off `shared_artifacts`. Each committed share
+  publishes an `ArtifactsChanged` frame, so the live surface reads and draws the file before the
+  terminal frame; the terminal read remains the durable recovery path. The held stream is also
   where a `client`-carrier turn reaches the member's machine: the same connection that tails the
   turn's frames also carries each sandbox op down as one directive and takes its result back as the
   client's next request — the rendezvous the carrier awaits (§Sandboxing), gated so only the member
@@ -876,9 +878,9 @@ breaking a tie two files one turn shared in one instant would otherwise leave un
 Artifacts app lists a file when a member-admitted turn already stood in its conversation when it
 was shared, while a scheduled file from a machine lane stays on its Radar run. A member entering
 the conversation later does not move its earlier files into Artifacts. Opening one pins a viewer
-over the listing that renders what the page honestly can — an image inline, text up to a bounded
-read, and a plain refusal to preview anything else — leaving the download an explicit act rather
-than the click's default.
+over the listing that renders what the page honestly can — a validated raster preview inline, text
+up to a bounded read, and a plain refusal to preview anything else — leaving the download an
+explicit act rather than the click's default. A raw SVG is never drawn in the member's page.
 
 Every secondary panel uses the app kit's right sheet: attachments, sites, object records, forms,
 and scheduled tasks overlay the page without changing its measure. Its header starts with the close
@@ -925,9 +927,10 @@ screen's own pane, the `create-application` skill interviews the member, and the
 app with its own `object_apply` create — the same gate, which admits a create from any speaking
 member and stamps them the owner, so the screen offers the act to every member it draws for. The
   run's own todo board is the only progress signal the pane reads. The application builder's design
-  phase shares one SVG wireframe before the create. The member accepts that artifact or requests one
-  revision. The same builder receives the accepted SVG in the app's first homepage turn, implements
-  it, and binds the page. An admin
+  phase shares one SVG wireframe before the create, with a PNG rendered from the same validated SVG
+  as its member-visible preview. The member accepts that artifact or requests one revision. The same
+  builder receives the accepted SVG in the app's first homepage turn, implements it, and binds the
+  page. An admin
 replaces any existing prompt or setting from the agent page's prepared intent. In chat, only the
 main agent may replace an agent prompt, including its own; a child agent may replace none. The
 agent kind writes the complete row directly, and the turn is the audit record. The

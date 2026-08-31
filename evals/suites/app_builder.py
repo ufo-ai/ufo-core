@@ -13,10 +13,8 @@ The second case is the known failure: a member who states the whole app in one s
 prompt, and `Go ahead` — invites the model to reach for `object_apply` in the first round, and the
 interview requirement is what holds it back; their message named the job, so no board is owed.
 
-The neighbour that shares the word is measured where the harness can decide it: `website-building`
-work legitimately keeps a todo board of its own, so "an app our customers open in a browser" is a
-routing case in the skill-loading catalog (`webapp-inventory`, which forbids `create-application`)
-rather than a trajectory case here.
+The neighbour that shares the word is measured where the harness can decide it. An explicit
+website routes to `website-building`; an explicit app routes to `create-application`.
 """
 
 from ufo_ext_todos import UPDATE_TODO_LIST_TOOL
@@ -28,12 +26,20 @@ from evals.harness.capability import (
     DescribedGrader,
     Grader,
 )
-from evals.harness.scorers import combine, required_tools_scorer, restraint_scorer, skill_scorer
+from evals.harness.scorers import (
+    attempted_tools_scorer,
+    combine,
+    required_tools_scorer,
+    restraint_scorer,
+    skill_scorer,
+)
 
 APPLICATION_SKILL = "create-application"
 SITE_SKILL = "website-building"
 ASK_TOOL = "ask_user"
 CREATE_TOOL = "object_apply"
+APPLICATION_PREVIEW_TOOL = "action:site:design_ufo_application"
+WEBSITE_BUILD_TOOL = "action:site:build_website"
 LOAD_TOOL = "load_skill"
 GUIDED_PHASES = 4
 
@@ -74,6 +80,20 @@ CASES = (
             restraint_scorer((CREATE_TOOL,)),
         ),
         digest_tag="app-builder:opening",
+    ),
+    CapabilityCase(
+        "named-app-holds-the-interview",
+        "lets build an app that displays the current time across pacific, eastern, and utc time.",
+        combine(
+            attempted_tools_scorer(
+                ((LOAD_TOOL, {"name": APPLICATION_SKILL}),),
+                (),
+                (),
+            ),
+            required_tools_scorer((ASK_TOOL,)),
+            restraint_scorer((CREATE_TOOL, APPLICATION_PREVIEW_TOOL, WEBSITE_BUILD_TOOL)),
+        ),
+        digest_tag="app-builder:named-app",
     ),
     CapabilityCase(
         "wizard-holds-the-interview",

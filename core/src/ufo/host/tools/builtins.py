@@ -825,6 +825,8 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     object_names = artifact_object_names(
         [(row.conversation_id, row.filename) for row in identities]
     )
+    if ctx.publish_artifacts is not None:
+        await ctx.publish_artifacts()
     expires_at = artifact_url_expiry(datetime.now(UTC))
     return ToolResult(
         content=(

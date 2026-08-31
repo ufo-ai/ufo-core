@@ -134,8 +134,9 @@ REDIS_HUB_MODULE = Path("extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py")
 TURNSTREAM_MODULE = Path("extensions/web/frontend/src/lib/turnStream.ts")
 DEBUGGER_TAIL_MODULE = Path("extensions/debugger/frontend/src/Tail.tsx")
 FRAME_EXEMPTIONS: dict[str, frozenset[str]] = {
-    "slack ThreadStatus._follow": frozenset({"CostTick", "Reply"}),
-    "slack ThreadProgress._follow": frozenset({"Absorbed", "Reply"}),
+    "web _sse": frozenset({"ArtifactsChanged"}),
+    "slack ThreadStatus._follow": frozenset({"ArtifactsChanged", "CostTick", "Reply"}),
+    "slack ThreadProgress._follow": frozenset({"Absorbed", "ArtifactsChanged", "Reply"}),
 }
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"

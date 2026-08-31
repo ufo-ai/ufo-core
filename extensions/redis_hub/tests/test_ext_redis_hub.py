@@ -31,6 +31,7 @@ from ufo.runtime.hub import (
     Absorbed,
     Activity,
     ArrivalQueued,
+    ArtifactsChanged,
     CostTick,
     HubFrame,
     Parked,
@@ -59,6 +60,7 @@ FRAMES: tuple[HubFrame, ...] = (
     Parked(message="over a spend cap"),
     CostTick(cost_micro_usd=110, tokens=10),
     Activity(text="Listing the workspace."),
+    ArtifactsChanged(),
     Absorbed(arrivals=(UUID(int=7), UUID(int=8))),
     ArrivalQueued(arrival_id=UUID(int=12)),
     SubagentActivity(

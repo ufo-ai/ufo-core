@@ -209,6 +209,7 @@ from ufo.runtime.ext.surface import (
 from ufo.runtime.hub import (
     Absorbed,
     Activity,
+    ArtifactsChanged,
     CostTick,
     InProcessHub,
     LiveFrame,
@@ -397,7 +398,7 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
             profile="general_purpose",
         ),
     }
-    assert set(frames) == set(get_args(LiveFrame))
+    assert set(frames) | {ArtifactsChanged} == set(get_args(LiveFrame))
     named = {
         Terminal: b"event: terminal\n",
         Parked: b"event: parked\n",
@@ -8513,6 +8514,78 @@ async def test_shared_files_stream_and_reload_as_download_links(
     assert reloaded["report.md"]["preview_url"].startswith("https://web/artifacts/")
     assert reloaded["portrait.jpg"]["media_type"] == "image/jpeg"
     assert reloaded["portrait.jpg"]["preview_url"].startswith("https://web/artifacts/")
+
+
+async def test_a_shared_file_streams_before_the_turn_ends(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    client, workspace_id, agent_id = web
+    _config, hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, _first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Ready."),
+    )
+    running = uuid4()
+    artifact_key = f"artifacts/{uuid4()}/world-clock-wireframe.svg"
+    preview_key = f"artifacts/{uuid4()}/world-clock-wireframe.png"
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=running,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound="build a world clock app",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    STREAM_GATE.arm()
+    tailing = asyncio.ensure_future(_collect_events(client, token, running))
+    await hub.publish(running, TextDelta(text="Drawing the design."))
+    with ws(workspace_id):
+        await blob.put(artifact_key, b"<svg></svg>")
+        await blob.put(preview_key, b"\x89PNG preview")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=running,
+                blob_key=artifact_key,
+                workspace_id=workspace_id,
+                filename="world-clock-wireframe.svg",
+                subject="Application wireframe",
+                media_type="image/svg+xml",
+                size_bytes=11,
+                preview_blob_key=preview_key,
+                preview_media_type="image/png",
+                preview_size_bytes=12,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await hub.publish(running, ArtifactsChanged())
+    await hub.publish(
+        running,
+        Terminal(frame=TerminalFrame(status="done", text="Review this design.")),
+    )
+
+    events = await tailing
+
+    names = [name for name, _payload in events]
+    assert names.count("files") == 1
+    assert names.index("files") < names.index("terminal")
+    files = dict(events)["files"]["files"]
+    assert [file["filename"] for file in files] == ["world-clock-wireframe.svg"]
+    assert files[0]["preview_url"].startswith("https://web/artifacts/")
+    assert "&preview=" in files[0]["preview_url"]
 
 
 FRAMED_PAGE_ORIGIN = "https://siwnfzm3trn3jahsxigamfhuh56n74adgc6q.sites.example/"

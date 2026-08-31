@@ -69,10 +69,13 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_SKILL,
     APPLICATION_BUILDER_WIREFRAME_TOOL,
     APPLICATION_BUILDER_WRITE_TOOL,
+    APPLICATION_CREATION_ROUTE_KEY,
+    APPLICATION_CREATION_ROUTE_REASON,
     APPLICATION_DESIGN_ACCEPT,
     APPLICATION_DESIGN_AUDIT_MAX_BYTES,
     APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS,
     APPLICATION_DESIGN_PATH,
+    APPLICATION_DESIGN_PREVIEW_RELATIVE,
     APPLICATION_DESIGN_RELEASE_ACCEPTED,
     APPLICATION_DESIGN_RELEASE_CLAIM,
     APPLICATION_FIXED_CALL_CLAIM,
@@ -107,6 +110,8 @@ from ufo_ext_sites.application_builder import (
     design_ufo_application,
     edit_application_source,
     enforce_application_builder_phase,
+    enforce_application_creation_route,
+    is_application_creation_request,
     limit_application_builder_repair_reads,
     read_application_source,
     require_application_builder_qa,
@@ -202,13 +207,14 @@ from ufo.harness.sandbox.session import (
     SandboxHandle,
 )
 from ufo.host.ext.loader import skill_registry
-from ufo.host.tools.builtins import BUILTIN_TOOLS
+from ufo.host.tools.builtins import BUILTIN_TOOLS, LoadSkillInput
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import TurnEngine
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.hub import InProcessHub
+from ufo.runtime.media.previews import StoredPreview
 from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH
 from ufo.runtime.object_scope import ObjectActionTarget
 from ufo.runtime.prompts.render import rendered_prompt
@@ -220,7 +226,7 @@ from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import ActivitySummarizer
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn, Usage
+from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION, Agent, ToolIntent, Turn, Usage
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.manifest import Deny, HookContext, PreToolUse
 from ufo.sdk.objects import AGENT_KIND
@@ -321,6 +327,7 @@ class FakeSandbox:
             stdout=json.dumps(AUDIT_DESIGN_REGIONS), stderr="", exit_code=0
         )
     )
+    design_preview: bytes = b"\x89PNG application wireframe"
     handle: SandboxHandle = field(
         default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="sites-test")
     )
@@ -459,6 +466,7 @@ class FakeSandbox:
         if "--design" in script:
             if self.design_audit_barrier is not None:
                 await self.design_audit_barrier.wait()
+            self.writes[args[2]] = self.design_preview
             return self.design_audit
         for needle, result in self.scripted_shells.items():
             if needle in script:
@@ -658,6 +666,7 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     assert "publish_website" not in profile.tool_names
     assert "this conversation's sandbox" in build.description
     assert [(hook.event, hook.tools) for hook in manifest.hooks] == [
+        ("pre_tool_use", ()),
         (
             "pre_tool_use",
             (
@@ -682,6 +691,113 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     ]
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
+
+
+def test_application_creation_route_recognizes_apps_not_sites() -> None:
+    for text in (
+        "lets build an app that displays the current time across pacific, eastern, and utc time.",
+        "Build me a new app.",
+        "Set up an application for invoice intake.",
+        "Create another support app.",
+    ):
+        assert is_application_creation_request(text)
+    for text in (
+        "Build a website that displays the current time.",
+        "Build a web app with a persistent backend.",
+        "Change the application homepage.",
+        "Show me the apps in this workspace.",
+        "Build an internal project board.",
+        "Build a full-stack inventory app with authentication and a persistent database.",
+        "Set up Slack in the wiki app.",
+        "Set up this app.",
+        "Show me the new apps in this workspace.",
+        "Fix the bug in the new app I made yesterday.",
+        "Add a chart to my new app.",
+        "Rename the new application.",
+        "Build a Slack app.",
+        "Build a mobile app.",
+        "Build a desktop application.",
+    ):
+        assert not is_application_creation_request(text)
+
+
+async def test_application_creation_route_requires_its_skill(tmp_path: Path) -> None:
+    base = _context(FakeSandbox(), tmp_path)
+    turn = base.turn.model_copy(
+        update={
+            "inbound": "Build an app that displays three time zones.",
+            "speaker_member_id": uuid4(),
+            "admission_source": MEMBER_ADMISSION,
+        }
+    )
+    store = FakeHookStore()
+    ext = cast(ExtensionContext, FakeHookExt(store))
+    agent = base.agent.model_copy(update={"is_main": True})
+
+    def hook(payload: PreToolUse) -> HookContext:
+        return HookContext(ext=ext, payload=payload, turn=turn, agent=agent)
+
+    refused = await enforce_application_creation_route(
+        hook(PreToolUse(tool_name="write", tool_input=BuildUfoApplicationInput()))
+    )
+    assert isinstance(refused, Deny)
+    assert refused.reason == APPLICATION_CREATION_ROUTE_REASON
+    wrong_skill = LoadSkillInput(name="website-building")
+    wrong = await enforce_application_creation_route(
+        hook(PreToolUse(tool_name="load_skill", tool_input=wrong_skill))
+    )
+    assert isinstance(wrong, Deny)
+    assert wrong.reason == APPLICATION_CREATION_ROUTE_REASON
+    load = LoadSkillInput(name="create-application")
+    assert (
+        await enforce_application_creation_route(
+            hook(PreToolUse(tool_name="load_skill", tool_input=load))
+        )
+        is None
+    )
+    assert store.values[APPLICATION_CREATION_ROUTE_KEY.format(turn_id=turn.id)] is True
+    assert (
+        await enforce_application_creation_route(
+            hook(PreToolUse(tool_name="load_skill", tool_input=wrong_skill))
+        )
+        is None
+    )
+    assert (
+        await enforce_application_creation_route(
+            hook(PreToolUse(tool_name="write", tool_input=BuildUfoApplicationInput()))
+        )
+        is None
+    )
+
+
+async def test_application_creation_route_leaves_a_prepared_intent_alone(tmp_path: Path) -> None:
+    base = _context(FakeSandbox(), tmp_path)
+    turn = base.turn.model_copy(
+        update={
+            "inbound": ToolIntent(
+                tool="object_apply",
+                input={
+                    "kind": "agent",
+                    "name": "finance-app",
+                    "spec": {"prompt": "Set up an application that files new invoices."},
+                },
+            ).model_dump_json(),
+            "speaker_member_id": uuid4(),
+            "admission_source": INTENT_ADMISSION,
+        }
+    )
+    store = FakeHookStore()
+    ext = cast(ExtensionContext, FakeHookExt(store))
+    agent = base.agent.model_copy(update={"is_main": True})
+    assert is_application_creation_request(turn.inbound)
+    payload = PreToolUse(tool_name="object_apply", tool_input=BuildUfoApplicationInput())
+    assert (
+        await enforce_application_creation_route(
+            HookContext(ext=ext, payload=payload, turn=turn, agent=agent)
+        )
+        is None
+    )
+    assert store.values == {}
 
 
 def test_hosting_writes_declare_side_effecting() -> None:
@@ -2955,15 +3071,34 @@ async def test_application_wireframe_shares_and_stores_the_builder_svg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sandbox = FakeSandbox()
-    shared: list[tuple[str, bytes, str | None]] = []
+    shared: list[tuple[str, bytes, str | None, StoredPreview | None]] = []
     design = APPLICATION_DESIGN.encode()
     digest = sha256(design).hexdigest()
     captured: dict[str, object] = {}
 
     async def _share(
-        _ctx: ToolContext, filename: str, data: bytes, subject: str | None = None
+        _ctx: ToolContext,
+        filename: str,
+        data: bytes,
+        subject: str | None = None,
+        *,
+        preview: StoredPreview | None = None,
     ) -> None:
-        shared.append((filename, data, subject))
+        shared.append((filename, data, subject, preview))
+
+    async def _store_preview(
+        _ctx: ToolContext, path: str, name: str, *, extension: str = "png"
+    ) -> StoredPreview:
+        assert path == (
+            f"{RUNTIME_ROOT}/{APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=digest)}"
+        )
+        assert sandbox.writes[path] == sandbox.design_preview
+        assert name == f"support-desk-wireframe-{digest[:12]}-preview"
+        assert extension == "png"
+        return StoredPreview(
+            blob_key=f"artifacts/{uuid4()}/{name}.png",
+            size_bytes=len(sandbox.design_preview),
+        )
 
     async def _capture(
         profile: str,
@@ -2975,6 +3110,13 @@ async def test_application_wireframe_shares_and_stores_the_builder_svg(
         captured["payload"] = payload
         captured["dedup_key"] = dedup_key
         sandbox.writes[APPLICATION_DESIGN_PATH] = design
+        sandbox.writes[
+            f"{RUNTIME_ROOT}/{APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=digest)}"
+        ] = sandbox.design_preview
+        rejected = sha256(APPLICATION_DESIGN.replace("183", "170").encode()).hexdigest()
+        sandbox.writes[
+            f"{RUNTIME_ROOT}/{APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=rejected)}"
+        ] = b"\x89PNG rejected wireframe"
         return SpawnResult(
             turn_id=uuid4(),
             conversation_id=uuid4(),
@@ -2987,6 +3129,7 @@ async def test_application_wireframe_shares_and_stores_the_builder_svg(
         )
 
     monkeypatch.setattr(ToolContext, "share_artifact", _share)
+    monkeypatch.setattr(ToolContext, "store_preview", _store_preview)
     store = FakeHookStore()
     ctx = replace(
         _application_context(sandbox, tmp_path),
@@ -3019,9 +3162,10 @@ async def test_application_wireframe_shares_and_stores_the_builder_svg(
         },
         "dedup_key": "turn-1/design_ufo_application/call-1",
     }
-    assert shared == [
-        (rendered.shared_filename, design, "Application wireframe"),
-    ]
+    assert shared[0][:3] == (rendered.shared_filename, design, "Application wireframe")
+    assert shared[0][3] is not None
+    assert shared[0][3].blob_key.endswith(".png")
+    assert shared[0][3].size_bytes == len(sandbox.design_preview)
     stored = AcceptedApplicationWireframe.model_validate(
         store.values["application-wireframe/support-desk"]
     )
@@ -3041,9 +3185,22 @@ async def test_wireframe_revision_replaces_the_stored_svg_only_after_share(
     revised_digest = sha256(revised).hexdigest()
 
     async def _refuse_share(
-        _ctx: ToolContext, filename: str, data: bytes, subject: str | None = None
+        _ctx: ToolContext,
+        filename: str,
+        data: bytes,
+        subject: str | None = None,
+        *,
+        preview: StoredPreview | None = None,
     ) -> None:
         raise RuntimeError("share failed")
+
+    async def _store_preview(
+        _ctx: ToolContext, path: str, name: str, *, extension: str = "png"
+    ) -> StoredPreview:
+        return StoredPreview(
+            blob_key=f"artifacts/{uuid4()}/{name}.{extension}",
+            size_bytes=len(sandbox.design_preview),
+        )
 
     async def _capture(
         profile: str,
@@ -3064,6 +3221,7 @@ async def test_wireframe_revision_replaces_the_stored_svg_only_after_share(
         )
 
     monkeypatch.setattr(ToolContext, "share_artifact", _refuse_share)
+    monkeypatch.setattr(ToolContext, "store_preview", _store_preview)
     store = FakeHookStore(values={"application-wireframe/support-desk": prior})
     sandbox = FakeSandbox()
     ctx = replace(
@@ -5100,6 +5258,11 @@ async def test_application_builder_design_audit_failure_leaves_design_repairable
 
     payload = json.loads(result.content[0].text)
     assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+    preview_path = await sandbox.runtime_path(
+        APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=payload["design_digest"])
+    )
+    assert sandbox.shells[-1][1][-1] == preview_path
+    assert sandbox.writes[preview_path] == sandbox.design_preview
 
 
 async def test_application_builder_accepts_one_corrected_native_design(tmp_path: Path) -> None:
@@ -5454,11 +5617,70 @@ async def test_application_builder_same_turn_accepts_the_candidate_it_audited(
     }
     assert len(candidates) == 2
     assert set(candidates.values()) == {first_design.encode(), second_design.encode()}
+    assert {path for path in sandbox.writes if path.endswith(".design.png")} == {
+        f"{RUNTIME_ROOT}/"
+        + APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=sha256(design.encode()).hexdigest())
+        for design in (first_design, second_design)
+    }
     design_path = "/workspace/application/application-design.svg"
     accepted_path = (
         f"{RUNTIME_ROOT}/{application_design_acceptance_relative(design_path, ctx.turn.id)}"
     )
     assert sandbox.writes[accepted_path] == sandbox.writes[design_path]
+
+
+async def test_application_builder_rejected_second_design_keeps_the_accepted_preview(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    accepted_design = APPLICATION_DESIGN
+    rejected_design = APPLICATION_DESIGN.replace("183", "170")
+    sandbox = FakeSandbox(track_design_claim=True)
+    base = _context(sandbox, tmp_path)
+    ctx = _application_design_context(
+        replace(
+            base,
+            turn=base.turn.model_copy(
+                update={
+                    "inbound": task.model_dump_json(),
+                    "subagent_profile": APPLICATION_BUILDER_NAME,
+                }
+            ),
+        )
+    )
+    accepted_preview_path = f"{RUNTIME_ROOT}/" + APPLICATION_DESIGN_PREVIEW_RELATIVE.format(
+        digest=sha256(accepted_design.encode()).hexdigest()
+    )
+    rejected_preview_path = f"{RUNTIME_ROOT}/" + APPLICATION_DESIGN_PREVIEW_RELATIVE.format(
+        digest=sha256(rejected_design.encode()).hexdigest()
+    )
+
+    accepted = await write_application_design(
+        ctx, WriteApplicationDesignInput(content=accepted_design)
+    )
+
+    assert json.loads(accepted.content[0].text)["design_digest"] == (
+        sha256(accepted_design.encode()).hexdigest()
+    )
+    assert sandbox.writes[accepted_preview_path] == sandbox.design_preview
+    sandbox.design_preview = b"\x89PNG rejected wireframe"
+
+    with pytest.raises(ValueError, match="already fixed"):
+        await write_application_design(
+            replace(
+                ctx,
+                idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-2",
+            ),
+            WriteApplicationDesignInput(content=rejected_design),
+        )
+
+    assert accepted_preview_path != rejected_preview_path
+    assert sandbox.writes[accepted_preview_path] == b"\x89PNG application wireframe"
+    assert sandbox.writes[rejected_preview_path] == b"\x89PNG rejected wireframe"
 
 
 async def test_application_audit_uses_durable_turn_evidence_without_requesting_the_svg(

@@ -408,9 +408,9 @@ class InProcessTarget:
             raise RuntimeError("an artifact probe returned an invalid result")
         if not 0 < captured.max_payload_bytes <= MAX_ARTIFACT_PAYLOAD_BYTES:
             raise RuntimeError("an artifact probe returned an invalid payload budget")
-        names = [artifact.name for artifact in (*output.artifacts, *captured.artifacts)]
-        if len(names) != len(set(names)):
-            raise RuntimeError("an artifact probe produced a duplicate artifact name")
+        output_digests = {
+            artifact.name: sha256(artifact.content).hexdigest() for artifact in output.artifacts
+        }
         durable = {
             (reference.name, reference.digest, reference.size_bytes)
             for reference in output.artifact_references
@@ -440,6 +440,11 @@ class InProcessTarget:
         for artifact in captured.artifacts:
             size = len(artifact.content)
             digest = f"sha256:{sha256(artifact.content).hexdigest()}"
+            prior_digest = output_digests.get(artifact.name)
+            if prior_digest == digest.removeprefix("sha256:"):
+                continue
+            if prior_digest is not None:
+                raise RuntimeError("an artifact probe produced a duplicate artifact name")
             exceeds_entry = size > captured.max_payload_bytes
             exceeds_total = captured_total + size > captured.max_payload_bytes
             exceeds_offline_total = total + size > MAX_ARTIFACT_PAYLOAD_BYTES
@@ -739,8 +744,7 @@ class InProcessTarget:
 
     async def step(self, conversation_id: UUID, message: str, idempotency_key: str) -> TargetResult:
         """Drive one member turn on an existing conversation and reconstruct its result — the
-        scenario runner's per-exchange seam. Log and artifact enrichment stay with `run`; a
-        scenario grader reads durable state itself."""
+        scenario runner's per-exchange seam."""
         started = perf_counter()
         try:
             turn_id = await self.conversations.admit(conversation_id, message, idempotency_key)
@@ -748,7 +752,19 @@ class InProcessTarget:
             return _invoke_failure(conversation_id, error)
         settled = await self._settled(conversation_id, turn_id, message)
         wall_ms = round((perf_counter() - started) * 1_000)
-        return await self._record_timing(settled, turn_id, wall_ms)
+        result = await self._record_timing(settled, turn_id, wall_ms)
+        if self.blob is None:
+            return result
+        collected = await self._shared_artifacts((turn_id, *settled.descendant_ids))
+        return replace(
+            result,
+            output=replace(
+                result.output,
+                artifacts=collected.artifacts,
+                artifact_references=collected.references,
+                artifact_error=collected.error,
+            ),
+        )
 
     async def invoke(
         self,

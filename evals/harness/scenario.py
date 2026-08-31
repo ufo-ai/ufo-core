@@ -330,6 +330,32 @@ class _ScenarioRun:
                 conversation_id, message, f"{case.name}:{conversation_id}:{index}"
             )
             turns.append(ScenarioTurn(message, result.output.response))
+            if last is not None:
+                artifacts = tuple(dict.fromkeys((*last.output.artifacts, *result.output.artifacts)))
+                references = tuple(
+                    dict.fromkeys(
+                        (*last.output.artifact_references, *result.output.artifact_references)
+                    )
+                )
+                artifact_errors = tuple(
+                    dict.fromkeys(
+                        error
+                        for error in (
+                            last.output.artifact_error,
+                            result.output.artifact_error,
+                        )
+                        if error
+                    )
+                )
+                result = replace(
+                    result,
+                    output=replace(
+                        result.output,
+                        artifacts=artifacts,
+                        artifact_references=references,
+                        artifact_error="; ".join(artifact_errors),
+                    ),
+                )
             if result.output.timing is not None:
                 timings.append(result.output.timing)
             handoffs.extend(result.output.handoffs)

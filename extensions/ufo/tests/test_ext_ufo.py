@@ -69,6 +69,7 @@ from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthAccount, ins
 from ufo.runtime.hub import (
     Absorbed,
     Activity,
+    ArtifactsChanged,
     CostTick,
     InProcessHub,
     Parked,
@@ -136,6 +137,7 @@ def test_frame_map_covers_every_live_frame() -> None:
     assert directives_for(Activity(text="Listing the workspace."), False) == (
         b"note\tListing the workspace.\tactivity\n",
     )
+    assert directives_for(ArtifactsChanged(), False) == ()
     assert directives_for(Resumed(attempt="attempt-one"), False) == (
         b"note\tthe service restarted; this turn resumed\n",
     )

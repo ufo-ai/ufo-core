@@ -713,6 +713,13 @@ async def test_share_file_delivers_a_list_in_share_order(
     rows' `created_at` stamps carry the list order — `(created_at, blob_key)` is what every surface
     sorts shared files by, so the order must never fall to the random blob key."""
     ctx, _ = file_ctx
+    published = 0
+
+    async def publish_artifacts() -> None:
+        nonlocal published
+        published += 1
+
+    ctx = replace(ctx, publish_artifacts=publish_artifacts)
     await _seed_turn_rows(ctx.turn)
     bodies = {name: f"{name} body\n".encode() for name in ("one.txt", "two.txt", "three.txt")}
     for name, body in bodies.items():
@@ -751,6 +758,7 @@ async def test_share_file_delivers_a_list_in_share_order(
         ("renamed_three.txt", None),
     ]
     assert len({row.created_at for row in rows}) == 3
+    assert published == 1
 
 
 async def _shared_row(blob_key: str) -> sa.Row:

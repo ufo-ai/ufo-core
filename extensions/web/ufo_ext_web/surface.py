@@ -69,6 +69,7 @@ from ufo.sdk.http import (
 from ufo.sdk.hub import (
     Absorbed,
     Activity,
+    ArtifactsChanged,
     CostTick,
     LiveFrame,
     Parked,
@@ -4223,8 +4224,9 @@ async def stream(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
-def _event(name: str, payload: dict[str, object]) -> bytes:
-    return f"event: {name}\ndata: ".encode() + json.dumps(payload).encode() + b"\n\n"
+def _event(name: str, payload: dict[str, object], cursor: str = "") -> bytes:
+    head = f"id: {cursor}\n".encode() if cursor else b""
+    return head + f"event: {name}\ndata: ".encode() + json.dumps(payload).encode() + b"\n\n"
 
 
 async def _pending_prompts(
@@ -4311,7 +4313,14 @@ async def _events(
     and nobody else, since the grant lands on whoever presses, and only where the deploy holds the
     machinery a press would need."""
     async with ctx.tail(turn_id, since) as frames:
+        shared_keys: tuple[str, ...] = ()
         async for cursor, frame in frames:
+            if isinstance(frame, ArtifactsChanged):
+                artifacts = await ctx.shared_artifacts(turn_id)
+                shared_keys = tuple(artifact.blob_key for artifact in artifacts)
+                files = [_file_payload(ctx, artifact) for artifact in artifacts]
+                yield _event("files", {"files": files}, cursor)
+                continue
             if isinstance(frame, Terminal):
                 detail = await ctx.turn_detail(turn_id)
                 if detail is not None:
@@ -4336,11 +4345,12 @@ async def _events(
                     prompts = await _pending_prompts(ctx, frame.frame.credential_request, member_id)
                     if prompts is not None:
                         yield _event("credentials", prompts)
-                files = [
-                    _file_payload(ctx, artifact) for artifact in await ctx.shared_artifacts(turn_id)
-                ]
-                if files:
-                    yield _event("files", {"files": files})
+                artifacts = await ctx.shared_artifacts(turn_id)
+                keys = tuple(artifact.blob_key for artifact in artifacts)
+                if artifacts and keys != shared_keys:
+                    yield _event(
+                        "files", {"files": [_file_payload(ctx, artifact) for artifact in artifacts]}
+                    )
                 if frame.frame.created:
                     audience = await web_audience(ctx, web_extension(), email)
                     apps = await _created_apps(

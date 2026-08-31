@@ -54,7 +54,7 @@ test("a file sheet owns the shared title, metadata, preview, and download", () =
         media_type: "image/png",
         size_bytes: 2048,
         url: "/files/report.png",
-        preview_url: null,
+        preview_url: "/previews/report.png",
       }}
       onClose={() => {}}
       details={<div>Shared by Mel</div>}
@@ -65,10 +65,33 @@ test("a file sheet owns the shared title, metadata, preview, and download", () =
   expect(within(sheet).getByText("Quarterly report · image/png · 2 kB")).toBeTruthy();
   expect(within(sheet).getByText("Shared by Mel")).toBeTruthy();
   expect(within(sheet).getByRole("img", { name: "Quarterly report" }).getAttribute("src")).toBe(
-    "/files/report.png",
+    "/previews/report.png",
   );
   expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
     "/files/report.png",
+  );
+});
+
+test("a file sheet never draws raw SVG bytes", () => {
+  render(
+    <FileSheet
+      file={{
+        filename: "design.svg",
+        subject: "Application wireframe",
+        media_type: "image/svg+xml",
+        size_bytes: 2048,
+        url: "/files/design.svg",
+        preview_url: null,
+      }}
+      onClose={() => {}}
+    />,
+  );
+
+  const sheet = screen.getByRole("dialog", { name: "design.svg" });
+  expect(within(sheet).queryByRole("img")).toBeNull();
+  expect(within(sheet).getByText("No preview for this file type. Download it to open it.")).toBeTruthy();
+  expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
+    "/files/design.svg",
   );
 });
 
@@ -1103,4 +1126,3 @@ test("under a band, a header naming a step past it draws its crumb and its close
   expect(shut).toHaveBeenCalledOnce();
   expect(document.querySelector("[data-slot=page-acts]")).toBeNull();
 });
-

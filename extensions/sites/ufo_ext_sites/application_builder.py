@@ -28,6 +28,7 @@ from ufo.sdk.manifest import (
     SubagentProfile,
 )
 from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, ExecResult, contained_relative
+from ufo.sdk.surfaces import MEMBER_ADMISSION
 from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
@@ -76,10 +77,31 @@ APPLICATION_BUILDER_REPAIR_READ_KEY = "application-builder/repair-read/{turn_id}
 APPLICATION_BUILDER_REPAIR_READ_REASON = (
     "Three repair source reads are complete. Edit the source, run product QA, and deploy again."
 )
+APPLICATION_CREATION_SKILL = "create-application"
+APPLICATION_CREATION_ROUTE_KEY = "application-builder/route/{turn_id}"
+APPLICATION_CREATION_REQUEST = re.compile(
+    r"\b(?:build|create|make|set\s+up|spin\s+up)\s+"
+    r"(?:(?:me|us)\s+)?(?:"
+    r"(?:app|application)s?\b|"
+    r"(?:a|an|another|new)\s+(?:[\w-]+\s+){0,3}(?:app|application)s?\b"
+    r")",
+    re.IGNORECASE,
+)
+APPLICATION_CREATION_SITE = re.compile(
+    r"\b(?:website|web\s+site|webpage|web\s+page|standalone\s+page|"
+    r"web\s+(?:app|application)|browser\s+(?:app|application)|homepage|"
+    r"(?:slack|mobile|desktop)\s+(?:app|application)|full[-\s]stack)\b",
+    re.IGNORECASE,
+)
+APPLICATION_CREATION_ROUTE_REASON = (
+    "This member asked to create a ufo application. Load create-application before using any "
+    "other tool."
+)
 APPLICATION_BUILDER_DEPLOY_GUARD_REASON = "Run and pass product QA before deployment."
 APPLICATION_SCAFFOLD_PATH = "/workspace/ufo-app"
 APPLICATION_SOURCE_PATH = f"{APPLICATION_SCAFFOLD_PATH}/app.tsx"
 APPLICATION_DESIGN_PATH = f"{APPLICATION_SCAFFOLD_PATH}/application-design.svg"
+APPLICATION_DESIGN_PREVIEW_RELATIVE = "tool-output/application-builder/{digest}.design.png"
 APPLICATION_WIREFRAME_KEY = "application-wireframe/{name}"
 APPLICATION_WIREFRAME_FILENAME = "{name}-wireframe-{digest}.svg"
 APPLICATION_BUILDER_PROMPT = (
@@ -1261,15 +1283,20 @@ async def _source_candidate_path(
 
 
 async def _render_application_design(
-    ctx: ToolContext, candidate_path: str, names: tuple[str, ...], page_height: int
+    ctx: ToolContext,
+    candidate_path: str,
+    preview_path: str,
+    names: tuple[str, ...],
+    page_height: int,
 ) -> tuple[ApplicationAuditRegion, ...]:
     script_relative = f"tool-output/application-builder/{ctx.turn.id}/audit-application.cjs"
     script_path = await ctx.sandbox.runtime_path(script_relative)
     await ctx.sandbox.write_runtime_file(script_relative, APPLICATION_AUDIT_SCRIPT)
     rendered = await ctx.sandbox.sh(
-        'node "$1" --design "$2"',
+        'node "$1" --design "$2" "$3"',
         script_path,
         candidate_path,
+        preview_path,
         timeout_s=APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS,
     )
     if rendered.exit_code != 0:
@@ -1379,7 +1406,15 @@ async def write_application_design(
         application_design_acceptance_relative(design_path, ctx.turn.id)
     )
     await ctx.sandbox.write_runtime_path(candidate_path, content)
-    rendered_regions = await _render_application_design(ctx, candidate_path, names, page_height)
+    rendered_regions = await _render_application_design(
+        ctx,
+        candidate_path,
+        await ctx.sandbox.runtime_path(
+            APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=content_sha256)
+        ),
+        names,
+        page_height,
+    )
     if size_failure := application_design_region_size_failure(rendered_regions, page_height):
         raise ValueError(size_failure)
     if fold_failure := application_design_region_fold_failure(rendered_regions, page_height):
@@ -1733,7 +1768,13 @@ async def design_ufo_application(ctx: ToolContext, args: DesignUfoApplicationInp
     if worker.design_digest != digest:
         raise RuntimeError("the application builder wireframe digest does not match")
     filename = APPLICATION_WIREFRAME_FILENAME.format(name=args.application_name, digest=digest[:12])
-    await ctx.share_artifact(filename, content, "Application wireframe")
+    preview = await ctx.store_preview(
+        await ctx.sandbox.runtime_path(APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=digest)),
+        f"{PurePosixPath(filename).stem}-preview",
+    )
+    if preview is None:
+        raise RuntimeError("the application builder wireframe preview is missing")
+    await ctx.share_artifact(filename, content, "Application wireframe", preview=preview)
     await ctx.ext.store.put(
         APPLICATION_WIREFRAME_KEY.format(name=args.application_name),
         AcceptedApplicationWireframe(
@@ -1901,6 +1942,39 @@ async def enforce_application_builder_phase(ctx: HookContext) -> Deny | None:
         return Deny(reason="The wireframe phase can only read style and write its SVG design.")
     if task.accepted_design_digest and ctx.payload.tool_name == APPLICATION_BUILDER_DESIGN_TOOL:
         return Deny(reason="The member already accepted the application wireframe.")
+    return None
+
+
+def is_application_creation_request(text: str) -> bool:
+    return (
+        APPLICATION_CREATION_REQUEST.search(text) is not None
+        and APPLICATION_CREATION_SITE.search(text) is None
+    )
+
+
+async def enforce_application_creation_route(ctx: HookContext) -> Deny | None:
+    if (
+        ctx.turn is None
+        or ctx.agent is None
+        or not ctx.agent.is_main
+        or ctx.turn.subagent_profile is not None
+        or ctx.turn.speaker_member_id is None
+        or ctx.turn.admission_source != MEMBER_ADMISSION
+        or not is_application_creation_request(ctx.turn.inbound)
+    ):
+        return None
+    key = APPLICATION_CREATION_ROUTE_KEY.format(turn_id=ctx.turn.id)
+    match ctx.payload:
+        case PreToolUse(tool_name="load_skill", tool_input=tool_input):
+            if await ctx.ext.store.get(key) is not None:
+                return None
+            if tool_input.model_dump().get("name") != APPLICATION_CREATION_SKILL:
+                return Deny(reason=APPLICATION_CREATION_ROUTE_REASON)
+            await ctx.ext.store.put(key, True)
+            return None
+        case PreToolUse():
+            if await ctx.ext.store.get(key) is None:
+                return Deny(reason=APPLICATION_CREATION_ROUTE_REASON)
     return None
 
 

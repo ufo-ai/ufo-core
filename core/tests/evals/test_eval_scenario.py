@@ -62,6 +62,7 @@ class ScriptedWorker:
     replies: tuple[tuple[Message, ...], ...]
     statuses: tuple[str, ...] = ()
     error_classes: tuple[str, ...] = ()
+    artifacts: tuple[tuple[str, bytes] | None, ...] = ()
     invoked: int = 0
     idempotency_keys: list[str] = field(default_factory=list)
     speakers: list[UUID | None] = field(default_factory=list)
@@ -107,6 +108,26 @@ class ScriptedWorker:
                     updated_at=sa.func.now(),
                 )
             )
+        artifact = self.artifacts[index] if index < len(self.artifacts) else None
+        if artifact is not None:
+            name, content = artifact
+            key = f"artifacts/{uuid4()}/{name}"
+            await self.blob.put(key, content)
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.shared_artifact).values(
+                        id=uuid4(),
+                        turn_id=turn_id,
+                        blob_key=key,
+                        workspace_id=self.workspace_id,
+                        filename=name,
+                        subject=None,
+                        media_type="image/svg+xml",
+                        size_bytes=len(content),
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
         self.transcript = (
             *self.transcript,
             Message(role="user", content=message),
@@ -528,6 +549,37 @@ async def test_scenario_followup_retains_offline_artifacts(db: None, tmp_path) -
     ]
     assert all(item["dataUri"].startswith("data:") for item in contents)
     assert attempt["artifactError"] is None
+
+
+async def test_scenario_retains_an_artifact_from_an_earlier_turn(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    design = SharedArtifact("design.svg", b"<svg/>")
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="The design is attached."),),
+            (Message(role="assistant", content="Waiting for approval."),),
+        ),
+        artifacts=((design.name, design.content), None),
+    )
+    member = ScriptedMember(("Show the design.", "Do not build it."))
+
+    async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
+        return CapabilityVerdict(outcome.output.artifacts == (design,), "design retained")
+
+    case = ScenarioCase("early-design", _SUM_USER, grade, max_turns=2)
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert result.passed, result.reason
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["artifacts"] == ["design.svg"]
 
 
 async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -> None:

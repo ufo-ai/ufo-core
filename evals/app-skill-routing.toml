@@ -1,0 +1,26 @@
+name = "app-creation-route"
+base = "HEAD"
+suites = ["new_application"]
+cases = ["A14-world-clock-shows-the-design"]
+repeats = 1
+concurrency = 2
+max_stacks = 1
+budget_usd = 12.0
+est_usd_per_case = 4.0
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+[[arm]]
+name = "without-app-route"
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/manifest.py"
+old = '''            HookSpec(event="pre_tool_use", handler=enforce_application_creation_route),
+'''
+new = ""

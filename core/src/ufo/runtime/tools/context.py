@@ -58,6 +58,7 @@ from ufo.runtime.access.grants import ConnectUnavailable, Grant, GrantStore
 from ufo.runtime.billing.accounting import record_image_usage, record_video_usage
 from ufo.runtime.ext.context import ExtensionContext, SourceReader
 from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
+from ufo.runtime.media.image_previews import IMAGE_PREVIEW_MAX_BYTES, raster_image_media_type
 from ufo.runtime.media.previews import StoredPreview
 from ufo.runtime.media.site_previewer import SitePreviewer
 from ufo.runtime.object_scope import ObjectActionTarget
@@ -331,6 +332,7 @@ class ToolContext:
     auto_model: str = AUTO_MODEL
     public_base_url: str | None = None
     site_previewer: SitePreviewer | None = None
+    publish_artifacts: Callable[[], Awaitable[None]] | None = None
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
 
     @property
@@ -459,14 +461,31 @@ class ToolContext:
                 connection, self.turn.workspace_id, self.turn.id, model, videos, micro_usd
             )
 
-    async def share_artifact(self, filename: str, data: bytes, subject: str | None = None) -> None:
+    async def share_artifact(
+        self,
+        filename: str,
+        data: bytes,
+        subject: str | None = None,
+        *,
+        preview: StoredPreview | None = None,
+    ) -> None:
         """Hand the member one file this call rendered in-process, as a shared artifact of this
         turn — the same rows `share_file` writes for a produced workspace file, so every surface
         delivers it by the path it already uploads artifacts through. For bytes a tool computed
         itself: nothing runs in the sandbox and nothing is measured there, so the size is bounded
-        here at the call."""
+        here at the call. An optional preview is a raster this context already stored from the
+        sandbox; the member sees those validated bytes and downloads the original file."""
         if len(data) > SHARED_BYTES_LIMIT:
             raise ValueError(f"shared artifact {filename!r} exceeds {SHARED_BYTES_LIMIT} bytes")
+        preview_media_type = None if preview is None else raster_image_media_type(preview.blob_key)
+        if preview is not None and (
+            preview.size_bytes < 0 or preview.size_bytes > IMAGE_PREVIEW_MAX_BYTES
+        ):
+            raise ValueError(f"shared artifact preview exceeds {IMAGE_PREVIEW_MAX_BYTES} bytes")
+        if preview is not None and (
+            not preview.blob_key.startswith(ARTIFACT_KEY_PREFIX) or preview_media_type is None
+        ):
+            raise ValueError("shared artifact preview is not a bounded stored raster")
         key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{filename}"
         await self.blob.put(key, data)
         now = datetime.now(UTC)
@@ -481,10 +500,15 @@ class ToolContext:
                     subject=subject,
                     media_type=artifact_media_type(filename),
                     size_bytes=len(data),
+                    preview_blob_key=None if preview is None else preview.blob_key,
+                    preview_media_type=preview_media_type,
+                    preview_size_bytes=None if preview is None else preview.size_bytes,
                     created_at=now,
                     updated_at=now,
                 )
             )
+        if self.publish_artifacts is not None:
+            await self.publish_artifacts()
 
     async def speaker_is_admin(self) -> bool:
         """Whether this call's requesting member is a workspace admin. Workspace-wide acts gate on

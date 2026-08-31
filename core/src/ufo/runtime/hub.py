@@ -49,6 +49,10 @@ class Activity(BaseModel):
     text: str
 
 
+class ArtifactsChanged(BaseModel):
+    """A turn committed a shared artifact that a live surface can read now."""
+
+
 class Absorbed(BaseModel):
     """The member's inbound-queue rows a running turn just folded into its window, pushed at the
     round boundary that drained them so a surface holding a message it admitted mid-turn learns the
@@ -125,6 +129,7 @@ LiveFrame = (
     | Parked
     | CostTick
     | Activity
+    | ArtifactsChanged
     | Absorbed
     | Resumed
     | Reply
