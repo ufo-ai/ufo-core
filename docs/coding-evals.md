@@ -38,9 +38,16 @@ Ordered by leverage; 1–3 are prerequisites that roughly double usable samples 
    human read on 4/12 completed decisions, the judged rubrics on 12/12 (all eight flips verified
    by reading the responses; the one kept failure is genuine).
 3. Record the missing baselines after item 1 lands: a full GLM SWE-bench run (the GLM column is
-   empty) and a clean Terminal-Bench rerun.
+   empty) and a clean Terminal-Bench rerun. RUN 2026-08-31 (two 66-at-once waves; see Measured
+   results): the runs are clean as a systems measurement but INVALID as a repair baseline — the
+   patches retrieve the public upstream fixes (32/38 wave-1 large-gold cases ≥90% identical to
+   gold), and every coding child ran `claude-opus-5` through the seeded member key, not GLM.
+   Blocked on the history fence and gold tripwire PRs; rerun after they land.
 4. When PR #2729 merges, drive ablation arms through `x-ufo-environment` against one shared stack
    (prompt and tool-description overrides per turn) instead of one isolated stack per arm.
+   MECHANISM PROVEN 2026-08-31: environment documents (#2743) ride SWE-bench runs (`--environment`)
+   and Terminal-Bench runs (#2750, uploaded into each Harbor box); a smoke turn attested the pinned
+   digest and passed under it. Arms themselves still to run.
 5. Build a deliverable-verification eval from the incomplete-deliverable failures (9 of GLM's 18
    valid Terminal-Bench failures were missing output files), then hill-climb on it. Single prompt
    clauses are a measured dead end: the five text variants below and the wait-budget clause
@@ -258,6 +265,48 @@ by passes plus valid model failures.
 ## Measured results
 
 Measurements below use `z-ai/glm-5.3-flash`.
+
+### 2026-08-31 queueing redesign and 66-at-once waves
+
+The turns queue's per-conversation partition + `concurrency=1` was replaced by dispatch-time
+serialization (#2747): admission and every workflow exit offer a conversation's frontmost queued
+turn under the conversation row's lock, the turns queue claims natively at `worker_concurrency=40`
+per pod, and spawned children plus prepared intents ride an unbounded `express` queue. Under a live
+66-at-once wave the four pods held 13/11/10/12 turns-queue claims, children ran cross-pod, and no
+pool timeouts or slot-wait cancellations occurred. Merged the same night: #2746 (a queued remote
+turn never times out; the wait budget arms at first execution), #2748 (the seat request seeds the
+eval member's model key, so coding spawns stop refusing), #2749 (the OpenRouter generation lookup
+retries through the ledger's indexing window), #2750 (Terminal-Bench runs pin an environment
+document).
+
+Two full SWE-bench waves ran with all 66 cases queued at once against the 4-pod testing fleet:
+
+| wave | completed | voided | wall clock | official resolved | notes |
+|---|---|---|---|---|---|
+| 1 (`20260831T095040Z-297afb27`) | 62/66 | 2 external (GLM idle timeout; generation 404) | ~80 min | 60/61 | 4 cases lost un-harvested: a mid-run deploy crossed runtime identities and the run gate refused the report |
+| 2 (`20260831T111934Z-8de2d9ee`) | 66/66 | 0 | ~25 min | 61/65 | merge-frozen fleet; runner proxy scored 42/66 |
+
+`django__django-10097` is excluded from both official counts: its official gold patch fails the
+same seven auth-template tests on this rig in every recorded grading.
+
+**The resolve rates are not repair measurements.** Every coding child ran `claude-opus-5` through
+the seeded member key (an own-key profile ignores `--model` by design), and the patches match the
+public upstream fixes nearly verbatim — wave 1: 32 of 38 cases whose gold patch changes more than
+ten lines matched ≥90% of gold's changed lines, several line-identical including a 188-line patch;
+wave 2: 25 of 42. The task envelope's "fetch depth 1, do not read a later commit" is an instruction
+nothing enforces, and eval turns have internet egress, so the agents retrieved the fixes. Fixes in
+flight: enforce truncated history at the staging seam, and record gold-overlap beside every graded
+verdict. The proxy-vs-official gap (42/66 vs 61/65 on wave 2) is unjudgeable until retrieval is
+fenced.
+
+Deploys mid-wave are acceptable: a turn that loses its pod is recovered once and picks up its
+prior rounds from recorded steps. Wave 1's four deploy-crossing turns each show one workflow,
+`recovery_attempts=2` (first dispatch plus exactly one recovery), the same two ledger rows as the
+64 non-crossing turns, and done terminals. The runner records the runtime identities a run
+observed instead of refusing a crossed run. Runs overlap freely; a result affected by model
+contention carries that as a caveat (3 of 4 smoke Terminal-Bench tasks timed out sharing GLM with
+wave 2 — their fixed per-task budgets absorb the added latency). BYOK child spend bypasses
+`--budget-usd` and is reported beside results (wave 1: $56 unmetered Opus beside $5 metered GLM).
 
 ### Remote wait behavior
 
