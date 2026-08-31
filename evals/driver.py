@@ -17,6 +17,7 @@ import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
+from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -128,19 +129,21 @@ async def _resolved_environment_files(
     return json.dumps(loaded).encode()
 
 
+def _identity_summary(identity: RuntimeIdentity) -> str:
+    digest = sha256(identity.model_dump_json().encode()).hexdigest()[:12]
+    return f"{identity.revision or 'unknown'}#{digest}"
+
+
 @dataclass
 class RemoteRuntimeLog:
-    runtime: RuntimeIdentity | None = None
+    identity_cases: dict[RuntimeIdentity, set[UUID]] = field(default_factory=dict)
     models: set[str] = field(default_factory=set)
     reasoning: set[ReasoningEffort | None] = field(default_factory=set)
     environments: set[str | None] = field(default_factory=set)
     error: str = ""
 
-    def record(self, attestation: RuntimeAttestation) -> None:
-        if self.runtime is None:
-            self.runtime = attestation.runtime
-        elif self.runtime != attestation.runtime:
-            self.error = "remote eval crossed runtime identities"
+    def record(self, conversation_id: UUID, attestation: RuntimeAttestation) -> None:
+        self.identity_cases.setdefault(attestation.runtime, set()).add(conversation_id)
         if attestation.model:
             self.models.add(attestation.model)
             self.reasoning.add(attestation.reasoning)
@@ -149,12 +152,23 @@ class RemoteRuntimeLog:
     def reject(self, reason: str) -> None:
         self.error = reason
 
+    def identity_counts(self) -> dict[str, int]:
+        """Cases per attested runtime identity (`revision#digest12`), most-covered first —
+        informational: a fleet deploy rolling mid-run shows here as two identities, never as a
+        refusal."""
+        return {
+            _identity_summary(identity): len(cases)
+            for identity, cases in sorted(
+                self.identity_cases.items(), key=lambda item: -len(item[1])
+            )
+        }
+
     def verify(
         self, model: str, reasoning: ReasoningEffort, environment: str | None = None
     ) -> RuntimeAttestation:
         if self.error:
             raise RuntimeError(self.error)
-        if self.runtime is None:
+        if not self.identity_cases:
             raise RuntimeError("remote eval received no runtime attestation")
         if self.models and self.models != {model}:
             raise RuntimeError(
@@ -171,8 +185,9 @@ class RemoteRuntimeLog:
                 f"remote eval expected environment {environment!r}, terminal frames reported "
                 f"{sorted(value or '' for value in self.environments)!r}"
             )
+        dominant = max(self.identity_cases, key=lambda identity: len(self.identity_cases[identity]))
         return RuntimeAttestation(
-            runtime=self.runtime,
+            runtime=dominant,
             model=next(iter(self.models), ""),
             reasoning=next(iter(self.reasoning), None),
             environment=next(iter(self.environments), None),
@@ -387,9 +402,10 @@ class RemoteClient:
         for event in runtime_events:
             try:
                 self.runtime.record(
+                    conversation_id,
                     RuntimeAttestation.model_validate(
                         {key: value for key, value in event.items() if key != "type"}
-                    )
+                    ),
                 )
             except ValidationError as error:
                 self.runtime.reject("remote eval terminal reported an invalid runtime attestation")

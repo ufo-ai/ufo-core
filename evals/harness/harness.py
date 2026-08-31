@@ -58,6 +58,14 @@ class EvalReport(BaseModel):
     )
     benchmark: JsonObject | None = None
     metrics: tuple[EvalMetric, ...] = ()
+    uncertified: str | None = None
+    """Why the runtime integrity gate refused to certify this report's run — a missing or
+    mismatched attestation — or None when certified or local. An uncertified report keeps its
+    measurements but fails the run."""
+    runtime_identities: dict[str, int] | None = None
+    """Cases per runtime identity the remote run attested (`revision#digest12`), most-covered
+    first — a fleet deploy rolling mid-run shows as two entries, purely informational. None for a
+    local run."""
 
     @property
     def scored(self) -> tuple[EvalCaseResult, ...]:
@@ -128,9 +136,14 @@ class EvalReport(BaseModel):
             if tiers
             else ""
         )
+        identities = ""
+        if self.runtime_identities and len(self.runtime_identities) > 1:
+            counts = ", ".join(f"{key} {count}" for key, count in self.runtime_identities.items())
+            identities = f" identities: {counts}"
+        taint = f" uncertified: {self.uncertified}" if self.uncertified else ""
         if self.degraded_recall_count is None or self.unmapped_evidence_count is None:
             detail = f", {metric_summary}" if metric_summary else ""
-            return f"{summary}{detail}{tier_summary} {self.digest}"
+            return f"{summary}{detail}{tier_summary} {self.digest}{identities}{taint}"
         coverage = "mapped evidence coverage n/a"
         if (
             self.mean_mapped_evidence_coverage is not None
@@ -147,7 +160,7 @@ class EvalReport(BaseModel):
         )
         return (
             f"{summary}, {coverage}, {pages}, {self.degraded_recall_count} degraded, "
-            f"{self.unmapped_evidence_count} unmapped evidence {self.digest}"
+            f"{self.unmapped_evidence_count} unmapped evidence {self.digest}{identities}{taint}"
         )
 
     def to_json(self) -> JsonObject:
@@ -190,6 +203,11 @@ class EvalReport(BaseModel):
             )
         if self.benchmark is not None:
             result["benchmark"] = self.benchmark
+        if self.uncertified is not None:
+            result["uncertified"] = self.uncertified
+        if self.runtime_identities is not None:
+            identities: JsonObject = {key: count for key, count in self.runtime_identities.items()}
+            result["runtimeIdentities"] = identities
         return result
 
 

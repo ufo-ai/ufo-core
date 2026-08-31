@@ -898,7 +898,7 @@ def main(argv: list[str] | None = None) -> None:
     failed = False
     for report in reports:
         print(report.console_summary)
-        failed = failed or not report.passed
+        failed = failed or not report.passed or report.uncertified is not None
     record = record_run(args.out, recorder.run()).resolve()
     print(f"run {recorder.id} · {record}")
     print(f"viewer {(args.out / 'index.html').resolve()}")
@@ -1193,16 +1193,28 @@ async def _run(
                 def finished(index: int, report: EvalReport) -> None:
                     """Stamp one suite's report with the runtime it ran against and record it. The
                     stamp happens here rather than after the whole run, so the report on disk is the
-                    final one from the moment its suite ends."""
+                    final one from the moment its suite ends. Every identity the run's cases
+                    attested rides along informationally — a fleet deploy rolling mid-run shows as
+                    two identities, never a refusal — while a missing or mismatched attestation
+                    marks the report uncertified with the refusal instead of raising: the
+                    measurements survive on disk and on the console, and the run fails at exit (a
+                    66-case remote run once lost every verdict to a mid-run deploy)."""
                     task = tasks[index]
                     runtime_attestation = None
+                    uncertified = None
+                    runtime_identities = None
                     if remote_client is not None:
-                        runtime_attestation = remote_client.runtime.verify(
-                            resolved_agent_model,
-                            agent_reasoning,
-                            remote_client.stored_environment(),
-                        )
-                        recorder.runtime = runtime_attestation
+                        runtime_identities = remote_client.runtime.identity_counts() or None
+                        try:
+                            runtime_attestation = remote_client.runtime.verify(
+                                resolved_agent_model,
+                                agent_reasoning,
+                                remote_client.stored_environment(),
+                            )
+                        except RuntimeError as error:
+                            uncertified = str(error)
+                        else:
+                            recorder.runtime = runtime_attestation
                     digest = report.digest
                     if task.pin_runtime:
                         digest = digest_payload(
@@ -1242,6 +1254,7 @@ async def _run(
                                     if runtime_attestation is not None
                                     else {}
                                 ),
+                                **({"uncertified": uncertified} if uncertified is not None else {}),
                             }
                         )
                     completed[index] = report.model_copy(
@@ -1251,6 +1264,8 @@ async def _run(
                             "judge_model": task.judge_model,
                             "simulator_model": task.simulator_model,
                             "judge_revision": task.judge_revision,
+                            "uncertified": uncertified,
+                            "runtime_identities": runtime_identities,
                         }
                     )
                     recorder.record(index, completed[index])

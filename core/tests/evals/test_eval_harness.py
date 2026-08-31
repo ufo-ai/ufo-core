@@ -218,6 +218,7 @@ from evals.suites.response_register import (
 )
 from evals.suites.tool_activity import ACTIVITY_MODEL
 from evals.suites.ufo_app_bench import WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
+from evals.swebench.runner import PatchCapture
 from ufo.blob import BlobNotFound, FilesystemBlobStore, S3BlobStore
 from ufo.config import (
     DEFAULT_AMBIENT_REPLY_MODEL,
@@ -7960,7 +7961,7 @@ async def test_environment_files_resolve_local_paths_to_stored_digests(tmp_path:
     assert stored == [b"archive bytes"]
 
 
-def test_remote_runtime_log_accepts_model_less_failures_and_rejects_runtime_drift() -> None:
+def test_remote_runtime_log_counts_identities_and_refuses_mismatched_attestations() -> None:
     runtime = RuntimeIdentity(
         revision="abc12345",
         image_digest=f"sha256:{'a' * 64}",
@@ -7972,10 +7973,21 @@ def test_remote_runtime_log_accepts_model_less_failures_and_rejects_runtime_drif
     with pytest.raises(RuntimeError, match="no runtime attestation"):
         log.verify(MODEL, AGENT_REASONING)
 
-    log.record(RuntimeAttestation(runtime=runtime))
+    first, second, third = uuid4(), uuid4(), uuid4()
+    log.record(first, RuntimeAttestation(runtime=runtime))
     assert log.verify(MODEL, AGENT_REASONING) == RuntimeAttestation(runtime=runtime)
 
-    log.record(RuntimeAttestation(runtime=runtime, model=MODEL, reasoning=AGENT_REASONING))
+    rolled = runtime.model_copy(update={"sandbox_digest": f"sha256:{'d' * 64}"})
+    log.record(first, RuntimeAttestation(runtime=runtime))
+    log.record(second, RuntimeAttestation(runtime=rolled))
+    log.record(third, RuntimeAttestation(runtime=rolled))
+    key = f"abc12345#{sha256(runtime.model_dump_json().encode()).hexdigest()[:12]}"
+    rolled_key = f"abc12345#{sha256(rolled.model_dump_json().encode()).hexdigest()[:12]}"
+    assert log.identity_counts() == {rolled_key: 2, key: 1}
+    assert list(log.identity_counts()) == [rolled_key, key]
+    assert log.verify(MODEL, AGENT_REASONING).runtime == rolled
+
+    log.record(third, RuntimeAttestation(runtime=rolled, model=MODEL, reasoning=AGENT_REASONING))
     with pytest.raises(RuntimeError, match="expected model"):
         log.verify("another-model", AGENT_REASONING)
     with pytest.raises(RuntimeError, match="expected environment"):
@@ -7984,18 +7996,18 @@ def test_remote_runtime_log_accepts_model_less_failures_and_rejects_runtime_drif
     arm = RemoteRuntimeLog()
     digest = f"sha256:{'e' * 64}"
     arm.record(
+        uuid4(),
         RuntimeAttestation(
             runtime=runtime, model=MODEL, reasoning=AGENT_REASONING, environment=digest
-        )
+        ),
     )
     assert arm.verify(MODEL, AGENT_REASONING, digest).environment == digest
     with pytest.raises(RuntimeError, match="expected environment"):
         arm.verify(MODEL, AGENT_REASONING, None)
 
-    changed = runtime.model_copy(update={"sandbox_digest": f"sha256:{'d' * 64}"})
-    log.record(RuntimeAttestation(runtime=changed, model=MODEL, reasoning=AGENT_REASONING))
-    with pytest.raises(RuntimeError, match="crossed runtime identities"):
-        log.verify(MODEL, AGENT_REASONING)
+    arm.reject("remote eval terminal reported no runtime attestation")
+    with pytest.raises(RuntimeError, match="terminal reported no runtime attestation"):
+        arm.verify(MODEL, AGENT_REASONING, digest)
 
 
 async def test_remote_workspace_driver_deadline_stops_the_client_and_cancels_the_turn(
@@ -9638,6 +9650,33 @@ def test_eval_run_is_recorded_without_git(tmp_path, monkeypatch) -> None:
     assert recorded[0].agent_prompt == "be helpful"
 
 
+def test_uncertified_reports_still_print_and_fail_the_run(tmp_path, monkeypatch, capsys) -> None:
+    report = EvalReport(
+        name="swebench_verified",
+        suite="swebench",
+        digest="sha256:abc",
+        cases=(EvalCaseResult(name="case-1", passed=True, reason="patch applied", evidence={}),),
+        uncertified="remote eval received no runtime attestation",
+        runtime_identities={"abc12345#0f3a9c1d2e4b": 61, "def67890#9b8c7d6e5f4a": 4},
+    )
+
+    async def run(*_args, **_kwargs) -> tuple[tuple[EvalReport, ...], str]:
+        return (report,), "be helpful"
+
+    monkeypatch.setattr("evals.__main__._run", run)
+    monkeypatch.setattr("evals.__main__.load_config", lambda: object())
+    monkeypatch.setattr("evals.__main__.version", lambda _package: "0.1.0")
+
+    with pytest.raises(SystemExit) as excinfo:
+        eval_main(["--out", str(tmp_path), "--label", "tainted"])
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "swebench_verified 1/1 passed" in out
+    assert "identities: abc12345#0f3a9c1d2e4b 61, def67890#9b8c7d6e5f4a 4" in out
+    assert "uncertified: remote eval received no runtime attestation" in out
+
+
 def test_remote_eval_budget_and_stack_run_id_reach_the_suite_runner(tmp_path, monkeypatch) -> None:
     run_id = UUID("11111111-2222-3333-4444-555555555555")
     received: list[tuple[bool, int, UUID]] = []
@@ -9804,6 +9843,175 @@ async def test_eval_run_installs_credentials_pins_model_and_closes_blob_client(
     )
     assert driver_models == [MODEL]
     assert not blob_backend._clients
+
+
+def _remote_run_rig(tmp_path: Path, monkeypatch, remotes: list[RemoteClient]) -> Config:
+    workspace_id = uuid4()
+    agent_id = uuid4()
+
+    async def resolve(*_args):
+        return workspace_id, agent_id, "prompt", "auto", "auto", DEFAULT_SANDBOX_SIZE
+
+    def workspace_driver(*_args, **kwargs):
+        remotes.append(kwargs["remote"])
+        return object()
+
+    async def validate(_client: RemoteClient) -> None:
+        return None
+
+    async def dispose() -> None:
+        return None
+
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setenv("UFO_TOKEN_SECRET", "token-secret")
+    monkeypatch.setattr("evals.__main__.shutil.which", lambda _name: "/bin/ufo")
+    monkeypatch.setattr("evals.__main__.RemoteClient.validate", validate)
+    monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
+    monkeypatch.setattr("evals.__main__.dispose_db", dispose)
+    monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)
+    monkeypatch.setattr("evals.__main__.install_credential_requests", lambda _requests: None)
+    monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
+    monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
+    monkeypatch.setattr("evals.__main__.replay_safe_client", lambda _url: object())
+    monkeypatch.setattr("evals.__main__.WorkspaceDriver", workspace_driver)
+    monkeypatch.setattr("evals.__main__.load_manifests", lambda *_args: ())
+    registry = ModelRegistry({}, CORE_PRICING, MODEL)
+    monkeypatch.setattr("evals.__main__.model_registry", lambda *_args: registry)
+    monkeypatch.setattr(
+        "evals.__main__.context_for",
+        lambda *_args, **kwargs: SimpleNamespace(
+            model=SimpleNamespace(model=kwargs["model_resolver"].auto_model)
+        ),
+    )
+    return Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path),
+    )
+
+
+def _runtime_identity(revision: str) -> RuntimeIdentity:
+    return RuntimeIdentity(
+        revision=revision,
+        image_digest=f"sha256:{'a' * 64}",
+        config_digest=f"sha256:{'b' * 64}",
+        sandbox_backend="e2b",
+        sandbox_digest=f"sha256:{'c' * 64}",
+    )
+
+
+def _identity_key(identity: RuntimeIdentity) -> str:
+    return f"{identity.revision}#{sha256(identity.model_dump_json().encode()).hexdigest()[:12]}"
+
+
+async def test_mid_run_deploy_records_both_identities_and_reports_normally(
+    tmp_path, monkeypatch
+) -> None:
+    """A fleet deploy rolling mid-run is data, not a fault (remote SWE-bench 66-case run,
+    2026-08-31): both identities land on the report with their case coverage, the post-roll case
+    still runs its graders — the patch harvest lands — and the run's verdict comes from its cases
+    alone."""
+    remotes: list[RemoteClient] = []
+    identity = _runtime_identity("abc12345")
+    rolled = _runtime_identity("def67890")
+    submissions = tmp_path / "submissions"
+    patch = b"--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+    async def run(target, slots) -> EvalReport:
+        log = remotes[0].runtime
+        log.record(uuid4(), RuntimeAttestation(runtime=identity))
+        log.record(uuid4(), RuntimeAttestation(runtime=identity))
+        log.record(uuid4(), RuntimeAttestation(runtime=rolled))
+        harvested = await PatchCapture("case-3", submissions)(
+            CapabilityOutput(
+                response="done",
+                calls=(
+                    ToolInvocation(
+                        name="share_file",
+                        input={"files": [{"file_path": "/workspace/case-3.patch"}]},
+                        result=json.dumps([{"name": "case-3.patch"}]),
+                        has_result=True,
+                    ),
+                ),
+                artifacts=(SharedArtifact(name="case-3.patch", content=patch),),
+            )
+        )
+        return EvalReport(
+            name="swebench_verified",
+            suite="swebench",
+            digest="sha256:abc",
+            cases=(
+                EvalCaseResult(name="case-1", passed=True, reason="patch applied", evidence={}),
+                EvalCaseResult(name="case-2", passed=True, reason="patch applied", evidence={}),
+                EvalCaseResult(
+                    name="case-3",
+                    passed=harvested.passed,
+                    reason=harvested.reason,
+                    evidence=harvested.evidence,
+                ),
+            ),
+        )
+
+    config = _remote_run_rig(tmp_path, monkeypatch, remotes)
+    task = EvalTask("swebench_verified", "swebench", "sha256:abc", (), run, pin_runtime=True)
+    recorder = _recorder(tmp_path)
+
+    reports, _prompt = await run_evals(config, (task,), "assistant", recorder, remote=True)
+
+    (report,) = reports
+    key = _identity_key(identity)
+    rolled_key = _identity_key(rolled)
+    assert report.uncertified is None
+    assert report.passed
+    assert report.runtime_identities == {key: 2, rolled_key: 1}
+    assert f"identities: {key} 2, {rolled_key} 1" in report.console_summary
+    assert report.digest != task.digest
+    assert recorder.runtime is not None
+    assert recorder.runtime.runtime == identity
+    assert (submissions / "case-3" / "case-3.patch").read_bytes() == patch
+    recorded = load_runs(tmp_path)
+    assert len(recorded) == 1
+    assert recorded[0].reports[0].runtime_identities == {key: 2, rolled_key: 1}
+
+
+async def test_mismatched_attestations_mark_the_report_uncertified_instead_of_losing_it(
+    tmp_path, monkeypatch
+) -> None:
+    """An attestation the gate refuses — here a model the run did not expect — no longer detonates
+    the report stage: the report survives on disk and in the return, marked with the refusal, and
+    the run fails at exit."""
+    remotes: list[RemoteClient] = []
+    identity = _runtime_identity("abc12345")
+
+    async def run(target, slots) -> EvalReport:
+        remotes[0].runtime.record(
+            uuid4(),
+            RuntimeAttestation(runtime=identity, model="another-model", reasoning="high"),
+        )
+        return EvalReport(
+            name="swebench_verified",
+            suite="swebench",
+            digest="sha256:abc",
+            cases=(
+                EvalCaseResult(name="case-1", passed=True, reason="patch applied", evidence={}),
+            ),
+        )
+
+    config = _remote_run_rig(tmp_path, monkeypatch, remotes)
+    task = EvalTask("swebench_verified", "swebench", "sha256:abc", (), run, pin_runtime=True)
+    recorder = _recorder(tmp_path)
+
+    reports, _prompt = await run_evals(config, (task,), "assistant", recorder, remote=True)
+
+    (report,) = reports
+    assert report.uncertified is not None
+    assert report.uncertified.startswith("remote eval expected model")
+    assert [case.passed for case in report.cases] == [True]
+    assert report.runtime_identities == {_identity_key(identity): 1}
+    assert f"uncertified: {report.uncertified}" in report.console_summary
+    assert recorder.runtime is None
+    recorded = load_runs(tmp_path)
+    assert len(recorded) == 1
+    assert recorded[0].reports[0].uncertified == report.uncertified
 
 
 async def test_fresh_workspace_is_provisioned_before_agent_resolution(

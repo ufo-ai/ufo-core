@@ -393,8 +393,10 @@ subagent profile model in the turn tree, and `--no-internet` beside it may only 
 agent policy. The server validates both at admission and stores the selection on each turn; it
 never changes the deployed configuration.
 A packaged deploy's terminal end attests its revision, immutable image, config and sandbox digests,
-and the terminal frame's selected model and reasoning. Remote evals bind that identity into their
-runtime digest and refuse missing, mixed, or unexpected attestations before recording scores.
+and the terminal frame's selected model and reasoning. Remote evals bind the most-covered identity
+into their runtime digest and list every identity seen with its case coverage — a deploy rolling
+mid-run is recorded, not refused. A missing or mismatched attestation is never certified: reports
+keep their measurements marked uncertified with the refusal, and the run fails.
 
 **The sandbox proxy is core, not an extension** — it is the enforcement point for three core
 invariants: **sentinel swap** (processes inside see placeholder credentials; the proxy swaps real
