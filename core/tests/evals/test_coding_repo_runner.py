@@ -64,6 +64,11 @@ SCOPED_ROUTES = (
     "gh api repos/{slug}/contents/README.md",
     "curl https://codeload.github.com/{slug}/tar.gz/HEAD",
     "curl https://raw.githubusercontent.com/{slug}/HEAD/README.md",
+    "curl -L https://github.com/{slug}/commit/HEAD.patch",
+    "gh api repos/{slug}/commits",
+    "curl https://github.com/{slug}/compare/base...HEAD.diff",
+    "curl https://github.com/{slug}/pull/1.diff",
+    "gh api repos/{slug}/pulls/1/files",
 )
 
 

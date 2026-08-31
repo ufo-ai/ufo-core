@@ -23,6 +23,12 @@ representative roster overlaps `hard` by two cases, and combined runs execute ea
 are the pin and the algorithm is the enforcement — `build` recomputes the split and refuses a
 snapshot that disagrees.
 
+The pin is enforced on the trajectory, not just instructed: the route grader fails a run whose
+commands clone the case repository, fetch or pull any ref that is not exactly the pinned commit, or
+read the repository through an archive, contents, commit, compare, or pull-request URL. It reads
+only command, code, and URL arguments, so a fix read from an ordinary web page or a command composed
+inside a script is not caught.
+
 ```bash
 PARQUET=.local/swebench/assets/test.parquet
 mkdir -p "$(dirname "$PARQUET")"

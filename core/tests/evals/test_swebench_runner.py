@@ -1,6 +1,6 @@
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NoReturn
 from uuid import UUID, uuid4
@@ -550,6 +550,42 @@ async def test_task_runs_all_three_deterministic_graders_and_captures_the_patch(
     assert grader_evidence["codingSpawns"] == 1
     assert grader_evidence["ownTools"] == []
     assert grader_evidence["sizeBytes"] == len(patch)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "git fetch origin main",
+        "git fetch --unshallow",
+        "git pull origin master",
+    ),
+    ids=("branch", "unshallow", "pull"),
+)
+async def test_a_fetch_past_the_pin_fails_the_case_despite_a_valid_patch(
+    tmp_path: Path, command: str
+) -> None:
+    snapshot_root = snapshot(tmp_path / "snapshot")
+    case = load_snapshot(snapshot_root).cases[0]
+    patch = b"diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+fixed\n"
+    compliant = successful_output(case, patch)
+    violating = replace(
+        compliant,
+        calls=(
+            *compliant.calls,
+            ToolInvocation(name="bash", input={"command": command}, result="", has_result=True),
+        ),
+    )
+    target = PreparingTarget(
+        tmp_path / "submissions", ALL_IDS, outputs={case.instance_id: violating}
+    )
+    (task,) = load_swebench((case.instance_id,), snapshot_root, target.submissions_root, None)
+
+    report = await task.run(target, asyncio.Semaphore(1))
+
+    assert not report.cases[0].passed
+    assert not report.cases[0].excluded
+    assert "past the pinned commit" in report.cases[0].reason
+    assert command in report.cases[0].reason
 
 
 def test_unknown_case_fails_during_loading(tmp_path: Path) -> None:
