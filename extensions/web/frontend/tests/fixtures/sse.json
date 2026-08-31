@@ -49,7 +49,7 @@
   },
   {
     "event": "terminal",
-    "data": "{\"status\":\"done\",\"text\":\"Looked it over.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":40,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
+    "data": "{\"status\":\"done\",\"text\":\"Looked it over.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":40,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
   },
   {
     "event": "parked",

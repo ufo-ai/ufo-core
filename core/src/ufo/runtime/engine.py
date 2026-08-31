@@ -3543,6 +3543,11 @@ class TurnEngine:
                 cache_percent=spend.cache_percent,
                 model=spend.model,
                 reasoning=self.agent.reasoning if spend.model else None,
+                environment=(
+                    None
+                    if self.turn.runtime_config is None
+                    else self.turn.runtime_config.environment
+                ),
                 question=question,
                 credential_request=credential_request,
                 connect_request=connect_request,

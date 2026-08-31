@@ -1745,7 +1745,8 @@ class SurfaceContext:
     _sandbox_sizes: tuple[str, ...] = ()
     _memory: "MemorySearch | None" = None
     _model: "SurfaceModel | None" = None
-    _environment_host_allowed: bool = False
+    _store_environment_document: Callable[[WorkspaceBlobStore, bytes], Awaitable[str]] | None = None
+    _store_environment_file: Callable[[WorkspaceBlobStore, bytes], Awaitable[str]] | None = None
     _objects: "Mapping[str, BoundKind]" = MappingProxyType({})
     _actions: "Mapping[str, Mapping[str, BoundAction]]" = MappingProxyType({})
     _frame_admissible: frozenset[str] = frozenset()
@@ -1817,11 +1818,28 @@ class SurfaceContext:
 
     def validate_runtime_config(self, runtime_config: TurnRuntimeConfig) -> None:
         """Refuse a turn model selection this deployed runtime cannot execute, and an environment
-        host on a deployment that does not allow one."""
-        if runtime_config.model not in self._models:
+        document on a deployment that does not allow one. The document store callable stands in
+        for the deployment gate: the composition root wires it exactly where documents are
+        allowed, so runtime never learns what a document is."""
+        if runtime_config.model is not None and runtime_config.model not in self._models:
             raise ValueError(f"unknown model: {runtime_config.model}")
-        if runtime_config.environment_host is not None and not self._environment_host_allowed:
-            raise ValueError("this deployment does not allow an environment host")
+        if runtime_config.environment is not None and self._store_environment_document is None:
+            raise ValueError("this deployment does not allow environment documents")
+
+    async def store_environment_document(self, body: bytes) -> str:
+        """Store one environment document (JSON or YAML) content-addressed in the workspace's blob
+        store and return the digest a turn pins as its environment. Refused where the deployment
+        does not allow the rail — the same gate that refuses the pin at admission."""
+        if self._store_environment_document is None:
+            raise ValueError("this deployment does not allow environment documents")
+        return await self._store_environment_document(self.blob, body)
+
+    async def store_environment_file(self, body: bytes) -> str:
+        """Store one file an environment document references, content-addressed in the
+        workspace's blob store, and return the digest the document's `files` entry pins."""
+        if self._store_environment_file is None:
+            raise ValueError("this deployment does not allow environment documents")
+        return await self._store_environment_file(self.blob, body)
 
     @property
     def sandbox_sizes(self) -> tuple[str, ...]:

@@ -392,16 +392,6 @@ class PackConfig(BaseModel):
     name: str | None = None
 
 
-class EnvironmentConfig(BaseModel):
-    """The environment override rail. `dev_host_allowed` lets a turn pin an environment host the
-    runtime dials for prompt and tool-description overrides (`ufo.runtime.environment`); off, the
-    default, refuses such a turn at admission and at execution. Enable it only on a deployment
-    whose members may point the serve process at hosts they control — a dev or eval stack."""
-
-    model_config = ConfigDict(extra="forbid")
-    dev_host_allowed: bool = False
-
-
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     database: DatabaseConfig
@@ -423,7 +413,6 @@ class Config(BaseModel):
     research: ResearchConfig = ResearchConfig()
     flags: FlagsConfig = FlagsConfig()
     pack: PackConfig = PackConfig()
-    environment: EnvironmentConfig = EnvironmentConfig()
     sources: tuple[SourceEntry, ...] = ()
 
 

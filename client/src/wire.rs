@@ -48,6 +48,8 @@ pub struct RuntimeAttestation {
     pub runtime: RuntimeIdentity,
     pub model: String,
     pub reasoning: Option<String>,
+    #[serde(default)]
+    pub environment: Option<String>,
 }
 
 /// One parsed directive line. Unknown verbs parse to `Unknown` and are dropped by the renderer.
@@ -279,6 +281,93 @@ impl Session {
         self.no_internet = no_internet;
         self.environment = environment;
         self
+    }
+
+    /// Resolve a file-valued environment before the first turn: upload each local path named
+    /// under `files:` (relative to the document), rewrite those entries to the digests the server
+    /// names, upload the document once, and pin its digest. A `sha256:` digest passes through
+    /// untouched, and a document whose `files` already hold digests uploads byte-identical.
+    pub fn resolve_environment(&mut self) -> Result<(), String> {
+        let Some(value) = self.environment.clone() else {
+            return Ok(());
+        };
+        if value.starts_with("sha256:") {
+            return Ok(());
+        }
+        let mut bytes = std::fs::read(&value)
+            .map_err(|error| format!("could not read environment file {value}: {error}"))?;
+        if let Some(resolved) = self.resolved_files(&value, &bytes)? {
+            bytes = resolved;
+        }
+        let digest = self.upload_environment("environment/document", &bytes)?;
+        self.environment = Some(digest);
+        Ok(())
+    }
+
+    /// The document re-serialized with every local `files:` path uploaded and replaced by its
+    /// digest, or None when there is nothing to resolve.
+    fn resolved_files(&self, document: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let mut parsed: serde_json::Value = serde_yaml::from_slice(bytes)
+            .map_err(|error| format!("could not parse environment file {document}: {error}"))?;
+        let base = std::path::Path::new(document)
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        let Some(files) = parsed.get_mut("files").and_then(|f| f.as_object_mut()) else {
+            return Ok(None);
+        };
+        let mut rewrote = false;
+        for (destination, entry) in files.iter_mut() {
+            let Some(source) = entry.as_str() else {
+                return Err(format!(
+                    "environment file entry {destination} is not a path"
+                ));
+            };
+            if source.starts_with("sha256:") {
+                continue;
+            }
+            let path = base.join(source);
+            let content = std::fs::read(&path).map_err(|error| {
+                format!(
+                    "could not read environment file {}: {error}",
+                    path.display()
+                )
+            })?;
+            let digest = self.upload_environment("environment/file", &content)?;
+            *entry = serde_json::Value::String(digest);
+            rewrote = true;
+        }
+        if !rewrote {
+            return Ok(None);
+        }
+        serde_json::to_vec(&parsed)
+            .map(Some)
+            .map_err(|error| format!("could not encode environment file {document}: {error}"))
+    }
+
+    fn upload_environment(&self, path: &str, bytes: &[u8]) -> Result<String, String> {
+        let url = format!("{}/surface/ufo/{path}", self.base().trim_end_matches('/'));
+        let mut request = build_agent().request("POST", &url);
+        if let Some(token) = &self.token {
+            request = request.set("authorization", &format!("Bearer {token}"));
+        }
+        let digest = match request.send_bytes(bytes) {
+            Ok(response) => response
+                .into_string()
+                .map_err(|error| format!("lost connection ({error})"))?,
+            Err(ureq::Error::Status(code, response)) => {
+                return Err(format!(
+                    "environment upload failed ({code}): {}",
+                    response.into_string().unwrap_or_default().trim()
+                ))
+            }
+            Err(error) => return Err(format!("lost connection ({error})")),
+        };
+        let digest = digest.trim().to_string();
+        if !digest.starts_with("sha256:") {
+            return Err(format!("the server answered no digest: {digest}"));
+        }
+        Ok(digest)
     }
 
     /// The endpoint this session posts to: the workspace surface when signed in, onboarding
@@ -1053,38 +1142,71 @@ mod tests {
         assert!(session.stop().is_none());
     }
 
+    fn take_request(socket: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+
+        let mut seen: Vec<u8> = Vec::new();
+        let mut byte = [0u8; 1];
+        while !seen.ends_with(b"\r\n\r\n") {
+            match socket.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => seen.push(byte[0]),
+            }
+        }
+        let head = String::from_utf8_lossy(&seen).to_lowercase();
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
+        let mut body = vec![0u8; length];
+        if length > 0 {
+            socket.read_exact(&mut body).expect("the body arrives");
+            seen.extend_from_slice(&body);
+        }
+        String::from_utf8_lossy(&seen).into_owned()
+    }
+
+    fn http_reply(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
     fn served(status: &str, body: &str) -> (String, std::thread::JoinHandle<String>) {
-        use std::io::{Read, Write};
+        use std::io::Write;
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
         let port = listener.local_addr().expect("the bound address").port();
-        let reply = format!(
-            "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\r\n{body}",
-            body.len()
-        );
+        let reply = http_reply(status, body);
         let handle = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().expect("the client connects");
-            let mut seen: Vec<u8> = Vec::new();
-            let mut byte = [0u8; 1];
-            while !seen.ends_with(b"\r\n\r\n") {
-                match socket.read(&mut byte) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => seen.push(byte[0]),
-                }
-            }
-            let head = String::from_utf8_lossy(&seen).to_lowercase();
-            let length: usize = head
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length:"))
-                .and_then(|value| value.trim().parse().ok())
-                .unwrap_or(0);
-            let mut body = vec![0u8; length];
-            if length > 0 {
-                socket.read_exact(&mut body).expect("the body arrives");
-                seen.extend_from_slice(&body);
-            }
+            let request = take_request(&mut socket);
             socket.write_all(reply.as_bytes()).expect("the reply lands");
-            String::from_utf8_lossy(&seen).into_owned()
+            request
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    fn served_each(
+        replies: Vec<(&'static str, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let port = listener.local_addr().expect("the bound address").port();
+        let handle = std::thread::spawn(move || {
+            replies
+                .into_iter()
+                .map(|(status, body)| {
+                    let (mut socket, _) = listener.accept().expect("the client connects");
+                    let request = take_request(&mut socket);
+                    let reply = http_reply(status, body);
+                    socket.write_all(reply.as_bytes()).expect("the reply lands");
+                    request
+                })
+                .collect()
         });
         (format!("http://127.0.0.1:{port}"), handle)
     }
@@ -1125,7 +1247,7 @@ mod tests {
         let mut session = stopping(base).with_runtime_config(
             Some("z-ai/glm-5.3-flash".into()),
             true,
-            Some("http://127.0.0.1:8377".into()),
+            Some("sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into()),
         );
 
         session
@@ -1139,10 +1261,144 @@ mod tests {
         );
         assert!(request.contains("x-ufo-internet: off"), "{request}");
         assert!(
-            request.contains("x-ufo-environment: http://127.0.0.1:8377"),
+            request.contains("x-ufo-environment: sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
             "{request}"
         );
         assert!(request.ends_with("\r\n\r\nrun it"), "{request}");
+    }
+
+    #[test]
+    fn a_pinned_environment_value_uploads_nothing() {
+        let value = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let mut session = stopping("http://127.0.0.1:1".into()).with_runtime_config(
+            Some("model".into()),
+            false,
+            Some(value.into()),
+        );
+        assert_eq!(session.resolve_environment(), Ok(()));
+        assert_eq!(session.environment.as_deref(), Some(value));
+    }
+
+    #[test]
+    fn a_missing_environment_file_fails_before_any_turn() {
+        let mut session = stopping("http://127.0.0.1:1".into()).with_runtime_config(
+            Some("model".into()),
+            false,
+            Some("no-such-environment.yaml".into()),
+        );
+        let error = session.resolve_environment().expect_err("the read fails");
+        assert!(error.contains("no-such-environment.yaml"), "{error}");
+    }
+
+    #[test]
+    fn an_environment_file_is_uploaded_once_and_pinned_by_digest() {
+        let digest = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let (base, serving) = served_each(vec![("200 OK", digest), ("200 OK", "ask\t>\n")]);
+        let file =
+            std::env::temp_dir().join(format!("ufo-environment-{}.yaml", std::process::id()));
+        std::fs::write(&file, "system_prompt: minimal\n").expect("the file is written");
+        let mut session = stopping(base).with_runtime_config(
+            Some("model".into()),
+            false,
+            Some(file.to_str().expect("a utf8 path").into()),
+        );
+
+        assert_eq!(session.resolve_environment(), Ok(()));
+        session
+            .post(PostBody::Message("run it".into()))
+            .expect("the message is accepted");
+
+        let requests = serving.join().expect("the server thread");
+        let _ = std::fs::remove_file(&file);
+        let upload = &requests[0];
+        assert!(
+            upload.starts_with("POST /surface/ufo/environment/document HTTP/1.1\r\n"),
+            "{upload}"
+        );
+        assert!(
+            upload.to_lowercase().contains("authorization: bearer tok"),
+            "{upload}"
+        );
+        assert!(
+            upload.ends_with("\r\n\r\nsystem_prompt: minimal\n"),
+            "{upload}"
+        );
+        let turn = &requests[1];
+        assert!(
+            turn.contains(&format!("x-ufo-environment: {digest}")),
+            "{turn}"
+        );
+    }
+
+    #[test]
+    fn a_files_section_uploads_each_local_path_and_pins_digests() {
+        let file_digest = "sha256:0c11d463c749db5838e2c0e489bf869d531e5403924740b0a317b95b34b0e514";
+        let doc_digest = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let (base, serving) = served_each(vec![("200 OK", file_digest), ("200 OK", doc_digest)]);
+        let dir = std::env::temp_dir().join(format!("ufo-env-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the dir is made");
+        std::fs::write(dir.join("case.tar"), b"archive bytes").expect("the archive is written");
+        let doc = dir.join("arm.yaml");
+        std::fs::write(&doc, "files:\n  data/case.tar: case.tar\n").expect("the doc is written");
+        let mut session = stopping(base).with_runtime_config(
+            None,
+            false,
+            Some(doc.to_str().expect("a utf8 path").into()),
+        );
+
+        assert_eq!(session.resolve_environment(), Ok(()));
+        assert_eq!(session.environment.as_deref(), Some(doc_digest));
+
+        let requests = serving.join().expect("the server thread");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            requests[0].starts_with("POST /surface/ufo/environment/file HTTP/1.1\r\n"),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[0].ends_with("\r\n\r\narchive bytes"),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[1].starts_with("POST /surface/ufo/environment/document HTTP/1.1\r\n"),
+            "{}",
+            requests[1]
+        );
+        assert!(
+            requests[1].ends_with(&format!(
+                "\r\n\r\n{{\"files\":{{\"data/case.tar\":\"{file_digest}\"}}}}"
+            )),
+            "{}",
+            requests[1]
+        );
+    }
+
+    #[test]
+    fn a_refused_environment_upload_names_what_the_server_answered() {
+        let (base, serving) = served("400 Bad Request", "environment documents are not enabled");
+        let file = std::env::temp_dir().join(format!(
+            "ufo-environment-refused-{}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(&file, "junk").expect("the file is written");
+        let mut session = stopping(base).with_runtime_config(
+            Some("model".into()),
+            false,
+            Some(file.to_str().expect("a utf8 path").into()),
+        );
+
+        let error = session
+            .resolve_environment()
+            .expect_err("the upload is refused");
+
+        let _ = std::fs::remove_file(&file);
+        let _ = serving.join();
+        assert_eq!(
+            error,
+            "environment upload failed (400): environment documents are not enabled"
+        );
     }
 
     #[test]

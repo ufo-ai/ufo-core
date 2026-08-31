@@ -1,0 +1,443 @@
+"""Assemble one turn's environment: the prompt, tool offer, and skills composed from the
+discovered manifests' contributions under the runtime's access policy, then reshaped by the
+turn's pinned environment document. The runtime resolves the turn's model and hands over the
+facts; this layer owns what the model reads and may call.
+
+A document narrows the platform's grants; it cannot widen them. Rewritten text touches only what
+the model reads, a removal only shrinks the offer, and a scoped name the offer does not hold fails
+the turn loud — so every surviving tool keeps the handler, capability context, and authorization
+the platform bound. A `run` tool is the one addition a document makes: its implementation is a
+command inside the turn's own sandbox, which grants nothing the sandbox's shell does not already
+grant."""
+
+import copy
+import json
+import shlex
+from dataclasses import dataclass, replace
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, Field, create_model
+
+from ufo.blob import WorkspaceBlobStore
+from ufo.harness.o11y import span
+from ufo.host.environment import (
+    EnvironmentDocument,
+    EnvironmentOverrides,
+    PromptOverride,
+    TextEdit,
+    ToolInput,
+    ToolOverride,
+    load_environment_document,
+    load_environment_file,
+)
+from ufo.host.ext.loader import (
+    connector_clis,
+    injecting_slots,
+    turn_hooks,
+    turn_member_skills,
+    turn_tools,
+)
+from ufo.runtime.access.connectors import CliCredential
+from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.ext.context import ExtensionContext
+from ufo.runtime.ext.hooks import HookChain
+from ufo.runtime.ext.manifest import CredentialSlot, Manifest
+from ufo.runtime.ext.surface import TurnTailer
+from ufo.runtime.indexing import EmbedClient, IndexBackend
+from ufo.runtime.kinds.agent_setup import setup_skill
+from ufo.runtime.objects import ObjectVerbs
+from ufo.runtime.prompts.render import (
+    RenderedPrompt,
+    render_system_prompt,
+    rendered_prompt,
+)
+from ufo.runtime.queue import (
+    AssembledTurn,
+    AssembleRequest,
+    EnvironmentFile,
+    _agent_actions,
+    _agent_tools,
+    _member_skill_block,
+    _prompt_skill_index,
+    _subagent_actions,
+    _subagent_tools,
+    _with_action_verbs,
+    _without_workspace_skills,
+)
+from ufo.runtime.skills.runtime import (
+    SKILL_MD,
+    LoadedSkill,
+    SkillCard,
+    SkillMaterializer,
+    SkillRegistry,
+    parse_skill_content,
+)
+from ufo.runtime.skills.selection import MemberVisibility, member_visibility
+from ufo.runtime.spawn_catalog import spawn_catalog_skill
+from ufo.runtime.subagents import FINISH_CONTRACT, subagent_system_prompt
+from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import ToolDef, ToolRegistry
+from ufo.runtime.tools.tasks import run_task
+from ufo.runtime.turns.audience import Audience
+from ufo.schema.records import SCHEDULED_ADMISSION
+
+RUN_INPUT_TYPES: dict[str, type] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+}
+
+
+@dataclass(frozen=True)
+class HostEnvironment:
+    """The default `TurnEnvironment`: compose each turn's prompt, tools, and skills from the
+    discovered manifests' contributions and the agent's grants. A composition root constructs one
+    from the deploy's discovered manifests and hands it to the runtime, which never reaches back
+    into this layer."""
+
+    manifests: tuple[Manifest, ...]
+    credentials: CredentialStore | None
+    index: IndexBackend | None = None
+    embed: EmbedClient | None = None
+    blob: WorkspaceBlobStore | None = None
+    tailer: TurnTailer | None = None
+    public_base_url: str | None = None
+    home_surface: str | None = None
+    artifact_token_secret: str = ""
+
+    async def assemble(self, request: AssembleRequest) -> AssembledTurn:
+        turn, agent, profile = request.turn, request.agent, request.profile
+        document: EnvironmentDocument | None = None
+        if request.environment is not None:
+            document = await load_environment_document(self._document_blob(), request.environment)
+        all_tools, tool_ext, verbs = self.tools(
+            audience=request.audience,
+            scheduled_member_id=(
+                turn.on_behalf_of_member_id
+                if turn.admission_source == SCHEDULED_ADMISSION
+                else None
+            ),
+        )
+        hooks = self.hooks(audience=request.audience)
+        member_cards: tuple[SkillCard, ...] = ()
+        materialize_member: SkillMaterializer = _without_workspace_skills
+        if agent.use_workspace_skills:
+            member_cards, materialize_member = await self.member_skills(agent_name=agent.name)
+        skills = request.skills.merged_with(
+            (
+                await spawn_catalog_skill(
+                    request.subagents,
+                    turn.speaker_member_id or turn.on_behalf_of_member_id,
+                ),
+            )
+        ).with_member(member_cards, materialize_member)
+        sections = tuple(
+            (section.name, section.body)
+            for manifest in self.manifests
+            for section in manifest.prompt_sections
+        )
+        preload: tuple[LoadedSkill, ...] = ()
+        view: MemberVisibility | None = None
+        if profile is None:
+            granted_actions = _agent_actions(
+                verbs.actions, agent.tools, turn.admission_source, turn.speaker_member_id
+            )
+            selected = _with_action_verbs(
+                _agent_tools(all_tools, agent.tools, turn.admission_source, turn.speaker_member_id),
+                all_tools,
+                granted_actions,
+            )
+            waiting = await setup_skill(turn.agent_id, agent.is_main, turn.speaker_member_id)
+            if waiting is not None:
+                skills = skills.merged_with((waiting,))
+            skills = _skills_with_document(skills, document)
+            cards = tuple(skills.member_cards.values())
+            view = member_visibility(turn.inbound, cards)
+            member_skill_block = _member_skill_block(turn, view, request.member_block)
+            prompt = render_system_prompt(
+                agent.prompt,
+                sections,
+                skills=_prompt_skill_index(skills, request.member_block),
+                knowledge_cutoff=request.knowledge_cutoff,
+            )
+        else:
+            skills = _skills_with_document(skills, document)
+            profile_grants = request.subagent_grants.get(profile.name, frozenset())
+            preload = await skills.materialize(skills.closure(*request.preload_names))
+            cards = tuple(skills.member_cards.values())
+            member_skill_block = _member_skill_block(
+                turn, member_visibility(turn.inbound, cards), request.member_block
+            )
+            prompt = rendered_prompt(
+                subagent_system_prompt(
+                    profile,
+                    skills=_prompt_skill_index(skills, request.member_block),
+                    preload=preload,
+                )
+            )
+            granted_actions = _subagent_actions(verbs.actions, profile, profile_grants)
+            selected = _with_action_verbs(
+                _subagent_tools(all_tools, profile, profile_grants),
+                all_tools,
+                granted_actions,
+            )
+        tools = ToolRegistry(selected)
+        prompt_replaced = False
+        files: tuple[EnvironmentFile, ...] = ()
+        if document is not None:
+            with span("environment.overrides"):
+                scoped = document.main if profile is None else document.profiles.get(profile.name)
+                prompt, tools, prompt_replaced = _applied_document(
+                    prompt, tools, scoped, document.tools
+                )
+                seeded: list[EnvironmentFile] = []
+                for path, digest in document.files.items():
+                    content = await load_environment_file(self._document_blob(), digest)
+                    seeded.append(EnvironmentFile(path=path, content=content))
+                files = tuple(seeded)
+        if turn.spawned and (profile is None or prompt_replaced):
+            prompt = rendered_prompt(f"{prompt.content}\n\n{FINISH_CONTRACT}")
+        return AssembledTurn(
+            system_prompt=prompt,
+            tools=tools,
+            tool_ext=tool_ext,
+            verbs=verbs,
+            granted_actions=granted_actions,
+            hooks=hooks,
+            skills=skills,
+            preload=preload,
+            files=files,
+            member_skill_block=member_skill_block,
+            cards=cards,
+            view=view,
+        )
+
+    def tools(
+        self, *, audience: Audience, scheduled_member_id: UUID | None
+    ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]:
+        return turn_tools(
+            self.manifests,
+            self.credentials,
+            self.index,
+            self.embed,
+            audience=audience,
+            public_base_url=self.public_base_url,
+            home_surface=self.home_surface,
+            artifact_token_secret=self.artifact_token_secret,
+            scheduled_member_id=scheduled_member_id,
+            member_context_blob=self.blob,
+        )
+
+    def hooks(self, *, audience: Audience) -> HookChain:
+        return turn_hooks(
+            self.manifests,
+            self.credentials,
+            self.index,
+            self.embed,
+            self.tailer,
+            audience=audience,
+            public_base_url=self.public_base_url,
+        )
+
+    async def member_skills(
+        self, *, agent_name: str
+    ) -> tuple[tuple[SkillCard, ...], SkillMaterializer]:
+        return await turn_member_skills(
+            self.manifests,
+            self.credentials,
+            self.index,
+            self.embed,
+            agent_name=agent_name,
+        )
+
+    async def environment_model(self, environment: str, profile: str | None) -> str | None:
+        """The document's model choice for one target, None when its block names none."""
+        document = await load_environment_document(self._document_blob(), environment)
+        scoped = document.main if profile is None else document.profiles.get(profile)
+        return None if scoped is None else scoped.model
+
+    def clis(self) -> dict[str, CliCredential]:
+        return connector_clis(self.manifests)
+
+    def slots(self) -> tuple[CredentialSlot, ...]:
+        return injecting_slots(self.manifests)
+
+    def _document_blob(self) -> WorkspaceBlobStore:
+        if self.blob is None:
+            raise RuntimeError("the host holds no blob store to load environment documents")
+        return self.blob
+
+
+def _skills_with_document(
+    skills: SkillRegistry, document: EnvironmentDocument | None
+) -> SkillRegistry:
+    """The deploy skill tier with the document's `skills` applied: a known name is replaced by the
+    given `SKILL.md` (or has `replace` edits applied to its existing one), keeping the skill's
+    bundled files; an unknown name is added whole, and edits against one fail loud. A replaced or
+    added name leaves the bundled set so the sandbox mounts its live content instead of the
+    image's copy. A member-authored skill is the member's, never a document's to change."""
+    if document is None or not document.skills:
+        return skills
+    by_name = dict(skills.by_name)
+    for name, entry in document.skills.items():
+        if name in skills.member_cards and name not in by_name:
+            raise ValueError(f"environment skills cannot override member skill {name!r}")
+        existing = by_name.get(name)
+        if isinstance(entry, str):
+            text = entry
+        elif existing is None:
+            raise ValueError(f"environment skills edit a skill the deploy does not hold: {name!r}")
+        else:
+            text = _edited(existing.raw_skill_md, entry.replace, f"skill {name!r}")
+        files = {SKILL_MD: text.encode(), **(dict(existing.files) if existing else {})}
+        by_name[name] = parse_skill_content(
+            name.rsplit("/", 1)[-1],
+            files,
+            registry_name=name,
+            parent=existing.parent if existing else None,
+        )
+    bundled = (skills.bundled_names or frozenset()) - set(document.skills)
+    return replace(skills, by_name=by_name, bundled_names=bundled)
+
+
+def _applied_document(
+    prompt: RenderedPrompt,
+    tools: ToolRegistry,
+    scoped: EnvironmentOverrides | None,
+    global_tools: dict[str, ToolOverride],
+) -> tuple[RenderedPrompt, ToolRegistry, bool]:
+    """One target's assembled prompt and offer, reshaped by its document block. Scoped entries fail
+    loud on a name the offer does not hold; top-level entries apply wherever the name is offered,
+    and a top-level `run` tool joins every offer."""
+    by_name = {tool.name: tool for tool in tools.tools}
+    if scoped is not None:
+        unknown = sorted(
+            name
+            for name, override in scoped.tools.items()
+            if name not in by_name and override.run is None
+        )
+        if unknown:
+            raise ValueError(
+                f"environment overrides name tools the turn does not offer: {', '.join(unknown)}"
+            )
+    merged = {
+        name: override
+        for name, override in global_tools.items()
+        if override.run is not None or name in by_name
+    }
+    if scoped is not None:
+        merged.update(scoped.tools)
+    for name, override in merged.items():
+        if not override.enabled:
+            by_name.pop(name, None)
+            continue
+        if override.run is not None:
+            existing = by_name.get(name)
+            description = override.description or (
+                existing.description if existing is not None else None
+            )
+            if description is None:
+                raise ValueError(
+                    f"environment tool {name!r} adds a command and needs a description"
+                )
+            by_name[name] = _run_tool(name, description, override.input, override.run)
+            continue
+        current = by_name[name]
+        by_name[name] = replace(
+            current,
+            description=override.description or current.description,
+            input_model=(
+                _described_model(current.input_model, name, override.parameters)
+                if override.parameters
+                else current.input_model
+            ),
+        )
+    prompt_replaced = False
+    if scoped is not None and scoped.prompt is not None:
+        prompt = _applied_prompt(prompt.content, scoped.prompt)
+        prompt_replaced = scoped.prompt.text is not None
+    return prompt, ToolRegistry(tuple(by_name.values())), prompt_replaced
+
+
+def _applied_prompt(content: str, override: PromptOverride) -> RenderedPrompt:
+    if override.text is not None:
+        return rendered_prompt(override.text)
+    return rendered_prompt(_edited(content, override.replace, "prompt"))
+
+
+def _edited(content: str, edits: tuple[TextEdit, ...], subject: str) -> str:
+    for edit in edits:
+        occurrences = content.count(edit.old)
+        if occurrences != 1:
+            raise ValueError(
+                f"{subject} edit must match exactly once, found {occurrences}: {edit.old[:80]!r}"
+            )
+        content = content.replace(edit.old, edit.new)
+    return content
+
+
+def _described_model(
+    model: type[BaseModel], tool: str, parameters: dict[str, str]
+) -> type[BaseModel]:
+    unknown = sorted(set(parameters) - set(model.model_fields))
+    if unknown:
+        raise ValueError(
+            f"environment overrides name parameters {tool!r} does not take: {', '.join(unknown)}"
+        )
+    fields: dict[str, Any] = {}
+    for name, text in parameters.items():
+        info = copy.deepcopy(model.model_fields[name])
+        info.description = text
+        fields[name] = (info.annotation, info)
+    return create_model(model.__name__, __base__=model, **fields)
+
+
+def _run_tool(name: str, description: str, inputs: dict[str, ToolInput], run: str) -> ToolDef:
+    fields: dict[str, Any] = {
+        field: (
+            RUN_INPUT_TYPES[spec.type] if spec.required else RUN_INPUT_TYPES[spec.type] | None,
+            Field(description=spec.description)
+            if spec.required
+            else Field(default=None, description=spec.description),
+        )
+        for field, spec in inputs.items()
+    }
+    input_model = create_model(f"EnvironmentRun_{name}", **fields)
+
+    async def handler(ctx: ToolContext, payload: BaseModel) -> ToolResult:
+        started = await run_task(ctx, _run_command(run, payload), None)
+        result = started.result
+        output = result.stdout + result.stderr
+        if result.timed_out_after_s is not None:
+            return ToolResult(
+                content=(TextContent(text=f"timed out after {result.timed_out_after_s}s"),),
+                is_error=True,
+            )
+        if result.exit_code == 0:
+            return ToolResult(content=(TextContent(text=output),))
+        notice = f"exit code: {result.exit_code}"
+        return ToolResult(
+            content=(TextContent(text=f"{output}\n{notice}" if output else notice),),
+            is_error=True,
+        )
+
+    return ToolDef(
+        name=name,
+        description=description,
+        input_model=input_model,
+        handler=handler,
+        side_effecting=True,
+    )
+
+
+def _run_command(run: str, payload: BaseModel) -> str:
+    pairs = []
+    for name, value in payload.model_dump(mode="json").items():
+        if value is None:
+            continue
+        text = json.dumps(value) if isinstance(value, bool) else str(value)
+        pairs.append(f"INPUT_{name.upper()}={shlex.quote(text)}")
+    quoted = shlex.quote(run)
+    return f"env {' '.join(pairs)} sh -c {quoted}" if pairs else f"sh -c {quoted}"

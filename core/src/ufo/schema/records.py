@@ -405,6 +405,9 @@ class TerminalFrame(BaseModel):
     cache_percent: int = Field(default=0, ge=0, le=100)
     model: str = ""
     reasoning: ReasoningEffort | None = None
+    environment: str | None = None
+    """The digest of the environment document the turn ran under, None when it pinned none — how
+    an eval run proves every sample measured the arm it uploaded."""
     question: AskUserInput | None = None
     credential_request: CredentialRequest | None = None
     connect_request: ConnectRequest | None = None
@@ -432,36 +435,43 @@ class RuntimeIdentity(BaseModel):
         return self
 
 
+ENVIRONMENT_DOCUMENT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
 class TurnRuntimeConfig(BaseModel):
-    """The runtime choices one turn tree pins without changing its deployed runtime: a concrete
-    model, optionally narrowed sandbox internet access, and optionally an environment host the
-    runtime sends the assembled prompt and tool offer to before the engine runs."""
+    """The runtime choices one turn tree pins without changing its deployed runtime, each
+    independently optional: a concrete model, narrowed sandbox internet access, and the digest of a
+    stored environment document the host applies while assembling the turn's prompt, tools, and
+    skills."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    model: str = Field(min_length=1)
+    model: str | None = Field(default=None, min_length=1)
     internet_access: Literal[False] | None = None
-    environment_host: str | None = None
+    environment: str | None = None
 
     @model_validator(mode="after")
-    def _concrete_model(self) -> "TurnRuntimeConfig":
+    def _pinned_values(self) -> "TurnRuntimeConfig":
         if self.model == "auto":
             raise ValueError("a turn pins a concrete model id, not 'auto'")
-        if self.environment_host is not None and not self.environment_host.startswith(
-            ("http://", "https://")
+        if (
+            self.environment is not None
+            and ENVIRONMENT_DOCUMENT_RE.fullmatch(self.environment) is None
         ):
-            raise ValueError("environment_host is an http(s) URL the runtime dials")
+            raise ValueError("environment is the sha256 digest of a stored environment document")
         return self
 
 
 class RuntimeAttestation(BaseModel):
-    """A turn-ending frame's actual model settings bound to its running service identity."""
+    """A turn-ending frame's actual model settings and pinned environment digest bound to its
+    running service identity."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     runtime: RuntimeIdentity
     model: str = ""
     reasoning: ReasoningEffort | None = None
+    environment: str | None = None
 
 
 class Agent(BaseModel):

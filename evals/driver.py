@@ -14,12 +14,14 @@ import asyncio
 import json
 import os
 import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
+import yaml
 from dbos import DBOSClient, WorkflowHandleAsync
 from dbos import error as dbos_error
 from httpx import AsyncClient
@@ -29,10 +31,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from evals.budget import EvalRunBudget
 from evals.harness.capability import UndeliveredRound, WorkspaceFile
 from evals.harness.timing import TurnStep
-from ufo.blob import BlobNotFound, BlobStore
+from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.models.catalog import CORE_PRICING
 from ufo.harness.models.pricing import Pricing
+from ufo.host.environment import store_environment_document, store_environment_file
 from ufo.onboard.onboard_control import (
     EnsuredWorkspace,
     SeatRequest,
@@ -64,6 +67,7 @@ from ufo.schema.records import (
     TerminalFrame,
     ToolIntent,
     TurnContext,
+    TurnRuntimeConfig,
     Usage,
 )
 from ufo.sdk.models import (
@@ -95,10 +99,38 @@ class RemoteTurnTimeout(Exception):
 
 
 @dataclass
+class _StoredEnvironment:
+    digest: str | None = None
+
+
+async def _resolved_environment_files(
+    body: bytes, base: Path, store: Callable[[bytes], Awaitable[str]]
+) -> bytes:
+    """The authored document with every local `files:` path uploaded through `store` and replaced
+    by its digest — byte-identical when there is nothing to resolve, so a digest-only document
+    stores exactly the bytes the author wrote."""
+    loaded = yaml.safe_load(body)
+    files = loaded.get("files") if isinstance(loaded, dict) else None
+    if not isinstance(files, dict):
+        return body
+    rewrote = False
+    for destination, source in files.items():
+        if isinstance(source, str) and source.startswith("sha256:"):
+            continue
+        content = await asyncio.to_thread((base / str(source)).read_bytes)
+        files[destination] = await store(content)
+        rewrote = True
+    if not rewrote:
+        return body
+    return json.dumps(loaded).encode()
+
+
+@dataclass
 class RemoteRuntimeLog:
     runtime: RuntimeIdentity | None = None
     models: set[str] = field(default_factory=set)
     reasoning: set[ReasoningEffort | None] = field(default_factory=set)
+    environments: set[str | None] = field(default_factory=set)
     error: str = ""
 
     def record(self, attestation: RuntimeAttestation) -> None:
@@ -109,11 +141,14 @@ class RemoteRuntimeLog:
         if attestation.model:
             self.models.add(attestation.model)
             self.reasoning.add(attestation.reasoning)
+            self.environments.add(attestation.environment)
 
     def reject(self, reason: str) -> None:
         self.error = reason
 
-    def verify(self, model: str, reasoning: ReasoningEffort) -> RuntimeAttestation:
+    def verify(
+        self, model: str, reasoning: ReasoningEffort, environment: str | None = None
+    ) -> RuntimeAttestation:
         if self.error:
             raise RuntimeError(self.error)
         if self.runtime is None:
@@ -128,10 +163,16 @@ class RemoteRuntimeLog:
                 f"remote eval expected reasoning {reasoning!r}, terminal frames reported "
                 f"{sorted(value or '' for value in self.reasoning)!r}"
             )
+        if self.environments and self.environments != {environment}:
+            raise RuntimeError(
+                f"remote eval expected environment {environment!r}, terminal frames reported "
+                f"{sorted(value or '' for value in self.environments)!r}"
+            )
         return RuntimeAttestation(
             runtime=self.runtime,
             model=next(iter(self.models), ""),
             reasoning=next(iter(self.reasoning), None),
+            environment=next(iter(self.environments), None),
         )
 
 
@@ -184,7 +225,9 @@ class RemoteClient:
     token_secret: str
     home_root: Path
     model: str | None = None
+    environment_document: Path | None = None
     runtime: RemoteRuntimeLog = field(default_factory=RemoteRuntimeLog)
+    _environment: _StoredEnvironment = field(default_factory=_StoredEnvironment, init=False)
 
     async def validate(self) -> None:
         """Fail unless the selected client implements the remote JSON transport."""
@@ -195,10 +238,58 @@ class RemoteClient:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await process.communicate()
-        needed = (b"--remote", b"--json", *((b"--model",) if self.model is not None else ()))
+        needed = (
+            b"--remote",
+            b"--json",
+            *((b"--model",) if self.model is not None else ()),
+            *((b"--environment",) if self.environment_document is not None else ()),
+        )
         if process.returncode or any(option not in stdout for option in needed):
             detail = (stderr or stdout).decode("utf-8", "replace").strip()
             raise RuntimeError(f"{self.executable} does not support remote JSON sessions: {detail}")
+
+    def stored_environment(self) -> str | None:
+        """The digest this run's turns must attest to — set once the document uploaded, None when
+        the run pins no environment (a turn attesting one anyway fails verification)."""
+        return self._environment.digest
+
+    async def _environment_value(self, workspace_id: UUID, email: str) -> str | None:
+        """The digest every remote turn pins: the run's overrides document, stored once through
+        the workspace's own document endpoint so the eval measures exactly the bytes it uploaded."""
+        if self.environment_document is None:
+            return None
+        if self._environment.digest is None:
+            token = mint_token(self.token_secret, str(workspace_id), email, REMOTE_TOKEN_TTL)
+            headers = {"authorization": f"Bearer {token}"}
+            body = await asyncio.to_thread(self.environment_document.read_bytes)
+            async with AsyncClient(timeout=30.0) as client:
+
+                async def store(content: bytes) -> str:
+                    stored = await client.post(
+                        f"{self.workspace_url}/surface/ufo/environment/file",
+                        content=content,
+                        headers=headers,
+                    )
+                    if stored.status_code != 200:
+                        raise RuntimeError(
+                            f"environment file refused ({stored.status_code}): {stored.text}"
+                        )
+                    return stored.text
+
+                body = await _resolved_environment_files(
+                    body, self.environment_document.parent, store
+                )
+                response = await client.post(
+                    f"{self.workspace_url}/surface/ufo/environment/document",
+                    content=body,
+                    headers=headers,
+                )
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"environment document refused ({response.status_code}): {response.text}"
+                )
+            self._environment.digest = response.text
+        return self._environment.digest
 
     async def admit(
         self,
@@ -211,6 +302,7 @@ class RemoteClient:
         """Run one member turn through `ufo --remote --json` and return its durable turn id."""
         home = self.home_root / str(conversation_id)
         token = mint_token(self.token_secret, str(workspace_id), email, REMOTE_TOKEN_TTL)
+        environment = await self._environment_value(workspace_id, email)
         await asyncio.to_thread(self._write_credentials, home, token)
         env = dict(os.environ)
         env.update(
@@ -230,6 +322,7 @@ class RemoteClient:
                         self.executable,
                         "--remote",
                         *(() if self.model is None else ("--model", self.model)),
+                        *(() if environment is None else ("--environment", environment)),
                         "--json",
                         "--resume",
                         str(conversation_id),
@@ -442,7 +535,7 @@ class WorkspaceDriver:
     workspace_id: UUID
     agent_id: UUID
     agent_prompt: str
-    blob: BlobStore
+    blob: WorkspaceBlobStore
     dbos: DBOSClient
     workspace_root: Path
     agent_model: str = "eval"
@@ -450,6 +543,8 @@ class WorkspaceDriver:
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS
     remote: RemoteClient | None = None
+    environment_document: Path | None = None
+    _environment: _StoredEnvironment = field(default_factory=_StoredEnvironment, init=False)
 
     async def open(
         self,
@@ -791,8 +886,24 @@ class WorkspaceDriver:
             idempotency_key,
             context=None if sender is None else TurnContext(sender=sender),
             speaker_member_id=speaker,
+            runtime_config=await self._local_environment(),
         )
         return admitted.turn_id
+
+    async def _local_environment(self) -> TurnRuntimeConfig | None:
+        """The digest every in-process turn pins: the run's environment document, stored once
+        content-addressed in this workspace's blob store — the same bytes the host loads back."""
+        if self.environment_document is None:
+            return None
+        if self._environment.digest is None:
+            body = await asyncio.to_thread(self.environment_document.read_bytes)
+
+            async def store(content: bytes) -> str:
+                return await store_environment_file(self.blob, content)
+
+            body = await _resolved_environment_files(body, self.environment_document.parent, store)
+            self._environment.digest = await store_environment_document(self.blob, body)
+        return TurnRuntimeConfig(environment=self._environment.digest)
 
     async def apply_object_intent(
         self,

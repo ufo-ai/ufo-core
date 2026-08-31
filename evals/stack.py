@@ -144,6 +144,7 @@ class RunSpec(BaseModel):
     args: tuple[str, ...] = ()
     env: dict[str, str] = {}
     model: str | None = None
+    environment: Path | None = None
     reasoning: ReasoningEffort | None = None
     memory_100: Path | None = None
     memory_ingestion: Path | None = None
@@ -711,6 +712,8 @@ class EvalStack:
         flags = {token.partition("=")[0] for token in argv}
         if "--remote" in flags and self.spec.model is not None:
             argv += ["--model", self.spec.model]
+        if self.spec.environment is not None:
+            argv += ["--environment", str(self.spec.environment.resolve())]
         argv += ["--out", str(self.out)]
         if self.run_budget is not None:
             argv += ["--run-id", str(self.run_budget.run_id)]

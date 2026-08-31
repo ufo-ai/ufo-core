@@ -52,7 +52,8 @@ from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
-from ufo.host.ext.loader import HostEnvironment, skill_registry
+from ufo.host.assemble import HostEnvironment
+from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore

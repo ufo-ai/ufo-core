@@ -74,9 +74,10 @@ from ufo.harness.sandbox.session import (
     RunTokenCodec,
 )
 from ufo.harness.sandbox.terminal import Terminals, TerminalTransport
+from ufo.host.assemble import HostEnvironment
+from ufo.host.environment import store_environment_document, store_environment_file
 from ufo.host.ext.loader import (
     CORE_OBJECT_KINDS,
-    HostEnvironment,
     MemberObjectRegistry,
     connection_hooks,
     connector_clis,
@@ -503,7 +504,6 @@ def run() -> None:
             public_base_url=config.connect.public_base_url,
             artifact_token_secret=artifact_secret,
         ),
-        environment_host_allowed=config.environment.dev_host_allowed,
     )
     _assert_no_reserved_routes(app)
     log("serve.started", host=config.serve.host, port=config.serve.port)
@@ -1105,7 +1105,6 @@ def _mount_shared_surfaces(
     surface_model: "Callable[[str], SurfaceModel] | None" = None,
     objects: MemberObjectRegistry | None = None,
     key_slot_for: Callable[[str], str | None] | None = None,
-    environment_host_allowed: bool = False,
 ) -> None:
     """Install the fleet-wide `WorkspaceScopeBoundary` and mount each shared-fleet-capable
     surface's routes, resolving the workspace per request instead of pinning one at boot:
@@ -1196,7 +1195,8 @@ def _mount_shared_surfaces(
             _deploy_sandbox_internet=deploy_sandbox_internet,
             _deploy_extensions=deploy_extensions,
             _models=models,
-            _environment_host_allowed=environment_host_allowed,
+            _store_environment_document=store_environment_document,
+            _store_environment_file=store_environment_file,
             _sandbox_sizes=sandbox_sizes,
             _skills=skills,
             _system_skill_bundle=system_skill_bundle,

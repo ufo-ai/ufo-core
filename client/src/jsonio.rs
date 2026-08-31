@@ -402,6 +402,7 @@ mod tests {
                 },
                 model: "glm-5.3-flash".into(),
                 reasoning: Some("high".into()),
+                environment: Some(format!("sha256:{}", "d".repeat(64))),
             })),
             vec![Event::Runtime {
                 attestation: Box::new(RuntimeAttestation {
@@ -414,6 +415,7 @@ mod tests {
                     },
                     model: "glm-5.3-flash".into(),
                     reasoning: Some("high".into()),
+                    environment: Some(format!("sha256:{}", "d".repeat(64))),
                 }),
             }]
         );

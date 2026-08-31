@@ -304,6 +304,11 @@ def main(argv: list[str] | None = None) -> None:
         help="concrete model id sent with each remote eval turn",
     )
     parser.add_argument(
+        "--environment",
+        type=Path,
+        help="overrides document stored once and pinned by digest on each remote eval turn",
+    )
+    parser.add_argument(
         "--fresh-workspace",
         action="store_true",
         help="provision a clean hosted workspace for a remote eval run",
@@ -879,6 +884,7 @@ def main(argv: list[str] | None = None) -> None:
             fresh_workspace=args.fresh_workspace,
             remote=args.remote,
             model=args.model,
+            environment=args.environment,
             candidate_proposal=args.candidate_from_proposal,
             concurrency=args.concurrency,
             budget_micro_usd=(
@@ -944,6 +950,7 @@ async def _run(
     fresh_workspace: bool = False,
     remote: bool = False,
     model: str | None = None,
+    environment: Path | None = None,
     candidate_proposal: UUID | None = None,
     concurrency: int = 1,
     budget_micro_usd: int | None = None,
@@ -988,6 +995,7 @@ async def _run(
                     token_secret=token_secret,
                     home_root=REMOTE_HOME_ROOT,
                     model=model,
+                    environment_document=environment,
                 )
                 await remote_client.validate()
             if fresh_workspace:
@@ -1060,6 +1068,7 @@ async def _run(
                 pricing=registry.pricing,
                 workflow_wait_seconds=workflow_wait_seconds,
                 remote=remote_client,
+                environment_document=environment,
             )
             ctx = context_for(
                 "evals",
@@ -1187,7 +1196,9 @@ async def _run(
                     runtime_attestation = None
                     if remote_client is not None:
                         runtime_attestation = remote_client.runtime.verify(
-                            resolved_agent_model, agent_reasoning
+                            resolved_agent_model,
+                            agent_reasoning,
+                            remote_client.stored_environment(),
                         )
                         recorder.runtime = runtime_attestation
                     digest = report.digest

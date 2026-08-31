@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -67,30 +67,22 @@ from ufo.runtime.engine import (
     TurnParked,
     _claim_turn_with_handoff,
 )
-from ufo.runtime.environment import (
-    EnvironmentRequest,
-    EnvironmentTool,
-    apply_environment_overrides,
-    fetch_environment_overrides,
-)
 from ufo.runtime.ext.context import ExtensionContext, ModelAccess, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest, SubagentProfile
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.hub import Hub, Terminal
 from ufo.runtime.indexing import EmbedClient, IndexBackend
-from ufo.runtime.kinds.agent_setup import setup_skill
 from ufo.runtime.kinds.provisioning import AgentProvisioning
 from ufo.runtime.media.site_previewer import SitePreviewer
 from ufo.runtime.memory import MemorySearch
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.objects import BoundAction, ObjectVerbs
-from ufo.runtime.prompts.render import render_system_prompt, rendered_prompt
+from ufo.runtime.prompts.render import RenderedPrompt
 from ufo.runtime.search import SearchProvider
 from ufo.runtime.skills.runtime import (
     LoadedSkill,
     SkillCard,
-    SkillMaterializer,
     SkillRegistry,
     SystemSkillBundle,
     load_skills,
@@ -99,17 +91,13 @@ from ufo.runtime.skills.selection import (
     SKILL_QUERY_MAX_CHARS,
     SKILL_TOP_K,
     MemberVisibility,
-    member_visibility,
     prompt_index,
     select_top_k,
 )
-from ufo.runtime.spawn_catalog import spawn_catalog_skill
 from ufo.runtime.subagents import (
-    FINISH_CONTRACT,
     SubagentRegistry,
     SubagentResult,
     Subagents,
-    subagent_system_prompt,
 )
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
 from ufo.runtime.tools.context import SPAWN_CONNECT_PATH, Spawn, UnknownSubagentProfile
@@ -488,21 +476,65 @@ TURN_QUEUE = Queue(
 )
 
 
+@dataclass(frozen=True)
+class AssembleRequest:
+    """The facts one turn hands the host to compose its environment from: the turn row and its
+    resolved agent or profile, the billing-resolved model, the deploy's skill registry and grants,
+    and the digest of the environment document the turn pins — gate-checked here, loaded and
+    applied by the host, which owns what a document means."""
+
+    turn: Turn
+    agent: Agent
+    audience: Audience
+    profile: SubagentProfile | None
+    model: str
+    knowledge_cutoff: str
+    preload_names: tuple[str, ...]
+    skills: SkillRegistry
+    subagents: SubagentRegistry
+    subagent_grants: dict[str, frozenset[str]]
+    member_block: bool
+    environment: str | None
+
+
+@dataclass(frozen=True)
+class EnvironmentFile:
+    """One file the turn's pinned document seeds into its sandbox before the model runs."""
+
+    path: str
+    content: bytes
+
+
+@dataclass(frozen=True)
+class AssembledTurn:
+    """What the host composed for one turn: the prompt the model reads, the tool offer it may
+    call with each tool's owning context and the object verbs, the reactive hook chain, the
+    skills to mount, and the member-skill view the founding message carries."""
+
+    system_prompt: RenderedPrompt
+    tools: ToolRegistry
+    tool_ext: dict[str, ExtensionContext]
+    verbs: ObjectVerbs
+    granted_actions: frozenset[str]
+    hooks: HookChain
+    skills: SkillRegistry
+    preload: tuple[LoadedSkill, ...]
+    files: tuple[EnvironmentFile, ...]
+    member_skill_block: str
+    cards: tuple[SkillCard, ...]
+    view: MemberVisibility | None
+
+
 class TurnEnvironment(Protocol):
-    """The environment a turn runs in, bound per turn from what the host layer discovered: the
-    authorized tool offer with each tool's owning context and the object verbs, the reactive hook
-    chain, the agent's member skills, and the connector plumbing the sandbox mounts. The runtime
-    consumes it; only a composition root constructs an implementation."""
+    """The environment a turn runs in. The host layer composes the whole bundle — prompt, tools,
+    skills, hooks — from what it discovered, reshaped by the turn's pinned environment document;
+    the runtime consumes it. `environment_model` reports the document's model choice for one
+    target so the runtime can resolve, validate, and bill it before assembly — the runtime never
+    reads a document itself. Only a composition root constructs an implementation."""
 
-    def tools(
-        self, *, audience: Audience, scheduled_member_id: UUID | None
-    ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]: ...
+    async def assemble(self, request: AssembleRequest) -> AssembledTurn: ...
 
-    def hooks(self, *, audience: Audience) -> HookChain: ...
-
-    async def member_skills(
-        self, *, agent_name: str
-    ) -> tuple[tuple[SkillCard, ...], SkillMaterializer]: ...
+    async def environment_model(self, environment: str, profile: str | None) -> str | None: ...
 
     def clis(self) -> dict[str, CliCredential]: ...
 
@@ -740,7 +772,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             )
         with span("turn.load"):
             turn, agent, audience = await _load_turn(UUID(turn_id))
-        if turn.runtime_config is not None:
+        if turn.runtime_config is not None and turn.runtime_config.model is not None:
             runtime.registry.spec(turn.runtime_config.model)
         internet_access_allowed = agent.internet_access_allowed and (
             turn.runtime_config is None or turn.runtime_config.internet_access is None
@@ -769,132 +801,37 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             authorized = subagents.authorize(acting_member_id)
             return authorized.spawn, authorized
 
-        with span("extensions.load"):
-            all_tools, tool_ext, verbs = runtime.environment.tools(
-                audience=audience,
-                scheduled_member_id=(
-                    turn.on_behalf_of_member_id
-                    if turn.admission_source == SCHEDULED_ADMISSION
-                    else None
-                ),
+        payload: dict[str, Any] = (
+            json.loads(turn.inbound) if turn.subagent_profile is not None and turn.seq == 1 else {}
+        )
+        profile = (
+            None
+            if turn.subagent_profile is None
+            else _resolve_profile(runtime.subagents, turn_id, turn.subagent_profile)
+        )
+        environment = None if turn.runtime_config is None else turn.runtime_config.environment
+        pinned_model = None if turn.runtime_config is None else turn.runtime_config.model
+        if environment is not None:
+            document_model = await runtime.environment.environment_model(
+                environment, turn.subagent_profile
             )
-            hooks = runtime.environment.hooks(audience=audience)
-            member_cards: tuple[SkillCard, ...] = ()
-            materialize_member: SkillMaterializer = _without_workspace_skills
-            if agent.use_workspace_skills:
-                member_cards, materialize_member = await runtime.environment.member_skills(
-                    agent_name=agent.name
-                )
-            skills = runtime.skills.merged_with(
-                (
-                    await spawn_catalog_skill(
-                        runtime.subagents,
-                        turn.speaker_member_id or turn.on_behalf_of_member_id,
-                    ),
-                )
-            ).with_member(member_cards, materialize_member)
-            sections = tuple(
-                (section.name, section.body)
-                for manifest in runtime.manifests
-                for section in manifest.prompt_sections
+            if document_model is not None:
+                runtime.registry.spec(document_model)
+                pinned_model = document_model
+        if profile is None:
+            resolved_model = (
+                pinned_model if pinned_model is not None else runtime.registry.resolve(agent.model)
             )
-        preload: tuple[LoadedSkill, ...] = ()
-        member_skill_block = ""
-        connector_read_only = False
-        if turn.subagent_profile is None:
-            resolved = agent.model_copy(
-                update={
-                    "model": (
-                        runtime.registry.resolve(agent.model)
-                        if turn.runtime_config is None
-                        else turn.runtime_config.model
-                    ),
-                    "internet_access_allowed": internet_access_allowed,
-                }
-            )
-            granted_actions = _agent_actions(
-                verbs.actions,
-                agent.tools,
-                turn.admission_source,
-                turn.speaker_member_id,
-            )
-            tools = ToolRegistry(
-                _with_action_verbs(
-                    _agent_tools(
-                        all_tools,
-                        agent.tools,
-                        turn.admission_source,
-                        turn.speaker_member_id,
-                    ),
-                    all_tools,
-                    granted_actions,
-                )
-            )
-            waiting = await setup_skill(turn.agent_id, agent.is_main, turn.speaker_member_id)
-            if waiting is not None:
-                skills = skills.merged_with((waiting,))
-            cards = tuple(skills.member_cards.values())
-            view = member_visibility(turn.inbound, cards)
-            member_skill_block = _member_skill_block(turn, view, runtime.config.skills.member_block)
-            if _member_skill_turn(turn) and cards and not view.catalog_fits:
-                _fire_shadow_selection(runtime.index, runtime.embed, turn, cards)
-            max_rounds = MAIN_ROUND_LIMIT
-            output_model: Contract | None = None
-            if turn.spawned:
-                output_model = output_contract(agent.output_schema)
         else:
-            profile = _resolve_profile(runtime.subagents, turn_id, turn.subagent_profile)
-            payload = json.loads(turn.inbound) if turn.seq == 1 else {}
-            preload = await skills.materialize(
-                skills.closure(*(payload.get("preload_skills") or ()))
-            )
-            member_skill_block = _member_skill_block(
-                turn,
-                member_visibility(turn.inbound, tuple(skills.member_cards.values())),
-                runtime.config.skills.member_block,
-            )
             own_account_member = turn.speaker_member_id or turn.on_behalf_of_member_id
             connected = await ws_current().member_model_provider(own_account_member)
-            resolved = Agent(
-                prompt=subagent_system_prompt(
-                    profile,
-                    skills=_prompt_skill_index(skills, runtime.config.skills.member_block),
-                    preload=preload,
-                ),
-                model=_subagent_model(
-                    profile,
-                    connected,
-                    agent,
-                    runtime,
-                    None if turn.runtime_config is None else turn.runtime_config.model,
-                ),
-                reasoning=profile.reasoning or agent.reasoning,
-                internet_access_allowed=internet_access_allowed,
-            )
-            granted_actions = _subagent_actions(
-                verbs.actions, profile, runtime.subagent_grants.get(profile.name, frozenset())
-            )
-            tools = ToolRegistry(
-                _with_action_verbs(
-                    _subagent_tools(
-                        all_tools,
-                        profile,
-                        runtime.subagent_grants.get(profile.name, frozenset()),
-                    ),
-                    all_tools,
-                    granted_actions,
-                )
-            )
-            system_prompt = rendered_prompt(resolved.prompt)
-            max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
-            output_model = profile.output_model
-            connector_read_only = profile.connector_read_only
-        current_price = runtime.registry.pricing.prices[resolved.model]
+            resolved_model = _subagent_model(profile, connected, agent, runtime, pinned_model)
+        current_price = runtime.registry.pricing.prices[resolved_model]
         billing = await _frozen_billing_identity(
             turn.id,
             _BillingIdentity(
                 attempt=attempt,
-                model=resolved.model,
+                model=resolved_model,
                 price_digest=runtime.registry.pricing.digest,
                 input=current_price.input,
                 output=current_price.output,
@@ -904,14 +841,59 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 cache_write_1h=current_price.cache_write_1h,
             ),
         )
-        resolved = resolved.model_copy(update={"model": billing.model})
-        if turn.subagent_profile is None:
-            system_prompt = render_system_prompt(
-                agent.prompt,
-                sections,
-                skills=_prompt_skill_index(skills, runtime.config.skills.member_block),
-                knowledge_cutoff=runtime.registry.spec(resolved.model).knowledge_cutoff,
+        with span("environment.assemble"):
+            assembled = await runtime.environment.assemble(
+                AssembleRequest(
+                    turn=turn,
+                    agent=agent,
+                    audience=audience,
+                    profile=profile,
+                    model=billing.model,
+                    knowledge_cutoff=runtime.registry.spec(billing.model).knowledge_cutoff,
+                    preload_names=tuple(payload.get("preload_skills") or ()),
+                    skills=runtime.skills,
+                    subagents=runtime.subagents,
+                    subagent_grants=runtime.subagent_grants,
+                    member_block=runtime.config.skills.member_block,
+                    environment=environment,
+                )
             )
+        system_prompt = assembled.system_prompt
+        tools = assembled.tools
+        tool_ext = assembled.tool_ext
+        verbs = assembled.verbs
+        hooks = assembled.hooks
+        preload = assembled.preload
+        member_skill_block = assembled.member_skill_block
+        if profile is None:
+            resolved = agent.model_copy(
+                update={
+                    "model": billing.model,
+                    "internet_access_allowed": internet_access_allowed,
+                }
+            )
+            max_rounds = MAIN_ROUND_LIMIT
+            output_model: Contract | None = (
+                output_contract(agent.output_schema) if turn.spawned else None
+            )
+            connector_read_only = False
+            if (
+                _member_skill_turn(turn)
+                and assembled.cards
+                and assembled.view is not None
+                and not assembled.view.catalog_fits
+            ):
+                _fire_shadow_selection(runtime.index, runtime.embed, turn, assembled.cards)
+        else:
+            resolved = Agent(
+                prompt=system_prompt.content,
+                model=billing.model,
+                reasoning=profile.reasoning or agent.reasoning,
+                internet_access_allowed=internet_access_allowed,
+            )
+            max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
+            output_model = profile.output_model
+            connector_read_only = profile.connector_read_only
         model = await runtime.registry.client_for(resolved.model)
         pricing = Pricing(
             prices={
@@ -964,38 +946,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         if preload:
             with span("skills.mount", count=len(preload)):
                 await load_skills(sandbox, preload)
-        prompt_replaced = False
-        if turn.runtime_config is not None and turn.runtime_config.environment_host is not None:
-            if not runtime.config.environment.dev_host_allowed:
-                raise RuntimeError(
-                    "the turn pins an environment host but this deployment does not allow one"
-                )
-            with span("environment.overrides"):
-                overrides = await fetch_environment_overrides(
-                    turn.runtime_config.environment_host,
-                    EnvironmentRequest(
-                        agent_name=agent.name,
-                        model=resolved.model,
-                        system_prompt=system_prompt.content,
-                        tools=tuple(
-                            EnvironmentTool(
-                                name=tool.name,
-                                description=tool.description,
-                                extension=(
-                                    None
-                                    if tool.name not in tool_ext
-                                    else tool_ext[tool.name].store.extension
-                                ),
-                            )
-                            for tool in tools.tools
-                        ),
-                        subagent_profile=turn.subagent_profile,
-                    ),
-                )
-                prompt_replaced = overrides.system_prompt is not None
-                system_prompt, tools = apply_environment_overrides(system_prompt, tools, overrides)
-        if turn.spawned and (turn.subagent_profile is None or prompt_replaced):
-            system_prompt = rendered_prompt(f"{system_prompt.content}\n\n{FINISH_CONTRACT}")
+        if assembled.files:
+            with span("environment.files", count=len(assembled.files)):
+                for seeded in assembled.files:
+                    await sandbox.write_file(seeded.path, seeded.content)
         engine = TurnEngine(
             turn=turn,
             agent=resolved,
@@ -1072,7 +1026,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             pricing=pricing,
             attempt=attempt,
             max_rounds=max_rounds,
-            skills=skills,
+            skills=assembled.skills,
             member_skill_block=member_skill_block,
             preload=preload,
             output_model=output_model,
@@ -1082,7 +1036,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 and turn.admission_source != INTENT_ADMISSION
             ),
             verbs=verbs,
-            granted_actions=granted_actions,
+            granted_actions=assembled.granted_actions,
         )
         run = engine.run_intent if turn.admission_source == INTENT_ADMISSION else engine.run
         frame = await run()

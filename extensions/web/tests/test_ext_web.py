@@ -165,8 +165,8 @@ from ufo.harness.sandbox.conversation import (
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.harness.untrusted import wall
+from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import (
-    HostEnvironment,
     member_object_registry,
     member_skill_listing,
     skill_registry,

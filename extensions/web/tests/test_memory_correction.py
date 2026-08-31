@@ -49,8 +49,8 @@ from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import (
-    HostEnvironment,
     member_object_registry,
     memory_search,
     skill_registry,

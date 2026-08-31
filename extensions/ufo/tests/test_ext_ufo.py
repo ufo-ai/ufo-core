@@ -56,7 +56,8 @@ from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSand
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.harness.sandbox.terminal import TerminalOpFailed
-from ufo.host.ext.loader import HostEnvironment, skill_registry
+from ufo.host.assemble import HostEnvironment
+from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import (
@@ -226,7 +227,13 @@ def test_turn_ending_frames_carry_the_deployed_runtime_and_selected_model() -> N
         sandbox_digest=f"sha256:{'c' * 64}",
     )
     terminal = Terminal(
-        frame=TerminalFrame(status="done", text="done", model="glm-5.3-flash", reasoning="high")
+        frame=TerminalFrame(
+            status="done",
+            text="done",
+            model="glm-5.3-flash",
+            reasoning="high",
+            environment=f"sha256:{'d' * 64}",
+        )
     )
     lines = directives_for(terminal, streamed=True, runtime=runtime)
 
@@ -234,6 +241,7 @@ def test_turn_ending_frames_carry_the_deployed_runtime_and_selected_model() -> N
         "runtime": runtime.model_dump(mode="json"),
         "model": "glm-5.3-flash",
         "reasoning": "high",
+        "environment": f"sha256:{'d' * 64}",
     }
     assert lines[1:] == (b"ask\t>\n",)
 
@@ -243,6 +251,7 @@ def test_turn_ending_frames_carry_the_deployed_runtime_and_selected_model() -> N
         "runtime": runtime.model_dump(mode="json"),
         "model": "",
         "reasoning": None,
+        "environment": None,
     }
     assert parked_lines[1:] == (b"say\tover cap\n", b"ask\t>\n")
 
@@ -952,11 +961,10 @@ async def test_a_runtime_config_that_cannot_run_or_would_widen_is_refused(
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     refused = (
         {"x-ufo-model": "no-such-model"},
-        {"x-ufo-internet": "off"},
         {"x-ufo-model": "claude-sonnet-5", "x-ufo-internet": "on"},
         {"x-ufo-environment": "http://127.0.0.1:9"},
+        {"x-ufo-environment": "not-a-digest"},
         {"x-ufo-model": "claude-sonnet-5", "x-ufo-environment": "http://127.0.0.1:9"},
-        {"x-ufo-model": "claude-sonnet-5", "x-ufo-environment": "not-a-url"},
     )
 
     for headers in refused:
@@ -978,59 +986,37 @@ async def test_a_runtime_config_that_cannot_run_or_would_widen_is_refused(
     assert turns == 0
 
 
-@pytest.fixture
-async def ufo_environment_allowed(
-    db: None,
-    stream_gate: None,
-    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
-    monkeypatch: pytest.MonkeyPatch,
-) -> AsyncIterator[tuple[AsyncClient, UUID]]:
-    """The `ufo` fixture on a deployment that allows an environment host, so the header admits."""
-    config, hub, blob, sandboxes = runtime
-    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
-    dbos_client = replay_safe_client(config.database.system_url)
-    workspace_id = await _seed_workspace()
-    app = FastAPI()
-    _mount_shared_surfaces(
-        app,
-        (ufo_manifest(),),
-        None,
-        blob,
-        sandboxes,
-        hub,
-        dbos_client,
-        "",
-        None,
-        None,
-        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
-        ambient_reply=UNREACHED_AMBIENT_REPLY,
-        skills=EMPTY_SKILL_REGISTRY,
-        member_skill_listing=no_member_skills,
-        environment_host_allowed=True,
-    )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://ufo") as client:
-        yield client, workspace_id
-    dbos_client.destroy()
-
-
-async def test_an_environment_header_pins_the_host_where_the_deployment_allows_it(
-    ufo_environment_allowed: tuple[AsyncClient, UUID],
+async def test_a_stored_document_digest_pins_a_turns_environment(
+    ufo: tuple[AsyncClient, UUID],
 ) -> None:
-    client, workspace_id = ufo_environment_allowed
+    """The document endpoint stores content-addressed, YAML and JSON of the same overrides land
+    on one digest, and the digest pins a turn's environment with no model header anywhere — the
+    three runtime headers are independent."""
+    client, workspace_id = ufo
     await _seed_member(workspace_id, "owner@example.com")
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    auth = {"authorization": f"Bearer {token}"}
+
+    stored = await client.post(
+        "/surface/ufo/environment/document",
+        content=b"main:\n  prompt:\n    text: OVERRIDDEN\n",
+        headers=auth,
+    )
+    assert stored.status_code == 200
+    digest = stored.text
+    again = await client.post(
+        "/surface/ufo/environment/document",
+        content=b'{"main": {"prompt": {"text": "OVERRIDDEN"}}}',
+        headers=auth,
+    )
+    assert again.text == digest
 
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
         response = await client.post(
-            "/surface/ufo/pinned-environment",
-            content=b"use the pinned environment",
-            headers={
-                "authorization": f"Bearer {token}",
-                "x-ufo-model": "claude-sonnet-5",
-                "x-ufo-environment": "http://127.0.0.1:9",
-            },
+            "/surface/ufo/pinned-document",
+            content=b"use the stored document",
+            headers={**auth, "x-ufo-environment": digest},
         )
-
     assert response.status_code == 200
     async with workspace_tx() as connection:
         row = (
@@ -1041,8 +1027,47 @@ async def test_an_environment_header_pins_the_host_where_the_deployment_allows_i
             )
         ).one()
     assert TurnRuntimeConfig.model_validate(row.runtime_config) == TurnRuntimeConfig(
-        model="claude-sonnet-5", environment_host="http://127.0.0.1:9"
+        environment=digest
     )
+
+
+async def test_the_file_store_answers_one_digest_for_one_content(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    auth = {"authorization": f"Bearer {token}"}
+
+    stored = await client.post(
+        "/surface/ufo/environment/file", content=b"archive bytes", headers=auth
+    )
+    assert stored.status_code == 200
+    assert stored.text.startswith("sha256:")
+    again = await client.post(
+        "/surface/ufo/environment/file", content=b"archive bytes", headers=auth
+    )
+    assert again.text == stored.text
+    unauthenticated = await client.post("/surface/ufo/environment/file", content=b"x")
+    assert unauthenticated.status_code == 401
+
+
+async def test_the_document_store_refuses_junk_and_no_bearer(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    unauthenticated = await client.post(
+        "/surface/ufo/environment/document", content=b"main:\n  prompt:\n    text: x\n"
+    )
+    assert unauthenticated.status_code == 401
+    junk = await client.post(
+        "/surface/ufo/environment/document",
+        content=b'{"grant_tools": ["bash"]}',
+        headers={"authorization": f"Bearer {token}"},
+    )
+    assert junk.status_code == 400
 
 
 async def test_shared_fleet_rejects_a_forged_or_missing_bearer(shared_ufo: AsyncClient) -> None:

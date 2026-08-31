@@ -71,6 +71,7 @@ MOVED_MODULES = {
     "ufo.kinds.workspace_kind": "ufo.runtime.kinds.workspace_kind",
     "ufo.listings": "ufo.runtime.listings",
     "ufo.loop": "ufo.runtime",
+    "ufo.runtime.environment": "ufo.host.environment",
     "ufo.loop.compaction": "ufo.runtime.compaction",
     "ufo.loop.delivery": "ufo.runtime.delivery",
     "ufo.loop.engine": "ufo.runtime.engine",

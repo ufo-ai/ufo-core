@@ -58,7 +58,7 @@ workflow that establishes workspace and agent scope from the durable turn record
 product effects to the four harness ports; the tenant domains it composes — access, auth, billing,
 seats, workspace scope, turns, surfaces, sources, kinds, and media; and everything its machinery
 consumes — the extension API (`runtime.ext`: manifest schema, capability contexts, hooks), the
-tool contract (`runtime.tools`), prompts, skills, and the environment override rail. It cannot
+tool contract (`runtime.tools`), prompts, and skills. It cannot
 supply whole-round close, dispatch, recovery, or exhaustion implementations. DBOS workflows and
 steps remain runtime-owned; their arguments and outputs are pickle records, so a class that moves
 lands with its `MOVED_MODULES` entry in the replay serializer and each step converts a harness
@@ -66,23 +66,31 @@ value to its runtime boundary type before returning. RFC 0043 defines the ports,
 landing order, and the matching Rust crate boundary.
 
 `core/src/ufo/host` provides the environment from above: extension discovery (entry points,
-lockfile, catalog), the first-party builtin tools, the default per-turn binding (`HostEnvironment`,
-the runtime's `TurnEnvironment` port), and the dev host. The layering is one-way and gated —
-host imports runtime and harness; the runtime and harness never import `ufo.host` — so host
-contributions reach the runtime only as values a composition root injects (`Runtime.manifests`,
-`Runtime.environment`). A turn admitted with an environment host pinned
-(`TurnRuntimeConfig.environment_host`, the `x-ufo-environment` header beside `x-ufo-model`) has
-its assembled prompt and authorized tool offer finalized by that locally running host before the
-engine runs: a replacement system prompt, rewritten descriptions for offered tools, withheld
-tools. Overrides narrow and cannot grant — a name outside the authorized offer fails the turn — so
-prompt and tool-description experiments run against a shared stack, one overrides document per arm
-(`ufoctl dev-host`), without expanding any member's access. The rail is off unless the deployment
-sets `environment.dev_host_allowed`.
+lockfile, catalog), the first-party builtin tools, and per-turn assembly (`HostEnvironment.assemble`
+in `ufo.host.assemble`, the runtime's `TurnEnvironment` port) — for every turn, the host composes
+the prompt, the tool offer the runtime's access policy authorized, and the skills, and hands the
+bundle back. The layering is one-way and gated — host imports runtime and harness; the runtime and
+harness never import `ufo.host` — so host contributions reach the runtime only as values a
+composition root injects (`Runtime.manifests`, `Runtime.environment`). A turn admitted with an
+environment document pinned (`TurnRuntimeConfig.environment`, the `x-ufo-environment` header —
+independent of `x-ufo-model` and internet narrowing) has that assembly reshaped through the
+document before the engine runs: uploaded once as JSON or YAML through the terminal surface,
+content-addressed by sha256, read from the workspace's blob store with no server anywhere,
+replayed byte-identical on recovery, and applied per target — a `main` block for the member
+agent's turns, a `profiles.<name>` block for each spawned profile, top-level `tools` wherever a
+name is offered, and `skills` replacing or adding whole skills. A block pins its target's model,
+replaces or edits the prompt, rewrites tool and parameter descriptions, withholds tools, and
+defines `run` tools whose implementation is a command in the turn's own sandbox. Overrides narrow and cannot grant — a
+scoped name outside the authorized offer fails the turn, and a `run` tool grants nothing the
+sandbox's shell does not — so prompt, description, and skill experiments run against a shared
+stack without expanding any member's access, and the turn row's digest is the audit. The `ufo`
+client drives the whole experience: `--environment` takes a file or a digest; an `evals.stack`
+matrix pins one document per arm (`[[run]] environment = "arm.yaml"`), local or remote.
 
 Prompt and schema configuration finishes before execution starts. `AgentDefinition` holds the
 system prompt and execution limits; `AgentTools` supplies the exact definitions offered each round
 and the tool-call effect. `AgentEngine.run` never loads extensions or speaks an extension
-protocol; the host layer and the environment rail consume this seam from outside the engine.
+protocol; the host layer's assembly consumes this seam from outside the engine.
 
 Rust `ufo-control` remains the hosted gateway. Its SQL reaches only its `ufo_control` ledgers; it
 calls the runtime's `/internal/onboard/*` routes for workspace choices, membership, seats, and fleet

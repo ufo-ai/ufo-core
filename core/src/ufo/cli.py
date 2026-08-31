@@ -44,7 +44,6 @@ from ufo.harness.containment import contained_file
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.interface import TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.harness.sandbox.ingress_serve import run as ingress_run
-from ufo.host.devhost import serve_dev_host
 from ufo.host.ext.loader import load_manifests, lockfile_path
 from ufo.host.ext.store import ExtensionStore, read_catalog
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
@@ -373,15 +372,6 @@ def new_migration(slug: str) -> None:
         click.echo(f"wrote {target.path} — revision {stamp}, down_revision {head}")
     with contained_file(MIGRATION_HEAD_FILENAME, CORE_VERSIONS_DIR) as head_file:
         head_file.replace_text(f"{stamp}\n", MIGRATION_FILE_MODE)
-
-
-@main.command(name="dev-host")
-@click.argument("overrides", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--host", default="127.0.0.1", show_default=True)
-@click.option("--port", default=8377, show_default=True, type=int)
-def dev_host(overrides: Path, host: str, port: int) -> None:
-    """Serve one environment-overrides document to every turn that pins this host."""
-    serve_dev_host(overrides, host, port)
 
 
 @main.command()

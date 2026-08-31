@@ -495,6 +495,35 @@ def test_remote_child_args_carry_the_model_override(
     )
 
 
+def test_child_args_carry_the_environment_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    document = tmp_path / "arm.yaml"
+    document.write_text("main:\n  prompt:\n    text: OVERRIDDEN\n")
+    stack = EvalStack.provision(
+        RunSpec(
+            label="local-environment",
+            config=template,
+            args=("--only", "basics"),
+            environment=document,
+        ),
+        root=tmp_path / "stack",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+
+    args = stack._child_args()
+    _close(stack)
+
+    assert args[args.index("--environment") : args.index("--environment") + 2] == (
+        "--environment",
+        str(document.resolve()),
+    )
+
+
 async def test_start_serve_uses_the_stack_private_executable_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

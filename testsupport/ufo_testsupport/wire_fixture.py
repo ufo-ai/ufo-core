@@ -68,6 +68,7 @@ WORKSPACE_FIELDS: dict[str, tuple[str, ...]] = {
                 },
                 "model": "glm-5.3-flash",
                 "reasoning": "high",
+                "environment": f"sha256:{'d' * 64}",
             },
             separators=(",", ":"),
         ),

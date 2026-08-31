@@ -51,6 +51,7 @@ ROLE_PACKAGES = (
     "ufo.runtime.subagents",
     "ufo.runtime.tool_bridge",
     "ufo.runtime.transcript",
+    "ufo.host.assemble",
 )
 LOOP_ROLE = frozenset(ROLE_PACKAGES[2:])
 BLOB_MODULE = CORE_SRC / "blob.py"
@@ -278,9 +279,6 @@ DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
         "the walk starts from _resolve, which contains the key under the lstat'ed store root"
     ),
     (CORE_SRC / "config.py", "load_config"): "the config file is deploy input, read before a turn",
-    (HOST_SRC / "devhost.py", "serve_dev_host"): (
-        "the overrides document is operator CLI input, read once at process start"
-    ),
     (Path(EXTENSIONS_ROOT) / "web" / "ufo_ext_web" / "surface.py", "load_assets"): (
         "the portal's built asset directory is deploy input, listed at boot"
     ),

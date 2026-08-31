@@ -347,6 +347,7 @@ def _answer(
                     runtime=runtime,
                     model=frame.model,
                     reasoning=frame.reasoning,
+                    environment=frame.environment,
                 ).model_dump_json(),
             ),
         )
@@ -617,22 +618,19 @@ def _turn_context(email: str, request: Request) -> TurnContext:
 
 
 def _runtime_config(ctx: SurfaceContext, request: Request) -> TurnRuntimeConfig | None:
+    """The turn tree's pinned runtime choices, each header independent of the others."""
     model = request.headers.get(MODEL_HEADER, "").strip()
     internet = request.headers.get(INTERNET_HEADER, "").strip()
     environment = request.headers.get(ENVIRONMENT_HEADER, "").strip()
     if internet and internet != "off":
         raise ValueError(f"{INTERNET_HEADER} only narrows: the one value is 'off'")
-    if internet and not model:
-        raise ValueError(f"{INTERNET_HEADER} requires {MODEL_HEADER}")
-    if environment and not model:
-        raise ValueError(f"{ENVIRONMENT_HEADER} requires {MODEL_HEADER}")
-    if not model:
+    if not model and not internet and not environment:
         return None
     try:
         runtime_config = TurnRuntimeConfig(
-            model=model,
+            model=model or None,
             internet_access=False if internet else None,
-            environment_host=environment or None,
+            environment=environment or None,
         )
     except ValidationError as error:
         raise ValueError("runtime config is invalid") from error
@@ -941,6 +939,31 @@ async def system_skills(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
+async def store_environment(ctx: SurfaceContext, request: Request) -> Response:
+    """Store one environment document and answer its digest — the value a later turn pins
+    through the x-ufo-environment header. Content-addressed, so re-uploading the same document
+    answers the same digest."""
+    if _authenticated_email(request, ctx.workspace_id) is None:
+        return PlainTextResponse("unauthorized", status_code=401)
+    try:
+        digest = await ctx.store_environment_document(await request.body())
+    except ValueError as error:
+        return PlainTextResponse(str(error), status_code=400)
+    return PlainTextResponse(digest)
+
+
+async def store_environment_file(ctx: SurfaceContext, request: Request) -> Response:
+    """Store one file an environment document references and answer its digest — the value the
+    document's `files` entry pins. Content-addressed: the same bytes land on the same digest."""
+    if _authenticated_email(request, ctx.workspace_id) is None:
+        return PlainTextResponse("unauthorized", status_code=401)
+    try:
+        digest = await ctx.store_environment_file(await request.body())
+    except ValueError as error:
+        return PlainTextResponse(str(error), status_code=400)
+    return PlainTextResponse(digest)
+
+
 async def workspace_file(ctx: SurfaceContext, request: Request) -> Response:
     """Stream one file out of the channel's workspace — the download half of `ufo cp`. The
     channel resolves through the same member-scoped queue key every post uses, so a member reaches
@@ -1012,6 +1035,8 @@ async def workspace_listing(ctx: SurfaceContext, request: Request) -> Response:
 
 
 ROUTES = (
+    SurfaceRoute(method="POST", path="environment/document", handler=store_environment),
+    SurfaceRoute(method="POST", path="environment/file", handler=store_environment_file),
     SurfaceRoute(method="POST", path="{channel}", handler=channel),
     SurfaceRoute(method="GET", path="{channel}/op/{op_id}", handler=op_body),
     SurfaceRoute(method="GET", path="{channel}/skills", handler=system_skills),

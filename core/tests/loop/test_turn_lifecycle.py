@@ -12,9 +12,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-import uvicorn
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
@@ -32,7 +30,7 @@ from evals.harness.scorers import exact_scorer
 from evals.harness.target import InProcessTarget
 from evals.harness.timing import UNNAMED_TOOL
 from ufo.blob import FilesystemBlobStore
-from ufo.config import Config, EnvironmentConfig
+from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.harness import o11y
 from ufo.harness.durability import replay_safe_client
@@ -54,8 +52,10 @@ from ufo.harness.sandbox.conversation import (
 )
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
-from ufo.host.devhost import overrides_app
-from ufo.host.ext.loader import HostEnvironment, embed_backend, index_backend, skill_registry
+from ufo.host import assemble as host_assemble
+from ufo.host.assemble import HostEnvironment
+from ufo.host.environment import store_environment_document, store_environment_file
+from ufo.host.ext.loader import embed_backend, index_backend, skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore, member_slot
@@ -64,7 +64,6 @@ from ufo.runtime.engine import (
     FINISH_TOOL,
     TRUNCATION_FEEDBACK,
 )
-from ufo.runtime.environment import ENVIRONMENT_PATH, EnvironmentOverrides, EnvironmentRequest
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest
 from ufo.runtime.hub import CostTick, Hub, InProcessHub, Parked, SubagentActivity, Terminal
@@ -384,9 +383,7 @@ def dbos_runtime(
     dbos_launched: Config,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[Config, GatingHub, FilesystemBlobStore]]:
-    config = dbos_launched.model_copy(
-        update={"environment": EnvironmentConfig(dev_host_allowed=True)}
-    )
+    config = dbos_launched
     hub = GatingHub(InProcessHub(), STREAM_GATE)
     blob = FilesystemBlobStore(root=config.blob.root)
     dbos_client = replay_safe_client(config.database.system_url)
@@ -685,7 +682,7 @@ async def test_member_turn_trace_joins_admission_and_names_its_stages(
     assert {
         "turn.claim",
         "turn.load",
-        "extensions.load",
+        "environment.assemble",
         "transcript.load",
         "model.round",
     } <= stages
@@ -806,13 +803,13 @@ async def test_turn_prompt_uses_the_models_knowledge_cutoff(
     surface: Turns, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cutoffs: list[str] = []
-    render = loop_queue.render_system_prompt
+    render = host_assemble.render_system_prompt
 
     def capture_knowledge_cutoff(*args: object, **kwargs: object) -> object:
         cutoffs.append(str(kwargs["knowledge_cutoff"]))
         return render(*args, **kwargs)
 
-    monkeypatch.setattr(loop_queue, "render_system_prompt", capture_knowledge_cutoff)
+    monkeypatch.setattr(host_assemble, "render_system_prompt", capture_knowledge_cutoff)
     seed = await _bootstrap(model=PINNED_MODEL)
     turn_id = await surface.admit(seed, "ping")
     _, terminal = await surface.consume(seed, turn_id)
@@ -2079,57 +2076,96 @@ async def test_runtime_config_model_overrides_the_parent_and_profile_models(
     assert TurnRuntimeConfig.model_validate(child.runtime_config) == runtime_config
 
 
-OVERRIDDEN_PROMPT = "OVERRIDDEN: answer as the environment host rewrote you."
+OVERRIDDEN_PROMPT = "OVERRIDDEN: answer as the environment document rewrote you."
 OVERRIDDEN_BASH = "OVERRIDDEN: the bash description this arm measures."
 
 
-@asynccontextmanager
-async def _dev_host(app: object) -> AsyncIterator[str]:
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
-    serving = asyncio.create_task(server.serve())
-    while not server.started:
-        if serving.done():
-            serving.result()
-            raise AssertionError("dev host exited before it started")
-        await asyncio.sleep(0.01)
-    port = server.servers[0].sockets[0].getsockname()[1]
-    try:
-        yield f"http://127.0.0.1:{port}"
-    finally:
-        server.should_exit = True
-        await serving
-
-
-async def test_environment_host_overrides_the_prompt_and_descriptions_a_turn_runs_with(
+async def test_a_stored_document_digest_drives_a_turn_with_no_host_anywhere(
     surface: Turns,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
 ) -> None:
-    """The whole rail: a turn pins a live environment host, the runtime sends it the assembled
-    prompt and tool offer, and the model round runs with the replacement prompt, the rewritten
-    description, and the withheld tool gone — while the surviving tools keep their runtime-bound
-    handlers (the turn still ends clean)."""
+    """The whole rail: the overrides live as content-addressed bytes in the blob store, the turn
+    pins their digest, and the model round runs with the replacement prompt, the rewritten
+    description, and the withheld tool gone — while the surviving tools keep their platform-bound
+    handlers (the turn still ends clean). No server dialed, nothing listening anywhere."""
+    _config, _hub, blob = dbos_runtime
     seed = await _bootstrap()
     SEEN_SYSTEM_PROMPTS.clear()
     SEEN_TOOLS.clear()
     SEEN_TOOL_DESCRIPTIONS.clear()
-    document = EnvironmentOverrides(
-        system_prompt=OVERRIDDEN_PROMPT,
-        tool_descriptions={"bash": OVERRIDDEN_BASH},
-        disabled_tools=("spawn",),
+    pinned_file = await store_environment_file(blob, b"from the arm")
+    digest = await store_environment_document(
+        blob,
+        (
+            "main:\n"
+            f"  prompt:\n    text: '{OVERRIDDEN_PROMPT}'\n"
+            f"  tools:\n    bash:\n      description: '{OVERRIDDEN_BASH}'\n"
+            "    spawn:\n      enabled: false\n"
+            f"files:\n  data/pinned.txt: {pinned_file}\n"
+        ).encode(),
     )
-    async with _dev_host(overrides_app(document)) as host:
-        turn = await surface.admit(
-            seed,
-            "hello there",
-            runtime_config=TurnRuntimeConfig(model="claude-sonnet-5", environment_host=host),
-        )
-        text, terminal = await surface.consume(seed, turn)
+    turn = await surface.admit(
+        seed,
+        "hello there",
+        runtime_config=TurnRuntimeConfig(environment=digest),
+    )
+    text, terminal = await surface.consume(seed, turn)
     assert terminal["status"] == "done"
+    assert terminal["environment"] == digest
     assert text.startswith("echo:")
     round_index = SEEN_SYSTEM_PROMPTS.index(OVERRIDDEN_PROMPT)
     offered = SEEN_TOOLS[round_index]
     assert "bash" in offered
     assert "spawn" not in offered
     assert SEEN_TOOL_DESCRIPTIONS[round_index]["bash"] == OVERRIDDEN_BASH
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seeded = sorted(runtime.sandboxes.workspace_root.rglob("pinned.txt"))
+    assert seeded and seeded[-1].read_bytes() == b"from the arm"
+
+
+async def test_a_missing_document_fails_the_turn(surface: Turns) -> None:
+    seed = await _bootstrap()
+    turn = await surface.admit(
+        seed,
+        "hello there",
+        runtime_config=TurnRuntimeConfig(environment="sha256:" + "0" * 64),
+    )
+    _text, terminal = await surface.consume(seed, turn)
+    assert terminal["status"] == "failed"
+
+
+async def test_a_document_pins_one_profiles_model_and_leaves_the_parent_alone(
+    surface: Turns,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
+) -> None:
+    _config, _hub, blob = dbos_runtime
+    seed = await _bootstrap()
+    digest = await store_environment_document(
+        blob, b'{"profiles": {"pinned": {"model": "claude-sonnet-5"}}}'
+    )
+    parent = await surface.admit(
+        seed, "spawn-pinned", runtime_config=TurnRuntimeConfig(environment=digest)
+    )
+    _text, terminal = await surface.consume(seed, parent)
+    assert terminal["status"] == "done"
+    async with workspace_tx() as connection:
+        child = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.parent_turn_id == UUID(parent))
+            )
+        ).scalar_one()
+        models = dict(
+            (
+                await connection.execute(
+                    sa.select(tables.ledger.c.turn_id, tables.ledger.c.model).where(
+                        tables.ledger.c.turn_id.in_((UUID(parent), child))
+                    )
+                )
+            ).all()
+        )
+    assert models[child] == "claude-sonnet-5"
+    assert models[UUID(parent)] != "claude-sonnet-5"
 
 
 REPLACED_CHILD_PROMPT = "OVERRIDDEN ROUNDTRIP: echo the value back under the arm's prompt."
@@ -2137,30 +2173,27 @@ REPLACED_CHILD_PROMPT = "OVERRIDDEN ROUNDTRIP: echo the value back under the arm
 
 async def test_a_replaced_prompt_on_a_spawned_child_keeps_the_finish_contract(
     surface: Turns,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
 ) -> None:
-    """A host that replaces a spawned child's prompt (the reference host declines subagent
-    requests; this one answers them) cannot displace the platform's finish contract: the runtime
-    re-appends it after the override, so the child still ends with a valid finish call."""
+    """A document block that replaces a spawned profile's prompt cannot displace the platform's
+    finish contract: the host re-appends it after the override, so the child still ends with a
+    valid finish call — and the block never touches the parent, whose target the document does
+    not name."""
+    _config, _hub, blob = dbos_runtime
     seed = await _bootstrap()
     SEEN_SYSTEM_PROMPTS.clear()
     SEEN_TOOLS.clear()
     SEEN_TOOL_DESCRIPTIONS.clear()
-    document = EnvironmentOverrides(system_prompt=REPLACED_CHILD_PROMPT)
-    unconditional = FastAPI()
-
-    @unconditional.post(ENVIRONMENT_PATH)
-    async def environment(request: EnvironmentRequest) -> EnvironmentOverrides:
-        if request.subagent_profile is None:
-            return EnvironmentOverrides()
-        return document
-
-    async with _dev_host(unconditional) as host:
-        parent = await surface.admit(
-            seed,
-            "spawn-pinned",
-            runtime_config=TurnRuntimeConfig(model="claude-sonnet-5", environment_host=host),
-        )
-        _text, terminal = await surface.consume(seed, parent)
+    digest = await store_environment_document(
+        blob,
+        json.dumps({"profiles": {"pinned": {"prompt": {"text": REPLACED_CHILD_PROMPT}}}}).encode(),
+    )
+    parent = await surface.admit(
+        seed,
+        "spawn-pinned",
+        runtime_config=TurnRuntimeConfig(model="claude-sonnet-5", environment=digest),
+    )
+    _text, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
     assert await _child_echo(parent) == 7
     child_prompts = [
@@ -2172,16 +2205,19 @@ async def test_a_replaced_prompt_on_a_spawned_child_keeps_the_finish_contract(
 
 async def test_an_override_naming_a_tool_the_turn_does_not_offer_fails_the_turn(
     surface: Turns,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
 ) -> None:
+    _config, _hub, blob = dbos_runtime
     seed = await _bootstrap()
-    document = EnvironmentOverrides(disabled_tools=("no-such-tool",))
-    async with _dev_host(overrides_app(document)) as host:
-        turn = await surface.admit(
-            seed,
-            "hello there",
-            runtime_config=TurnRuntimeConfig(model="claude-sonnet-5", environment_host=host),
-        )
-        _text, terminal = await surface.consume(seed, turn)
+    digest = await store_environment_document(
+        blob, b"main:\n  tools:\n    no-such-tool:\n      enabled: false\n"
+    )
+    turn = await surface.admit(
+        seed,
+        "hello there",
+        runtime_config=TurnRuntimeConfig(environment=digest),
+    )
+    _text, terminal = await surface.consume(seed, turn)
     assert terminal["status"] == "failed"
 
 

@@ -956,7 +956,7 @@ def test_layering_gate_allows_the_named_boot_modules_and_the_host_itself() -> No
     tree = ast.parse("from ufo.host.ext.loader import load_manifests\n")
     trees = {
         Path("core/src/ufo/harness/sandbox/ingress_serve.py"): tree,
-        Path("core/src/ufo/host/devhost.py"): tree,
+        Path("core/src/ufo/host/assemble.py"): tree,
         Path("core/src/ufo/serve.py"): tree,
     }
     assert gates._layering_failures(trees) == []

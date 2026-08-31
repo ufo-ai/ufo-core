@@ -316,9 +316,10 @@ class Subagents:
             delivers_result=delivers_result,
             name=name,
             model=(
-                _target_model(resolved)
-                if self.parent.runtime_config is None
-                else self.parent.runtime_config.model
+                self.parent.runtime_config.model
+                if self.parent.runtime_config is not None
+                and self.parent.runtime_config.model is not None
+                else _target_model(resolved)
             ),
         ):
             await self._enqueue(turn_id, conversation_id)
@@ -517,9 +518,9 @@ class Subagents:
                 await self._require_balance(
                     connection,
                     (
-                        self._profile_model(child.subagent_profile)
-                        if runtime_config is None
-                        else runtime_config.model
+                        runtime_config.model
+                        if runtime_config is not None and runtime_config.model is not None
+                        else self._profile_model(child.subagent_profile)
                     ),
                     child.agent_id,
                 )

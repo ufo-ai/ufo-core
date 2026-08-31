@@ -7,6 +7,7 @@ turn row and the transcript the agent would have produced, then returns the turn
 real work — invoke, reconstruct, grade — is what the tests assert, read back through the corpus."""
 
 import asyncio
+import json
 import subprocess
 import time
 from base64 import b64encode, urlsafe_b64decode
@@ -7877,6 +7878,27 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
     assert not (tmp_path / "ufo-home" / str(conversation_id)).exists()
 
 
+async def test_environment_files_resolve_local_paths_to_stored_digests(tmp_path: Path) -> None:
+    from evals.driver import _resolved_environment_files
+
+    (tmp_path / "case.tar").write_bytes(b"archive bytes")
+    digest = f"sha256:{'e' * 64}"
+    stored: list[bytes] = []
+
+    async def store(content: bytes) -> str:
+        stored.append(content)
+        return digest
+
+    body = b"files:\n  data/case.tar: ./case.tar\n"
+    resolved = await _resolved_environment_files(body, tmp_path, store)
+    assert stored == [b"archive bytes"]
+    assert json.loads(resolved) == {"files": {"data/case.tar": digest}}
+
+    untouched = f"files:\n  data/case.tar: {digest}\n".encode()
+    assert await _resolved_environment_files(untouched, tmp_path, store) == untouched
+    assert stored == [b"archive bytes"]
+
+
 def test_remote_runtime_log_accepts_model_less_failures_and_rejects_runtime_drift() -> None:
     runtime = RuntimeIdentity(
         revision="abc12345",
@@ -7895,6 +7917,19 @@ def test_remote_runtime_log_accepts_model_less_failures_and_rejects_runtime_drif
     log.record(RuntimeAttestation(runtime=runtime, model=MODEL, reasoning=AGENT_REASONING))
     with pytest.raises(RuntimeError, match="expected model"):
         log.verify("another-model", AGENT_REASONING)
+    with pytest.raises(RuntimeError, match="expected environment"):
+        log.verify(MODEL, AGENT_REASONING, f"sha256:{'e' * 64}")
+
+    arm = RemoteRuntimeLog()
+    digest = f"sha256:{'e' * 64}"
+    arm.record(
+        RuntimeAttestation(
+            runtime=runtime, model=MODEL, reasoning=AGENT_REASONING, environment=digest
+        )
+    )
+    assert arm.verify(MODEL, AGENT_REASONING, digest).environment == digest
+    with pytest.raises(RuntimeError, match="expected environment"):
+        arm.verify(MODEL, AGENT_REASONING, None)
 
     changed = runtime.model_copy(update={"sandbox_digest": f"sha256:{'d' * 64}"})
     log.record(RuntimeAttestation(runtime=changed, model=MODEL, reasoning=AGENT_REASONING))
