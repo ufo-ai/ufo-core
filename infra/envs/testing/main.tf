@@ -36,7 +36,7 @@ module "platform" {
 
   # Cost-trimmed, single-AZ data stores for a testing instance.
   single_nat_gateway        = true
-  node_instance_types       = ["m6i.large"]
+  node_instance_types       = ["m6i.xlarge"]
   node_min_size             = 4
   node_max_size             = 6
   node_desired_size         = 4
