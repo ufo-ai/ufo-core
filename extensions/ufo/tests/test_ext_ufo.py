@@ -79,6 +79,7 @@ from ufo.runtime.hub import (
 from ufo.runtime.media.artifact_url import verify_artifact_url
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces import hub_tail
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     CredentialPrompt,
@@ -2612,3 +2613,89 @@ async def test_an_idle_listen_reconnect_prints_the_turn_the_conversation_woke_on
     assert ["you", "start the job"] not in lines, f"a listen never replays history: {lines}"
     assert lines[-2][:2] == ["since", str(woken)]
     assert lines[-1] == ["listen", "2"]
+
+
+async def test_a_member_downloads_a_file_from_their_own_channels_workspace(
+    ufo: tuple[AsyncClient, UUID],
+    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The download projection serves a workspace file to the channel's own member and nothing to
+    anyone else: an absent path, a channel that never spoke, and another member's bearer on the
+    same channel name all answer 404 alike, and no bearer answers 401."""
+    client, workspace_id = ufo
+    _config, _hub, _blob, sandboxes = runtime
+    await _seed_member(workspace_id, "owner@example.com")
+    await _seed_member(workspace_id, "peer@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    bearer = {"authorization": f"Bearer {token}"}
+
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        admitted = await client.post("/surface/ufo/artifacts", content=b"hello", headers=bearer)
+    assert admitted.status_code == 200
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.queue_key == "owner@example.com:artifacts",
+                )
+            )
+        ).scalar_one()
+    with ws(workspace_id):
+        await sandboxes.write(conversation_id, "report/out.txt", b"hello world")
+
+    served = await client.get("/surface/ufo/artifacts/file/report/out.txt", headers=bearer)
+    assert served.status_code == 200
+    assert served.content == b"hello world"
+    assert served.headers["content-type"] == "application/octet-stream"
+
+    absent = await client.get("/surface/ufo/artifacts/file/report/absent.txt", headers=bearer)
+    assert absent.status_code == 404
+    escaping = await client.get("/surface/ufo/artifacts/file/../messages.json.lz4", headers=bearer)
+    assert escaping.status_code == 404
+    silent = await client.get("/surface/ufo/never-spoke/file/report/out.txt", headers=bearer)
+    assert silent.status_code == 404
+    naked = await client.get("/surface/ufo/artifacts/file/report/out.txt")
+    assert naked.status_code == 401
+
+    peer = _mint(SECRET, workspace_id, "peer@example.com", _future())
+    other = await client.get(
+        "/surface/ufo/artifacts/file/report/out.txt",
+        headers={"authorization": f"Bearer {peer}"},
+    )
+    assert other.status_code == 404
+
+
+async def test_uploads_stage_files_and_the_listing_carries_the_quick_check(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """The upload half of `ufo cp`: a PUT stages a file before the channel's first turn ever runs
+    (the conversation is created by the upload), the listing carries the size and modified time a
+    sync compares, and the staged bytes come back through the download route. An upload without a
+    bearer changes nothing, and an empty path is refused."""
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    bearer = {"authorization": f"Bearer {token}"}
+
+    staged = await client.put(
+        "/surface/ufo/staging/file/in/repo.tar", content=b"tarball", headers=bearer
+    )
+    assert staged.status_code == 204
+    listed = await client.get("/surface/ufo/staging/files", headers=bearer)
+    assert listed.status_code == 200
+    (entry,) = listed.json()["files"]
+    assert entry["path"] == "in/repo.tar"
+    assert entry["size_bytes"] == 7
+    assert entry["modified_at"] > 0
+    served = await client.get("/surface/ufo/staging/file/in/repo.tar", headers=bearer)
+    assert served.status_code == 200
+    assert served.content == b"tarball"
+
+    silent = await client.get("/surface/ufo/never-spoke/files", headers=bearer)
+    assert silent.status_code == 200
+    assert silent.json() == {"files": []}
+    naked = await client.put("/surface/ufo/staging/file/in/repo.tar", content=b"x")
+    assert naked.status_code == 401
+    empty = await client.put("/surface/ufo/staging/file/", content=b"x", headers=bearer)
+    assert empty.status_code in (400, 404, 405)

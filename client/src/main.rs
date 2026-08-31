@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
 
 use ufo::clipboard::{self, Clip};
-use ufo::cmd::{fscli, llm, run, tools};
+use ufo::cmd::{cp, fscli, llm, run, tools};
 #[cfg(unix)]
 use ufo::interrupt;
 use ufo::ops::{self, OpRuntime};
@@ -26,6 +26,7 @@ Opens a conversation with your workspace assistant.
 Usage: ufo [--resume [id]] [--remote] [--model MODEL] [--no-internet] [--environment URL] [--json]
            [message...]
        ufo login | logout
+       ufo cp SRC DST  (one side is CHANNEL:PATH; directories sync)
        ufo fs {read|write|edit|grep|glob|changes} <json>
        ufo llm [--model MODEL] [--max-tokens N] PROMPT
        ufo run [--task PATH] [--detach] -- COMMAND [ARG...]
@@ -34,6 +35,7 @@ Usage: ufo [--resume [id]] [--remote] [--model MODEL] [--no-internet] [--environ
 Commands:
   login          Sign in again.
   logout         Sign out.
+  cp             Copy files or sync a folder with a conversation's workspace.
   fs             Run one file op inside a sandbox and print its JSON result.
   llm            Ask a model one question through the sandbox's egress proxy.
   run            Run a command with task state and sandbox egress.
@@ -62,6 +64,7 @@ const RESUME_ROWS: usize = 12;
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("cp") => process::exit(cp::main(&args[1..])),
         Some("fs") => process::exit(fscli::main(&args[1..])),
         Some("llm") => process::exit(llm::main(&args[1..])),
         Some("run") => process::exit(run::main(&args[1..])),

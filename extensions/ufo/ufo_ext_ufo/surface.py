@@ -31,6 +31,7 @@ reach them down the stream they are already holding."""
 
 import asyncio
 import hashlib
+import json
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, suppress
@@ -940,8 +941,81 @@ async def system_skills(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
+async def workspace_file(ctx: SurfaceContext, request: Request) -> Response:
+    """Stream one file out of the channel's workspace — the download half of `ufo cp`. The
+    channel resolves through the same member-scoped queue key every post uses, so a member reaches
+    only their own conversations, and the read creates nothing: a channel that never spoke, a
+    conversation without a sandbox, and a path naming nothing all answer 404 alike."""
+    email = _authenticated_email(request, ctx.workspace_id)
+    if email is None:
+        return PlainTextResponse("unauthorized", status_code=401)
+    queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
+    conversation_id = await ctx.find_conversation(queue_key)
+    if conversation_id is None:
+        return PlainTextResponse("no such file", status_code=404)
+    path = request.path_params["path"]
+    try:
+        stream = await ctx.read_workspace_file(conversation_id, path)
+    except ValueError:
+        return PlainTextResponse("no such file", status_code=404)
+    if stream is None:
+        return PlainTextResponse("no such file", status_code=404)
+    return StreamingResponse(stream, media_type="application/octet-stream")
+
+
+async def workspace_upload(ctx: SurfaceContext, request: Request) -> Response:
+    """Land one file in the channel's workspace — the upload half of `ufo cp`. Unlike the reads,
+    an upload get-or-creates the conversation: staging files before the first turn is the point,
+    so the agent's tools find them already present. The body streams into the bounded workspace
+    write, which refuses past its limit instead of first sitting whole in memory."""
+    email = _authenticated_email(request, ctx.workspace_id)
+    if email is None:
+        return PlainTextResponse("unauthorized", status_code=401)
+    member_id = await ctx.linked_member(email) or await ctx.link_member(email, email)
+    path = request.path_params["path"].strip("/")
+    if not path:
+        return PlainTextResponse("a file path is required", status_code=400)
+    queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
+    conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
+    try:
+        await ctx.write_workspace_file(conversation_id, path, request.stream())
+    except ValueError as refused:
+        return PlainTextResponse(str(refused), status_code=413)
+    return Response(status_code=204)
+
+
+async def workspace_listing(ctx: SurfaceContext, request: Request) -> Response:
+    """List the channel's workspace files — what `ufo cp` syncs a folder against: each path with
+    the size and modified time the quick-check compares. A channel that never spoke lists
+    nothing."""
+    email = _authenticated_email(request, ctx.workspace_id)
+    if email is None:
+        return PlainTextResponse("unauthorized", status_code=401)
+    queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
+    conversation_id = await ctx.find_conversation(queue_key)
+    files = () if conversation_id is None else await ctx.list_workspace_files(conversation_id)
+    return Response(
+        content=json.dumps(
+            {
+                "files": [
+                    {
+                        "path": entry.path,
+                        "size_bytes": entry.size_bytes,
+                        "modified_at": entry.modified_at.timestamp(),
+                    }
+                    for entry in files
+                ]
+            }
+        ),
+        media_type="application/json",
+    )
+
+
 ROUTES = (
     SurfaceRoute(method="POST", path="{channel}", handler=channel),
     SurfaceRoute(method="GET", path="{channel}/op/{op_id}", handler=op_body),
     SurfaceRoute(method="GET", path="{channel}/skills", handler=system_skills),
+    SurfaceRoute(method="GET", path="{channel}/files", handler=workspace_listing),
+    SurfaceRoute(method="GET", path="{channel}/file/{path:path}", handler=workspace_file),
+    SurfaceRoute(method="PUT", path="{channel}/file/{path:path}", handler=workspace_upload),
 )

@@ -4929,7 +4929,7 @@ class SurfaceRoute:
     `/surface/<name>/<path>` bound to the surface's `SurfaceContext` (the handler reads path and
     query params off the Request and returns the Response)."""
 
-    method: Literal["GET", "POST"]
+    method: Literal["GET", "POST", "PUT"]
     path: str
     handler: RouteHandler
 

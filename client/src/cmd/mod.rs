@@ -1,3 +1,4 @@
+pub mod cp;
 pub mod fscli;
 pub mod llm;
 pub mod run;
