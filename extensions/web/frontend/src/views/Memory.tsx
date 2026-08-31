@@ -1,14 +1,8 @@
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Filter } from "@/components/ui/filter";
+import { Sheet } from "@/components/ui/sheet";
 import { Td } from "@/components/ui/table";
 import { ActionForm } from "@/kernel/action";
 import { Pager, type Placement } from "@/kernel/pager";
@@ -148,7 +142,7 @@ export function Memory({
                   empty="No memories yet."
                   note={note}
                   open={(match) => (correctable(match) ? () => setCorrecting(match) : null)}
-                  act={(match) => (correctable(match) ? "Correct" : null)}
+                  act={(match) => (correctable(match) ? "Edit" : null)}
                 >
                   {(match) => (
                     <>
@@ -165,9 +159,14 @@ export function Memory({
           }}
         </Panel>
       </Section>
-      <Dialog open={correcting !== null} onOpenChange={(next) => !next && setCorrecting(null)}>
-        {correcting && update ? (
-          <CorrectionDialog
+      {correcting && update ? (
+        <Sheet
+          open
+          title="Edit memory"
+          onClose={() => setCorrecting(null)}
+          describedBy="memory-correction-description"
+        >
+          <CorrectionSheet
             match={correcting}
             view={update}
             onSuccess={() => {
@@ -175,8 +174,8 @@ export function Memory({
               setReloads((count) => count + 1);
             }}
           />
-        ) : null}
-      </Dialog>
+        </Sheet>
+      ) : null}
     </>
   );
 }
@@ -186,7 +185,7 @@ export function Memory({
  *  `corrects` pinned. A correction is a new statement and never an edit of the row it names, so a row past the
  *  bound — the Overview paragraph is one — opens the field empty with its current text above it to
  *  write against, rather than seeding a body the action would refuse. */
-function CorrectionDialog({
+function CorrectionSheet({
   match,
   view,
   onSuccess,
@@ -200,15 +199,12 @@ function CorrectionDialog({
   const overlong = limit !== undefined && match.text.length > limit;
 
   return (
-    <DialogContent>
-      <DialogHeader>
-        <DialogTitle>Correct Memory</DialogTitle>
-        <DialogDescription>
-          {overlong
-            ? "This memory is longer than a correction may run. Write the corrected statement."
-            : "The correction replaces this memory."}
-        </DialogDescription>
-      </DialogHeader>
+    <>
+      <p id="memory-correction-description" className="m-0 text-label text-ink-soft">
+        {overlong
+          ? "This memory is too long to edit. Write the new statement."
+          : "The edit replaces this memory."}
+      </p>
       {overlong ? (
         <p
           className={cn(
@@ -230,6 +226,6 @@ function CorrectionDialog({
           return outcome;
         }}
       />
-    </DialogContent>
+    </>
   );
 }

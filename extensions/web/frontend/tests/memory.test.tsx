@@ -26,7 +26,7 @@ const RECORD_CORRECTION = (maxLength?: number) => ({
     required: ["corrects", "body"],
   },
   call: { kind: "memory", action: "record_correction", input: {} },
-  label: "Record correction",
+  label: "Record edit",
 });
 
 const memories = (matches: unknown[], rest: Record<string, unknown> = {}) => ({
@@ -145,7 +145,7 @@ test("a correction posts the projected write to the main agent's lane and re-rea
   const field = screen.getByDisplayValue("the deploy runs on EKS");
   await userEvent.clear(field);
   await userEvent.type(field, "the deploy runs on EKS in us-west-2");
-  await userEvent.click(screen.getByRole("button", { name: "Record correction" }));
+  await userEvent.click(screen.getByRole("button", { name: "Record edit" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toEqual({
@@ -153,6 +153,16 @@ test("a correction posts the projected write to the main agent's lane and re-rea
     body: { corrects: "m1", body: "the deploy runs on EKS in us-west-2" },
   });
   await waitFor(() => expect(reads).toBe(2));
+});
+
+test("a correction opens in the sheet and the listing stays live behind it", async () => {
+  wire({ "/workspace/memory": () => json(memories([MATCH])) });
+  open();
+
+  await userEvent.click(await screen.findByText("the deploy runs on EKS"));
+  const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]')!;
+  expect(within(sheet).getByText("The edit replaces this memory.")).toBeTruthy();
+  expect(screen.getByRole("table")).toBeTruthy();
 });
 
 test("a memory carrying no memory ref is not a row the member can open", async () => {
@@ -194,7 +204,7 @@ test("a refused correction tones its notice in place", async () => {
   open();
 
   await userEvent.click(await screen.findByText("the deploy runs on EKS"));
-  await userEvent.click(screen.getByRole("button", { name: "Record correction" }));
+  await userEvent.click(screen.getByRole("button", { name: "Record edit" }));
   await refusedNotice("Only the owner corrects it.");
 });
 
@@ -260,17 +270,17 @@ test("a memory past the bound opens the correction empty beside the text it corr
   const dialog = within(screen.getByRole("dialog"));
   expect(
     dialog.getByText(
-      "This memory is longer than a correction may run. Write the corrected statement.",
+      "This memory is too long to edit. Write the new statement.",
     ),
   ).toBeTruthy();
   expect(dialog.getByText(overview)).toBeTruthy();
 
   const field = dialog.getByRole("textbox", { name: "Body" }) as HTMLInputElement;
   expect(field.value).toBe("");
-  expect(dialog.getByRole("button", { name: "Record correction" })).toHaveProperty("disabled", true);
+  expect(dialog.getByRole("button", { name: "Record edit" })).toHaveProperty("disabled", true);
 
   await userEvent.type(field, "The handshake rotates every hour.");
-  await userEvent.click(dialog.getByRole("button", { name: "Record correction" }));
+  await userEvent.click(dialog.getByRole("button", { name: "Record edit" }));
   await waitFor(() => expect(posted).toEqual(["The handshake rotates every hour."]));
   expect(posted[0].length).toBeLessThanOrEqual(40);
 });

@@ -488,7 +488,7 @@ CLAIMS = (
         source=WEB_MEMORY_VIEW,
         pattern=(
             r"usePanelRead<MemoryPayload>\((?:.*\n)*?\s+"
-            r"<DialogTitle>Correct Memory</DialogTitle>"
+            r"title=\"Edit memory\""
         ),
     ),
     Claim(
