@@ -573,6 +573,97 @@ async def test_a_non_404_generation_error_still_fails_loud(
             pass
 
 
+async def test_a_transport_fault_on_the_generation_lookup_retries_within_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lookup GET is cheap and a whole re-run of the round is not, so a dropped connection on
+    the ledger endpoint retries in place on the 404 window before anything reaches the engine."""
+    monkeypatch.setattr(openrouter, "GENERATION_404_RETRY_SECONDS", 0.0)
+    attempts: list[httpx.Request] = []
+
+    def generation(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) == 1:
+            raise httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body"
+            )
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "cancelled": False,
+                    "finish_reason": "tool_calls",
+                    "native_tokens_prompt": 13,
+                    "native_tokens_completion": 5,
+                    "native_tokens_cached": 8,
+                }
+            },
+        )
+
+    create = ScriptedCreate([_chunk(content="ok"), _chunk(finish="tool_calls")])
+    client = replace(
+        _client(create),
+        key=OPENROUTER_KEY,
+        generation_transport=httpx.MockTransport(generation),
+    )
+
+    events = [event async for event in client.complete(REQUEST)]
+
+    assert events[-1] == Usage(input_tokens=5, output_tokens=5, cache_read_tokens=8)
+    assert len(attempts) == 2
+
+
+async def test_an_exhausted_generation_lookup_transport_fault_interrupts_the_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live gap the SWE-bench wave exposed: the ledger endpoint dropping every lookup
+    connection killed the turn with the raw httpx error, because the GET sat outside the
+    classified stream faults. Exhausting the window now interrupts the round for the engine's
+    single whole-round retry; a second exhaustion fails loud on the typed class."""
+    monkeypatch.setattr(openrouter, "GENERATION_404_RETRY_SECONDS", 0.0)
+    attempts: list[httpx.Request] = []
+
+    def generation(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        raise httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        )
+
+    create = ScriptedCreate([_chunk(content="ok"), _chunk(finish="tool_calls")])
+    client = replace(
+        _client(create),
+        key=OPENROUTER_KEY,
+        generation_transport=httpx.MockTransport(generation),
+    )
+
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for _ in client.complete(REQUEST):
+            pass
+
+    assert raised.value.kind == "generation_lookup"
+    assert "peer closed connection" in str(raised.value)
+    assert len(attempts) == openrouter.GENERATION_404_RETRIES + 1
+
+
+async def test_a_read_timeout_mid_stream_interrupts_the_round() -> None:
+    create = ScriptedCreate(
+        [
+            _chunk(content="partial"),
+            httpx.ReadTimeout("read timed out"),
+        ]
+    )
+    events = []
+
+    with pytest.raises(ModelStreamInterrupted) as raised:
+        async for event in _client(create).complete(REQUEST):
+            events.append(event)
+
+    assert raised.value.kind == "stream_transport"
+    assert "ReadTimeout" in str(raised.value)
+    assert events == [ModelStreamStart(), TextDelta(text="partial")]
+    assert len(create.calls) == 1
+
+
 async def test_complete_does_not_recover_an_unfinished_stream() -> None:
     requests: list[httpx.Request] = []
 

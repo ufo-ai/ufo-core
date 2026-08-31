@@ -86,9 +86,10 @@ GENERATION_404_RETRIES = 5
 GENERATION_404_RETRY_SECONDS = 2.0
 """The generation ledger is eventually consistent: a lookup right after the stream ends can 404
 before the row is indexed, and a turn that already streamed its output must not die on that
-window. A 404 that survives the bounded retries is a generation the upstream never finalized —
-raised as ModelStreamInterrupted so the engine re-runs the round once; a second exhaustion fails
-the turn."""
+window. A transport fault on a lookup — the endpoint dropping the connection mid-body, a timeout —
+retries on the same window, since the GET is cheap and a whole re-run of the round is not. A 404
+or a transport fault that survives the bounded retries is raised as ModelStreamInterrupted so the
+engine re-runs the round once; a second exhaustion fails the turn."""
 
 OPENROUTER_CONTEXT_WINDOW = 200_000
 _REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
@@ -394,7 +395,8 @@ class OpenRouterModelClient:
     OpenRouter's own behavior. 429/5xx retry with retry-after-aware backoff but only until visible
     output yields; finish_reason=length raises ModelResponseTruncated. A fault on the live stream —
     an error frame OpenRouter injects when its upstream stalls or dies (the exact APIError class), a
-    peer disconnect mid-body, or a generation the usage ledger never indexes — raises
+    raw timeout or peer disconnect mid-body, or a usage lookup the ledger never answers (a 404 past
+    the indexing window, a transport fault past the same window) — raises
     ModelStreamInterrupted whether or not output already yielded: the engine discards the partial
     round and re-runs it once, and a second interruption fails the turn. A normal completion that
     returned no text and no tool calls is a dead upstream — the client re-issues excluding that
@@ -505,12 +507,12 @@ class OpenRouterModelClient:
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
                 continue
-            except httpx.RemoteProtocolError as error:
+            except (httpx.TimeoutException, httpx.RemoteProtocolError) as error:
                 if usage is not None:
                     yield usage
                 raise ModelStreamInterrupted(
                     "stream_transport",
-                    f"OpenRouter stream disconnected mid-round: {error}",
+                    f"OpenRouter stream died mid-round ({type(error).__name__}): {error}",
                 ) from error
             except openai.APIError as error:
                 if type(error) is not openai.APIError:
@@ -573,8 +575,24 @@ class OpenRouterModelClient:
             transport=self.generation_transport,
         ) as client:
             for attempt in range(GENERATION_404_RETRIES + 1):
-                response = await client.get(GENERATION_PATH, params={"id": generation_id})
-                if response.status_code != 404 or attempt == GENERATION_404_RETRIES:
+                last = attempt == GENERATION_404_RETRIES
+                try:
+                    response = await client.get(GENERATION_PATH, params={"id": generation_id})
+                except httpx.TransportError as error:
+                    if last:
+                        raise ModelStreamInterrupted(
+                            "generation_lookup",
+                            f"OpenRouter generation lookup for {generation_id} failed: {error}",
+                        ) from error
+                    emit_metric(
+                        "model_provider_retry_total",
+                        provider=self.spec.provider,
+                        model=self.spec.id,
+                        kind="generation_lookup",
+                    )
+                    await asyncio.sleep(GENERATION_404_RETRY_SECONDS)
+                    continue
+                if response.status_code != 404 or last:
                     break
                 emit_metric(
                     "model_provider_retry_total",
