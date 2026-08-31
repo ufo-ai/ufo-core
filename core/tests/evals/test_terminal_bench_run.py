@@ -16,6 +16,7 @@ from evals.terminal_bench.run import (
     BenchCredentials,
     HarborBackend,
     TerminalBenchRun,
+    TrialOutcome,
     harbor_command,
     harbor_environment,
     official_outputs,
@@ -333,11 +334,30 @@ def test_official_outputs_require_results_and_rewards(tmp_path: Path) -> None:
     (output,) = official_outputs(job_dir)
     assert output.result.name == "result.json"
     assert output.reward.name == "reward.txt"
+    assert output.outcome is TrialOutcome.PASSED
     assert output.exception is None
 
     output.reward.unlink()
     with pytest.raises(FileNotFoundError, match="reward"):
         official_outputs(job_dir)
+
+
+def test_official_outputs_void_a_rewardless_trial_with_its_recorded_exception(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    _job(job_dir, CASES)
+    _void(job_dir / "cancel-async-tasks__2", "ProtocolError")
+    (job_dir / "regex-log__1" / "verifier" / "reward.txt").write_text("0")
+
+    voided, passed, failed = official_outputs(job_dir)
+    assert voided.outcome is TrialOutcome.VOIDED
+    assert voided.reward is None
+    assert voided.exception == "ProtocolError"
+    assert passed.outcome is TrialOutcome.PASSED
+    assert passed.reward is not None
+    assert failed.outcome is TrialOutcome.FAILED
+    assert failed.exception is None
 
 
 def test_recorded_trial_exception_fails_the_run(
@@ -356,6 +376,31 @@ def test_recorded_trial_exception_fails_the_run(
     monkeypatch.setattr(subprocess, "run", complete)
 
     assert TerminalBenchRun(root, ("regex-log",), 1, credentials).run() == 1
+
+
+def test_voided_trials_read_out_fully_and_fail_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, credentials = _prepared_root(tmp_path)
+
+    def complete(command: tuple[str, ...], **kwargs) -> subprocess.CompletedProcess[str]:
+        job_dir = (
+            Path(command[command.index("--jobs-dir") + 1])
+            / command[command.index("--job-name") + 1]
+        )
+        _job(job_dir, CASES)
+        (job_dir / "regex-log__1" / "verifier" / "reward.txt").write_text("0")
+        _void(job_dir / "cancel-async-tasks__2", "ProtocolError")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", complete)
+
+    assert TerminalBenchRun(root, CASES, 3, credentials).run() == 1
+    output = capsys.readouterr().out
+    assert "voided by ProtocolError" in output
+    assert "reward.txt" in output
+    assert "1 passed, 1 failed, 1 voided by exception" in output
+    assert "Harbor recorded ProtocolError" in output
 
 
 def test_eval_runner_routes_remote_scale_into_one_harbor_run(
@@ -536,3 +581,10 @@ def _job(job_dir: Path, cases: tuple[str, ...], exception: str | None = None) ->
             )
         )
         (trial / "verifier" / "reward.txt").write_text("1")
+
+
+def _void(trial: Path, exception: str) -> None:
+    (trial / "verifier" / "reward.txt").unlink()
+    (trial / "result.json").write_text(
+        json.dumps({"trial_name": trial.name, "exception_info": {"exception_type": exception}})
+    )
