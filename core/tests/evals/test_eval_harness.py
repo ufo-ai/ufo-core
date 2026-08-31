@@ -61,6 +61,7 @@ from evals.driver import (
     CANDIDATE_AGENT_NAME,
     RemoteClient,
     RemoteRuntimeLog,
+    RemoteTurnTimeout,
     RemoteWorkspaceProvisioner,
     WorkspaceDriver,
     resolve_workspace_and_agent,
@@ -7961,6 +7962,8 @@ async def test_remote_workspace_driver_deadline_stops_the_client_and_cancels_the
                         }
                     )
                     + "\n"
+                    + dumps({"type": "text_delta", "text": "working"})
+                    + "\n"
                 ).encode()
             )
             self.stderr = asyncio.StreamReader()
@@ -11889,3 +11892,45 @@ def test_every_new_application_case_can_reach_its_create() -> None:
     assert not pinned, "cases cap turns below the messages their path needs: " + ", ".join(
         f"{case.name} (max_turns={case.max_turns})" for case in pinned
     )
+
+
+def _session_stub(tmp_path, turn_id, *, queue_seconds: float, run_seconds: float) -> str:
+    stub = tmp_path / "stub-ufo"
+    stub.write_text(
+        "#!/bin/sh\n"
+        """echo \'{"type": "session_start"}\'\n"""
+        f'''echo \'{{"type": "message_sent", "turn_id": "{turn_id}"}}\'\n'''
+        f"sleep {queue_seconds}\n"
+        """echo \'{"type": "text_delta", "text": "working"}\'\n"""
+        f"sleep {run_seconds}\n"
+        """echo \'{"type": "turn_end"}\'\n"""
+    )
+    stub.chmod(0o755)
+    return str(stub)
+
+
+async def test_a_queued_remote_turn_never_times_out(tmp_path) -> None:
+    """The wait budget covers execution, not the slot queue: a turn that sits queued past the
+    whole budget and then runs briefly completes, because nothing after admission arrived yet."""
+    turn_id = uuid4()
+    remote = RemoteClient(
+        executable=_session_stub(tmp_path, turn_id, queue_seconds=1.6, run_seconds=0),
+        workspace_url="http://workspace.test",
+        token_secret="remote-test-secret",
+        home_root=tmp_path / "homes",
+    )
+    admitted = await remote.admit(uuid4(), uuid4(), "owner@example.com", "run it", 0.7)
+    assert admitted == turn_id
+
+
+async def test_a_running_remote_turn_exhausts_its_budget(tmp_path) -> None:
+    turn_id = uuid4()
+    remote = RemoteClient(
+        executable=_session_stub(tmp_path, turn_id, queue_seconds=0, run_seconds=1.6),
+        workspace_url="http://workspace.test",
+        token_secret="remote-test-secret",
+        home_root=tmp_path / "homes",
+    )
+    with pytest.raises(RemoteTurnTimeout) as timeout:
+        await remote.admit(uuid4(), uuid4(), "owner@example.com", "run it", 0.7)
+    assert timeout.value.turn_id == turn_id

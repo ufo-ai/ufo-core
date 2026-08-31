@@ -317,7 +317,13 @@ class RemoteClient:
         admitted: list[UUID] = []
         try:
             try:
-                async with asyncio.timeout(wait_seconds):
+                loop = asyncio.get_running_loop()
+                async with asyncio.timeout(None) as budget:
+
+                    def executing() -> None:
+                        if budget.when() is None:
+                            budget.reschedule(loop.time() + wait_seconds)
+
                     process = await asyncio.create_subprocess_exec(
                         self.executable,
                         "--remote",
@@ -332,7 +338,7 @@ class RemoteClient:
                         stderr=asyncio.subprocess.PIPE,
                         env=env,
                     )
-                    stdout, stderr = await self._read_session(process, admitted)
+                    stdout, stderr = await self._read_session(process, admitted, executing)
             except TimeoutError as error:
                 await self._stop(process)
                 raise RemoteTurnTimeout(admitted[-1] if admitted else None) from error
@@ -375,8 +381,14 @@ class RemoteClient:
 
     @staticmethod
     async def _read_session(
-        process: asyncio.subprocess.Process, admitted: list[UUID]
+        process: asyncio.subprocess.Process,
+        admitted: list[UUID],
+        executing: Callable[[], None],
     ) -> tuple[bytes, bytes]:
+        """Read the session's events, calling `executing` at the first evidence the admitted turn
+        is actually running. A turn waiting in the fleet's member-turn slot queue emits nothing
+        after its `message_sent`, and a queued turn never times out — the wait budget covers
+        execution, so the caller arms it here rather than at admission."""
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("ufo remote session pipes are unavailable")
         lines: list[bytes] = []
@@ -391,6 +403,8 @@ class RemoteClient:
                 match event:
                     case {"type": "message_sent", "turn_id": str(turn_id)}:
                         admitted.append(UUID(turn_id))
+                    case {"type": _} if admitted:
+                        executing()
             await process.wait()
             return b"".join(lines), await stderr_task
         finally:
