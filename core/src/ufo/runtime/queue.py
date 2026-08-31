@@ -315,14 +315,21 @@ def _subagent_model(
     agent: Agent,
     runtime: "Runtime",
     pinned: str | None,
+    document: str | None,
 ) -> str:
     """The model a subagent turn runs on.
 
-    A profile bound to the member's own account takes the model that account serves and nothing
-    else — a pin cannot reach it, because the pinned id is not one the account was bound to serve
-    and the turn would quietly fall through to the deploy's key, which is the spend this profile
-    exists to prevent. Every other profile takes the turn's pin, else its own, else the agent's."""
+    A profile bound to the member's own account takes the model that account serves — a bare pin
+    cannot reach it, because the pinned id is not one the account was bound to serve and the turn
+    would quietly fall through to the deploy's key, which is the spend this profile exists to
+    prevent. A stored environment document naming this profile's model is the one exception: the
+    document is the workspace's explicit, digest-attested choice of what runs and what it spends,
+    made by a speaker who could already run any model as the main agent through the same document,
+    so it outranks the account binding and the turn bills the workspace. Every other profile takes
+    the turn's pin, else its own, else the agent's."""
     if profile.needs_own_model_key:
+        if document is not None:
+            return runtime.registry.resolve(document)
         own = profile.own_key_models.get(connected or "")
         if own is not None:
             return runtime.registry.resolve(own)
@@ -775,6 +782,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         )
         environment = None if turn.runtime_config is None else turn.runtime_config.environment
         pinned_model = None if turn.runtime_config is None else turn.runtime_config.model
+        document_model = None
         if environment is not None:
             document_model = await runtime.environment.environment_model(
                 environment, turn.subagent_profile
@@ -789,7 +797,9 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         else:
             own_account_member = turn.speaker_member_id or turn.on_behalf_of_member_id
             connected = await ws_current().member_model_provider(own_account_member)
-            resolved_model = _subagent_model(profile, connected, agent, runtime, pinned_model)
+            resolved_model = _subagent_model(
+                profile, connected, agent, runtime, pinned_model, document_model
+            )
         current_price = runtime.registry.pricing.prices[resolved_model]
         billing = await _frozen_billing_identity(
             turn.id,

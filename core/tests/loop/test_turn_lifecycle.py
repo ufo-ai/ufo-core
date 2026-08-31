@@ -2363,16 +2363,18 @@ def test_a_profile_on_the_members_account_has_no_deploy_model_to_fall_back_to() 
     )
 
     assert (
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "openai", agent, runtime, None)
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "openai", agent, runtime, None, None)
         == OWN_ACCOUNT_MODEL
     )
     with pytest.raises(loop_queue.SubagentKeyWithdrawn):
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, None)
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, None, None)
     with pytest.raises(loop_queue.SubagentKeyWithdrawn):
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "anthropic", agent, runtime, None)
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "anthropic", agent, runtime, None, None)
 
     ordinary = replace(OWN_ACCOUNT_PROFILE, needs_own_model_key=False, own_key_models={})
-    assert loop_queue._subagent_model(ordinary, None, agent, runtime, None) == ("workspace-model")
+    assert loop_queue._subagent_model(ordinary, None, agent, runtime, None, None) == (
+        "workspace-model"
+    )
 
 
 def test_a_pinned_model_cannot_move_a_coding_turn_onto_the_deploys_key() -> None:
@@ -2388,16 +2390,38 @@ def test_a_pinned_model_cannot_move_a_coding_turn_onto_the_deploys_key() -> None
     )
 
     assert (
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, "openai", agent, runtime, "pinned-model")
+        loop_queue._subagent_model(
+            OWN_ACCOUNT_PROFILE, "openai", agent, runtime, "pinned-model", None
+        )
         == OWN_ACCOUNT_MODEL
     )
     with pytest.raises(loop_queue.SubagentKeyWithdrawn):
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, "pinned-model")
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, "pinned-model", None)
 
     ordinary = replace(OWN_ACCOUNT_PROFILE, needs_own_model_key=False, own_key_models={})
     assert (
-        loop_queue._subagent_model(ordinary, None, agent, runtime, "pinned-model") == "pinned-model"
+        loop_queue._subagent_model(ordinary, None, agent, runtime, "pinned-model", None)
+        == "pinned-model"
     )
+
+
+def test_an_environment_document_moves_a_coding_turn_onto_the_workspaces_key() -> None:
+    """The stored document is the workspace's explicit, attested spend choice, so its model
+    reaches even the own-account profile — connected or not — where a bare pin never does."""
+    agent = SimpleNamespace(model="workspace-model")
+    runtime = SimpleNamespace(
+        registry=SimpleNamespace(resolve=lambda model: model),
+        config=SimpleNamespace(connect=SimpleNamespace(public_base_url="https://ufo.example")),
+        manifests=(SimpleNamespace(connects_member_accounts=True),),
+    )
+
+    for connected in ("openai", None):
+        assert (
+            loop_queue._subagent_model(
+                OWN_ACCOUNT_PROFILE, connected, agent, runtime, "document-model", "document-model"
+            )
+            == "document-model"
+        )
 
 
 def test_a_withdrawn_account_hands_over_the_same_address_the_spawn_refusal_does() -> None:
@@ -2412,7 +2436,7 @@ def test_a_withdrawn_account_hands_over_the_same_address_the_spawn_refusal_does(
     agent = SimpleNamespace(model="workspace-model")
 
     with pytest.raises(loop_queue.SubagentKeyWithdrawn) as withdrawn:
-        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, None)
+        loop_queue._subagent_model(OWN_ACCOUNT_PROFILE, None, agent, runtime, None, None)
 
     named = str(withdrawn.value)
     assert f"https://ufo.example{SPAWN_CONNECT_PATH}" in named
@@ -2482,13 +2506,13 @@ def test_a_deploy_that_cannot_hold_an_account_runs_the_profile_on_its_own_key() 
         )
 
     assert (
-        loop_queue._subagent_model(pinned_profile, None, agent, runtime_with(False), None)
+        loop_queue._subagent_model(pinned_profile, None, agent, runtime_with(False), None, None)
         == "profile-pin"
     )
     with pytest.raises(loop_queue.SubagentKeyWithdrawn):
-        loop_queue._subagent_model(pinned_profile, None, agent, runtime_with(True), None)
+        loop_queue._subagent_model(pinned_profile, None, agent, runtime_with(True), None, None)
 
     assert (
-        loop_queue._subagent_model(pinned_profile, "openai", agent, runtime_with(False), None)
+        loop_queue._subagent_model(pinned_profile, "openai", agent, runtime_with(False), None, None)
         == OWN_ACCOUNT_MODEL
     )

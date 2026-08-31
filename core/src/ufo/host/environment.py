@@ -116,8 +116,10 @@ class SkillEdit(BaseModel):
 
 class EnvironmentOverrides(BaseModel):
     """One target's overrides: the model it runs on, the prompt it runs with, and the tools in
-    its offer. `model` outranks the turn tree's `x-ufo-model` pin for this target alone — an
-    own-account profile still ignores both, exactly as it ignores the header."""
+    its offer. `model` outranks the turn tree's `x-ufo-model` pin for this target alone, and it
+    reaches even an own-account profile — the document is the workspace's explicit, attested
+    spend choice, unlike the header pin such a profile still ignores — with the turn billing the
+    workspace."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
