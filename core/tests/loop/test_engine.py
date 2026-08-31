@@ -135,7 +135,6 @@ from ufo.runtime.engine import (
     _bounded,
     _BoundToolCall,
     _claim_turn,
-    _claim_turn_with_handoff,
     _created_refs,
     _final_act,
     _loaded_skill_closures,
@@ -156,6 +155,7 @@ from ufo.runtime.ext.manifest import (
     UserPromptSubmit,
 )
 from ufo.runtime.hub import Absorbed, Activity, InProcessHub, LiveFrame, Resumed, Terminal
+from ufo.runtime.jobs import TurnDispatcher
 from ufo.runtime.memory import MemoryMatch, MemorySearch
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.object_scope import ObjectActionTarget
@@ -190,6 +190,7 @@ from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import ActivitySummarizer
 from ufo.runtime.turns.audience import Audience, audience_subjects, conversation_audience
 from ufo.runtime.turns.contracts import AgentResultOutput, ResultOutput
+from ufo.runtime.turns.dispatch import dispatch_next_turn
 from ufo.runtime.turns.transcript import CompactionSummary, Conversation
 from ufo.runtime.turns.workspace_changes import (
     WorkspaceChange,
@@ -3728,36 +3729,15 @@ async def test_running_turn_is_claimed_only_by_its_own_workflow_id(
     assert stamp is None
 
 
-async def test_handoff_offers_an_ever_claimed_next_turn_a_fresh_workflow_id(db: None) -> None:
-    """The next queued turn is a fold-resumed park whose enqueue was deferred: its own workflow
-    id was consumed by the run that parked it, so a handoff riding it would dedup into a no-op
-    while stamping the offer."""
-    turn = await _seed_turn("queued", None)
-    next_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=next_id,
-                workspace_id=turn.workspace_id,
-                conversation_id=turn.conversation_id,
-                agent_id=turn.agent_id,
-                seq=2,
-                status="queued",
-                inbound="resumed",
-                running_attempt=uuid4().hex,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    claimed, handoff = await _claim_turn_with_handoff(turn.id, str(turn.id))
-    assert claimed == FRESH_CLAIM
-    assert handoff is not None
-    assert handoff.id == next_id
-    assert handoff.workflow_id != str(next_id)
+class _RecordingEnqueue:
+    def __init__(self) -> None:
+        self.options: list[dict] = []
+
+    async def enqueue_async(self, options, *args) -> None:
+        self.options.append(dict(options))
 
 
-async def test_handoff_offers_a_never_claimed_next_turn_its_own_workflow_id(db: None) -> None:
-    turn = await _seed_turn("queued", None)
+async def _queued_successor(turn, *, running_attempt: str | None) -> UUID:
     next_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -3769,13 +3749,87 @@ async def test_handoff_offers_a_never_claimed_next_turn_its_own_workflow_id(db: 
                 seq=2,
                 status="queued",
                 inbound="waiting",
+                running_attempt=running_attempt,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
-    _, handoff = await _claim_turn_with_handoff(turn.id, str(turn.id))
-    assert handoff is not None
-    assert handoff.workflow_id == str(next_id)
+    return next_id
+
+
+async def test_exit_handoff_offers_an_ever_claimed_next_turn_a_fresh_workflow_id(
+    db: None,
+) -> None:
+    """The next queued turn is a fold-resumed park whose enqueue was deferred: its own workflow
+    id was consumed by the run that parked it, so an offer riding it would dedup into a no-op
+    while stamping the row."""
+    turn = await _seed_turn("done", TerminalFrame(status="done", text="over"))
+    next_id = await _queued_successor(turn, running_attempt=uuid4().hex)
+    client = _RecordingEnqueue()
+    await dispatch_next_turn(client, turn.conversation_id)
+    (options,) = client.options
+    assert options["workflow_id"] != str(next_id)
+    assert options["queue_name"] == "turns"
+    async with workspace_tx() as connection:
+        stamp = (
+            await connection.execute(
+                sa.select(tables.turn.c.dispatch_enqueued_at).where(tables.turn.c.id == next_id)
+            )
+        ).scalar_one()
+    assert stamp is not None
+
+
+async def test_exit_handoff_offers_a_never_claimed_next_turn_its_own_workflow_id(
+    db: None,
+) -> None:
+    turn = await _seed_turn("done", TerminalFrame(status="done", text="over"))
+    next_id = await _queued_successor(turn, running_attempt=None)
+    client = _RecordingEnqueue()
+    await dispatch_next_turn(client, turn.conversation_id)
+    (options,) = client.options
+    assert options["workflow_id"] == str(next_id)
+
+
+async def test_exit_handoff_offers_nothing_past_a_running_sibling(db: None) -> None:
+    """One conversation runs one turn at a time: while a sibling executes, the queued successor
+    stays unstamped for the exit that ends it — the serialization the plain queue no longer
+    provides."""
+    turn = await _seed_turn("running", None)
+    next_id = await _queued_successor(turn, running_attempt=None)
+    client = _RecordingEnqueue()
+    await dispatch_next_turn(client, turn.conversation_id)
+    assert client.options == []
+    async with workspace_tx() as connection:
+        stamp = (
+            await connection.execute(
+                sa.select(tables.turn.c.dispatch_enqueued_at).where(tables.turn.c.id == next_id)
+            )
+        ).scalar_one()
+    assert stamp is None
+
+
+async def test_the_sweep_holds_a_queued_turn_while_its_sibling_runs(db: None) -> None:
+    """The dispatcher sweep recovers offers the exit handoff missed, under the same rule: nothing
+    is offered into a conversation whose turn still runs, and the ended sibling frees the offer
+    on the next pass."""
+    turn = await _seed_turn("running", None)
+    next_id = await _queued_successor(turn, running_attempt=None)
+    client = _RecordingEnqueue()
+    await TurnDispatcher(client=client).run()
+    assert client.options == []
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status="done",
+                terminal=TerminalFrame(status="done", text="over").model_dump(mode="json"),
+            )
+            .where(tables.turn.c.id == turn.id)
+        )
+    await TurnDispatcher(client=client).run()
+    (options,) = client.options
+    assert options["workflow_id"] == str(next_id)
+    assert options["queue_name"] == "turns"
 
 
 async def test_tool_call_round_dispatches_in_sandbox_then_answers(db: None, tmp_path: Path) -> None:

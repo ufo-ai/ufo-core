@@ -3,9 +3,10 @@
 A profile names a prompt, a tool subset, and an input/output schema; a workspace agent row carries
 its own prompt, model, tool allowlist, and declared (or default) I/O contract. `spawn` resolves the
 target across both namespaces, validates the payload against the target's input contract, admits a
-child turn linked to its parent (`parent_turn_id`) on its own conversation, and enqueues it on the
-turn queue — a distinct partition, so the parent may await it without the queue serializing them
-into a deadlock. Foreground awaits the child's terminal and returns its contract-validated output;
+child turn linked to its parent (`parent_turn_id`) on its own conversation, and enqueues it on
+the express queue — uncapped, so a fleet whose turn capacity is claimed whole by waiting parents
+still starts their children. Foreground awaits the child's terminal and returns its
+contract-validated output;
 background returns the child turn id at once and the child delivers its own result through
 `SubagentResult` when it finishes. A foreground wait is interruptible: a member message arriving on
 the parent's conversation moves the child to the background — it keeps running and delivers its own
@@ -63,18 +64,19 @@ from ufo.runtime.turns.contracts import (
     input_contract,
     output_contract,
 )
+from ufo.runtime.turns.dispatch import dispatch_next_turn
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
     DELIVERY_DELIVERED,
     DELIVERY_PENDING,
+    EXPRESS_QUEUE_NAME,
     INTERNAL_ADMISSION,
     MEMBER_ADMISSION,
     PARKED,
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
-    TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     TerminalFrame,
     Turn,
@@ -459,8 +461,8 @@ class Subagents:
         self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool = False
     ) -> SubagentStatus:
         """Queue a follow-up for a background child by admitting the next turn on the child's own
-        conversation with `text` as its inbound. The child's partition serializes it after the turn
-        in flight (create-or-attach hands it the same sandbox), and the engine loads the child's
+        conversation with `text` as its inbound. The exit handoff runs it after the turn in
+        flight (create-or-attach hands it the same sandbox), and the engine loads the child's
         accumulated transcript as prior context — so the follow-up continues the child under its
         own contract rather than starting fresh. Admission is idempotent through
         `turn.idempotency_key`: a re-run of the messaging tool step (crash recovery) finds the turn
@@ -568,28 +570,8 @@ class Subagents:
                     followup.seq,
                     followup.status,
                 )
-            earlier_queued = (
-                await connection.execute(
-                    sa.select(
-                        sa.exists(
-                            sa.select(tables.turn.c.id).where(
-                                tables.turn.c.conversation_id == child.conversation_id,
-                                tables.turn.c.status == "queued",
-                                tables.turn.c.seq < followup_seq,
-                            )
-                        )
-                    )
-                )
-            ).scalar_one()
-            dispatch = followup_status == "queued" and not earlier_queued
-            if dispatch:
-                await connection.execute(
-                    sa.update(tables.turn)
-                    .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
-                    .where(tables.turn.c.id == followup_id)
-                )
-        if dispatch:
-            await self._enqueue(followup_id, child.conversation_id)
+        if followup_status == "queued":
+            await dispatch_next_turn(self.client, child.conversation_id)
         return SubagentStatus(turn_id=followup_id, status=followup_status, text="")
 
     async def _resolve(self, target: str) -> SubagentProfile | AgentTarget:
@@ -858,10 +840,9 @@ class Subagents:
 
     async def _enqueue(self, turn_id: UUID, conversation_id: UUID) -> None:
         options: EnqueueOptions = {
-            "queue_name": TURN_QUEUE_NAME,
+            "queue_name": EXPRESS_QUEUE_NAME,
             "workflow_name": TURN_WORKFLOW_NAME,
             "workflow_id": str(turn_id),
-            "queue_partition_key": str(conversation_id),
             "app_version": DBOS_APP_VERSION,
         }
         try:

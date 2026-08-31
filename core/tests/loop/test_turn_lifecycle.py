@@ -2420,25 +2420,22 @@ def test_a_withdrawn_account_hands_over_the_same_address_the_spawn_refusal_does(
     assert OWN_ACCOUNT_PROFILE.name in named
 
 
-async def test_spawned_children_run_outside_the_member_slot(
+async def test_spawned_children_run_outside_the_turns_queue_claim(
     surface: Turns, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(loop_queue, "MEMBER_TURN_CONCURRENCY", 1)
-    loop_queue._turn_slot_registry.clear()
-    try:
-        seed = await _bootstrap()
-        parent = await surface.admit(seed, "spawn-subagent")
-        _, terminal = await surface.consume(seed, parent)
-        assert terminal["status"] == "done"
-    finally:
-        loop_queue._turn_slot_registry.clear()
+    """With the turns queue's worker bound at one, the parent holds the process's only claim on
+    it for its whole run — the spawn completes only because children ride the express queue."""
+    monkeypatch.setattr(loop_queue.TURN_QUEUE, "_worker_concurrency", 1)
+    seed = await _bootstrap()
+    parent = await surface.admit(seed, "spawn-subagent")
+    _, terminal = await surface.consume(seed, parent)
+    assert terminal["status"] == "done"
 
 
-async def test_member_turns_hold_to_the_slot_bound(
+async def test_member_turns_hold_to_the_worker_claim_bound(
     surface: Turns, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(loop_queue, "MEMBER_TURN_CONCURRENCY", 2)
-    loop_queue._turn_slot_registry.clear()
+    monkeypatch.setattr(loop_queue.TURN_QUEUE, "_worker_concurrency", 2)
     HOLD_STARTED.clear()
     HOLD_RELEASE.clear()
     HOLD_TWO_STARTED.clear()
@@ -2458,16 +2455,14 @@ async def test_member_turns_hold_to_the_slot_bound(
         assert all(terminal["status"] == "done" for _, terminal in results)
     finally:
         HOLD_RELEASE.set()
-        loop_queue._turn_slot_registry.clear()
 
 
-async def test_the_member_slot_gates_only_model_loop_turns() -> None:
-    member = loop_queue._turn_gates(None, MEMBER_ADMISSION)
-    assert len(member) == 1 and isinstance(member[0], asyncio.Semaphore)
-    assert loop_queue._turn_gates(uuid4(), MEMBER_ADMISSION) == ()
+async def test_the_scheduled_slot_gates_only_scheduled_model_loop_turns() -> None:
+    assert loop_queue._turn_gates(None, MEMBER_ADMISSION) == ()
     assert loop_queue._turn_gates(None, INTENT_ADMISSION) == ()
+    assert loop_queue._turn_gates(uuid4(), SCHEDULED_ADMISSION) == ()
     scheduled = loop_queue._turn_gates(None, SCHEDULED_ADMISSION)
-    assert len(scheduled) == 2 and scheduled[1] is member[0]
+    assert len(scheduled) == 1 and isinstance(scheduled[0], asyncio.Semaphore)
     assert scheduled[0]._value == loop_queue.SCHEDULED_TURN_CONCURRENCY
 
 

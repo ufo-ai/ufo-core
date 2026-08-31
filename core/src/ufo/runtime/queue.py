@@ -1,4 +1,4 @@
-"""Durable turn execution: partitioned queue, the turn workflow, per-process runtime."""
+"""Durable turn execution: capacity-claimed queues, the turn workflow, per-process runtime."""
 
 import asyncio
 import json
@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 import sqlalchemy as sa
-from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
+from dbos import DBOS, DBOSClient, Queue
 from pydantic import BaseModel
 
 from ufo.blob import WorkspaceBlobStore
@@ -65,7 +65,7 @@ from ufo.runtime.engine import (
     TranscriptRepair,
     TurnEngine,
     TurnParked,
-    _claim_turn_with_handoff,
+    _claim_turn,
 )
 from ufo.runtime.ext.context import ExtensionContext, ModelAccess, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
@@ -111,10 +111,11 @@ from ufo.runtime.turns.activity import (
 )
 from ufo.runtime.turns.audience import Audience, parse_audience
 from ufo.runtime.turns.contracts import Contract, output_contract
+from ufo.runtime.turns.dispatch import dispatch_next_turn
 from ufo.runtime.workspace import speaker, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
-    DBOS_APP_VERSION,
+    EXPRESS_QUEUE_NAME,
     INTENT_ADMISSION,
     INTERNAL_ADMISSION,
     SCHEDULED_ADMISSION,
@@ -130,8 +131,8 @@ from ufo.schema.records import (
 )
 
 TURN_QUEUE_POLL_SECONDS = 0.1
-MEMBER_TURN_CONCURRENCY = 8
-SCHEDULED_TURN_CONCURRENCY = 4
+TURN_WORKER_CONCURRENCY = 40
+SCHEDULED_TURN_CONCURRENCY = 20
 _turn_slot_registry: dict[tuple[asyncio.AbstractEventLoop, str], asyncio.Semaphore] = {}
 
 
@@ -139,32 +140,19 @@ def _turn_gates(
     parent_turn_id: UUID | None, admission_source: TurnAdmissionSource
 ) -> tuple[asyncio.Semaphore, ...]:
     """The slots a turn must hold to run, held per event loop the way `db.py` holds its engines.
-    DBOS cannot bound this: `worker_concurrency` is refused beside the turns queue's
-    per-conversation `concurrency=1` and would count per partition if it stood, so an executor
-    claims every due turn and a 66-turn wave lands whole on one loop — the CPU saturation that
-    starves the connection pools. Root turns hold one of `MEMBER_TURN_CONCURRENCY` slots for their
-    model loop. A scheduled turn first holds one of `SCHEDULED_TURN_CONCURRENCY` — acquired before
-    the shared slot, so at most that many scheduled turns ever compete for shared slots and one
-    workspace's scheduled wave cannot park a member's message behind a full process. Two kinds of
-    turn hold nothing. A spawned turn's slot is held by its ancestors: a foreground parent waits
-    inside its own slot for the child, so a gated child could wait forever. A prepared intent runs
-    one typed verb with no model round while a portal panel waits a bounded 120 seconds on it —
-    parked behind eight chat turns' model loops, every intent would time out exactly when the
-    fleet is busiest."""
-    if parent_turn_id is not None or admission_source == INTENT_ADMISSION:
+    Capacity itself is the turns queue's `worker_concurrency` — an executor claims only the
+    remainder of what it runs, so nothing here bounds load. What remains is fairness: a scheduled
+    turn holds one of `SCHEDULED_TURN_CONCURRENCY` slots, so one workspace's scheduled wave can
+    fill at most half a process and a member's message always finds claimed capacity."""
+    if parent_turn_id is not None or admission_source != SCHEDULED_ADMISSION:
         return ()
     loop = asyncio.get_running_loop()
-
-    def slots(name: str, limit: int) -> asyncio.Semaphore:
-        gate = _turn_slot_registry.get((loop, name))
-        if gate is None:
-            gate = _turn_slot_registry[(loop, name)] = asyncio.Semaphore(limit)
-        return gate
-
-    shared = slots("member", MEMBER_TURN_CONCURRENCY)
-    if admission_source == SCHEDULED_ADMISSION:
-        return (slots("scheduled", SCHEDULED_TURN_CONCURRENCY), shared)
-    return (shared,)
+    gate = _turn_slot_registry.get((loop, "scheduled"))
+    if gate is None:
+        gate = _turn_slot_registry[(loop, "scheduled")] = asyncio.Semaphore(
+            SCHEDULED_TURN_CONCURRENCY
+        )
+    return (gate,)
 
 
 FAILED_TERMINAL_RETRY_SECONDS = 1.0
@@ -470,8 +458,11 @@ async def _apply_provisions(runtime: "Runtime", workspace_id: UUID) -> None:
 
 TURN_QUEUE = Queue(
     TURN_QUEUE_NAME,
-    concurrency=1,
-    partition_queue=True,
+    worker_concurrency=TURN_WORKER_CONCURRENCY,
+    polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
+)
+EXPRESS_QUEUE = Queue(
+    EXPRESS_QUEUE_NAME,
     polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
 )
 
@@ -614,6 +605,7 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
     workspace_uuid = UUID(workspace_id)
     turn_uuid = UUID(turn_id)
+    conversation_id: UUID | None = None
     with ws(workspace_uuid):
         try:
             async with workspace_tx() as connection:
@@ -634,6 +626,7 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                         )
                     )
                 ).one()
+            conversation_id = row.conversation_id
             profile = (
                 runtime.subagents.find(row.subagent_profile)
                 if row.subagent_profile is not None
@@ -673,7 +666,24 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
             await _commit_failed_terminal(runtime.hub, turn_uuid, error)
             status = "failed"
         await _deliver_to_parent(runtime, turn_uuid)
+        if conversation_id is not None:
+            await _offer_next_turn(runtime, conversation_id)
         return status
+
+
+async def _offer_next_turn(runtime: Runtime, conversation_id: UUID) -> None:
+    """Hand the conversation to its next queued turn as this workflow ends — every exit passes
+    here, so the offer needs no per-path wiring. It swallows its own fault for the same reason
+    `_deliver_to_parent` does: the ended turn's terminal already stands, and the dispatcher
+    sweep re-offers within its grace whatever this call missed."""
+    try:
+        await dispatch_next_turn(runtime.dbos, conversation_id)
+    except Exception as error:
+        log(
+            "turn.offer_deferred",
+            conversation_id=str(conversation_id),
+            error_class=type(error).__name__,
+        )
 
 
 async def _deliver_to_parent(runtime: Runtime, turn_id: UUID) -> None:
@@ -711,49 +721,11 @@ async def _deliver_to_parent(runtime: Runtime, turn_id: UUID) -> None:
         )
 
 
-async def _enqueue_handoff(
-    client: DBOSClient,
-    workspace_id: UUID,
-    turn_id: UUID,
-    conversation_id: UUID,
-    workflow_id: str,
-) -> None:
-    options: EnqueueOptions = {
-        "queue_name": TURN_QUEUE_NAME,
-        "workflow_name": TURN_WORKFLOW_NAME,
-        "workflow_id": workflow_id,
-        "queue_partition_key": str(conversation_id),
-        "app_version": DBOS_APP_VERSION,
-    }
-    try:
-        await client.enqueue_async(options, str(workspace_id), str(turn_id))
-    except asyncio.CancelledError:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.turn)
-                .values(dispatch_enqueued_at=None, updated_at=sa.func.now())
-                .where(tables.turn.c.id == turn_id, tables.turn.c.status == "queued")
-            )
-        raise
-    except Exception as error:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.turn)
-                .values(dispatch_enqueued_at=None, updated_at=sa.func.now())
-                .where(tables.turn.c.id == turn_id, tables.turn.c.status == "queued")
-            )
-        log(
-            "turn.enqueue_deferred",
-            turn_id=str(turn_id),
-            error_class=type(error).__name__,
-        )
-
-
 async def _run_turn(runtime: Runtime, turn_id: str) -> str:
     try:
         attempt = DBOS.workflow_id or turn_id
         with span("turn.claim"):
-            claim, handoff = await _claim_turn_with_handoff(UUID(turn_id), attempt)
+            claim = await _claim_turn(UUID(turn_id), attempt)
         if claim is None:
             turn, _, _ = await _load_turn(UUID(turn_id))
             await TranscriptRepair(
@@ -762,14 +734,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 hub=runtime.hub,
             ).resolve()
             return "superseded"
-        if handoff is not None:
-            await _enqueue_handoff(
-                runtime.dbos,
-                handoff.workspace_id,
-                handoff.id,
-                handoff.conversation_id,
-                handoff.workflow_id,
-            )
         with span("turn.load"):
             turn, agent, audience = await _load_turn(UUID(turn_id))
         if turn.runtime_config is not None and turn.runtime_config.model is not None:

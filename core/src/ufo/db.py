@@ -62,13 +62,13 @@ WORKSPACE_GUC = "app.workspace_id"
 # The owner registry is sized apart because its consumers are serial — the background sweeps'
 # enumeration and the heartbeat, never a fan-out — and a pod with no owner DSN spends nothing on
 # it at all: `owner_tx` resolves the app pool's engine rather than a second pool for one URL.
-# 5 + 5 is not a bound on concurrent demand — gated member turns still fan out parallel tool
-# calls, spawned children and prepared intents run ungated, and job workers share the loop. It is
-# sized to how the pool is actually used: every checkout here is transaction-scoped and no
-# transaction spans a non-database await (a scan the review gate keeps true), so a demand burst
-# queues for milliseconds and drains. What the pool cannot absorb is a starved event loop
-# stretching checkout-to-release cycles, and `MEMBER_TURN_CONCURRENCY` in `ufo.runtime.queue` bounds
-# that at its source by capping the model loops one process runs at once.
+# 5 + 5 is not a bound on concurrent demand — turns fan out parallel tool calls, spawned children
+# and prepared intents run on the express queue, and job workers share the loop. It is sized to
+# how the pool is actually used: every checkout here is transaction-scoped and no transaction
+# spans a non-database await (a scan the review gate keeps true), so a demand burst queues for
+# milliseconds and drains. What the pool cannot absorb is a starved event loop stretching
+# checkout-to-release cycles, and the turns queue's `TURN_WORKER_CONCURRENCY` in
+# `ufo.runtime.queue` bounds that at its source by capping what one process claims to run at once.
 #
 # `db_connections_high` brackets these two numbers: it warns above what the fleet is entitled to and
 # alerts below where Postgres refuses.

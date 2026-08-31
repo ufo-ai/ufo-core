@@ -55,6 +55,7 @@ from ufo.runtime.turns.audience import (
     room_audience,
 )
 from ufo.runtime.turns.delivery_register import DELIVERY_REGISTER_BLOCK, SUBAGENT_RESULT_DESCRIPTION
+from ufo.runtime.turns.dispatch import dispatch_next_turn
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -554,12 +555,13 @@ async def _running_child(
     return child_id, conversation_id
 
 
-async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
+async def test_message_admits_the_running_childs_next_turn_for_its_exit(
     db: None, dbos_launched: Config
 ) -> None:
     """A follow-up message becomes the child's next turn (seq+1) on its own conversation, carrying
-    the child's subagent profile so the continuation runs as the subagent, and lands on the turn
-    queue — the running child receives it once the turn in flight ends."""
+    the child's subagent profile so the continuation runs as the subagent. While the child's turn
+    in flight runs, the follow-up stays unstamped and off the queue — the running turn's exit
+    handoff dispatches it."""
     workspace_id, agent_id = await _workspace_agent()
     member_id = uuid4()
     async with workspace_tx() as connection:
@@ -616,6 +618,7 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
                     tables.turn.c.speaker_member_id,
                     tables.turn.c.traceparent,
                     tables.turn.c.runtime_config,
+                    tables.turn.c.dispatch_enqueued_at,
                 ).where(tables.turn.c.id == status.turn_id)
             )
         ).one()
@@ -626,7 +629,8 @@ async def test_message_admits_the_running_childs_next_turn_and_enqueues_it(
     assert row.speaker_member_id is None
     assert row.traceparent == SPAWNING_TRACEPARENT
     assert TurnRuntimeConfig.model_validate(row.runtime_config) == runtime_config
-    assert client.enqueued == [str(status.turn_id)]
+    assert row.dispatch_enqueued_at is None
+    assert client.enqueued == []
 
 
 async def test_message_refuses_a_turn_this_parent_did_not_spawn(
@@ -741,7 +745,7 @@ async def test_messages_dispatch_in_child_conversation_order(
         inbound="parent",
         created_at=datetime(2026, 7, 9, tzinfo=UTC),
     )
-    child_id, _ = await _running_child(workspace_id, agent_id, parent.id)
+    child_id, child_conversation = await _running_child(workspace_id, agent_id, parent.id)
     client = _RecordingClient()
     subagents = Subagents(
         client=client,
@@ -768,8 +772,29 @@ async def test_messages_dispatch_in_child_conversation_order(
             )
         ).all()
     assert [row.id for row in rows] == [first.turn_id, second.turn_id]
-    assert rows[0].dispatch_enqueued_at is not None
-    assert rows[1].dispatch_enqueued_at is None
+    assert [row.dispatch_enqueued_at for row in rows] == [None, None]
+    assert client.enqueued == []
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status="done",
+                terminal=TerminalFrame(status="done", text="over").model_dump(mode="json"),
+            )
+            .where(tables.turn.c.id == child_id)
+        )
+    await dispatch_next_turn(client, child_conversation)
+    async with workspace_tx() as connection:
+        stamps = (
+            await connection.execute(
+                sa.select(tables.turn.c.dispatch_enqueued_at)
+                .where(tables.turn.c.id.in_((first.turn_id, second.turn_id)))
+                .order_by(tables.turn.c.seq)
+            )
+        ).scalars()
+    stamped_first, stamped_second = list(stamps)
+    assert stamped_first is not None
+    assert stamped_second is None
     assert client.enqueued == [str(first.turn_id)]
 
 
@@ -798,12 +823,6 @@ async def test_message_reexecuted_with_its_dedup_key_reconnects_to_its_followup(
     first = await subagents.message(
         child_id, "narrow the search", dedup_key="turn-1/message_spawn/call-4"
     )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(dispatch_enqueued_at=None)
-            .where(tables.turn.c.id == first.turn_id)
-        )
     second = await subagents.message(
         child_id, "narrow the search", dedup_key="turn-1/message_spawn/call-4"
     )
@@ -819,8 +838,8 @@ async def test_message_reexecuted_with_its_dedup_key_reconnects_to_its_followup(
             )
         ).all()
     assert [row.id for row in rows] == [first.turn_id]
-    assert rows[0].dispatch_enqueued_at is not None
-    assert client.enqueued == [str(first.turn_id), str(first.turn_id)]
+    assert rows[0].dispatch_enqueued_at is None
+    assert client.enqueued == []
 
 
 async def test_message_reconnect_past_queued_reports_status_without_redispatch(
@@ -853,7 +872,7 @@ async def test_message_reconnect_past_queued_reports_status_without_redispatch(
     second = await subagents.message(child_id, "go deeper", dedup_key="turn-1/message_spawn/call-4")
     assert second.turn_id == first.turn_id
     assert second.status == "running"
-    assert client.enqueued == [str(first.turn_id)]
+    assert client.enqueued == []
 
 
 async def test_message_reconnect_behind_an_earlier_queued_followup_stays_undispatched(
@@ -889,12 +908,12 @@ async def test_message_reconnect_behind_an_earlier_queued_followup_stays_undispa
         stamped = (
             await connection.execute(
                 sa.select(tables.turn.c.dispatch_enqueued_at).where(
-                    tables.turn.c.id == behind.turn_id
+                    tables.turn.c.id.in_((front.turn_id, behind.turn_id))
                 )
             )
-        ).scalar_one()
-    assert stamped is None
-    assert client.enqueued == [str(front.turn_id)]
+        ).scalars()
+    assert list(stamped) == [None, None]
+    assert client.enqueued == []
 
 
 async def test_message_dedup_key_reused_for_another_child_is_refused(

@@ -16,6 +16,7 @@ from dbos import DBOSClient
 from ufo.db import workspace_tx
 from ufo.harness.o11y import emit_metric, turn_profile
 from ufo.runtime.object_name import ObjectRef
+from ufo.runtime.turns.dispatch import dispatch_next_turn
 from ufo.schema import tables
 from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, TerminalFrame
 
@@ -44,6 +45,7 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | 
                     tables.turn.c.status,
                     tables.turn.c.subagent_profile,
                     tables.turn.c.parent_turn_id,
+                    tables.turn.c.conversation_id,
                 ).where(tables.turn.c.id == turn_id)
             )
         ).one_or_none()
@@ -80,4 +82,5 @@ async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | 
         error_class="",
         profile=turn_profile(row.subagent_profile, spawned=row.parent_turn_id is not None),
     )
+    await dispatch_next_turn(client, row.conversation_id)
     return frame

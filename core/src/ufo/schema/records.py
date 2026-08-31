@@ -242,7 +242,21 @@ REJECTED: ProposalStatus = "rejected"
 
 DEFAULT_AGENT_NAME = "chat"
 TURN_QUEUE_NAME = "turns"
+EXPRESS_QUEUE_NAME = "express"
 TURN_WORKFLOW_NAME = "turn"
+
+
+def turn_queue_for(parent_turn_id: UUID | None, admission_source: "TurnAdmissionSource") -> str:
+    """The queue a turn rides. Root model loops take the capacity-claimed turns queue — an
+    executor claims only the remainder of what it can run and leaves the rest for its peers.
+    Express carries what a full fleet must still start: a spawned child (its foreground parent
+    holds capacity while it waits, so a capped child deadlocks its own ancestor) and a prepared
+    intent (one typed verb, no model round, a portal panel's bounded wait)."""
+    if parent_turn_id is not None or admission_source == INTENT_ADMISSION:
+        return EXPRESS_QUEUE_NAME
+    return TURN_QUEUE_NAME
+
+
 DBOS_APP_NAME = "ufo"
 DBOS_APP_VERSION = "ufo"
 DBOS_MAX_EXECUTOR_THREADS = 8192

@@ -23,7 +23,7 @@ from ufo.runtime.tools.bridge import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame
+from ufo.schema.records import EXPRESS_QUEUE_NAME, TerminalFrame
 
 
 @dataclass
@@ -159,7 +159,7 @@ async def test_describe_refuses_a_tool_outside_the_agents_allowlist(db: None) ->
 
 
 async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: None) -> None:
-    run, parent_conversation_id, sandbox_id = await _seed()
+    run, _, sandbox_id = await _seed()
     dbos = _DBOS()
     hub = InProcessHub()
     bridge = _bridge(dbos, hub)
@@ -214,5 +214,5 @@ async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: 
     assert child.on_behalf_of_member_id == run.acting_member_id
     assert child.admission_source == "intent"
     assert child.sandbox_conversation_id == sandbox_id
-    assert parent_conversation_id != UUID(dbos.options["queue_partition_key"])
+    assert dbos.options["queue_name"] == EXPRESS_QUEUE_NAME
     assert response == ToolBridgeSuccess(result={"objects": []})

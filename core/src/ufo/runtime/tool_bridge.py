@@ -35,10 +35,10 @@ from ufo.runtime.tools.registry import ACTION_READ_TOOLS, OBJECT_ACTION_TOOL, To
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
+    EXPRESS_QUEUE_NAME,
     INTENT_ADMISSION,
     RUNNING,
     SUBAGENT_SURFACE,
-    TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     TerminalFrame,
     turn_id_for,
@@ -259,10 +259,9 @@ class ToolBridge:
 
     async def _enqueue(self, workspace_id: UUID, turn_id: UUID, conversation_id: UUID) -> None:
         options: EnqueueOptions = {
-            "queue_name": TURN_QUEUE_NAME,
+            "queue_name": EXPRESS_QUEUE_NAME,
             "workflow_name": TURN_WORKFLOW_NAME,
             "workflow_id": str(turn_id),
-            "queue_partition_key": str(conversation_id),
             "app_version": DBOS_APP_VERSION,
         }
         try:

@@ -17,7 +17,7 @@ Working against the old repo:
 | Old file(s) | Lands in | Unit | Transformation |
 |---|---|---|---|
 | `metalcraft_agent/model_clients.py` | `models/` (split anthropic/openai) | U1 | drop OpenRouter routing; keep streaming, usage accounting, image-count trim. Backports from upstream fixes (landed after the U1 port): raise `ModelResponseTruncated` on `finish_reason=length` instead of letting cut-off tool-call JSON fail in json.loads (24723e46); flag errored tool results in-band ("[tool error] " prefix) on the chat-completions path where is_error has no field (24723e46); treat an empty 200 completion as a retryable provider failure, never success (ed876401) |
-| `metalcraft_agent/dbos_turns.py`, `turn_work.py`, `turn_host.py`, `turn_store.py` | `loop/queue.py`, `loop/engine.py` | U1 | de-k8s (no CRD projection/readiness); queue partition key = conversation_id; keep the 0.1s poll + system-DB retention lessons |
+| `metalcraft_agent/dbos_turns.py`, `turn_work.py`, `turn_host.py`, `turn_store.py` | `loop/queue.py`, `loop/engine.py` | U1 | de-k8s (no CRD projection/readiness); conversations serialized at dispatch, not by queue partition; keep the 0.1s poll + system-DB retention lessons |
 | `metalcraft_agent/turn_engine.py` | `loop/engine.py` (model rounds), `loop/compaction.py` | U1/U5 | drop substring injection scan (spec divergence in old repo); keep round loop, exhaustion policy |
 | `metalcraft_store/thread_store.py` | `loop/transcript.py` | U1 | `<ns>/threads/…` keys → `conversations/<cid>/…`; S3-only → BlobStore |
 | `metalcraft_store/object_store.py`, `metalcraft_brain/object_store.py` | `blob.py` | U1 | merge; add FilesystemBlobStore (new, default) |

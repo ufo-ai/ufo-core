@@ -529,6 +529,15 @@ async def test_dispatch_waits_for_the_earlier_queued_turn_to_start(db: None) -> 
     assert await _dispatch_stamp(second) is None
 
     assert await _claim_turn(first, "first-attempt")
+    while_running = StubDbos()
+    await _dispatch(while_running)
+    assert while_running.enqueued == []
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(status="done", terminal=TerminalFrame(status="done").model_dump(mode="json"))
+            .where(tables.turn.c.id == first)
+        )
     again = StubDbos()
     await _dispatch(again)
     assert again.enqueued == [str(second)]
@@ -644,7 +653,7 @@ async def test_resume_reenqueues_a_parked_turn_past_the_grace_window(db: None) -
 async def test_resume_sweep_bounds_its_batch_and_progresses_across_sweeps(db: None) -> None:
     """A sweep re-admits at most `dispatch_batch` turns per workspace — a workspace that parked many
     makes bounded progress each tick rather than holding one tick for all of them. A later parked
-    turn becomes eligible after the earlier one starts, preserving conversation sequence."""
+    turn becomes eligible after the earlier one ends, preserving conversation sequence."""
     async with workspace_tx() as connection:
         workspace_id, _, agent_id, conversation_id = await _seed(connection)
         first = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
@@ -653,6 +662,12 @@ async def test_resume_sweep_bounds_its_batch_and_progresses_across_sweeps(db: No
     await _dispatch(dbos, dispatch_batch=1)
     assert dbos.enqueued == [str(first)]
     assert await _claim_turn(first, "first-parked-attempt")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(status="done", terminal=TerminalFrame(status="done").model_dump(mode="json"))
+            .where(tables.turn.c.id == first)
+        )
     again = StubDbos()
     await _dispatch(again, dispatch_batch=1)
     assert again.enqueued == [str(second)]

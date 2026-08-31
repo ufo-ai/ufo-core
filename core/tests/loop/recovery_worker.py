@@ -1,7 +1,7 @@
 """Subprocess halves of the queued-turn recovery proof (driven by test_turn_recovery.py).
 
 Two phases, two real processes against one shared DBOS system database — the prod topology a
-deploy rollout creates. `crash` runs a turn through the real partitioned turns queue and dies with
+deploy rollout creates. `crash` runs a turn through the real turns queue and dies with
 `os._exit` mid-round-two, exactly a killed pod: the workflow stays PENDING with its queue
 assignment and recorded round-one steps. `recover` boots the way `ufoctl serve` boots — runtime
 installed, `DBOS.launch()` from the sync main thread (recovery fires there), then the main thread
@@ -341,7 +341,6 @@ def _enqueue_like_admission(env: _Env) -> None:
         "queue_name": TURN_QUEUE_NAME,
         "workflow_name": TURN_WORKFLOW_NAME,
         "workflow_id": str(env.turn_id),
-        "queue_partition_key": str(env.conversation_id),
         "app_version": DBOS_APP_VERSION,
     }
     client = replay_safe_client(env.system_url)

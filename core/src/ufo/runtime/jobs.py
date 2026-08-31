@@ -67,10 +67,11 @@ from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
     PARKED,
-    TURN_QUEUE_NAME,
+    RUNNING,
     TURN_WORKFLOW_NAME,
     TurnAdmissionSource,
     TurnStatus,
+    turn_queue_for,
 )
 
 
@@ -117,14 +118,17 @@ class _DispatchTurn:
     on_behalf_of_member_id: UUID | None
     admission_source: TurnAdmissionSource
     status: TurnStatus
+    parent_turn_id: UUID | None
 
 
 @dataclass(frozen=True)
 class TurnDispatcher:
-    """Dispatch durable turn rows onto the conversation-partitioned worker queue. QUEUED is an
-    outbox state: admission stamps and offers the first turn immediately, while this bounded sweep
-    recovers an unstamped or stale offer. Only the lowest-sequence QUEUED turn in a conversation is
-    eligible, so a later turn cannot overtake an earlier offer that has not started. A never-claimed
+    """Dispatch durable turn rows onto the capacity-claimed queues. QUEUED is an outbox state:
+    admission stamps and offers the first turn immediately, the exit handoff offers each
+    successor, and this bounded sweep recovers an unstamped or stale offer. Only the
+    lowest-sequence QUEUED turn in a conversation with no running sibling is eligible, so one
+    conversation runs one turn at a time and a later turn cannot overtake an earlier offer.
+    A never-claimed
     QUEUED turn's DBOS workflow id is the turn id, making an ambiguous duplicate offer safe.
 
     PARKED rows share the same scanner and advisory dispatch stamp, but remain spend-, balance-
@@ -207,6 +211,7 @@ class TurnDispatcher:
                         tables.turn.c.on_behalf_of_member_id,
                         tables.turn.c.admission_source,
                         tables.turn.c.status,
+                        tables.turn.c.parent_turn_id,
                     )
                     .select_from(tables.turn.join(tables.conversation))
                     .where(self._eligible(cutoff))
@@ -229,6 +234,7 @@ class TurnDispatcher:
                 r.on_behalf_of_member_id,
                 r.admission_source,
                 r.status,
+                r.parent_turn_id,
             )
             for r in rows
         )
@@ -253,22 +259,33 @@ class TurnDispatcher:
         if claimed is None:
             return
         options: EnqueueOptions = {
-            "queue_name": TURN_QUEUE_NAME,
+            "queue_name": turn_queue_for(turn.parent_turn_id, turn.admission_source),
             "workflow_name": TURN_WORKFLOW_NAME,
             "workflow_id": (
                 str(turn.id)
                 if turn.status == QUEUED and claimed.running_attempt is None
                 else uuid4().hex
             ),
-            "queue_partition_key": str(turn.conversation_id),
             "app_version": DBOS_APP_VERSION,
         }
         await self.client.enqueue_async(options, str(turn.workspace_id), str(turn.id))
 
     def _eligible(self, cutoff: datetime) -> sa.ColumnElement[bool]:
+        """A stale queued or parked turn with nothing ahead of it. The no-running guard is what
+        the plain queue does not provide: one conversation runs one turn at a time, so nothing is
+        offered while a sibling executes — the exit handoff or a later sweep offers it then."""
+        running = tables.turn.alias("running_sibling_turn")
+        no_running_sibling = ~sa.exists(
+            sa.select(running.c.id).where(
+                running.c.workspace_id == tables.turn.c.workspace_id,
+                running.c.conversation_id == tables.turn.c.conversation_id,
+                running.c.status == RUNNING,
+            )
+        )
         return sa.and_(
             tables.turn.c.status.in_((QUEUED, PARKED)),
             self._stale(cutoff),
+            no_running_sibling,
             sa.or_(
                 sa.and_(tables.turn.c.status == QUEUED, self._first_in_status(QUEUED)),
                 sa.and_(tables.turn.c.status == PARKED, self._first_in_status(PARKED)),

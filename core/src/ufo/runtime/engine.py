@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from html import escape
 from io import BytesIO
-from uuid import UUID, uuid4
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
@@ -331,77 +331,6 @@ async def _claim_turn(turn_id: UUID, attempt: str) -> str | None:
     if prior.status == RUNNING and prior.running_attempt == attempt:
         return ADOPTED_CLAIM
     return FRESH_CLAIM
-
-
-@dataclass(frozen=True)
-class _TurnHandoff:
-    id: UUID
-    workspace_id: UUID
-    conversation_id: UUID
-    workflow_id: str
-
-
-async def _claim_turn_with_handoff(
-    turn_id: UUID, attempt: str
-) -> tuple[str | None, _TurnHandoff | None]:
-    claim = await _claim_turn(turn_id, attempt)
-    if claim is None:
-        return None, None
-    async with workspace_tx() as connection:
-        turn_scope = (
-            await connection.execute(
-                sa.select(
-                    tables.turn.c.workspace_id,
-                    tables.turn.c.conversation_id,
-                ).where(tables.turn.c.id == turn_id)
-            )
-        ).one()
-        await connection.execute(
-            sa.select(tables.conversation.c.id)
-            .where(tables.conversation.c.id == turn_scope.conversation_id)
-            .with_for_update()
-        )
-        next_turn = (
-            await connection.execute(
-                sa.select(
-                    tables.turn.c.id,
-                    tables.turn.c.dispatch_enqueued_at,
-                    tables.turn.c.running_attempt,
-                )
-                .where(
-                    tables.turn.c.conversation_id == turn_scope.conversation_id,
-                    tables.turn.c.status == "queued",
-                )
-                .order_by(tables.turn.c.seq)
-                .limit(1)
-                .with_for_update()
-            )
-        ).one_or_none()
-        if next_turn is None or next_turn.dispatch_enqueued_at is not None:
-            return claim, None
-        stamped = (
-            await connection.execute(
-                sa.update(tables.turn)
-                .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
-                .where(
-                    tables.turn.c.id == next_turn.id,
-                    tables.turn.c.status == "queued",
-                    tables.turn.c.dispatch_enqueued_at.is_(None),
-                )
-                .returning(tables.turn.c.id)
-            )
-        ).scalar_one_or_none()
-    return (
-        claim,
-        None
-        if stamped is None
-        else _TurnHandoff(
-            stamped,
-            turn_scope.workspace_id,
-            turn_scope.conversation_id,
-            str(stamped) if next_turn.running_attempt is None else uuid4().hex,
-        ),
-    )
 
 
 MAX_TOOL_RESULT_CHARS = 25_600
@@ -1985,8 +1914,8 @@ class TurnEngine:
         queued or parked turn transitions to running under this id; a turn already running is
         re-claimed only by the same id — a DBOS crash-recovery replay of this very workflow, which
         must resume its own turn. A different id (a redundant resume enqueue) matches nothing, loses
-        the claim, and is resolved as superseded, so single ownership is the DB claim itself, not
-        the per-conversation partition. Clearing the advisory dispatch stamp here tells the outbox
+        the claim, and is resolved as superseded — single ownership is the DB claim itself.
+        Clearing the advisory dispatch stamp here tells the outbox
         the turn is live; a crash before this leaves the turn re-enqueueable."""
         return await _claim_turn(self.turn.id, self.attempt) is not None
 

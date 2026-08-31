@@ -20,7 +20,7 @@ services: SQLite + filesystem blobs + in-process hub.
 - migration 001: workspace, member, surface_identity, agent, conversation, turn, ledger.
 - `config.py` (ufo.toml, fail-loud), `db.py` (`workspace_tx` boundary + gate), `o11y.py`, `blob.py`
   (FilesystemBlobStore + S3BlobStore), `hub.py` (in-process), `models/` (anthropic, openai),
-  `loop/` (DBOS queue partitioned by conversation, TurnEngine minus compaction/tools, transcript
+  `loop/` (DBOS queue serialized per conversation at dispatch, TurnEngine minus compaction/tools, transcript
   `messages.json.lz4`), `accounting.py` (ledger writes + prices only), `surfaces/cli.py`, `cli.py`, `serve.py`.
 - First-run bootstrap: create workspace + first owner + default agent (`ufoctl init`).
 - **Proof**: a terminal client streams a real Anthropic turn; transcript in blob store; ledger rows

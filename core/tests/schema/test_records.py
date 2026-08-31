@@ -4,7 +4,26 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from ufo.schema.records import TerminalFrame, Turn, TurnContext, ledger_id_for, turn_id_for
+from ufo.schema.records import (
+    EXPRESS_QUEUE_NAME,
+    INTENT_ADMISSION,
+    MEMBER_ADMISSION,
+    SCHEDULED_ADMISSION,
+    TURN_QUEUE_NAME,
+    TerminalFrame,
+    Turn,
+    TurnContext,
+    ledger_id_for,
+    turn_id_for,
+    turn_queue_for,
+)
+
+
+def test_children_and_intents_ride_the_express_queue() -> None:
+    assert turn_queue_for(uuid4(), MEMBER_ADMISSION) == EXPRESS_QUEUE_NAME
+    assert turn_queue_for(None, INTENT_ADMISSION) == EXPRESS_QUEUE_NAME
+    assert turn_queue_for(None, MEMBER_ADMISSION) == TURN_QUEUE_NAME
+    assert turn_queue_for(None, SCHEDULED_ADMISSION) == TURN_QUEUE_NAME
 
 
 def test_turn_id_deterministic() -> None:

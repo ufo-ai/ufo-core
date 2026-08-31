@@ -73,7 +73,6 @@ from ufo.schema.records import (
     SCHEDULED_ADMISSION,
     SUBAGENT_SURFACE,
     SURFACE_COMMENT_ROUND_INDEX,
-    TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     WRITEBACK_PENDING,
     TerminalFrame,
@@ -86,6 +85,7 @@ from ufo.schema.records import (
     admits_spent_balance,
     mid_turn_reply_id_for,
     turn_id_for,
+    turn_queue_for,
 )
 
 QUEUED: TurnStatus = "queued"
@@ -900,11 +900,18 @@ class Admission:
         fold, or its later redispatch — rides a fresh id, because the run that claimed it consumed
         its own and DBOS would drop a duplicate as complete. The worker's claim keeps a duplicate
         fresh-id offer safe."""
+        async with workspace_tx() as connection:
+            kind = (
+                await connection.execute(
+                    sa.select(tables.turn.c.parent_turn_id, tables.turn.c.admission_source).where(
+                        tables.turn.c.id == turn_id
+                    )
+                )
+            ).one()
         options: EnqueueOptions = {
-            "queue_name": TURN_QUEUE_NAME,
+            "queue_name": turn_queue_for(kind.parent_turn_id, kind.admission_source),
             "workflow_name": TURN_WORKFLOW_NAME,
             "workflow_id": workflow_id if workflow_id is not None else str(turn_id),
-            "queue_partition_key": str(conversation_id),
             "app_version": DBOS_APP_VERSION,
         }
         try:
@@ -1020,7 +1027,7 @@ class ConnectResume:
     The prepared-intent lane takes nothing. A connect begun from a portal panel seals that panel's
     own conversation, and that lane dispatches one typed verb per turn with no model round: a
     free-text message admitted there would run a whole turn nothing reads (the surface declares no
-    writeback and the chat index skips the lane), while holding the lane's single partition until
+    writeback and the chat index skips the lane), while holding the lane's conversation until
     it ended — so the member's next panel submit would wait behind it and time out. Left alone, the
     grant still lands and the page tells them to ask for the work in the conversation they can
     actually read."""
