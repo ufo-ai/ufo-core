@@ -1,12 +1,12 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 
-import { setMuted, soundMoved, soundOpened, useMuted } from "@/lib/sound";
+import { setMuted, soundEnded, soundMoved, useMuted } from "@/lib/sound";
 
 const speaker = vi.hoisted(() => ({
   init: vi.fn(),
-  pop: vi.fn(),
   swoosh: vi.fn(),
+  click: vi.fn(),
   mute: vi.fn(),
   unmute: vi.fn(),
 }));
@@ -20,27 +20,27 @@ beforeEach(() => {
   vi.stubGlobal("AudioContext", class {});
 });
 
-/** The engine is started by the first sound and by nothing else, so a member who never opens a lane
- *  never holds an `AudioContext` — and the theme and the volume are settled in that one call. */
+/** The engine is started by the first sound and by nothing else, so a member who never walks the
+ *  row never holds an `AudioContext` — and the theme and the volume are settled in that one call. */
 test("the first sound starts the speaker, and the sounds after it find it started", () => {
-  soundOpened();
   soundMoved();
-  soundOpened();
+  soundEnded();
+  soundMoved();
 
   expect(speaker.init).toHaveBeenCalledTimes(1);
   expect(speaker.init).toHaveBeenCalledWith({ theme: "soft", volume: 0.3 });
-  expect(speaker.pop).toHaveBeenCalledTimes(2);
-  expect(speaker.swoosh).toHaveBeenCalledTimes(1);
+  expect(speaker.swoosh).toHaveBeenCalledTimes(2);
+  expect(speaker.click).toHaveBeenCalledTimes(1);
 });
 
 test("a muted browser plays nothing, and the engine is told as well", () => {
   setMuted(true);
 
-  soundOpened();
   soundMoved();
+  soundEnded();
 
-  expect(speaker.pop).not.toHaveBeenCalled();
   expect(speaker.swoosh).not.toHaveBeenCalled();
+  expect(speaker.click).not.toHaveBeenCalled();
   expect(speaker.mute).toHaveBeenCalledTimes(1);
 });
 
@@ -64,8 +64,8 @@ test("a browser muted before this page loaded is muted when it loads", () => {
   localStorage.setItem(HELD, "muted");
 
   const { result } = renderHook(() => useMuted());
-  soundOpened();
+  soundMoved();
 
   expect(result.current).toBe(true);
-  expect(speaker.pop).not.toHaveBeenCalled();
+  expect(speaker.swoosh).not.toHaveBeenCalled();
 });

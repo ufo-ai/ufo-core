@@ -216,6 +216,10 @@ export function App({
   useEffect(() => {
     if (route.kind !== "home") setSeeking(undefined);
   }, [route.kind]);
+  /** The lane home says the member is standing in, which the rail marks. The track is what knows it
+   *  — the walk and the cursor both move it, and neither passes through the address — so it is held
+   *  here rather than derived, and the track clears it as home unmounts. */
+  const [activeLane, setActiveLane] = useState<string | undefined>(undefined);
 
   /** The router owns the address: it states the boot address in the bar, lands the arrival on the
    *  track the screen was left holding, and follows the browser from there. It starts here rather
@@ -340,6 +344,7 @@ export function App({
                 {!narrow ? (
                   <MinimalSidebar
                     lanes={homeLanes}
+                    active={activeLane}
                     agents={listed}
                     account={<AccountMenu member={member} />}
                     onNewTab={() => {
@@ -361,6 +366,7 @@ export function App({
                     member={member}
                     mainAgent={mainAgent}
                     seeking={seeking}
+                    onActive={setActiveLane}
                     onAgents={onAgents}
                     onExitBuilder={exitBuild}
                     onForwardAgents={forwardBuild}
@@ -843,6 +849,7 @@ function RoutedPane({
   member,
   mainAgent,
   seeking,
+  onActive,
   onAgents,
   onExitBuilder,
   onForwardAgents,
@@ -853,6 +860,7 @@ function RoutedPane({
   member: Member;
   mainAgent: Agent | null;
   seeking: Seek | undefined;
+  onActive: (lane: string | undefined) => void;
   onAgents: () => void;
   onExitBuilder: () => void;
   onForwardAgents: () => void;
@@ -1054,6 +1062,7 @@ function RoutedPane({
           member={member}
           mainAgent={mainAgent}
           seeking={seeking}
+          onActive={onActive}
           onFounded={founded}
           onActivity={railActivity}
           onAgents={onAgents}

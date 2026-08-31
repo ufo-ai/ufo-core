@@ -122,13 +122,17 @@ function defaultLanes(agents: Agent[], chatAgent: Agent | null): string[] {
  *  reads the open lanes off, what a reorder writes back, and what closing a lane cuts from.
  *
  *  `seeking` is the lane the rail was last pressed for, brought into view by the track: the row may
- *  be wider than the screen, and the tile is how the member reaches a lane that scrolled off it. */
+ *  be wider than the screen, and the tile is how the member reaches a lane that scrolled off it.
+ *  `onActive` is the answer travelling the other way — the lane the member is standing in, which the
+ *  rail marks, since the tile a press lands on is not the only way a lane becomes the one they are
+ *  in. */
 export function Home({
   place,
   agents,
   member,
   mainAgent,
   seeking,
+  onActive,
   onFounded,
   onActivity,
   onAgents,
@@ -138,6 +142,7 @@ export function Home({
   member: Member;
   mainAgent: Agent | null;
   seeking?: Seek;
+  onActive: (lane: string | undefined) => void;
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
   onActivity: (conversationId: string) => void;
   onAgents: () => void;
@@ -160,7 +165,7 @@ export function Home({
   );
   return (
     <main className="relative flex min-h-0 min-w-0 flex-col">
-      <SlotTrack over opens={standing} onMove={move} seek={seeking}>
+      <SlotTrack over opens={standing} onMove={move} seek={seeking} onActive={onActive}>
         {standing.map((lane) => (
           <HomeLane
             key={lane}

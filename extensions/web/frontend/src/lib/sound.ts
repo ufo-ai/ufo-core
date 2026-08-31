@@ -1,10 +1,12 @@
 import { useSyncExternalStore } from "react";
 import { tiks } from "@rexa-developer/tiks";
 
-/** The portal's one speaker. Two acts on the track are said out loud — a lane opening, and focus
- *  crossing to the lane beside it — because both move the screen under a member whose eyes are on
- *  the pane rather than on the pointer. Every sound is synthesised in the browser at the moment it
- *  plays: nothing is fetched, decoded, or held. */
+/** The portal's one speaker. What is said out loud is the bracket keys walking the row — the row
+ *  carrying the member a lane along, and the press that finds the end of it — because that is the
+ *  one act on the track whose whole result is on a pane the member's eyes are on rather than on
+ *  their hand. A lane opened, and a lane picked off the rail, arrive where the member was already
+ *  pointing and say nothing. Every sound is synthesised in the browser at the moment it plays:
+ *  nothing is fetched, decoded, or held. */
 const HELD = "ufo.sound-muted";
 const MUTED = "muted";
 const UNMUTED = "unmuted";
@@ -14,14 +16,15 @@ const VOLUME = 0.3;
 let started = false;
 const listeners = new Set<() => void>();
 
-/** A lane opened. */
-export function soundOpened(): void {
-  play(() => tiks.pop());
-}
-
-/** Focus moved to another lane. */
+/** The row carried the member a lane along. */
 export function soundMoved(): void {
   play(() => tiks.swoosh());
+}
+
+/** The row was asked for a lane past the end it already stands at. Flat where the move is a
+ *  swoosh, so the press that moved nothing is heard as that rather than as another step. */
+export function soundEnded(): void {
+  play(() => tiks.click());
 }
 
 /** The engine holds an `AudioContext`, which a browser mints only on a member's own gesture and

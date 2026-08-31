@@ -426,10 +426,11 @@
   /* The floor a slot holds before the track scrolls sideways instead of dividing further. Under it
      a form's labels wrap off their fields and a table prints one word to a cell, so a member who
      opens one more lane pushes the track past the pane's edge rather than making the ones already
-     standing unreadable. It is set so four lanes stand beside the rail on a 1280px laptop: four at
-     305px with three hairlines between them is 1223px against the 1240px the rail leaves, where
-     320px would already scroll. */
-  --size-slot-min: 305px;
+     standing unreadable. It is also what decides how many lanes a screen stands, since the row
+     fills its width with whole lanes of at least this: four at 360px with three hairlines between
+     them is 1443px against the 1472px the rail leaves on a 1512px laptop, and a fifth waits for a
+     1844px screen. */
+  --size-slot-min: 360px;
   /* What a thin scrollbar reserves, so anything laid over the pane can stop short of it. */
   --size-scrollbar: 12px;
   /* The floor a control the member points at with a finger keeps, which is taller than the

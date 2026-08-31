@@ -19,13 +19,13 @@ import {
   type SlotKind,
 } from "@/kernel/slots";
 import { Banded } from "@/kernel/pane";
-import { soundMoved, soundOpened } from "@/lib/sound";
+import { soundEnded, soundMoved } from "@/lib/sound";
 import type { Crumb } from "@/lib/title";
 import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 
 import { atPhoneWidth } from "./harness";
 
-vi.mock("@/lib/sound", () => ({ soundOpened: vi.fn(), soundMoved: vi.fn() }));
+vi.mock("@/lib/sound", () => ({ soundMoved: vi.fn(), soundEnded: vi.fn() }));
 
 /** Motion's frame loop needs a browser to run in, so the spring lands at once here and every arm
  *  of it is recorded: what the row does is where each lane comes to rest, and which lanes were
@@ -46,8 +46,8 @@ vi.mock("motion/react", async (whole) => {
 });
 
 const heard = () => {
-  vi.mocked(soundOpened).mockClear();
   vi.mocked(soundMoved).mockClear();
+  vi.mocked(soundEnded).mockClear();
 };
 
 function Opener({ name, kind = "reading" }: { name: string; kind?: SlotKind }) {
@@ -587,8 +587,8 @@ function Spread({ names }: { names: string[] }) {
   );
 }
 
-/** The width the rail leaves on the laptop `--size-slot-min` is set against. */
-const PANE_WIDTH = 1240;
+/** The width the rail leaves on the 1512px laptop `--size-slot-min` is set against. */
+const PANE_WIDTH = 1472;
 
 /** A track handed the whole pane fills it. The lanes on screen divide the row exactly — as many as
  *  the floor leaves room for — and the rest stand off the right edge at that same width, so a row of
@@ -1392,26 +1392,22 @@ test("the track takes focus without scrolling, having scrolled the lane itself",
   }
 });
 
-/** Two acts on the track are said out loud, because both move the screen under a member whose eyes
- *  are on the pane rather than on their hand: a lane opening, and the row moving under focus. A row
- *  the screen stood whole opened nothing — the member is arriving at a row they already arranged —
- *  so it says nothing at all. */
-test("a lane opened by a press is heard, and a row stood whole is not", async () => {
+/** A lane opened by a press lands where the member was already pointing, and a row the screen
+ *  stood whole opened nothing at all, so neither says anything. */
+test("a lane opened by a press is silent, and so is a row stood whole", async () => {
   heard();
   render(<Walk names={["A", "B", "C", "D"]} opening={["A", "B", "C"]} />);
 
-  expect(soundOpened).not.toHaveBeenCalled();
   expect(soundMoved).not.toHaveBeenCalled();
 
   await open("D");
 
-  expect(soundOpened).toHaveBeenCalledTimes(1);
   expect(soundMoved).not.toHaveBeenCalled();
+  expect(soundEnded).not.toHaveBeenCalled();
 });
 
-/** A seek and a bracket press both move the row rather than open anything, so both are heard as
- *  that — the lane already standing and the lane that scrolls in as it lands alike. */
-test("the row moving is heard, once per press and once per seek", async () => {
+/** The bracket keys are the one act the track says out loud, once a press. */
+test("the row moving under a bracket press is heard, once per press", async () => {
   heard();
   render(<Row names={["A", "B", "C"]} />);
 
@@ -1420,24 +1416,54 @@ test("the row moving is heard, once per press and once per seek", async () => {
 
   press(LANE_PRIOR);
   expect(soundMoved).toHaveBeenCalledTimes(2);
-  expect(soundOpened).not.toHaveBeenCalled();
 });
 
-test("a seek is heard as the row moving, whether the lane stands or lands", async () => {
+/** A seek is a lane the member picked off the rail with the pointer already on it, so the row
+ *  brings it in without saying so — the lane already standing and the lane that lands alike. */
+test("a seek is silent, whether the lane stands or lands", async () => {
   heard();
   const { unmount } = render(<Seeking names={["A", "B", "C"]} opening={["A", "B"]} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Seek B" }));
-  expect(soundMoved).toHaveBeenCalledTimes(1);
+  expect(soundMoved).not.toHaveBeenCalled();
 
   unmount();
   heard();
   render(<Seeking names={["A", "B"]} opening={["A", "B"]} seeking="B" />);
 
-  expect(soundMoved).toHaveBeenCalledTimes(1);
-  expect(soundOpened).not.toHaveBeenCalled();
+  expect(soundMoved).not.toHaveBeenCalled();
+  expect(soundEnded).not.toHaveBeenCalled();
 });
 
+
+/** The lane the member is standing in is the track's to name, since the walk and the cursor both
+ *  move it and neither passes through the address. It outlives the focus that set it: a rail drawn
+ *  outside the row takes the press that leaves the row, and a mark that went out under that press
+ *  would say the member is in no lane at all. */
+test("the track names the lane the member stands in, and keeps naming it after focus leaves", () => {
+  const seen: (string | undefined)[] = [];
+  const note = (id: string | undefined) => void seen.push(id);
+  render(
+    <SlotTrack onActive={note}>
+      <Standing name="A" kind="panel">
+        <p>A body</p>
+      </Standing>
+      <Standing name="B" kind="panel">
+        <p>B body</p>
+      </Standing>
+    </SlotTrack>,
+  );
+
+  expect(seen).toEqual([undefined]);
+
+  press(LANE_NEXT);
+
+  expect(seen.at(-1)).toBe("B");
+
+  act(() => slotFor("B").blur());
+
+  expect(seen.at(-1)).toBe("B");
+});
 
 /** A row stood whole, one lane of it holding a field the member types in. */
 function Row({ names, typing }: { names: string[]; typing?: string }) {
@@ -1456,9 +1482,10 @@ const press = (key: string, held: KeyboardEventInit = {}, on: Node = document) =
   fireEvent.keyDown(on, { key, ...held });
 
 /** `[` and `]` walk the row. From outside it the first press moves the way it was pressed; after
- *  that the lane holding focus is where the walk stands, and both ends wrap. The lane it reaches
- *  takes focus and scrolls to itself, which is the whole of the act. */
-test("the bracket keys walk the row, and it wraps at both ends", () => {
+ *  that the lane holding focus is where the walk stands, and the walk stops at both ends. The lane
+ *  it reaches takes focus and scrolls to itself, which is the whole of the act; a press past an end
+ *  reaches no lane, moves no focus, and is heard as the end. */
+test("the bracket keys walk the row, and it stops at both ends", () => {
   const scrolled: string[] = [];
   const scrolls = vi
     .spyOn(Element.prototype, "scrollIntoView")
@@ -1467,6 +1494,7 @@ test("the bracket keys walk the row, and it wraps at both ends", () => {
     });
   try {
     render(<Row names={["A", "B", "C"]} />);
+    heard();
     expect(standing()).toEqual(["A", "B", "C"]);
     expect(document.activeElement).toBe(document.body);
 
@@ -1478,14 +1506,20 @@ test("the bracket keys walk the row, and it wraps at both ends", () => {
     expect(document.activeElement).toBe(slotFor("C"));
 
     press(LANE_NEXT);
-    expect(document.activeElement).toBe(slotFor("A"));
-
-    press(LANE_PRIOR);
     expect(document.activeElement).toBe(slotFor("C"));
+    expect(soundEnded).toHaveBeenCalledTimes(1);
 
     press(LANE_PRIOR);
     expect(document.activeElement).toBe(slotFor("B"));
-    expect(scrolled).toEqual(["B", "C", "A", "C", "B"]);
+
+    press(LANE_PRIOR);
+    expect(document.activeElement).toBe(slotFor("A"));
+
+    press(LANE_PRIOR);
+    expect(document.activeElement).toBe(slotFor("A"));
+    expect(scrolled).toEqual(["B", "C", "B", "A"]);
+    expect(soundMoved).toHaveBeenCalledTimes(4);
+    expect(soundEnded).toHaveBeenCalledTimes(2);
   } finally {
     scrolls.mockRestore();
   }
@@ -1622,9 +1656,9 @@ function Rolled({ opening }: { opening: string[] }) {
 
 const NINE = ["A", "B", "C", "D", "E", "F", "G", "H", "I"];
 
-/** The pane the comps are drawn at, four lanes across at `--size-slot-min`, and the step from one
+/** The pane the laptop leaves, four lanes across at `--size-slot-min`, and the step from one
  *  lane's left edge to the next: the share of the row it takes, and the hairline after it. */
-const ROW_WIDTH = 1400;
+const ROW_WIDTH = 1472;
 const STEP = (ROW_WIDTH - 3) / 4 + 1;
 
 /** Where a lane stands along the row, in lanes. The row itself never scrolls, so a lane's place is
@@ -1648,48 +1682,100 @@ function rolling(names: string[]): () => void {
   return () => boxes.mockRestore();
 }
 
-/** A row holding more lanes than fit has no end: the lanes past the far edge are read one row's
- *  length to the left instead, so they stand waiting on the near side rather than queued behind
- *  every other lane. */
-test("a row wider than the pane carries its far lanes round to the near side", () => {
+/** A row holding more lanes than fit stands them in the one order the address states: the four
+ *  that fit on the screen, and the rest queued past the right edge waiting to be walked to. */
+test("a row wider than the pane queues its far lanes past the right edge", () => {
   const done = rolling(NINE);
   try {
     expect(spotted("A")).toBe(0);
     expect(spotted("E")).toBe(4);
     expect(spotted("F")).toBe(5);
-    expect(spotted("I")).toBe(-1);
-    expect(spotted("G")).toBe(-3);
+    expect(spotted("I")).toBe(8);
   } finally {
     done();
   }
 });
 
-/** `]` and `[` move the row itself, one lane a press, and focus stays where the member left it. */
-test("a bracket press rotates the endless row by one lane, and moves no focus", () => {
+/** `]` and `[` move the member, not the row: the lane the press lands on takes focus, and the row
+ *  holds still for as long as that lane is already on the screen. */
+test("a bracket press stands the member in the next lane, and holds the row still", () => {
   const done = rolling(NINE);
   try {
     heard();
 
     press(LANE_NEXT);
 
-    expect(spotted("B")).toBe(0);
-    expect(spotted("A")).toBe(-1);
-    expect(spotted("F")).toBe(4);
-    expect(document.activeElement).toBe(document.body);
+    expect(document.activeElement).toBe(slotFor("B"));
+    expect(spotted("A")).toBe(0);
+    expect(spotted("E")).toBe(4);
     expect(soundMoved).toHaveBeenCalledTimes(1);
 
     press(LANE_PRIOR);
 
+    expect(document.activeElement).toBe(slotFor("A"));
     expect(spotted("A")).toBe(0);
-    expect(spotted("I")).toBe(-1);
-    expect(soundMoved).toHaveBeenCalledTimes(2);
+    expect(soundEnded).not.toHaveBeenCalled();
+  } finally {
+    done();
+  }
+});
+
+/** The row follows the walk only as far as it has to: a step onto the lane past the right edge
+ *  brings that lane in by one and no further, so the lanes the member walked through are still
+ *  beside the one they are standing in. */
+test("the walk carries the row only where the lane it lands on is off the screen", () => {
+  const done = rolling(NINE);
+  try {
+    for (let walked = 0; walked < 4; walked += 1) press(LANE_NEXT);
+
+    expect(document.activeElement).toBe(slotFor("E"));
+    expect(spotted("E")).toBe(3);
+    expect(spotted("A")).toBe(-1);
+
+    press(LANE_NEXT);
+
+    expect(document.activeElement).toBe(slotFor("F"));
+    expect(spotted("F")).toBe(3);
+    expect(spotted("B")).toBe(-1);
+  } finally {
+    done();
+  }
+});
+
+/** The row has two ends and the walk stops against them: the first lane at the left edge, the last
+ *  at the right. A press asking past one moves nothing and is heard as the end, so a member walking
+ *  the row hears where it stops rather than finding themselves back at the other end of it. */
+test("the walk stops at both ends, and the press past one is heard as the end", () => {
+  const done = rolling(NINE);
+  try {
+    heard();
+
+    press(LANE_PRIOR);
+
+    expect(document.activeElement).toBe(document.body);
+    expect(spotted("A")).toBe(0);
+    expect(soundMoved).not.toHaveBeenCalled();
+    expect(soundEnded).toHaveBeenCalledTimes(1);
+
+    for (let walked = 0; walked < 8; walked += 1) press(LANE_NEXT);
+
+    expect(document.activeElement).toBe(slotFor("I"));
+    expect(spotted("F")).toBe(0);
+    expect(spotted("I")).toBe(3);
+    expect(soundMoved).toHaveBeenCalledTimes(8);
+
+    press(LANE_NEXT);
+
+    expect(document.activeElement).toBe(slotFor("I"));
+    expect(spotted("I")).toBe(3);
+    expect(soundEnded).toHaveBeenCalledTimes(2);
   } finally {
     done();
   }
 });
 
 /** A row every lane already fits has nothing to bring round, so the keys move it nowhere. */
-test("a row every lane fits rotates nowhere", () => {
+test("a row every lane fits rolls nowhere", () => {
   const done = rolling(["A", "B", "C"]);
   try {
     press(LANE_NEXT);
@@ -1740,14 +1826,15 @@ test("a wheel that is mostly vertical is left to the page", () => {
 
 /** A lane holds its body only near the row: one lane of reach past either edge, read off the place
  *  the lane stands in rather than off anything the browser has to observe. */
-test("a lane more than a lane past either edge of the endless row holds no body", () => {
+test("a lane more than a lane past either edge of the rolling row holds no body", () => {
   const done = rolling(NINE);
   try {
-    for (const name of ["A", "B", "C", "D", "E", "F", "I"]) {
+    for (const name of ["A", "B", "C", "D", "E", "F"]) {
       expect(screen.getByText(name + " body")).toBeTruthy();
     }
     expect(screen.queryByText("G body")).toBeNull();
     expect(screen.queryByText("H body")).toBeNull();
+    expect(screen.queryByText("I body")).toBeNull();
   } finally {
     done();
   }
@@ -1763,7 +1850,7 @@ test("a lane the address moved slides to its new place, and a lane that stayed d
 
     expect(spotted("I")).toBe(0);
     expect(spotted("A")).toBe(1);
-    expect(spotted("H")).toBe(-1);
+    expect(spotted("H")).toBe(8);
 
     glided.moves.length = 0;
     fireEvent.click(screen.getByRole("button", { name: "Swap the first two" }));
@@ -1778,14 +1865,14 @@ test("a lane the address moved slides to its new place, and a lane that stayed d
 
 /** A member who asked for stillness gets the row moved, not animated: the same press lands the same
  *  lane, and no spring is ever started. */
-test("a reduced-motion press lands the row without a glide", () => {
+test("a reduced-motion walk lands the row without a glide", () => {
   glided.still = true;
   const done = rolling(NINE);
   try {
-    press(LANE_NEXT);
+    for (let walked = 0; walked < 4; walked += 1) press(LANE_NEXT);
 
     expect(spotted("A")).toBe(-1);
-    expect(spotted("B")).toBe(0);
+    expect(spotted("E")).toBe(3);
     expect(glided.moves).toEqual([]);
   } finally {
     glided.still = false;
@@ -1798,14 +1885,14 @@ test("a reduced-motion press lands the row without a glide", () => {
 test("a resize re-seats the row at its new step without a glide", () => {
   const done = rolling(NINE);
   try {
-    press(LANE_NEXT);
-    expect(spotted("B")).toBe(0);
+    for (let walked = 0; walked < 4; walked += 1) press(LANE_NEXT);
+    expect(spotted("A")).toBe(-1);
     glided.moves.length = 0;
 
     const narrower = laidOut([0, 1000], {});
     Sizing.made[0].report();
 
-    const step = (1000 - 2) / 3 + 1;
+    const step = (1000 - 1) / 2 + 1;
     const lane = screen.getByRole("region", { name: "A" });
     expect(lane.style.transform).toBe("translateX(" + Math.round(-step * 100) / 100 + "px)");
     expect(glided.moves).toEqual([]);

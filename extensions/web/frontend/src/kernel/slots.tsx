@@ -31,7 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Banded, Header } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
 import { GLYPH_STROKE } from "@/lib/glyph";
-import { soundMoved, soundOpened } from "@/lib/sound";
+import { soundEnded, soundMoved } from "@/lib/sound";
 import type { Crumb } from "@/lib/title";
 import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 import { useNarrow } from "@/lib/narrow";
@@ -255,22 +255,18 @@ const REACH = 1;
  *  left edge to the next, how many stand on the screen at once, the lanes in the order the address
  *  states them, and whether this browser is asking for no movement. */
 type Rolling = {
-  wraps: boolean;
+  rolls: boolean;
   step: number;
   lanes: number;
   ids: string[];
   still: boolean;
 };
 
-/** Where a lane whose place along the row is `spot` stands on the screen. The place is taken modulo
- *  the row's whole length, so the row has no end; past a lane's reach beyond the right edge the same
- *  place is read one length to the left instead, so the lanes the member has rotated by stand
- *  waiting on the near side rather than queued behind every other lane in the row. */
-function placed(spot: number, offset: number, row: Rolling): number {
-  if (!row.wraps) return spot - offset;
-  const total = row.ids.length * row.step;
-  const x = (((spot - offset) % total) + total) % total;
-  return x > (row.lanes + REACH) * row.step ? x - total : x;
+/** How far the row can be carried before it runs out: the lanes standing past the right edge, at a
+ *  lane apiece. A row every lane fits has nowhere to go, and a row carried this far stands its last
+ *  lane against the right edge. */
+function far(row: Rolling): number {
+  return Math.max(0, (row.ids.length - row.lanes) * row.step);
 }
 
 /** How the row settles on a lane boundary: a spring at a damping ratio of 0.87, which crosses the
@@ -376,31 +372,34 @@ function inOrder(entries: Entry[], opens: string[]): Entry[] {
  *  lane carries no edge of its own and closing one leaves no seam where it stood — and it is the
  *  pixel a share subtracts, so the lanes and the hairlines between them come to exactly the row.
  *
- *  A row wider than the pane it fills has no end: it carries one running offset in pixels, and each
- *  lane is translated to that offset taken modulo the whole row's length, so rotating past the last
- *  lane brings the first one back rather than stopping against a wall. The lanes hold their places
- *  in the document — the address, the focus order and the drag handles all read the row the member
- *  arranged — and only the transform moves, which is what a browser animates without laying anything
- *  out again. Where every lane fits, nothing wraps: the offset rests at zero and the row is what it
- *  looks like. The hand moves the row by the horizontal wheel, which the row takes over from the
- *  browser and settles on the nearest lane boundary once it goes quiet; the pointer's own drag is
- *  the band's, which carries a lane to a new place in the address, so the row is never dragged by
- *  it. A track standing beside a body scrolls sideways in the ordinary way instead, snapping to lane
- *  boundaries at the narrow width where a lane is the whole screen.
+ *  A row wider than the pane it fills carries one running offset in pixels, and each lane is
+ *  translated by it. The row has two ends: the offset is held between zero and the width of the
+ *  lanes standing past the right edge, so the member walks it left and right and it stops — the
+ *  first lane against the left edge at one end, the last against the right edge at the other. A row
+ *  that came round would walk a member who kept pressing back to the lane they started at with
+ *  nothing having said so, and this row is a path they walked rather than a carousel. The lanes
+ *  hold their places in the document — the address, the focus order and the drag handles all read
+ *  the row the member arranged — and only the transform moves, which is what a browser animates
+ *  without laying anything out again. Where every lane fits, nothing rolls: the offset rests at
+ *  zero and the row is what it looks like. The hand moves the row by the horizontal wheel, which
+ *  the row takes over from the browser and settles on the nearest lane boundary once it goes quiet;
+ *  the pointer's own drag is the band's, which carries a lane to a new place in the address, so the
+ *  row is never dragged by it. A track standing beside a body scrolls sideways in the ordinary way
+ *  instead, snapping to lane boundaries at the narrow width where a lane is the whole screen.
  *
  *  What a lane holds is drawn only near the row. Every lane keeps its width and its band, so the
  *  row's width, the drag handles and the address hold still, but a body standing more than a lane
- *  past either edge is an empty surface until it comes round: a row of twenty app pages is twenty
- *  frames loading at once, for a member who can see three. The endless row reads that off the same
- *  offset the transforms come from, so a lane is filled by the place it stands in rather than by
- *  anything the browser has to observe. A track beside a body has a scrollport to watch instead, and
- *  one observer per track watches its lanes against it, rooted on the row with a scrollport of
- *  margin: the track measures the row and each lane itself as they stand, before the frame is
- *  painted, because an observer's first batch arrives a task after the paint and a track that waited
- *  for it would draw every lane on the screen empty on the way in. What a body held comes back with
- *  it — chat state lives in stores keyed by lane, and an app page loads again in its frame — which
- *  is the whole cost of the rule. A track nothing can observe, jsdom's, draws every body, and so
- *  does a row no layout has given a width.
+ *  past either edge is an empty surface until the row brings it in: a row of twenty app pages is
+ *  twenty frames loading at once, for a member who can see three. The rolling row reads that off
+ *  the same offset the transforms come from, so a lane is filled by the place it stands in rather
+ *  than by anything the browser has to observe. A track beside a body has a scrollport to watch
+ *  instead, and one observer per track watches its lanes against it, rooted on the row with a
+ *  scrollport of margin: the track measures the row and each lane itself as they stand, before the
+ *  frame is painted, because an observer's first batch arrives a task after the paint and a track
+ *  that waited for it would draw every lane on the screen empty on the way in. What a body held
+ *  comes back with it — chat state lives in stores keyed by lane, and an app page loads again in
+ *  its frame — which is the whole cost of the rule. A track nothing can observe, jsdom's, draws
+ *  every body, and so does a row no layout has given a width.
  *
  *  The lane holding the member's cursor draws the focus stroke. A row is several open things at once
  *  by design, so the lane the words are going into says so on its own edge; nothing is taken from the
@@ -409,35 +408,44 @@ function inOrder(entries: Entry[], opens: string[]): Entry[] {
  *  Escape out of the field, or focus landing anywhere that is not one, on this row or off it. It is
  *  the cursor that is read, not the press: a lane focused at a button draws no stroke.
  *
- *  `seek` brings one lane into view: the endless row rotates until that lane stands at its head, and
- *  a row beside a body scrolls to it — a lane not yet standing waits and is brought in as it lands.
- *  A seek is a movement and nothing else, so the lane it names takes no focus — the member asked to
- *  see it, not to stand in it, and a rail tile that emptied the field they were typing in would cost
- *  them the words. A lane arriving by a press does take focus, because the press was the ask to
- *  stand in it.
+ *  `seek` brings one lane into view: the rolling row carries that lane to its head, or as near the
+ *  head as the row's own end leaves room for, and a row beside a body scrolls to it — a lane not
+ *  yet standing waits and is brought in as it lands. A seek is a movement and nothing else, so the
+ *  lane it names takes no focus — the member asked to see it, not to stand in it, and a rail tile
+ *  that emptied the field they were typing in would cost them the words. A lane arriving by a press
+ *  does take focus, because the press was the ask to stand in it.
  *
- *  `[` and `]` walk the row: `]` toward the next lane, `[` toward the one before, and both wrap, so
- *  a row wider than the screen is reachable without a pointer or a tab through everything each lane
- *  holds. On the endless row the press moves the row itself, one lane per press, and focus stays
- *  where the member left it: the row is what came out from under them, so a press that also carried
- *  the cursor away would cost them the lane they were reading. Where every lane already fits there
- *  is nothing to bring round and the press does nothing. A row beside a body has no offset to move,
- *  so there the press stands the member in the next lane and scrolls it into view. They are pressed
- *  bare, which is what Linear spends them on over its own lists: walking the row is the act a member
- *  repeats most, and a chord costs a hand for it every time. What a bare key costs instead is that
- *  it is also a character, so the row yields — a press inside an input, a textarea, a select or
- *  anything editable is what the member is typing and the track never sees it, and neither does a
- *  press a menu, a select or a dialog has claimed, or one another handler has already taken. A track
- *  answers only where the row it draws is the nearest track row above the focused element, and where
- *  focus stands outside every track, only a row no other row encloses answers — two nested tracks
- *  never both move on one press.
+ *  `onActive` names the lane the member is standing in — the one the walk landed on, the one
+ *  holding their cursor, or the one a seek brought in — so a rail drawn outside the row can mark
+ *  it. It is not the focus: pressing a rail tile takes focus off the row entirely, and a mark that
+ *  went out under that press would say the member is in no lane at all.
  *
- *  What does end the row is `TRACK_MAX_SLOTS`, past which neither the address nor the store can
- *  carry it whole. A press there stands nothing, so the row states the cap and the one act that
- *  lifts it, standing where the next lane would have gone: the member reads why the press did
- *  nothing in the place the press was aimed at, and closing any lane takes the line away. It stands
- *  only where an address holds the track, since a row nothing writes has no cap to reach, and only
- *  where the row has an end to stand it at — a row that comes round has no place that is not a lane.
+ *  `[` and `]` walk the row: `]` toward the next lane, `[` toward the one before, so a row wider
+ *  than the screen is reachable without a pointer or a tab through everything each lane holds. What
+ *  the press moves is the member, not the row: the lane it lands on takes focus and draws the
+ *  stroke, and the row follows only as far as it has to for that lane to stand on the screen, which
+ *  is not at all while it already does. A press that slid the row a lane along and left the cursor
+ *  where it stood would put the member in a lane they can no longer see. Neither key comes round.
+ *  The walk stops at the row's ends, and a press asking for a lane past one of them moves nothing
+ *  and is answered by the end sound, so a member holding the key down hears where the row stops
+ *  instead of finding themselves back at the other end of it. A row beside a body scrolls the lane
+ *  into view where the whole-pane row translates itself, which is the only thing the two do
+ *  differently here. They are pressed bare, which is what Linear spends them on over its own lists:
+ *  walking the row is the act a member repeats most, and a chord costs a hand for it every time.
+ *  What a bare key costs instead is that it is also a character, so the row yields — a press inside
+ *  an input, a textarea, a select or anything editable is what the member is typing and the track
+ *  never sees it, and neither does a press a menu, a select or a dialog has claimed, or one another
+ *  handler has already taken. A track answers only where the row it draws is the nearest track row
+ *  above the focused element, and where focus stands outside every track, only a row no other row
+ *  encloses answers — two nested tracks never both move on one press.
+ *
+ *  What caps the row is `TRACK_MAX_SLOTS`, past which neither the address nor the store can carry
+ *  it whole. A press there stands nothing, so the row states the cap and the one act that lifts it,
+ *  standing where the next lane would have gone: the member reads why the press did nothing in the
+ *  place the press was aimed at, and closing any lane takes the line away. It stands only where an
+ *  address holds the track, since a row nothing writes has no cap to reach, and only where the row
+ *  stands whole, since a rolling row lays its lanes past the pane's edge and would lay the line out
+ *  there with them.
  *
  *  `over` is the host a lane keeps for the acts raised inside it. Such an act cannot be drawn in
  *  the lane it is already standing in: filling that lane means emptying it of the panel, which
@@ -451,10 +459,14 @@ export function SlotTrack({
   opens,
   onMove,
   seek,
+  onActive,
   children,
 }: {
   over?: boolean;
   seek?: Seek;
+  /** Told the lane the member is standing in whenever it changes, so a rail outside the row can
+   *  mark it. */
+  onActive?: (id: string | undefined) => void;
   children: ReactNode;
 } & (
   | { opens: string[]; onMove: (opens: string[]) => void }
@@ -525,10 +537,10 @@ export function SlotTrack({
   const [nearby, setNearby] = useState<ReadonlySet<string>>(() => new Set());
   const culls = typeof IntersectionObserver !== "undefined";
   /* The observer serves every row that scrolls — a track beside a body, and the whole-pane track
-     wherever it does not wrap: every lane fitting, or a phone paging it by hand. Only an endless
+     wherever it does not roll: every lane fitting, or a phone paging it by hand. Only a rolling
      row reads its lanes off the offset instead, since nothing scrolls there. */
   useLayoutEffect(() => {
-    if (!culls || !row || (over && rolling.current.wraps)) return;
+    if (!culls || !row || (over && rolling.current.rolls)) return;
     const watching = new IntersectionObserver(
       (seen) =>
         setNearby((held) => {
@@ -582,18 +594,34 @@ export function SlotTrack({
     [row],
   );
   const [typing, setTyping] = useState<string | undefined>(undefined);
-  const writing = useCallback((held: EventTarget | null) => {
+  /* The lane the member is standing in: the one the bracket walk last landed on, the one holding
+     their cursor, or the one a seek brought in. It is what the rail marks, so unlike `typing` it
+     outlives the focus that set it — pressing a rail tile takes focus off the row, and a mark that
+     went out under that press would say the member is nowhere. */
+  const [active, setActive] = useState<string | undefined>(undefined);
+  const holding = useCallback((held: EventTarget | null) => {
     if (!(held instanceof HTMLElement)) return undefined;
-    if (!held.closest(TYPING) && !held.isContentEditable) return undefined;
     for (const [id, panel] of panels.current) if (panel.contains(held)) return id;
     return undefined;
   }, []);
+  const writing = useCallback(
+    (held: EventTarget | null) => {
+      if (!(held instanceof HTMLElement)) return undefined;
+      if (!held.closest(TYPING) && !held.isContentEditable) return undefined;
+      return holding(held);
+    },
+    [holding],
+  );
   /* The lanes reach the row through portals, so a React focus handler on the row would never hear
      them — synthetic events climb the component tree, and a lane's parent there is the view that
      asked for it. The row listens on the DOM instead, where the lanes are its descendants. */
   useEffect(() => {
     if (!row) return;
-    const entered = (event: FocusEvent) => setTyping(writing(event.target));
+    const entered = (event: FocusEvent) => {
+      setTyping(writing(event.target));
+      const stood = holding(event.target);
+      if (stood !== undefined) setActive(stood);
+    };
     const left = (event: FocusEvent) => setTyping(writing(event.relatedTarget));
     row.addEventListener("focusin", entered);
     row.addEventListener("focusout", left);
@@ -601,7 +629,10 @@ export function SlotTrack({
       row.removeEventListener("focusin", entered);
       row.removeEventListener("focusout", left);
     };
-  }, [row, writing]);
+  }, [row, writing, holding]);
+  useEffect(() => {
+    onActive?.(active);
+  }, [active, onActive]);
   useLayoutEffect(() => {
     if (!over || !row || typeof ResizeObserver === "undefined") return;
     const sizes = new ResizeObserver(() => setFit(fitting(row)));
@@ -614,7 +645,7 @@ export function SlotTrack({
   /* What the row is carrying, read by every handler that moves it: they run on events rather than
      on a render, and a row that answered a press with the width it had two lanes ago would step by
      a lane that is no longer a lane wide. */
-  const rolling = useRef<Rolling>({ wraps: false, step: 0, lanes: 0, ids: [], still: false });
+  const rolling = useRef<Rolling>({ rolls: false, step: 0, lanes: 0, ids: [], still: false });
   /* Where the row is headed, which is what the next press steps from. `offset` is mid-flight while
      an earlier press is still settling, so a press that stepped from there would arrive short of a
      lane and leave the row resting between two. */
@@ -634,7 +665,7 @@ export function SlotTrack({
         continue;
       }
       const spot = spots.current.get(id);
-      const x = placed(spot === undefined ? at * step : spot.get(), offset.get(), rolling.current);
+      const x = (spot === undefined ? at * step : spot.get()) - offset.get();
       if (panel) panel.style.transform = "translateX(" + Math.round((x - at * step) * 100) / 100 + "px)";
       if (x >= -REACH * step && x <= (lanes + REACH) * step) drawn.add(id);
     }
@@ -659,18 +690,16 @@ export function SlotTrack({
   const paced = useRef(0);
   useLayoutEffect(() => {
     if (!over) return;
-    const { wraps, step, ids, still: fixed } = rolling.current;
+    const { rolls, step, ids, still: fixed } = rolling.current;
     const was = paced.current;
     const resized = was !== step;
     paced.current = step;
-    if (!wraps) {
+    if (!rolls) {
       aimed.current = 0;
       if (offset.get() !== 0) offset.jump(0);
     } else {
       if (resized && was > 0) aimed.current = Math.round(aimed.current / was) * step;
-      const total = ids.length * step;
-      if (Math.abs(aimed.current) >= total)
-        aimed.current = ((aimed.current % total) + total) % total;
+      aimed.current = Math.min(Math.max(aimed.current, 0), far(rolling.current));
       if (aimed.current !== offset.get()) offset.jump(aimed.current);
     }
     const held = new Set(ids);
@@ -697,10 +726,8 @@ export function SlotTrack({
       }
       if (seated.current.get(id) === to) continue;
       seated.current.set(id, to);
-      const total = ids.length * step;
-      const way = wraps ? to + Math.round((spot.get() - to) / total) * total : to;
-      if (fixed) spot.jump(way);
-      else settle(animate(spot, way, GLIDE));
+      if (fixed) spot.jump(to);
+      else settle(animate(spot, to, GLIDE));
     }
     paint();
   });
@@ -712,18 +739,37 @@ export function SlotTrack({
     },
     [],
   );
+  /* Carry the row toward `to`, held inside its ends. What comes back is whether the row had
+     anywhere left to go, which is what a press against an end is answered with. */
   const glide = useCallback(
     (to: number) => {
-      aimed.current = to;
-      if (rolling.current.still) offset.jump(to);
-      else settle(animate(offset, to, GLIDE));
+      const held = Math.min(Math.max(to, 0), far(rolling.current));
+      if (held === aimed.current) return false;
+      aimed.current = held;
+      if (rolling.current.still) offset.jump(held);
+      else settle(animate(offset, held, GLIDE));
+      return true;
     },
     [offset, settle],
   );
+  /* The least the row has to move for the lane standing at `at` to be on the screen: nothing
+     while it already is, and one lane's width otherwise. The walk carries the member rather than
+     the row, so the lane they step onto stands beside the one they left instead of at the head of
+     a row that emptied out from under them. */
+  const carry = useCallback(
+    (at: number) => {
+      const { step, lanes } = rolling.current;
+      if (step <= 0) return;
+      const first = Math.round(aimed.current / step);
+      if (at < first) glide(at * step);
+      else if (at > first + lanes - 1) glide((at - lanes + 1) * step);
+    },
+    [glide],
+  );
   const shows = useCallback(
     (id: string) => {
-      const { wraps, step, ids } = rolling.current;
-      if (!wraps) {
+      const { rolls, step, ids } = rolling.current;
+      if (!rolls) {
         panels.current.get(id)?.scrollIntoView(NEAREST);
         return;
       }
@@ -745,13 +791,14 @@ export function SlotTrack({
     (id: string) =>
       focused !== undefined
         ? id === focused
-        : over && rolling.current.wraps
+        : over && rolling.current.rolls
           ? ticking.has(id)
           : !culls || nearby.has(id),
     [focused, over, ticking, culls, nearby, narrow, fit],
   );
   useEffect(() => {
     if (!seek) return;
+    setActive(seek.id);
     setExpanded((held) =>
       seek.expansion === "restore" || held === undefined ? undefined : seek.id,
     );
@@ -760,7 +807,6 @@ export function SlotTrack({
       return;
     }
     shows(seek.id);
-    soundMoved();
   }, [seek, shows]);
   useEffect(() => {
     if (!row) return;
@@ -769,46 +815,43 @@ export function SlotTrack({
       const way = event.key === LANE_NEXT ? 1 : event.key === LANE_PRIOR ? -1 : 0;
       const ids = order.current;
       if (way === 0 || ids.length < 2) return;
-      const active = document.activeElement;
-      if (active?.closest(TYPING) || (active instanceof HTMLElement && active.isContentEditable))
+      const cursor = document.activeElement;
+      if (cursor?.closest(TYPING) || (cursor instanceof HTMLElement && cursor.isContentEditable))
         return;
-      if (active?.closest(CLAIMED) || document.querySelector(DIALOG)) return;
-      const nearest = active?.closest(ROW_MARK) ?? null;
+      if (cursor?.closest(CLAIMED) || document.querySelector(DIALOG)) return;
+      const nearest = cursor?.closest(ROW_MARK) ?? null;
       const answers = nearest === null ? !row.parentElement?.closest(ROW_MARK) : nearest === row;
       if (!answers) return;
-      const { wraps, step } = rolling.current;
-      if (over) {
-        if (!wraps) return;
-        event.preventDefault();
-        glide(aimed.current + way * step);
-        soundMoved();
-        return;
-      }
-      const stood = ids.findIndex((id) => panels.current.get(id)?.contains(active));
+      const stood = ids.findIndex((id) => panels.current.get(id)?.contains(cursor));
       const port = row.getBoundingClientRect();
       const seen = ids.filter((id) => {
         const lane = panels.current.get(id)?.getBoundingClientRect();
         return lane !== undefined && lane.right > port.left && lane.left < port.right;
       });
       const edge = seen.length === 0 ? 0 : ids.indexOf(way > 0 ? seen[0] : seen[seen.length - 1]);
-      const at = ((stood < 0 ? edge : stood) + way + ids.length) % ids.length;
+      const at = (stood < 0 ? edge : stood) + way;
+      event.preventDefault();
+      if (at < 0 || at >= ids.length) {
+        soundEnded();
+        return;
+      }
       const panel = panels.current.get(ids[at]);
       if (!panel) return;
-      event.preventDefault();
       panel.focus(KEEP);
-      panel.scrollIntoView(NEAREST);
+      if (over) carry(at);
+      else panel.scrollIntoView(NEAREST);
       soundMoved();
     };
     document.addEventListener("keydown", rotate);
     return () => document.removeEventListener("keydown", rotate);
-  }, [row, over, glide]);
+  }, [row, over, carry]);
   useEffect(() => {
     if (!row || !over) return;
     let quiet: ReturnType<typeof setTimeout> | undefined;
-    const rolls = (event: WheelEvent) => {
-      if (!rolling.current.wraps || Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+    const carries = (event: WheelEvent) => {
+      if (!rolling.current.rolls || Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
       event.preventDefault();
-      aimed.current = offset.get() + event.deltaX;
+      aimed.current = Math.min(Math.max(offset.get() + event.deltaX, 0), far(rolling.current));
       offset.jump(aimed.current);
       clearTimeout(quiet);
       quiet = setTimeout(() => {
@@ -816,9 +859,9 @@ export function SlotTrack({
         glide(Math.round(aimed.current / step) * step);
       }, SETTLE);
     };
-    row.addEventListener("wheel", rolls, { passive: false });
+    row.addEventListener("wheel", carries, { passive: false });
     return () => {
-      row.removeEventListener("wheel", rolls);
+      row.removeEventListener("wheel", carries);
       clearTimeout(quiet);
     };
   }, [row, over, offset, glide]);
@@ -852,13 +895,13 @@ export function SlotTrack({
     prior.current = new Set(ids);
     order.current = ids;
   });
-  const wraps = focused === undefined && over && !narrow && fit !== null && ids.length > fit.lanes;
+  const rolls = focused === undefined && over && !narrow && fit !== null && ids.length > fit.lanes;
   const share =
     focused === undefined
       ? Math.max(1, fit === null ? ids.length : Math.min(ids.length, fit.lanes))
       : 1;
   rolling.current = {
-    wraps,
+    rolls,
     step: fit === null ? 0 : (fit.width - (share - 1) * HAIRLINE) / share + HAIRLINE,
     lanes: fit?.lanes ?? 0,
     ids: focused === undefined ? ids : [focused],
@@ -866,7 +909,7 @@ export function SlotTrack({
   };
   const shown = standing.length > 0;
   const lanes = standing.map((entry) => <SlotHost key={entry.id} id={entry.id} hold={hold} />);
-  const full = shown && !wraps && opens !== undefined && opens.length >= TRACK_MAX_SLOTS;
+  const full = shown && !rolls && opens !== undefined && opens.length >= TRACK_MAX_SLOTS;
   return (
     <TrackContext.Provider value={track}>
       {over ? (
@@ -1047,10 +1090,7 @@ export function useSlot(
       const arriving = arrivals.current.delete(id);
       const asked = sought.current.delete(id);
       if (!arriving && !asked) return;
-      if (arriving) {
-        arrived.current = true;
-        soundOpened();
-      } else soundMoved();
+      if (arriving) arrived.current = true;
       shows(id);
     },
     [arrivals, sought, watch, shows, id],

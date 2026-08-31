@@ -1,8 +1,10 @@
-import { act, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { MARK_HELD } from "@/components/MinimalSidebar";
+import { LANE_NEXT, LANE_PRIOR } from "@/kernel/slots";
 import {
   holdTurn,
   moveTurnHold,
@@ -269,6 +271,77 @@ test("the rail's new tab at the cap drops the lane standing at the right end", a
   expect(laneNames()).toEqual(["New tab", ...kept.map(laneName)]);
 });
 
+/** The rail marks the lane the member is standing in, and the bracket walk is what moves it: the
+ *  tile the press lands on is the one the box stands under. The mark is the rail's whole answer to
+ *  "which of these am I in", so a row nobody has stood in yet carries none. */
+test("the rail marks the lane the member is standing in, and the walk moves the mark", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([AGENT_ID, SECOND_ID]);
+  await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Second"]));
+  const rail = screen.getByRole("navigation", { name: "Tabs" });
+  const marked = () =>
+    within(rail)
+      .getAllByRole("button")
+      .filter((tile) => tile.getAttribute("aria-current") === "true")
+      .map((tile) => tile.getAttribute("aria-label"));
+
+  expect(marked()).toEqual([]);
+
+  fireEvent.keyDown(document, { key: LANE_NEXT });
+
+  await waitFor(() => expect(marked()).toEqual(["Second"]));
+
+  fireEvent.keyDown(document, { key: LANE_PRIOR });
+
+  await waitFor(() => expect(marked()).toEqual(["Assistant"]));
+});
+
+/** The mark answers a question the member asked by walking the row, so it stands long enough to be
+ *  read and then leaves the rail alone. The tile stays the current one — what fades is the box, not
+ *  the answer. */
+test("the rail's mark fades once the member has had time to read it", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([AGENT_ID, SECOND_ID]);
+  await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Second"]));
+  const rail = screen.getByRole("navigation", { name: "Tabs" });
+  const mark = () => rail.querySelector("li[aria-hidden]") as HTMLElement;
+
+  expect(mark().className).toContain("opacity-0");
+
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    await act(async () => void fireEvent.keyDown(document, { key: LANE_NEXT }));
+
+    expect(mark().className).not.toContain("opacity-0");
+
+    act(() => void vi.advanceTimersByTime(MARK_HELD));
+
+    expect(mark().className).toContain("opacity-0");
+    expect(
+      within(rail).getByRole("button", { name: "Second" }).getAttribute("aria-current"),
+    ).toBe("true");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+/** A rail press is the other way a lane becomes the one the member is in, and the mark follows it
+ *  even though the press took focus off the row. */
+test("the rail marks the lane its own tile was pressed for", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([AGENT_ID, SECOND_ID]);
+  await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Second"]));
+  const rail = screen.getByRole("navigation", { name: "Tabs" });
+
+  await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
+
+  await waitFor(() =>
+    expect(
+      within(rail).getByRole("button", { name: "Second" }).getAttribute("aria-current"),
+    ).toBe("true"),
+  );
+});
+
 /** The row may be wider than the screen, and the rail's tile is how a lane that scrolled off it is
  *  reached: the press brings that lane into view and leaves the row in the order the member arranged
  *  it. Two presses are two asks — the member scrolled away between them. */
@@ -278,7 +351,7 @@ test("the rail's tile brings its lane into view and leaves the row where it stoo
   const scrolls = vi
     .spyOn(Element.prototype, "scrollIntoView")
     .mockImplementation(function (this: Element) {
-      scrolled.push(this.getAttribute("aria-label") ?? "");
+      if (this.tagName === "SECTION") scrolled.push(this.getAttribute("aria-label") ?? "");
     });
   try {
     drawHome([AGENT_ID, SECOND_ID]);
@@ -307,7 +380,7 @@ test("the rail's tile from another screen lands home with that lane in view", as
   const scrolls = vi
     .spyOn(Element.prototype, "scrollIntoView")
     .mockImplementation(function (this: Element) {
-      scrolled.push(this.getAttribute("aria-label") ?? "");
+      if (this.tagName === "SECTION") scrolled.push(this.getAttribute("aria-label") ?? "");
     });
   try {
     drawHome([AGENT_ID, SECOND_ID]);

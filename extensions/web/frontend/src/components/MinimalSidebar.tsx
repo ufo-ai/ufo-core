@@ -1,4 +1,4 @@
-import { type ReactElement, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
   IconCirclePlus,
   IconPlus,
@@ -30,6 +30,30 @@ const UNMUTE = "Unmute sounds";
 const TILE =
   "flex size-(--size-glyph) shrink-0 items-center justify-center rounded-control border-0 bg-transparent p-0 text-ink-soft hover:text-ink";
 
+/** The mark saying which tab the member is standing in. It is a single box slid up and down the
+ *  column rather than a fill switched on under one tile and off under another: the member's eye
+ *  follows a box that travels, and two fills crossing over each other is a flicker they have to read
+ *  twice. It takes the stronger fill because it is read against the rail's own ground rather than
+ *  against the page, and the lighter one is barely a box there. It is measured off the tile it lands
+ *  under rather than counted from that tile's place, because the list scrolls and a row's height is
+ *  the tile's to state, not this one's to assume. */
+const MARK =
+  "pointer-events-none absolute top-0 left-1/2 size-(--size-lede) rounded-control bg-fill-strong " +
+  "transition-[transform,opacity] duration-200 ease-control";
+
+/** How long the mark stands before it fades. It answers a question the member asked by walking the
+ *  row — which of these am I in — and a permanent answer to a question nobody is still asking is one
+ *  more thing on a rail whose whole job is to stay out of the way. Walking again brings it back.
+ *  The test that holds the fade reads the span from here, so what it waits cannot drift from what
+ *  the rail holds. */
+export const MARK_HELD = 5000;
+
+/** Where the mark sits: its own centre carried to the tile's, which is why the box's own height is
+ *  subtracted here rather than the tile's assumed. */
+const SLID = (mark: number | null) => ({
+  transform: "translate(-50%, calc(" + String(mark ?? 0) + "px - 50%))",
+});
+
 /** The rail states its destinations as marks alone, so every one of them is named here. The word
  *  stands to the right because the rail opens the shell on the left and has no room beside it. */
 function RailTip({ label, children }: { label: string; children: ReactElement }) {
@@ -58,6 +82,7 @@ function RailTip({ label, children }: { label: string; children: ReactElement })
  *  row. */
 export function MinimalSidebar({
   lanes,
+  active,
   agents,
   account,
   onNewTab,
@@ -65,6 +90,9 @@ export function MinimalSidebar({
   onBuild,
 }: {
   lanes: { lane: string; agent: Agent }[];
+  /** The lane home says the member is standing in, which this column marks. A lane the rail does
+   *  not list — the picker's — leaves the mark off, since there is no tile for it to stand under. */
+  active: string | undefined;
   agents: Agent[];
   /** The member's own menu — identity, theme, administration, sign out — drawn at the rail's foot,
    *  because at a desk width this rail is the whole shell and the way out has to stand on it. */
@@ -75,6 +103,21 @@ export function MinimalSidebar({
 }) {
   const { statuses } = useAppStatus();
   const muted = useMuted();
+  const list = useRef<HTMLUListElement>(null);
+  const [mark, setMark] = useState<number | null>(null);
+  const [held, setHeld] = useState(false);
+  useLayoutEffect(() => {
+    const tile = list.current?.querySelector<HTMLElement>("[data-active]") ?? null;
+    if (!tile) {
+      setHeld(false);
+      return;
+    }
+    setMark(tile.offsetTop + tile.offsetHeight / 2);
+    setHeld(true);
+    tile.scrollIntoView({ block: "nearest" });
+    const fades = setTimeout(() => setHeld(false), MARK_HELD);
+    return () => clearTimeout(fades);
+  }, [active, lanes]);
   return (
     <nav
       aria-label="Tabs"
@@ -107,17 +150,23 @@ export function MinimalSidebar({
       {/* The tiles scroll, and a scrolling box clips both axes — so the track carries a gutter the
           width of the dot's overhang, and the mark's own column stays where it stood. Without it the
           rail is 16px wide inside its padding and the dot loses its outer half at every width. */}
-      <ul className="scrollbar-none my-0 -mx-2xs flex min-h-0 flex-1 list-none flex-col items-center gap-2xl self-stretch overflow-y-auto px-2xs py-0">
+      <ul
+        ref={list}
+        className="scrollbar-none relative -mx-2xs -my-2xs flex min-h-0 flex-1 list-none flex-col items-center gap-2xl self-stretch overflow-y-auto px-2xs py-2xs"
+      >
+        <li aria-hidden className={cn(MARK, !held && "opacity-0")} style={SLID(mark)} />
         {lanes.map(({ lane, agent }) => {
           const dot = statusDot(statuses[agent.id], agent.setup_due === true);
+          const here = lane === active;
           return (
-            <li key={lane}>
+            <li key={lane} data-active={here ? "" : undefined}>
               <RailTip label={agentName(agent.name)}>
                 <button
                   type="button"
                   aria-label={agentName(agent.name)}
+                  aria-current={here ? true : undefined}
                   onClick={() => onLane(lane)}
-                  className={TILE}
+                  className={cn(TILE, here && "text-ink")}
                 >
                   {/* The dot the wide column's rows wear, and nothing else of theirs: the rail has
                       no line for what an app is doing, so what it is doing stays off it — the dot
@@ -144,9 +193,9 @@ export function MinimalSidebar({
           <IconCirclePlus className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />
         </button>
       </RailTip>
-      {/* The track speaks when a lane opens and when focus crosses to the one beside it, and this
-          is where a member takes that back. The word names the act, as every other tile's does, and
-          the glyph carries the state. */}
+      {/* The track speaks when the bracket keys walk the row, and this is where a member takes that
+          back. The word names the act, as every other tile's does, and the glyph carries the
+          state. */}
       <RailTip label={muted ? UNMUTE : MUTE}>
         <button
           type="button"
