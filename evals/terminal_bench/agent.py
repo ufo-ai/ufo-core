@@ -14,6 +14,7 @@ from harbor.models.agent.context import AgentContext
 CLIENT_TARGET = "/installed-agent/ufo"
 HOME_TARGET = "/installed-agent/home"
 CREDENTIALS_TARGET = f"{HOME_TARGET}/credentials"
+ENVIRONMENT_TARGET = f"{HOME_TARGET}/environment.yaml"
 
 
 def _required_environment(name: str) -> str:
@@ -28,6 +29,7 @@ class UfoAgent(BaseInstalledAgent):
 
     _workspace_url: str
     _model: str | None = None
+    _environment: str | None = None
 
     @staticmethod
     @override
@@ -40,6 +42,7 @@ class UfoAgent(BaseInstalledAgent):
         token = _required_environment("UFO_BENCH_TOKEN")
         workspace_url = _required_environment("UFO_BENCH_WORKSPACE_URL")
         self._model = os.environ.get("UFO_BENCH_MODEL") or None
+        document = os.environ.get("UFO_BENCH_ENVIRONMENT") or None
         parsed = urlsplit(workspace_url)
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("UFO_BENCH_WORKSPACE_URL must be a public HTTPS URL")
@@ -61,6 +64,12 @@ class UfoAgent(BaseInstalledAgent):
             await environment.upload_file(credentials, CREDENTIALS_TARGET)
         finally:
             await asyncio.to_thread(credentials.unlink, missing_ok=True)
+        if document is not None:
+            source = await asyncio.to_thread(Path(document).resolve)
+            if not await asyncio.to_thread(source.is_file):
+                raise FileNotFoundError(f"Terminal-Bench environment document is missing: {source}")
+            await environment.upload_file(source, ENVIRONMENT_TARGET)
+            self._environment = ENVIRONMENT_TARGET
 
         owner = shlex.quote(
             str(environment.default_user) if environment.default_user is not None else "root"
@@ -96,6 +105,8 @@ class UfoAgent(BaseInstalledAgent):
         command = [CLIENT_TARGET]
         if self._model is not None:
             command.extend(("--model", self._model))
+        if self._environment is not None:
+            command.extend(("--environment", self._environment))
         command.extend(("--json", instruction))
         await self.exec_as_agent(
             environment,

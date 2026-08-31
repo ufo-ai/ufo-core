@@ -22,6 +22,7 @@ BENCH_ENVIRONMENT = (
     "UFO_BENCH_TOKEN",
     "UFO_BENCH_WORKSPACE_URL",
     "UFO_BENCH_MODEL",
+    "UFO_BENCH_ENVIRONMENT",
 )
 REWARD_FILE = "reward.txt"
 JOB_STAMP = "%Y%m%dT%H%M%SZ"
@@ -125,7 +126,10 @@ def harbor_command(
 
 
 def harbor_environment(
-    base: Mapping[str, str], credentials: BenchCredentials, model: str | None = None
+    base: Mapping[str, str],
+    credentials: BenchCredentials,
+    model: str | None = None,
+    environment_document: Path | None = None,
 ) -> dict[str, str]:
     """Pass benchmark credentials to the custom-agent process only."""
     environment = {name: value for name, value in base.items() if name not in BENCH_ENVIRONMENT}
@@ -138,6 +142,8 @@ def harbor_environment(
     )
     if model is not None:
         environment["UFO_BENCH_MODEL"] = model
+    if environment_document is not None:
+        environment["UFO_BENCH_ENVIRONMENT"] = str(environment_document)
     return environment
 
 
@@ -181,6 +187,7 @@ class TerminalBenchRun:
     backend: HarborBackend = DAYTONA_BACKEND
     upstream_file: Path = UPSTREAM_FILE
     model: str | None = None
+    environment_document: Path | None = None
 
     def run(self) -> int:
         """Run one concurrent Harbor job and return its exit status."""
@@ -203,7 +210,9 @@ class TerminalBenchRun:
         completed = subprocess.run(
             command,
             check=False,
-            env=harbor_environment(os.environ, self.credentials, self.model),
+            env=harbor_environment(
+                os.environ, self.credentials, self.model, self.environment_document
+            ),
         )
         job_dir = jobs_dir / job_name
         if completed.returncode:
@@ -236,4 +245,8 @@ class TerminalBenchRun:
         if not os.access(self.credentials.client, os.X_OK):
             raise PermissionError(
                 f"Terminal-Bench client is not executable: {self.credentials.client}"
+            )
+        if self.environment_document is not None and not self.environment_document.is_file():
+            raise FileNotFoundError(
+                f"Terminal-Bench environment document is missing: {self.environment_document}"
             )

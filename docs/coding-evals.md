@@ -151,7 +151,9 @@ uv run python -m evals \
 Omitting `--terminal-bench-case` runs all 89 tasks. The outer `--remote` selects the remote Harbor
 environment and public ufo service. The client inside Harbor uses `--json` without `--remote`, so
 its tools remain attached to the filesystem and services that Harbor grades. The attached client
-still sends `--model` to the public service.
+still sends `--model` to the public service. `--environment <file>` uploads the overrides document
+into each task box and the client pins it on every turn, exactly as `ufo --environment` does
+anywhere else.
 
 Harbor retains each job under `.local/terminal_bench/jobs/`:
 

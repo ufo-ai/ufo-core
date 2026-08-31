@@ -129,6 +129,66 @@ def test_token_reaches_harbor_only_through_the_environment(tmp_path: Path) -> No
     }
 
 
+def test_harbor_environment_carries_the_document_path_only_when_the_run_pins_one(
+    tmp_path: Path,
+) -> None:
+    credentials = BenchCredentials(
+        client=tmp_path / "ufo",
+        token=TOKEN,
+        workspace_url="https://eval.ufo.test",
+    )
+    document = tmp_path / "overrides.yaml"
+    pinned = harbor_environment({"PATH": "/usr/bin"}, credentials, None, document)
+    assert pinned["UFO_BENCH_ENVIRONMENT"] == str(document)
+    inherited = harbor_environment(
+        {"PATH": "/usr/bin", "UFO_BENCH_ENVIRONMENT": "stale"}, credentials
+    )
+    assert "UFO_BENCH_ENVIRONMENT" not in inherited
+
+
+async def test_terminal_bench_agent_uploads_and_pins_the_environment_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench.agent import (
+        CLIENT_TARGET,
+        CREDENTIALS_TARGET,
+        ENVIRONMENT_TARGET,
+        UfoAgent,
+    )
+
+    client = tmp_path / "ufo"
+    client.write_text("client")
+    client.chmod(0o755)
+    document = tmp_path / "overrides.yaml"
+    document.write_text("main:\n  model: z-ai/glm-5.3-flash\n")
+    monkeypatch.setenv("UFO_BENCH_CLIENT", str(client))
+    monkeypatch.setenv("UFO_BENCH_TOKEN", TOKEN)
+    monkeypatch.setenv("UFO_BENCH_WORKSPACE_URL", "https://eval.ufo.test")
+    monkeypatch.setenv("UFO_BENCH_ENVIRONMENT", str(document))
+    monkeypatch.delenv("UFO_BENCH_MODEL", raising=False)
+    environment = SimpleNamespace(default_user="agent", upload_file=AsyncMock(), context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    monkeypatch.setattr(agent, "exec_as_root", AsyncMock())
+    execute = AsyncMock()
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+
+    await agent.install(environment)
+    assert [call.args[1] for call in environment.upload_file.await_args_list] == [
+        CLIENT_TARGET,
+        CREDENTIALS_TARGET,
+        ENVIRONMENT_TARGET,
+    ]
+
+    await agent.run("repair input", environment, AgentContext())
+    assert execute.await_args.kwargs["command"] == (
+        "/installed-agent/ufo --environment /installed-agent/home/environment.yaml "
+        "--json 'repair input' </dev/null"
+    )
+
+
 async def test_terminal_bench_agent_closes_json_stdin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -323,8 +383,11 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             credentials: BenchCredentials,
             backend: HarborBackend,
             model: str | None,
+            environment_document: Path | None,
         ) -> None:
-            captured.append((root, cases, concurrency, credentials, backend, model))
+            captured.append(
+                (root, cases, concurrency, credentials, backend, model, environment_document)
+            )
 
         def run(self) -> int:
             return 0
@@ -357,6 +420,8 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             str(workspace_id),
             "--concurrency",
             "18",
+            "--environment",
+            str(tmp_path / "overrides.yaml"),
         ]
     )
 
@@ -368,6 +433,7 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             credentials,
             HarborBackend(environment="e2b", extra="e2b"),
             "z-ai/glm-5.3-flash",
+            tmp_path / "overrides.yaml",
         )
     ]
 

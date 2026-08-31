@@ -596,6 +596,7 @@ def main(argv: list[str] | None = None) -> None:
                     extra=args.terminal_bench_harbor_extra,
                 ),
                 model=args.model,
+                environment_document=args.environment,
             ).run()
         except (OSError, ValueError, ValidationError) as error:
             parser.error(str(error))
