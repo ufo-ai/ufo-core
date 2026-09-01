@@ -52,7 +52,7 @@ from ufo.sdk.connectors import (
 )
 from ufo.sdk.context import JsonValue
 from ufo.sdk.sandbox import WORKSPACE_DIR, contained_leaf, workspace_path
-from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo.sdk.tools import ConnectorConnection, TextContent, ToolContext, ToolDef, ToolResult
 
 CONNECTOR_FILES_DIR = "connector_files"
 FALLBACK_FILENAME = "download"
@@ -444,10 +444,10 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
         described = await entry.broker.schema(ctx.turn.workspace_id, entry.provider, args.tool_name)
         if not described.read_only:
             raise PermissionError
-    account_id = await ctx.connector_account(args.source_id, args.account_id)
+    connection = await ctx.connector_connection(args.source_id, args.account_id)
     arguments = slack_attributed(entry.provider, args.tool_name, args.arguments)
     call = _ConnectorCall(ctx=ctx, entry=entry, slug=args.tool_name)
-    return ToolResult(content=(TextContent(text=await call.run(arguments, account_id)),))
+    return ToolResult(content=(TextContent(text=await call.run(arguments, connection)),))
 
 
 @dataclass(frozen=True)
@@ -475,14 +475,15 @@ class _ConnectorCall:
     entry: ConnectorEntry
     slug: str
 
-    async def run(self, arguments: dict[str, JsonValue], account_id: str) -> str:
+    async def run(self, arguments: dict[str, JsonValue], connection: ConnectorConnection) -> str:
         staged = {key: await self._staged_value(item) for key, item in arguments.items()}
+        await self.ctx.require_connector_connection(connection)
         response = await self.entry.broker.execute(
             self.ctx.turn.workspace_id,
             self.entry.provider,
             self.slug,
             staged,
-            account_id,
+            connection.account_id,
             self.ctx.idempotency_key,
         )
         files = await self._fetched_files(self.entry.broker.file_outputs(response))

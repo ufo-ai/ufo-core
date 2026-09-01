@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 import ufo_ext_connectors.manifest as connectors
@@ -81,16 +81,19 @@ GRANT_OWNER_EMAIL = "owner@x.test"
 class _Grants(GrantStore):
     accounts: tuple[str, ...]
     provider: str = sample.CONNECTOR_PROVIDER
+    revoked: asyncio.Event | None = None
 
     async def active_grants(self) -> tuple[Grant, ...]:
+        if self.revoked is not None and self.revoked.is_set():
+            return ()
         return tuple(
             Grant(
-                id=uuid4(),
-                connection_id=uuid4(),
+                id=uuid5(NAMESPACE_URL, f"grant/{self.provider}/{account}"),
+                connection_id=uuid5(NAMESPACE_URL, f"connection/{self.provider}/{account}"),
                 provider=self.provider,
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
-                owner_member_id=uuid4(),
+                owner_member_id=uuid5(NAMESPACE_URL, f"owner/{self.provider}/{account}"),
                 owner_email=GRANT_OWNER_EMAIL,
                 connection_shared=True,
             )
@@ -176,6 +179,7 @@ def _ctx(
     sandbox: SandboxSession | None = None,
     provider: str = sample.CONNECTOR_PROVIDER,
     connector_read_only: bool = False,
+    revoked: asyncio.Event | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=sandbox,
@@ -195,7 +199,7 @@ def _ctx(
         speaker_member_id=None,
         audience=conversation_audience(None),
         artifact_token_secret="",
-        grants=_Grants(accounts, provider),
+        grants=_Grants(accounts, provider, revoked),
         connectors=registry,
         connector_read_only=connector_read_only,
         idempotency_key="t1/call_external_tool/c1",
@@ -545,6 +549,38 @@ class _FileBroker:
         )
 
 
+@dataclass(frozen=True)
+class _RevokingFileBroker(_FileBroker):
+    revoked: asyncio.Event = field(default_factory=asyncio.Event)
+    executed: list[str] = field(default_factory=list)
+
+    async def execute(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        arguments: Mapping[str, object],
+        account_id: str,
+        idempotency_key: str | None,
+    ) -> dict[str, object]:
+        self.executed.append(slug)
+        return await super().execute(
+            workspace_id, provider, slug, arguments, account_id, idempotency_key
+        )
+
+    async def stage_upload(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        filename: str,
+        mimetype: str,
+        md5: str,
+    ) -> StagedUpload:
+        self.revoked.set()
+        return await super().stage_upload(workspace_id, provider, slug, filename, mimetype, md5)
+
+
 def _file_registry(broker: _FileBroker) -> ConnectorRegistry:
     return ConnectorRegistry(
         entries={
@@ -602,6 +638,30 @@ async def test_call_external_tool_stages_a_workspace_file_argument(tmp_path: Pat
     echoed = _payload(result)["arguments"]
     assert echoed["media"] == {"name": "report.csv", "mimetype": "text/csv", "s3key": key}
     assert (workspace / key).read_bytes() == b"a,b\n1,2\n"
+
+
+async def test_a_revoked_grant_cannot_execute_after_file_staging(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "report.csv").write_bytes(b"a,b\n1,2\n")
+    broker = _RevokingFileBroker()
+
+    with pytest.raises(ValueError, match="grant is no longer active"):
+        await call_external_tool(
+            _ctx(
+                _file_registry(broker),
+                accounts=("acct-one",),
+                sandbox=await _sandbox(workspace),
+                revoked=broker.revoked,
+            ),
+            CallExternalToolInput(
+                tool_name=sample.BROKER_TOOL_SLUG,
+                source_id=sample.CONNECTOR_PROVIDER,
+                arguments={"media": {"workspace_file": "/workspace/report.csv"}},
+            ),
+        )
+
+    assert broker.executed == []
 
 
 async def test_a_produced_files_name_cannot_escape_its_workspace_dir(tmp_path: Path) -> None:

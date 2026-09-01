@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 import sqlalchemy as sa
@@ -219,12 +219,12 @@ class _Grants(GrantStore):
     async def active_grants(self) -> tuple[Grant, ...]:
         return tuple(
             Grant(
-                id=uuid4(),
-                connection_id=uuid4(),
+                id=uuid5(NAMESPACE_URL, f"eval-grant/{provider}/{env.ACCOUNT_ID}"),
+                connection_id=uuid5(NAMESPACE_URL, f"eval-connection/{provider}/{env.ACCOUNT_ID}"),
                 provider=provider,
                 account_id=env.ACCOUNT_ID,
                 host=host,
-                owner_member_id=uuid4(),
+                owner_member_id=uuid5(NAMESPACE_URL, f"eval-owner/{provider}/{BOB}"),
                 owner_email=BOB,
                 connection_shared=True,
             )

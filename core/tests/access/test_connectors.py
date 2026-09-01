@@ -211,6 +211,91 @@ async def test_connector_account_is_scoped_to_the_turn_agents_own_grants(db: Non
             await ctx_a.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-b")
 
 
+async def test_connector_account_selects_the_named_account(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    with ws(workspace_id), agent(agent_id):
+        for account in ("acct-1", "acct-2"):
+            await store.record(
+                provider=sample.CONNECTOR_PROVIDER,
+                account_id=account,
+                host=sample.CONNECTOR_HOST,
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
+        ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
+        with pytest.raises(ValueError, match=r"multiple active.*pass account_id"):
+            await ctx.connector_account(sample.CONNECTOR_PROVIDER)
+        assert (
+            await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-2") == "acct-2"
+        )
+        with pytest.raises(ValueError, match="acct-9"):
+            await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-9")
+
+
+async def test_connector_selection_does_not_survive_a_regrant_of_the_same_connection(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    with ws(workspace_id), agent(agent_id):
+        await store.record(
+            provider=sample.CONNECTOR_PROVIDER,
+            account_id="acct-1",
+            host=sample.CONNECTOR_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
+        ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
+        selected = await ctx.connector_connection(sample.CONNECTOR_PROVIDER)
+        assert await store.revoke(selected.grant_id, actor_member_id=member_id) is True
+        await store.record(
+            provider=sample.CONNECTOR_PROVIDER,
+            account_id="acct-1",
+            host=sample.CONNECTOR_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
+        replacement = await ctx.connector_connection(sample.CONNECTOR_PROVIDER)
+
+        assert replacement.id == selected.id
+        assert replacement.grant_id != selected.grant_id
+        with pytest.raises(ValueError, match="grant is no longer active"):
+            await ctx.require_connector_connection(selected)
+        await ctx.require_connector_connection(replacement)
+
+
+async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    for provider, account in (
+        (sample.CONNECTOR_PROVIDER, "acct-2"),
+        (sample.CONNECTOR_PROVIDER, "acct-1"),
+        ("other", "acct-other"),
+    ):
+        with ws(workspace_id), agent(agent_id):
+            await store.record(
+                provider=provider,
+                account_id=account,
+                host=sample.CONNECTOR_HOST,
+                grantor_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+            )
+    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
+    with ws(workspace_id), agent(agent_id):
+        assert await ctx.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-1", "acct-2")
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_source_credential_stays_bound_to_its_connection_generation(db: None) -> None:
     workspace_id = await _workspace()

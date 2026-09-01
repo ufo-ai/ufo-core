@@ -14,6 +14,9 @@ from ufo.runtime.media.previews import (
     StoredPreview as StoredPreview,
 )
 from ufo.runtime.tools.context import (
+    ConnectorConnection as ConnectorConnection,
+)
+from ufo.runtime.tools.context import (
     ImageContent as ImageContent,
 )
 from ufo.runtime.tools.context import (

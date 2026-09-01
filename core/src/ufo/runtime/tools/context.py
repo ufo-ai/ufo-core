@@ -304,6 +304,8 @@ class TurnCleanup:
 @dataclass(frozen=True)
 class ConnectorConnection:
     id: UUID
+    grant_id: UUID
+    provider: str
     account_id: str
     owner_member_id: UUID
 
@@ -637,6 +639,8 @@ class ToolContext:
             if match is not None:
                 return ConnectorConnection(
                     id=match.connection_id,
+                    grant_id=match.id,
+                    provider=match.provider,
                     account_id=match.account_id,
                     owner_member_id=match.owner_member_id,
                 )
@@ -657,9 +661,33 @@ class ToolContext:
         match = preferred[0]
         return ConnectorConnection(
             id=match.connection_id,
+            grant_id=match.id,
+            provider=match.provider,
             account_id=match.account_id,
             owner_member_id=match.owner_member_id,
         )
+
+    async def require_connector_connection(self, selected: ConnectorConnection) -> None:
+        """Refuse a connection selection whose exact agent-grant generation is no longer usable by
+        this call's authority. A connector call can stage files after selecting its account; this
+        last-mile read keeps a revoke, disconnect, regrant, or sharing change during that work from
+        reaching the broker as an external side effect."""
+        private, shared = await self._connector_account_tiers(selected.provider)
+        current = next(
+            (
+                grant
+                for grant in (*private, *shared)
+                if grant.id == selected.grant_id
+                and grant.connection_id == selected.id
+                and grant.account_id == selected.account_id
+                and grant.owner_member_id == selected.owner_member_id
+            ),
+            None,
+        )
+        if current is None:
+            raise ValueError(
+                f"the selected {selected.provider!r} connector grant is no longer active"
+            )
 
     async def connector_accounts(self, provider: str) -> tuple[str, ...]:
         """The connected-account ids this call may use for one provider. `MemberAuthority` admits
