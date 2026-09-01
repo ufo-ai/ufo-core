@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from evals.harness.handoff import SubagentHandoff
 from evals.harness.harness import (
+    WAIT_EXPIRED,
     EvalCaseResult,
     Json,
     JsonObject,
@@ -614,11 +615,14 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
     return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
 
 
-def _unclean_verdict(result: TargetResult) -> CapabilityVerdict:
+def _unclean_verdict(
+    result: TargetResult, current_output: CapabilityOutput | None = None
+) -> CapabilityVerdict:
     """The verdict for a turn that never reached a grader. A provider fault, rejected eval
-    credential, or harness wait put no capability question to the model, so the sample is excluded
-    rather than scored. Every other unclean end stays a failure. Exclusion reaches only turns that
-    never terminated cleanly, so a graded answer, refusal, and failed rubric remain scored."""
+    credential, or harness wait with no model output is excluded rather than scored. A wait that
+    expires after a model response or tool call is model behavior, as is every other unclean end.
+    Exclusion reaches only turns that never put the capability question to the model, so a graded
+    answer, refusal, failed rubric, and incomplete agent loop remain scored."""
     status = result.trajectory.status if result.trajectory is not None else None
     provider_configuration = result.error_class == "APIError" and bool(
         infra_error((result.error_message,))
@@ -628,10 +632,17 @@ def _unclean_verdict(result: TargetResult) -> CapabilityVerdict:
         and "/tmp/ufo-local/bin/ufo" in result.error_message
         and "cannot execute binary file" in result.error_message.casefold()
     )
+    output = current_output or result.output
+    expired_after_model_output = result.failure_reason == WAIT_EXPIRED and bool(
+        output.response or output.own_calls or (current_output is not None and output.calls)
+    )
     if (
         not provider_configuration
         and not local_client_execution
-        and not infra_owned_fault(result.error_class, result.failure_reason, status)
+        and (
+            expired_after_model_output
+            or not infra_owned_fault(result.error_class, result.failure_reason, status)
+        )
     ):
         return CapabilityVerdict(False, result.failure_reason)
     if is_transient_fault(result.error_class):
@@ -735,7 +746,11 @@ async def _sample_capability(case: CapabilityCase, target: CapabilityTarget) -> 
                 ),
             )
             if not result.clean:
-                return CapabilitySample(result.output, _unclean_verdict(result), result.trajectory)
+                return CapabilitySample(
+                    result.output,
+                    _unclean_verdict(result, step_output),
+                    result.trajectory,
+                )
     deterministic = await case.grader(result.output)
     has_semantic_rubric = bool(case.rubric or case.artifact_rubric or case.visual_rubric)
     if not has_semantic_rubric or (

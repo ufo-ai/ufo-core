@@ -63,6 +63,7 @@ import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
 import tomli_w
@@ -154,6 +155,7 @@ class ExperimentSpec(BaseModel):
     est_usd_per_case: float = 1.20
     model: str | None = None
     reasoning: ReasoningEffort | None = None
+    member_model_provider: Literal["anthropic", "openai"] | None = None
     template: dict[str, dict[str, str]]
     arm: tuple[ArmSpec, ...]
 
@@ -785,7 +787,11 @@ class Ablation:
         )
         agent: dict[str, object] = {
             key: value
-            for key, value in (("model", self.spec.model), ("reasoning", self.spec.reasoning))
+            for key, value in (
+                ("model", self.spec.model),
+                ("reasoning", self.spec.reasoning),
+                ("member_model_provider", self.spec.member_model_provider),
+            )
             if value is not None
         }
         arm_names = (CONTROL_ARM, *(candidate.name for candidate in self.spec.arm))

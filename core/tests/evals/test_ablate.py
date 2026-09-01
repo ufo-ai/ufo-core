@@ -356,6 +356,37 @@ def test_remote_ablation_routes_every_arm_through_the_remote_transport(tmp_path:
     )
 
 
+def test_an_ablation_matrix_seeds_the_members_model_provider(tmp_path: Path) -> None:
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("basics",),
+        member_model_provider="anthropic",
+        budget_usd=5.0,
+        template={"pack": {"name": "assistant_eval"}},
+        arm=(ArmSpec(name="knockout", files={}),),
+    )
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    written = ablation.matrix(spec.arm[0], tmp_path / "ablate-template.toml")
+    matrix = Matrix.model_validate(tomllib.loads(tomli_w.dumps(written)))
+
+    assert matrix.run[0].member_model_provider == "anthropic"
+
+
+def test_an_ablation_rejects_an_unknown_member_model_provider() -> None:
+    with pytest.raises(ValueError, match="member_model_provider"):
+        ExperimentSpec(
+            name="exp",
+            base="origin/main",
+            suites=("basics",),
+            member_model_provider="z-ai",
+            budget_usd=5.0,
+            template={"pack": {"name": "assistant_eval"}},
+            arm=(ArmSpec(name="knockout", files={}),),
+        )
+
+
 def test_remote_run_allocations_conserve_the_experiment_budget(tmp_path: Path) -> None:
     spec = ExperimentSpec(
         name="exp",
