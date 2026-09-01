@@ -117,6 +117,13 @@ resource "datadog_dashboard" "database" {
   }
 
   widget {
+    event_stream_definition {
+      title = "billing usage-export plan checks"
+      query = "check:billing_usage_export_plan env:$env.value"
+    }
+  }
+
+  widget {
     timeseries_definition {
       title = "connections"
       request {

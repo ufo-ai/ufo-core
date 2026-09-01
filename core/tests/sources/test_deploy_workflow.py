@@ -601,7 +601,8 @@ def _check_pull_request_plans_active_deployment_inputs() -> None:
     assert isinstance(environment, dict)
     assert environment["DEPLOY_PATHS_PATTERN"] == (
         r"^(\.github/(workflows/deploy(-production)?\.yml|"
-        r"scripts/(deploy_change_gate\.py|terraform_plan_guard\.py|"
+        r"scripts/(billing_export_plan_(check\.py|gate\.sh)|deploy_change_gate\.py|"
+        r"terraform_plan_guard\.py|"
         r"production_prerequisites\.sh))$|"
         r"infra/(production_secrets|testing_secrets)\.py$|"
         r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
@@ -3629,6 +3630,52 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
             env=environment | overrides,
         )
         assert failed.returncode != 0, overrides
+
+
+@pytest.mark.parametrize(
+    ("workflow", "job_name", "environment", "revision"),
+    [
+        ("deploy.yml", "rollout", "testing", "$GITHUB_SHA"),
+        ("deploy-production.yml", "deploy", "prod", "$TARGET_SHA"),
+    ],
+)
+def test_runtime_rollout_verifies_the_live_billing_plan_before_origin_gates(
+    workflow: str, job_name: str, environment: str, revision: str
+) -> None:
+    job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
+    assert isinstance(job, dict)
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    names = [step.get("name") for step in steps if isinstance(step, dict)]
+    assert names.index("Wait for runtime rollout") < names.index("Verify billing usage-export plan")
+    assert names.index("Verify billing usage-export plan") < names.index("Gate gateway origin")
+    step = _step(job_name, "Verify billing usage-export plan", workflow)
+    assert step.get("if") == (
+        "github.event_name != 'pull_request'" if workflow == "deploy.yml" else None
+    )
+    assert ".github/scripts/billing_export_plan_gate.sh" in step["run"]
+    assert f'"$NAMESPACE" {environment} "$IMAGE_TAG" "{revision}" "$RUN_URL"' in step["run"]
+
+
+def test_billing_plan_scripts_trigger_a_testing_deploy() -> None:
+    selection = _step("changes", "Select deployment work")["env"]
+    assert isinstance(selection, dict)
+    pattern = selection["DEPLOY_PATHS_PATTERN"]
+    assert isinstance(pattern, str)
+    for path in (
+        ".github/scripts/billing_export_plan_check.py",
+        ".github/scripts/billing_export_plan_gate.sh",
+    ):
+        assert re.search(pattern, path)
+
+
+def test_database_dashboard_reads_billing_plan_events_for_the_selected_fleet() -> None:
+    dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+    assert re.search(
+        r'event_stream_definition \{\s*title = "billing usage-export plan checks"\s*'
+        r'query = "check:billing_usage_export_plan env:\$env\.value"\s*\}',
+        dashboard,
+    )
 
 
 def _check_runtime_bundle_consumes_the_sandbox_client_artifact() -> None:

@@ -387,6 +387,14 @@ jobs:
           .github/scripts/await_rollout.sh "$NAMESPACE" otel-collector
           kubectl --namespace "$NAMESPACE" rollout status daemonset/otel-logs-agent --timeout=15m
 
+      - name: Verify billing usage-export plan
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
+          .github/scripts/billing_export_plan_gate.sh \
+            "$NAMESPACE" prod "$IMAGE_TAG" "$TARGET_SHA" "$RUN_URL"
+
       - name: Gate gateway origin
         shell: bash
         run: |
