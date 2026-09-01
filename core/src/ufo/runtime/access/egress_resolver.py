@@ -6,6 +6,7 @@ own workspace scope; the Rust data-plane proxy calls it, never touching this log
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -39,6 +40,20 @@ signed by the one deploy secret and name their own domain, so the wire cannot pa
 other."""
 
 
+def _seat_scope(workspace_id: UUID, member_id: UUID | None) -> tuple[sa.ColumnElement[bool], ...]:
+    if member_id is None:
+        return ()
+    return (
+        sa.exists(
+            sa.select(tables.member.c.id).where(
+                tables.member.c.workspace_id == workspace_id,
+                tables.member.c.id == member_id,
+                tables.member.c.seated_at.is_not(None),
+            )
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _Authority:
     """Whose egress a principal carries: the agent whose rules derive, that agent's snapshotted
@@ -57,10 +72,11 @@ class PerAgentRules:
     only A's grants, so A cannot inject or forward through another agent's account — and
     per-workspace resolution is the tenant's: a stored secret is read against the run token's own
     `workspace_id`, so one shared proxy injects for every workspace and none of them holds another's
-    key. A run with no or unknown token yields the base alone; a resolution error raises to the
-    proxy, which returns service unavailable without caching it — never a policy denial, broad
-    allow, or another workspace's secret. Deriving each call (not once at boot) is the liveness: a
-    grant recorded or a slot filled mid-serve is live for the next turn.
+    key. A missing or forged token yields the base alone; a verified principal whose authority is
+    no longer live yields no rules. A resolution error raises to the proxy, which returns service
+    unavailable without caching it — never a policy denial, broad allow, or another workspace's
+    secret. Deriving each call (not once at boot) is the liveness: a grant recorded or a slot filled
+    mid-serve is live for the next turn.
 
     A probe token resolves the same chain under the same agent, reached through its conversation
     rather than a turn, minus the deployment's model key."""
@@ -88,7 +104,7 @@ class PerAgentRules:
                 case ProbeToken():
                     authority = await self._conversation_of(principal)
             if authority is None:
-                return self.base
+                return ()
             with agent(authority.agent_id):
                 # Cache routes optimize an existing InternetRule. Granting them from the agent flag
                 # alone turns the cache host list into an allowlist and blocks unlisted redirects.
@@ -153,7 +169,9 @@ class PerAgentRules:
                     .where(
                         tables.turn.c.id == run.turn_id,
                         tables.turn.c.workspace_id == run.workspace_id,
+                        tables.turn.c.status == RUNNING,
                         tables.agent.c.workspace_id == run.workspace_id,
+                        *_seat_scope(run.workspace_id, run.acting_member_id),
                     )
                 )
             ).one_or_none()
@@ -176,6 +194,8 @@ class PerAgentRules:
         command that reached their own connected account in the arming turn keeps reaching it, the
         way a scheduled fire keeps its initiator's private connectors. A memberless probe forwards
         only what is shared with the workspace."""
+        if probe.expires_at <= int(datetime.now(UTC).timestamp()):
+            return None
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -193,6 +213,7 @@ class PerAgentRules:
                         tables.conversation.c.id == probe.conversation_id,
                         tables.conversation.c.workspace_id == probe.workspace_id,
                         tables.agent.c.workspace_id == probe.workspace_id,
+                        *_seat_scope(probe.workspace_id, probe.acting_member_id),
                     )
                 )
             ).one_or_none()
@@ -215,13 +236,13 @@ class PerAgentRules:
 
     async def turn_live(self, run: RunToken) -> int | None:
         """The egress-authorization gate: the workspace's egress-rules generation while the run
-        token names a turn the DB still reports running, None otherwise. A keyed host's real-key
-        injection is applied only for a live turn, so a token for a turn that has ended, a turn
-        that never existed, or (checked before this) no token at all is denied at CONNECT and the
-        key never reaches the wire. Read fresh per request — never the per-turn rule cache — so a
-        turn that ends between requests can no longer draw the key; the generation rides the same
-        one indexed read, so the rule cache pins what it derived from without a second
-        round-trip."""
+        token names a turn the DB still reports running and its acting member still holds a seat,
+        None otherwise. A keyed host's real-key injection is applied only for a live turn, so a
+        token for a turn that has ended, a turn that never existed, or a revoked member is denied
+        at CONNECT and the key never reaches the wire. Read fresh per request — never the per-turn
+        rule cache — so a turn that ends between requests can no longer draw the key; the generation
+        rides the same one indexed read, so the rule cache pins what it derived from without a
+        second round-trip."""
         with ws(run.workspace_id):
             async with workspace_tx() as connection:
                 row = (
@@ -239,6 +260,7 @@ class PerAgentRules:
                         .where(
                             tables.turn.c.id == run.turn_id,
                             tables.turn.c.workspace_id == run.workspace_id,
+                            *_seat_scope(run.workspace_id, run.acting_member_id),
                         )
                     )
                 ).one_or_none()
@@ -246,15 +268,26 @@ class PerAgentRules:
             return None
         return row.egress_rules_generation
 
-    async def rules_generation(self, workspace_id: UUID) -> int:
-        """The workspace's egress-rules counter, read fresh — the probe path's per-CONNECT read;
-        a run token's rides `turn_live`."""
-        with ws(workspace_id):
+    async def probe_live(self, probe: ProbeToken) -> int | None:
+        """The current rules generation while the probe is unexpired, its conversation exists,
+        and its acting member still holds a seat."""
+        if probe.expires_at <= int(datetime.now(UTC).timestamp()):
+            return None
+        with ws(probe.workspace_id):
             async with workspace_tx() as connection:
                 return (
                     await connection.execute(
-                        sa.select(tables.workspace.c.egress_rules_generation).where(
-                            tables.workspace.c.id == workspace_id
+                        sa.select(tables.workspace.c.egress_rules_generation)
+                        .select_from(
+                            tables.conversation.join(
+                                tables.workspace,
+                                tables.workspace.c.id == tables.conversation.c.workspace_id,
+                            )
+                        )
+                        .where(
+                            tables.conversation.c.id == probe.conversation_id,
+                            tables.conversation.c.workspace_id == probe.workspace_id,
+                            *_seat_scope(probe.workspace_id, probe.acting_member_id),
                         )
                     )
-                ).scalar_one()
+                ).scalar_one_or_none()

@@ -13,13 +13,11 @@ codec and scopes every read to its workspace under the normal RLS-scoped role. T
 accepts run tokens only and reuses the same authority for its host-side dispatch."""
 
 from base64 import b64decode, b64encode
-from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
-import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -27,7 +25,6 @@ from ufo.db import workspace_tx
 from ufo.harness.models.pricing import Pricing
 from ufo.harness.o11y import emit_metric, warn
 from ufo.harness.sandbox.session import ProbeToken, ProbeTokenCodec, RunToken, RunTokenCodec
-from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import credential_host, slot_is_set, slot_secret
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
@@ -46,7 +43,6 @@ from ufo.runtime.billing.accounting import (
 )
 from ufo.runtime.tools.bridge import ToolBridgeRequest, ToolBridgeRequester, ToolBridgeResponse
 from ufo.runtime.workspace import ws
-from ufo.schema import tables
 from ufo.schema.records import Usage
 
 EgressPrincipal = RunToken | ProbeToken
@@ -155,11 +151,11 @@ class GitCredentialRequest(BaseModel):
 class EgressControl:
     """The control-plane RPC over the egress policy code, mounted on core `serve`. `resolver` is the
     real `PerAgentRules` — its liveness gate authorizes each CONNECT, its resolution answers the
-    rule set, and its generation reader keys the proxy's rule cache. `clis` forwards a
-    sentinel-carrying request through the broker under a granted account. `pricing` prices the model
-    usage the proxy tees off the wire. `run_tokens` verifies the deploy-signed token each body
-    carries; probe tokens verify against the same secret. `bridge` dispatches the bounded JSON
-    interface under a live run.
+    rule set, and its generation reader keys the proxy's rule cache. A forwarded request resolves
+    the current `ForwardRule` again before it reaches the broker. `pricing` prices the model usage
+    the proxy tees off the wire. `run_tokens` verifies the deploy-signed token each body carries;
+    probe tokens verify against the same secret. `bridge` dispatches the bounded JSON interface
+    under a live run.
 
     Two secrets, two routers: `control_token` gates `/internal/egress/*`, the secrets-and-metering
     tier the proxy holds; `cache_control_token` gates `/internal/git-credential` alone, the route
@@ -170,7 +166,6 @@ class EgressControl:
     control_token: str
     cache_control_token: str
     resolver: PerAgentRules
-    clis: Mapping[str, CliCredential]
     pricing: Pricing
     run_tokens: RunTokenCodec
     bridge: ToolBridgeRequester | None = None
@@ -200,17 +195,16 @@ class EgressControl:
             raise HTTPException(status_code=401, detail="unauthorized")
 
     async def _authorize(self, body: AuthorizeRequest) -> AuthorizeResponse:
-        match self._principal(body.proxy_auth):
+        principal = self._principal(body.proxy_auth)
+        generation = None if principal is None else await self._live_generation(principal)
+        return AuthorizeResponse(authorized=generation is not None, generation=generation)
+
+    async def _live_generation(self, principal: EgressPrincipal) -> int | None:
+        match principal:
             case RunToken() as run:
-                generation = await self.resolver.turn_live(run)
-                return AuthorizeResponse(authorized=generation is not None, generation=generation)
+                return await self.resolver.turn_live(run)
             case ProbeToken() as probe:
-                if probe.expires_at <= int(datetime.now(UTC).timestamp()):
-                    return AuthorizeResponse(authorized=False)
-                generation = await self.resolver.rules_generation(probe.workspace_id)
-                return AuthorizeResponse(authorized=True, generation=generation)
-            case None:
-                return AuthorizeResponse(authorized=False)
+                return await self.resolver.probe_live(probe)
 
     async def _resolve(self, body: ResolveRequest) -> dict[str, object]:
         rules = await self.resolver.resolve(self._principal(body.proxy_auth))
@@ -290,28 +284,27 @@ class EgressControl:
 
     async def _forward(self, body: ForwardRequest) -> ForwardResponse:
         principal = self._principal(body.proxy_auth)
-        if principal is None:
+        target = urlsplit(body.url)
+        if (
+            principal is None
+            or target.scheme != "https"
+            or target.hostname is None
+            or await self._live_generation(principal) is None
+        ):
             raise HTTPException(status_code=403, detail="forbidden")
-        with ws(principal.workspace_id):
-            async with workspace_tx() as connection:
-                row = (
-                    await connection.execute(
-                        sa.select(
-                            tables.connection.c.provider,
-                            tables.connection.c.owner_member_id,
-                            tables.connection.c.shared,
-                        ).where(
-                            tables.connection.c.workspace_id == principal.workspace_id,
-                            tables.connection.c.account_id == body.account_id,
-                        )
-                    )
-                ).one_or_none()
-        if row is None or not (row.shared or row.owner_member_id == principal.acting_member_id):
+        forward = next(
+            (
+                rule
+                for rule in await self.resolver.resolve(principal)
+                if isinstance(rule, ForwardRule)
+                and rule.host == target.hostname
+                and rule.account_id == body.account_id
+            ),
+            None,
+        )
+        if forward is None:
             raise HTTPException(status_code=403, detail="forbidden")
-        cli = self.clis.get(row.provider)
-        if cli is None:
-            raise HTTPException(status_code=403, detail="forbidden")
-        response = await cli.forward.forward(
+        response = await forward.forward.forward(
             body.account_id,
             body.method,
             body.url,

@@ -1421,7 +1421,6 @@ def _proxy_endpoint(
         control_token=control_token,
         cache_control_token=cache_control_token or secrets.token_urlsafe(32),
         resolver=resolver,
-        clis=clis,
         pricing=pricing,
         run_tokens=run_tokens,
         bridge=bridge,

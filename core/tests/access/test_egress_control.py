@@ -9,7 +9,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
@@ -96,14 +96,12 @@ class _Bridge:
 
 def _control(
     resolver: PerAgentRules,
-    clis: dict[str, CliCredential] | None = None,
     bridge: object | None = None,
 ) -> EgressControl:
     return EgressControl(
         control_token=CONTROL_TOKEN,
         cache_control_token=CACHE_TOKEN,
         resolver=resolver,
-        clis=clis or {},
         pricing=CORE_PRICING,
         run_tokens=RUN_TOKENS,
         bridge=bridge,
@@ -115,6 +113,28 @@ def _client(control: EgressControl) -> AsyncClient:
     app.include_router(control.router())
     app.include_router(control.git_credential_router())
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://serve")
+
+
+async def _forward(
+    client: AsyncClient,
+    token: str,
+    *,
+    method: str = "POST",
+    headers: list[tuple[str, str]] | None = None,
+    body: bytes = b"",
+) -> Response:
+    return await client.post(
+        "/internal/egress/forward",
+        headers=_auth(),
+        json={
+            "proxy_auth": _basic(token),
+            "account_id": ACCOUNT,
+            "method": method,
+            "url": f"https://{HOST}/v1/thing",
+            "headers": headers or [],
+            "body_b64": base64.b64encode(body).decode(),
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -143,6 +163,7 @@ async def _seed_turn(
             id=member_id,
             workspace_id=workspace_id,
             email="a@b.c",
+            seated_at=sa.func.now(),
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -285,6 +306,43 @@ async def test_authorize_admits_a_probe_until_its_deadline(db: None) -> None:
     assert refused.json() == {"authorized": False, "generation": None}
 
 
+async def test_authorize_refuses_run_and_probe_authority_after_seat_revocation(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    run = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id, seeded.member_id))
+    probe = PROBE_TOKENS.encode(
+        ProbeToken(
+            seeded.workspace_id,
+            seeded.conversation_id,
+            uuid4(),
+            int(datetime.now(UTC).timestamp()) + 300,
+            seeded.member_id,
+        )
+    )
+    resolver = PerAgentRules(base=(), grants=None)
+    async with _client(_control(resolver)) as client:
+        for token in (run, probe):
+            response = await client.post(
+                "/internal/egress/authorize",
+                headers=_auth(),
+                json={"proxy_auth": _basic(token)},
+            )
+            assert response.json() == {"authorized": True, "generation": 0}
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.member)
+                .values(seated_at=None, updated_at=sa.func.now())
+                .where(tables.member.c.id == seeded.member_id)
+            )
+        for token in (run, probe):
+            response = await client.post(
+                "/internal/egress/authorize",
+                headers=_auth(),
+                json={"proxy_auth": _basic(token)},
+            )
+            assert response.json() == {"authorized": False, "generation": None}
+
+
 async def test_tool_bridge_passes_only_a_run_principal_to_the_bridge(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
@@ -346,7 +404,7 @@ async def test_resolve_returns_the_seeded_grant_and_forward_rules(db: None) -> N
         PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=_FakeForwarder())
     }
     resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
-    async with _client(_control(resolver, clis)) as client:
+    async with _client(_control(resolver)) as client:
         response = await client.post(
             "/internal/egress/resolve",
             headers=_auth(),
@@ -367,6 +425,60 @@ async def test_resolve_returns_the_seeded_grant_and_forward_rules(db: None) -> N
         "sentinel": grant_sentinel(ACCOUNT),
         "account_id": ACCOUNT,
     }
+
+
+async def test_resolve_rechecks_turn_and_probe_liveness(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    run = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id, seeded.member_id))
+    expired_probe = PROBE_TOKENS.encode(
+        ProbeToken(
+            seeded.workspace_id,
+            seeded.conversation_id,
+            uuid4(),
+            int(datetime.now(UTC).timestamp()) - 1,
+            seeded.member_id,
+        )
+    )
+    resolver = PerAgentRules(
+        base=(
+            ScopeRule(allowed_hosts=frozenset({HOST})),
+            InjectionRule(
+                host=HOST,
+                header="authorization",
+                sentinel=SENTINEL_MODEL_KEY,
+                real="deployment-model-key",
+            ),
+        ),
+        grants=None,
+        preview_token="preview-real",
+    )
+    async with _client(_control(resolver)) as client:
+        authorized = await client.post(
+            "/internal/egress/authorize",
+            headers=_auth(),
+            json={"proxy_auth": _basic(run)},
+        )
+        assert authorized.json() == {"authorized": True, "generation": 0}
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(status="done", terminal={"status": "done"}, updated_at=sa.func.now())
+                .where(tables.turn.c.id == seeded.turn_id)
+            )
+        ended = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={"proxy_auth": _basic(run)},
+        )
+        expired = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={"proxy_auth": _basic(expired_probe)},
+        )
+
+    assert ended.json() == {"rules": []}
+    assert expired.json() == {"rules": []}
 
 
 async def test_resolve_admits_the_preview_host_whatever_the_agents_internet_policy(
@@ -626,20 +738,13 @@ async def test_forward_routes_through_the_broker_forwarder(db: None) -> None:
     forwarder = _FakeForwarder()
     clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=forwarder)}
     resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
-    async with _client(_control(resolver, clis)) as client:
-        response = await client.post(
-            "/internal/egress/forward",
-            headers=_auth(),
-            json={
-                "proxy_auth": _basic(
-                    RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
-                ),
-                "account_id": ACCOUNT,
-                "method": "POST",
-                "url": f"https://{HOST}/v1/thing",
-                "headers": [["content-type", "application/json"]],
-                "body_b64": base64.b64encode(b"payload").decode(),
-            },
+    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
+    async with _client(_control(resolver)) as client:
+        response = await _forward(
+            client,
+            token,
+            headers=[("content-type", "application/json")],
+            body=b"payload",
         )
     body = response.json()
     assert body["status"] == 201
@@ -654,6 +759,116 @@ async def test_forward_routes_through_the_broker_forwarder(db: None) -> None:
             b"payload",
         )
     ]
+
+
+async def test_forward_refuses_a_grant_revoked_after_the_tunnel_resolved_it(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        grants = GrantStore()
+        await grants.record(
+            provider=PROVIDER,
+            account_id=ACCOUNT,
+            host=HOST,
+            grantor_member_id=seeded.member_id,
+            conversation_id=seeded.conversation_id,
+            shared=True,
+        )
+        (grant,) = await grants.active_grants()
+    forwarder = _FakeForwarder()
+    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=forwarder)}
+    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
+    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
+    async with _client(_control(resolver)) as client:
+        resolved = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={"proxy_auth": _basic(token)},
+        )
+        assert any(rule["kind"] == "forward" for rule in resolved.json()["rules"])
+        with ws(seeded.workspace_id), agent(seeded.agent_id):
+            assert await grants.revoke(grant.id, actor_member_id=seeded.member_id)
+        response = await _forward(client, token)
+
+    assert response.status_code == 403
+    assert forwarder.received == []
+
+
+async def test_forward_refuses_a_tunnel_whose_turn_has_ended(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        await GrantStore().record(
+            provider=PROVIDER,
+            account_id=ACCOUNT,
+            host=HOST,
+            grantor_member_id=seeded.member_id,
+            conversation_id=seeded.conversation_id,
+            shared=True,
+        )
+    forwarder = _FakeForwarder()
+    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=forwarder)}
+    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
+    token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
+    async with _client(_control(resolver)) as client:
+        resolved = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={"proxy_auth": _basic(token)},
+        )
+        assert any(rule["kind"] == "forward" for rule in resolved.json()["rules"])
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(status="done", terminal={"status": "done"}, updated_at=sa.func.now())
+                .where(tables.turn.c.id == seeded.turn_id)
+            )
+        response = await _forward(client, token)
+
+    assert response.status_code == 403
+    assert forwarder.received == []
+
+
+async def test_forward_refuses_a_probe_after_its_members_seat_is_revoked(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        await GrantStore().record(
+            provider=PROVIDER,
+            account_id=ACCOUNT,
+            host=HOST,
+            grantor_member_id=seeded.member_id,
+            conversation_id=seeded.conversation_id,
+            shared=False,
+        )
+    forwarder = _FakeForwarder()
+    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=forwarder)}
+    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
+    probe = ProbeToken(
+        seeded.workspace_id,
+        seeded.conversation_id,
+        uuid4(),
+        int(datetime.now(UTC).timestamp()) + 300,
+        seeded.member_id,
+    )
+    token = PROBE_TOKENS.encode(probe)
+    async with _client(_control(resolver)) as client:
+        resolved = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={"proxy_auth": _basic(token)},
+        )
+        assert any(rule["kind"] == "forward" for rule in resolved.json()["rules"])
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.member)
+                .values(seated_at=None, updated_at=sa.func.now())
+                .where(tables.member.c.id == seeded.member_id)
+            )
+        response = await _forward(client, token)
+
+    assert response.status_code == 403
+    assert forwarder.received == []
 
 
 async def test_forward_refuses_a_foreign_private_grant(db: None) -> None:
@@ -672,20 +887,21 @@ async def test_forward_refuses_a_foreign_private_grant(db: None) -> None:
         PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, forward=_FakeForwarder())
     }
     resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
-    stranger = RunToken(seeded.workspace_id, seeded.turn_id, acting_member_id=uuid4())
-    async with _client(_control(resolver, clis)) as client:
-        response = await client.post(
-            "/internal/egress/forward",
-            headers=_auth(),
-            json={
-                "proxy_auth": _basic(RUN_TOKENS.encode(stranger)),
-                "account_id": ACCOUNT,
-                "method": "GET",
-                "url": f"https://{HOST}/v1/thing",
-                "headers": [],
-                "body_b64": "",
-            },
+    stranger_member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=stranger_member_id,
+                workspace_id=seeded.workspace_id,
+                email="stranger@b.c",
+                seated_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
         )
+    stranger = RunToken(seeded.workspace_id, seeded.turn_id, acting_member_id=stranger_member_id)
+    async with _client(_control(resolver)) as client:
+        response = await _forward(client, RUN_TOKENS.encode(stranger), method="GET")
     assert response.status_code == 403
 
 
