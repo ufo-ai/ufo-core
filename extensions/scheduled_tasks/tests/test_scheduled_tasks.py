@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,6 +20,7 @@ import sqlalchemy as sa
 import yaml
 from sqlalchemy.exc import IntegrityError
 from ufo_ext_memory.store import memory_item
+from ufo_ext_scheduled_tasks import tools as scheduled_tools
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
@@ -89,6 +91,7 @@ from ufo.sdk.audience import (
 TOOL_NARRATION = "setting up the reminder"
 
 DAILY_9AM = "0 9 * * *"
+APPLY_NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
 
 
 def _object_tool(name: str) -> ToolDef:
@@ -1425,6 +1428,103 @@ async def test_applied_task_rejects_non_five_field_cron(db: None) -> None:
         await apply.handler(ctx, args)
 
 
+async def test_applied_task_rejects_expiry_at_its_first_fire(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scheduled_tools, "datetime", SimpleNamespace(now=lambda _tz: APPLY_NOW))
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    first_fire = next_fire(DAILY_9AM, APPLY_NOW)
+    apply = _object_tool("object_apply")
+    args = apply.input_model.model_validate(
+        {"manifest": _task_manifest("zero-fire", DAILY_9AM, "report once", expires_at=first_fire)}
+    )
+
+    with ws(workspace_id), agent(agent_id), pytest.raises(ValueError, match="next scheduled fire"):
+        await apply.handler(ctx, args)
+
+
+async def test_applied_task_accepts_expiry_after_its_first_fire(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scheduled_tools, "datetime", SimpleNamespace(now=lambda _tz: APPLY_NOW))
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    first_fire = next_fire(DAILY_9AM, APPLY_NOW)
+    expires_at = next_fire(DAILY_9AM, first_fire)
+
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_task_manifest("one-fire", DAILY_9AM, "report once", expires_at=expires_at),
+        )
+        [task] = await _store().list()
+
+    assert task.expires_at == expires_at
+
+
+async def test_applied_paused_task_accepts_expiry_at_its_first_fire(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scheduled_tools, "datetime", SimpleNamespace(now=lambda _tz: APPLY_NOW))
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    first_fire = next_fire(DAILY_9AM, APPLY_NOW)
+    manifest = yaml.safe_dump(
+        {
+            "kind": SCHEDULED_TASK_KIND,
+            "name": "paused-zero-fire",
+            "spec": {
+                "schedule": DAILY_9AM,
+                "prompt": "report once",
+                "expires_at": first_fire,
+                "paused": True,
+            },
+        }
+    )
+
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(_object_tool("object_apply"), ctx, manifest=manifest)
+        [task] = await _store().list()
+
+    assert task.paused
+    assert task.expires_at == first_fire
+
+
+async def test_applied_task_update_rejects_expiry_at_its_next_fire(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scheduled_tools, "datetime", SimpleNamespace(now=lambda _tz: APPLY_NOW))
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
+    apply = _object_tool("object_apply")
+    first_fire = next_fire(DAILY_9AM, APPLY_NOW)
+
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            apply,
+            ctx,
+            manifest=_task_manifest("zero-fire-update", DAILY_9AM, "report once"),
+        )
+        args = apply.input_model.model_validate(
+            {
+                "manifest": _task_manifest(
+                    "zero-fire-update", DAILY_9AM, "report once", expires_at=first_fire
+                )
+            }
+        )
+        with pytest.raises(ValueError, match="next scheduled fire"):
+            await apply.handler(ctx, args)
+        [task] = await _store().list()
+
+    assert task.expires_at is None
+
+
 def test_task_scheduling_skill_parses_and_indexes() -> None:
     registry = skill_registry((manifest(),))
     index = dict(registry.index())
@@ -1589,7 +1689,11 @@ async def test_run_once_eval_rejects_a_cron_schedule_bounded_by_an_expiry(db: No
         assert not emulated.passed
         assert "expiry" in emulated.reason
         assert not (await _graded_no_emulated_run_once(recurring)).passed
-        assert (await _graded_no_emulated_run_once(CapabilityOutput("", ()))).passed
+        assert (
+            await _graded_no_emulated_run_once(
+                CapabilityOutput("One-time runs are not supported, so nothing is scheduled.", ())
+            )
+        ).passed
 
 
 async def test_run_count_eval_counts_the_fires_the_expiry_admits(db: None) -> None:

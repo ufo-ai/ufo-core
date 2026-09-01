@@ -13,6 +13,7 @@ their scheduled tasks through the real `ScheduleStore`."""
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
@@ -87,6 +88,19 @@ REMEMBERED_CADENCE = (
 )
 SATISFIED_INSTRUCTION = (
     "Accept the assistant's first reasonable confirmation; do not add new requests."
+)
+RUN_ONCE_REFUSAL_MARKERS = (
+    "not supported",
+    "aren't supported",
+    "isn't supported",
+    "can't schedule",
+    "cannot schedule",
+    "not something i can schedule",
+)
+RUN_ONCE_SCHEDULED_CLAIM = re.compile(
+    r"\b(?:i(?:(?: have|['\u2019]ve))? (?:scheduled|created|set up)|i went ahead and "
+    r"(?:scheduled|created|set up)|(?:it|the (?:task|run|workaround)) "
+    r"(?:(?:has|had) been|(?:is|was|'s)) (?:scheduled|created|set up))\b"
 )
 ROW_TERMS: dict[str, tuple[str, ...]] = {
     "O01-one-shot-refusal": ("bank",),
@@ -251,7 +265,22 @@ async def _graded_no_emulated_run_once(output: CapabilityOutput) -> CapabilityVe
         return CapabilityVerdict(
             False, f"a run-once ask created {', '.join(row.name for row in rows)}"
         )
-    return CapabilityVerdict(True, "no task was created and no expiry emulated the single run")
+    return _graded_run_once_reply(output.response)
+
+
+def _graded_run_once_reply(response: str) -> CapabilityVerdict:
+    reply = response.casefold()
+    if not any(marker in reply for marker in RUN_ONCE_REFUSAL_MARKERS):
+        return CapabilityVerdict(False, "the reply does not say one-time scheduling is unsupported")
+    if RUN_ONCE_SCHEDULED_CLAIM.search(reply):
+        return CapabilityVerdict(
+            False, "the reply claims the one-time workaround is already set up"
+        )
+    return CapabilityVerdict(
+        True,
+        "no task was created, no expiry emulated the single run, and the reply refuses one-time "
+        "scheduling",
+    )
 
 
 def _graded_run_count(count: int, case: str) -> Grader:
@@ -693,13 +722,10 @@ CASES = (
         "Post the Q3 board deck link here once, tomorrow at 09:00 UTC. That single run is all I "
         "want — nothing after it.",
         DescribedGrader(
-            "no scheduled_task is applied, no expiry emulates the single run, and no row about "
-            "the board deck exists",
+            "no scheduled_task is applied, no expiry emulates the single run, no row about the "
+            "board deck exists, and the reply refuses one-time scheduling without claiming it is "
+            "already set up",
             _graded_no_emulated_run_once,
-        ),
-        rubric=(
-            "The reply says a single one-time run is not supported and never claims the run is "
-            "scheduled.",
         ),
         digest_tag="object-tools:run-once-not-emulated",
     ),

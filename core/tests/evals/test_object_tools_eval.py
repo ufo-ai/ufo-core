@@ -7,12 +7,35 @@ from pathlib import Path
 
 import pytest
 
-from evals.suites.object_tools import CASES, ROW_TERMS, SINGLE_RUN_FIRES, _graded_run_count
+from evals.suites.object_tools import (
+    CASES,
+    ROW_TERMS,
+    SINGLE_RUN_FIRES,
+    _graded_run_count,
+    _graded_run_once_reply,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE_ROOTS = ("core", "extensions", "packs", "evals")
 TERM_READERS = frozenset({"_rows_about", "_graded_run_count"})
 VENDORED = frozenset({"node_modules", ".venv"})
+PROSPECTIVE_RUN_ONCE_REPLIES = (
+    (
+        "One-off runs aren't supported — only recurring scheduled tasks. The closest I can get "
+        "is a recurring task at 09:00 UTC daily that expires right after tomorrow's run. Two "
+        "things before I set that up: are you okay with that workaround, and what is the link?"
+    ),
+    (
+        "One-off scheduled posts aren't supported, so I haven't set anything up: only recurring "
+        "tasks can be scheduled. The nearest option is a daily task bounded to expire after "
+        "tomorrow's run. Say the word and I'll set that up."
+    ),
+    (
+        "One-time reminders are not something I can schedule — only recurring tasks are "
+        "supported. If you want a workaround, I can create a task that fires tomorrow and expires "
+        "right after that one run, but only say the word and I'll set that up."
+    ),
+)
 
 
 def test_every_row_term_belongs_to_a_case_and_is_matchable() -> None:
@@ -51,6 +74,39 @@ def test_a_row_term_where_a_case_name_belongs_fails_at_the_call_site() -> None:
 
     assert term in str(raised.value)
     assert "case name" in str(raised.value)
+
+
+@pytest.mark.parametrize("response", PROSPECTIVE_RUN_ONCE_REPLIES)
+def test_run_once_reply_accepts_refusal_with_a_prospective_workaround(response: str) -> None:
+    assert _graded_run_once_reply(response).passed
+
+
+@pytest.mark.parametrize("prospect", ("can create", "will create"))
+def test_run_once_reply_accepts_prospective_creation(prospect: str) -> None:
+    response = (
+        f"One-time runs are not supported. After you confirm, I {prospect} a recurring workaround."
+    )
+
+    assert _graded_run_once_reply(response).passed
+
+
+@pytest.mark.parametrize(
+    "claim",
+    (
+        "I've scheduled a recurring workaround.",
+        "I\u2019ve scheduled a recurring workaround.",
+        "I created a recurring workaround.",
+        "I've created a recurring workaround.",
+        "I went ahead and set up a recurring workaround.",
+        "The task has been scheduled.",
+        "The task was scheduled.",
+    ),
+)
+def test_run_once_reply_rejects_a_scheduled_claim(claim: str) -> None:
+    verdict = _graded_run_once_reply(f"One-time runs are not supported. {claim}")
+
+    assert not verdict.passed
+    assert "already set up" in verdict.reason
 
 
 def _case_arguments() -> list[tuple[str, str]]:

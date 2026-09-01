@@ -135,6 +135,13 @@ def _summary(task: ScheduledTask) -> str:
     return f"{task.schedule} — {task.description or task.prompt}"[:SUMMARY_MAX]
 
 
+def _validate_future_fire(
+    next_run_at: datetime, expires_at: datetime | None, *, paused: bool
+) -> None:
+    if not paused and expires_at is not None and expires_at <= next_run_at:
+        raise ValueError("expires_at must be later than the next scheduled fire")
+
+
 def _owner(listed: ListedTask) -> GeneratedObjectOwner:
     """Who a task belongs to and who else may see it. A task is shared exactly as far as the
     conversation it reports into is, so every surface listing the kind — the index, the section,
@@ -364,16 +371,19 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 raise ValueError(f"scheduled task {name!r} changed while editing")
             if validated_schedule is None or spec.prompt is None:
                 raise ValueError("creating a scheduled task requires schedule and prompt")
+            next_run_at = next_fire(validated_schedule, datetime.now(UTC))
+            paused = bool(spec.paused)
+            _validate_future_fire(next_run_at, spec.expires_at, paused=paused)
             await scheduler.create(
                 conversation_id=ctx.turn.conversation_id,
                 name=name,
                 schedule=validated_schedule,
                 prompt=spec.prompt,
                 description=spec.description or "",
-                next_run_at=next_fire(validated_schedule, datetime.now(UTC)),
+                next_run_at=next_run_at,
                 created_by_member_id=acting_member,
                 expires_at=spec.expires_at,
-                paused=bool(spec.paused),
+                paused=paused,
             )
             return
         if existing is None or existing.id != owner.generation or old is None:
@@ -384,16 +394,20 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 raise AdminRequired(SCHEDULE_GATE)
         elif existing.created_by_member_id != acting_member and not await ctx.speaker_is_admin():
             raise AdminRequired(SCHEDULE_GATE)
+        next_run_at = next_fire(schedule, datetime.now(UTC))
+        expires_at = (
+            spec.expires_at if "expires_at" in spec.model_fields_set else existing.expires_at
+        )
+        paused = existing.paused if spec.paused is None else spec.paused
+        _validate_future_fire(next_run_at, expires_at, paused=paused)
         await scheduler.update(
             expected=existing,
             schedule=schedule,
             prompt=spec.prompt or existing.prompt,
             description=existing.description if spec.description is None else spec.description,
-            next_run_at=next_fire(schedule, datetime.now(UTC)),
-            expires_at=(
-                spec.expires_at if "expires_at" in spec.model_fields_set else existing.expires_at
-            ),
-            paused=existing.paused if spec.paused is None else spec.paused,
+            next_run_at=next_run_at,
+            expires_at=expires_at,
+            paused=paused,
         )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
