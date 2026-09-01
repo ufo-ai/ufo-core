@@ -98,83 +98,22 @@ class ModelRoundRunner[RequestT, ToolCallT, ReasoningT, UsageT]:
         self, request: RequestT, text_filter: TextFilter
     ) -> CollectedRound[ToolCallT, ReasoningT, UsageT]:
         """Run exactly one provider stream; failures retain consumed usage and partial output."""
-        parts: list[str] = []
-        buffer: list[str] = []
-        pending = 0
-        flush_lock = asyncio.Lock()
+        started = self.monotonic()
+        state = _RoundState(self, text_filter, started)
         stop = asyncio.Event()
-        call_names: dict[str, str] = {}
-        call_json: dict[str, list[str]] = {}
-        call_order: list[str] = []
-        reasoning: list[ReasoningT] = []
-        usages: list[UsageT] = []
         error: Exception | None = None
-
-        async def flush() -> None:
-            nonlocal pending
-            async with flush_lock:
-                if not buffer:
-                    return
-                visible = text_filter.feed("".join(buffer))
-                buffer.clear()
-                pending = 0
-                if visible:
-                    published = self.publish_text(visible)
-                    if inspect.isawaitable(published):
-                        await published
 
         async def pace() -> None:
             while not stop.is_set():
                 try:
                     await asyncio.wait_for(stop.wait(), self.flush_seconds)
                 except TimeoutError:
-                    await flush()
+                    await state.flush()
 
-        started = self.monotonic()
-        provider_start_ms: int | None = None
-        first_visible_event_ms: int | None = None
         pacer = asyncio.create_task(pace())
         try:
             async for event in self.complete(request):
-                if isinstance(event, self.events.stream_start):
-                    if provider_start_ms is None:
-                        provider_start_ms = int((self.monotonic() - started) * 1000)
-                        if self.milestone is not None:
-                            self.milestone("provider_start")
-                    continue
-                if isinstance(event, self.events.text):
-                    chunk = cast(_TextEvent, event).text
-                    if chunk and first_visible_event_ms is None:
-                        first_visible_event_ms = int((self.monotonic() - started) * 1000)
-                        if self.milestone is not None:
-                            self.milestone("first_visible_event")
-                    parts.append(chunk)
-                    buffer.append(chunk)
-                    pending += len(chunk)
-                    if pending >= self.flush_bytes:
-                        await flush()
-                    continue
-                if isinstance(event, self.events.tool_start):
-                    visible = cast(_ToolStartEvent, event)
-                    if first_visible_event_ms is None:
-                        first_visible_event_ms = int((self.monotonic() - started) * 1000)
-                        if self.milestone is not None:
-                            self.milestone("first_visible_event")
-                    call_names[visible.id] = visible.name
-                    call_json[visible.id] = []
-                    call_order.append(visible.id)
-                    continue
-                if isinstance(event, self.events.tool_delta):
-                    delta = cast(_ToolDeltaEvent, event)
-                    call_json[delta.id].append(delta.partial_json)
-                    continue
-                if isinstance(event, self.events.reasoning):
-                    reasoning.append(cast(ReasoningT, event))
-                    continue
-                if isinstance(event, self.events.usage):
-                    usages.append(cast(UsageT, event))
-                    continue
-                raise TypeError(f"unknown model stream event: {type(event).__name__}")
+                await state.accept(event)
         except Exception as caught:
             error = caught
         finally:
@@ -185,46 +124,131 @@ class ModelRoundRunner[RequestT, ToolCallT, ReasoningT, UsageT]:
                 if error is None:
                     error = caught
         wall_ms = int((self.monotonic() - started) * 1000)
-        await flush()
+        await state.flush()
+        return state.result(error, wall_ms)
 
+
+class _RoundState[RequestT, ToolCallT, ReasoningT, UsageT]:
+    def __init__(
+        self,
+        runner: ModelRoundRunner[RequestT, ToolCallT, ReasoningT, UsageT],
+        text_filter: TextFilter,
+        started: float,
+    ) -> None:
+        self.runner = runner
+        self.text_filter = text_filter
+        self.started = started
+        self.parts: list[str] = []
+        self.buffer: list[str] = []
+        self.pending = 0
+        self.flush_lock = asyncio.Lock()
+        self.call_names: dict[str, str] = {}
+        self.call_json: dict[str, list[str]] = {}
+        self.call_order: list[str] = []
+        self.reasoning: list[ReasoningT] = []
+        self.usages: list[UsageT] = []
+        self.provider_start_ms: int | None = None
+        self.first_visible_event_ms: int | None = None
+
+    async def accept(self, event: object) -> None:
+        if isinstance(event, self.runner.events.stream_start):
+            if self.provider_start_ms is None:
+                self.provider_start_ms = self._elapsed_ms()
+                if self.runner.milestone is not None:
+                    self.runner.milestone("provider_start")
+            return
+        if isinstance(event, self.runner.events.text):
+            chunk = cast(_TextEvent, event).text
+            if chunk:
+                self._mark_visible()
+            self.parts.append(chunk)
+            self.buffer.append(chunk)
+            self.pending += len(chunk)
+            if self.pending >= self.runner.flush_bytes:
+                await self.flush()
+            return
+        if isinstance(event, self.runner.events.tool_start):
+            visible = cast(_ToolStartEvent, event)
+            self._mark_visible()
+            self.call_names[visible.id] = visible.name
+            self.call_json[visible.id] = []
+            self.call_order.append(visible.id)
+            return
+        if isinstance(event, self.runner.events.tool_delta):
+            delta = cast(_ToolDeltaEvent, event)
+            self.call_json[delta.id].append(delta.partial_json)
+            return
+        if isinstance(event, self.runner.events.reasoning):
+            self.reasoning.append(cast(ReasoningT, event))
+            return
+        if isinstance(event, self.runner.events.usage):
+            self.usages.append(cast(UsageT, event))
+            return
+        raise TypeError(f"unknown model stream event: {type(event).__name__}")
+
+    async def flush(self) -> None:
+        async with self.flush_lock:
+            if not self.buffer:
+                return
+            visible = self.text_filter.feed("".join(self.buffer))
+            self.buffer.clear()
+            self.pending = 0
+            if visible:
+                published = self.runner.publish_text(visible)
+                if inspect.isawaitable(published):
+                    await published
+
+    def result(
+        self, error: Exception | None, wall_ms: int
+    ) -> CollectedRound[ToolCallT, ReasoningT, UsageT]:
         if error is not None:
             partial_calls = tuple(
-                f"[tool call: {call_names[call_id]}]\n{''.join(call_json[call_id])}"
-                for call_id in call_order
+                f"[tool call: {self.call_names[call_id]}]\n{''.join(self.call_json[call_id])}"
+                for call_id in self.call_order
             )
             return CollectedRound(
-                usages=tuple(usages),
+                usages=tuple(self.usages),
                 error_class=type(error).__name__,
                 error_message=str(error),
                 error_kind=error.kind if isinstance(error, ModelStreamInterrupted) else None,
                 partial_output="\n\n".join(
-                    segment for segment in ("".join(parts), *partial_calls) if segment
+                    segment for segment in ("".join(self.parts), *partial_calls) if segment
                 ),
                 wall_ms=wall_ms,
-                provider_start_ms=provider_start_ms,
-                first_visible_event_ms=first_visible_event_ms,
+                provider_start_ms=self.provider_start_ms,
+                first_visible_event_ms=self.first_visible_event_ms,
             )
-        if not usages:
+        if not self.usages:
             raise RuntimeError("model stream produced no usage")
         tool_calls = tuple(
-            self.new_tool_call(
+            self.runner.new_tool_call(
                 call_id,
-                call_names[call_id],
+                self.call_names[call_id],
                 cast(
                     dict[str, object],
-                    json.loads("".join(call_json[call_id]))
-                    if "".join(call_json[call_id]).strip()
+                    json.loads("".join(self.call_json[call_id]))
+                    if "".join(self.call_json[call_id]).strip()
                     else {},
                 ),
             )
-            for call_id in call_order
+            for call_id in self.call_order
         )
         return CollectedRound(
-            text="".join(parts),
+            text="".join(self.parts),
             tool_calls=tool_calls,
-            reasoning=tuple(reasoning),
-            usages=tuple(usages),
+            reasoning=tuple(self.reasoning),
+            usages=tuple(self.usages),
             wall_ms=wall_ms,
-            provider_start_ms=provider_start_ms,
-            first_visible_event_ms=first_visible_event_ms,
+            provider_start_ms=self.provider_start_ms,
+            first_visible_event_ms=self.first_visible_event_ms,
         )
+
+    def _mark_visible(self) -> None:
+        if self.first_visible_event_ms is not None:
+            return
+        self.first_visible_event_ms = self._elapsed_ms()
+        if self.runner.milestone is not None:
+            self.runner.milestone("first_visible_event")
+
+    def _elapsed_ms(self) -> int:
+        return int((self.runner.monotonic() - self.started) * 1000)

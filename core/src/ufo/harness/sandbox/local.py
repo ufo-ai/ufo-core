@@ -168,46 +168,71 @@ class LocalCarrier:
             raise TypeError("invalid skill load payload")
         roots: dict[str, str] = {}
         for name, digest in system.items():
-            if not isinstance(name, str) or not isinstance(digest, str):
-                raise TypeError("invalid system skill")
-            contained_relative(name, str(root))
-            declared = manifest_skills.get(name)
-            if not isinstance(declared, Mapping) or declared.get("digest") != digest:
-                continue
-            files = declared.get("files")
-            if not isinstance(files, list) or any(not isinstance(path, str) for path in files):
-                raise TypeError(f"invalid system skill manifest: {name}")
-            contents = self._read_skill_files(root, name, files)
-            if self._skill_digest(contents) == digest:
-                roots[name] = contained_relative(name, str(root))
+            loaded = self._load_system_skill(root, manifest_skills, name, digest)
+            if loaded is not None:
+                loaded_name, loaded_root = loaded
+                roots[loaded_name] = loaded_root
         system_names = tuple(system)
         for name, encoded in user.items():
-            if not isinstance(name, str) or not isinstance(encoded, Mapping):
-                raise TypeError("invalid user skill")
-            self._validate_user_skill_name(name, root)
-            if any(
-                system_name == name
-                or system_name.startswith(f"{name}/")
-                or name.startswith(f"{system_name}/")
-                for system_name in system_names
-            ):
-                raise ValueError(f"user skill conflicts with system skill: {name}")
-            digest = encoded.get("digest")
-            files = encoded.get("files")
-            if not isinstance(digest, str) or not isinstance(files, Mapping):
-                raise TypeError(f"invalid user skill: {name}")
-            contents = []
-            for path, content in files.items():
-                if not isinstance(path, str) or not isinstance(content, str):
-                    raise TypeError(f"invalid user skill file: {name}")
-                contained_relative(path, f"/{name}")
-                contents.append((path, urlsafe_b64decode(content)))
-            contents.sort()
-            if self._skill_digest(contents) != digest:
-                raise ValueError(f"user skill does not match its digest: {name}")
-            self._install_user_skill(root, name, contents)
-            roots[name] = contained_relative(name, str(root))
+            loaded_name, loaded_root = self._load_user_skill(root, system_names, name, encoded)
+            roots[loaded_name] = loaded_root
         return roots
+
+    def _load_system_skill(
+        self,
+        root: Path,
+        manifest_skills: Mapping[object, object],
+        name: object,
+        digest: object,
+    ) -> tuple[str, str] | None:
+        if not isinstance(name, str) or not isinstance(digest, str):
+            raise TypeError("invalid system skill")
+        contained_relative(name, str(root))
+        declared = manifest_skills.get(name)
+        if not isinstance(declared, Mapping) or declared.get("digest") != digest:
+            return None
+        files = declared.get("files")
+        if not isinstance(files, list) or any(not isinstance(path, str) for path in files):
+            raise TypeError(f"invalid system skill manifest: {name}")
+        contents = self._read_skill_files(root, name, files)
+        if self._skill_digest(contents) != digest:
+            return None
+        return name, contained_relative(name, str(root))
+
+    def _load_user_skill(
+        self,
+        root: Path,
+        system_names: tuple[object, ...],
+        name: object,
+        encoded: object,
+    ) -> tuple[str, str]:
+        if not isinstance(name, str) or not isinstance(encoded, Mapping):
+            raise TypeError("invalid user skill")
+        self._validate_user_skill_name(name, root)
+        if any(
+            system_name == name
+            or (
+                isinstance(system_name, str)
+                and (system_name.startswith(f"{name}/") or name.startswith(f"{system_name}/"))
+            )
+            for system_name in system_names
+        ):
+            raise ValueError(f"user skill conflicts with system skill: {name}")
+        digest = encoded.get("digest")
+        files = encoded.get("files")
+        if not isinstance(digest, str) or not isinstance(files, Mapping):
+            raise TypeError(f"invalid user skill: {name}")
+        contents: list[tuple[str, bytes]] = []
+        for path, content in files.items():
+            if not isinstance(path, str) or not isinstance(content, str):
+                raise TypeError(f"invalid user skill file: {name}")
+            contained_relative(path, f"/{name}")
+            contents.append((path, urlsafe_b64decode(content)))
+        contents.sort()
+        if self._skill_digest(contents) != digest:
+            raise ValueError(f"user skill does not match its digest: {name}")
+        self._install_user_skill(root, name, contents)
+        return name, contained_relative(name, str(root))
 
     @staticmethod
     def _system_manifest(root: Path) -> Mapping[str, object]:

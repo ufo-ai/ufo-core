@@ -3,6 +3,12 @@ default_install_hook_types: [pre-commit, pre-push]
 repos:
   - repo: local
     hooks:
+      - id: complexity
+        name: cyclomatic complexity
+        entry: uv run ruff check --select C901 .
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: ruff-check
         name: ruff check
         entry: uv run ruff check

@@ -266,96 +266,17 @@ class PartitionWalk:
         try:
             async for partition in partition_iter:
                 seen.add(partition)
-                if self.ordering is Ordering.none:
-                    if partition in stored:
-                        continue
-                    page_iter = self.pages(partition, PartitionBound())
-                    try:
-                        async for page in page_iter:
-                            yield StreamPage(
-                                records=page.records,
-                                deletes=page.deletes,
-                                next_cursor=self._encode(checkpoint),
-                            )
-                    except PartitionSkipped:
-                        continue
-                    finally:
-                        if isinstance(page_iter, AsyncGenerator):
-                            await page_iter.aclose()
-                    checkpoint[partition] = ""
-                    yield StreamPage(records=[], next_cursor=self._encode(checkpoint))
-                    continue
-                high: str | None
-                until: str | None
-                synced: str | None
-                match stored.get(partition):
-                    case _Window(high=high, until=until):
-                        bound, synced, backfill = (
-                            PartitionBound(before=until, since=self.floor),
-                            None,
-                            True,
-                        )
-                    case str() as synced:
-                        bound, high, until, backfill = (
-                            PartitionBound(after=synced),
-                            synced,
-                            None,
-                            False,
-                        )
-                    case _:
-                        backfill = self.ordering is Ordering.newest_first
-                        bound, high, until, synced = (
-                            PartitionBound(since=self.floor if backfill else None),
-                            None,
-                            None,
-                            None,
-                        )
-                page_iter = self.pages(partition, bound)
+                page_iter = (
+                    self._stream_unordered(partition, stored, checkpoint)
+                    if self.ordering is Ordering.none
+                    else self._stream_ordered(partition, stored, checkpoint)
+                )
                 try:
                     async for page in page_iter:
-                        if (
-                            self.ordering is Ordering.newest_first
-                            and not backfill
-                            and synced is not None
-                            and page.high is not None
-                            and page.high < synced
-                        ):
-                            break
-                        if page.high is not None and (high is None or page.high > high):
-                            high = page.high
-                        if (
-                            backfill
-                            and page.low is not None
-                            and (until is None or page.low < until)
-                        ):
-                            until = page.low
-                        grounded = (
-                            backfill
-                            and self.floor is not None
-                            and until is not None
-                            and until <= self.floor
-                        )
-                        if backfill and high is not None and until is not None and not grounded:
-                            checkpoint[partition] = _Window(high=high, until=until)
-                        elif not backfill and high is not None:
-                            checkpoint[partition] = high
-                        yield StreamPage(
-                            records=page.records,
-                            deletes=page.deletes,
-                            next_cursor=self._encode(checkpoint),
-                        )
-                        if grounded:
-                            # reached the floor: dissolve to the watermark below rather than leave
-                            # a window a later run keeps descending from
-                            break
-                except PartitionSkipped:
-                    continue
+                        yield page
                 finally:
                     if isinstance(page_iter, AsyncGenerator):
                         await page_iter.aclose()
-                if backfill and high is not None:
-                    checkpoint[partition] = high
-                    yield StreamPage(records=[], next_cursor=self._encode(checkpoint))
         finally:
             if isinstance(partition_iter, AsyncGenerator):
                 await partition_iter.aclose()
@@ -366,6 +287,96 @@ class PartitionWalk:
         )
         if completed != checkpoint:
             yield StreamPage(records=[], next_cursor=self._encode(completed))
+
+    async def _stream_unordered(
+        self,
+        partition: str,
+        stored: dict[str, str | _Window],
+        checkpoint: dict[str, str | _Window],
+    ) -> AsyncIterator[StreamPage]:
+        if partition in stored:
+            return
+        page_iter = self.pages(partition, PartitionBound())
+        try:
+            async for page in page_iter:
+                yield StreamPage(
+                    records=page.records,
+                    deletes=page.deletes,
+                    next_cursor=self._encode(checkpoint),
+                )
+        except PartitionSkipped:
+            return
+        finally:
+            if isinstance(page_iter, AsyncGenerator):
+                await page_iter.aclose()
+        checkpoint[partition] = ""
+        yield StreamPage(records=[], next_cursor=self._encode(checkpoint))
+
+    async def _stream_ordered(
+        self,
+        partition: str,
+        stored: dict[str, str | _Window],
+        checkpoint: dict[str, str | _Window],
+    ) -> AsyncIterator[StreamPage]:
+        bound, high, until, synced, backfill = self._ordered_state(stored.get(partition))
+        page_iter = self.pages(partition, bound)
+        try:
+            async for page in page_iter:
+                if (
+                    self.ordering is Ordering.newest_first
+                    and not backfill
+                    and synced is not None
+                    and page.high is not None
+                    and page.high < synced
+                ):
+                    break
+                if page.high is not None and (high is None or page.high > high):
+                    high = page.high
+                if backfill and page.low is not None and (until is None or page.low < until):
+                    until = page.low
+                grounded = (
+                    backfill
+                    and self.floor is not None
+                    and until is not None
+                    and until <= self.floor
+                )
+                if backfill and high is not None and until is not None and not grounded:
+                    checkpoint[partition] = _Window(high=high, until=until)
+                elif not backfill and high is not None:
+                    checkpoint[partition] = high
+                yield StreamPage(
+                    records=page.records,
+                    deletes=page.deletes,
+                    next_cursor=self._encode(checkpoint),
+                )
+                if grounded:
+                    break
+        except PartitionSkipped:
+            return
+        finally:
+            if isinstance(page_iter, AsyncGenerator):
+                await page_iter.aclose()
+        if backfill and high is not None:
+            checkpoint[partition] = high
+            yield StreamPage(records=[], next_cursor=self._encode(checkpoint))
+
+    def _ordered_state(
+        self, stored: str | _Window | None
+    ) -> tuple[PartitionBound, str | None, str | None, str | None, bool]:
+        match stored:
+            case _Window(high=high, until=until):
+                return PartitionBound(before=until, since=self.floor), high, until, None, True
+            case str() as synced:
+                return PartitionBound(after=synced), synced, None, synced, False
+            case _:
+                backfill = self.ordering is Ordering.newest_first
+                return (
+                    PartitionBound(since=self.floor if backfill else None),
+                    None,
+                    None,
+                    None,
+                    backfill,
+                )
 
     @staticmethod
     def _decode(cursor: str | None) -> dict[str, str | _Window]:

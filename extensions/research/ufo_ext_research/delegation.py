@@ -14,6 +14,7 @@ entities return their memoized result, only the remainder is fresh work."""
 import asyncio
 import json
 import shlex
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Literal
 
@@ -71,6 +72,117 @@ async def _read_lines(ctx: ToolContext, path: str) -> list[str]:
     return entities
 
 
+@dataclass(frozen=True)
+class _WideResearch:
+    ctx: ToolContext
+    args: WideResearchInput
+    entities: list[str]
+    call_id: str
+    recovery_path: str
+    recovery_staging_path: str
+    output_schema: str
+    result_paths: dict[str, str]
+    recovered_rows: dict[str, WideResearchRow]
+    persisted_result_paths: set[str]
+    completed_rows: dict[str, WideResearchRow]
+    semaphore: asyncio.Semaphore
+    aggregate_lock: asyncio.Lock
+
+    async def run(self) -> ToolResult:
+        self.ctx.cleanup.register(self._remove_result_files)
+        rows = tuple(await asyncio.gather(*(self._visit(entity) for entity in self.entities)))
+        output = WideResearchFile(call_id=self.call_id, rows=rows).model_dump(mode="json")
+        await self._install_recovery(rows)
+        await self.ctx.sandbox.write_file(
+            WIDE_RESEARCH_OUTPUT, json.dumps(output, indent=2).encode()
+        )
+        return ToolResult(
+            content=(TextContent(text=json.dumps({**output, "output_file": WIDE_RESEARCH_OUTPUT})),)
+        )
+
+    async def _remove_result_files(self) -> None:
+        if not self.persisted_result_paths:
+            return
+        removed = await self.ctx.sandbox.bash(
+            "rm -f -- " + " ".join(shlex.quote(path) for path in self.persisted_result_paths)
+        )
+        if removed.exit_code != 0:
+            raise OSError(removed.stderr.strip() or "cannot remove wide research result files")
+
+    async def _install_recovery(self, rows: tuple[WideResearchRow, ...]) -> None:
+        aggregate = WideResearchFile(call_id=self.call_id, rows=rows).model_dump(mode="json")
+        await self.ctx.sandbox.write_file(
+            self.recovery_staging_path,
+            json.dumps(aggregate, indent=2).encode(),
+        )
+        installed = await self.ctx.sandbox.bash(
+            f"mv -f -- {shlex.quote(self.recovery_staging_path)} {shlex.quote(self.recovery_path)}"
+        )
+        if installed.exit_code != 0:
+            raise OSError(installed.stderr.strip() or "cannot install wide research recovery file")
+
+    async def _save_row(self, row: WideResearchRow) -> None:
+        async with self.aggregate_lock:
+            self.completed_rows[row.entity] = row
+            await self._install_recovery(
+                tuple(
+                    self.completed_rows[entity]
+                    for entity in self.entities
+                    if entity in self.completed_rows
+                )
+            )
+            self.persisted_result_paths.add(self.result_paths[row.entity])
+
+    async def _visit(self, entity: str) -> WideResearchRow:
+        async with self.semaphore:
+            if entity in self.recovered_rows:
+                return self.recovered_rows[entity]
+            idempotency_key = self.ctx.idempotency_key
+            if idempotency_key is None:
+                raise RuntimeError("wide_research requires a call idempotency key")
+            child_key = f"{idempotency_key}/{entity}"
+            result_path = self.result_paths[entity]
+            objective = self.args.prompt_template.replace("{entity}", entity)
+            if self.output_schema.strip():
+                objective = (
+                    f"{objective}\n\nWrite the complete result as JSON to {result_path}. It must "
+                    f"match this schema:\n{self.output_schema}\n\nReturn only the result path."
+                )
+            else:
+                objective = (
+                    f"{objective}\n\nWrite the complete result as JSON to {result_path}. Return "
+                    "only the result path."
+                )
+            spawned = await self.ctx.spawn(
+                f"profile:{RESEARCH_PROFILE_NAME}",
+                {"objective": objective},
+                dedup_key=child_key,
+            )
+            read = await self.ctx.sandbox.bash(f"cat {shlex.quote(result_path)}")
+            if read.exit_code != 0:
+                error = (read.stderr.strip() or f"cannot read {result_path}")[
+                    :WIDE_RESEARCH_ERROR_MAX_CHARS
+                ]
+                if spawned.output is not None:
+                    child_result = ResearchOutput.model_validate(spawned.output.model_dump()).result
+                    error = f"{error}; child: {child_result}"[:WIDE_RESEARCH_ERROR_MAX_CHARS]
+                row = WideResearchRow(entity=entity, error=error)
+                await self._save_row(row)
+                return row
+            try:
+                result = json.loads(read.stdout)
+            except json.JSONDecodeError as error:
+                row = WideResearchRow(
+                    entity=entity,
+                    error=f"{result_path} is not JSON: {error}"[:WIDE_RESEARCH_ERROR_MAX_CHARS],
+                )
+                await self._save_row(row)
+                return row
+            row = WideResearchRow(entity=entity, result=result)
+            await self._save_row(row)
+            return row
+
+
 async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResult:
     if ctx.idempotency_key is None:
         raise RuntimeError("wide_research requires a call idempotency key")
@@ -112,93 +224,21 @@ async def _wide_research(ctx: ToolContext, args: WideResearchInput) -> ToolResul
     persisted_result_paths = {
         result_paths[entity] for entity in recovered_rows if entity in result_paths
     }
-    completed_rows = dict(recovered_rows)
-    aggregate_lock = asyncio.Lock()
-
-    async def remove_result_files() -> None:
-        if not persisted_result_paths:
-            return
-        removed = await ctx.sandbox.bash(
-            "rm -f -- " + " ".join(shlex.quote(path) for path in persisted_result_paths)
-        )
-        if removed.exit_code != 0:
-            raise OSError(removed.stderr.strip() or "cannot remove wide research result files")
-
-    ctx.cleanup.register(remove_result_files)
-
-    async def install_recovery(rows: tuple[WideResearchRow, ...]) -> None:
-        aggregate = WideResearchFile(call_id=call_id, rows=rows).model_dump(mode="json")
-        await ctx.sandbox.write_file(
-            recovery_staging_path,
-            json.dumps(aggregate, indent=2).encode(),
-        )
-        installed = await ctx.sandbox.bash(
-            f"mv -f -- {shlex.quote(recovery_staging_path)} {shlex.quote(recovery_path)}"
-        )
-        if installed.exit_code != 0:
-            raise OSError(installed.stderr.strip() or "cannot install wide research recovery file")
-
-    async def save_row(row: WideResearchRow) -> None:
-        async with aggregate_lock:
-            completed_rows[row.entity] = row
-            await install_recovery(
-                tuple(completed_rows[entity] for entity in entities if entity in completed_rows)
-            )
-            persisted_result_paths.add(result_paths[row.entity])
-
-    async def visit(entity: str) -> WideResearchRow:
-        async with semaphore:
-            if entity in recovered_rows:
-                return recovered_rows[entity]
-            child_key = f"{ctx.idempotency_key}/{entity}"
-            result_path = result_paths[entity]
-            objective = args.prompt_template.replace("{entity}", entity)
-            if output_schema.strip():
-                objective = (
-                    f"{objective}\n\nWrite the complete result as JSON to {result_path}. It must "
-                    f"match this schema:\n{output_schema}\n\nReturn only the result path."
-                )
-            else:
-                objective = (
-                    f"{objective}\n\nWrite the complete result as JSON to {result_path}. Return "
-                    "only the result path."
-                )
-            spawned = await ctx.spawn(
-                f"profile:{RESEARCH_PROFILE_NAME}",
-                {"objective": objective},
-                dedup_key=child_key,
-            )
-            read = await ctx.sandbox.bash(f"cat {shlex.quote(result_path)}")
-            if read.exit_code != 0:
-                error = (read.stderr.strip() or f"cannot read {result_path}")[
-                    :WIDE_RESEARCH_ERROR_MAX_CHARS
-                ]
-                if spawned.output is not None:
-                    child_result = ResearchOutput.model_validate(spawned.output.model_dump()).result
-                    error = f"{error}; child: {child_result}"[:WIDE_RESEARCH_ERROR_MAX_CHARS]
-                row = WideResearchRow(entity=entity, error=error)
-                await save_row(row)
-                return row
-            try:
-                result = json.loads(read.stdout)
-            except json.JSONDecodeError as error:
-                row = WideResearchRow(
-                    entity=entity,
-                    error=f"{result_path} is not JSON: {error}"[:WIDE_RESEARCH_ERROR_MAX_CHARS],
-                )
-                await save_row(row)
-                return row
-            row = WideResearchRow(entity=entity, result=result)
-            await save_row(row)
-            return row
-
-    rows = tuple(await asyncio.gather(*(visit(entity) for entity in entities)))
-    output = WideResearchFile(call_id=call_id, rows=rows).model_dump(mode="json")
-    await install_recovery(rows)
-    await ctx.sandbox.write_file(WIDE_RESEARCH_OUTPUT, json.dumps(output, indent=2).encode())
-    return ToolResult(
-        content=(TextContent(text=json.dumps({**output, "output_file": WIDE_RESEARCH_OUTPUT})),)
-    )
+    return await _WideResearch(
+        ctx,
+        args,
+        entities,
+        call_id,
+        recovery_path,
+        recovery_staging_path,
+        output_schema,
+        result_paths,
+        recovered_rows,
+        persisted_result_paths,
+        dict(recovered_rows),
+        semaphore,
+        asyncio.Lock(),
+    ).run()
 
 
 WIDE_RESEARCH_TOOL = ToolDef(

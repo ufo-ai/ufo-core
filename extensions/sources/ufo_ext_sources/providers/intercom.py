@@ -223,36 +223,8 @@ class IntercomConnector(RestConnector):
         cursor: str | None,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
-            name = stream.name
-            if name in _SEARCH_PATHS:
-                async for page in self._paginate_search(client, stream, cursor=cursor):
-                    yield page
-                return
-            if name == "companies":
-                async for page in self._paginate_scroll(client):
-                    yield page
-                return
-            if name in _LIST_PATHS:
-                async for page in self._paginate_list(client, stream):
-                    yield page
-                return
-            if name in _ATTRIBUTE_MODELS:
-                async for page in self._paginate_attributes(client, stream):
-                    yield page
-                return
-            if name == "conversation_parts":
-                async for page in self._paginate_conversation_parts(client, cursor=cursor):
-                    yield page
-                return
-            if name == "company_segments":
-                async for page in self._paginate_company_segments(client):
-                    yield page
-                return
-            if name == "activity_logs":
-                async for page in self._paginate_activity_logs(client, cursor=cursor):
-                    yield page
-                return
-            raise NotImplementedError(f"intercom: no pagination strategy for stream {name!r}")
+            async for page in self._stream_pages(client, stream, cursor):
+                yield page
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
@@ -260,6 +232,26 @@ class IntercomConnector(RestConnector):
                     "lacks the scope"
                 ) from error
             raise
+
+    def _stream_pages(
+        self, client: httpx.AsyncClient, stream: StreamSpec, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        name = stream.name
+        if name in _SEARCH_PATHS:
+            return self._paginate_search(client, stream, cursor=cursor)
+        if name == "companies":
+            return self._paginate_scroll(client)
+        if name in _LIST_PATHS:
+            return self._paginate_list(client, stream)
+        if name in _ATTRIBUTE_MODELS:
+            return self._paginate_attributes(client, stream)
+        if name == "conversation_parts":
+            return self._paginate_conversation_parts(client, cursor=cursor)
+        if name == "company_segments":
+            return self._paginate_company_segments(client)
+        if name == "activity_logs":
+            return self._paginate_activity_logs(client, cursor=cursor)
+        raise NotImplementedError(f"intercom: no pagination strategy for stream {name!r}")
 
     async def _paginate_search(
         self,

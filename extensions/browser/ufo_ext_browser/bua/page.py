@@ -476,36 +476,48 @@ def _node_by_backend(frame: FrameSnapshot, backend_id: int) -> str | None:
     return None
 
 
-def render_page(
-    root: FrameSnapshot,
-    *,
-    viewport: Size,
-    model_size: Size | None = None,
-    filter_type: str = "all",
-    max_depth: int = DEFAULT_MAX_DEPTH,
-    ref: str | None = None,
-) -> str | None:
-    target = effective_model_size(viewport, model_size)
-    scale_x = target.width / viewport.width
-    scale_y = target.height / viewport.height
-    lines: list[str] = []
-    visited: set[tuple[int, str]] = set()
+@dataclass(frozen=True)
+class _PageRenderer:
+    viewport: Size
+    scale_x: float
+    scale_y: float
+    filter_type: str
+    max_depth: int
+    lines: list[str] = field(default_factory=list)
+    visited: set[tuple[int, str]] = field(default_factory=set)
 
-    def coord_str(geom: NodeGeom | None) -> str:
+    def render(self, root: FrameSnapshot, ref: str | None) -> str | None:
+        if ref is not None:
+            parsed = split_ref(ref)
+            if parsed is None:
+                return None
+            prefix, backend_id = parsed
+            frame = _frame_by_prefix(root, prefix)
+            if frame is None:
+                return None
+            start = _node_by_backend(frame, backend_id)
+            if start is None:
+                return None
+            self._render_node(frame, start, 0, "")
+        elif root.root_ax_id is not None:
+            self._render_node(root, root.root_ax_id, 0, "")
+        return "\n".join(self.lines)
+
+    def _coord_str(self, geom: NodeGeom | None) -> str:
         if geom is None or geom.bounds is None:
             return ""
         bx, by, bw, bh = geom.bounds
-        return f" (x={int((bx + bw / 2) * scale_x)},y={int((by + bh / 2) * scale_y)})"
+        return f" (x={int((bx + bw / 2) * self.scale_x)},y={int((by + bh / 2) * self.scale_y)})"
 
-    def splice(frame: FrameSnapshot, backend_id: int | None, depth: int) -> None:
+    def _splice(self, frame: FrameSnapshot, backend_id: int | None, depth: int) -> None:
         child = frame.children.get(backend_id) if backend_id is not None else None
         if child is not None and child.root_ax_id is not None:
-            render_node(child, child.root_ax_id, depth, "")
+            self._render_node(child, child.root_ax_id, depth, "")
 
-    def render_node(frame: FrameSnapshot, ax_id: str, depth: int, parent_name: str) -> None:
-        if depth > max_depth or (id(frame), ax_id) in visited:
+    def _render_node(self, frame: FrameSnapshot, ax_id: str, depth: int, parent_name: str) -> None:
+        if depth > self.max_depth or (id(frame), ax_id) in self.visited:
             return
-        visited.add((id(frame), ax_id))
+        self.visited.add((id(frame), ax_id))
         node = frame.ax_by_id.get(ax_id)
         if node is None or _ax_property(node, "hidden"):
             return
@@ -517,12 +529,6 @@ def render_page(
             as_str(child, "childIds[]") for child in as_list(node.get("childIds") or [], "childIds")
         ]
         geom = frame.geom.get(backend_id) if backend_id is not None else None
-
-        def descend(child_depth: int, child_parent_name: str) -> None:
-            for child_id in child_ids:
-                render_node(frame, child_id, child_depth, child_parent_name)
-            splice(frame, backend_id, child_depth)
-
         if role == "StaticText" and name == parent_name:
             return
         transparent = (
@@ -530,22 +536,24 @@ def render_page(
             or (role in IGNORED_ROLES and not name)
             or _should_skip(node, role, name)
             or (
-                filter_type == "interactive"
+                self.filter_type == "interactive"
                 and role not in INTERACTIVE_ROLES
                 and not (geom is not None and geom.cursor_pointer)
             )
         )
         if transparent:
-            descend(depth, parent_name)
+            self._descend(frame, backend_id, child_ids, depth, parent_name)
             return
-        if filter_type == "viewport" and geom is not None and geom.bounds is not None:
+        if self.filter_type == "viewport" and geom is not None and geom.bounds is not None:
             bx, by, bw, bh = geom.bounds
             offscreen = (
-                bx + bw <= 0 or by + bh <= 0 or bx >= viewport.width or by >= viewport.height
+                bx + bw <= 0
+                or by + bh <= 0
+                or bx >= self.viewport.width
+                or by >= self.viewport.height
             )
             if bw <= 0 or bh <= 0 or offscreen:
                 return
-
         ref_str = ""
         if backend_id is not None and role != "option":
             ref_str = f" [ref={frame.prefix}e{backend_id}]"
@@ -555,24 +563,40 @@ def render_page(
         name_str = f' "{_truncate(display_name, MAX_NAME_LEN)}"' if display_name else ""
         indent = "  " * depth
         extras = _format_extras(node, geom)
-        lines.append(f"{indent}- {role}{name_str}{ref_str}{coord_str(geom)}{extras}")
-        descend(depth + 1, name)
+        self.lines.append(f"{indent}- {role}{name_str}{ref_str}{self._coord_str(geom)}{extras}")
+        self._descend(frame, backend_id, child_ids, depth + 1, name)
 
-    if ref is not None:
-        parsed = split_ref(ref)
-        if parsed is None:
-            return None
-        prefix, backend_id = parsed
-        frame = _frame_by_prefix(root, prefix)
-        if frame is None:
-            return None
-        start = _node_by_backend(frame, backend_id)
-        if start is None:
-            return None
-        render_node(frame, start, 0, "")
-    elif root.root_ax_id is not None:
-        render_node(root, root.root_ax_id, 0, "")
-    return "\n".join(lines)
+    def _descend(
+        self,
+        frame: FrameSnapshot,
+        backend_id: int | None,
+        child_ids: list[str],
+        depth: int,
+        parent_name: str,
+    ) -> None:
+        for child_id in child_ids:
+            self._render_node(frame, child_id, depth, parent_name)
+        self._splice(frame, backend_id, depth)
+
+
+def render_page(
+    root: FrameSnapshot,
+    *,
+    viewport: Size,
+    model_size: Size | None = None,
+    filter_type: str = "all",
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    ref: str | None = None,
+) -> str | None:
+    target = effective_model_size(viewport, model_size)
+    renderer = _PageRenderer(
+        viewport,
+        target.width / viewport.width,
+        target.height / viewport.height,
+        filter_type,
+        max_depth,
+    )
+    return renderer.render(root, ref)
 
 
 HEADING_ROLES = {"heading"}
@@ -580,29 +604,32 @@ LIST_ITEM_ROLES = {"listitem"}
 BLOCK_ROLES = {"paragraph", "blockquote", "article", "Section", "main", "region"}
 
 
-def render_markdown(root: FrameSnapshot) -> str:
-    """Reading view: the accessibility tree rendered as markdown — headings keep their level, links
-    carry their href, list items bullet, and inline text merges into paragraphs bounded by
-    BLOCK_ROLES nodes — so the model reads structure, not a flat innerText smear.
-    Same frame splice as render_page."""
-    blocks: list[str] = []
-    visited: set[tuple[int, str]] = set()
-    inline: list[str] = []
+@dataclass(frozen=True)
+class _MarkdownRenderer:
+    blocks: list[str] = field(default_factory=list)
+    visited: set[tuple[int, str]] = field(default_factory=set)
+    inline: list[str] = field(default_factory=list)
 
-    def emit(text: str) -> None:
+    def render(self, root: FrameSnapshot) -> str:
+        if root.root_ax_id is not None:
+            self._walk(root, root.root_ax_id, "")
+            self._flush()
+        return "\n\n".join(self.blocks)
+
+    def _emit(self, text: str) -> None:
         text = text.strip()
-        if text and (not blocks or blocks[-1] != text):
-            blocks.append(text)
+        if text and (not self.blocks or self.blocks[-1] != text):
+            self.blocks.append(text)
 
-    def flush() -> None:
-        if inline:
-            emit(" ".join(inline))
-            inline.clear()
+    def _flush(self) -> None:
+        if self.inline:
+            self._emit(" ".join(self.inline))
+            self.inline.clear()
 
-    def walk(frame: FrameSnapshot, ax_id: str, parent_name: str) -> None:
-        if (id(frame), ax_id) in visited:
+    def _walk(self, frame: FrameSnapshot, ax_id: str, parent_name: str) -> None:
+        if (id(frame), ax_id) in self.visited:
             return
-        visited.add((id(frame), ax_id))
+        self.visited.add((id(frame), ax_id))
         node = frame.ax_by_id.get(ax_id)
         if node is None or _ax_property(node, "hidden"):
             return
@@ -610,45 +637,56 @@ def render_markdown(root: FrameSnapshot) -> str:
         name = _ax_value(node.get("name"))
         backend = node.get("backendDOMNodeId")
         backend_id = backend if isinstance(backend, int) else None
-
         if not (role == "StaticText" and name == parent_name):
-            if role in BLOCK_ROLES:
-                flush()
-                if name:
-                    emit(name)
-            elif role in HEADING_ROLES and name:
-                level = _ax_property(node, "level")
-                depth = int(level) if isinstance(level, int) and 1 <= level <= 6 else 1
-                flush()
-                emit(f"{'#' * depth} {name}")
-            elif role == "link" and name:
-                url = _ax_property(node, "url")
-                inline.append(f"[{name}]({url})" if isinstance(url, str) and url else name)
-            elif role in LIST_ITEM_ROLES and name:
-                flush()
-                emit(f"- {name}")
-            elif role == "image" and (name or (backend_id and frame.geom.get(backend_id))):
-                geom = frame.geom.get(backend_id) if backend_id is not None else None
-                alt = name or _image_name(geom.img_src if geom else None)
-                if alt:
-                    flush()
-                    emit(f"![{alt}]")
-            elif name and role not in IGNORED_ROLES:
-                inline.append(name)
-
+            self._render_content(frame, backend_id, role, name, node)
         for child in as_list(node.get("childIds") or [], "childIds"):
-            walk(frame, as_str(child, "childIds[]"), name)
+            self._walk(frame, as_str(child, "childIds[]"), name)
         if role in BLOCK_ROLES:
-            flush()
+            self._flush()
         child_frame = frame.children.get(backend_id) if backend_id is not None else None
         if child_frame is not None and child_frame.root_ax_id is not None:
-            flush()
-            walk(child_frame, child_frame.root_ax_id, "")
+            self._flush()
+            self._walk(child_frame, child_frame.root_ax_id, "")
 
-    if root.root_ax_id is not None:
-        walk(root, root.root_ax_id, "")
-        flush()
-    return "\n\n".join(blocks)
+    def _render_content(
+        self,
+        frame: FrameSnapshot,
+        backend_id: int | None,
+        role: str,
+        name: str,
+        node: JsonDict,
+    ) -> None:
+        if role in BLOCK_ROLES:
+            self._flush()
+            if name:
+                self._emit(name)
+        elif role in HEADING_ROLES and name:
+            level = _ax_property(node, "level")
+            depth = int(level) if isinstance(level, int) and 1 <= level <= 6 else 1
+            self._flush()
+            self._emit(f"{'#' * depth} {name}")
+        elif role == "link" and name:
+            url = _ax_property(node, "url")
+            self.inline.append(f"[{name}]({url})" if isinstance(url, str) and url else name)
+        elif role in LIST_ITEM_ROLES and name:
+            self._flush()
+            self._emit(f"- {name}")
+        elif role == "image" and (name or (backend_id and frame.geom.get(backend_id))):
+            geom = frame.geom.get(backend_id) if backend_id is not None else None
+            alt = name or _image_name(geom.img_src if geom else None)
+            if alt:
+                self._flush()
+                self._emit(f"![{alt}]")
+        elif name and role not in IGNORED_ROLES:
+            self.inline.append(name)
+
+
+def render_markdown(root: FrameSnapshot) -> str:
+    """Reading view: the accessibility tree rendered as markdown — headings keep their level, links
+    carry their href, list items bullet, and inline text merges into paragraphs bounded by
+    BLOCK_ROLES nodes — so the model reads structure, not a flat innerText smear.
+    Same frame splice as render_page."""
+    return _MarkdownRenderer().render(root)
 
 
 @dataclass(frozen=True)

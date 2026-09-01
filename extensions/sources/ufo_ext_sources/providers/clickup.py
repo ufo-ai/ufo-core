@@ -150,37 +150,15 @@ class ClickUpConnector(RestConnector):
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        if stream.name == "teams":
-            teams = await self._teams(client)
-            if teams:
-                yield teams
+        if stream.name in {"teams", "spaces", "folders", "lists"}:
+            records = await self._root_records(client, stream.name)
+            if records:
+                yield records
             return
         if stream.name == "users":
-            users: dict[str, dict[str, Any]] = {}
-            for team in await self._teams(client):
-                for member in team.get("members") or []:
-                    if not isinstance(member, dict):
-                        continue
-                    user = member.get("user")
-                    if isinstance(user, dict) and user.get("id") is not None:
-                        users[str(user["id"])] = {**user, "team_id": team.get("id")}
+            users = await self._users(client)
             if users:
                 yield list(users.values())
-            return
-        if stream.name == "spaces":
-            spaces = await self._spaces(client)
-            if spaces:
-                yield spaces
-            return
-        if stream.name == "folders":
-            folders = await self._folders(client)
-            if folders:
-                yield folders
-            return
-        if stream.name == "lists":
-            lists = await self._lists(client)
-            if lists:
-                yield lists
             return
         if stream.name == "tasks":
             async for page in self._tasks(client, cursor=cursor):
@@ -191,17 +169,45 @@ class ClickUpConnector(RestConnector):
                 yield page
             return
         if stream.name == "goals":
-            out: list[dict[str, Any]] = []
-            for team in await self._teams(client):
-                team_id = team.get("id")
-                if not isinstance(team_id, str) or not team_id:
-                    continue
-                data = await self._get(client, f"/team/{team_id}/goal")
-                out.extend(with_context(records_at(data, "goals"), team_id=team_id))
+            out = await self._goals(client)
             if out:
                 yield out
             return
         raise StreamSkipped(f"clickup stream {stream.name!r} is not implemented")
+
+    async def _root_records(self, client: httpx.AsyncClient, name: str) -> list[dict[str, Any]]:
+        match name:
+            case "teams":
+                return await self._teams(client)
+            case "spaces":
+                return await self._spaces(client)
+            case "folders":
+                return await self._folders(client)
+            case "lists":
+                return await self._lists(client)
+            case _:
+                raise ValueError(f"clickup has no root collection {name!r}")
+
+    async def _users(self, client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
+        users: dict[str, dict[str, Any]] = {}
+        for team in await self._teams(client):
+            for member in team.get("members") or []:
+                if not isinstance(member, dict):
+                    continue
+                user = member.get("user")
+                if isinstance(user, dict) and user.get("id") is not None:
+                    users[str(user["id"])] = {**user, "team_id": team.get("id")}
+        return users
+
+    async def _goals(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
+        goals: list[dict[str, Any]] = []
+        for team in await self._teams(client):
+            team_id = team.get("id")
+            if not isinstance(team_id, str) or not team_id:
+                continue
+            data = await self._get(client, f"/team/{team_id}/goal")
+            goals.extend(with_context(records_at(data, "goals"), team_id=team_id))
+        return goals
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
         if stream.name == "users":

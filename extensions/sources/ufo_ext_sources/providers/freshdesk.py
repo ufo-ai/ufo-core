@@ -152,61 +152,9 @@ class FreshdeskConnector(RestConnector):
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
-            if stream.name == "tickets":
-                async for page in self._paginate_tickets(client, cursor=cursor):
-                    yield page
-                return
-            if stream.name == "conversations":
-                async for page in self._paginate_conversations(client, cursor=cursor):
-                    yield page
-                return
-            if stream.name == "canned_responses":
-                async for page in self._paginate_two_level(
-                    client,
-                    parent_path="/api/v2/canned_response_folders",
-                    child_path_template="/api/v2/canned_response_folders/{id}/responses",
-                ):
-                    yield page
-                return
-            if stream.name == "solution_folders":
-                async for page in self._paginate_two_level(
-                    client,
-                    parent_path="/api/v2/solutions/categories",
-                    child_path_template="/api/v2/solutions/categories/{id}/folders",
-                ):
-                    yield page
-                return
-            if stream.name == "solution_articles":
-                async for page in self._paginate_three_level(
-                    client,
-                    root_path="/api/v2/solutions/categories",
-                    mid_path_template="/api/v2/solutions/categories/{id}/folders",
-                    leaf_path_template="/api/v2/solutions/folders/{id}/articles",
-                ):
-                    yield page
-                return
-            if stream.name == "discussion_forums":
-                async for page in self._paginate_two_level(
-                    client,
-                    parent_path="/api/v2/discussions/categories",
-                    child_path_template="/api/v2/discussions/categories/{id}/forums",
-                ):
-                    yield page
-                return
-            if stream.name == "discussion_topics":
-                async for page in self._paginate_two_level(
-                    client,
-                    parent_path="/api/v2/discussions/forums",
-                    child_path_template="/api/v2/discussions/forums/{id}/topics",
-                ):
-                    yield page
-                return
-            if stream.name == "discussion_comments":
-                async for page in self._paginate_two_level(
-                    client,
-                    parent_path="/api/v2/discussions/topics",
-                    child_path_template="/api/v2/discussions/topics/{id}/comments",
-                ):
+            special = self._special_pages(client, stream.name, cursor)
+            if special is not None:
+                async for page in special:
                     yield page
                 return
             path = _SIMPLE_PATHS.get(stream.name)
@@ -228,6 +176,49 @@ class FreshdeskConnector(RestConnector):
                     "lacks scope or the key is invalid"
                 ) from error
             raise
+
+    def _special_pages(
+        self, client: httpx.AsyncClient, name: str, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]] | None:
+        if name == "tickets":
+            return self._paginate_tickets(client, cursor=cursor)
+        if name == "conversations":
+            return self._paginate_conversations(client, cursor=cursor)
+        two_level = {
+            "canned_responses": (
+                "/api/v2/canned_response_folders",
+                "/api/v2/canned_response_folders/{id}/responses",
+            ),
+            "solution_folders": (
+                "/api/v2/solutions/categories",
+                "/api/v2/solutions/categories/{id}/folders",
+            ),
+            "discussion_forums": (
+                "/api/v2/discussions/categories",
+                "/api/v2/discussions/categories/{id}/forums",
+            ),
+            "discussion_topics": (
+                "/api/v2/discussions/forums",
+                "/api/v2/discussions/forums/{id}/topics",
+            ),
+            "discussion_comments": (
+                "/api/v2/discussions/topics",
+                "/api/v2/discussions/topics/{id}/comments",
+            ),
+        }.get(name)
+        if two_level is not None:
+            parent_path, child_path = two_level
+            return self._paginate_two_level(
+                client, parent_path=parent_path, child_path_template=child_path
+            )
+        if name == "solution_articles":
+            return self._paginate_three_level(
+                client,
+                root_path="/api/v2/solutions/categories",
+                mid_path_template="/api/v2/solutions/categories/{id}/folders",
+                leaf_path_template="/api/v2/solutions/folders/{id}/articles",
+            )
+        return None
 
     async def _paginate_link_header(
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None

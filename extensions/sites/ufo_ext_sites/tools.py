@@ -889,20 +889,9 @@ async def _application_audit_feedback(
     return feedback
 
 
-async def _audit_builder_application(
-    ctx: ToolContext, project: str
-) -> ApplicationAuditReport | ApplicationAuditFeedback:
-    attempts = await _application_audit_attempts(ctx)
-    if attempts >= APPLICATION_AUDIT_MAX_ATTEMPTS:
-        raise RuntimeError("Application audit stopped after two failed product audits.")
-    relative_root = f"{TOOL_OUTPUT_DIR}/application-audit/{ctx.turn.id}"
-    root = await ctx.sandbox.runtime_path(relative_root)
-    script_path = f"{root}.cjs"
-    report_path = f"{root}.json"
-    light_path = f"{root}-light.png"
-    dark_path = f"{root}-dark.png"
-    interactive_path = f"{root}-interactive.html"
-    static_path = f"{root}-static.html"
+async def _accepted_application_design(
+    ctx: ToolContext,
+) -> tuple[AcceptedApplicationDesignEvidence, str, str]:
     accepted_design_path = await ctx.sandbox.runtime_path(
         application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
     )
@@ -921,9 +910,7 @@ async def _audit_builder_application(
             or "accepted application design evidence is absent"
         )
     try:
-        design_evidence = AcceptedApplicationDesignEvidence.model_validate_json(
-            evidence_read.stdout
-        )
+        evidence = AcceptedApplicationDesignEvidence.model_validate_json(evidence_read.stdout)
     except ValueError as error:
         raise RuntimeError("accepted application design evidence is invalid") from error
     design_read = await ctx.sandbox.python(
@@ -935,8 +922,30 @@ async def _audit_builder_application(
         raise RuntimeError(
             design_read.stderr or design_read.stdout or "accepted application design is absent"
         )
-    if sha256(design_read.stdout.encode()).hexdigest() != design_evidence.design_sha256:
+    if sha256(design_read.stdout.encode()).hexdigest() != evidence.design_sha256:
         raise RuntimeError("accepted application design evidence digest does not match the design")
+    return evidence, accepted_design_path, accepted_evidence_path
+
+
+async def _audit_builder_application(
+    ctx: ToolContext, project: str
+) -> ApplicationAuditReport | ApplicationAuditFeedback:
+    attempts = await _application_audit_attempts(ctx)
+    if attempts >= APPLICATION_AUDIT_MAX_ATTEMPTS:
+        raise RuntimeError("Application audit stopped after two failed product audits.")
+    relative_root = f"{TOOL_OUTPUT_DIR}/application-audit/{ctx.turn.id}"
+    root = await ctx.sandbox.runtime_path(relative_root)
+    script_path = f"{root}.cjs"
+    report_path = f"{root}.json"
+    light_path = f"{root}-light.png"
+    dark_path = f"{root}-dark.png"
+    interactive_path = f"{root}-interactive.html"
+    static_path = f"{root}-static.html"
+    (
+        design_evidence,
+        accepted_design_path,
+        accepted_evidence_path,
+    ) = await _accepted_application_design(ctx)
     await ctx.sandbox.write_runtime_file(f"{relative_root}.cjs", APPLICATION_AUDIT_SCRIPT)
     run = await ctx.sandbox.sh(
         'node "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"',

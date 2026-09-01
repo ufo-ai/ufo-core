@@ -36,6 +36,7 @@ intentionally absent — the source seam only reads."""
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 import httpx
@@ -302,61 +303,80 @@ class GitHubConnector(RestConnector):
             params["state"] = "all"
 
         if stream.name == "repositories":
-            async for org, page in self._iter_granted_org_repo_pages(client):
-                yield with_context(page, **{ORG_PARTITION_FIELD: org})
+            async for page in self._repository_pages(client):
+                yield page
             return
 
         if "{owner}" in path and "{repo}" in path:
-
-            async def repos() -> AsyncIterator[str]:
-                async for owner, repo in self._iter_user_repos(client):
-                    yield f"{owner}/{repo}"
-
-            def repo_pages(repo_key: str, bound: PartitionBound) -> AsyncIterator[WalkPage]:
-                return self._repo_pages(client, stream, path, repo_key, bound)
-
-            # the pinned floor as the ISO string GitHub stamps records with — the space the walk
-            # compares in and `?since`/`?until` take
-            floor = (
-                None
-                if backfill_after is None
-                else backfill_after.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            )
-            walk = PartitionWalk(
-                ordering=stream.ordering,
-                partitions=repos,
-                pages=repo_pages,
-                floor=floor,
-            ).stream(cursor)
-            try:
-                async for repo_page in walk:
-                    yield repo_page
-            finally:
-                if isinstance(walk, AsyncGenerator):
-                    await walk.aclose()
+            async for repo_page in self._repo_stream_pages(
+                client, stream, path, cursor, backfill_after
+            ):
+                yield repo_page
             return
 
         if "{org}" in path:
-            semaphore = (
-                asyncio.Semaphore(_USERS_ENRICH_CONCURRENCY) if stream.name == "users" else None
-            )
-            async for org in self._iter_user_orgs(client):
-                scoped = path.format(org=org)
-                try:
-                    async for page in self._paginate_link_header(
-                        client, scoped, params=dict(params)
-                    ):
-                        if stream.name == "users" and semaphore is not None:
-                            page = await self._enrich_users(client, page, semaphore=semaphore)
-                        yield with_context(page, **{ORG_PARTITION_FIELD: org})
-                except httpx.HTTPStatusError as error:
-                    if error.response.status_code in {404, 410}:
-                        continue
-                    raise
+            async for page in self._org_stream_pages(client, stream, path, params):
+                yield page
             return
 
         async for page in self._paginate_link_header(client, path, params=params):
             yield page
+
+    async def _repository_pages(
+        self, client: httpx.AsyncClient
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        async for org, page in self._iter_granted_org_repo_pages(client):
+            yield with_context(page, **{ORG_PARTITION_FIELD: org})
+
+    async def _repo_partitions(self, client: httpx.AsyncClient) -> AsyncIterator[str]:
+        async for owner, repo in self._iter_user_repos(client):
+            yield f"{owner}/{repo}"
+
+    async def _repo_stream_pages(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        path: str,
+        cursor: str | None,
+        backfill_after: datetime | None,
+    ) -> AsyncIterator[StreamPage]:
+        floor = (
+            None
+            if backfill_after is None
+            else backfill_after.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        walk = PartitionWalk(
+            ordering=stream.ordering,
+            partitions=partial(self._repo_partitions, client),
+            pages=partial(self._repo_pages, client, stream, path),
+            floor=floor,
+        ).stream(cursor)
+        try:
+            async for page in walk:
+                yield page
+        finally:
+            if isinstance(walk, AsyncGenerator):
+                await walk.aclose()
+
+    async def _org_stream_pages(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        path: str,
+        params: dict[str, Any],
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        semaphore = asyncio.Semaphore(_USERS_ENRICH_CONCURRENCY) if stream.name == "users" else None
+        async for org in self._iter_user_orgs(client):
+            scoped = path.format(org=org)
+            try:
+                async for page in self._paginate_link_header(client, scoped, params=dict(params)):
+                    if stream.name == "users" and semaphore is not None:
+                        page = await self._enrich_users(client, page, semaphore=semaphore)
+                    yield with_context(page, **{ORG_PARTITION_FIELD: org})
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code in {404, 410}:
+                    continue
+                raise
 
     async def _repo_pages(
         self,

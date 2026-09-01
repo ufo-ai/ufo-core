@@ -1387,6 +1387,20 @@ async def test_openai_truncation_raises() -> None:
     assert events[-1] == Usage(input_tokens=1, output_tokens=9)
 
 
+async def test_openai_truncation_without_usage_still_raises_truncated() -> None:
+    """A cut-off round that carries no usage chunk keeps its truncation class: the engine recovers
+    on that class alone, so a no-usage RuntimeError would cost the round its salvaged output and
+    its truncation feedback."""
+    create = ScriptedCreate(([openai_text("cut of"), openai_finish("length")], None))
+    events = []
+    with pytest.raises(ModelResponseTruncated):
+        async for event in OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC).complete(
+            REQUEST
+        ):
+            events.append(event)
+    assert events == [ModelStreamStart(), TextDelta(text="cut of")]
+
+
 async def test_anthropic_empty_completion_retries_then_succeeds() -> None:
     create = ScriptedCreate(
         (

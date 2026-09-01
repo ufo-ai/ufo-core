@@ -1142,16 +1142,8 @@ def _link_count(text: str) -> int:
     return len(markdown) + len(re.findall(URL_PATTERN, bare))
 
 
-def slack_reply_parts(text: str, limit: int = SLACK_MARKDOWN_TEXT_LIMIT) -> list[str]:
-    """Split a reply at the strongest available markdown-safe boundary."""
-    if not text:
-        raise ValueError("Slack reply text is required")
-    if limit <= 0:
-        raise ValueError("Slack reply part limit must be positive")
-    if len(text) <= limit:
-        return [text]
-
-    atomic_spans: list[tuple[int, int]] = []
+def _slack_atomic_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
     fence_start: int | None = None
     fence_marker: str | None = None
     table_start: int | None = None
@@ -1166,14 +1158,14 @@ def slack_reply_parts(text: str, limit: int = SLACK_MARKDOWN_TEXT_LIMIT) -> list
                 and set(stripped) == {fence_marker[0]}
                 and len(stripped) >= len(fence_marker)
             ):
-                atomic_spans.append((fence_start, offset + len(line)))
+                spans.append((fence_start, offset + len(line)))
                 fence_start = None
                 fence_marker = None
             offset += len(line)
             continue
         if marker is not None:
             if table_start is not None:
-                atomic_spans.append((table_start, offset))
+                spans.append((table_start, offset))
                 table_start = None
             fence_start = offset
             fence_marker = marker.group(1)
@@ -1181,41 +1173,53 @@ def slack_reply_parts(text: str, limit: int = SLACK_MARKDOWN_TEXT_LIMIT) -> list
             if table_start is None:
                 table_start = offset
         elif table_start is not None:
-            atomic_spans.append((table_start, offset))
+            spans.append((table_start, offset))
             table_start = None
         offset += len(line)
     if fence_start is not None:
-        atomic_spans.append((fence_start, len(text)))
+        spans.append((fence_start, len(text)))
     if table_start is not None:
-        atomic_spans.append((table_start, len(text)))
+        spans.append((table_start, len(text)))
+    return spans
 
+
+def _slack_reply_cut(text: str, start: int, limit: int, atomic_spans: list[tuple[int, int]]) -> int:
+    ceiling = start + limit
+    for pattern in SLACK_REPLY_BOUNDARY_PATTERNS:
+        candidates = [
+            start + match.end()
+            for match in re.finditer(pattern, text[start:ceiling])
+            if not any(
+                span_start < start + match.end() < span_end for span_start, span_end in atomic_spans
+            )
+        ]
+        if candidates:
+            return candidates[-1]
+    containing = next(
+        (
+            (span_start, span_end)
+            for span_start, span_end in atomic_spans
+            if span_start < ceiling < span_end
+        ),
+        None,
+    )
+    return containing[0] if containing is not None and containing[0] > start else ceiling
+
+
+def slack_reply_parts(text: str, limit: int = SLACK_MARKDOWN_TEXT_LIMIT) -> list[str]:
+    """Split a reply at the strongest available markdown-safe boundary."""
+    if not text:
+        raise ValueError("Slack reply text is required")
+    if limit <= 0:
+        raise ValueError("Slack reply part limit must be positive")
+    if len(text) <= limit:
+        return [text]
+
+    atomic_spans = _slack_atomic_spans(text)
     parts: list[str] = []
     start = 0
     while len(text) - start > limit:
-        ceiling = start + limit
-        cut = None
-        for pattern in SLACK_REPLY_BOUNDARY_PATTERNS:
-            candidates = [
-                start + match.end()
-                for match in re.finditer(pattern, text[start:ceiling])
-                if not any(
-                    span_start < start + match.end() < span_end
-                    for span_start, span_end in atomic_spans
-                )
-            ]
-            if candidates:
-                cut = candidates[-1]
-                break
-        if cut is None:
-            containing = next(
-                (
-                    (span_start, span_end)
-                    for span_start, span_end in atomic_spans
-                    if span_start < ceiling < span_end
-                ),
-                None,
-            )
-            cut = containing[0] if containing is not None and containing[0] > start else ceiling
+        cut = _slack_reply_cut(text, start, limit, atomic_spans)
         parts.append(text[start:cut])
         start = cut
     parts.append(text[start:])
@@ -3416,6 +3420,80 @@ class ConnectClick:
     thread_ts: str | None
 
 
+async def _handle_connect_click(
+    ctx: SurfaceContext, interaction: ConnectClick, member_id: UUID | None
+) -> None:
+    if member_id is None:
+        text = "This connection request is not available to you."
+    else:
+        try:
+            url = await ctx.connect_url(interaction.turn_id, member_id)
+        except ConnectRequestInvalid:
+            text = "This connection request is no longer available. Ask me to connect again."
+        else:
+            text = f"Complete the connection privately: <{url}|Open authorization>"
+    _ephemeral_in_background(
+        ctx, interaction.channel, interaction.slack_user_id, interaction.thread_ts, text
+    )
+
+
+async def _handle_answer_submit(
+    ctx: SurfaceContext,
+    bot_token: str,
+    interaction: AnswerSubmit,
+    member_id: UUID | None,
+) -> Response | None:
+    conversation_id = await ctx.find_conversation(interaction.queue_key)
+    if conversation_id is None:
+        return JSONResponse({"ok": True, "ignored": True})
+    answered = tuple(answer for answer in interaction.answers if answer.answer)
+    if not answered:
+        _ephemeral_in_background(
+            ctx,
+            interaction.channel,
+            interaction.slack_user_id,
+            interaction.reply_root,
+            ASK_EMPTY_SUBMIT_TEXT,
+        )
+        return JSONResponse({"ok": True, "ignored": True})
+    sender, answered_at = await asyncio.gather(
+        _slack_user(bot_token, interaction.slack_user_id),
+        _slack_permalink(bot_token, interaction.channel, interaction.message_ts),
+    )
+    if member_id is None:
+        member_id = await _resolve_member(ctx, interaction.slack_user_id, interaction.is_dm, sender)
+    if interaction.is_dm and member_id is not None:
+        conversation_id = await ctx.conversation_for(
+            interaction.queue_key, conversation_audience(member_id)
+        )
+    lone = len(interaction.answers) == 1
+    answered_text = (
+        answered[0].answer
+        if lone
+        else "\n".join(f"{answer.question}: {answer.answer}" for answer in answered)
+    )
+    body = fence_member_message(mint_marker(), "", answered_text, "")
+    thread = MirroredThread(queue_key=interaction.queue_key, message_ts=interaction.reply_root)
+    await _mirror_thread(conversation_id, thread)
+    answer_key = f"{interaction.queue_key}:{interaction.message_ts}:answer"
+    admitted = await ctx.admit(
+        conversation_id,
+        body,
+        idempotency_key=answer_key,
+        context=_turn_context(sender, answered_at, answered[0].question if lone else None),
+        speaker_member_id=member_id,
+    )
+    if interaction.is_dm:
+        await _anchor_dm_thread(admitted, interaction.reply_root)
+    if admitted.opened_run:
+        _arm_followers(
+            ctx, FollowedTurn(id=admitted.turn_id, conversation_id=conversation_id), thread
+        )
+    if await ctx.admitted_body(answer_key) == body:
+        _rewrite_in_background(bot_token, interaction)
+    return None
+
+
 async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     """Slack interactivity ingest: verify the signed form payload, decode a submit on an ask_user
     form, admit every answer it carries as the conversation's next turn — idempotent per question
@@ -3453,73 +3531,11 @@ async def interactive(ctx: SurfaceContext, request: Request) -> Response:
     member_id = await ctx.linked_member(interaction.slack_user_id)
     match interaction:
         case ConnectClick():
-            if member_id is None:
-                text = "This connection request is not available to you."
-            else:
-                try:
-                    url = await ctx.connect_url(interaction.turn_id, member_id)
-                except ConnectRequestInvalid:
-                    text = (
-                        "This connection request is no longer available. Ask me to connect again."
-                    )
-                else:
-                    text = f"Complete the connection privately: <{url}|Open authorization>"
-            _ephemeral_in_background(
-                ctx, interaction.channel, interaction.slack_user_id, interaction.thread_ts, text
-            )
+            await _handle_connect_click(ctx, interaction, member_id)
         case AnswerSubmit():
-            conversation_id = await ctx.find_conversation(interaction.queue_key)
-            if conversation_id is None:
-                return JSONResponse({"ok": True, "ignored": True})
-            answered = tuple(answer for answer in interaction.answers if answer.answer)
-            if not answered:
-                _ephemeral_in_background(
-                    ctx,
-                    interaction.channel,
-                    interaction.slack_user_id,
-                    interaction.reply_root,
-                    ASK_EMPTY_SUBMIT_TEXT,
-                )
-                return JSONResponse({"ok": True, "ignored": True})
-            sender, answered_at = await asyncio.gather(
-                _slack_user(bot_token, interaction.slack_user_id),
-                _slack_permalink(bot_token, interaction.channel, interaction.message_ts),
-            )
-            if member_id is None:
-                member_id = await _resolve_member(
-                    ctx, interaction.slack_user_id, interaction.is_dm, sender
-                )
-            if interaction.is_dm and member_id is not None:
-                conversation_id = await ctx.conversation_for(
-                    interaction.queue_key, conversation_audience(member_id)
-                )
-            lone = len(interaction.answers) == 1
-            answered_text = (
-                answered[0].answer
-                if lone
-                else "\n".join(f"{answer.question}: {answer.answer}" for answer in answered)
-            )
-            body = fence_member_message(mint_marker(), "", answered_text, "")
-            thread = MirroredThread(
-                queue_key=interaction.queue_key, message_ts=interaction.reply_root
-            )
-            await _mirror_thread(conversation_id, thread)
-            answer_key = f"{interaction.queue_key}:{interaction.message_ts}:answer"
-            admitted = await ctx.admit(
-                conversation_id,
-                body,
-                idempotency_key=answer_key,
-                context=_turn_context(sender, answered_at, answered[0].question if lone else None),
-                speaker_member_id=member_id,
-            )
-            if interaction.is_dm:
-                await _anchor_dm_thread(admitted, interaction.reply_root)
-            if admitted.opened_run:
-                _arm_followers(
-                    ctx, FollowedTurn(id=admitted.turn_id, conversation_id=conversation_id), thread
-                )
-            if await ctx.admitted_body(answer_key) == body:
-                _rewrite_in_background(bot_token, interaction)
+            response = await _handle_answer_submit(ctx, bot_token, interaction, member_id)
+            if response is not None:
+                return response
     return JSONResponse({"ok": True})
 
 

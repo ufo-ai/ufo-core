@@ -1667,6 +1667,194 @@ def _stop_header(request: Request) -> UUID | None | Response:
         return Response(f"{STOP_TURN_HEADER} must be a turn id", status_code=400)
 
 
+@dataclass(frozen=True)
+class _ChatInbound:
+    text: str
+    uploads: tuple[UploadFile, ...]
+    uploaded_keys: tuple[str, ...]
+    paths: tuple[str, ...]
+    body: str
+    stop: UUID | None
+    answer: tuple[UUID, int] | None
+
+
+@dataclass(frozen=True)
+class _ChatTarget:
+    conversation_id: UUID
+    title: str
+    comment: str | None
+
+
+async def _chat_inbound(ctx: SurfaceContext, request: Request) -> _ChatInbound | Response:
+    stop = _stop_header(request)
+    if isinstance(stop, Response):
+        return stop
+    parsed = await _parse_inbound(request)
+    if isinstance(parsed, Response):
+        return parsed
+    text, uploads, uploaded_keys = parsed
+    if stop is not None and (text or uploads or uploaded_keys):
+        return Response("a stop admits no message", status_code=400)
+    if stop is None and not text.strip() and not uploads and not uploaded_keys:
+        return Response("empty message", status_code=400)
+    for uploaded in uploaded_keys:
+        if not await ctx.blob.exists(uploaded):
+            return Response("upload not found", status_code=404)
+    paths = _inbox_paths(uploads, uploaded_keys)
+    body = _files_note(text, paths) if paths else text
+    if len(body) > MAX_INBOUND_CHARS:
+        return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
+    answer = _answer_headers(request)
+    if isinstance(answer, Response):
+        return answer
+    return _ChatInbound(text, uploads, uploaded_keys, paths, body, stop, answer)
+
+
+async def _new_chat_target(
+    ctx: SurfaceContext,
+    store: ScopedStore,
+    audience: WebAudience,
+    agent_id: UUID,
+    member_id: UUID,
+    email: str,
+    inbound: _ChatInbound,
+) -> _ChatTarget | Response:
+    if not audience.allows(agent_id):
+        return Response("no such agent", status_code=404)
+    if inbound.answer is not None:
+        return Response("an answer names the conversation it was asked in", status_code=400)
+    if inbound.stop is not None:
+        return Response("a stop names the conversation its turn runs in", status_code=400)
+    conversation_id, title = await _open_conversation(
+        ctx,
+        store,
+        agent_id,
+        member_id,
+        email,
+        f"{agent_id}/{email}/{uuid4().hex}",
+        inbound.text,
+        inbound.paths,
+    )
+    return _ChatTarget(conversation_id, title, None)
+
+
+async def _existing_chat_target(
+    ctx: SurfaceContext,
+    store: ScopedStore,
+    audience: WebAudience,
+    agent_id: UUID,
+    member_id: UUID,
+    email: str,
+    conversation_id: UUID,
+    inbound: _ChatInbound,
+) -> _ChatTarget | Response:
+    conversation = await _member_chat(
+        ctx,
+        store,
+        agent_id,
+        member_id,
+        email,
+        conversation_id,
+        agent_visible=audience.allows(agent_id),
+    )
+    if conversation is None:
+        return Response("no such conversation", status_code=404)
+    comment = None
+    if _commentable(conversation, member_id):
+        comment = _comment_notice(
+            ctx.public_base_url,
+            conversation,
+            member_id,
+            email,
+            inbound.text,
+            inbound.paths,
+        )
+    return _ChatTarget(conversation_id, conversation.title, comment)
+
+
+async def _resolve_chat_target(
+    ctx: SurfaceContext,
+    request: Request,
+    audience: WebAudience,
+    agent_id: UUID,
+    member_id: UUID,
+    email: str,
+    inbound: _ChatInbound,
+) -> _ChatTarget | Response:
+    requested = request.query_params.get("conversation", "").strip()
+    if not requested:
+        return Response("conversation is required", status_code=400)
+    store = web_extension().store
+    if requested == NEW_CONVERSATION:
+        return await _new_chat_target(ctx, store, audience, agent_id, member_id, email, inbound)
+    try:
+        conversation_id = UUID(requested)
+    except ValueError:
+        return Response("no such conversation", status_code=404)
+    return await _existing_chat_target(
+        ctx, store, audience, agent_id, member_id, email, conversation_id, inbound
+    )
+
+
+async def _stop_chat(
+    ctx: SurfaceContext, request: Request, conversation_id: UUID, turn_id: UUID
+) -> Response:
+    authorized = await _member_turn(ctx, request, named_turn=turn_id)
+    if isinstance(authorized, Response):
+        return authorized
+    try:
+        stopped = await ctx.stop_turn(conversation_id, turn_id)
+    except ValueError:
+        return Response("no such turn in this conversation", status_code=404)
+    outcome: dict[str, bool | str] = {"stopped": stopped.ended}
+    if stopped.founded_turn_id is not None:
+        outcome["turn_id"] = str(stopped.founded_turn_id)
+    return JSONResponse(outcome)
+
+
+async def _admit_chat(
+    ctx: SurfaceContext,
+    request: Request,
+    target: _ChatTarget,
+    inbound: _ChatInbound,
+    member_id: UUID,
+    email: str,
+) -> Response:
+    key = (
+        None
+        if inbound.answer is None
+        else _answer_key(target.conversation_id, inbound.answer[0], inbound.answer[1])
+    )
+    await _deliver_uploads(
+        ctx,
+        target.conversation_id,
+        inbound.uploads,
+        inbound.uploaded_keys,
+        inbound.paths,
+    )
+    admitted = await ctx.admit(
+        target.conversation_id,
+        inbound.body,
+        context=_turn_context(
+            email, request, _chat_source(ctx.public_base_url, target.conversation_id, email)
+        ),
+        idempotency_key=key,
+        speaker_member_id=member_id,
+        comment=target.comment,
+    )
+    payload: dict[str, str | bool | None] = {
+        "turn_id": str(admitted.turn_id),
+        "conversation_id": str(target.conversation_id),
+        "title": target.title,
+        "opened_run": admitted.opened_run,
+    }
+    if admitted.arrival_id is not None:
+        payload["arrival_id"] = str(admitted.arrival_id)
+    if key is not None:
+        payload["body"] = await ctx.admitted_body(key)
+    return JSONResponse(payload)
+
+
 async def chat(ctx: SurfaceContext, request: Request) -> Response:
     """Admit one member message. The `conversation` query parameter continues that conversation —
     gated to the member's own portal or private-extension chat, or a Slack/terminal conversation
@@ -1694,99 +1882,15 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     agent_id = _agent_param(request)
     if agent_id is None or not audience.allows_chat(agent_id):
         return Response("no such agent", status_code=404)
-    stop = _stop_header(request)
-    if isinstance(stop, Response):
-        return stop
-    parsed = await _parse_inbound(request)
-    if isinstance(parsed, Response):
-        return parsed
-    text, uploads, uploaded_keys = parsed
-    if stop is not None:
-        if text or uploads or uploaded_keys:
-            return Response("a stop admits no message", status_code=400)
-    elif not text.strip() and not uploads and not uploaded_keys:
-        return Response("empty message", status_code=400)
-    for uploaded in uploaded_keys:
-        if not await ctx.blob.exists(uploaded):
-            return Response("upload not found", status_code=404)
-    paths = _inbox_paths(uploads, uploaded_keys)
-    inbound = _files_note(text, paths) if paths else text
-    if len(inbound) > MAX_INBOUND_CHARS:
-        return Response(f"message exceeds {MAX_INBOUND_CHARS} characters", status_code=413)
-    answer = _answer_headers(request)
-    if isinstance(answer, Response):
-        return answer
-    store = web_extension().store
-    requested = request.query_params.get("conversation", "").strip()
-    if not requested:
-        return Response("conversation is required", status_code=400)
-    comment = None
-    if requested == NEW_CONVERSATION:
-        if not audience.allows(agent_id):
-            return Response("no such agent", status_code=404)
-        if answer is not None:
-            return Response("an answer names the conversation it was asked in", status_code=400)
-        if stop is not None:
-            return Response("a stop names the conversation its turn runs in", status_code=400)
-        conversation_id, title = await _open_conversation(
-            ctx, store, agent_id, member_id, email, f"{agent_id}/{email}/{uuid4().hex}", text, paths
-        )
-    else:
-        try:
-            conversation_id = UUID(requested)
-        except ValueError:
-            return Response("no such conversation", status_code=404)
-        conversation = await _member_chat(
-            ctx,
-            store,
-            agent_id,
-            member_id,
-            email,
-            conversation_id,
-            agent_visible=audience.allows(agent_id),
-        )
-        if conversation is None:
-            return Response("no such conversation", status_code=404)
-        title = conversation.title
-        if _commentable(conversation, member_id):
-            comment = _comment_notice(
-                ctx.public_base_url, conversation, member_id, email, text, paths
-            )
-    if stop is not None:
-        authorized = await _member_turn(ctx, request, named_turn=stop)
-        if isinstance(authorized, Response):
-            return authorized
-        try:
-            stopped = await ctx.stop_turn(conversation_id, stop)
-        except ValueError:
-            return Response("no such turn in this conversation", status_code=404)
-        outcome: dict[str, bool | str] = {"stopped": stopped.ended}
-        if stopped.founded_turn_id is not None:
-            outcome["turn_id"] = str(stopped.founded_turn_id)
-        return JSONResponse(outcome)
-    key = None if answer is None else _answer_key(conversation_id, answer[0], answer[1])
-    await _deliver_uploads(ctx, conversation_id, uploads, uploaded_keys, paths)
-    admitted = await ctx.admit(
-        conversation_id,
-        inbound,
-        context=_turn_context(
-            email, request, _chat_source(ctx.public_base_url, conversation_id, email)
-        ),
-        idempotency_key=key,
-        speaker_member_id=member_id,
-        comment=comment,
-    )
-    payload: dict[str, str | bool | None] = {
-        "turn_id": str(admitted.turn_id),
-        "conversation_id": str(conversation_id),
-        "title": title,
-        "opened_run": admitted.opened_run,
-    }
-    if admitted.arrival_id is not None:
-        payload["arrival_id"] = str(admitted.arrival_id)
-    if key is not None:
-        payload["body"] = await ctx.admitted_body(key)
-    return JSONResponse(payload)
+    inbound = await _chat_inbound(ctx, request)
+    if isinstance(inbound, Response):
+        return inbound
+    target = await _resolve_chat_target(ctx, request, audience, agent_id, member_id, email, inbound)
+    if isinstance(target, Response):
+        return target
+    if inbound.stop is not None:
+        return await _stop_chat(ctx, request, target.conversation_id, inbound.stop)
+    return await _admit_chat(ctx, request, target, inbound, member_id, email)
 
 
 def _rendered_text(message: Message) -> str:
@@ -1968,6 +2072,147 @@ async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> Subag
     return runs
 
 
+@dataclass(frozen=True)
+class _ReplyState:
+    pending: tuple[dict[str, str], ...] = ()
+    answer: str = ""
+    answer_at: int = 0
+    notes: int = 0
+    current_turn_id: str | None = None
+
+    def note_answer(self) -> "_ReplyState":
+        pending = list(self.pending)
+        notes = self.notes
+        if self.answer and notes < SUBAGENT_EVENT_LIMIT:
+            pending.insert(self.answer_at, {"kind": "note", "text": self.answer})
+            notes += 1
+        return replace(self, pending=tuple(pending), answer="", notes=notes)
+
+
+@dataclass(frozen=True)
+class _TranscriptRenderer:
+    subagents: SubagentRuns
+    turn_ids: frozenset[str]
+    agent_origin: frozenset[str]
+    speakers: Mapping[str, str] | None
+    questions: Mapping[str, dict[str, object]]
+    asked: Mapping[str, str]
+    files: Mapping[str, list[dict[str, object]]]
+    apps: Mapping[str, list[dict[str, object]]]
+    connects: Mapping[str, dict[str, object]]
+    attach: Attach | None
+    answers: frozenset[str]
+
+    def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]:
+        activity = {
+            block.tool_use_id: block
+            for message in messages
+            if not isinstance(message.content, str)
+            for block in message.content
+            if isinstance(block, ToolResultBlock) and block.activity
+        }
+        rendered: list[dict[str, object]] = []
+        state = _ReplyState()
+        for message in messages:
+            if message.role == "assistant":
+                state = self._assistant(message, activity, state)
+            else:
+                state = self._member(message, state, rendered)
+        self._flush(state, rendered, include_subagents=True)
+        return rendered
+
+    def _assistant(
+        self,
+        message: Message,
+        activity: Mapping[str, ToolResultBlock],
+        state: _ReplyState,
+    ) -> _ReplyState:
+        text = _rendered_text(message)
+        if text:
+            state = state.note_answer()
+            state = replace(state, answer=text, answer_at=len(state.pending))
+        if isinstance(message.content, str):
+            return state
+        pending = list(state.pending)
+        for block in message.content:
+            if isinstance(block, ToolUseBlock) and block.id in activity:
+                activity_text = _stored_activity(block, activity[block.id])
+                if activity_text is not None:
+                    _append_activity(pending, activity_text)
+        return replace(state, pending=tuple(pending))
+
+    def _member(
+        self,
+        message: Message,
+        state: _ReplyState,
+        rendered: list[dict[str, object]],
+    ) -> _ReplyState:
+        text = _rendered_text(message)
+        if not text:
+            return state
+        if not isinstance(message.content, str) or CONTEXT_TAG.match(message.content) is None:
+            return state
+        match = MESSAGE_REF.match(message.content)
+        turn_id = None if match is None else match.group("ref").strip()
+        if state.answer_at < len(state.pending):
+            state = state.note_answer()
+        if turn_id in self.turn_ids and turn_id != state.current_turn_id:
+            state = self._flush(state, rendered, include_subagents=True)
+            state = replace(state, current_turn_id=turn_id)
+        else:
+            state = self._flush(state, rendered, include_subagents=False)
+        if turn_id in self.agent_origin or turn_id in self.answers:
+            return state
+        bubble = _member_bubble(member_message_text(text), self.attach)
+        label = None if self.speakers is None or turn_id is None else self.speakers.get(turn_id)
+        if label is not None:
+            bubble["speaker"] = label
+        answered = None if turn_id is None else self.asked.get(turn_id)
+        if answered is not None:
+            bubble["asked"] = answered
+        rendered.append(bubble)
+        return state
+
+    def _flush(
+        self,
+        state: _ReplyState,
+        rendered: list[dict[str, object]],
+        *,
+        include_subagents: bool,
+    ) -> _ReplyState:
+        closing = state.current_turn_id if include_subagents else None
+        runs = [] if closing is None else self.subagents.get(closing, [])
+        question = None if closing is None else self.questions.get(closing)
+        shared = [] if closing is None else self.files.get(closing, [])
+        made = [] if closing is None else self.apps.get(closing, [])
+        control = None if closing is None else self.connects.get(closing)
+        if (
+            not state.answer
+            and not state.pending
+            and not runs
+            and question is None
+            and not shared
+            and not made
+            and control is None
+        ):
+            return state
+        reply: dict[str, object] = {"role": "assistant", "text": state.answer}
+        if state.pending:
+            reply["events"] = list(state.pending)
+        if runs:
+            reply["subagents"] = runs
+        if question is not None:
+            reply["question"] = question
+        if shared:
+            reply["files"] = shared
+        if made:
+            reply["apps"] = made
+        if control is not None:
+            reply["connect"] = control
+        rendered.append(reply)
+        return replace(state, pending=(), answer="", answer_at=0, notes=0)
+
+
 def _rendered_messages(
     messages: tuple[Message, ...],
     subagents: SubagentRuns | None = None,
@@ -2030,108 +2275,20 @@ def _rendered_messages(
     so that text is a step of the work too and the reply states no words, which is the shape the
     live view settles into. The rule reaches a turn's own reply and no further: a run's transcript
     closes on the message it stored last, and that message is the answer its page states."""
-    subagents = subagents or {}
-    connects = connects or {}
-    questions = questions or {}
-    asked = asked or {}
-    files = files or {}
-    apps = apps or {}
-    rendered: list[dict[str, object]] = []
-    pending: list[dict[str, str]] = []
-    answer = ""
-    answer_at = 0
-    notes = 0
-    current_turn_id: str | None = None
-
-    def note_answer() -> None:
-        nonlocal answer, notes
-        if answer and notes < SUBAGENT_EVENT_LIMIT:
-            pending.insert(answer_at, {"kind": "note", "text": answer})
-            notes += 1
-        answer = ""
-
-    def flush_reply(include_subagents: bool) -> None:
-        nonlocal answer, answer_at, notes, pending
-        closing = current_turn_id if include_subagents else None
-        runs = [] if closing is None else subagents.get(closing, [])
-        asked = None if closing is None else questions.get(closing)
-        shared = [] if closing is None else files.get(closing, [])
-        made = [] if closing is None else apps.get(closing, [])
-        control = None if closing is None else connects.get(closing)
-        if (
-            not answer
-            and not pending
-            and not runs
-            and asked is None
-            and not shared
-            and not made
-            and control is None
-        ):
-            return
-        reply: dict[str, object] = {"role": "assistant", "text": answer}
-        if pending:
-            reply["events"] = pending
-        if runs:
-            reply["subagents"] = runs
-        if asked is not None:
-            reply["question"] = asked
-        if shared:
-            reply["files"] = shared
-        if made:
-            reply["apps"] = made
-        if control is not None:
-            reply["connect"] = control
-        rendered.append(reply)
-        pending = []
-        answer = ""
-        answer_at = 0
-        notes = 0
-
-    activity = {
-        block.tool_use_id: block
-        for message in messages
-        if not isinstance(message.content, str)
-        for block in message.content
-        if isinstance(block, ToolResultBlock) and block.activity
-    }
-    for message in messages:
-        text = _rendered_text(message)
-        if message.role == "assistant":
-            if text:
-                note_answer()
-                answer, answer_at = text, len(pending)
-            if not isinstance(message.content, str):
-                for block in message.content:
-                    if isinstance(block, ToolUseBlock) and block.id in activity:
-                        activity_text = _stored_activity(block, activity[block.id])
-                        if activity_text is not None:
-                            _append_activity(pending, activity_text)
-            continue
-        if not text:
-            continue
-        if not isinstance(message.content, str) or CONTEXT_TAG.match(message.content) is None:
-            continue
-        match = MESSAGE_REF.match(message.content)
-        turn_id = None if match is None else match.group("ref").strip()
-        if answer_at < len(pending):
-            note_answer()
-        if turn_id in turn_ids and turn_id != current_turn_id:
-            flush_reply(True)
-            current_turn_id = turn_id
-        else:
-            flush_reply(False)
-        if turn_id in agent_origin or turn_id in answers:
-            continue
-        bubble = _member_bubble(member_message_text(text), attach)
-        label = None if speakers is None or turn_id is None else speakers.get(turn_id)
-        if label is not None:
-            bubble["speaker"] = label
-        answered = None if turn_id is None else asked.get(turn_id)
-        if answered is not None:
-            bubble["asked"] = answered
-        rendered.append(bubble)
-    flush_reply(True)
-    return rendered
+    renderer = _TranscriptRenderer(
+        subagents=subagents or {},
+        turn_ids=turn_ids,
+        agent_origin=agent_origin,
+        speakers=speakers,
+        questions=questions or {},
+        asked=asked or {},
+        files=files or {},
+        apps=apps or {},
+        connects=connects or {},
+        attach=attach,
+        answers=answers,
+    )
+    return renderer.render(messages)
 
 
 @dataclass(frozen=True)

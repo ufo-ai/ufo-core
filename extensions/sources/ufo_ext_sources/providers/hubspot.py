@@ -19,8 +19,9 @@ a skip rather than a failure. The credential is resolved through the auth proxy 
 this connector holds no token. The write path is intentionally absent — the source seam only reads.
 """
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 from urllib.parse import quote
 
@@ -764,6 +765,12 @@ class HubSpotConnector(RestConnector):
             async for product_page in self._paginate_product_api(client, stream, cursor=cursor):
                 yield product_page
             return
+        async for page in self._paginate_crm_object(client, stream, cursor=cursor):
+            yield page
+
+    async def _paginate_crm_object(
+        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         path = f"/crm/v3/objects/{stream.source_object}/search"
         properties = await self._list_properties(client, stream.source_object)
         boundary_ids: set[str] = set()
@@ -872,94 +879,45 @@ class HubSpotConnector(RestConnector):
         *,
         cursor: str | None,
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        if stream.name == "owner_teams":
-            async for page in self._paginate_owner_teams(client):
-                yield page
-            return
-        if stream.name == "lists":
-            async for page in self._paginate_lists(client):
-                yield page
-            return
-        if stream.name == "knowledge_articles":
-            async for page in self._paginate_site_search(
-                client,
-                content_type="KNOWLEDGE_ARTICLE",
-            ):
-                yield page
-            return
-        if stream.name == "campaign_assets":
-            async for page in self._paginate_campaign_assets(client):
-                yield page
-            return
-        if stream.name == "analytics_views":
-            async for page in self._paginate_analytics_views(client):
-                yield page
-            return
-        if stream.name == "analytics_reports":
-            async for page in self._paginate_analytics_reports(client):
-                yield page
-            return
-        if stream.name == "event_types":
-            async for page in self._paginate_event_types(client):
-                yield page
-            return
-        if stream.name == "event_occurrences":
-            async for page in self._paginate_event_occurrences(client, cursor=cursor):
-                yield page
-            return
-        if stream.name == "email_events":
-            async for page in self._paginate_email_events(client, cursor=cursor):
-                yield page
-            return
-        if stream.name == _ASSOCIATION_LABELS_STREAM:
-            async for page in self._paginate_association_labels(client):
-                yield page
-            return
-        if stream.name == _ASSOCIATIONS_STREAM:
-            async for page in self._paginate_associations(client):
-                yield page
-            return
-        if stream.name == _LIST_MEMBERSHIPS_STREAM:
-            async for page in self._paginate_list_memberships(client):
-                yield page
-            return
-        if stream.name == _SUBSCRIPTION_DEFINITIONS_STREAM:
-            async for page in self._paginate_subscription_definitions(client):
-                yield page
-            return
-        if stream.name == _CONSENT_STATES_STREAM:
-            async for page in self._paginate_consent_states(client):
-                yield page
-            return
-        if stream.name == _SEQUENCES_STREAM:
-            async for page in self._paginate_sequences(client):
-                yield page
-            return
-        if stream.name == _SEQUENCE_ENROLLMENTS_STREAM:
-            async for page in self._paginate_sequence_enrollments(client):
-                yield page
-            return
-        if stream.name == "form_submissions":
-            async for page in self._paginate_form_submissions(client):
-                yield page
-            return
-        if stream.name == "conversation_messages":
-            async for page in self._paginate_conversation_messages(client):
-                yield page
-            return
-        if stream.name == "pipelines":
-            async for page in self._paginate_pipelines(client):
-                yield page
-            return
-        if stream.name == "pipeline_stages":
-            async for page in self._paginate_pipeline_stages(client):
-                yield page
-            return
-        path = _GET_PRODUCT_API_PATHS.get(stream.name)
-        if path is None:
-            raise NotImplementedError(f"hubspot: product API stream {stream.name!r} has no path")
-        async for page in self._paginate_get_collection(client, path):
+        async for page in self._product_pages(client, stream.name, cursor):
             yield page
+
+    def _product_pages(
+        self, client: httpx.AsyncClient, name: str, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        paginators: dict[
+            str, Callable[[httpx.AsyncClient], AsyncIterator[list[dict[str, Any]]]]
+        ] = {
+            "owner_teams": self._paginate_owner_teams,
+            "lists": self._paginate_lists,
+            "knowledge_articles": partial(
+                self._paginate_site_search, content_type="KNOWLEDGE_ARTICLE"
+            ),
+            "campaign_assets": self._paginate_campaign_assets,
+            "analytics_views": self._paginate_analytics_views,
+            "analytics_reports": self._paginate_analytics_reports,
+            "event_types": self._paginate_event_types,
+            "event_occurrences": partial(self._paginate_event_occurrences, cursor=cursor),
+            "email_events": partial(self._paginate_email_events, cursor=cursor),
+            _ASSOCIATION_LABELS_STREAM: self._paginate_association_labels,
+            _ASSOCIATIONS_STREAM: self._paginate_associations,
+            _LIST_MEMBERSHIPS_STREAM: self._paginate_list_memberships,
+            _SUBSCRIPTION_DEFINITIONS_STREAM: self._paginate_subscription_definitions,
+            _CONSENT_STATES_STREAM: self._paginate_consent_states,
+            _SEQUENCES_STREAM: self._paginate_sequences,
+            _SEQUENCE_ENROLLMENTS_STREAM: self._paginate_sequence_enrollments,
+            "form_submissions": self._paginate_form_submissions,
+            "conversation_messages": self._paginate_conversation_messages,
+            "pipelines": self._paginate_pipelines,
+            "pipeline_stages": self._paginate_pipeline_stages,
+        }
+        paginator = paginators.get(name)
+        if paginator is not None:
+            return paginator(client)
+        path = _GET_PRODUCT_API_PATHS.get(name)
+        if path is None:
+            raise NotImplementedError(f"hubspot: product API stream {name!r} has no path")
+        return self._paginate_get_collection(client, path)
 
     async def _paginate_get_collection(
         self,

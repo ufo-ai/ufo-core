@@ -460,6 +460,24 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
     return ApplicationDesignFidelity(passed=passed, total=total, failures=tuple(failures))
 
 
+def _contrast_failures(views: tuple[ApplicationAuditView, ...]) -> list[str]:
+    failures: list[str] = []
+    for view in views:
+        for item in view.text:
+            needed = _needed_ratio(item)
+            if item.ratio >= needed:
+                continue
+            label = f' "{item.text}"' if item.text else ""
+            colours = (
+                f" {item.colour} on {item.background}" if item.colour and item.background else ""
+            )
+            failures.append(
+                f"{view.scheme} {view.width}px{label} at {item.selector}{colours} "
+                f"is {item.ratio}:1; needs {needed}:1"
+            )
+    return failures
+
+
 def audit_application(
     report: ApplicationAuditReport,
     contract: ApplicationAuditContract | None = None,
@@ -477,20 +495,7 @@ def audit_application(
     empty = tuple(f"{view.scheme} {view.width}px" for view in measured if view.text_checked == 0)
     if empty:
         issues.append(_issue("empty_view", f"Audit read no text in {', '.join(empty)}."))
-    contrast = []
-    for view in measured:
-        for item in view.text:
-            needed = _needed_ratio(item)
-            if item.ratio >= needed:
-                continue
-            label = f' "{item.text}"' if item.text else ""
-            colours = (
-                f" {item.colour} on {item.background}" if item.colour and item.background else ""
-            )
-            contrast.append(
-                f"{view.scheme} {view.width}px{label} at {item.selector}{colours} "
-                f"is {item.ratio}:1; needs {needed}:1"
-            )
+    contrast = _contrast_failures(measured)
     if contrast:
         issues.append(_issue("contrast", f"Fix text contrast: {'; '.join(contrast[:4])}."))
     overflow = tuple(

@@ -226,70 +226,8 @@ class InstagramConnector(RestConnector):
         cursor: str | None,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
-            if stream.name == "pages":
-                pages = await self._pages(client)
-                if pages:
-                    yield pages
-                return
-            if stream.name == "instagram_accounts":
-                accounts = await self._instagram_accounts(client)
-                if accounts:
-                    yield accounts
-                return
-            if stream.name == "media":
-                async for page in self._account_collection(
-                    client,
-                    "media",
-                    fields=(
-                        "id,caption,media_type,media_url,permalink,timestamp,username,"
-                        "like_count,comments_count"
-                    ),
-                    cursor=cursor,
-                    cursor_field="timestamp",
-                ):
-                    yield page
-                return
-            if stream.name == "stories":
-                async for page in self._account_collection(
-                    client,
-                    "stories",
-                    fields="id,caption,media_type,media_url,permalink,timestamp,username",
-                    cursor=cursor,
-                    cursor_field="timestamp",
-                ):
-                    yield page
-                return
-            if stream.name == "media_insights":
-                async for page in self._object_insights(
-                    client,
-                    self.paginate(
-                        client,
-                        next(s for s in self.streams_list if s.name == "media"),
-                        cursor=None,
-                    ),
-                    metrics="impressions,reach,engagement,saved,video_views",
-                    stream_name="media_insights",
-                ):
-                    yield page
-                return
-            if stream.name == "story_insights":
-                async for page in self._object_insights(
-                    client,
-                    self.paginate(
-                        client,
-                        next(s for s in self.streams_list if s.name == "stories"),
-                        cursor=None,
-                    ),
-                    metrics="impressions,reach,replies,taps_forward,taps_back,exits",
-                    stream_name="story_insights",
-                ):
-                    yield page
-                return
-            if stream.name == "user_insights":
-                async for page in self._user_insights(client, cursor=cursor):
-                    yield page
-                return
-            raise StreamSkipped(f"instagram stream {stream.name!r} is not implemented")
+            async for page in self._stream_pages(client, stream.name, cursor):
+                yield page
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
@@ -297,3 +235,59 @@ class InstagramConnector(RestConnector):
                     "the grant lacks scope or the token is invalid"
                 ) from error
             raise
+
+    def _stream_pages(
+        self, client: httpx.AsyncClient, name: str, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        if name in {"pages", "instagram_accounts"}:
+            return self._root_pages(client, name)
+        if name == "media":
+            return self._account_collection(
+                client,
+                "media",
+                fields=(
+                    "id,caption,media_type,media_url,permalink,timestamp,username,"
+                    "like_count,comments_count"
+                ),
+                cursor=cursor,
+                cursor_field="timestamp",
+            )
+        if name == "stories":
+            return self._account_collection(
+                client,
+                "stories",
+                fields="id,caption,media_type,media_url,permalink,timestamp,username",
+                cursor=cursor,
+                cursor_field="timestamp",
+            )
+        if name == "media_insights":
+            return self._insight_pages(
+                client, "media", "impressions,reach,engagement,saved,video_views", name
+            )
+        if name == "story_insights":
+            return self._insight_pages(
+                client, "stories", "impressions,reach,replies,taps_forward,taps_back,exits", name
+            )
+        if name == "user_insights":
+            return self._user_insights(client, cursor=cursor)
+        raise StreamSkipped(f"instagram stream {name!r} is not implemented")
+
+    async def _root_pages(
+        self, client: httpx.AsyncClient, name: str
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        records = await (
+            self._pages(client) if name == "pages" else self._instagram_accounts(client)
+        )
+        if records:
+            yield records
+
+    def _insight_pages(
+        self, client: httpx.AsyncClient, source: str, metrics: str, name: str
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        source_stream = next(stream for stream in self.streams_list if stream.name == source)
+        return self._object_insights(
+            client,
+            self.paginate(client, source_stream, cursor=None),
+            metrics=metrics,
+            stream_name=name,
+        )

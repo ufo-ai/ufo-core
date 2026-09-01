@@ -65,7 +65,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.harness.o11y import warn
-from ufo.runtime.access.connectors import GrantUnusable
+from ufo.runtime.access.connectors import Credential, GrantUnusable
 from ufo.runtime.sources.connector import Connector, StreamPage, StreamSpec, get_path
 from ufo.runtime.sources.sync import (
     Page,
@@ -149,29 +149,9 @@ class ConnectorBackend:
     async def fetch(
         self, config: ConnectorSourceConfig, cursor: str | None, auth: SourceAuth
     ) -> SyncResult:
-        if auth.auth_proxy is None:
-            raise RuntimeError(
-                f"connector source {self.connector.name!r} needs an auth proxy but none is wired "
-                "(install the provider's broker extension, or set [connectors] auth_backend)"
-            )
-        try:
-            credential = await auth.auth_proxy.credential(
-                auth.workspace_id, self.connector.name, config.account
-            )
-        except GrantUnusable as unusable:
-            raise StreamSkipped(
-                f"{self.connector.name}: {config.stream!r} {unusable}",
-                awaits_grant=unusable.awaits_grant,
-            ) from unusable
+        credential = await self._credential(config, auth)
         stream = self._stream(config.stream)
-        base_url = config.base_url or self.connector.base_url
-        if not base_url:
-            raise RuntimeError(
-                f"connector source {self.connector.name!r} resolved no base_url: it is a "
-                "per-tenant provider (its connector class leaves base_url empty) and the source "
-                "row set no base_url — a misconfigured source fails its run rather than dial an "
-                "empty host"
-            )
+        base_url = self._base_url(config)
         envelope = None if stream.delete_missing else self._decode_cursor(cursor)
         if envelope is None:
             origin, skip_target, watermark = cursor, 0, cursor
@@ -253,6 +233,33 @@ class ConnectorBackend:
             deletes=tuple(deletes),
             snapshot=stream.delete_missing,
             dropped=dropped,
+        )
+
+    async def _credential(self, config: ConnectorSourceConfig, auth: SourceAuth) -> Credential:
+        if auth.auth_proxy is None:
+            raise RuntimeError(
+                f"connector source {self.connector.name!r} needs an auth proxy but none is wired "
+                "(install the provider's broker extension, or set [connectors] auth_backend)"
+            )
+        try:
+            return await auth.auth_proxy.credential(
+                auth.workspace_id, self.connector.name, config.account
+            )
+        except GrantUnusable as unusable:
+            raise StreamSkipped(
+                f"{self.connector.name}: {config.stream!r} {unusable}",
+                awaits_grant=unusable.awaits_grant,
+            ) from unusable
+
+    def _base_url(self, config: ConnectorSourceConfig) -> str:
+        base_url = config.base_url or self.connector.base_url
+        if base_url:
+            return base_url
+        raise RuntimeError(
+            f"connector source {self.connector.name!r} resolved no base_url: it is a "
+            "per-tenant provider (its connector class leaves base_url empty) and the source "
+            "row set no base_url — a misconfigured source fails its run rather than dial an "
+            "empty host"
         )
 
     def _stream(self, name: str) -> StreamSpec:

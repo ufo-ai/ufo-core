@@ -1018,6 +1018,32 @@ async def test_length_finish_raises_truncated() -> None:
     assert events[-1] == Usage(input_tokens=1, output_tokens=9)
 
 
+async def test_length_finish_without_stream_usage_truncates_before_any_generation_lookup() -> None:
+    """The engine recovers a truncated round on the ModelResponseTruncated class alone, so a round
+    cut at the budget raises it whether or not the stream carried usage: a generation lookup here
+    would replace it with ModelStreamInterrupted and cost the round its salvage and its feedback."""
+    requests: list[httpx.Request] = []
+
+    def generation(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(404)
+
+    create = ScriptedCreate([_chunk(content="cut"), _chunk(finish="length")])
+    client = replace(
+        _client(create),
+        key=OPENROUTER_KEY,
+        generation_transport=httpx.MockTransport(generation),
+    )
+    events = []
+
+    with pytest.raises(ModelResponseTruncated):
+        async for event in client.complete(REQUEST):
+            events.append(event)
+
+    assert events == [ModelStreamStart(), TextDelta(text="cut")]
+    assert requests == []
+
+
 def test_manifest_registers_slug_pinned_specs() -> None:
     manifest = openrouter.manifest()
     by_id = {spec.id: spec for spec in manifest.models}

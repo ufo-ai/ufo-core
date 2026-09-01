@@ -714,23 +714,59 @@ onto a live one is a message no round ever reads, and the member waits for a rep
 coming. A member reads that room and speaks to the app in their own chat with it."""
 
 
-async def submit_intent(
-    ctx: SurfaceContext, request: Request, agent_id: UUID, member_id: UUID, email: str
-) -> Response:
-    """Admit one prepared intent for the selected agent and answer with its terminal outcome. The
-    intent lands on the member's one durable intent conversation with this agent — never the chat
-    conversation, so it cannot fold into a live chat turn — and a model the deploy's registry
-    cannot serve refuses before a turn exists, because a stored unknown id would wedge the agent's
-    every later turn at setup.
+async def _complete_agent_spec(
+    ctx: SurfaceContext,
+    submitted: ApplyIntent,
+    submitted_fields: frozenset[str],
+    agent_id: UUID,
+    member_id: UUID,
+) -> ApplyIntent | Response:
+    if (
+        submitted.verb != "apply"
+        or submitted.kind != "agent"
+        or submitted.spec is None
+        or AGENT_SPEC_REQUIRED <= submitted_fields
+    ):
+        return submitted
+    detail = await ctx.agent_detail(agent_id, member_id)
+    if detail is None or detail.name != submitted.name:
+        return JSONResponse({"applied": False, "message": "No such app."})
+    return submitted.model_copy(
+        update={
+            "spec": {
+                "model": detail.model,
+                "internet_access_allowed": detail.internet_access_allowed,
+                "reasoning": detail.reasoning,
+                "sandbox_size": detail.sandbox_size,
+                **submitted.spec,
+            }
+        }
+    )
 
-    A panel that writes one part of an agent — its prompt, its icon — submits that part alone, so
-    the fields `AgentSpec` requires are read from the agent and merged beneath what was submitted.
-    Without it the spec fails validation on fields the member was never shown, and the panel is
-    told no model was named.
 
-    An action intent is admitted only for an action this deploy presents on its kind — the rule
-    the projection draws controls by — so a panel cannot prepare an act the portal never
-    offered."""
+async def _intent_refusal(
+    ctx: SurfaceContext, submitted: ApplyIntent, submitted_fields: frozenset[str]
+) -> Response | None:
+    if submitted.kind == "agent" and submitted.spec:
+        model = submitted.spec.get("model")
+        if model not in ctx.models:
+            return JSONResponse({"applied": False, "message": f"No model named {model!r}."})
+        if "sandbox_size" in submitted_fields and not ctx.sandbox_sizes:
+            return JSONResponse(
+                {"applied": False, "message": "This deploy does not offer sandbox sizes."}
+            )
+    if submitted.kind == "credential":
+        slots = {view.name for view in await ctx.list_credential_slots()}
+        if submitted.name not in slots:
+            return JSONResponse(
+                {"applied": False, "message": f"No credential slot named {submitted.name!r}."}
+            )
+    return None
+
+
+async def _prepare_panel_intent(
+    ctx: SurfaceContext, request: Request, agent_id: UUID, member_id: UUID
+) -> ApplyIntent | Response:
     body = await request.body()
     if len(body) > INTENT_MAX_BYTES:
         return JSONResponse(
@@ -750,57 +786,87 @@ async def submit_intent(
         and not ctx.frame_admits("connect_account")
     ):
         return JSONResponse({"applied": False, "message": NO_FRAME_ACCESS})
-    submitted_fields = (
-        frozenset(submitted.spec)
-        if submitted.kind == "agent" and submitted.spec is not None
-        else frozenset()
+    submitted_fields = frozenset(submitted.spec or {}) if submitted.kind == "agent" else frozenset()
+    completed = await _complete_agent_spec(ctx, submitted, submitted_fields, agent_id, member_id)
+    if isinstance(completed, Response):
+        return completed
+    refused = await _intent_refusal(ctx, completed, submitted_fields)
+    if refused is not None:
+        return refused
+    return completed
+
+
+def _oversized_manifest(intent: ToolIntent) -> Response | None:
+    if intent.tool != "object_apply":
+        return None
+    manifest = intent.input.get("manifest")
+    if not isinstance(manifest, str):
+        raise RuntimeError("an object apply intent has no manifest")
+    if len(manifest.encode()) <= INTENT_MAX_BYTES:
+        return None
+    return JSONResponse(
+        {
+            "applied": False,
+            "message": f"Intent exceeds {INTENT_MAX_BYTES} bytes.",
+        },
+        status_code=413,
     )
-    if (
-        submitted.verb == "apply"
-        and submitted.kind == "agent"
-        and submitted.spec is not None
-        and not AGENT_SPEC_REQUIRED <= submitted_fields
-    ):
-        detail = await ctx.agent_detail(agent_id, member_id)
-        if detail is None or detail.name != submitted.name:
-            return JSONResponse({"applied": False, "message": "No such app."})
-        submitted = submitted.model_copy(
-            update={
-                "spec": {
-                    "model": detail.model,
-                    "internet_access_allowed": detail.internet_access_allowed,
-                    "reasoning": detail.reasoning,
-                    "sandbox_size": detail.sandbox_size,
-                    **submitted.spec,
-                }
-            }
+
+
+async def _intent_result(ctx: SurfaceContext, turn_id: UUID) -> Response:
+    try:
+        async with (
+            ctx.tail(turn_id) as frames,
+            asyncio.timeout(INTENT_RESULT_TIMEOUT_SECONDS),
+        ):
+            async for _cursor, frame in frames:
+                match frame:
+                    case Terminal():
+                        return _outcome(frame.frame, turn_id)
+                    case Parked():
+                        return JSONResponse(
+                            {
+                                "applied": False,
+                                "message": frame.message,
+                                "turn_id": str(turn_id),
+                            }
+                        )
+    except TimeoutError:
+        return JSONResponse(
+            {
+                "applied": False,
+                "message": "The change is still being applied — check back.",
+                "turn_id": str(turn_id),
+            },
+            status_code=504,
         )
-    if isinstance(submitted, ApplyIntent) and submitted.kind == "agent" and submitted.spec:
-        model = submitted.spec.get("model")
-        if model not in ctx.models:
-            return JSONResponse({"applied": False, "message": f"No model named {model!r}."})
-        if "sandbox_size" in submitted_fields and not ctx.sandbox_sizes:
-            return JSONResponse(
-                {"applied": False, "message": "This deploy does not offer sandbox sizes."}
-            )
-    if isinstance(submitted, ApplyIntent) and submitted.kind == "credential":
-        if submitted.name not in {view.name for view in await ctx.list_credential_slots()}:
-            return JSONResponse(
-                {"applied": False, "message": f"No credential slot named {submitted.name!r}."}
-            )
-    intent = _tool_intent(submitted)
-    if intent.tool == "object_apply":
-        manifest = intent.input.get("manifest")
-        if not isinstance(manifest, str):
-            raise RuntimeError("an object apply intent has no manifest")
-        if len(manifest.encode()) > INTENT_MAX_BYTES:
-            return JSONResponse(
-                {
-                    "applied": False,
-                    "message": f"Intent exceeds {INTENT_MAX_BYTES} bytes.",
-                },
-                status_code=413,
-            )
+    raise RuntimeError("the turn's tail ended without a terminal frame")
+
+
+async def submit_intent(
+    ctx: SurfaceContext, request: Request, agent_id: UUID, member_id: UUID, email: str
+) -> Response:
+    """Admit one prepared intent for the selected agent and answer with its terminal outcome. The
+    intent lands on the member's one durable intent conversation with this agent — never the chat
+    conversation, so it cannot fold into a live chat turn — and a model the deploy's registry
+    cannot serve refuses before a turn exists, because a stored unknown id would wedge the agent's
+    every later turn at setup.
+
+    A panel that writes one part of an agent — its prompt, its icon — submits that part alone, so
+    the fields `AgentSpec` requires are read from the agent and merged beneath what was submitted.
+    Without it the spec fails validation on fields the member was never shown, and the panel is
+    told no model was named.
+
+    An action intent is admitted only for an action this deploy presents on its kind — the rule
+    the projection draws controls by — so a panel cannot prepare an act the portal never
+    offered."""
+    prepared = await _prepare_panel_intent(ctx, request, agent_id, member_id)
+    if isinstance(prepared, Response):
+        return prepared
+    intent = _tool_intent(prepared)
+    refused = _oversized_manifest(intent)
+    if refused is not None:
+        return refused
     conversation_id = await ctx.conversation_for(
         f"{PORTAL_LANE_PREFIX}{agent_id}/{email}",
         conversation_audience(member_id),
@@ -813,33 +879,7 @@ async def submit_intent(
         speaker_member_id=member_id,
         intent=intent,
     )
-    try:
-        async with (
-            ctx.tail(admitted.turn_id) as frames,
-            asyncio.timeout(INTENT_RESULT_TIMEOUT_SECONDS),
-        ):
-            async for _cursor, frame in frames:
-                match frame:
-                    case Terminal():
-                        return _outcome(frame.frame, admitted.turn_id)
-                    case Parked():
-                        return JSONResponse(
-                            {
-                                "applied": False,
-                                "message": frame.message,
-                                "turn_id": str(admitted.turn_id),
-                            }
-                        )
-    except TimeoutError:
-        return JSONResponse(
-            {
-                "applied": False,
-                "message": "The change is still being applied — check back.",
-                "turn_id": str(admitted.turn_id),
-            },
-            status_code=504,
-        )
-    raise RuntimeError("the turn's tail ended without a terminal frame")
+    return await _intent_result(ctx, admitted.turn_id)
 
 
 async def submit_action(

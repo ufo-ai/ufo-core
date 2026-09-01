@@ -21,6 +21,7 @@ from pydantic import (
     model_validator,
 )
 
+from ufo.sdk.context import ExtensionContext
 from ufo.sdk.manifest import (
     Deny,
     HookContext,
@@ -782,34 +783,18 @@ class ApplicationBuildAcceptance:
     child_turn_id: UUID
 
     async def accept(self, result: ApplicationBuilderResult) -> ApplicationBuilderResult:
-        if result.status == "wireframe":
-            return self._blocked(result, "The worker returned a wireframe instead of a build.", 0)
-        if result.status == "blocked":
-            return result
-        if self.ctx.ext is None:
+        initial = self._initial_result(result)
+        if initial is not None:
+            return initial
+        extension = self.ctx.ext
+        if extension is None:
             raise RuntimeError("the application builder dispatched without its extension context")
-        if result.source_path != APPLICATION_SOURCE_PATH:
-            return self._blocked(result, "The worker returned the wrong source path.", 0)
-        key = APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=self.child_turn_id)
-        stored_proof = await self.ctx.ext.store.get(key)
-        if stored_proof is None:
-            return self._blocked(
-                result,
-                "The worker returned no passed product QA proof.",
-                0,
-            )
-        try:
-            proof = ApplicationQaProof.model_validate(stored_proof)
-        except ValueError as error:
-            raise RuntimeError("application builder QA proof is invalid") from error
+        checked_proof = await self._proof(result, extension)
+        if isinstance(checked_proof, ApplicationBuilderResult):
+            return checked_proof
+        proof = checked_proof
         browser_batches = proof.browser_batches
-        if result.observed_errors:
-            return self._blocked(
-                result,
-                "The worker reported browser errors.",
-                browser_batches,
-            )
-        sites = HostedSites(self.ctx.ext.store.workspace_id, self.ctx.ext.transaction)
+        sites = HostedSites(extension.store.workspace_id, extension.transaction)
         site = await sites.read(self.ctx.sandbox.conversation_id, result.site_name)
         if site is None:
             homepage = await sites.homepage(self.ctx.turn.agent_id)
@@ -877,13 +862,46 @@ class ApplicationBuildAcceptance:
                 "site_name": bound.name,
                 "site_url": site_url(
                     self.ctx.public_base_url,
-                    self.ctx.ext.store.workspace_id,
+                    extension.store.workspace_id,
                     bound.conversation_id,
                     bound.name,
                 ),
                 "browser_batches": browser_batches,
             }
         )
+
+    def _initial_result(self, result: ApplicationBuilderResult) -> ApplicationBuilderResult | None:
+        if result.status == "wireframe":
+            return self._blocked(result, "The worker returned a wireframe instead of a build.", 0)
+        if result.status == "blocked":
+            return result
+        if result.source_path != APPLICATION_SOURCE_PATH:
+            return self._blocked(result, "The worker returned the wrong source path.", 0)
+        return None
+
+    async def _proof(
+        self, result: ApplicationBuilderResult, extension: ExtensionContext
+    ) -> ApplicationQaProof | ApplicationBuilderResult:
+        key = APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=self.child_turn_id)
+        stored_proof = await extension.store.get(key)
+        if stored_proof is None:
+            return self._blocked(
+                result,
+                "The worker returned no passed product QA proof.",
+                0,
+            )
+        try:
+            proof = ApplicationQaProof.model_validate(stored_proof)
+        except ValueError as error:
+            raise RuntimeError("application builder QA proof is invalid") from error
+        browser_batches = proof.browser_batches
+        if result.observed_errors:
+            return self._blocked(
+                result,
+                "The worker reported browser errors.",
+                browser_batches,
+            )
+        return proof
 
     def _blocked(
         self,
@@ -977,9 +995,7 @@ class EditApplicationSourceInput(BaseModel):
         return tuple(edits)
 
 
-def _validate_application_source(
-    source: str, designed_kit_components: tuple[str, ...] = ()
-) -> None:
+def _validate_application_imports(source: str) -> None:
     modules = tuple(left or right for left, right in IMPORT_MODULE.findall(source))
     if IMPORT_DECLARATION.search(source) is None or "ufo/kit" not in modules:
         raise ValueError("app.tsx must import its runtime and components from ufo/kit")
@@ -991,6 +1007,9 @@ def _validate_application_source(
         raise ValueError("app.tsx must not export declarations")
     if "UfoAppKit" in source:
         raise ValueError("app.tsx must import from ufo/kit instead of using UfoAppKit")
+
+
+def _rendered_application_components(source: str) -> set[str]:
     if ROOT_MOUNT.search(source) is None:
         raise ValueError("mountApp must receive the root element and a render callback")
     imported_components: dict[str, set[str]] = {}
@@ -1017,6 +1036,12 @@ def _validate_application_source(
     }
     if not rendered_kit_components:
         raise ValueError("app.tsx must render at least one UI component imported from ufo/kit")
+    return rendered_kit_components
+
+
+def _validate_designed_components(
+    rendered_kit_components: set[str], designed_kit_components: tuple[str, ...]
+) -> None:
     missing_designed_components = tuple(
         name for name in designed_kit_components if name not in rendered_kit_components
     )
@@ -1026,6 +1051,9 @@ def _validate_application_source(
             f"app.tsx must directly render designed Kit {label}: "
             f"{', '.join(missing_designed_components)}"
         )
+
+
+def _validate_application_styling(source: str) -> None:
     if LITERAL_WHITE_ON_SCHEME_INK.search(source):
         raise ValueError(
             "a --color-ink background must use --color-surface text in both colour schemes"
@@ -1058,9 +1086,16 @@ def _validate_application_source(
             )
 
 
-def _validate_application_design(
-    source: str,
-) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+def _validate_application_source(
+    source: str, designed_kit_components: tuple[str, ...] = ()
+) -> None:
+    _validate_application_imports(source)
+    rendered_kit_components = _rendered_application_components(source)
+    _validate_designed_components(rendered_kit_components, designed_kit_components)
+    _validate_application_styling(source)
+
+
+def _parse_application_design(source: str) -> tuple[ElementTree.Element, tuple[float, ...]]:
     if "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
         raise ValueError("application design must not declare XML entities")
     try:
@@ -1088,98 +1123,114 @@ def _validate_application_design(
             'application design must use viewBox="0 0 305 H", width="305", and a matching '
             "integer height H from 844 through 4096"
         )
-    regions = []
-    kit_components: list[str] = []
-    ids = set()
-    drawing_elements = 0
-    for element in root.iter():
-        tag = element.tag.rsplit("}", 1)[-1]
-        if tag.casefold() in {"clippath", "filter", "mask"}:
-            raise ValueError(APPLICATION_DESIGN_EFFECT_ERROR)
-        attributes = {
-            name.rsplit("}", 1)[-1]: value.strip() for name, value in element.attrib.items()
-        }
-        if any(
-            name.casefold() in {"clip-path", "filter", "mask", "mask-image"}
-            and value.casefold() not in {"", "none"}
-            for name, value in attributes.items()
-        ) or any(
-            match.group(1).strip().casefold() != "none"
-            for value in (
-                attributes.get("style", ""),
-                "".join(element.itertext()) if tag == "style" else "",
+    return root, view_box
+
+
+def _visible_design_element(
+    element: ElementTree.Element, tag: str, attributes: dict[str, str]
+) -> bool:
+    match tag:
+        case "circle":
+            return attributes.get("r", "") not in {"", "0", "0.0"}
+        case "ellipse":
+            return all(attributes.get(name, "") not in {"", "0", "0.0"} for name in ("rx", "ry"))
+        case "image" | "rect":
+            return all(
+                attributes.get(name, "") not in {"", "0", "0.0"} for name in ("width", "height")
             )
-            for match in APPLICATION_DESIGN_EFFECT_STYLE.finditer(value)
+        case "line":
+            return (
+                attributes.get("x1", "") != attributes.get("x2", "")
+                or attributes.get("y1", "") != attributes.get("y2", "")
+            ) and attributes.get("stroke", "").casefold() not in {"", "none", "transparent"}
+        case "path":
+            return bool(attributes.get("d"))
+        case "polygon" | "polyline":
+            return bool(attributes.get("points"))
+        case "text":
+            return bool("".join(element.itertext()).strip())
+        case "use":
+            return attributes.get("href", "").startswith("#")
+        case _:
+            return False
+
+
+def _validate_design_attributes(element: ElementTree.Element) -> None:
+    for name, value in element.attrib.items():
+        attribute = name.rsplit("}", 1)[-1].casefold()
+        lowered = value.casefold()
+        if attribute.startswith("on") or any(
+            scheme in lowered for scheme in ("javascript:", "data:", "http:", "https:")
         ):
-            raise ValueError(APPLICATION_DESIGN_EFFECT_ERROR)
-        match tag:
-            case "circle":
-                visible = attributes.get("r", "") not in {"", "0", "0.0"}
-            case "ellipse":
-                visible = all(
-                    attributes.get(name, "") not in {"", "0", "0.0"} for name in ("rx", "ry")
-                )
-            case "image" | "rect":
-                visible = all(
-                    attributes.get(name, "") not in {"", "0", "0.0"} for name in ("width", "height")
-                )
-            case "line":
-                visible = (
-                    attributes.get("x1", "") != attributes.get("x2", "")
-                    or attributes.get("y1", "") != attributes.get("y2", "")
-                ) and attributes.get("stroke", "").casefold() not in {"", "none", "transparent"}
-            case "path":
-                visible = bool(attributes.get("d"))
-            case "polygon" | "polyline":
-                visible = bool(attributes.get("points"))
-            case "text":
-                visible = bool("".join(element.itertext()).strip())
-            case "use":
-                visible = attributes.get("href", "").startswith("#")
-            case _:
-                visible = False
-        if tag in SVG_DRAWING_ELEMENTS and visible:
-            drawing_elements += 1
-        element_id = element.attrib.get("id", "").strip()
-        if element_id:
-            if element_id in ids:
-                raise ValueError("application design SVG ids must be unique")
-            ids.add(element_id)
-        if tag in {"script", "foreignObject"}:
-            raise ValueError("application design must contain SVG drawing elements only")
-        region = element.attrib.get("data-app-region")
-        if region is not None:
-            if tag != "g" or APPLICATION_DESIGN_REGION.fullmatch(region) is None:
-                raise ValueError(
-                    "application design regions must be lowercase slugs on SVG g elements"
-                )
-            regions.append(element)
-        kit_component = element.attrib.get("data-kit-component")
-        if kit_component is not None:
-            if tag != "g":
-                raise ValueError(
-                    "application design data-kit-component must be on an SVG g element"
-                )
-            if not kit_component.strip():
-                raise ValueError(
-                    "application design data-kit-component must name one visual ufo/kit export"
-                )
-            if APPLICATION_DESIGN_KIT_COMPONENT.fullmatch(kit_component) is None:
-                raise ValueError("application design data-kit-component must be one ComponentName")
-            if kit_component not in APPLICATION_KIT_COMPONENTS:
-                raise ValueError(
-                    f"application design data-kit-component {kit_component!r} is not a visual "
-                    "ufo/kit export"
-                )
-            if kit_component not in kit_components:
-                kit_components.append(kit_component)
-        for name, value in element.attrib.items():
-            attribute = name.rsplit("}", 1)[-1].casefold()
-            lowered = value.casefold()
-            if attribute.startswith("on") or any(
-                scheme in lowered for scheme in ("javascript:", "data:", "http:", "https:")
-            ):
-                raise ValueError("application design must not contain active or external content")
+            raise ValueError("application design must not contain active or external content")
+
+
+def _validate_design_element(
+    element: ElementTree.Element,
+    ids: set[str],
+    regions: list[ElementTree.Element],
+    kit_components: list[str],
+) -> bool:
+    tag = element.tag.rsplit("}", 1)[-1]
+    if tag.casefold() in {"clippath", "filter", "mask"}:
+        raise ValueError(APPLICATION_DESIGN_EFFECT_ERROR)
+    attributes = {name.rsplit("}", 1)[-1]: value.strip() for name, value in element.attrib.items()}
+    if any(
+        name.casefold() in {"clip-path", "filter", "mask", "mask-image"}
+        and value.casefold() not in {"", "none"}
+        for name, value in attributes.items()
+    ) or any(
+        match.group(1).strip().casefold() != "none"
+        for value in (
+            attributes.get("style", ""),
+            "".join(element.itertext()) if tag == "style" else "",
+        )
+        for match in APPLICATION_DESIGN_EFFECT_STYLE.finditer(value)
+    ):
+        raise ValueError(APPLICATION_DESIGN_EFFECT_ERROR)
+    element_id = element.attrib.get("id", "").strip()
+    if element_id:
+        if element_id in ids:
+            raise ValueError("application design SVG ids must be unique")
+        ids.add(element_id)
+    if tag in {"script", "foreignObject"}:
+        raise ValueError("application design must contain SVG drawing elements only")
+    region = element.attrib.get("data-app-region")
+    if region is not None:
+        if tag != "g" or APPLICATION_DESIGN_REGION.fullmatch(region) is None:
+            raise ValueError("application design regions must be lowercase slugs on SVG g elements")
+        regions.append(element)
+    kit_component = element.attrib.get("data-kit-component")
+    if kit_component is not None:
+        if tag != "g":
+            raise ValueError("application design data-kit-component must be on an SVG g element")
+        if not kit_component.strip():
+            raise ValueError(
+                "application design data-kit-component must name one visual ufo/kit export"
+            )
+        if APPLICATION_DESIGN_KIT_COMPONENT.fullmatch(kit_component) is None:
+            raise ValueError("application design data-kit-component must be one ComponentName")
+        if kit_component not in APPLICATION_KIT_COMPONENTS:
+            raise ValueError(
+                f"application design data-kit-component {kit_component!r} is not a visual "
+                "ufo/kit export"
+            )
+        if kit_component not in kit_components:
+            kit_components.append(kit_component)
+    _validate_design_attributes(element)
+    return tag in SVG_DRAWING_ELEMENTS and _visible_design_element(element, tag, attributes)
+
+
+def _validate_application_design(
+    source: str,
+) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+    root, view_box = _parse_application_design(source)
+    regions: list[ElementTree.Element] = []
+    kit_components: list[str] = []
+    ids: set[str] = set()
+    drawing_elements = sum(
+        _validate_design_element(element, ids, regions, kit_components) for element in root.iter()
+    )
     if drawing_elements == 0:
         raise ValueError("application design must contain SVG drawing elements only")
     names = tuple(element.attrib["data-app-region"] for element in regions)

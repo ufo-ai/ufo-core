@@ -22,7 +22,7 @@ import base64
 import json
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, get_args
 
 import httpx
@@ -389,6 +389,121 @@ def _openrouter_messages(
 
 
 @dataclass(frozen=True)
+class _OpenRouterRetry:
+    spec: ModelSpec
+    model: str
+    delay: float = INITIAL_RETRY_DELAY_SECONDS
+    attempt: int = 0
+    abort_retried: bool = False
+
+    async def status(self, error: openai.APIStatusError, yielded: bool) -> "_OpenRouterRetry":
+        attempt = self.attempt + 1
+        retryable = error.status_code == 429 or error.status_code >= 500
+        if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
+            log(
+                "model.provider_status_error",
+                provider=self.spec.provider,
+                model=self.model,
+                attempts=attempt,
+                status_code=error.status_code,
+            )
+            raise error
+        header = error.response.headers.get("retry-after")
+        try:
+            wait = max(float(header), 0.0) if header is not None else self.delay
+        except ValueError:
+            wait = self.delay
+        log(
+            "model.provider_status_retry",
+            provider=self.spec.provider,
+            model=self.model,
+            attempt=attempt,
+            status_code=error.status_code,
+            wait_seconds=wait,
+        )
+        emit_metric(
+            "model_provider_retry_total",
+            provider=self.spec.provider,
+            model=self.model,
+            kind="status",
+        )
+        await asyncio.sleep(wait)
+        return replace(
+            self,
+            delay=min(self.delay * 2, MAX_RETRY_DELAY_SECONDS),
+            attempt=attempt,
+        )
+
+    def stream_error(self, error: openai.APIError, yielded: bool) -> "_OpenRouterRetry":
+        if type(error) is not openai.APIError:
+            raise error
+        is_gemini_abort = (
+            str(error) == GEMINI_ABORT_ERROR and self.model == GEMINI_ABORT_RETRY_MODEL
+        )
+        if is_gemini_abort and not yielded and not self.abort_retried:
+            log(
+                "model.provider_abort_retry",
+                provider=self.spec.provider,
+                model=self.model,
+                attempt=1,
+            )
+            emit_metric(
+                "model_provider_retry_total",
+                provider=self.spec.provider,
+                model=self.model,
+                kind="abort",
+            )
+            return replace(self, abort_retried=True)
+        raise ModelStreamInterrupted(
+            "stream_error",
+            f"OpenRouter injected an error into the SSE stream: {error}",
+        ) from error
+
+
+class _OpenRouterStream:
+    def __init__(self, cache_write_30m_priced: bool) -> None:
+        self.cache_write_30m_priced = cache_write_30m_priced
+        self.yielded = False
+        self.tool_call_ids: dict[int, str] = {}
+        self.usage: Usage | None = None
+        self.finish_reason: str | None = None
+        self.provider: str | None = None
+        self.generation_id: str | None = None
+
+    def accept(self, chunk: ChatCompletionChunk) -> tuple[ModelEvent, ...]:
+        self.generation_id = chunk.id or self.generation_id
+        self.provider = _chunk_provider(chunk) or self.provider
+        if chunk.usage is not None:
+            self.usage = _usage_of(chunk.usage, self.cache_write_30m_priced)
+        if not chunk.choices:
+            return ()
+        choice = chunk.choices[0]
+        if choice.finish_reason is not None:
+            self.finish_reason = choice.finish_reason
+        events: list[ModelEvent] = []
+        if choice.delta.content:
+            events.append(TextDelta(text=choice.delta.content))
+        for call in choice.delta.tool_calls or ():
+            if call.index not in self.tool_call_ids:
+                self.tool_call_ids[call.index] = call.id or ""
+                events.append(
+                    ToolCallStart(
+                        id=call.id or "",
+                        name=(call.function.name or "") if call.function else "",
+                    )
+                )
+            if call.function is not None and call.function.arguments:
+                events.append(
+                    ToolCallDelta(
+                        id=self.tool_call_ids[call.index],
+                        partial_json=call.function.arguments,
+                    )
+                )
+        self.yielded = self.yielded or bool(events)
+        return tuple(events)
+
+
+@dataclass(frozen=True)
 class OpenRouterModelClient:
     """The OpenRouter backend behind the `ModelClient` protocol: it streams ModelEvents from the
     Chat Completions wire, ending with one Usage, exactly as core's OpenAIClient does, and adds
@@ -423,139 +538,51 @@ class OpenRouterModelClient:
     generation_transport: httpx.AsyncBaseTransport | None = None
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        delay = INITIAL_RETRY_DELAY_SECONDS
-        attempt = 0
+        retry = _OpenRouterRetry(self.spec, request.model)
         empty_attempt = 0
-        abort_retried = False
         ignore_providers: set[str] = set()
         while True:
-            yielded = False
-            tool_call_ids: dict[int, str] = {}
-            usage: Usage | None = None
-            finish_reason: str | None = None
-            provider: str | None = None
-            generation_id: str | None = None
+            state = _OpenRouterStream(bool(self.spec.price.cache_write_30m))
             try:
                 stream = await self.client.chat.completions.create(
                     **self._create_kwargs(request, frozenset(ignore_providers))
                 )
                 stream_started = False
                 async for chunk in stream:
-                    generation_id = chunk.id or generation_id
                     if not stream_started:
                         stream_started = True
                         yield ModelStreamStart()
-                    provider = _chunk_provider(chunk) or provider
-                    if chunk.usage is not None:
-                        usage = _usage_of(chunk.usage, self.spec.price.cache_write_30m)
-                    if not chunk.choices:
-                        continue
-                    choice = chunk.choices[0]
-                    if choice.finish_reason is not None:
-                        finish_reason = choice.finish_reason
-                    delta = choice.delta
-                    if delta.content:
-                        yielded = True
-                        yield TextDelta(text=delta.content)
-                    for call in delta.tool_calls or ():
-                        if call.index not in tool_call_ids:
-                            tool_call_ids[call.index] = call.id or ""
-                            yielded = True
-                            yield ToolCallStart(
-                                id=call.id or "",
-                                name=call.function.name if call.function else "",
-                            )
-                        if call.function is not None and call.function.arguments:
-                            yielded = True
-                            yield ToolCallDelta(
-                                id=tool_call_ids[call.index],
-                                partial_json=call.function.arguments,
-                            )
+                    for event in state.accept(chunk):
+                        yield event
             except openai.APIStatusError as error:
-                if usage is not None:
-                    yield usage
-                attempt += 1
-                retryable = error.status_code == 429 or error.status_code >= 500
-                if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
-                    log(
-                        "model.provider_status_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt,
-                        status_code=error.status_code,
-                    )
-                    raise
-                header = error.response.headers.get("retry-after")
-                try:
-                    wait = max(float(header), 0.0) if header is not None else delay
-                except ValueError:
-                    wait = delay
-                log(
-                    "model.provider_status_retry",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    attempt=attempt,
-                    status_code=error.status_code,
-                    wait_seconds=wait,
-                )
-                emit_metric(
-                    "model_provider_retry_total",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    kind="status",
-                )
-                await asyncio.sleep(wait)
-                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                if state.usage is not None:
+                    yield state.usage
+                retry = await retry.status(error, state.yielded)
                 continue
             except (httpx.TimeoutException, httpx.RemoteProtocolError) as error:
-                if usage is not None:
-                    yield usage
+                if state.usage is not None:
+                    yield state.usage
                 raise ModelStreamInterrupted(
                     "stream_transport",
                     f"OpenRouter stream died mid-round ({type(error).__name__}): {error}",
                 ) from error
             except openai.APIError as error:
-                if type(error) is not openai.APIError:
-                    raise
-                if usage is not None:
-                    yield usage
-                is_gemini_abort = (
-                    str(error) == GEMINI_ABORT_ERROR and request.model == GEMINI_ABORT_RETRY_MODEL
-                )
-                if is_gemini_abort and not yielded and not abort_retried:
-                    abort_retried = True
-                    log(
-                        "model.provider_abort_retry",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempt=1,
-                    )
-                    emit_metric(
-                        "model_provider_retry_total",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        kind="abort",
-                    )
-                    continue
-                raise ModelStreamInterrupted(
-                    "stream_error",
-                    f"OpenRouter injected an error into the SSE stream: {error}",
-                ) from error
-            if finish_reason == "length":
-                if usage is not None:
-                    yield usage
+                if state.usage is not None:
+                    yield state.usage
+                retry = retry.stream_error(error, state.yielded)
+                continue
+            if state.finish_reason == "length":
+                if state.usage is not None:
+                    yield state.usage
                 raise ModelResponseTruncated(
                     "OpenRouter completion truncated at the max_tokens budget "
                     "(finish_reason=length)"
                 )
-            if usage is None and finish_reason is not None and generation_id is not None:
-                usage = await self._generation_usage(generation_id, finish_reason)
-            if usage is None:
-                raise RuntimeError("model stream produced no usage")
-            dead = finish_reason == "stop" and not yielded
-            if dead and provider is not None and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES:
+            usage = await self._finish_usage(state)
+            dead = state.finish_reason == "stop" and not state.yielded
+            if dead and state.provider is not None and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES:
                 empty_attempt += 1
-                ignore_providers.add(provider)
+                ignore_providers.add(state.provider)
                 emit_metric(
                     "model_provider_retry_total",
                     provider=self.spec.provider,
@@ -566,6 +593,14 @@ class OpenRouterModelClient:
                 continue
             yield usage
             return
+
+    async def _finish_usage(self, state: _OpenRouterStream) -> Usage:
+        usage = state.usage
+        if usage is None and state.finish_reason is not None and state.generation_id is not None:
+            usage = await self._generation_usage(state.generation_id, state.finish_reason)
+        if usage is None:
+            raise RuntimeError("model stream produced no usage")
+        return usage
 
     async def _generation_usage(self, generation_id: str, finish_reason: str) -> Usage | None:
         async with httpx.AsyncClient(

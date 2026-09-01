@@ -37,6 +37,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -391,6 +392,100 @@ def _say_lines(text: str) -> tuple[bytes, ...]:
     return tuple(directive("say", line) for line in (text.splitlines() or [text]))
 
 
+@dataclass(frozen=True)
+class _RenderedFrame:
+    lines: tuple[bytes, ...]
+    streamed: bool
+    terminated: bool
+    prompting: bool
+
+
+async def _render_stream_frame(
+    frame: LiveFrame,
+    streamed: bool,
+    pending: Callable[[str, str], Awaitable[bool]] | None,
+    connect: Callable[[], Awaitable[str]] | None,
+    files: Callable[[], Awaitable[tuple[SharedFile, ...]]] | None,
+    exits: bool,
+    runtime: RuntimeIdentity | None,
+) -> _RenderedFrame:
+    collect: tuple[CredentialPrompt, ...] = ()
+    if (
+        isinstance(frame, Terminal)
+        and frame.frame.credential_request is not None
+        and pending is not None
+    ):
+        request = frame.frame.credential_request
+        collect = tuple(
+            [prompt for prompt in request.prompts if await pending(request.sealed, prompt.slot)]
+        )
+    connect_message: str | None = None
+    if isinstance(frame, Terminal) and frame.frame.connect_request is not None:
+        if connect is None:
+            connect_message = "Connection request unavailable; ask me to connect again."
+        else:
+            try:
+                url = await connect()
+            except ConnectRequestInvalid:
+                connect_message = "Connection request unavailable; ask me to connect again."
+            else:
+                connect_message = f"[Complete the connection]({url})"
+    shared: tuple[SharedFile, ...] = ()
+    if isinstance(frame, Terminal) and files is not None:
+        shared = await files()
+    lines = directives_for(
+        frame,
+        streamed,
+        collect,
+        connect_message,
+        shared,
+        exits=exits,
+        runtime=runtime,
+    )
+    streamed = streamed or bool(lines and isinstance(frame, TextDelta))
+    terminated = isinstance(frame, Terminal | Parked)
+    prompting = isinstance(frame, Terminal) and not (
+        exits and frame.frame.status == "cancelled" and bool(frame.frame.text)
+    )
+    return _RenderedFrame(lines, streamed, terminated, prompting)
+
+
+async def _stream_end_directives(
+    turn_id: UUID,
+    rendered_cursor: str,
+    terminated: bool,
+    ran: bool,
+    prompting: bool,
+    moved_on: Callable[[], Awaitable[bool]] | None,
+) -> tuple[bytes, ...]:
+    if not terminated and not ran:
+        return (
+            directive("since", str(turn_id), rendered_cursor),
+            directive("poll", str(POLL_SECONDS)),
+        )
+    if terminated and moved_on is not None and await moved_on():
+        return (
+            directive("since", str(turn_id), rendered_cursor),
+            directive("poll", "0"),
+        )
+    if prompting:
+        return (
+            directive("since", str(turn_id), rendered_cursor),
+            directive("listen", str(LISTEN_SECONDS)),
+        )
+    return ()
+
+
+async def _cancel_stream_tasks(*tasks: asyncio.Task[Any] | None) -> None:
+    for task in tasks:
+        if task is not None:
+            task.cancel()
+    for task in tasks:
+        if task is not None:
+            with suppress(asyncio.CancelledError, TerminalGone):
+                await task
+
+
 async def stream_directives(
     tail: AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]],
     hold_seconds: float,
@@ -493,69 +588,29 @@ async def stream_directives(
                 if item is None:
                     break
                 cursor, frame = item
-                collect: tuple[CredentialPrompt, ...] = ()
-                if (
-                    isinstance(frame, Terminal)
-                    and frame.frame.credential_request is not None
-                    and pending is not None
-                ):
-                    request = frame.frame.credential_request
-                    collect = tuple(
-                        [p for p in request.prompts if await pending(request.sealed, p.slot)]
-                    )
-                connect_message: str | None = None
-                if isinstance(frame, Terminal) and frame.frame.connect_request is not None:
-                    if connect is None:
-                        connect_message = "Connection request unavailable; ask me to connect again."
-                    else:
-                        try:
-                            url = await connect()
-                        except ConnectRequestInvalid:
-                            connect_message = (
-                                "Connection request unavailable; ask me to connect again."
-                            )
-                        else:
-                            connect_message = f"[Complete the connection]({url})"
-                shared: tuple[SharedFile, ...] = ()
-                if isinstance(frame, Terminal) and files is not None:
-                    shared = await files()
-                lines = directives_for(
+                rendered = await _render_stream_frame(
                     frame,
                     streamed,
-                    collect,
-                    connect_message,
-                    shared,
-                    exits=exits,
-                    runtime=runtime,
+                    pending,
+                    connect,
+                    files,
+                    exits,
+                    runtime,
                 )
-                if lines and isinstance(frame, TextDelta):
-                    streamed = True
-                for line in lines:
+                streamed = rendered.streamed
+                for line in rendered.lines:
                     yield line
                 rendered_cursor = cursor
-                if isinstance(frame, Terminal | Parked):
-                    terminated = True
-                    prompting = isinstance(frame, Terminal) and not (
-                        exits and frame.frame.status == "cancelled" and bool(frame.frame.text)
-                    )
+                if rendered.terminated:
+                    terminated = rendered.terminated
+                    prompting = rendered.prompting
                     break
         finally:
-            for task in (frame_task, op_task):
-                if task is not None:
-                    task.cancel()
-            for task in (frame_task, op_task):
-                if task is not None:
-                    with suppress(asyncio.CancelledError, TerminalGone):
-                        await task
-    if not terminated and not ran:
-        yield directive("since", str(turn_id), rendered_cursor)
-        yield directive("poll", str(POLL_SECONDS))
-    elif terminated and moved_on is not None and await moved_on():
-        yield directive("since", str(turn_id), rendered_cursor)
-        yield directive("poll", "0")
-    elif prompting:
-        yield directive("since", str(turn_id), rendered_cursor)
-        yield directive("listen", str(LISTEN_SECONDS))
+            await _cancel_stream_tasks(frame_task, op_task)
+    for line in await _stream_end_directives(
+        turn_id, rendered_cursor, terminated, ran, prompting, moved_on
+    ):
+        yield line
 
 
 async def _next(frames: AsyncIterator[tuple[str, LiveFrame]]) -> tuple[str, LiveFrame] | None:
@@ -657,6 +712,182 @@ def _runtime_config(ctx: SurfaceContext, request: Request) -> TurnRuntimeConfig 
     return runtime_config
 
 
+@dataclass(frozen=True)
+class _ChannelTurn:
+    id: UUID
+    note: bytes | None = None
+    sent: bytes | None = None
+    resumed: bool = False
+    op_id: str = ""
+
+
+async def _channel_op_reply(
+    ctx: SurfaceContext,
+    request: Request,
+    conversation_id: UUID,
+    member_id: UUID | None,
+    op_id: str,
+    stale: bool,
+) -> Response | _ChannelTurn:
+    reply = await request.body()
+    if len(reply) > MAX_OP_REPLY_BYTES:
+        ctx.terminal_resolve(
+            conversation_id, op_id, b"", "E2BIG: the reply is too large", member_id
+        )
+        return PlainTextResponse("op reply too large", status_code=413)
+    failed = _utf8_header(request, OP_ERR_HEADER) or None
+    ctx.terminal_resolve(conversation_id, op_id, bytes(reply), failed, member_id)
+    if stale:
+        return PlainTextResponse(directive("poll", "0"))
+    turn_id = await ctx.latest_turn(conversation_id)
+    if turn_id is None:
+        return PlainTextResponse(directive("ask", PROMPT))
+    return _ChannelTurn(turn_id, op_id=op_id)
+
+
+async def _channel_stop(
+    ctx: SurfaceContext, request: Request, conversation_id: UUID, stale: bool
+) -> Response | _ChannelTurn:
+    if await request.body():
+        return PlainTextResponse("a stop admits no message", status_code=400)
+    turn_id = await ctx.latest_turn(conversation_id)
+    if turn_id is None:
+        return PlainTextResponse(directive("ask", PROMPT))
+    await ctx.stop_turn(conversation_id, turn_id)
+    if stale:
+        return PlainTextResponse(_client_update())
+    return _ChannelTurn(turn_id)
+
+
+async def _channel_message(
+    ctx: SurfaceContext,
+    request: Request,
+    conversation_id: UUID,
+    member_id: UUID | None,
+    email: str,
+    cwd: str,
+    stale: bool,
+    marked: bool,
+) -> Response | _ChannelTurn:
+    body = (await request.body()).decode("utf-8", "replace").strip()
+    if not body:
+        turn_id = await ctx.latest_turn(conversation_id)
+        named, _, held = request.headers.get(SINCE_HEADER, "").strip().partition(":")
+        if stale and (marked or turn_id is None or named != str(turn_id)):
+            return PlainTextResponse(_client_update())
+        if turn_id is None:
+            return PlainTextResponse(directive("ask", PROMPT))
+        if marked and named == str(turn_id) and await ctx.turn_is_terminal(turn_id):
+            return PlainTextResponse(
+                directive("since", named, held) + directive("listen", str(LISTEN_SECONDS))
+            )
+        return _ChannelTurn(turn_id, resumed=True)
+    if stale:
+        return PlainTextResponse(_client_update())
+    if len(body.encode()) > MAX_MESSAGE_BYTES:
+        return PlainTextResponse("message too large", status_code=413)
+    try:
+        runtime_config = _runtime_config(ctx, request)
+    except ValueError as error:
+        return PlainTextResponse(str(error), status_code=400)
+    note = None
+    if cwd and await ctx.claim_terminal(conversation_id, cwd):
+        note = directive("note", f"Workspace: {cwd}")
+    try:
+        admitted = await ctx.admit(
+            conversation_id,
+            body,
+            context=_turn_context(email, request),
+            speaker_member_id=member_id,
+            runtime_config=runtime_config,
+        )
+    except ValueError as error:
+        return PlainTextResponse(str(error), status_code=409)
+    sent = directive(
+        "sent",
+        str(admitted.turn_id),
+        "1" if admitted.opened_run else "0",
+        "" if admitted.arrival_id is None else str(admitted.arrival_id),
+    )
+    return _ChannelTurn(admitted.turn_id, note=note, sent=sent)
+
+
+@dataclass(frozen=True)
+class _ChannelStream:
+    ctx: SurfaceContext
+    request: Request
+    conversation_id: UUID
+    member_id: UUID | None
+    cwd: str
+    marked: bool
+    turn: _ChannelTurn
+
+    async def response(self) -> Response:
+        connect = (
+            None
+            if self.member_id is None
+            else partial(self.ctx.connect_url, self.turn.id, self.member_id)
+        )
+        since = _resumed_from(self.request, self.turn.id)
+        history: tuple[bytes, ...] = ()
+        if self.turn.resumed and self.request.headers.get(SINCE_HEADER) is None:
+            transcript = await self.ctx.read_transcript(self.conversation_id)
+            if transcript is not None:
+                history = history_directives(transcript)
+        directives = stream_directives(
+            self.ctx.tail(self.turn.id, since),
+            HOLD_SECONDS,
+            self.ctx.credential_prompt_pending,
+            connect,
+            partial(shared_files, self.ctx, self.turn.id),
+            ops=(
+                partial(
+                    self.ctx.next_terminal_op,
+                    self.conversation_id,
+                    self.turn.op_id or None,
+                )
+                if self.cwd
+                else None
+            ),
+            turn_id=self.turn.id,
+            since=since,
+            moved_on=self._moved_on,
+            exits=not self.marked,
+            runtime=self.ctx.runtime,
+        )
+        return StreamingResponse(
+            self._bound(history, directives),
+            media_type="text/plain",
+        )
+
+    async def _moved_on(self) -> bool:
+        latest = await self.ctx.latest_turn(self.conversation_id)
+        return (
+            latest is not None
+            and latest != self.turn.id
+            and not await self.ctx.turn_is_terminal(latest)
+        )
+
+    async def _bound(
+        self, history: tuple[bytes, ...], directives: AsyncIterator[bytes]
+    ) -> AsyncIterator[bytes]:
+        if self.cwd:
+            run_id = terminal_runtime_id(self.request.path_params["channel"])
+            self.ctx.terminal_connect(self.conversation_id, self.cwd, self.member_id, run_id)
+        try:
+            if self.turn.sent is not None:
+                yield self.turn.sent
+            for line in history:
+                yield line
+            if self.turn.note is not None:
+                yield self.turn.note
+            async for line in directives:
+                yield line
+        finally:
+            if self.cwd:
+                self.ctx.terminal_disconnect(self.conversation_id)
+
+
 async def channel(ctx: SurfaceContext, request: Request) -> Response:
     """One held turn on a channel. The bearer names the member; the channel path scopes their
     conversation. A body admits a turn and streams it; an empty body admits nothing and resumes
@@ -700,120 +931,21 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     if UNSEND_HEADER in request.headers:
         unsend = request.headers[UNSEND_HEADER].strip()
         return await _unsend(ctx, request, conversation_id, member_id, unsend)
-    note: bytes | None = None
-    sent: bytes | None = None
-    resumed = False
     marked = bool(request.headers.get(LISTEN_HEADER, "").strip())
     op_id = request.headers.get(OP_HEADER, "").strip()
     if op_id:
-        reply = await request.body()
-        if len(reply) > MAX_OP_REPLY_BYTES:
-            ctx.terminal_resolve(
-                conversation_id, op_id, b"", "E2BIG: the reply is too large", member_id
-            )
-            return PlainTextResponse("op reply too large", status_code=413)
-        failed = _utf8_header(request, OP_ERR_HEADER) or None
-        ctx.terminal_resolve(conversation_id, op_id, bytes(reply), failed, member_id)
-        if stale:
-            return PlainTextResponse(directive("poll", "0"))
-        turn_id = await ctx.latest_turn(conversation_id)
-        if turn_id is None:
-            return PlainTextResponse(directive("ask", PROMPT))
+        resolution = await _channel_op_reply(ctx, request, conversation_id, member_id, op_id, stale)
     elif request.headers.get(STOP_HEADER, "").strip():
-        if await request.body():
-            return PlainTextResponse("a stop admits no message", status_code=400)
-        turn_id = await ctx.latest_turn(conversation_id)
-        if turn_id is None:
-            return PlainTextResponse(directive("ask", PROMPT))
-        await ctx.stop_turn(conversation_id, turn_id)
-        if stale:
-            return PlainTextResponse(_client_update())
+        resolution = await _channel_stop(ctx, request, conversation_id, stale)
     else:
-        body = (await request.body()).decode("utf-8", "replace").strip()
-        if not body:
-            resumed = True
-            turn_id = await ctx.latest_turn(conversation_id)
-            named, _, held = request.headers.get(SINCE_HEADER, "").strip().partition(":")
-            if stale and (marked or turn_id is None or named != str(turn_id)):
-                return PlainTextResponse(_client_update())
-            if turn_id is None:
-                return PlainTextResponse(directive("ask", PROMPT))
-            if marked and named == str(turn_id) and await ctx.turn_is_terminal(turn_id):
-                return PlainTextResponse(
-                    directive("since", named, held) + directive("listen", str(LISTEN_SECONDS))
-                )
-        else:
-            if stale:
-                return PlainTextResponse(_client_update())
-            if len(body.encode()) > MAX_MESSAGE_BYTES:
-                return PlainTextResponse("message too large", status_code=413)
-            try:
-                runtime_config = _runtime_config(ctx, request)
-            except ValueError as error:
-                return PlainTextResponse(str(error), status_code=400)
-            if cwd and await ctx.claim_terminal(conversation_id, cwd):
-                note = directive("note", f"Workspace: {cwd}")
-            try:
-                admitted = await ctx.admit(
-                    conversation_id,
-                    body,
-                    context=_turn_context(email, request),
-                    speaker_member_id=member_id,
-                    runtime_config=runtime_config,
-                )
-            except ValueError as error:
-                return PlainTextResponse(str(error), status_code=409)
-            turn_id = admitted.turn_id
-            sent = directive(
-                "sent",
-                str(turn_id),
-                "1" if admitted.opened_run else "0",
-                "" if admitted.arrival_id is None else str(admitted.arrival_id),
-            )
-    connect = None if member_id is None else partial(ctx.connect_url, turn_id, member_id)
-    since = _resumed_from(request, turn_id)
-    history: tuple[bytes, ...] = ()
-    if resumed and request.headers.get(SINCE_HEADER) is None:
-        transcript = await ctx.read_transcript(conversation_id)
-        if transcript is not None:
-            history = history_directives(transcript)
-
-    async def moved_on() -> bool:
-        latest = await ctx.latest_turn(conversation_id)
-        return latest is not None and latest != turn_id and not await ctx.turn_is_terminal(latest)
-
-    directives = stream_directives(
-        ctx.tail(turn_id, since),
-        HOLD_SECONDS,
-        ctx.credential_prompt_pending,
-        connect,
-        partial(shared_files, ctx, turn_id),
-        ops=partial(ctx.next_terminal_op, conversation_id, op_id or None) if cwd else None,
-        turn_id=turn_id,
-        since=since,
-        moved_on=moved_on,
-        exits=not marked,
-        runtime=ctx.runtime,
-    )
-
-    async def bound() -> AsyncIterator[bytes]:
-        if cwd:
-            run_id = terminal_runtime_id(request.path_params["channel"])
-            ctx.terminal_connect(conversation_id, cwd, member_id, run_id)
-        try:
-            if sent is not None:
-                yield sent
-            for line in history:
-                yield line
-            if note is not None:
-                yield note
-            async for line in directives:
-                yield line
-        finally:
-            if cwd:
-                ctx.terminal_disconnect(conversation_id)
-
-    return StreamingResponse(bound(), media_type="text/plain")
+        resolution = await _channel_message(
+            ctx, request, conversation_id, member_id, email, cwd, stale, marked
+        )
+    if isinstance(resolution, Response):
+        return resolution
+    return await _ChannelStream(
+        ctx, request, conversation_id, member_id, cwd, marked, resolution
+    ).response()
 
 
 async def _send(

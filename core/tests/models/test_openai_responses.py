@@ -556,6 +556,50 @@ async def test_responses_path_fails_loud_on_truncation_and_refusal() -> None:
     assert refused_events == [ModelStreamStart(), Usage(input_tokens=3, output_tokens=7)]
 
 
+async def test_responses_path_keeps_the_terminal_class_without_usage() -> None:
+    """An incomplete or refused round that reports no usage keeps its own error class. The engine
+    recovers a truncated round on ModelResponseTruncated alone, and a refusal recorded as a plain
+    RuntimeError would read as an internal fault."""
+    truncated = ScriptedResponses(
+        (
+            [
+                ResponseIncompleteEvent(
+                    type="response.incomplete",
+                    sequence_number=0,
+                    response=_response(incomplete=IncompleteDetails(reason="max_output_tokens")),
+                )
+            ],
+            None,
+        )
+    )
+    truncated_events = []
+    with pytest.raises(ModelResponseTruncated):
+        async for event in _responses_client(truncated).complete(_request()):
+            truncated_events.append(event)
+    assert truncated_events == [ModelStreamStart()]
+
+    refused = ScriptedResponses(
+        (
+            [
+                ResponseRefusalDeltaEvent(
+                    type="response.refusal.delta",
+                    item_id="message-1",
+                    output_index=0,
+                    content_index=0,
+                    sequence_number=0,
+                    delta="no",
+                )
+            ],
+            None,
+        )
+    )
+    refused_events = []
+    with pytest.raises(ModelRefusal):
+        async for event in _responses_client(refused).complete(_request()):
+            refused_events.append(event)
+    assert refused_events == [ModelStreamStart()]
+
+
 @pytest.mark.parametrize("status", [429, 500])
 async def test_responses_path_retries_status_then_succeeds(
     status: int, monkeypatch: pytest.MonkeyPatch

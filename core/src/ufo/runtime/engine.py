@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from html import escape
 from io import BytesIO
 from uuid import UUID
@@ -405,6 +406,14 @@ class ActiveMessage:
 
 
 @dataclass(frozen=True)
+class _PreparedRun:
+    system: str
+    messages: tuple[Message, ...]
+    injected: str
+    terminal: TerminalFrame | None = None
+
+
+@dataclass(frozen=True)
 class _OpenActs:
     question: AskUserInput | None = None
     credential_request: CredentialRequest | None = None
@@ -524,6 +533,33 @@ class _RejectedToolCall:
 
 type _DispatchInput = _BoundToolCall | _RejectedToolCall
 type _Resolution = EffectiveCall | _RejectedToolCall
+
+
+@dataclass(frozen=True)
+class _DispatchReady:
+    context: ToolContext
+    effective: EffectiveCall
+    args: BaseModel
+    target: ObjectActionTarget | None
+
+
+@dataclass(frozen=True)
+class _DispatchGate:
+    target: ObjectActionTarget | None
+    ready: _DispatchReady | None = None
+    result: "DispatchResult | None" = None
+    outcome: str = "ok"
+    error_class: str | None = None
+
+
+@dataclass(frozen=True)
+class _HandlerOutput:
+    content: str
+    is_error: bool
+    untrusted: bool
+    images: tuple[ImageBlock, ...]
+    outcome: str
+    error_class: str | None = None
 
 
 @dataclass
@@ -1555,32 +1591,6 @@ class TurnEngine:
         arrival_log: list[Message] = []
         absorbed_ids: list[UUID] = []
         requesters: dict[UUID, ActiveMessage] = {}
-        founding_denial: str | None = None
-
-        async def rank_find(system: str, user: str) -> str:
-            """The browser `find` tool's element ranking: a host-side model call (the engine
-            runs on the host, never in the sandbox) whose usage meters onto this turn."""
-            request = ModelRequest(
-                model=self.agent.model,
-                system=system,
-                messages=(Message(role="user", content=user),),
-                max_tokens=FIND_MAX_TOKENS,
-                conversation_cache_ttl="5m",
-                session_id=str(self.turn.conversation_id),
-                reasoning=self.reasoning.internal_effort(),
-            )
-            parts: list[str] = []
-            async for event in self.model.complete(request):
-                match event:
-                    case TextDelta(text=text):
-                        parts.append(text)
-                    case Usage():
-                        usage_events.append(event)
-                        find_usages = self._find_usages.get()
-                        if find_usages is None:
-                            raise RuntimeError("find completion ran outside a tool dispatch")
-                        find_usages.append(event)
-            return "".join(parts)
 
         context = ToolContext(
             sandbox=self.sandbox,
@@ -1600,7 +1610,7 @@ class TurnEngine:
             search_provider=self.search_provider,
             connectors=self.connectors,
             connector_read_only=self.connector_read_only,
-            find=rank_find,
+            find=partial(self._rank_find, usage_events),
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
             site_previewer=self.site_previewer,
@@ -1615,55 +1625,15 @@ class TurnEngine:
             if not await self._mark_running():
                 return await self._resolve_unclaimed()
             await self._publish_run()
-            system = self.system_prompt.content
-            if self.turn.admission_source == SCHEDULED_ADMISSION:
-                system = await self._scheduled_system(system)
-            with span("hooks.user_prompt_submit"):
-                inbound = await self.hooks.fire(
-                    "user_prompt_submit",
-                    UserPromptSubmit(text=self.turn.inbound),
-                    self.turn,
-                    self.agent,
-                    self.turn.speaker_member_id,
-                )
             pending_guard = not self.turn.spawned
-            injected = inbound.injected
-            if inbound.denied is not None:
-                self._window.denied = DENIED_INBOUND_NOTICE.format(reason=escape(inbound.denied))
-                denial = await self._commit(
-                    "done",
-                    usage_events,
-                    meter,
-                    answer=inbound.denied,
-                    unless_arrivals=pending_guard,
-                    absorbed=tuple(absorbed_ids),
-                )
-                if denial is not None:
-                    await self._persist_transcript(
-                        await self._load_messages(), inbound.denied, system, inbound.injected
-                    )
-                    await self._publish_terminal(denial)
-                    await self._record_workspace_changes(())
-                    return denial
-                founding_denial = DENIED_INBOUND_NOTICE.format(reason=escape(inbound.denied))
-                messages = (
-                    *await self._repair()._prior_messages(),
-                    Message(role="user", content=founding_denial),
-                )
-            else:
-                messages = await self._load_messages()
-                founding = messages[-1].content
-                if not isinstance(founding, str):
-                    raise RuntimeError("founding inbound did not render as text")
-                if not self.turn.spawned:
-                    requesters[self.turn.id] = ActiveMessage(
-                        member_id=self.turn.speaker_member_id,
-                        rendered=founding,
-                    )
-                injected = "\n\n".join(part for part in (injected, self.member_skill_block) if part)
-                if injected:
-                    rendered = INJECTED_CONTEXT.format(content=founding, injected=injected)
-                    messages = (*messages[:-1], Message(role="user", content=rendered))
+            prepared = await self._prepare_run(
+                usage_events, meter, absorbed_ids, requesters, pending_guard
+            )
+            if prepared.terminal is not None:
+                return prepared.terminal
+            system = prepared.system
+            messages = prepared.messages
+            injected = prepared.injected
             self._window.messages = messages
             change_paths: dict[str, None] = {}
             while True:
@@ -1749,6 +1719,87 @@ class TurnEngine:
             raise
         finally:
             await context.cleanup.drain()
+
+    async def _rank_find(self, usage_events: list[Usage], system: str, user: str) -> str:
+        request = ModelRequest(
+            model=self.agent.model,
+            system=system,
+            messages=(Message(role="user", content=user),),
+            max_tokens=FIND_MAX_TOKENS,
+            conversation_cache_ttl="5m",
+            session_id=str(self.turn.conversation_id),
+            reasoning=self.reasoning.internal_effort(),
+        )
+        parts: list[str] = []
+        async for event in self.model.complete(request):
+            match event:
+                case TextDelta(text=text):
+                    parts.append(text)
+                case Usage():
+                    usage_events.append(event)
+                    find_usages = self._find_usages.get()
+                    if find_usages is None:
+                        raise RuntimeError("find completion ran outside a tool dispatch")
+                    find_usages.append(event)
+        return "".join(parts)
+
+    async def _prepare_run(
+        self,
+        usage_events: list[Usage],
+        meter: _TurnMeter,
+        absorbed_ids: list[UUID],
+        requesters: dict[UUID, ActiveMessage],
+        pending_guard: bool,
+    ) -> _PreparedRun:
+        system = self.system_prompt.content
+        if self.turn.admission_source == SCHEDULED_ADMISSION:
+            system = await self._scheduled_system(system)
+        with span("hooks.user_prompt_submit"):
+            inbound = await self.hooks.fire(
+                "user_prompt_submit",
+                UserPromptSubmit(text=self.turn.inbound),
+                self.turn,
+                self.agent,
+                self.turn.speaker_member_id,
+            )
+        injected = inbound.injected
+        if inbound.denied is not None:
+            self._window.denied = DENIED_INBOUND_NOTICE.format(reason=escape(inbound.denied))
+            denial = await self._commit(
+                "done",
+                usage_events,
+                meter,
+                answer=inbound.denied,
+                unless_arrivals=pending_guard,
+                absorbed=tuple(absorbed_ids),
+            )
+            if denial is not None:
+                await self._persist_transcript(
+                    await self._load_messages(), inbound.denied, system, inbound.injected
+                )
+                await self._publish_terminal(denial)
+                await self._record_workspace_changes(())
+                return _PreparedRun(system, (), injected, denial)
+            founding_denial = DENIED_INBOUND_NOTICE.format(reason=escape(inbound.denied))
+            messages = (
+                *await self._repair()._prior_messages(),
+                Message(role="user", content=founding_denial),
+            )
+            return _PreparedRun(system, messages, injected)
+        messages = await self._load_messages()
+        founding = messages[-1].content
+        if not isinstance(founding, str):
+            raise RuntimeError("founding inbound did not render as text")
+        if not self.turn.spawned:
+            requesters[self.turn.id] = ActiveMessage(
+                member_id=self.turn.speaker_member_id,
+                rendered=founding,
+            )
+        injected = "\n\n".join(part for part in (injected, self.member_skill_block) if part)
+        if injected:
+            rendered = INJECTED_CONTEXT.format(content=founding, injected=injected)
+            messages = (*messages[:-1], Message(role="user", content=rendered))
+        return _PreparedRun(system, messages, injected)
 
     async def run_intent(self) -> TerminalFrame | None:
         """Run an intent turn: dispatch its one typed tool call verbatim and commit the result.
@@ -3084,173 +3135,17 @@ class TurnEngine:
                         text=bound.text,
                         is_error=True,
                     )
-                effective = bound.effective
-                tool = effective.tool
-                if (
-                    self.adoption.replaying
-                    and self._redoes_on_replay(tool)
-                    and await self._pending_member_guidance()
-                ):
-                    outcome = "guidance_preempted"
-                    log(
-                        "turn.dispatch_preempted_by_guidance",
-                        turn_id=str(self.turn.id),
-                        tool=call.name,
-                        call=effective.call_id,
-                    )
-                    return DispatchResult(
-                        tool_use_id=call.id,
-                        text=GUIDANCE_PREEMPTED_NOTICE,
-                        is_error=True,
-                        activity=True,
-                    )
-                context = bound.context
-                if effective.action_args is not None:
-                    args: BaseModel = effective.action_args
-                else:
-                    try:
-                        args = tool.input_model.model_validate(call.input)
-                    except Exception as error:
-                        outcome, error_class = "invalid_call", type(error).__name__
-                        return DispatchResult(
-                            tool_use_id=call.id,
-                            text=f"{type(error).__name__}: {error}",
-                            is_error=True,
-                            activity=True,
-                        )
-                if effective.action is not None and target is None:
-                    try:
-                        target = await self.verbs.action_target(context, tool, effective.action)
-                    except ValueError as error:
-                        outcome, error_class = "invalid_call", type(error).__name__
-                        return DispatchResult(
-                            tool_use_id=call.id,
-                            text=f"{type(error).__name__}: {error}",
-                            is_error=True,
-                            activity=True,
-                        )
-                pre = await self.hooks.fire(
-                    "pre_tool_use",
-                    PreToolUse(
-                        tool_name=call.name,
-                        tool_input=args,
-                        call=effective.call_id,
-                        target=target,
-                    ),
-                    self.turn,
-                    self.agent,
-                    context.speaker_member_id,
-                )
-                if pre.denied is not None:
-                    outcome, error_class = (
-                        ("hook_denied", None)
-                        if pre.failed_closed is None
-                        else ("hook_failed", pre.failed_closed)
-                    )
-                    return DispatchResult(
-                        tool_use_id=call.id,
-                        text=pre.denied,
-                        is_error=True,
-                        activity=True,
-                    )
-                args = pre.tool_input if pre.tool_input is not None else args
-                images: list[ImageBlock] = []
-                key = (
-                    f"{self.turn.id}/{effective.call_id}/{call.id}" if tool.side_effecting else None
-                )
-                try:
-                    handler_context = replace(
-                        context, ext=effective.ext, idempotency_key=key, target=target
-                    )
-                    find_usage_token = self._find_usages.set(find_usages)
-                    try:
-                        result = await tool.handler(handler_context, args)
-                    finally:
-                        self._find_usages.reset(find_usage_token)
-                    text_parts: list[str] = []
-                    for block in result.content:
-                        match block:
-                            case TextContent(text=text):
-                                text_parts.append(text)
-                            case ImageContent(media_type=media_type, data=data):
-                                images.append(
-                                    ImageBlock(source=ImageSource(media_type=media_type, data=data))
-                                )
-                    content = "".join(text_parts)
-                    is_error = result.is_error
-                    untrusted = tool.untrusted or result.untrusted
-                    outcome, error_class = ("handler_error" if is_error else "ok"), None
-                except TerminalAbsent as error:
-                    raise TerminalGone(str(error)) from error
-                except Exception as error:
-                    content, is_error = f"{type(error).__name__}: {error}", True
-                    if isinstance(error, SpeakerRequired) and bound.member_refs:
-                        content += REQUESTED_BY_HINT.format(
-                            refs=", ".join(str(ref) for ref in bound.member_refs)
-                        )
-                    untrusted = tool.untrusted or isinstance(error, UntrustedContentError)
-                    outcome, error_class = "handler_raised", type(error).__name__
-                if is_error:
-                    content = _bounded(content)
-                elif len(content) > MAX_TOOL_RESULT_CHARS:
-                    path = await self._offload(f"{call.id}.txt", content)
-                    content = (
-                        content[:TOOL_RESULT_PREVIEW_CHARS]
-                        + OFFLOAD_NOTICE.format(total=len(content), path=path)
-                        if path is not None
-                        else _bounded(content)
-                    )
-                if untrusted:
-                    content = wall(effective.call_id, content)
-                if is_error:
-                    await self.hooks.fire(
-                        "post_tool_use_failure",
-                        PostToolUseFailure(
-                            tool_name=call.name,
-                            tool_input=args,
-                            output=content,
-                            call=effective.call_id,
-                            target=target,
-                        ),
-                        self.turn,
-                        self.agent,
-                        context.speaker_member_id,
-                    )
-                else:
-                    post = await self.hooks.fire(
-                        "post_tool_use",
-                        PostToolUse(
-                            tool_name=call.name,
-                            tool_input=args,
-                            output=content,
-                            call=effective.call_id,
-                            target=target,
-                        ),
-                        self.turn,
-                        self.agent,
-                        context.speaker_member_id,
-                    )
-                    if post.output is not None:
-                        content = post.output
-                    if post.injected:
-                        content = f"{content}\n{post.injected}"
-                image_refs: list[ImageRef] = []
-                if images and not is_error:
-                    for index, image in enumerate(images):
-                        bounded = await self._bounded_image(image)
-                        blob_key = f"{TOOL_IMAGE_BLOB_DIR}/{self.turn.id}/{call.id}/{index}"
-                        await self.blob.put(blob_key, bounded.source.data.encode())
-                        image_refs.append(
-                            ImageRef(media_type=bounded.source.media_type, blob_key=blob_key)
-                        )
-                return DispatchResult(
-                    tool_use_id=call.id,
-                    text=content,
-                    is_error=is_error,
-                    activity=True,
-                    image_refs=tuple(image_refs),
-                    usages=tuple(find_usages),
-                )
+                gate = await self._prepare_dispatch(bound, target)
+                target = gate.target
+                if gate.result is not None:
+                    outcome, error_class = gate.outcome, gate.error_class
+                    return gate.result
+                ready = gate.ready
+                if ready is None:
+                    raise RuntimeError("dispatch gate returned no result or ready call")
+                handled = await self._invoke_dispatch(bound, ready, find_usages)
+                outcome, error_class = handled.outcome, handled.error_class
+                return await self._finish_dispatch(ready, handled, find_usages)
             except asyncio.CancelledError:
                 outcome, error_class = "step_failed", "CancelledError"
                 return DispatchResult(
@@ -3269,6 +3164,230 @@ class TurnEngine:
                 _meter_dispatch(
                     self.tools, call, started, outcome, error_class, self.profile, semantic
                 )
+
+    async def _prepare_dispatch(
+        self, bound: _BoundToolCall, target: ObjectActionTarget | None
+    ) -> _DispatchGate:
+        call = bound.call
+        effective = bound.effective
+        tool = effective.tool
+        if (
+            self.adoption.replaying
+            and self._redoes_on_replay(tool)
+            and await self._pending_member_guidance()
+        ):
+            log(
+                "turn.dispatch_preempted_by_guidance",
+                turn_id=str(self.turn.id),
+                tool=call.name,
+                call=effective.call_id,
+            )
+            return _DispatchGate(
+                target,
+                result=DispatchResult(
+                    tool_use_id=call.id,
+                    text=GUIDANCE_PREEMPTED_NOTICE,
+                    is_error=True,
+                    activity=True,
+                ),
+                outcome="guidance_preempted",
+            )
+        if effective.action_args is not None:
+            args: BaseModel = effective.action_args
+        else:
+            try:
+                args = tool.input_model.model_validate(call.input)
+            except Exception as error:
+                return _DispatchGate(
+                    target,
+                    result=DispatchResult(
+                        tool_use_id=call.id,
+                        text=f"{type(error).__name__}: {error}",
+                        is_error=True,
+                        activity=True,
+                    ),
+                    outcome="invalid_call",
+                    error_class=type(error).__name__,
+                )
+        if effective.action is not None and target is None:
+            try:
+                target = await self.verbs.action_target(bound.context, tool, effective.action)
+            except ValueError as error:
+                return _DispatchGate(
+                    target,
+                    result=DispatchResult(
+                        tool_use_id=call.id,
+                        text=f"{type(error).__name__}: {error}",
+                        is_error=True,
+                        activity=True,
+                    ),
+                    outcome="invalid_call",
+                    error_class=type(error).__name__,
+                )
+        pre = await self.hooks.fire(
+            "pre_tool_use",
+            PreToolUse(
+                tool_name=call.name,
+                tool_input=args,
+                call=effective.call_id,
+                target=target,
+            ),
+            self.turn,
+            self.agent,
+            bound.context.speaker_member_id,
+        )
+        if pre.denied is not None:
+            outcome, error_class = (
+                ("hook_denied", None)
+                if pre.failed_closed is None
+                else ("hook_failed", pre.failed_closed)
+            )
+            return _DispatchGate(
+                target,
+                result=DispatchResult(
+                    tool_use_id=call.id,
+                    text=pre.denied,
+                    is_error=True,
+                    activity=True,
+                ),
+                outcome=outcome,
+                error_class=error_class,
+            )
+        return _DispatchGate(
+            target,
+            ready=_DispatchReady(
+                bound.context,
+                effective,
+                pre.tool_input if pre.tool_input is not None else args,
+                target,
+            ),
+        )
+
+    async def _invoke_dispatch(
+        self,
+        bound: _BoundToolCall,
+        ready: _DispatchReady,
+        find_usages: list[Usage],
+    ) -> _HandlerOutput:
+        tool = ready.effective.tool
+        key = (
+            f"{self.turn.id}/{ready.effective.call_id}/{bound.call.id}"
+            if tool.side_effecting
+            else None
+        )
+        try:
+            handler_context = replace(
+                ready.context,
+                ext=ready.effective.ext,
+                idempotency_key=key,
+                target=ready.target,
+            )
+            find_usage_token = self._find_usages.set(find_usages)
+            try:
+                result = await tool.handler(handler_context, ready.args)
+            finally:
+                self._find_usages.reset(find_usage_token)
+            text_parts: list[str] = []
+            images: list[ImageBlock] = []
+            for block in result.content:
+                match block:
+                    case TextContent(text=text):
+                        text_parts.append(text)
+                    case ImageContent(media_type=media_type, data=data):
+                        images.append(
+                            ImageBlock(source=ImageSource(media_type=media_type, data=data))
+                        )
+            return _HandlerOutput(
+                "".join(text_parts),
+                result.is_error,
+                tool.untrusted or result.untrusted,
+                tuple(images),
+                "handler_error" if result.is_error else "ok",
+            )
+        except TerminalAbsent as error:
+            raise TerminalGone(str(error)) from error
+        except Exception as error:
+            content = f"{type(error).__name__}: {error}"
+            if isinstance(error, SpeakerRequired) and bound.member_refs:
+                content += REQUESTED_BY_HINT.format(
+                    refs=", ".join(str(ref) for ref in bound.member_refs)
+                )
+            return _HandlerOutput(
+                content,
+                True,
+                tool.untrusted or isinstance(error, UntrustedContentError),
+                (),
+                "handler_raised",
+                type(error).__name__,
+            )
+
+    async def _finish_dispatch(
+        self,
+        ready: _DispatchReady,
+        handled: _HandlerOutput,
+        find_usages: list[Usage],
+    ) -> DispatchResult:
+        call = ready.effective.call
+        content = handled.content
+        if handled.is_error:
+            content = _bounded(content)
+        elif len(content) > MAX_TOOL_RESULT_CHARS:
+            path = await self._offload(f"{call.id}.txt", content)
+            content = (
+                content[:TOOL_RESULT_PREVIEW_CHARS]
+                + OFFLOAD_NOTICE.format(total=len(content), path=path)
+                if path is not None
+                else _bounded(content)
+            )
+        if handled.untrusted:
+            content = wall(ready.effective.call_id, content)
+        if handled.is_error:
+            await self.hooks.fire(
+                "post_tool_use_failure",
+                PostToolUseFailure(
+                    tool_name=call.name,
+                    tool_input=ready.args,
+                    output=content,
+                    call=ready.effective.call_id,
+                    target=ready.target,
+                ),
+                self.turn,
+                self.agent,
+                ready.context.speaker_member_id,
+            )
+        else:
+            post = await self.hooks.fire(
+                "post_tool_use",
+                PostToolUse(
+                    tool_name=call.name,
+                    tool_input=ready.args,
+                    output=content,
+                    call=ready.effective.call_id,
+                    target=ready.target,
+                ),
+                self.turn,
+                self.agent,
+                ready.context.speaker_member_id,
+            )
+            if post.output is not None:
+                content = post.output
+            if post.injected:
+                content = f"{content}\n{post.injected}"
+        image_refs: list[ImageRef] = []
+        if handled.images and not handled.is_error:
+            for index, image in enumerate(handled.images):
+                bounded = await self._bounded_image(image)
+                blob_key = f"{TOOL_IMAGE_BLOB_DIR}/{self.turn.id}/{call.id}/{index}"
+                await self.blob.put(blob_key, bounded.source.data.encode())
+                image_refs.append(ImageRef(media_type=bounded.source.media_type, blob_key=blob_key))
+        return DispatchResult(
+            tool_use_id=call.id,
+            text=content,
+            is_error=handled.is_error,
+            activity=True,
+            image_refs=tuple(image_refs),
+            usages=tuple(find_usages),
+        )
 
     def _redoes_on_replay(self, tool: ToolDef) -> bool:
         """Whether re-executing this call redoes its work, making it preemptible. A side-effecting

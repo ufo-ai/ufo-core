@@ -1,8 +1,10 @@
 """Anthropic Messages API client streaming ModelEvents."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import anthropic
@@ -128,10 +130,254 @@ def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dic
 
 
 @dataclass(frozen=True)
+class _AnthropicRetry:
+    spec: ModelSpec
+    model: str
+    attempt: int = 0
+    delay: float = INITIAL_RETRY_DELAY_SECONDS
+
+    async def transport(self, error: Exception, yielded: bool) -> _AnthropicRetry:
+        attempt = self.attempt + 1
+        if yielded or attempt > MAX_PROVIDER_RETRIES:
+            log(
+                "model.provider_transport_error",
+                provider=self.spec.provider,
+                model=self.model,
+                attempts=attempt,
+                error_class=type(error).__name__,
+            )
+            if yielded:
+                raise ModelStreamInterrupted(
+                    "stream_transport",
+                    f"Anthropic stream died mid-round ({type(error).__name__}): {error}",
+                ) from error
+            raise error
+        log(
+            "model.provider_transport_retry",
+            provider=self.spec.provider,
+            model=self.model,
+            attempt=attempt,
+            error_class=type(error).__name__,
+            wait_seconds=self.delay,
+        )
+        emit_metric(
+            "model_provider_retry_total",
+            provider=self.spec.provider,
+            model=self.model,
+            kind="transport",
+        )
+        await asyncio.sleep(self.delay)
+        return replace(
+            self,
+            attempt=attempt,
+            delay=min(self.delay * 2, MAX_RETRY_DELAY_SECONDS),
+        )
+
+    async def status(self, error: anthropic.APIStatusError, yielded: bool) -> _AnthropicRetry:
+        if error.status_code == KEY_REJECTED_STATUS:
+            log(
+                "model.provider_status_error",
+                provider=self.spec.provider,
+                model=self.model,
+                attempts=self.attempt + 1,
+                status_code=error.status_code,
+            )
+            raise self.spec.key_rejected() from error
+        attempt = self.attempt + 1
+        deterministic_client_error = 400 <= error.status_code < 500 and error.status_code != 429
+        if yielded or deterministic_client_error or attempt > MAX_PROVIDER_RETRIES:
+            log(
+                "model.provider_status_error",
+                provider=self.spec.provider,
+                model=self.model,
+                attempts=attempt,
+                status_code=error.status_code,
+            )
+            if yielded and not deterministic_client_error:
+                raise ModelStreamInterrupted(
+                    "stream_error",
+                    f"Anthropic errored the stream mid-round ({error.status_code}): {error}",
+                ) from error
+            raise error
+        header = error.response.headers.get("retry-after")
+        try:
+            wait = max(float(header), 0.0) if header is not None else self.delay
+        except ValueError:
+            wait = self.delay
+        log(
+            "model.provider_status_retry",
+            provider=self.spec.provider,
+            model=self.model,
+            attempt=attempt,
+            status_code=error.status_code,
+            wait_seconds=wait,
+        )
+        emit_metric(
+            "model_provider_retry_total",
+            provider=self.spec.provider,
+            model=self.model,
+            kind="status",
+        )
+        await asyncio.sleep(wait)
+        return replace(
+            self,
+            attempt=attempt,
+            delay=min(self.delay * 2, MAX_RETRY_DELAY_SECONDS),
+        )
+
+
+class _AnthropicStream:
+    def __init__(self) -> None:
+        self.yielded = False
+        self.tool_use_ids: dict[int, str] = {}
+        self.thinking_parts: dict[int, list[str]] = {}
+        self.thinking_signatures: dict[int, str] = {}
+        self.reasoning: list[ThinkingBlock | RedactedThinkingBlock] = []
+        self.input_tokens = 0
+        self.cache_read_tokens = 0
+        self.cache_write_5m_tokens = 0
+        self.cache_write_1h_tokens = 0
+        self.output_tokens: int | None = None
+        self.stop_reason: str | None = None
+
+    def accept(self, event: object) -> tuple[ModelEvent, ...]:
+        emitted: tuple[ModelEvent, ...] = ()
+        match event:
+            case anthropic.types.RawMessageStartEvent(message=message):
+                self._record_input_usage(message.usage)
+            case anthropic.types.RawContentBlockStartEvent(
+                content_block=anthropic.types.ToolUseBlock(id=block_id, name=name), index=index
+            ):
+                self.tool_use_ids[index] = block_id
+                emitted = (ToolCallStart(id=block_id, name=name),)
+            case anthropic.types.RawContentBlockDeltaEvent(
+                delta=anthropic.types.TextDelta(text=text)
+            ):
+                emitted = (TextDelta(text=text),)
+            case anthropic.types.RawContentBlockDeltaEvent(
+                delta=anthropic.types.InputJSONDelta(partial_json=partial_json), index=index
+            ):
+                emitted = (ToolCallDelta(id=self.tool_use_ids[index], partial_json=partial_json),)
+            case anthropic.types.RawContentBlockStartEvent(
+                content_block=anthropic.types.ThinkingBlock(thinking=initial, signature=signature),
+                index=index,
+            ):
+                self.thinking_parts[index] = [initial]
+                self.thinking_signatures[index] = signature
+            case anthropic.types.RawContentBlockStartEvent(
+                content_block=anthropic.types.RedactedThinkingBlock(data=data)
+            ):
+                self.reasoning.append(RedactedThinkingBlock(data=data))
+            case anthropic.types.RawContentBlockDeltaEvent(
+                delta=anthropic.types.ThinkingDelta(thinking=part), index=index
+            ):
+                self.thinking_parts[index].append(part)
+            case anthropic.types.RawContentBlockDeltaEvent(
+                delta=anthropic.types.SignatureDelta(signature=signature), index=index
+            ):
+                self.thinking_signatures[index] = signature
+            case anthropic.types.RawContentBlockStopEvent(index=index) if (
+                index in self.thinking_parts
+            ):
+                self._close_thinking(index)
+            case anthropic.types.RawMessageDeltaEvent(delta=delta, usage=usage):
+                self.output_tokens = usage.output_tokens
+                self.stop_reason = delta.stop_reason
+        self.yielded = self.yielded or bool(emitted)
+        return emitted
+
+    def _record_input_usage(self, usage: Any) -> None:
+        self.input_tokens = usage.input_tokens
+        self.cache_read_tokens = usage.cache_read_input_tokens or 0
+        creation = usage.cache_creation
+        if creation is None:
+            self.cache_write_1h_tokens = usage.cache_creation_input_tokens or 0
+            return
+        self.cache_write_5m_tokens = creation.ephemeral_5m_input_tokens
+        self.cache_write_1h_tokens = creation.ephemeral_1h_input_tokens
+
+    def _close_thinking(self, index: int) -> None:
+        signature = self.thinking_signatures.pop(index)
+        if not signature:
+            raise RuntimeError("Anthropic thinking block closed without a signature")
+        self.reasoning.append(
+            ThinkingBlock(
+                thinking="".join(self.thinking_parts.pop(index)),
+                signature=signature,
+            )
+        )
+
+    def has_usage(self) -> bool:
+        return bool(
+            self.input_tokens
+            or self.cache_read_tokens
+            or self.cache_write_5m_tokens
+            or self.cache_write_1h_tokens
+        )
+
+    def usage(self) -> Usage:
+        return Usage(
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens or 0,
+            cache_read_tokens=self.cache_read_tokens,
+            cache_write_5m_tokens=self.cache_write_5m_tokens,
+            cache_write_1h_tokens=self.cache_write_1h_tokens,
+        )
+
+
+@dataclass(frozen=True)
 class AnthropicClient:
     client: anthropic.AsyncAnthropic
     spec: ModelSpec
     oauth: bool = False
+
+    def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
+        system_cache = {"type": "ephemeral", "ttl": STABLE_PREFIX_CACHE_TTL}
+        create_kwargs: dict[str, Any] = {
+            "model": request.model,
+            "system": [
+                *([{"type": "text", "text": OAUTH_SYSTEM_PREFIX}] if self.oauth else []),
+                {
+                    "type": "text",
+                    "text": request.system,
+                    "cache_control": system_cache,
+                },
+            ],
+            "messages": [
+                {"role": message.role, "content": anthropic_content(message.content)}
+                for message in trim_images(request.messages)
+            ],
+            "max_tokens": request.max_tokens,
+            "stream": True,
+            "cache_control": {"type": "ephemeral", "ttl": request.conversation_cache_ttl},
+        }
+        effort = self.spec.wire_reasoning(request.reasoning, request.tools)
+        if effort == "off" and self.spec.reasoning.default_on:
+            create_kwargs["thinking"] = {"type": "disabled"}
+        elif effort not in (None, "off"):
+            create_kwargs["thinking"] = {"type": "adaptive"}
+            if effort != "auto":
+                create_kwargs["output_config"] = {"effort": effort}
+        if request.tools:
+            create_kwargs["tools"] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                }
+                for tool in request.tools
+            ]
+            create_kwargs["tools"][-1]["cache_control"] = system_cache
+            create_kwargs["tool_choice"] = (
+                {"type": "auto", "disable_parallel_tool_use": False}
+                if request.tool_choice is None
+                else {
+                    "type": "tool",
+                    "name": request.tool_choice,
+                    "disable_parallel_tool_use": True,
+                }
+            )
+        return create_kwargs
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         """Yield text and tool-call events then exactly one Usage as the final event. The round's
@@ -167,287 +413,45 @@ class AnthropicClient:
         result for the turn loop's nudge — a tool-call-only response has yielded and never
         degrades.
         """
-        delay = INITIAL_RETRY_DELAY_SECONDS
-        attempt = 0
+        retry = _AnthropicRetry(self.spec, request.model, delay=INITIAL_RETRY_DELAY_SECONDS)
         empty_attempt = 0
         while True:
-            yielded = False
-            tool_use_ids: dict[int, str] = {}
-            thinking_parts: dict[int, list[str]] = {}
-            thinking_signatures: dict[int, str] = {}
-            reasoning: list[ThinkingBlock | RedactedThinkingBlock] = []
-            input_tokens = 0
-            cache_read_tokens = 0
-            cache_write_5m_tokens = 0
-            cache_write_1h_tokens = 0
-            output_tokens: int | None = None
-            stop_reason: str | None = None
-            system_cache = {"type": "ephemeral", "ttl": STABLE_PREFIX_CACHE_TTL}
-            conversation_cache = {"type": "ephemeral", "ttl": request.conversation_cache_ttl}
-            create_kwargs: dict[str, Any] = {
-                "model": request.model,
-                "system": [
-                    *([{"type": "text", "text": OAUTH_SYSTEM_PREFIX}] if self.oauth else []),
-                    {
-                        "type": "text",
-                        "text": request.system,
-                        "cache_control": system_cache,
-                    },
-                ],
-                "messages": [
-                    {"role": m.role, "content": anthropic_content(m.content)}
-                    for m in trim_images(request.messages)
-                ],
-                "max_tokens": request.max_tokens,
-                "stream": True,
-                "cache_control": conversation_cache,
-            }
-            effort = self.spec.wire_reasoning(request.reasoning, request.tools)
-            if effort == "off" and self.spec.reasoning.default_on:
-                create_kwargs["thinking"] = {"type": "disabled"}
-            elif effort not in (None, "off"):
-                create_kwargs["thinking"] = {"type": "adaptive"}
-                if effort != "auto":
-                    create_kwargs["output_config"] = {"effort": effort}
-            if request.tools:
-                create_kwargs["tools"] = [
-                    {"name": t.name, "description": t.description, "input_schema": t.input_schema}
-                    for t in request.tools
-                ]
-                create_kwargs["tools"][-1]["cache_control"] = system_cache
-                create_kwargs["tool_choice"] = (
-                    {"type": "auto", "disable_parallel_tool_use": False}
-                    if request.tool_choice is None
-                    else {
-                        "type": "tool",
-                        "name": request.tool_choice,
-                        "disable_parallel_tool_use": True,
-                    }
-                )
+            state = _AnthropicStream()
             try:
-                stream = await self.client.messages.create(**create_kwargs)
+                stream = await self.client.messages.create(**self._request_kwargs(request))
                 stream_started = False
                 async for event in stream:
                     if not stream_started:
                         stream_started = True
                         yield ModelStreamStart()
-                    match event:
-                        case anthropic.types.RawMessageStartEvent(message=message):
-                            input_tokens = message.usage.input_tokens
-                            cache_read_tokens = message.usage.cache_read_input_tokens or 0
-                            creation = message.usage.cache_creation
-                            if creation is None:
-                                cache_creation_tokens = (
-                                    message.usage.cache_creation_input_tokens or 0
-                                )
-                                cache_write_1h_tokens = cache_creation_tokens
-                            else:
-                                cache_write_5m_tokens = creation.ephemeral_5m_input_tokens
-                                cache_write_1h_tokens = creation.ephemeral_1h_input_tokens
-                        case anthropic.types.RawContentBlockStartEvent(
-                            content_block=anthropic.types.ToolUseBlock(id=block_id, name=name),
-                            index=index,
-                        ):
-                            tool_use_ids[index] = block_id
-                            yielded = True
-                            yield ToolCallStart(id=block_id, name=name)
-                        case anthropic.types.RawContentBlockDeltaEvent(
-                            delta=anthropic.types.TextDelta(text=text)
-                        ):
-                            yielded = True
-                            yield TextDelta(text=text)
-                        case anthropic.types.RawContentBlockDeltaEvent(
-                            delta=anthropic.types.InputJSONDelta(partial_json=partial_json),
-                            index=index,
-                        ):
-                            yielded = True
-                            yield ToolCallDelta(id=tool_use_ids[index], partial_json=partial_json)
-                        case anthropic.types.RawContentBlockStartEvent(
-                            content_block=anthropic.types.ThinkingBlock(
-                                thinking=initial, signature=signature
-                            ),
-                            index=index,
-                        ):
-                            thinking_parts[index] = [initial]
-                            thinking_signatures[index] = signature
-                        case anthropic.types.RawContentBlockStartEvent(
-                            content_block=anthropic.types.RedactedThinkingBlock(data=data)
-                        ):
-                            reasoning.append(RedactedThinkingBlock(data=data))
-                        case anthropic.types.RawContentBlockDeltaEvent(
-                            delta=anthropic.types.ThinkingDelta(thinking=part), index=index
-                        ):
-                            thinking_parts[index].append(part)
-                        case anthropic.types.RawContentBlockDeltaEvent(
-                            delta=anthropic.types.SignatureDelta(signature=signature), index=index
-                        ):
-                            thinking_signatures[index] = signature
-                        case anthropic.types.RawContentBlockStopEvent(index=index) if (
-                            index in thinking_parts
-                        ):
-                            signature = thinking_signatures.pop(index)
-                            if not signature:
-                                raise RuntimeError(
-                                    "Anthropic thinking block closed without a signature"
-                                )
-                            reasoning.append(
-                                ThinkingBlock(
-                                    thinking="".join(thinking_parts.pop(index)),
-                                    signature=signature,
-                                )
-                            )
-                        case anthropic.types.RawMessageDeltaEvent(delta=delta, usage=usage):
-                            output_tokens = usage.output_tokens
-                            stop_reason = delta.stop_reason
+                    for emitted in state.accept(event):
+                        yield emitted
             except STREAM_TRANSPORT_ERRORS as error:
-                if (
-                    input_tokens
-                    or cache_read_tokens
-                    or cache_write_5m_tokens
-                    or cache_write_1h_tokens
-                ):
-                    yield Usage(
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens or 0,
-                        cache_read_tokens=cache_read_tokens,
-                        cache_write_5m_tokens=cache_write_5m_tokens,
-                        cache_write_1h_tokens=cache_write_1h_tokens,
-                    )
-                attempt += 1
-                if yielded or attempt > MAX_PROVIDER_RETRIES:
-                    log(
-                        "model.provider_transport_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt,
-                        error_class=type(error).__name__,
-                    )
-                    if yielded:
-                        raise ModelStreamInterrupted(
-                            "stream_transport",
-                            f"Anthropic stream died mid-round ({type(error).__name__}): {error}",
-                        ) from error
-                    raise
-                log(
-                    "model.provider_transport_retry",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    attempt=attempt,
-                    error_class=type(error).__name__,
-                    wait_seconds=delay,
-                )
-                emit_metric(
-                    "model_provider_retry_total",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    kind="transport",
-                )
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                if state.has_usage():
+                    yield state.usage()
+                retry = await retry.transport(error, state.yielded)
                 continue
             except STREAM_STATUS_ERRORS as error:
-                if (
-                    input_tokens
-                    or cache_read_tokens
-                    or cache_write_5m_tokens
-                    or cache_write_1h_tokens
-                ):
-                    yield Usage(
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens or 0,
-                        cache_read_tokens=cache_read_tokens,
-                        cache_write_5m_tokens=cache_write_5m_tokens,
-                        cache_write_1h_tokens=cache_write_1h_tokens,
-                    )
-                if error.status_code == KEY_REJECTED_STATUS:
-                    log(
-                        "model.provider_status_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt + 1,
-                        status_code=error.status_code,
-                    )
-                    raise self.spec.key_rejected() from error
-                attempt += 1
-                deterministic_client_error = (
-                    400 <= error.status_code < 500 and error.status_code != 429
-                )
-                if yielded or deterministic_client_error or attempt > MAX_PROVIDER_RETRIES:
-                    log(
-                        "model.provider_status_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt,
-                        status_code=error.status_code,
-                    )
-                    if yielded and not deterministic_client_error:
-                        raise ModelStreamInterrupted(
-                            "stream_error",
-                            f"Anthropic errored the stream mid-round "
-                            f"({error.status_code}): {error}",
-                        ) from error
-                    raise
-                header = error.response.headers.get("retry-after")
-                try:
-                    wait = max(float(header), 0.0) if header is not None else delay
-                except ValueError:
-                    wait = delay
-                log(
-                    "model.provider_status_retry",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    attempt=attempt,
-                    status_code=error.status_code,
-                    wait_seconds=wait,
-                )
-                emit_metric(
-                    "model_provider_retry_total",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    kind="status",
-                )
-                await asyncio.sleep(wait)
-                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                if state.has_usage():
+                    yield state.usage()
+                retry = await retry.status(error, state.yielded)
                 continue
-            if stop_reason == "max_tokens":
-                yield Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens or 0,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_write_5m_tokens=cache_write_5m_tokens,
-                    cache_write_1h_tokens=cache_write_1h_tokens,
-                )
+            if state.stop_reason == "max_tokens":
+                yield state.usage()
                 raise ModelResponseTruncated(
                     "Anthropic completion truncated at the max_tokens budget "
                     "(stop_reason=max_tokens)"
                 )
-            if stop_reason == "refusal":
-                yield Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens or 0,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_write_5m_tokens=cache_write_5m_tokens,
-                    cache_write_1h_tokens=cache_write_1h_tokens,
-                )
+            if state.stop_reason == "refusal":
+                yield state.usage()
                 raise ModelRefusal("Anthropic declined the completion (stop_reason=refusal)")
-            if output_tokens is None:
-                if (
-                    input_tokens
-                    or cache_read_tokens
-                    or cache_write_5m_tokens
-                    or cache_write_1h_tokens
-                ):
-                    yield Usage(
-                        input_tokens=input_tokens,
-                        output_tokens=0,
-                        cache_read_tokens=cache_read_tokens,
-                        cache_write_5m_tokens=cache_write_5m_tokens,
-                        cache_write_1h_tokens=cache_write_1h_tokens,
-                    )
+            if state.output_tokens is None:
+                if state.has_usage():
+                    yield state.usage()
                 raise RuntimeError("model stream produced no usage")
             if (
-                not yielded
-                and stop_reason == "end_turn"
+                not state.yielded
+                and state.stop_reason == "end_turn"
                 and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES
             ):
                 empty_attempt += 1
@@ -457,21 +461,9 @@ class AnthropicClient:
                     model=request.model,
                     kind="empty",
                 )
-                yield Usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_write_5m_tokens=cache_write_5m_tokens,
-                    cache_write_1h_tokens=cache_write_1h_tokens,
-                )
+                yield state.usage()
                 continue
-            for block in reasoning:
+            for block in state.reasoning:
                 yield block
-            yield Usage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_read_tokens=cache_read_tokens,
-                cache_write_5m_tokens=cache_write_5m_tokens,
-                cache_write_1h_tokens=cache_write_1h_tokens,
-            )
+            yield state.usage()
             return

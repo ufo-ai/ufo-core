@@ -306,6 +306,31 @@ def _stopping() -> bool:
     return task is not None and bool(task.cancelling())
 
 
+async def _await_opening(
+    opening: asyncio.Future[AsyncConnection],
+) -> tuple[AsyncConnection, asyncio.CancelledError | None]:
+    cancelled: asyncio.CancelledError | None = None
+    while not opening.done():
+        try:
+            await asyncio.shield(opening)
+        except asyncio.CancelledError as cancel:
+            cancelled = cancel
+        except Exception:
+            break
+    return opening.result(), cancelled
+
+
+async def _await_close(close: asyncio.Future[bool | None]) -> asyncio.CancelledError | None:
+    cancelled: asyncio.CancelledError | None = None
+    while not close.done():
+        try:
+            await asyncio.shield(close)
+        except asyncio.CancelledError as cancel:
+            cancelled = cancel
+    close.result()
+    return cancelled
+
+
 @asynccontextmanager
 async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]:
     """Begin a transaction, timing the acquisition and counting the ones that never begin. A
@@ -339,16 +364,8 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
                 locked = True
             stack = AsyncExitStack()
             opening = asyncio.ensure_future(stack.enter_async_context(engine.begin()))
-            cancelled: asyncio.CancelledError | None = None
-            while not opening.done():
-                try:
-                    await asyncio.shield(opening)
-                except asyncio.CancelledError as cancel:
-                    cancelled = cancel
-                except Exception:
-                    break
             try:
-                connection = opening.result()
+                connection, cancelled = await _await_opening(opening)
             except Exception as error:
                 if isinstance(error, sa.exc.TimeoutError):
                     emit_metric("db_pool_exhausted_total", path=path)
@@ -370,13 +387,7 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
             if caught is not None
             else stack.__aexit__(None, None, None)
         )
-        cancelled = None
-        while not close.done():
-            try:
-                await asyncio.shield(close)
-            except asyncio.CancelledError as cancel:
-                cancelled = cancel
-        close.result()
+        cancelled = await _await_close(close)
         if cancelled is not None:
             raise cancelled
         if caught is not None:

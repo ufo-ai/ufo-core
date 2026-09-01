@@ -188,45 +188,9 @@ class KlaviyoConnector(RestConnector):
         rels = record.get("relationships")
 
         if stream.name == "profiles":
-            subs = attrs.get("subscriptions") if isinstance(attrs, dict) else None
-            email_block = subs.get("email") if isinstance(subs, dict) else None
-            marketing = email_block.get("marketing") if isinstance(email_block, dict) else None
-            if isinstance(marketing, dict):
-                flat["email_consent"] = marketing.get("consent")
-                supp = marketing.get("suppression") or marketing.get("suppressions")
-                if isinstance(supp, list) and supp:
-                    head = supp[0]
-                    if isinstance(head, dict):
-                        flat["email_suppression"] = head.get("reason") or head.get("code")
-                    else:
-                        flat["email_suppression"] = str(head)
-                elif isinstance(supp, str):
-                    flat["email_suppression"] = supp
-
+            self._flatten_profile(flat, attrs)
         elif stream.name == "campaigns":
-            audiences = attrs.get("audiences") if isinstance(attrs, dict) else None
-            if isinstance(audiences, dict):
-                msg = audiences.get("message_settings")
-                if isinstance(msg, dict):
-                    flat["subject_line"] = msg.get("subject_line") or msg.get("subject")
-                    flat["from_label"] = msg.get("from_label") or msg.get("from_name")
-                    flat["from_email"] = msg.get("from_email")
-                included = audiences.get("included")
-                if isinstance(included, list) and included:
-                    first = included[0]
-                    flat["primary_list_id"] = (
-                        str(first) if not isinstance(first, dict) else first.get("id")
-                    )
-            flat.setdefault(
-                "subject_line", attrs.get("subject_line") if isinstance(attrs, dict) else None
-            )
-            flat.setdefault(
-                "from_label", attrs.get("from_label") if isinstance(attrs, dict) else None
-            )
-            flat.setdefault(
-                "from_email", attrs.get("from_email") if isinstance(attrs, dict) else None
-            )
-
+            self._flatten_campaign(flat, attrs)
         elif stream.name == "events":
             flat["profile_id"] = self._lift_relationship_id(rels, "profile")
             flat["metric_id"] = self._lift_relationship_id(rels, "metric")
@@ -240,6 +204,44 @@ class KlaviyoConnector(RestConnector):
                 flat["parent_list_id"] = list_id
 
         return flat
+
+    @staticmethod
+    def _flatten_profile(flat: dict[str, Any], attrs: Any) -> None:
+        subs = attrs.get("subscriptions") if isinstance(attrs, dict) else None
+        email_block = subs.get("email") if isinstance(subs, dict) else None
+        marketing = email_block.get("marketing") if isinstance(email_block, dict) else None
+        if not isinstance(marketing, dict):
+            return
+        flat["email_consent"] = marketing.get("consent")
+        suppression = marketing.get("suppression") or marketing.get("suppressions")
+        if isinstance(suppression, list) and suppression:
+            head = suppression[0]
+            flat["email_suppression"] = (
+                head.get("reason") or head.get("code") if isinstance(head, dict) else str(head)
+            )
+        elif isinstance(suppression, str):
+            flat["email_suppression"] = suppression
+
+    @staticmethod
+    def _flatten_campaign(flat: dict[str, Any], attrs: Any) -> None:
+        audiences = attrs.get("audiences") if isinstance(attrs, dict) else None
+        if isinstance(audiences, dict):
+            message = audiences.get("message_settings")
+            if isinstance(message, dict):
+                flat["subject_line"] = message.get("subject_line") or message.get("subject")
+                flat["from_label"] = message.get("from_label") or message.get("from_name")
+                flat["from_email"] = message.get("from_email")
+            included = audiences.get("included")
+            if isinstance(included, list) and included:
+                first = included[0]
+                flat["primary_list_id"] = (
+                    str(first) if not isinstance(first, dict) else first.get("id")
+                )
+        flat.setdefault(
+            "subject_line", attrs.get("subject_line") if isinstance(attrs, dict) else None
+        )
+        flat.setdefault("from_label", attrs.get("from_label") if isinstance(attrs, dict) else None)
+        flat.setdefault("from_email", attrs.get("from_email") if isinstance(attrs, dict) else None)
 
     async def paginate(
         self,

@@ -254,66 +254,8 @@ class MondayConnector(RestConnector):
         cursor: str | None,
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
-            if stream.name == "users":
-                async for page in self._paged_root(
-                    client,
-                    field="users",
-                    selection="id name email created_at enabled is_guest",
-                ):
-                    yield page
-                return
-            if stream.name == "teams":
-                data = await self._graphql(client, "{ teams { id name users { id name email } } }")
-                teams = data.get("teams") if isinstance(data.get("teams"), list) else []
-                if teams:
-                    yield teams
-                return
-            if stream.name == "workspaces":
-                async for page in self._paged_root(
-                    client,
-                    field="workspaces",
-                    selection="id name kind description created_at",
-                ):
-                    yield page
-                return
-            if stream.name == "boards":
-                async for page in self._paged_root(
-                    client,
-                    field="boards",
-                    selection=(
-                        "id name description state board_kind type created_at updated_at url "
-                        "workspace{id name kind description}"
-                    ),
-                    cursor=cursor,
-                    cursor_field="updated_at",
-                ):
-                    yield page
-                return
-            if stream.name == "items":
-                async for page in self._items(client, cursor=cursor):
-                    yield page
-                return
-            if stream.name == "updates":
-                async for page in self._paged_root(
-                    client,
-                    field="updates",
-                    selection="id body created_at text_body creator { id name email } item_id",
-                    cursor=cursor,
-                    cursor_field="created_at",
-                ):
-                    yield page
-                return
-            if stream.name == "activity_logs":
-                async for page in self._activity_logs(client, cursor=cursor):
-                    yield page
-                return
-            if stream.name == "tags":
-                data = await self._graphql(client, "{ tags { id name color } }")
-                tags = data.get("tags") if isinstance(data.get("tags"), list) else []
-                if tags:
-                    yield tags
-                return
-            raise StreamSkipped(f"monday stream {stream.name!r} is not implemented")
+            async for page in self._stream_pages(client, stream.name, cursor):
+                yield page
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
@@ -321,6 +263,59 @@ class MondayConnector(RestConnector):
                     "the grant lacks scope or the token is invalid"
                 ) from error
             raise
+
+    def _stream_pages(
+        self, client: httpx.AsyncClient, name: str, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        if name == "users":
+            return self._paged_root(
+                client, field="users", selection="id name email created_at enabled is_guest"
+            )
+        if name in {"teams", "tags"}:
+            return self._single_root(client, name)
+        if name == "workspaces":
+            return self._paged_root(
+                client,
+                field="workspaces",
+                selection="id name kind description created_at",
+            )
+        if name == "boards":
+            return self._paged_root(
+                client,
+                field="boards",
+                selection=(
+                    "id name description state board_kind type created_at updated_at url "
+                    "workspace{id name kind description}"
+                ),
+                cursor=cursor,
+                cursor_field="updated_at",
+            )
+        if name == "items":
+            return self._items(client, cursor=cursor)
+        if name == "updates":
+            return self._paged_root(
+                client,
+                field="updates",
+                selection="id body created_at text_body creator { id name email } item_id",
+                cursor=cursor,
+                cursor_field="created_at",
+            )
+        if name == "activity_logs":
+            return self._activity_logs(client, cursor=cursor)
+        raise StreamSkipped(f"monday stream {name!r} is not implemented")
+
+    async def _single_root(
+        self, client: httpx.AsyncClient, name: str
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        query = (
+            "{ teams { id name users { id name email } } }"
+            if name == "teams"
+            else "{ tags { id name color } }"
+        )
+        data = await self._graphql(client, query)
+        records = data.get(name) if isinstance(data.get(name), list) else []
+        if records:
+            yield records
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
         if stream.name == "users":

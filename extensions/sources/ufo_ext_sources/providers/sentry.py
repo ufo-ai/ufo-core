@@ -96,35 +96,8 @@ class SentryConnector(RestConnector):
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
-            if stream.name == "organizations":
-                orgs = await self._organizations(client)
-                if orgs:
-                    yield orgs
-                return
-            if stream.name == "projects":
-                projects = await self._projects(client)
-                if cursor:
-                    projects = [p for p in projects if str(p.get("dateCreated") or "") > cursor]
-                if projects:
-                    yield projects
-                return
-            if stream.name == "members":
-                async for page in self._members(client):
-                    yield page
-                return
-            if stream.name == "issues":
-                async for page in self._issues(client, cursor=cursor):
-                    yield page
-                return
-            if stream.name == "events":
-                async for page in self._events(client, cursor=cursor):
-                    yield page
-                return
-            if stream.name == "releases":
-                async for page in self._releases(client, cursor=cursor):
-                    yield page
-                return
-            raise StreamSkipped(f"sentry stream {stream.name!r} is not implemented")
+            async for page in self._stream_pages(client, stream.name, cursor):
+                yield page
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
@@ -132,6 +105,36 @@ class SentryConnector(RestConnector):
                     "lacks scope or the key is invalid"
                 ) from error
             raise
+
+    def _stream_pages(
+        self, client: httpx.AsyncClient, name: str, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        if name in {"organizations", "projects"}:
+            return self._root_pages(client, name, cursor)
+        if name == "members":
+            return self._members(client)
+        if name == "issues":
+            return self._issues(client, cursor=cursor)
+        if name == "events":
+            return self._events(client, cursor=cursor)
+        if name == "releases":
+            return self._releases(client, cursor=cursor)
+        raise StreamSkipped(f"sentry stream {name!r} is not implemented")
+
+    async def _root_pages(
+        self, client: httpx.AsyncClient, name: str, cursor: str | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        records = (
+            await self._organizations(client)
+            if name == "organizations"
+            else await self._projects(client)
+        )
+        if name == "projects" and cursor:
+            records = [
+                record for record in records if str(record.get("dateCreated") or "") > cursor
+            ]
+        if records:
+            yield records
 
     async def _paged_list(
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None

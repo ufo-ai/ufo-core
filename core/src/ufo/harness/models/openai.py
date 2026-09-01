@@ -11,16 +11,19 @@ token, which api.openai.com refuses and the ChatGPT Codex backend answers for â€
 serves Responses alone, so a client built for such a token calls that surface whatever the model's
 spec declares."""
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import binascii
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import httpx
 import openai
+from openai.types.chat import ChatCompletionChunk
 from openai.types.completion_usage import PromptTokensDetails
 from openai.types.responses import (
     ResponseCompletedEvent,
@@ -35,6 +38,7 @@ from openai.types.responses import (
     ResponseReasoningItem,
     ResponseReasoningItemParam,
     ResponseRefusalDeltaEvent,
+    ResponseStreamEvent,
     ResponseTextDeltaEvent,
 )
 from openai.types.responses.easy_input_message_param import EasyInputMessageParam
@@ -128,6 +132,23 @@ def _responses_usage(raw: ResponseUsage, cache_write_30m_priced: bool) -> Usage:
     return Usage(
         input_tokens=raw.input_tokens - cached_tokens - cache_write_tokens,
         output_tokens=raw.output_tokens,
+        cache_read_tokens=cached_tokens,
+        cache_write_30m_tokens=cache_write_tokens,
+    )
+
+
+def _chat_usage(raw: openai.types.CompletionUsage, cache_write_30m_priced: bool) -> Usage:
+    details = raw.prompt_tokens_details
+    cached_tokens = (details.cached_tokens or 0) if details is not None else 0
+    reported_cache_write_tokens = _cache_write_tokens(details)
+    cache_write_tokens = reported_cache_write_tokens if cache_write_30m_priced else 0
+    if cached_tokens > raw.prompt_tokens:
+        raise RuntimeError("cached prompt tokens exceed total prompt tokens")
+    if cached_tokens + reported_cache_write_tokens > raw.prompt_tokens:
+        raise RuntimeError("cached and cache-write prompt tokens exceed total prompt tokens")
+    return Usage(
+        input_tokens=raw.prompt_tokens - cached_tokens - cache_write_tokens,
+        output_tokens=raw.completion_tokens,
         cache_read_tokens=cached_tokens,
         cache_write_30m_tokens=cache_write_tokens,
     )
@@ -428,6 +449,241 @@ def responses_request(
 
 
 @dataclass(frozen=True)
+class _OpenAIRetry:
+    spec: ModelSpec
+    model: str
+    attempt: int = 0
+    delay: float = INITIAL_RETRY_DELAY_SECONDS
+
+    async def transport(self, error: Exception, yielded: bool) -> _OpenAIRetry:
+        attempt = self.attempt + 1
+        if yielded or attempt > MAX_PROVIDER_RETRIES:
+            log(
+                "model.provider_transport_error",
+                provider=self.spec.provider,
+                model=self.model,
+                attempts=attempt,
+                error_class=type(error).__name__,
+            )
+            if yielded:
+                raise ModelStreamInterrupted(
+                    "stream_transport",
+                    f"OpenAI stream died mid-round ({type(error).__name__}): {error}",
+                ) from error
+            raise error
+        log(
+            "model.provider_transport_retry",
+            provider=self.spec.provider,
+            model=self.model,
+            attempt=attempt,
+            error_class=type(error).__name__,
+            wait_seconds=self.delay,
+        )
+        emit_metric(
+            "model_provider_retry_total",
+            provider=self.spec.provider,
+            model=self.model,
+            kind="transport",
+        )
+        await asyncio.sleep(self.delay)
+        return replace(
+            self,
+            attempt=attempt,
+            delay=min(self.delay * 2, MAX_RETRY_DELAY_SECONDS),
+        )
+
+    async def status(self, error: openai.APIStatusError, yielded: bool) -> _OpenAIRetry:
+        if error.status_code == KEY_REJECTED_STATUS:
+            log(
+                "model.provider_status_error",
+                provider=self.spec.provider,
+                model=self.model,
+                attempts=self.attempt + 1,
+                status_code=error.status_code,
+            )
+            raise self.spec.key_rejected() from error
+        attempt = self.attempt + 1
+        retryable = error.status_code == 429 or error.status_code >= 500
+        if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
+            log(
+                "model.provider_status_error",
+                provider=self.spec.provider,
+                model=self.model,
+                attempts=attempt,
+                status_code=error.status_code,
+            )
+            if yielded and retryable:
+                raise ModelStreamInterrupted(
+                    "stream_error",
+                    f"OpenAI errored the stream mid-round ({error.status_code}): {error}",
+                ) from error
+            raise error
+        wait = _status_retry_wait(error, self.delay)
+        log(
+            "model.provider_status_retry",
+            provider=self.spec.provider,
+            model=self.model,
+            attempt=attempt,
+            status_code=error.status_code,
+            wait_seconds=wait,
+        )
+        emit_metric(
+            "model_provider_retry_total",
+            provider=self.spec.provider,
+            model=self.model,
+            kind="status",
+        )
+        await asyncio.sleep(wait)
+        return replace(
+            self,
+            attempt=attempt,
+            delay=min(self.delay * 2, MAX_RETRY_DELAY_SECONDS),
+        )
+
+
+class _ChatStream:
+    def __init__(self, cache_write_30m_priced: bool) -> None:
+        self.cache_write_30m_priced = cache_write_30m_priced
+        self.yielded = False
+        self.tool_call_ids: dict[int, str] = {}
+        self.usage: Usage | None = None
+        self.finish_reason: str | None = None
+
+    def accept(self, chunk: ChatCompletionChunk) -> tuple[ModelEvent, ...]:
+        if chunk.usage is not None:
+            self.usage = _chat_usage(chunk.usage, self.cache_write_30m_priced)
+        if not chunk.choices:
+            return ()
+        choice = chunk.choices[0]
+        if choice.finish_reason is not None:
+            self.finish_reason = choice.finish_reason
+        events: list[ModelEvent] = []
+        if choice.delta.content:
+            events.append(TextDelta(text=choice.delta.content))
+        for call in choice.delta.tool_calls or ():
+            if call.index not in self.tool_call_ids:
+                self.tool_call_ids[call.index] = call.id or ""
+                events.append(
+                    ToolCallStart(
+                        id=call.id or "",
+                        name=(call.function.name or "") if call.function else "",
+                    )
+                )
+            if call.function is not None and call.function.arguments:
+                events.append(
+                    ToolCallDelta(
+                        id=self.tool_call_ids[call.index],
+                        partial_json=call.function.arguments,
+                    )
+                )
+        self.yielded = self.yielded or bool(events)
+        return tuple(events)
+
+    def finish(self) -> tuple[Usage, Exception | None]:
+        """The round's usage and its terminal error. A stream that carried no usage still raises
+        that terminal error rather than the missing-usage fault: the engine recovers a truncated
+        round on the ModelResponseTruncated class alone."""
+        error = (
+            ModelResponseTruncated(
+                "OpenAI completion truncated at the max_tokens budget (finish_reason=length)"
+            )
+            if self.finish_reason == "length"
+            else None
+        )
+        if self.usage is None:
+            if error is not None:
+                raise error
+            raise RuntimeError("model stream produced no usage")
+        return self.usage, error
+
+
+class _ResponsesStream:
+    def __init__(self, cache_write_30m_priced: bool) -> None:
+        self.cache_write_30m_priced = cache_write_30m_priced
+        self.yielded = False
+        self.tool_call_ids: dict[str, str] = {}
+        self.tool_call_arguments: set[str] = set()
+        self.reasoning: list[ReasoningItemBlock] = []
+        self.usage: Usage | None = None
+        self.terminal_error: Exception | None = None
+
+    def accept(self, event: ResponseStreamEvent) -> tuple[ModelEvent, ...]:
+        emitted: tuple[ModelEvent, ...] = ()
+        match event:
+            case ResponseTextDeltaEvent(delta=text):
+                emitted = (TextDelta(text=text),)
+            case ResponseOutputItemAddedEvent(
+                item=ResponseFunctionToolCall(id=item_id, call_id=call_id, name=name)
+            ):
+                if item_id is None:
+                    raise RuntimeError("OpenAI function call has no item id")
+                self.tool_call_ids[item_id] = call_id
+                emitted = (ToolCallStart(id=call_id, name=name),)
+            case ResponseFunctionCallArgumentsDeltaEvent(item_id=item_id, delta=partial_json):
+                self.tool_call_arguments.add(item_id)
+                emitted = (
+                    ToolCallDelta(id=self.tool_call_ids[item_id], partial_json=partial_json),
+                )
+            case ResponseFunctionCallArgumentsDoneEvent(item_id=item_id, arguments=arguments) if (
+                item_id not in self.tool_call_arguments
+            ):
+                emitted = (ToolCallDelta(id=self.tool_call_ids[item_id], partial_json=arguments),)
+            case ResponseOutputItemDoneEvent(item=ResponseReasoningItem() as item):
+                self._record_reasoning(item)
+            case ResponseRefusalDeltaEvent(delta=refusal):
+                self.terminal_error = ModelRefusal(f"OpenAI declined the completion: {refusal}")
+            case ResponseCompletedEvent(response=response):
+                if response.usage is None:
+                    raise RuntimeError("model stream produced no usage")
+                self.usage = _responses_usage(response.usage, self.cache_write_30m_priced)
+            case ResponseIncompleteEvent(response=response):
+                self._record_incomplete(response)
+            case ResponseFailedEvent(response=response):
+                if response.usage is not None:
+                    self.usage = _responses_usage(response.usage, self.cache_write_30m_priced)
+                message = response.error.message if response.error else "unknown error"
+                self.terminal_error = RuntimeError(f"OpenAI response failed: {message}")
+            case ResponseErrorEvent(message=message):
+                self.terminal_error = RuntimeError(f"OpenAI response failed: {message}")
+        self.yielded = self.yielded or bool(emitted)
+        return emitted
+
+    def _record_reasoning(self, item: ResponseReasoningItem) -> None:
+        if item.encrypted_content is None:
+            raise RuntimeError("OpenAI reasoning item has no encrypted content")
+        self.reasoning.append(
+            ReasoningItemBlock(
+                id=item.id,
+                encrypted_content=item.encrypted_content,
+                summary=tuple(part.text for part in item.summary),
+            )
+        )
+
+    def _record_incomplete(self, response: Any) -> None:
+        if response.usage is not None:
+            self.usage = _responses_usage(response.usage, self.cache_write_30m_priced)
+        reason = response.incomplete_details
+        if reason is not None and reason.reason == "max_output_tokens":
+            self.terminal_error = ModelResponseTruncated(
+                "OpenAI response truncated at the max_output_tokens budget"
+            )
+        elif reason is not None and reason.reason == "content_filter":
+            self.terminal_error = ModelRefusal("OpenAI declined the completion (content_filter)")
+        else:
+            self.terminal_error = RuntimeError("OpenAI returned an incomplete response")
+
+    def finish(self) -> tuple[Usage, Exception | None]:
+        """The `_ChatStream.finish` contract on this surface: a truncation or a refusal that
+        reported no usage keeps its own class, so the engine recovers the round instead of
+        recording an internal fault."""
+        if self.usage is None:
+            if self.terminal_error is not None:
+                raise self.terminal_error
+            raise RuntimeError("model stream produced no usage")
+        return self.usage, self.terminal_error
+
+
+@dataclass(frozen=True)
 class OpenAIClient:
     """An OpenAI-wire backend for one model. `spec.api_surface` selects the Chat Completions or
     Responses request shape; `spec.reasoning` gates whether reasoning is emitted and whether it
@@ -516,14 +772,10 @@ class OpenAIClient:
         MAX_EMPTY_PROVIDER_RETRIES before degrading to the empty result for the turn loop's nudge â€”
         a tool-call-only response has yielded and never degrades.
         """
-        delay = INITIAL_RETRY_DELAY_SECONDS
-        attempt = 0
+        retry = _OpenAIRetry(self.spec, request.model, delay=INITIAL_RETRY_DELAY_SECONDS)
         empty_attempt = 0
         while True:
-            yielded = False
-            tool_call_ids: dict[int, str] = {}
-            usage: Usage | None = None
-            finish_reason: str | None = None
+            state = _ChatStream(bool(self.spec.price.cache_write_30m))
             try:
                 stream = await self.client.chat.completions.create(**self._chat_kwargs(request))
                 stream_started = False
@@ -531,151 +783,34 @@ class OpenAIClient:
                     if not stream_started:
                         stream_started = True
                         yield ModelStreamStart()
-                    if chunk.usage is not None:
-                        details = chunk.usage.prompt_tokens_details
-                        cached_tokens = (details.cached_tokens or 0) if details is not None else 0
-                        reported_cache_write_tokens = _cache_write_tokens(details)
-                        cache_write_tokens = (
-                            reported_cache_write_tokens if self.spec.price.cache_write_30m else 0
-                        )
-                        if cached_tokens > chunk.usage.prompt_tokens:
-                            raise RuntimeError("cached prompt tokens exceed total prompt tokens")
-                        if cached_tokens + reported_cache_write_tokens > chunk.usage.prompt_tokens:
-                            raise RuntimeError(
-                                "cached and cache-write prompt tokens exceed total prompt tokens"
-                            )
-                        usage = Usage(
-                            input_tokens=(
-                                chunk.usage.prompt_tokens - cached_tokens - cache_write_tokens
-                            ),
-                            output_tokens=chunk.usage.completion_tokens,
-                            cache_read_tokens=cached_tokens,
-                            cache_write_30m_tokens=cache_write_tokens,
-                        )
-                    if not chunk.choices:
-                        continue
-                    choice = chunk.choices[0]
-                    if choice.finish_reason is not None:
-                        finish_reason = choice.finish_reason
-                    delta = choice.delta
-                    if delta.content:
-                        yielded = True
-                        yield TextDelta(text=delta.content)
-                    for call in delta.tool_calls or ():
-                        if call.index not in tool_call_ids:
-                            tool_call_ids[call.index] = call.id or ""
-                            yielded = True
-                            yield ToolCallStart(
-                                id=call.id or "",
-                                name=call.function.name if call.function else "",
-                            )
-                        if call.function is not None and call.function.arguments:
-                            yielded = True
-                            yield ToolCallDelta(
-                                id=tool_call_ids[call.index],
-                                partial_json=call.function.arguments,
-                            )
+                    for event in state.accept(chunk):
+                        yield event
             except STREAM_TRANSPORT_ERRORS as error:
-                if usage is not None:
-                    yield usage
-                attempt += 1
-                if yielded or attempt > MAX_PROVIDER_RETRIES:
-                    log(
-                        "model.provider_transport_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt,
-                        error_class=type(error).__name__,
-                    )
-                    if yielded:
-                        raise ModelStreamInterrupted(
-                            "stream_transport",
-                            f"OpenAI stream died mid-round ({type(error).__name__}): {error}",
-                        ) from error
-                    raise
-                log(
-                    "model.provider_transport_retry",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    attempt=attempt,
-                    error_class=type(error).__name__,
-                    wait_seconds=delay,
-                )
-                emit_metric(
-                    "model_provider_retry_total",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    kind="transport",
-                )
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                if state.usage is not None:
+                    yield state.usage
+                retry = await retry.transport(error, state.yielded)
                 continue
             except STREAM_STATUS_ERRORS as error:
-                if usage is not None:
-                    yield usage
-                if error.status_code == KEY_REJECTED_STATUS:
-                    log(
-                        "model.provider_status_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt + 1,
-                        status_code=error.status_code,
-                    )
-                    raise self.spec.key_rejected() from error
-                attempt += 1
-                retryable = error.status_code == 429 or error.status_code >= 500
-                if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
-                    log(
-                        "model.provider_status_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt,
-                        status_code=error.status_code,
-                    )
-                    if yielded and retryable:
-                        raise ModelStreamInterrupted(
-                            "stream_error",
-                            f"OpenAI errored the stream mid-round ({error.status_code}): {error}",
-                        ) from error
-                    raise
-                wait = _status_retry_wait(error, delay)
-                log(
-                    "model.provider_status_retry",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    attempt=attempt,
-                    status_code=error.status_code,
-                    wait_seconds=wait,
-                )
-                emit_metric(
-                    "model_provider_retry_total",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    kind="status",
-                )
-                await asyncio.sleep(wait)
-                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                if state.usage is not None:
+                    yield state.usage
+                retry = await retry.status(error, state.yielded)
                 continue
             except openai.APIError as error:
                 if type(error) is not openai.APIError:
                     raise
-                if usage is not None:
-                    yield usage
+                if state.usage is not None:
+                    yield state.usage
                 raise ModelStreamInterrupted(
                     "stream_error",
                     f"OpenAI injected an error into the stream: {error}",
                 ) from error
-            if finish_reason == "length":
-                if usage is not None:
-                    yield usage
-                raise ModelResponseTruncated(
-                    "OpenAI completion truncated at the max_tokens budget (finish_reason=length)"
-                )
-            if usage is None:
-                raise RuntimeError("model stream produced no usage")
+            usage, terminal_error = state.finish()
+            if terminal_error is not None:
+                yield usage
+                raise terminal_error
             if (
-                not yielded
-                and finish_reason == "stop"
+                not state.yielded
+                and state.finish_reason == "stop"
                 and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES
             ):
                 empty_attempt += 1
@@ -706,16 +841,10 @@ class OpenAIClient:
         attempt must not deliver the abandoned attempt's items, and reasoning alone never counts as
         having yielded: an answerless round stays an empty completion and is retried."""
         effort = self._reasoning_effort(request)
-        delay = INITIAL_RETRY_DELAY_SECONDS
-        attempt = 0
+        retry = _OpenAIRetry(self.spec, request.model, delay=INITIAL_RETRY_DELAY_SECONDS)
         empty_attempt = 0
         while True:
-            yielded = False
-            tool_call_ids: dict[str, str] = {}
-            tool_call_arguments: set[str] = set()
-            reasoning: list[ReasoningItemBlock] = []
-            usage: Usage | None = None
-            terminal_error: Exception | None = None
+            state = _ResponsesStream(bool(self.spec.price.cache_write_30m))
             try:
                 stream = await self.client.responses.create(
                     **responses_request(request, effort, self.codex)
@@ -725,178 +854,32 @@ class OpenAIClient:
                     if not stream_started:
                         stream_started = True
                         yield ModelStreamStart()
-                    match event:
-                        case ResponseTextDeltaEvent(delta=text):
-                            yielded = True
-                            yield TextDelta(text=text)
-                        case ResponseOutputItemAddedEvent(
-                            item=ResponseFunctionToolCall(id=item_id, call_id=call_id, name=name)
-                        ):
-                            if item_id is None:
-                                raise RuntimeError("OpenAI function call has no item id")
-                            tool_call_ids[item_id] = call_id
-                            yielded = True
-                            yield ToolCallStart(id=call_id, name=name)
-                        case ResponseFunctionCallArgumentsDeltaEvent(
-                            item_id=item_id, delta=partial_json
-                        ):
-                            tool_call_arguments.add(item_id)
-                            yielded = True
-                            yield ToolCallDelta(
-                                id=tool_call_ids[item_id], partial_json=partial_json
-                            )
-                        case ResponseFunctionCallArgumentsDoneEvent(
-                            item_id=item_id, arguments=arguments
-                        ) if item_id not in tool_call_arguments:
-                            yielded = True
-                            yield ToolCallDelta(id=tool_call_ids[item_id], partial_json=arguments)
-                        case ResponseOutputItemDoneEvent(
-                            item=ResponseReasoningItem(
-                                id=item_id, summary=parts, encrypted_content=encrypted
-                            )
-                        ):
-                            if encrypted is None:
-                                raise RuntimeError("OpenAI reasoning item has no encrypted content")
-                            reasoning.append(
-                                ReasoningItemBlock(
-                                    id=item_id,
-                                    encrypted_content=encrypted,
-                                    summary=tuple(part.text for part in parts),
-                                )
-                            )
-                        case ResponseRefusalDeltaEvent(delta=refusal):
-                            terminal_error = ModelRefusal(
-                                f"OpenAI declined the completion: {refusal}"
-                            )
-                        case ResponseCompletedEvent(response=response):
-                            raw = response.usage
-                            if raw is None:
-                                raise RuntimeError("model stream produced no usage")
-                            usage = _responses_usage(raw, bool(self.spec.price.cache_write_30m))
-                        case ResponseIncompleteEvent(response=response):
-                            if response.usage is not None:
-                                usage = _responses_usage(
-                                    response.usage, bool(self.spec.price.cache_write_30m)
-                                )
-                            reason = response.incomplete_details
-                            if reason is not None and reason.reason == "max_output_tokens":
-                                terminal_error = ModelResponseTruncated(
-                                    "OpenAI response truncated at the max_output_tokens budget"
-                                )
-                            elif reason is not None and reason.reason == "content_filter":
-                                terminal_error = ModelRefusal(
-                                    "OpenAI declined the completion (content_filter)"
-                                )
-                            else:
-                                terminal_error = RuntimeError(
-                                    "OpenAI returned an incomplete response"
-                                )
-                        case ResponseFailedEvent(response=response):
-                            if response.usage is not None:
-                                usage = _responses_usage(
-                                    response.usage, bool(self.spec.price.cache_write_30m)
-                                )
-                            message = response.error.message if response.error else "unknown error"
-                            terminal_error = RuntimeError(f"OpenAI response failed: {message}")
-                        case ResponseErrorEvent(message=message):
-                            terminal_error = RuntimeError(f"OpenAI response failed: {message}")
+                    for emitted in state.accept(event):
+                        yield emitted
             except STREAM_TRANSPORT_ERRORS as error:
-                if usage is not None:
-                    yield usage
-                attempt += 1
-                if yielded or attempt > MAX_PROVIDER_RETRIES:
-                    log(
-                        "model.provider_transport_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt,
-                        error_class=type(error).__name__,
-                    )
-                    if yielded:
-                        raise ModelStreamInterrupted(
-                            "stream_transport",
-                            f"OpenAI stream died mid-round ({type(error).__name__}): {error}",
-                        ) from error
-                    raise
-                log(
-                    "model.provider_transport_retry",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    attempt=attempt,
-                    error_class=type(error).__name__,
-                    wait_seconds=delay,
-                )
-                emit_metric(
-                    "model_provider_retry_total",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    kind="transport",
-                )
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                if state.usage is not None:
+                    yield state.usage
+                retry = await retry.transport(error, state.yielded)
                 continue
             except STREAM_STATUS_ERRORS as error:
-                if usage is not None:
-                    yield usage
-                if error.status_code == KEY_REJECTED_STATUS:
-                    log(
-                        "model.provider_status_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt + 1,
-                        status_code=error.status_code,
-                    )
-                    raise self.spec.key_rejected() from error
-                attempt += 1
-                retryable = error.status_code == 429 or error.status_code >= 500
-                if yielded or not retryable or attempt > MAX_PROVIDER_RETRIES:
-                    log(
-                        "model.provider_status_error",
-                        provider=self.spec.provider,
-                        model=request.model,
-                        attempts=attempt,
-                        status_code=error.status_code,
-                    )
-                    if yielded and retryable:
-                        raise ModelStreamInterrupted(
-                            "stream_error",
-                            f"OpenAI errored the stream mid-round ({error.status_code}): {error}",
-                        ) from error
-                    raise
-                wait = _status_retry_wait(error, delay)
-                log(
-                    "model.provider_status_retry",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    attempt=attempt,
-                    status_code=error.status_code,
-                    wait_seconds=wait,
-                )
-                emit_metric(
-                    "model_provider_retry_total",
-                    provider=self.spec.provider,
-                    model=request.model,
-                    kind="status",
-                )
-                await asyncio.sleep(wait)
-                delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                if state.usage is not None:
+                    yield state.usage
+                retry = await retry.status(error, state.yielded)
                 continue
             except openai.APIError as error:
                 if type(error) is not openai.APIError:
                     raise
-                if usage is not None:
-                    yield usage
+                if state.usage is not None:
+                    yield state.usage
                 raise ModelStreamInterrupted(
                     "stream_error",
                     f"OpenAI injected an error into the stream: {error}",
                 ) from error
+            usage, terminal_error = state.finish()
             if terminal_error is not None:
-                if usage is not None:
-                    yield usage
+                yield usage
                 raise terminal_error
-            if usage is None:
-                raise RuntimeError("model stream produced no usage")
-            if not yielded and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES:
+            if not state.yielded and empty_attempt < MAX_EMPTY_PROVIDER_RETRIES:
                 empty_attempt += 1
                 emit_metric(
                     "model_provider_retry_total",
@@ -906,7 +889,7 @@ class OpenAIClient:
                 )
                 yield usage
                 continue
-            for block in reasoning:
+            for block in state.reasoning:
                 yield block
             yield usage
             return

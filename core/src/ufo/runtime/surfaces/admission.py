@@ -43,7 +43,8 @@ because every member surface resolves its speaker, so one that did not is a stra
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -98,6 +99,44 @@ class _SupersededByMember(Exception):
 
 
 ARCHIVED_REFUSAL_MESSAGE = "This app is archived. Restore it from Applications to use it again."
+
+
+@dataclass(frozen=True)
+class _Inbound:
+    body: str
+    speaker_member_id: UUID | None
+    context: TurnContext | None
+    admitted_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class _ExistingTurn:
+    id: UUID
+    status: TurnStatus
+    seq: int
+    running_attempt: str | None
+
+
+@dataclass(frozen=True)
+class _DedupeResult:
+    existing: _ExistingTurn | None
+    inbound: _Inbound
+    admitted: Admitted | None = None
+
+
+@dataclass(frozen=True)
+class _FoldResult:
+    parked_turn_id: UUID | None = None
+    arrival_id: UUID | None = None
+    admitted: Admitted | None = None
+
+
+@dataclass(frozen=True)
+class _CreatedTurn:
+    id: UUID
+    seq: int
+    status: TurnStatus
+    admission_source: TurnAdmissionSource
 
 
 def _refused(
@@ -324,15 +363,15 @@ class Admission:
         comment: str | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
     ) -> Admitted:
-        if (unless_member_since is None) != (unless_member_arrival_since is None):
-            raise ValueError("waiting on a member takes both watermarks, turn and arrival")
+        self._validate_member_watermarks(unless_member_since, unless_member_arrival_since)
         dispatch_now = False
         opened_run = False
         counted_source: TurnAdmissionSource | None = None
         folded_parked_turn: UUID | None = None
+        status: TurnStatus | None = None
         arrival_id: UUID | None = None
         redispatch_workflow_id: str | None = None
-        admitted_at = None
+        inbound = _Inbound(body, speaker_member_id, context)
         async with workspace_tx() as connection:
             conversation = (
                 await connection.execute(
@@ -378,277 +417,50 @@ class Admission:
                         )
                         .values(timezone=context.timezone, updated_at=sa.func.now())
                     )
-            deduped = None
-            if idempotency_key is not None:
-                deduped = (
-                    await connection.execute(
-                        sa.select(
-                            tables.turn.c.id,
-                            tables.turn.c.status,
-                            tables.turn.c.seq,
-                            tables.turn.c.conversation_id,
-                            tables.turn.c.agent_id,
-                            tables.turn.c.running_attempt,
-                            tables.turn.c.runtime_config,
-                        )
-                        .where(
-                            tables.turn.c.workspace_id == workspace_id,
-                            tables.turn.c.idempotency_key == idempotency_key,
-                        )
-                        .with_for_update()
-                    )
-                ).one_or_none()
-                if deduped is None:
-                    queued_message = (
-                        await connection.execute(
-                            sa.select(
-                                tables.inbound_message.c.id,
-                                tables.inbound_message.c.conversation_id,
-                                tables.inbound_message.c.admitted_turn_id,
-                                tables.inbound_message.c.consumed_turn_id,
-                                tables.inbound_message.c.body,
-                                tables.inbound_message.c.context,
-                                tables.inbound_message.c.speaker_member_id,
-                                tables.inbound_message.c.created_at,
-                            ).where(
-                                tables.inbound_message.c.workspace_id == workspace_id,
-                                tables.inbound_message.c.idempotency_key == idempotency_key,
-                            )
-                        )
-                    ).one_or_none()
-                    if queued_message is not None:
-                        if queued_message.conversation_id != conversation_id:
-                            raise RuntimeError("idempotency key reused for a different turn")
-                        if queued_message.consumed_turn_id is not None:
-                            return await self._record_comment(
-                                connection,
-                                workspace_id,
-                                Admitted(queued_message.consumed_turn_id, opened_run=False),
-                                comment,
-                                queued_message.id,
-                            )
-                        target_live = (
-                            await connection.execute(
-                                sa.select(tables.turn.c.status.in_(NON_TERMINAL_STATUSES)).where(
-                                    tables.turn.c.id == queued_message.admitted_turn_id
-                                )
-                            )
-                        ).scalar_one()
-                        if target_live:
-                            return await self._record_comment(
-                                connection,
-                                workspace_id,
-                                Admitted(
-                                    queued_message.admitted_turn_id,
-                                    opened_run=False,
-                                    arrival_id=queued_message.id,
-                                ),
-                                comment,
-                            )
-                        await connection.execute(
-                            sa.delete(tables.inbound_message).where(
-                                tables.inbound_message.c.id == queued_message.id
-                            )
-                        )
-                        body = queued_message.body
-                        context = (
-                            None
-                            if queued_message.context is None
-                            else TurnContext.model_validate(queued_message.context)
-                        )
-                        speaker_member_id = queued_message.speaker_member_id
-                        admitted_at = queued_message.created_at
-                if deduped is not None:
-                    if deduped.conversation_id != conversation_id or deduped.agent_id != agent_id:
-                        raise RuntimeError("idempotency key reused for a different turn")
-                    if runtime_config is not None and (
-                        deduped.runtime_config is None
-                        or TurnRuntimeConfig.model_validate(deduped.runtime_config)
-                        != runtime_config
-                    ):
-                        raise ValueError("turn already has a different runtime config")
-            if (
-                deduped is None
-                and unless_member_since is not None
-                and unless_member_arrival_since is not None
-            ):
-                superseded = (
-                    await connection.execute(
-                        sa.select(
-                            sa.exists(
-                                sa.select(tables.turn.c.id).where(
-                                    tables.turn.c.workspace_id == workspace_id,
-                                    tables.turn.c.conversation_id == conversation_id,
-                                    tables.turn.c.speaker_member_id.is_not(None),
-                                    tables.turn.c.status != CANCELLED,
-                                    tables.turn.c.seq > unless_member_since,
-                                )
-                            )
-                            | sa.exists(
-                                sa.select(tables.inbound_message.c.id).where(
-                                    tables.inbound_message.c.workspace_id == workspace_id,
-                                    tables.inbound_message.c.conversation_id == conversation_id,
-                                    tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
-                                    tables.inbound_message.c.seq > unless_member_arrival_since,
-                                )
-                            )
-                        )
-                    )
-                ).scalar_one()
-                if superseded:
-                    raise _SupersededByMember
+            dedupe = await self._deduplicate(
+                connection,
+                workspace_id,
+                conversation_id,
+                agent_id,
+                idempotency_key,
+                runtime_config,
+                inbound,
+                comment,
+            )
+            if dedupe.admitted is not None:
+                return dedupe.admitted
+            deduped = dedupe.existing
+            inbound = dedupe.inbound
+            body = inbound.body
+            context = inbound.context
+            speaker_member_id = inbound.speaker_member_id
+            await self._guard_member_watermark(
+                connection,
+                workspace_id,
+                conversation_id,
+                deduped,
+                unless_member_since,
+                unless_member_arrival_since,
+            )
             if deduped is None and not as_scheduled and not standalone and intent is None:
-                live_turn = (
-                    await connection.execute(
-                        sa.select(
-                            tables.turn.c.id,
-                            tables.turn.c.seq,
-                            tables.turn.c.status,
-                            tables.turn.c.speaker_member_id,
-                            tables.turn.c.admission_source,
-                            tables.turn.c.on_behalf_of_member_id,
-                            tables.turn.c.runtime_config,
-                        )
-                        .where(
-                            tables.turn.c.workspace_id == workspace_id,
-                            tables.turn.c.conversation_id == conversation_id,
-                            tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
-                        )
-                        .order_by(tables.turn.c.seq)
-                        .limit(1)
-                        .with_for_update()
-                    )
-                ).one_or_none()
-                live_runtime_config = (
-                    None
-                    if live_turn is None or live_turn.runtime_config is None
-                    else TurnRuntimeConfig.model_validate(live_turn.runtime_config)
+                folded = await self._fold_live(
+                    connection,
+                    workspace_id,
+                    conversation_id,
+                    conversation.member_id,
+                    agent_id,
+                    archived,
+                    member_admission,
+                    holds_work_already_done,
+                    runtime_config,
+                    idempotency_key,
+                    inbound,
+                    comment,
                 )
-                if (
-                    runtime_config is not None
-                    and live_turn is not None
-                    and live_runtime_config != runtime_config
-                    and not holds_work_already_done
-                ):
-                    raise ValueError("running turn has a different runtime config")
-                effective_runtime_config = (
-                    live_runtime_config if live_turn is not None else runtime_config
-                )
-                parked_gate = (
-                    None
-                    if live_turn is None or live_turn.status != PARKED
-                    else gate_member(
-                        live_turn.speaker_member_id,
-                        live_turn.on_behalf_of_member_id,
-                    )
-                )
-                parked_members = {parked_gate} if parked_gate is not None else set()
-                if live_turn is not None and live_turn.status == PARKED:
-                    parked_members.update(
-                        (
-                            await connection.execute(
-                                sa.select(tables.inbound_message.c.speaker_member_id)
-                                .where(
-                                    tables.inbound_message.c.workspace_id == workspace_id,
-                                    tables.inbound_message.c.conversation_id == conversation_id,
-                                    tables.inbound_message.c.consumed_turn_id.is_(None),
-                                    tables.inbound_message.c.speaker_member_id.is_not(None),
-                                )
-                                .distinct()
-                            )
-                        )
-                        .scalars()
-                        .all()
-                    )
-                seats = Seats(workspace_id)
-                parked_seated = await seats.all_seated(
-                    connection, [member for member in parked_members if member is not None]
-                )
-                fold_admitted = (
-                    live_turn is not None
-                    and not archived
-                    and (
-                        await seats.admits(connection, speaker_member_id)
-                        if speaker_member_id is not None
-                        else not member_admission
-                    )
-                    and parked_seated
-                )
-                fold_decision = (
-                    None
-                    if not fold_admitted
-                    else await SpendEvaluator(
-                        workspace_id, conversation.member_id, agent_id
-                    ).decide(connection, 0)
-                )
-                fold_balance = (
-                    None
-                    if fold_decision is None or fold_decision.outcome != ALLOW
-                    else await BalanceGate(workspace_id, self.billing_url).admits(
-                        connection,
-                        agent_id,
-                        self.key_slot_for,
-                        model=(
-                            None
-                            if effective_runtime_config is None
-                            else effective_runtime_config.model
-                        ),
-                    )
-                )
-                if (
-                    live_turn is not None
-                    and fold_balance is not None
-                    and fold_balance.outcome == ALLOW
-                ):
-                    message_seq = (
-                        await connection.execute(
-                            sa.select(
-                                sa.func.coalesce(sa.func.max(tables.inbound_message.c.seq), 0) + 1
-                            ).where(tables.inbound_message.c.conversation_id == conversation_id)
-                        )
-                    ).scalar_one()
-                    arrival_id = uuid4()
-                    arrival_source = MEMBER_ADMISSION if member_admission else INTERNAL_ADMISSION
-                    await connection.execute(
-                        sa.insert(tables.inbound_message).values(
-                            id=arrival_id,
-                            workspace_id=workspace_id,
-                            conversation_id=conversation_id,
-                            seq=message_seq,
-                            body=body,
-                            admission_source=arrival_source,
-                            context=None if context is None else context.model_dump(mode="json"),
-                            speaker_member_id=speaker_member_id,
-                            idempotency_key=idempotency_key,
-                            admitted_turn_id=live_turn.id,
-                            created_at=admitted_at if admitted_at is not None else sa.func.now(),
-                        )
-                    )
-                    log(
-                        "arrival.queued",
-                        turn_id=str(live_turn.id),
-                        arrival_id=str(arrival_id),
-                        conversation_id=str(conversation_id),
-                        admission_source=arrival_source,
-                        turn_status=live_turn.status,
-                    )
-                    if live_turn.status != PARKED:
-                        return await self._record_comment(
-                            connection,
-                            workspace_id,
-                            Admitted(live_turn.id, opened_run=False, arrival_id=arrival_id),
-                            comment,
-                        )
-                    await connection.execute(
-                        sa.update(tables.turn)
-                        .values(
-                            status=QUEUED,
-                            dispatch_enqueued_at=sa.func.now(),
-                            updated_at=sa.func.now(),
-                        )
-                        .where(tables.turn.c.id == live_turn.id, tables.turn.c.status == PARKED)
-                    )
-                    folded_parked_turn = live_turn.id
+                if folded.admitted is not None:
+                    return folded.admitted
+                folded_parked_turn = folded.parked_turn_id
+                arrival_id = folded.arrival_id
             if deduped is not None:
                 turn_id = deduped.id
                 turn_seq = deduped.seq
@@ -664,134 +476,28 @@ class Admission:
                     )
                 status = QUEUED
             if deduped is None and folded_parked_turn is None:
-                seq = (
-                    await connection.execute(
-                        sa.select(sa.func.coalesce(sa.func.max(tables.turn.c.seq), 0) + 1).where(
-                            tables.turn.c.conversation_id == conversation_id
-                        )
-                    )
-                ).scalar_one()
-                spawned_identity = None
-                if conversation.surface == SUBAGENT_SURFACE and seq > 1:
-                    spawned_identity = (
-                        await connection.execute(
-                            sa.select(
-                                tables.turn.c.parent_turn_id,
-                                tables.turn.c.subagent_profile,
-                                tables.turn.c.subagent_name,
-                                tables.turn.c.result_delivery,
-                            ).where(
-                                tables.turn.c.conversation_id == conversation_id,
-                                tables.turn.c.seq == 1,
-                            )
-                        )
-                    ).one()
-                turn_id = turn_id_for(workspace_id, conversation_id, seq)
-                turn_seq = seq
+                created = await self._create_turn(
+                    connection,
+                    workspace_id,
+                    conversation_id,
+                    conversation.member_id,
+                    conversation.surface,
+                    agent_id,
+                    archived,
+                    member_admission,
+                    intent,
+                    holds_work_already_done,
+                    as_scheduled,
+                    on_behalf_of_member_id,
+                    idempotency_key,
+                    runtime_config,
+                    inbound,
+                )
+                turn_id = created.id
+                turn_seq = created.seq
+                status = created.status
                 opened_run = True
-                admission_source = (
-                    INTENT_ADMISSION
-                    if intent is not None
-                    else MEMBER_ADMISSION
-                    if member_admission
-                    else SCHEDULED_ADMISSION
-                    if as_scheduled
-                    else INTERNAL_ADMISSION
-                )
-                gate = gate_member(speaker_member_id, on_behalf_of_member_id)
-                terminal: TerminalFrame | None
-                if archived:
-                    status, terminal = _refused(holds_work_already_done, ARCHIVED_REFUSAL_MESSAGE)
-                elif gate is None and member_admission:
-                    status, terminal = (
-                        CANCELLED,
-                        TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE),
-                    )
-                elif gate is not None and not await Seats(workspace_id).admits(connection, gate):
-                    status, terminal = _refused(holds_work_already_done, SEAT_REFUSAL_MESSAGE)
-                else:
-                    decision = await SpendEvaluator(
-                        workspace_id, conversation.member_id, agent_id
-                    ).decide(connection, 0)
-                    balance = (
-                        SpendDecision(outcome=ALLOW, message="")
-                        if intent is not None and admits_spent_balance(intent)
-                        else await BalanceGate(workspace_id, self.billing_url).admits(
-                            connection,
-                            agent_id,
-                            self.key_slot_for,
-                            model=(None if runtime_config is None else runtime_config.model),
-                        )
-                    )
-                    match decision.outcome:
-                        case _ if balance.outcome != ALLOW:
-                            status, terminal = _refused(holds_work_already_done, balance.message)
-                        case "allow":
-                            status, terminal = QUEUED, None
-                        case "park":
-                            status, terminal = PARKED, None
-                        case _:
-                            status, terminal = _refused(holds_work_already_done, decision.message)
-                await connection.execute(
-                    sa.insert(tables.turn).values(
-                        id=turn_id,
-                        workspace_id=workspace_id,
-                        conversation_id=conversation_id,
-                        agent_id=agent_id,
-                        seq=seq,
-                        status=status,
-                        inbound=body,
-                        admission_source=admission_source,
-                        speaker_member_id=speaker_member_id,
-                        on_behalf_of_member_id=on_behalf_of_member_id,
-                        parent_turn_id=(
-                            None if spawned_identity is None else spawned_identity.parent_turn_id
-                        ),
-                        subagent_profile=(
-                            None if spawned_identity is None else spawned_identity.subagent_profile
-                        ),
-                        subagent_name=(
-                            None if spawned_identity is None else spawned_identity.subagent_name
-                        ),
-                        result_delivery=(
-                            DELIVERY_PENDING
-                            if spawned_identity is not None
-                            and spawned_identity.result_delivery is not None
-                            else None
-                        ),
-                        context=None if context is None else context.model_dump(mode="json"),
-                        terminal=None if terminal is None else terminal.model_dump(mode="json"),
-                        idempotency_key=idempotency_key,
-                        traceparent=current_traceparent(),
-                        runtime_config=(
-                            None
-                            if runtime_config is None
-                            else runtime_config.model_dump(mode="json")
-                        ),
-                        created_at=admitted_at if admitted_at is not None else sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
-                counted_source = admission_source
-                await connection.execute(
-                    sa.update(tables.conversation)
-                    .where(
-                        tables.conversation.c.workspace_id == workspace_id,
-                        tables.conversation.c.id == conversation_id,
-                        tables.conversation.c.title.is_(None),
-                    )
-                    .values(title=conversation_name(body))
-                )
-                if conversation.surface in self.durable_surfaces:
-                    await connection.execute(
-                        sa.insert(tables.writeback).values(
-                            turn_id=turn_id,
-                            workspace_id=workspace_id,
-                            status=WRITEBACK_PENDING,
-                            created_at=sa.func.now(),
-                            updated_at=sa.func.now(),
-                        )
-                    )
+                counted_source = created.admission_source
             if folded_parked_turn is None and status == QUEUED:
                 earlier_turn = tables.turn.alias("earlier_turn")
                 earlier_queued = (
@@ -827,14 +533,80 @@ class Admission:
                 ),
                 comment,
             )
+        return await self._finish_admission(
+            workspace_id,
+            conversation_id,
+            conversation.surface,
+            admitted.turn_id,
+            status,
+            admitted,
+            counted_source,
+            folded_parked_turn,
+            dispatch_now,
+            redispatch_workflow_id,
+        )
+
+    async def _guard_member_watermark(
+        self,
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        conversation_id: UUID,
+        deduped: _ExistingTurn | None,
+        turn_watermark: int | None,
+        arrival_watermark: int | None,
+    ) -> None:
+        if deduped is not None or turn_watermark is None or arrival_watermark is None:
+            return
+        superseded = (
+            await connection.execute(
+                sa.select(
+                    sa.exists(
+                        sa.select(tables.turn.c.id).where(
+                            tables.turn.c.workspace_id == workspace_id,
+                            tables.turn.c.conversation_id == conversation_id,
+                            tables.turn.c.speaker_member_id.is_not(None),
+                            tables.turn.c.status != CANCELLED,
+                            tables.turn.c.seq > turn_watermark,
+                        )
+                    )
+                    | sa.exists(
+                        sa.select(tables.inbound_message.c.id).where(
+                            tables.inbound_message.c.workspace_id == workspace_id,
+                            tables.inbound_message.c.conversation_id == conversation_id,
+                            tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                            tables.inbound_message.c.seq > arrival_watermark,
+                        )
+                    )
+                )
+            )
+        ).scalar_one()
+        if superseded:
+            raise _SupersededByMember
+
+    @staticmethod
+    def _validate_member_watermarks(
+        turn_watermark: int | None, arrival_watermark: int | None
+    ) -> None:
+        if (turn_watermark is None) != (arrival_watermark is None):
+            raise ValueError("waiting on a member takes both watermarks, turn and arrival")
+
+    async def _finish_admission(
+        self,
+        workspace_id: UUID,
+        conversation_id: UUID,
+        surface: str,
+        turn_id: UUID,
+        status: TurnStatus | None,
+        admitted: Admitted,
+        counted_source: TurnAdmissionSource | None,
+        folded_parked_turn: UUID | None,
+        dispatch_now: bool,
+        redispatch_workflow_id: str | None,
+    ) -> Admitted:
         if counted_source is not None:
-            # Counted off the committed row, never beside the insert: the statements after it and
-            # the commit itself can fail, and the surface then retries under the same idempotency
-            # key with nothing committed to dedupe against. One row is one turn, so the count
-            # follows the row.
             emit_metric(
                 ADMITTED_TURN_METRIC,
-                surface=conversation.surface,
+                surface=surface,
                 admission_source=counted_source,
             )
         if folded_parked_turn is not None:
@@ -842,6 +614,8 @@ class Admission:
                 workspace_id, conversation_id, folded_parked_turn, workflow_id=uuid4().hex
             )
             return admitted
+        if status is None:
+            raise RuntimeError("admission finished without a turn status")
         if status != QUEUED:
             return admitted
         if dispatch_now:
@@ -849,6 +623,417 @@ class Admission:
                 workspace_id, conversation_id, turn_id, workflow_id=redispatch_workflow_id
             )
         return admitted
+
+    async def _deduplicate(
+        self,
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        conversation_id: UUID,
+        agent_id: UUID,
+        idempotency_key: str | None,
+        runtime_config: TurnRuntimeConfig | None,
+        inbound: _Inbound,
+        comment: str | None,
+    ) -> _DedupeResult:
+        if idempotency_key is None:
+            return _DedupeResult(None, inbound)
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.id,
+                    tables.turn.c.status,
+                    tables.turn.c.seq,
+                    tables.turn.c.conversation_id,
+                    tables.turn.c.agent_id,
+                    tables.turn.c.running_attempt,
+                    tables.turn.c.runtime_config,
+                )
+                .where(
+                    tables.turn.c.workspace_id == workspace_id,
+                    tables.turn.c.idempotency_key == idempotency_key,
+                )
+                .with_for_update()
+            )
+        ).one_or_none()
+        if row is not None:
+            if row.conversation_id != conversation_id or row.agent_id != agent_id:
+                raise RuntimeError("idempotency key reused for a different turn")
+            if runtime_config is not None and (
+                row.runtime_config is None
+                or TurnRuntimeConfig.model_validate(row.runtime_config) != runtime_config
+            ):
+                raise ValueError("turn already has a different runtime config")
+            return _DedupeResult(
+                _ExistingTurn(row.id, row.status, row.seq, row.running_attempt), inbound
+            )
+        queued = (
+            await connection.execute(
+                sa.select(
+                    tables.inbound_message.c.id,
+                    tables.inbound_message.c.conversation_id,
+                    tables.inbound_message.c.admitted_turn_id,
+                    tables.inbound_message.c.consumed_turn_id,
+                    tables.inbound_message.c.body,
+                    tables.inbound_message.c.context,
+                    tables.inbound_message.c.speaker_member_id,
+                    tables.inbound_message.c.created_at,
+                ).where(
+                    tables.inbound_message.c.workspace_id == workspace_id,
+                    tables.inbound_message.c.idempotency_key == idempotency_key,
+                )
+            )
+        ).one_or_none()
+        if queued is None:
+            return _DedupeResult(None, inbound)
+        if queued.conversation_id != conversation_id:
+            raise RuntimeError("idempotency key reused for a different turn")
+        if queued.consumed_turn_id is not None:
+            admitted = await self._record_comment(
+                connection,
+                workspace_id,
+                Admitted(queued.consumed_turn_id, opened_run=False),
+                comment,
+                queued.id,
+            )
+            return _DedupeResult(None, inbound, admitted)
+        target_live = (
+            await connection.execute(
+                sa.select(tables.turn.c.status.in_(NON_TERMINAL_STATUSES)).where(
+                    tables.turn.c.id == queued.admitted_turn_id
+                )
+            )
+        ).scalar_one()
+        if target_live:
+            admitted = await self._record_comment(
+                connection,
+                workspace_id,
+                Admitted(
+                    queued.admitted_turn_id,
+                    opened_run=False,
+                    arrival_id=queued.id,
+                ),
+                comment,
+            )
+            return _DedupeResult(None, inbound, admitted)
+        await connection.execute(
+            sa.delete(tables.inbound_message).where(tables.inbound_message.c.id == queued.id)
+        )
+        return _DedupeResult(
+            None,
+            replace(
+                inbound,
+                body=queued.body,
+                context=(
+                    None if queued.context is None else TurnContext.model_validate(queued.context)
+                ),
+                speaker_member_id=queued.speaker_member_id,
+                admitted_at=queued.created_at,
+            ),
+        )
+
+    async def _fold_live(
+        self,
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        conversation_id: UUID,
+        conversation_member_id: UUID | None,
+        agent_id: UUID,
+        archived: bool,
+        member_admission: bool,
+        holds_work_already_done: bool,
+        runtime_config: TurnRuntimeConfig | None,
+        idempotency_key: str | None,
+        inbound: _Inbound,
+        comment: str | None,
+    ) -> _FoldResult:
+        live_turn = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.id,
+                    tables.turn.c.status,
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.on_behalf_of_member_id,
+                    tables.turn.c.runtime_config,
+                )
+                .where(
+                    tables.turn.c.workspace_id == workspace_id,
+                    tables.turn.c.conversation_id == conversation_id,
+                    tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                )
+                .order_by(tables.turn.c.seq)
+                .limit(1)
+                .with_for_update()
+            )
+        ).one_or_none()
+        live_runtime_config = (
+            None
+            if live_turn is None or live_turn.runtime_config is None
+            else TurnRuntimeConfig.model_validate(live_turn.runtime_config)
+        )
+        if (
+            runtime_config is not None
+            and live_turn is not None
+            and live_runtime_config != runtime_config
+            and not holds_work_already_done
+        ):
+            raise ValueError("running turn has a different runtime config")
+        effective_runtime_config = live_runtime_config if live_turn is not None else runtime_config
+        parked_gate = (
+            None
+            if live_turn is None or live_turn.status != PARKED
+            else gate_member(live_turn.speaker_member_id, live_turn.on_behalf_of_member_id)
+        )
+        parked_members = {parked_gate} if parked_gate is not None else set()
+        if live_turn is not None and live_turn.status == PARKED:
+            parked_members.update(
+                (
+                    await connection.execute(
+                        sa.select(tables.inbound_message.c.speaker_member_id)
+                        .where(
+                            tables.inbound_message.c.workspace_id == workspace_id,
+                            tables.inbound_message.c.conversation_id == conversation_id,
+                            tables.inbound_message.c.consumed_turn_id.is_(None),
+                            tables.inbound_message.c.speaker_member_id.is_not(None),
+                        )
+                        .distinct()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        seats = Seats(workspace_id)
+        parked_seated = await seats.all_seated(connection, list(parked_members))
+        fold_admitted = (
+            live_turn is not None
+            and not archived
+            and (
+                await seats.admits(connection, inbound.speaker_member_id)
+                if inbound.speaker_member_id is not None
+                else not member_admission
+            )
+            and parked_seated
+        )
+        fold_decision = (
+            None
+            if not fold_admitted
+            else await SpendEvaluator(workspace_id, conversation_member_id, agent_id).decide(
+                connection, 0
+            )
+        )
+        fold_balance = (
+            None
+            if fold_decision is None or fold_decision.outcome != ALLOW
+            else await BalanceGate(workspace_id, self.billing_url).admits(
+                connection,
+                agent_id,
+                self.key_slot_for,
+                model=(
+                    None if effective_runtime_config is None else effective_runtime_config.model
+                ),
+            )
+        )
+        if live_turn is None or fold_balance is None or fold_balance.outcome != ALLOW:
+            return _FoldResult()
+        message_seq = (
+            await connection.execute(
+                sa.select(sa.func.coalesce(sa.func.max(tables.inbound_message.c.seq), 0) + 1).where(
+                    tables.inbound_message.c.conversation_id == conversation_id
+                )
+            )
+        ).scalar_one()
+        arrival_id = uuid4()
+        arrival_source = MEMBER_ADMISSION if member_admission else INTERNAL_ADMISSION
+        await connection.execute(
+            sa.insert(tables.inbound_message).values(
+                id=arrival_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                seq=message_seq,
+                body=inbound.body,
+                admission_source=arrival_source,
+                context=(
+                    None if inbound.context is None else inbound.context.model_dump(mode="json")
+                ),
+                speaker_member_id=inbound.speaker_member_id,
+                idempotency_key=idempotency_key,
+                admitted_turn_id=live_turn.id,
+                created_at=(
+                    inbound.admitted_at if inbound.admitted_at is not None else sa.func.now()
+                ),
+            )
+        )
+        log(
+            "arrival.queued",
+            turn_id=str(live_turn.id),
+            arrival_id=str(arrival_id),
+            conversation_id=str(conversation_id),
+            admission_source=arrival_source,
+            turn_status=live_turn.status,
+        )
+        if live_turn.status != PARKED:
+            admitted = await self._record_comment(
+                connection,
+                workspace_id,
+                Admitted(live_turn.id, opened_run=False, arrival_id=arrival_id),
+                comment,
+            )
+            return _FoldResult(admitted=admitted)
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(
+                status=QUEUED,
+                dispatch_enqueued_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+            .where(tables.turn.c.id == live_turn.id, tables.turn.c.status == PARKED)
+        )
+        return _FoldResult(parked_turn_id=live_turn.id, arrival_id=arrival_id)
+
+    async def _create_turn(
+        self,
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        conversation_id: UUID,
+        conversation_member_id: UUID | None,
+        surface: str,
+        agent_id: UUID,
+        archived: bool,
+        member_admission: bool,
+        intent: ToolIntent | None,
+        holds_work_already_done: bool,
+        as_scheduled: bool,
+        on_behalf_of_member_id: UUID | None,
+        idempotency_key: str | None,
+        runtime_config: TurnRuntimeConfig | None,
+        inbound: _Inbound,
+    ) -> _CreatedTurn:
+        seq = (
+            await connection.execute(
+                sa.select(sa.func.coalesce(sa.func.max(tables.turn.c.seq), 0) + 1).where(
+                    tables.turn.c.conversation_id == conversation_id
+                )
+            )
+        ).scalar_one()
+        spawned_identity = None
+        if surface == SUBAGENT_SURFACE and seq > 1:
+            spawned_identity = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.parent_turn_id,
+                        tables.turn.c.subagent_profile,
+                        tables.turn.c.subagent_name,
+                        tables.turn.c.result_delivery,
+                    ).where(
+                        tables.turn.c.conversation_id == conversation_id,
+                        tables.turn.c.seq == 1,
+                    )
+                )
+            ).one()
+        turn_id = turn_id_for(workspace_id, conversation_id, seq)
+        admission_source = (
+            INTENT_ADMISSION
+            if intent is not None
+            else MEMBER_ADMISSION
+            if member_admission
+            else SCHEDULED_ADMISSION
+            if as_scheduled
+            else INTERNAL_ADMISSION
+        )
+        gate = gate_member(inbound.speaker_member_id, on_behalf_of_member_id)
+        terminal: TerminalFrame | None
+        if archived:
+            status, terminal = _refused(holds_work_already_done, ARCHIVED_REFUSAL_MESSAGE)
+        elif gate is None and member_admission:
+            status, terminal = (
+                CANCELLED,
+                TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE),
+            )
+        elif gate is not None and not await Seats(workspace_id).admits(connection, gate):
+            status, terminal = _refused(holds_work_already_done, SEAT_REFUSAL_MESSAGE)
+        else:
+            decision = await SpendEvaluator(workspace_id, conversation_member_id, agent_id).decide(
+                connection, 0
+            )
+            balance = (
+                SpendDecision(outcome=ALLOW, message="")
+                if intent is not None and admits_spent_balance(intent)
+                else await BalanceGate(workspace_id, self.billing_url).admits(
+                    connection,
+                    agent_id,
+                    self.key_slot_for,
+                    model=None if runtime_config is None else runtime_config.model,
+                )
+            )
+            match decision.outcome:
+                case _ if balance.outcome != ALLOW:
+                    status, terminal = _refused(holds_work_already_done, balance.message)
+                case "allow":
+                    status, terminal = QUEUED, None
+                case "park":
+                    status, terminal = PARKED, None
+                case _:
+                    status, terminal = _refused(holds_work_already_done, decision.message)
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status=status,
+                inbound=inbound.body,
+                admission_source=admission_source,
+                speaker_member_id=inbound.speaker_member_id,
+                on_behalf_of_member_id=on_behalf_of_member_id,
+                parent_turn_id=(
+                    None if spawned_identity is None else spawned_identity.parent_turn_id
+                ),
+                subagent_profile=(
+                    None if spawned_identity is None else spawned_identity.subagent_profile
+                ),
+                subagent_name=(
+                    None if spawned_identity is None else spawned_identity.subagent_name
+                ),
+                result_delivery=(
+                    DELIVERY_PENDING
+                    if spawned_identity is not None and spawned_identity.result_delivery is not None
+                    else None
+                ),
+                context=(
+                    None if inbound.context is None else inbound.context.model_dump(mode="json")
+                ),
+                terminal=None if terminal is None else terminal.model_dump(mode="json"),
+                idempotency_key=idempotency_key,
+                traceparent=current_traceparent(),
+                runtime_config=(
+                    None if runtime_config is None else runtime_config.model_dump(mode="json")
+                ),
+                created_at=(
+                    inbound.admitted_at if inbound.admitted_at is not None else sa.func.now()
+                ),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(
+                tables.conversation.c.workspace_id == workspace_id,
+                tables.conversation.c.id == conversation_id,
+                tables.conversation.c.title.is_(None),
+            )
+            .values(title=conversation_name(inbound.body))
+        )
+        if surface in self.durable_surfaces:
+            await connection.execute(
+                sa.insert(tables.writeback).values(
+                    turn_id=turn_id,
+                    workspace_id=workspace_id,
+                    status=WRITEBACK_PENDING,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        return _CreatedTurn(turn_id, seq, status, admission_source)
 
     async def _record_comment(
         self,

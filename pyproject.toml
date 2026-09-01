@@ -249,7 +249,14 @@ target-version = "py312"
 extend-exclude = ["extensions/**/skills/**", "extensions/imessage/**/proto/**", ".worktrees"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF", "TID", "ERA"]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "PTH", "RUF", "TID", "ERA", "C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+"evals/**/*.py" = ["C901"]
+"**/tests/**/*.py" = ["C901"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["evals", "ufo"]
