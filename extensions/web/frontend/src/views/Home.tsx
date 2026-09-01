@@ -65,12 +65,6 @@ const HISTORY_OPTIONS = "History options";
 const SORT_BY = "Sort by";
 const SHOW = "Show";
 
-/** The apps home stands on for a member who has arranged nothing, each named by the slug its
- *  extension ships it under rather than by its name — provisioning may suffix a name on a
- *  collision, and the slug is what the app is. The chat app follows them, so the lane a member
- *  types in stands where they last read. */
-const HOME_DEFAULT_APPS = ["metrics", "meetings", "code"] as const;
-
 /** The place the framed page inside a lane stands at. Home holds no place of its own past its
  *  track, and the frame re-sends its `init` whenever this changes — so it is one value rather
  *  than an empty record minted per render. */
@@ -88,20 +82,11 @@ const PICK_ROWS = "min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable pb-md"
 
 const PICK_EMPTY = "flex min-h-0 flex-1 flex-col";
 
-/** The lanes home opens on a member holding no track: the workspace's shipped apps and its chat
- *  app after them, each as the instance the codec mints. An app this workspace does not hold
- *  stands no lane, and a workspace holding none of them opens on the picker — the one thing a
- *  member can act on where there is nothing to read. */
-function defaultLanes(agents: Agent[], chatAgent: Agent | null): string[] {
-  const shipped = [
-    ...HOME_DEFAULT_APPS.map((app) => agents.find((agent) => agent.app === app)),
-    chatAgent,
-  ].filter((agent): agent is Agent => Boolean(agent));
-  const opens: string[] = [];
-  for (const agent of shipped) {
-    if (!opens.includes(agent.id)) opens.push(mintHomeLane(agent.id, opens));
-  }
-  return opens.length ? opens : [HOME_NEW_LANE];
+/** The lane home opens on for a member holding no track: the chat app where the member types.
+ *  A workspace holding no chat app opens on the picker — the one thing a member can act on where
+ *  there is nothing to read. */
+function defaultLanes(chatAgent: Agent | null): string[] {
+  return chatAgent ? [mintHomeLane(chatAgent.id, [])] : [HOME_NEW_LANE];
 }
 
 /** The home screen: a track of open app instances, one lane each, in the order the address states
@@ -151,7 +136,7 @@ export function Home({
   const opens = place.opens;
   useEffect(() => {
     if (opens?.length) return;
-    placeHome({ ...place, opens: defaultLanes(agents, chatAgent) }, "replace");
+    placeHome({ ...place, opens: defaultLanes(chatAgent) }, "replace");
   }, [opens, place, agents, chatAgent]);
   const standing = useMemo(() => opens ?? [], [opens]);
   /* Home always stands a lane. A track of nothing is a screen with no act on it, and the address

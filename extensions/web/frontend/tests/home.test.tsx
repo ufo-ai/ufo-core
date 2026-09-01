@@ -29,6 +29,8 @@ import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 import {
   AGENT,
   AGENT_ID,
+  CHAT_APP,
+  CHAT_APP_ID,
   CHAT_ROW,
   chatsOnWire,
   CONVO_ID,
@@ -93,6 +95,32 @@ beforeEach(() => {
   // the next one's lanes.
   localStorage.clear();
   useStreamFake();
+});
+
+test("a fresh home opens one chat lane and keeps the feature apps in the picker", async () => {
+  const metrics = { ...SECOND, name: "metrics", app: "metrics" };
+  const meetings = {
+    ...SECOND,
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    name: "meetings",
+    app: "meetings",
+  };
+  const code = {
+    ...SECOND,
+    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    name: "code",
+    app: "code",
+  };
+  wire(chatsOnWire([]));
+  render(<App agents={[metrics, meetings, code, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
+
+  await waitFor(() => expect(location.hash).toBe(homeHash({ opens: [CHAT_APP_ID] })));
+  expect(laneNames()).toEqual(["Chat"]);
+
+  const picker = await openPicker();
+  expect(within(picker).getByRole("button", { name: "Metrics" })).toBeTruthy();
+  expect(within(picker).getByRole("button", { name: "Meetings" })).toBeTruthy();
+  expect(within(picker).getByRole("button", { name: "Code" })).toBeTruthy();
 });
 
 test("home stands one lane per app the address opens, in the order it opens them", async () => {
