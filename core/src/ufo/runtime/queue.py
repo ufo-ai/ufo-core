@@ -120,6 +120,9 @@ from ufo.runtime.turns.dispatch import dispatch_next_turn
 from ufo.runtime.workspace import (
     PLAN_FUNDED,
     PLATFORM_FUNDED,
+    Funding,
+    ModelFundingChanged,
+    ResolvedModelClient,
     model_authority,
     ws,
     ws_current,
@@ -192,6 +195,63 @@ class _BillingIdentity(BaseModel):
     cache_write_5m: int
     cache_write_30m: int
     cache_write_1h: int
+    funding: Funding | None = None
+    payer: str | None = None
+
+
+@dataclass(frozen=True)
+class _TurnBilling:
+    registry: ModelRegistry
+    turn_id: UUID
+    attempt: str
+    candidate_model: str
+
+    async def resolve(self) -> tuple[_BillingIdentity, ResolvedModelClient, bool]:
+        billing = await _stored_billing_identity(self.turn_id, self.attempt)
+        if billing is None:
+            model = await self.registry.client_for(self.candidate_model)
+            candidate = self._identity(self.candidate_model, model)
+            billing = await _frozen_billing_identity(self.turn_id, candidate)
+            if billing != candidate:
+                model = await self.registry.client_for(billing.model)
+        else:
+            model = await self.registry.client_for(billing.model)
+        self._validate(billing, model)
+        byok = await _frozen_byok(self.turn_id, model.funding != PLATFORM_FUNDED, self.attempt)
+        if byok != (model.funding != PLATFORM_FUNDED):
+            raise ModelFundingChanged("model payer changed during turn attempt")
+        return billing, model, byok
+
+    def _identity(self, model: str, resolved: ResolvedModelClient) -> _BillingIdentity:
+        card = (
+            pricing_from({model: PLAN_SERVED_PRICE})
+            if resolved.funding == PLAN_FUNDED
+            else self.registry.pricing
+        )
+        current = card.prices[model]
+        return _BillingIdentity(
+            attempt=self.attempt,
+            model=model,
+            price_digest=card.digest,
+            input=current.input,
+            output=current.output,
+            cache_read=current.cache_read,
+            cache_write_5m=current.cache_write_5m,
+            cache_write_30m=current.cache_write_30m,
+            cache_write_1h=current.cache_write_1h,
+            funding=resolved.funding,
+            payer=resolved.payer,
+        )
+
+    @staticmethod
+    def _validate(billing: _BillingIdentity, model: ResolvedModelClient) -> None:
+        if billing.funding is not None and billing.funding != model.funding:
+            raise ModelFundingChanged("model funding changed during turn attempt")
+        if billing.payer is not None and billing.payer != model.payer:
+            raise ModelFundingChanged("model payer changed during turn attempt")
+        plan_digest = pricing_from({billing.model: PLAN_SERVED_PRICE}).digest
+        if (billing.price_digest == plan_digest) != (model.funding == PLAN_FUNDED):
+            raise ModelFundingChanged("model funding changed during turn attempt")
 
 
 async def _without_workspace_skills(name: str) -> None:
@@ -818,32 +878,12 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             resolved_model = _subagent_model(
                 profile, connected, agent, runtime, pinned_model, document_model
             )
-        key_slot = runtime.registry.spec(resolved_model).key_slot
-        funding = (
-            await ws_current().model_funding(key_slot, resolved_model)
-            if key_slot
-            else PLATFORM_FUNDED
-        )
-        card = (
-            pricing_from({resolved_model: PLAN_SERVED_PRICE})
-            if funding == PLAN_FUNDED
-            else runtime.registry.pricing
-        )
-        current_price = card.prices[resolved_model]
-        billing = await _frozen_billing_identity(
-            turn.id,
-            _BillingIdentity(
-                attempt=attempt,
-                model=resolved_model,
-                price_digest=card.digest,
-                input=current_price.input,
-                output=current_price.output,
-                cache_read=current_price.cache_read,
-                cache_write_5m=current_price.cache_write_5m,
-                cache_write_30m=current_price.cache_write_30m,
-                cache_write_1h=current_price.cache_write_1h,
-            ),
-        )
+        billing, model, byok = await _TurnBilling(
+            registry=runtime.registry,
+            turn_id=turn.id,
+            attempt=attempt,
+            candidate_model=resolved_model,
+        ).resolve()
         with span("environment.assemble"):
             assembled = await runtime.environment.assemble(
                 AssembleRequest(
@@ -897,7 +937,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
             output_model = profile.output_model
             connector_read_only = profile.connector_read_only
-        model = await runtime.registry.client_for(resolved.model)
         pricing = Pricing(
             prices={
                 billing.model: ModelPrice(
@@ -911,7 +950,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             },
             digest=billing.price_digest,
         )
-        byok = await _frozen_byok(turn.id, funding != PLATFORM_FUNDED, attempt)
         grants = GrantStore() if runtime.credentials is not None else None
         clis = runtime.environment.clis()
         sandbox = _LateSandbox(
@@ -1295,6 +1333,19 @@ async def _frozen_billing_identity(turn_id: UUID, candidate: _BillingIdentity) -
             )
         )
     return candidate
+
+
+async def _stored_billing_identity(turn_id: UUID, attempt: str) -> _BillingIdentity | None:
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.turn.c.billing_identity).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one_or_none()
+    if stored is None:
+        return None
+    identity = _BillingIdentity.model_validate(stored)
+    return identity if identity.attempt == attempt else None
 
 
 async def _frozen_byok(turn_id: UUID, decided: bool, attempt: str) -> bool:

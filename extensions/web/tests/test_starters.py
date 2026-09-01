@@ -54,7 +54,12 @@ from ufo.harness.models.interface import (
 from ufo.harness.models.pricing import Pricing
 from ufo.runtime.ext.context import ModelAccess, ScopedStore
 from ufo.runtime.turns.subjects import member_subject
-from ufo.runtime.workspace import ws
+from ufo.runtime.workspace import (
+    PLATFORM_FUNDED,
+    PLATFORM_PAYER,
+    ResolvedModelClient,
+    ws,
+)
 from ufo.schema import tables
 from ufo.schema.records import Usage
 
@@ -306,8 +311,8 @@ class _Resolver:
     auto_model: str = AUTO_MODEL
     pricing: Pricing = CORE_PRICING
 
-    async def client_for(self, model: str) -> ModelClient:
-        return self.client
+    async def client_for(self, model: str) -> ResolvedModelClient:
+        return ResolvedModelClient(self.client, PLATFORM_FUNDED, PLATFORM_PAYER)
 
     def key_slot_for(self, model: str) -> str | None:
         return None

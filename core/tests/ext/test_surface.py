@@ -65,6 +65,7 @@ from ufo.runtime.access.credentials import (
     open_credential_request,
     seal_credential_request,
 )
+from ufo.runtime.billing.accounting import PARK, REJECT, OffTurnSpendRefused, SpendOutcome
 from ufo.runtime.engine import INJECTED_CONTEXT, _context_tag
 from ufo.runtime.ext.surface import (
     CONVERSATION_TITLE_CHARS,
@@ -1339,6 +1340,15 @@ class _Raises:
 
 
 @dataclass
+class _SpendRefused:
+    outcome: SpendOutcome = REJECT
+    model: str = "decider"
+
+    async def complete(self, request: ModelRequest) -> str:
+        raise OffTurnSpendRefused(self.outcome, "out of credit")
+
+
+@dataclass
 class _Stalls:
     model: str = "decider"
 
@@ -1404,6 +1414,58 @@ async def test_an_undecided_ambient_reply_admits_the_turn(
     assert "unreadable" in undecided[1]
     assert "TimeoutError" in undecided[2]
     assert not [r for r in caplog.records if r.getMessage() == "surface.ambient_reply"]
+
+
+@pytest.mark.parametrize(("outcome", "wanted"), ((PARK, True), (REJECT, False)))
+async def test_a_spend_refused_ambient_reply_preserves_the_policy_outcome(
+    tmp_path, caplog: pytest.LogCaptureFixture, outcome: SpendOutcome, wanted: bool
+) -> None:
+    message = AmbientMessage(speaker="U2", text="nice, thanks for chasing that")
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        assert (
+            await _ambient_context(tmp_path, _SpendRefused(outcome)).ambient_reply_wanted(
+                message, ()
+            )
+            is wanted
+        )
+
+    refused = [
+        r.__dict__["ufo"]["outcome"]
+        for r in caplog.records
+        if r.getMessage() == "surface.ambient_reply_spend_refused"
+    ]
+    assert refused == [outcome]
+    assert not [r for r in caplog.records if r.getMessage() == "surface.ambient_reply"]
+
+
+async def test_a_refused_deploy_classifier_retries_on_the_surface_agents_model(
+    db: None, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    workspace_id, _, _ = await _seed()
+    selected: list[str] = []
+
+    def classifier_for(model: str) -> AmbientReplyClassifier:
+        selected.append(model)
+        return AmbientReplyClassifier(model=_Decides("NO_REPLY", model=model))
+
+    context = replace(
+        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _ambient_reply=AmbientReplyClassifier(model=_SpendRefused(REJECT, "openai-decider")),
+        _ambient_reply_for=classifier_for,
+    )
+    message = AmbientMessage(speaker="U2", text="nice, thanks for chasing that")
+
+    with ws(workspace_id), caplog.at_level(logging.INFO, logger="ufo"):
+        assert not await context.ambient_reply_wanted(message, ())
+
+    assert selected == ["claude-opus-4-8"]
+    decided = [
+        r.__dict__["ufo"] for r in caplog.records if r.getMessage() == "surface.ambient_reply"
+    ]
+    assert [(entry["model"], entry["decision"]) for entry in decided] == [
+        ("claude-opus-4-8", "NO_REPLY")
+    ]
 
 
 async def test_an_oversized_ambient_message_is_admitted(tmp_path) -> None:

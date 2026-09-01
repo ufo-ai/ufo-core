@@ -488,6 +488,12 @@ def run() -> None:
                 AMBIENT_REPLY_JOB,
             )
         ),
+        ambient_reply_for=lambda model: AmbientReplyClassifier(
+            model=ModelAccess(
+                replace(registry, auto_model=registry.resolve(model)),
+                AMBIENT_REPLY_JOB,
+            )
+        ),
         surface_model=lambda name: ModelAccess(
             replace(registry, auto_model=config.models.background_jobs_model),
             f"{SURFACE_MODEL_JOB_PREFIX}{name}",
@@ -1105,6 +1111,7 @@ def _mount_shared_surfaces(
     surface_model: "Callable[[str], SurfaceModel] | None" = None,
     objects: MemberObjectRegistry | None = None,
     key_slot_for: Callable[[str], str | None] | None = None,
+    ambient_reply_for: "Callable[[str], AmbientReplyClassifier] | None" = None,
 ) -> None:
     """Install the fleet-wide `WorkspaceScopeBoundary` and mount each shared-fleet-capable
     surface's routes, resolving the workspace per request instead of pinning one at boot:
@@ -1203,6 +1210,7 @@ def _mount_shared_surfaces(
             _member_skill_listing=member_skill_listing,
             _declared_slots=slots,
             _ambient_reply=ambient_reply,
+            _ambient_reply_for=ambient_reply_for,
             _connectors=connectors,
             _runtime=runtime_identity,
             _object_schemas=kind_schemas,

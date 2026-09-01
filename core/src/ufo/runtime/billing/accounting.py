@@ -48,11 +48,19 @@ ALLOW: SpendOutcome = "allow"
 
 CAP_PRESENCE_TTL_SECONDS = 5.0
 CAP_PRESENCE_CACHE_MAX = 4096
-_no_applicable_caps: dict[tuple[UUID, UUID | None, UUID], float] = {}
+_no_applicable_caps: dict[tuple[UUID, UUID | None, UUID | None], float] = {}
 
 
 class TurnUsageConflict(RuntimeError):
     """One attempt presented cumulative usage that cannot safely advance its ledger row."""
+
+
+class OffTurnSpendRefused(RuntimeError):
+    """An off-turn model call was refused by its workspace spend gates."""
+
+    def __init__(self, outcome: SpendOutcome, message: str) -> None:
+        self.outcome = outcome
+        super().__init__(message)
 
 
 def applicable_caps_absent(workspace_id: UUID, member_id: UUID | None, agent_id: UUID) -> bool:
@@ -64,7 +72,7 @@ def applicable_caps_absent(workspace_id: UUID, member_id: UUID | None, agent_id:
     return expiry is not None and expiry > time.monotonic()
 
 
-def _note_absent_caps(key: tuple[UUID, UUID | None, UUID]) -> None:
+def _note_absent_caps(key: tuple[UUID, UUID | None, UUID | None]) -> None:
     """Remember for the TTL that no cap applies to this triple. Evict expired entries once the map
     is full so a long-lived serve seeing many distinct triples never grows it without bound —
     correctness never rests on the cache, so a purge that frees nothing simply lets it drift over
@@ -824,17 +832,18 @@ class SpendDecision:
 
 @dataclass(frozen=True)
 class SpendEvaluator:
-    """Decide whether a turn may run under the workspace's caps: every cap that applies to this
-    turn's workspace, member, and agent is read, the priced ledger summed over each cap's rolling
-    window, and the answer is allow / park / reject. Every applicable cap must have headroom (the
-    tightest binds); a breach parks unless any breached cap rejects, in which case reject wins.
+    """Decide whether work may run under the workspace's caps: every cap that applies to its
+    workspace and any attributed member and agent is read, the priced ledger summed over each
+    cap's rolling window, and the answer is allow / park / reject. Every applicable cap must have
+    headroom (the tightest binds); a breach parks unless any breached cap rejects, in which case
+    reject wins.
     `decide` is the whole workflow, its `_` steps beneath it in execution order; the caller supplies
     the connection so the same decision runs inside an admission transaction or a fresh read at a
     mid-turn step."""
 
     workspace_id: UUID
     member_id: UUID | None
-    agent_id: UUID
+    agent_id: UUID | None
 
     async def decide(self, connection: AsyncConnection, pending_micro_usd: int) -> SpendDecision:
         caps = await self._applicable_caps(connection)

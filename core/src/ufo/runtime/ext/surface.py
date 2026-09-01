@@ -89,9 +89,11 @@ from ufo.runtime.agent_scope import agent as bind_agent
 from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.accounting import (
     ALLOW,
+    PARK,
     AgentSpendReport,
     BalanceGate,
     MemberSpendReport,
+    OffTurnSpendRefused,
     SpendEvaluator,
     SpendReport,
     SpendRollup,
@@ -1748,6 +1750,7 @@ class SurfaceContext:
     _ambient_reply: AmbientReplyClassifier
     _connectors: ConnectorRegistry
     _runtime: RuntimeIdentity | None = None
+    _ambient_reply_for: Callable[[str], AmbientReplyClassifier] | None = None
     _system_skill_bundle: SystemSkillBundle = field(
         default_factory=lambda: SystemSkillBundle.from_skills(())
     )
@@ -2557,28 +2560,69 @@ class SurfaceContext:
         Fails open, bounded by `AMBIENT_REPLY_TIMEOUT_SECONDS`: a provider that errors, stalls, or
         answers something unreadable admits the turn. The two outcomes are not symmetric — an
         unwanted reply costs one line, while a decision this seam gets wrong in the other direction
-        drops a member's request with nothing to show them — so every failure resolves to the
-        expensive outcome. Only a decision this seam actually read holds a message back."""
-        try:
-            decision = await asyncio.wait_for(
-                self._ambient_reply.decide(message, history), AMBIENT_REPLY_TIMEOUT_SECONDS
-            )
-        except Exception as error:
-            warn(
-                "surface.ambient_reply_undecided",
+        drops a member's request with nothing to show them — so an actual classifier failure takes
+        the expensive outcome. A spend refusal is a policy decision instead: retry on the surface
+        agent's model, which may run on the workspace's own provider key; if that model is refused
+        too, a park reaches admission and a reject stays silent. Only a decision this seam actually
+        read holds a message back."""
+        classifier = self._ambient_reply
+        retried = False
+        while True:
+            try:
+                decision = await asyncio.wait_for(
+                    classifier.decide(message, history), AMBIENT_REPLY_TIMEOUT_SECONDS
+                )
+            except OffTurnSpendRefused as refusal:
+                if not retried and self._ambient_reply_for is not None:
+                    retried = True
+                    try:
+                        fallback = self._ambient_reply_for(await self._surface_agent_model())
+                    except Exception as error:
+                        warn(
+                            "surface.ambient_reply_undecided",
+                            surface=self.surface,
+                            model=classifier.model.model,
+                            error=repr(error),
+                        )
+                        return True
+                    if fallback.model.model != classifier.model.model:
+                        classifier = fallback
+                        continue
+                log(
+                    "surface.ambient_reply_spend_refused",
+                    surface=self.surface,
+                    model=classifier.model.model,
+                    outcome=refusal.outcome,
+                )
+                return refusal.outcome == PARK
+            except Exception as error:
+                warn(
+                    "surface.ambient_reply_undecided",
+                    surface=self.surface,
+                    model=classifier.model.model,
+                    error=repr(error),
+                )
+                return True
+            log(
+                "surface.ambient_reply",
                 surface=self.surface,
-                model=self._ambient_reply.model.model,
-                error=repr(error),
+                model=classifier.model.model,
+                decision=decision,
+                history=len(history),
             )
-            return True
-        log(
-            "surface.ambient_reply",
-            surface=self.surface,
-            model=self._ambient_reply.model.model,
-            decision=decision,
-            history=len(history),
-        )
-        return decision != NO_REPLY
+            return decision != NO_REPLY
+
+    async def _surface_agent_model(self) -> str:
+        agent_id = await self._surface_agent()
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.agent.c.model).where(
+                        tables.agent.c.id == agent_id,
+                        tables.agent.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).scalar_one()
 
     async def admit(
         self,

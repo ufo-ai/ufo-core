@@ -962,7 +962,7 @@ async def test_sample_model_provider_is_selected_priced_and_streams(tmp_path: Pa
     )
     registry = model_registry(config, (manifest,))
     client = await registry.client_for(sample.SAMPLE_MODEL)
-    assert isinstance(client, sample.SampleModelClient)
+    assert isinstance(client.client, sample.SampleModelClient)
     request = ModelRequest(
         model=sample.SAMPLE_MODEL,
         system="",

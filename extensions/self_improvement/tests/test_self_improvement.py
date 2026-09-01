@@ -51,7 +51,12 @@ from ufo.runtime.ext.context import Trajectory, context_for
 from ufo.runtime.kinds.governance import prompt_digest
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.transcript import Conversation
-from ufo.runtime.workspace import ws
+from ufo.runtime.workspace import (
+    PLATFORM_FUNDED,
+    PLATFORM_PAYER,
+    ResolvedModelClient,
+    ws,
+)
 from ufo.schema import tables
 from ufo.schema.records import Usage
 
@@ -368,9 +373,9 @@ class ModelResolver:
     pricing: Pricing
     client: ModelClient
 
-    async def client_for(self, model: str) -> ModelClient:
+    async def client_for(self, model: str) -> ResolvedModelClient:
         assert model == self.auto_model
-        return self.client
+        return ResolvedModelClient(self.client, PLATFORM_FUNDED, PLATFORM_PAYER)
 
     def provider_for(self, model: str) -> str:
         return PROVIDER_ANTHROPIC

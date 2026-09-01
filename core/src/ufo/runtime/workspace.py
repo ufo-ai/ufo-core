@@ -29,7 +29,13 @@ from ufo.harness.models.grant import (
     read_grant,
     refreshed,
 )
-from ufo.harness.models.interface import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
+from ufo.harness.models.interface import (
+    PROVIDER_ANTHROPIC,
+    PROVIDER_OPENAI,
+    ModelClient,
+    ModelEvent,
+    ModelRequest,
+)
 from ufo.harness.models.pricing import Pricing
 from ufo.runtime.access.credentials import (
     CredentialSlotUnset,
@@ -54,6 +60,7 @@ Funding = Literal["platform", "key", "plan"]
 PLATFORM_FUNDED: Funding = "platform"
 KEY_FUNDED: Funding = "key"
 PLAN_FUNDED: Funding = "plan"
+PLATFORM_PAYER = "platform"
 
 _current_model_authority: ContextVar[tuple[ExecutionAuthority, frozenset[str]] | None] = ContextVar(
     "ufo_model_authority", default=None
@@ -91,6 +98,31 @@ class WorkspaceUnbound(RuntimeError):
     """A credentialed, billed, or workspace-scoped call ran with no workspace bound — a handle used
     outside the `with ws(...)` block a turn or job establishes. Fails loud, never a silent
     cross-workspace read or an unbilled call."""
+
+
+class ModelFundingChanged(RuntimeError):
+    """A model client would continue an attempt on a different payer than the one it began on."""
+
+
+@dataclass(frozen=True)
+class ModelCredential:
+    """A model credential bound to the funding and payer its client must retain."""
+
+    value: str = field(repr=False)
+    funding: Funding
+    payer: str
+
+
+@dataclass(frozen=True)
+class ResolvedModelClient:
+    """A constructed model client and the immutable payer facts its usage must carry."""
+
+    client: ModelClient = field(repr=False)
+    funding: Funding
+    payer: str
+
+    def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        return self.client.complete(request)
 
 
 @dataclass
@@ -150,11 +182,11 @@ class WorkspaceScope:
             raise CredentialSlotUnset(slot)
         return value
 
-    async def model_credential(self, slot: str, env: str | None, model: str) -> str:
-        """What a model call spends for `slot`. A slot holding a member's connected account holds a
-        grant rather than a key: it expires, so a spent one is refreshed and the new pair written
-        back to the row it came from before the call gets it. A plain API key is returned as it is,
-        which is what the workspace row and the deploy's environment hold."""
+    async def model_credential(self, slot: str, env: str | None, model: str) -> ModelCredential:
+        """The credential and payer one model client resolves together. A connected-account grant
+        is plan-funded, a stored API key is paid directly by its holder, and the deploy environment
+        is platform-funded. `payer` names the exact stored slot or the platform, so a retry cannot
+        move the same attempt onto a different account while retaining its first billing verdict."""
         if _store is not None:
             for candidate in self._slot_order(slot, model):
                 try:
@@ -163,18 +195,18 @@ class WorkspaceScope:
                     continue
                 grant = read_grant(stored)
                 if grant is None:
-                    return stored
+                    return ModelCredential(stored, KEY_FUNDED, candidate)
                 if not grant.spent:
-                    return grant.access
-                return await self._refreshed_access(_store, candidate, slot, stored, grant)
+                    return ModelCredential(grant.access, PLAN_FUNDED, candidate)
+                return await self._refreshed_credential(_store, candidate, slot, stored, grant)
         value = deploy_env(env or slot.upper())
         if not value:
             raise CredentialSlotUnset(slot)
-        return value
+        return ModelCredential(value, PLATFORM_FUNDED, PLATFORM_PAYER)
 
-    async def _refreshed_access(
+    async def _refreshed_credential(
         self, store: "CredentialStore", candidate: str, slot: str, stored: str, grant: Grant
-    ) -> str:
+    ) -> ModelCredential:
         """A spent grant, refreshed once however many calls wanted it at once.
 
         The claim is a compare-and-swap that leases the refresh, and the provider call happens
@@ -192,33 +224,16 @@ class WorkspaceScope:
                     await store.rotate(
                         self.workspace_id, candidate, leased.stored(), bought.stored()
                     )
-                    return bought.access
+                    return ModelCredential(bought.access, PLAN_FUNDED, candidate)
             await asyncio.sleep(REFRESH_POLL_SECONDS)
             stored = await store.get(self.workspace_id, candidate)
             held = read_grant(stored)
             if held is None:
-                return stored
+                return ModelCredential(stored, KEY_FUNDED, candidate)
             if not held.spent:
-                return held.access
+                return ModelCredential(held.access, PLAN_FUNDED, candidate)
             grant = held
         raise GrantRefusedRefresh(slot)
-
-    async def model_funding(self, slot: str, model: str) -> Funding:
-        """What buys a call to `model` on `slot`, decided the way `model_credential` resolves it and
-        against the same candidate order, so the answer names the credential that will serve the
-        call rather than whichever one a later reader happens to find.
-
-        A grant is a subscription its holder already paid for and a stored key is metered by its
-        provider, which is why the two cannot share one answer: the first has no per-token price to
-        record and the second has a real one that is simply not the deploy's to bill."""
-        if _store is not None:
-            for candidate in self._slot_order(slot, model):
-                try:
-                    stored = await _store.get(self.workspace_id, candidate)
-                except CredentialSlotUnset:
-                    continue
-                return PLAN_FUNDED if read_grant(stored) is not None else KEY_FUNDED
-        return PLATFORM_FUNDED
 
     def member_routed_call(self, slot: str, model: str) -> bool:
         """Whether this call resolves the speaking member's own slot — which is the only slot that

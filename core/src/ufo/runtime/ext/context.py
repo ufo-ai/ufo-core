@@ -29,7 +29,6 @@ from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import (
     Message,
-    ModelClient,
     ModelRequest,
     ReasoningItemBlock,
     RedactedThinkingBlock,
@@ -59,6 +58,10 @@ from ufo.runtime.authority import (
     authority_member_id,
 )
 from ufo.runtime.billing.accounting import (
+    ALLOW,
+    BalanceGate,
+    OffTurnSpendRefused,
+    SpendEvaluator,
     UsageExport,
     ack_usage_exports,
     mint_usage_exports,
@@ -93,7 +96,7 @@ from ufo.runtime.turns.audience import (
 )
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.turns.transcript import TranscriptDecodeError, decode, transcript_key
-from ufo.runtime.workspace import ws_current
+from ufo.runtime.workspace import PLATFORM_FUNDED, ResolvedModelClient, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     MEMBER_ADMISSION,
@@ -766,7 +769,7 @@ class ModelResolver(Protocol):
     @property
     def pricing(self) -> Pricing: ...
 
-    async def client_for(self, model: str) -> ModelClient: ...
+    async def client_for(self, model: str) -> ResolvedModelClient: ...
 
     def key_slot_for(self, model: str) -> str | None: ...
 
@@ -779,8 +782,10 @@ class ModelAccess:
     keyed to and billed to the ambient workspace. It resolves its client through the same
     `client_for` a turn uses (the workspace's BYOK key, else the platform key) and books usage
     through the same `billable_event`, so the key's workspace and the billed workspace are one, by
-    construction — never an unmetered direct egress. Both operations fix the request's model and its
-    cache series to this seam's own, so the model billed is always the model called; `turn`
+    construction — never an unmetered direct egress. Before either, every call clears the balance
+    entry line and workspace caps, so off-turn work cannot bypass the turn loop's spend gates. Both
+    operations fix the request's model and its cache series to this seam's own, so the model billed
+    is always the model called; `turn`
     preserves requested tool calls in the existing assistant `Message` shape and `complete` returns
     only its text.
 
@@ -810,16 +815,6 @@ class ModelAccess:
             return response.content
         return "".join(block.text for block in response.content if isinstance(block, TextBlock))
 
-    async def _serves_itself(self, model: str) -> bool:
-        """Whether the workspace's own provider key serves this job's call, decided beside the call
-        rather than at billing time — a background job is metered on the same terms a turn is, and
-        the workspace already paid its provider directly for what its own key served.
-
-        Asked the way the call itself resolves its key: a job binds no speaker, so a member's own
-        account is not in its order and a job served by the platform key is billed as one."""
-        slot = self._resolver.key_slot_for(model)
-        return slot is not None and await ws_current().credential_is_stored(slot)
-
     async def turn(self, request: ModelRequest) -> Message:
         """Run one tool-aware model turn and return its assistant message after metering it. A
         reasoning round's message opens with the blocks the model streamed, ahead of its text and
@@ -841,8 +836,21 @@ class ModelAccess:
         the only trace that the model was reached at all. A cancellation is one of those classes — a
         job dropped at shutdown must not read back as a round that answered in no tokens."""
         model = self._resolver.auto_model
+        async with workspace_tx() as connection:
+            balance = await BalanceGate(ws_current().workspace_id).admits(
+                connection,
+                key_slot_for=self._resolver.key_slot_for,
+                model=model,
+            )
+            spend = await SpendEvaluator(ws_current().workspace_id, None, None).decide(
+                connection, 0
+            )
+        if balance.outcome != ALLOW:
+            raise OffTurnSpendRefused(balance.outcome, balance.message)
+        if spend.outcome != ALLOW:
+            raise OffTurnSpendRefused(spend.outcome, spend.message)
         client = await self._resolver.client_for(model)
-        byok = await self._serves_itself(model)
+        byok = client.funding != PLATFORM_FUNDED
         dimensions = {
             "model": model,
             "provider": self._resolver.provider_for(model),

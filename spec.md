@@ -1088,6 +1088,12 @@ evaluated at inbound and per-step; `reject` refuses new turns, `park` suspends. 
 table per model; usage a key that is not the deploy's paid for still meters (visibility without
 billing).
 
+Background and off-turn model calls clear the workspace spend cap and balance entry line before
+reaching the provider. They carry no member or agent attribution, so narrower caps do not apply. An
+ambient classifier refused on its deploy model retries on the surface agent's model, allowing a
+workspace's own provider key to decide without platform spend. If both are refused, a park reaches
+admission for resumption and a reject stays silent.
+
 A workspace may also hold a prepaid balance in micro-USD, credited once per `reference` so a repeated
 delivery of one payment adds nothing. An operator reads and moves it through `ufoctl balance`, which
 names the workspace explicitly on a deploy that serves more than one.
@@ -1107,7 +1113,10 @@ and every figure the card produces reads zero: its rounds, its live cost ticks, 
 the caps it counts against, the rollups, and the usage export. One card decides them together, so
 none of them can put a price on the member's screen that nobody is owed. The tokens are recorded in
 full either way, which is what makes plan usage visible without pricing it. Only a member slot can
-hold a grant, so a background job — which binds no member — is never plan-served.
+hold a grant, so a background job — which binds no member — is never plan-served. Credential,
+funding class, exact payer slot, and client resolve as one value: a rejected credential may refresh
+within that slot but cannot fall through to another payer. A turn freezes the same payer beside its
+model and rate card for the attempt, and recovery refuses a resolution that no longer matches it.
 
 So the balance is not a sum over the ledger:
 lifetime `granted_micro_usd` less the ledger's priced total is an upper bound on what was taken, and

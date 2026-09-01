@@ -53,7 +53,8 @@ from ufo.runtime.authority import (
     ExecutionAuthority,
     MemberAuthority,
 )
-from ufo.runtime.billing.balance import credit
+from ufo.runtime.billing.accounting import record_workspace_usage
+from ufo.runtime.billing.balance import credit, debit, set_reserve
 from ufo.runtime.ext.context import (
     PROBE_TIMEOUT_MAX_SECONDS,
     ConversationFacts,
@@ -73,7 +74,15 @@ from ufo.runtime.ext.surface import (
 from ufo.runtime.sources.sync import CorePageFeed
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.runtime.workspace import init_workspace_credentials, ws
+from ufo.runtime.workspace import (
+    KEY_FUNDED,
+    PLATFORM_FUNDED,
+    PLATFORM_PAYER,
+    Funding,
+    ResolvedModelClient,
+    init_workspace_credentials,
+    ws,
+)
 from ufo.schema import tables
 from ufo.schema.records import Usage
 
@@ -173,6 +182,8 @@ class StubResolver:
     """The model registry as `ModelAccess` reads it, wired to one scripted client."""
 
     client: ModelClient
+    funding: Funding = PLATFORM_FUNDED
+    payer: str = PLATFORM_PAYER
 
     @property
     def auto_model(self) -> str:
@@ -182,8 +193,8 @@ class StubResolver:
     def pricing(self) -> Pricing:
         return CORE_PRICING
 
-    async def client_for(self, model: str) -> ModelClient:
-        return self.client
+    async def client_for(self, model: str) -> ResolvedModelClient:
+        return ResolvedModelClient(self.client, self.funding, self.payer)
 
     key_slot: str | None = None
 
@@ -246,6 +257,64 @@ async def test_model_turn_opens_a_tool_calling_message_with_its_reasoning_blocks
         TextBlock(text="checking"),
         ToolUseBlock(id="c1", name="bash", input={"command": "ls"}),
     )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_spent_workspace_cannot_run_a_background_model_call(db: None) -> None:
+    workspace_id = await _workspace()
+    model = RecordingModel()
+    context = context_for("core", frozenset(), model_resolver=StubResolver(model), model_job=JOB)
+    assert context.model is not None
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 1, 1, "seed")
+            await debit(connection, workspace_id, 1)
+        with pytest.raises(RuntimeError, match="out of credit"):
+            await context.model.complete(
+                ModelRequest(
+                    model="auto",
+                    system="be terse",
+                    messages=(Message(role="user", content="hi"),),
+                    max_tokens=64,
+                    conversation_cache_ttl="5m",
+                )
+            )
+    assert model.sent == []
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_workspace_cap_blocks_a_background_model_call(db: None) -> None:
+    workspace_id = await _workspace()
+    model = RecordingModel()
+    context = context_for("core", frozenset(), model_resolver=StubResolver(model), model_job=JOB)
+    assert context.model is not None
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await record_workspace_usage(connection, workspace_id, MODEL, Usage(input_tokens=1_000))
+            await connection.execute(
+                sa.insert(tables.spend_cap).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    scope="workspace",
+                    subject_id=None,
+                    window_seconds=3_600,
+                    limit_micro_usd=1,
+                    on_breach="reject",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        with pytest.raises(RuntimeError, match="workspace spend cap"):
+            await context.model.complete(
+                ModelRequest(
+                    model="auto",
+                    system="be terse",
+                    messages=(Message(role="user", content="hi"),),
+                    max_tokens=64,
+                    conversation_cache_ttl="5m",
+                )
+            )
+    assert model.sent == []
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1367,11 +1436,17 @@ async def test_a_background_job_on_the_workspaces_own_key_debits_nothing(
     init_workspace_credentials(store)
     async with workspace_tx() as connection:
         await credit(connection, workspace_id, 50 * 1_000_000, 0, "opening")
+        await set_reserve(connection, workspace_id, 100 * 1_000_000)
     await store.put(workspace_id, "anthropic_api_key", "workspace-key")
     context = context_for(
         "core",
         frozenset(),
-        model_resolver=StubResolver(_CostlyModel(), key_slot="anthropic_api_key"),
+        model_resolver=StubResolver(
+            _CostlyModel(),
+            funding=KEY_FUNDED,
+            payer="anthropic_api_key",
+            key_slot="anthropic_api_key",
+        ),
         model_job="billing_probe",
     )
     assert context.model is not None
@@ -1395,4 +1470,56 @@ async def test_a_background_job_on_the_workspaces_own_key_debits_nothing(
             )
         ).one()
     assert int(priced) > 0
+    assert int(debited) == 0
+
+
+async def test_a_background_call_bills_the_key_that_built_its_client(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    slot = "anthropic_api_key"
+    await store.put(workspace_id, slot, "workspace-key")
+    async with workspace_tx() as connection:
+        await credit(connection, workspace_id, 50 * 1_000_000, 0, "opening")
+        await set_reserve(connection, workspace_id, 100 * 1_000_000)
+
+    @dataclass(frozen=True)
+    class RemovingResolver(StubResolver):
+        async def client_for(self, model: str) -> ResolvedModelClient:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.delete(tables.credential).where(
+                        tables.credential.c.workspace_id == workspace_id,
+                        tables.credential.c.slot == slot,
+                    )
+                )
+            return ResolvedModelClient(self.client, self.funding, self.payer)
+
+    context = context_for(
+        "core",
+        frozenset(),
+        model_resolver=RemovingResolver(
+            _CostlyModel(), funding=KEY_FUNDED, payer=slot, key_slot=slot
+        ),
+        model_job="billing_probe",
+    )
+    assert context.model is not None
+    with ws(workspace_id):
+        await context.model.complete(
+            ModelRequest(
+                model="auto",
+                system="be terse",
+                messages=(Message(role="user", content="hi"),),
+                max_tokens=64,
+                conversation_cache_ttl="5m",
+            )
+        )
+    async with workspace_tx() as connection:
+        debited = (
+            await connection.execute(
+                sa.select(sa.func.sum(tables.ledger.c.debited_micro_usd)).where(
+                    tables.ledger.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
     assert int(debited) == 0

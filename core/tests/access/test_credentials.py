@@ -14,7 +14,7 @@ from cryptography.fernet import Fernet
 
 from ufo import product as product_module
 from ufo.db import workspace_tx
-from ufo.harness.models.catalog import OPENAI_KEY_SLOT
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
 from ufo.harness.models.grant import Grant, read_grant
 from ufo.harness.models.pricing import Pricing
 from ufo.harness.models.registry import ModelRegistry
@@ -266,6 +266,43 @@ async def test_a_member_key_serves_only_a_turn_bound_to_that_member(
                 == "workspace-key"
             )
         assert await ws_current().credential(OPENAI_KEY_SLOT) == "workspace-key"
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_model_resolution_tells_a_plan_apart_from_a_metered_key(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two things a member can connect cost different things. A grant is a subscription they
+    already bought, so its tokens carry no per-token price; a pasted API key is metered by the
+    provider, so its tokens cost real money that is simply not the deploy's to bill. Both make the
+    deploy's key idle, which is why one boolean could never answer for both."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "platform-default")
+    async with workspace_tx() as connection:
+        planned = await create_member(connection, workspace_id, "planned@work.com")
+        keyed = await create_member(connection, workspace_id, "keyed@work.com")
+    grant = Grant(access="oat-token", refresh="refresh", expires_at=time.time() + 3600)
+    await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, planned), grant.stored())
+    await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, keyed), "sk-ant-api-pasted")
+    served = frozenset({OWN_ACCOUNT_MODEL})
+    with ws(workspace_id):
+        assert (
+            await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+        ).funding == "platform"
+        with model_authority(MemberAuthority(planned), served):
+            assert (
+                await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+            ).funding == "plan"
+        with model_authority(MemberAuthority(keyed), served):
+            assert (
+                await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+            ).funding == "key"
+        await store.put(workspace_id, ANTHROPIC_KEY_SLOT, "workspace-key")
+        assert (
+            await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+        ).funding == "key"
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -963,8 +1000,7 @@ async def test_a_spent_grant_is_refreshed_in_place_before_a_call_gets_it(
     with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         assert (
             await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
-            == "fresh-access"
-        )
+        ).value == "fresh-access"
 
     written = read_grant(await store.get(workspace_id, member_slot(OPENAI_KEY_SLOT, member)))
     assert written is not None
@@ -992,8 +1028,7 @@ async def test_a_live_grant_is_spent_as_it_stands(
     with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         assert (
             await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
-            == "live-access"
-        )
+        ).value == "live-access"
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1030,7 +1065,9 @@ async def test_two_turns_finding_one_grant_spent_exchange_its_token_once(
             ws(workspace_id),
             model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})),
         ):
-            return await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+            return (
+                await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+            ).value
 
     served = await asyncio.gather(turn(), turn())
 
@@ -1075,8 +1112,8 @@ async def test_no_transaction_is_held_open_across_the_provider_refresh(
     monkeypatch.setattr(workspace_module, "refreshed", buys)
     with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         assert (
-            await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL) == "fresh"
-        )
+            await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
+        ).value == "fresh"
 
     assert wrote_during_refresh
 
@@ -1159,6 +1196,52 @@ async def test_a_token_rejected_mid_turn_is_refreshed_and_the_round_carries_on(
         assert [event async for event in client.complete(object())] == ["round"]
 
     assert served == ["first", "second"]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_rejected_member_token_cannot_retry_on_another_payer(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    async with workspace_tx() as connection:
+        member = await create_member(connection, workspace_id, "coder@work.com")
+    slot = member_slot(OPENAI_KEY_SLOT, member)
+    await store.put(workspace_id, slot, "member-key")
+    await store.put(workspace_id, OPENAI_KEY_SLOT, "workspace-key")
+    served: list[str] = []
+
+    class Wire:
+        def __init__(self, key: str) -> None:
+            self.key = key
+
+        async def complete(self, request: object) -> AsyncIterator[str]:
+            served.append(self.key)
+            if self.key == "member-key":
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.delete(tables.credential).where(
+                            tables.credential.c.workspace_id == workspace_id,
+                            tables.credential.c.slot == slot,
+                        )
+                    )
+                raise CredentialValueInvalid("member token was rejected")
+            yield "platform answer"
+
+    spec = SimpleNamespace(
+        key_slot=OPENAI_KEY_SLOT, key_env=None, client=lambda _spec, key: Wire(key)
+    )
+    registry = ModelRegistry(
+        specs={OWN_ACCOUNT_MODEL: spec},
+        pricing=Pricing(prices={}, digest="test"),
+        auto_model=OWN_ACCOUNT_MODEL,
+    )
+
+    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
+        client = await registry.client_for(OWN_ACCOUNT_MODEL)
+        with pytest.raises(RuntimeError, match="payer changed"):
+            [event async for event in client.complete(object())]
+
+    assert served == ["member-key"]
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

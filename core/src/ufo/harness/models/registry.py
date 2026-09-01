@@ -22,7 +22,14 @@ from ufo.harness.models.pricing import Pricing, pricing_from
 from ufo.harness.models.spec import ModelSpec
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialValueInvalid
 from ufo.runtime.ext.manifest import Manifest
-from ufo.runtime.workspace import ws_current
+from ufo.runtime.workspace import (
+    PLATFORM_FUNDED,
+    PLATFORM_PAYER,
+    Funding,
+    ModelFundingChanged,
+    ResolvedModelClient,
+    ws_current,
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +51,8 @@ class _RebuiltOnRejection:
     registry: "ModelRegistry"
     model: str
     built: ModelClient
+    funding: Funding
+    payer: str
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         delivered = False
@@ -56,7 +65,9 @@ class _RebuiltOnRejection:
             if delivered:
                 raise
         rebuilt = await self.registry.client_for(self.model)
-        once = rebuilt.built if isinstance(rebuilt, _RebuiltOnRejection) else rebuilt
+        if rebuilt.funding != self.funding or rebuilt.payer != self.payer:
+            raise ModelFundingChanged("model payer changed during provider retry")
+        once = rebuilt.client.built if isinstance(rebuilt.client, _RebuiltOnRejection) else rebuilt
         async for event in once.complete(request):
             yield event
 
@@ -85,35 +96,42 @@ class ModelRegistry:
         except KeyError as miss:
             raise ValueError(f"no model registered for id {model!r}") from miss
 
-    async def client_for(self, model: str) -> ModelClient:
-        """The client serving `model`, built for the ambient workspace from the key resolved for its
-        spec — the workspace's BYOK secret if set, else the platform default from env. Built per
-        call so a workspace's own key is honoured and a rotated platform key takes effect without a
-        restart. Fetching the key asserts a bound workspace (`ws_current`); a key set nowhere fails
-        loud."""
+    async def client_for(self, model: str) -> ResolvedModelClient:
+        """The client serving `model`, bound to the funding class and exact payer resolved with its
+        credential. The workspace's BYOK secret wins when set, else the platform default from env.
+        Built per call so a rotated key takes effect without a restart. Fetching it asserts a bound
+        workspace (`ws_current`); a key set nowhere fails loud."""
         spec = self.spec(model)
         if not spec.key_slot and not spec.key_env:
-            return spec.client(spec, "")
+            return ResolvedModelClient(spec.client(spec, ""), PLATFORM_FUNDED, PLATFORM_PAYER)
         needed = spec.key_env or spec.key_slot.upper()
         try:
-            key = await ws_current().model_credential(spec.key_slot, spec.key_env or None, model)
+            credential = await ws_current().model_credential(
+                spec.key_slot, spec.key_env or None, model
+            )
         except CredentialSlotUnset as unset:
             raise RuntimeError(
                 f"model {model!r} needs a key: set env UFO_{needed} (or {needed}) or the "
                 f"workspace's {spec.key_slot!r} BYOK slot"
             ) from unset
         try:
-            key.encode("ascii")
+            credential.value.encode("ascii")
         except UnicodeEncodeError as error:
             raise CredentialValueInvalid(
                 f"model {model!r} key contains non-ASCII characters: env UFO_{needed} (or "
                 f"{needed}) or the workspace's {spec.key_slot!r} BYOK slot holds a value the "
                 "provider wire cannot carry."
             ) from error
-        built = spec.client(spec, key)
+        built = spec.client(spec, credential.value)
         if spec.key_slot and ws_current().member_routed_call(spec.key_slot, model):
-            return _RebuiltOnRejection(registry=self, model=model, built=built)
-        return built
+            built = _RebuiltOnRejection(
+                registry=self,
+                model=model,
+                built=built,
+                funding=credential.funding,
+                payer=credential.payer,
+            )
+        return ResolvedModelClient(built, credential.funding, credential.payer)
 
     def provider_for(self, model: str) -> str:
         """The provider that serves `model` — the `provider` metric dimension its calls are metered

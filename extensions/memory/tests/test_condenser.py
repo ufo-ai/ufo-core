@@ -111,7 +111,12 @@ from ufo.runtime.sources.sync import CorePageFeed, PageChange
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.turns.audience import conversation_audience, foreign_room_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.runtime.workspace import ws
+from ufo.runtime.workspace import (
+    PLATFORM_FUNDED,
+    PLATFORM_PAYER,
+    ResolvedModelClient,
+    ws,
+)
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.audience import SHARED_AUDIENCE
@@ -343,8 +348,8 @@ class _Resolver:
     pricing: Pricing
     client: ModelClient
 
-    async def client_for(self, model: str) -> ModelClient:
-        return self.client
+    async def client_for(self, model: str) -> ResolvedModelClient:
+        return ResolvedModelClient(self.client, PLATFORM_FUNDED, PLATFORM_PAYER)
 
     def key_slot_for(self, model: str) -> str | None:
         return None

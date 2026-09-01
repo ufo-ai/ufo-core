@@ -1,5 +1,6 @@
 import time
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
 from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICES, CORE_PRICING, PRICE_DIGEST
-from ufo.harness.models.interface import PROVIDER_ANTHROPIC
+from ufo.harness.models.interface import PROVIDER_ANTHROPIC, ModelClient
 from ufo.harness.models.pricing import (
     TOKENS_PER_MTOK,
     ModelPrice,
@@ -16,6 +17,7 @@ from ufo.harness.models.pricing import (
     pricing_from,
     usage_priced_micro_usd,
 )
+from ufo.harness.models.registry import ModelRegistry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.billing import accounting
 from ufo.runtime.billing.accounting import (
@@ -35,6 +37,11 @@ from ufo.runtime.billing.accounting import (
     record_workspace_usage,
 )
 from ufo.runtime.billing.balance import credit
+from ufo.runtime.workspace import (
+    KEY_FUNDED,
+    ModelFundingChanged,
+    ResolvedModelClient,
+)
 from ufo.schema import tables
 from ufo.schema.records import Usage, ledger_id_for
 
@@ -1484,6 +1491,48 @@ async def test_a_recovery_uses_the_model_and_prices_that_started_the_attempt(db:
     assert frozen == first
     assert recovered == first
     assert resumed == changed.model_copy(update={"attempt": "attempt-2"})
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_recovery_cannot_move_the_frozen_model_to_another_payer(db: None) -> None:
+    async with workspace_tx() as connection:
+        _, turn_id = await _seed_turn(connection)
+
+    class Registry:
+        pricing = CORE_PRICING
+
+        def __init__(self, payer: str) -> None:
+            self.payer = payer
+            self.requested: list[str] = []
+
+        async def client_for(self, model: str) -> ResolvedModelClient:
+            self.requested.append(model)
+            return ResolvedModelClient(cast(ModelClient, object()), KEY_FUNDED, self.payer)
+
+    first_registry = Registry("anthropic_api_key:member:first")
+    billing, _, byok = await loop_queue._TurnBilling(
+        registry=cast(ModelRegistry, first_registry),
+        turn_id=turn_id,
+        attempt="attempt-1",
+        candidate_model="claude-opus-4-8",
+    ).resolve()
+
+    recovered_registry = Registry("anthropic_api_key")
+    with pytest.raises(ModelFundingChanged, match="payer changed"):
+        await loop_queue._TurnBilling(
+            registry=cast(ModelRegistry, recovered_registry),
+            turn_id=turn_id,
+            attempt="attempt-1",
+            candidate_model="gpt-5.4",
+        ).resolve()
+
+    assert (billing.funding, billing.payer, byok) == (
+        KEY_FUNDED,
+        "anthropic_api_key:member:first",
+        True,
+    )
+    assert first_registry.requested == ["claude-opus-4-8"]
+    assert recovered_registry.requested == ["claude-opus-4-8"]
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
