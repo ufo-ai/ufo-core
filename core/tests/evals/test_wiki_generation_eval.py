@@ -1,3 +1,8 @@
+from typing import cast
+
+import pytest
+
+from evals.harness.judge import JudgeLeg
 from evals.registry import SEMANTIC_JUDGE_MODEL, TASKS
 from evals.suites.wiki_generation import (
     ATTRIBUTED,
@@ -19,6 +24,8 @@ from evals.suites.wiki_generation import (
     wiki_generation_task,
 )
 from ufo.config import DEFAULT_BACKGROUND_JOBS_MODEL
+from ufo.sdk.context import ModelAccess
+from ufo.sdk.models import Message
 
 BY_NAME = {case.name: case for case in CASES}
 SYNC = BY_NAME["daily-sync-across-passes"]
@@ -115,6 +122,38 @@ def test_a_stranger_notice_about_our_own_cluster_keeps_both_parties() -> None:
     assert f"row 0 takes '{WORKSPACE}' as the subject of a stranger's page" in (
         NOTICE.parts(handed_over)[ATTRIBUTED].reasons
     )
+
+
+def test_only_extraction_corpora_with_outside_parties_need_the_attribution_judge() -> None:
+    assert not SYNC.requires_attribution_judge
+    assert NOTICE.requires_attribution_judge
+
+
+@pytest.mark.asyncio
+async def test_the_same_overview_output_keeps_the_deterministic_scorer_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = (Row("", " ".join(OVERVIEW.facts)),)
+
+    async def recorded(
+        _suite: WikiGenerationSuite, _case: WikiCase, _writer: ModelAccess
+    ) -> tuple[tuple[Row, ...], dict[str, object]]:
+        return rows, {"summary": rows[0].body}
+
+    class JudgeMustNotRun:
+        async def complete(self, _system: str, _messages: tuple[Message, ...]) -> str:
+            raise AssertionError("Overview output reached the semantic judge")
+
+    monkeypatch.setattr(WikiGenerationSuite, "_generate", recorded)
+    suite = WikiGenerationSuite(cases=(OVERVIEW,), digest="sha256:test")
+
+    generated = await suite._sample(
+        OVERVIEW,
+        cast(ModelAccess, object()),
+        cast(JudgeLeg, JudgeMustNotRun()),
+    )
+
+    assert generated.parts == OVERVIEW.parts(rows)
 
 
 def test_one_notice_restated_with_extra_detail_is_still_one_claim() -> None:

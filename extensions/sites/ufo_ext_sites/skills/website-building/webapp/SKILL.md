@@ -1,7 +1,8 @@
 ---
 name: webapp
-description: Load when building a fullstack web application — interactive, stateful frontend with a backend, data, and routing (Express + Vite + React + Tailwind + Drizzle), beyond a static informational site.
+description: Load when building a full-stack browser application that needs server-side authentication, an API, a persistent database, or durable multi-user data. Do not load for a homepage, project board, informational site, browser game, or frontend-only interaction.
 metadata:
+  indexed: true
   depends:
   - website-building
 ---

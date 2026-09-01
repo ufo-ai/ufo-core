@@ -19,6 +19,7 @@ from sandbox.build_template import (
 
 IMAGE_REPOSITORY = "ufo-sandbox-eval"
 IMAGE_KEY_PATTERN = re.compile(r"[0-9a-f]{16}")
+SANDBOX_PLATFORM = "linux/amd64"
 PROTOCOL_PROBE = f"""set -eu
 test "$(cat {BUILD_DIGEST_PATH})" = "$1"
 base=/var/tmp/ufo-eval-task-contract
@@ -50,6 +51,8 @@ class SandboxImagePlan:
                 [
                     "docker",
                     "build",
+                    "--platform",
+                    SANDBOX_PLATFORM,
                     "-t",
                     self.reference,
                     "-f",
@@ -75,6 +78,8 @@ class SandboxImagePlan:
                 "docker",
                 "run",
                 "--rm",
+                "--platform",
+                SANDBOX_PLATFORM,
                 "--entrypoint",
                 "sh",
                 self.reference,

@@ -4,7 +4,16 @@ runtime staying global — and the media neighbor pair: a file already on disk i
 artifact collection's action and then delivered. The media pair is authored here; no recorded run
 seeded it."""
 
-from evals.harness.capability import CapabilityCase, Grader, WorkspaceFile
+import shlex
+
+from evals.harness.capability import (
+    CapabilityCase,
+    CapabilityOutput,
+    CapabilityVerdict,
+    DescribedGrader,
+    Grader,
+    WorkspaceFile,
+)
 from evals.harness.scorers import (
     combine,
     exact_scorer,
@@ -21,6 +30,80 @@ POSTER_PNG = (
     b"\x00IEND\xaeB`\x82"
 )
 
+
+def _site_readback_scorer(expected: str) -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        served = next(
+            (
+                index
+                for index, call in enumerate(output.calls)
+                if call.call == "start_server" and call.succeeded
+            ),
+            None,
+        )
+        shared = next(
+            (
+                index
+                for index, call in enumerate(output.calls)
+                if call.call == "share_file" and call.succeeded
+            ),
+            None,
+        )
+        if served is None or shared is None:
+            return CapabilityVerdict(False, "site was not served and shared successfully")
+        readback = False
+        for call in output.calls[served + 1 : shared]:
+            if call.call != "bash" or not call.succeeded or expected not in call.result:
+                continue
+            lexer = shlex.shlex(
+                str(call.arguments.get("command", "")),
+                posix=True,
+                punctuation_chars=";&|\n",
+            )
+            lexer.whitespace = " \t\r"
+            lexer.whitespace_split = True
+            segments: list[list[str]] = [[]]
+            for token in lexer:
+                if token and all(character in ";&|\n" for character in token):
+                    segments.append([])
+                else:
+                    segments[-1].append(token)
+            readback = any(
+                segment
+                and (
+                    (
+                        segment[0].rsplit("/", 1)[-1] in {"cat", "head", "tail", "wc"}
+                        and any(
+                            argument == "index.html" or argument.endswith("/index.html")
+                            for argument in segment[1:]
+                        )
+                    )
+                    or (
+                        segment[0].rsplit("/", 1)[-1] in {"sed", "awk", "grep"}
+                        and any(
+                            index >= 2
+                            and (argument == "index.html" or argument.endswith("/index.html"))
+                            for index, argument in enumerate(segment)
+                        )
+                    )
+                )
+                for segment in segments
+            )
+            if readback:
+                break
+        return CapabilityVerdict(
+            readback,
+            "read index.html after serving and before sharing"
+            if readback
+            else "did not read index.html back after serving",
+        )
+
+    return DescribedGrader(
+        f"a successful shell read of index.html after serving returns {expected!r} before sharing",
+        grade,
+    )
+
+
 SPECS: list[tuple[str, str, Grader]] = [
     (
         "static-site-heading",
@@ -33,14 +116,13 @@ SPECS: list[tuple[str, str, Grader]] = [
         combine(
             exact_scorer("Ufo Status: Operational"),
             required_tools_scorer(
-                ("write", "start_server", "read", "bash", "share_file"),
+                ("start_server", "bash", "share_file"),
                 (
-                    ("write", "start_server"),
-                    ("start_server", "read"),
-                    ("read", "bash"),
+                    ("start_server", "bash"),
                     ("bash", "share_file"),
                 ),
             ),
+            _site_readback_scorer("Ufo Status: Operational"),
             site_archive_scorer("Ufo Status: Operational"),
         ),
     ),

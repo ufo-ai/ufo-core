@@ -245,6 +245,10 @@ class ExtractionCase:
         return (ATTRIBUTED, DISTINCT, FILED, STATED)
 
     @property
+    def requires_attribution_judge(self) -> bool:
+        return any(not page.is_ours for page in self.pages)
+
+    @property
     def instruction(self) -> str:
         return "Extract the wiki rows of these source pages\n\n" + "\n\n".join(
             f"{page.stream} — {page.title}\n{page.body}" for page in self.pages
@@ -881,7 +885,11 @@ class WikiGenerationSuite:
             fault = type(error).__name__
             return Generated({}, {"fault": f"{fault}: {error}"}, is_transient_fault(fault))
         parts = case.parts(rows)
-        if isinstance(case, ExtractionCase) and parts[ATTRIBUTED].passed:
+        if (
+            isinstance(case, ExtractionCase)
+            and parts[ATTRIBUTED].passed
+            and case.requires_attribution_judge
+        ):
             parts = parts | {ATTRIBUTED: await self._judged(case, rows, parts[ATTRIBUTED], judge)}
         return Generated(parts, evidence)
 

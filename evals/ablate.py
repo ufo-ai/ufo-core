@@ -74,7 +74,7 @@ from evals.harness.viewer import EvalRun, write_viewer
 from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
 from ufo.harness.models.pricing import MICRO_USD_PER_USD
-from ufo.harness.sandbox.client_binary import CLIENT_BINARY_NAME
+from ufo.harness.sandbox.client_binary import CLIENT_BINARY_ENV, CLIENT_BINARY_NAME
 from ufo.schema.records import ReasoningEffort
 
 CONTROL_ARM = "control"
@@ -825,6 +825,8 @@ class Ablation:
             environment["PATH"] = os.pathsep.join(
                 part for part in (str(carried_client.parent), environment.get("PATH")) if part
             )
+            if self.spec.template.get("sandbox", {}).get("backend") == "local":
+                environment[CLIENT_BINARY_ENV] = str(carried_client)
         process = await asyncio.create_subprocess_exec(
             "uv",
             "run",

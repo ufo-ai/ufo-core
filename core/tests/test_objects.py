@@ -113,7 +113,7 @@ from ufo.runtime.tools.context import (
     ToolContext,
     ToolResult,
 )
-from ufo.runtime.tools.registry import ToolDef
+from ufo.runtime.tools.registry import ObjectBinding, ToolDef
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
@@ -267,6 +267,42 @@ async def _agent_text(
 ) -> str:
     with agent(agent_id):
         return await _text(tools, tool_name, ctx, **args)
+
+
+async def test_object_list_discovers_instance_actions_without_an_executable_call(db: None) -> None:
+    workspace_id = await _workspace()
+    manifest = sample.manifest()
+    manifest = replace(
+        manifest,
+        tools=tuple(
+            replace(
+                tool,
+                bound=ObjectBinding(kind=sample.WIDGET_KIND, binding="instance", name="anvil"),
+            )
+            if tool.name == sample.POLISH_ACTION
+            else tool
+            for tool in manifest.tools
+        ),
+    )
+    tool_defs, _, _ = turn_tools(
+        (manifest,),
+        CredentialStore(fernet=Fernet(Fernet.generate_key())),
+        audience=conversation_audience(None),
+    )
+    tools = {tool.name: tool for tool in tool_defs}
+    actions = frozenset(tool.canonical_id for tool in manifest.tools if tool.bound is not None)
+    with ws(workspace_id):
+        owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        ctx = replace(
+            _tool_context(workspace_id, speaker_member_id=owner),
+            granted_actions=actions,
+        )
+        listing = json.loads(await _text(tools, "object_list", ctx, kind=sample.WIDGET_KIND))
+
+    by_name = {view["name"]: view for view in listing["instance_actions"]}
+    assert {sample.POLISH_ACTION, sample.ENGRAVE_ACTION, sample.BLESS_ACTION} <= set(by_name)
+    assert by_name[sample.POLISH_ACTION]["target_name"] == "anvil"
+    assert "call" not in by_name[sample.POLISH_ACTION]
 
 
 def _widget_manifest(name: str, color: str = "teal", size: int = 1) -> str:

@@ -3405,11 +3405,14 @@ def test_application_page_builds_with_relative_asset_urls() -> None:
     assert 'base: "./"' in vite_config
 
 
-def test_website_building_indexes_the_parent_and_hides_the_nested_child() -> None:
+def test_website_building_indexes_the_parent_and_the_webapp_route() -> None:
     registry = skill_registry((sites_manifest.manifest(),))
     index = dict(registry.index())
     assert "website-building" in index
-    assert "website-building/webapp" not in index
+    assert index["website-building/webapp"].startswith(
+        "Load when building a full-stack browser application"
+    )
+    assert len(index["website-building/webapp"].split()) <= 50
 
 
 def test_website_building_parent_keeps_its_own_subdirs_but_not_the_child_subtree() -> None:

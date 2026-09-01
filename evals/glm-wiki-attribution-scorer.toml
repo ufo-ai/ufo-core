@@ -1,0 +1,62 @@
+name = "glm-wiki-attribution-scorer"
+base = "e7a7e719ab496d13bd9da85416b6fc1639f5cc43"
+suites = ["wiki_generation"]
+cases = [
+  "daily-sync-in-one-pass-attributed",
+  "daily-sync-across-passes-attributed",
+  "service-notice-in-one-pass-attributed",
+  "pull-request-in-one-pass-attributed",
+  "overview-keeps-the-parties-apart-attributed",
+]
+repeats = 3
+concurrency = 15
+max_stacks = 2
+budget_usd = 18.0
+est_usd_per_case = 0.50
+model = "z-ai/glm-5.3-flash"
+reasoning = "medium"
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "own-page-check"
+
+[[arm.replacements]]
+path = "evals/suites/wiki_generation.py"
+old = '''    @property
+    def dimensions(self) -> tuple[str, ...]:
+        return (ATTRIBUTED, DISTINCT, FILED, STATED)
+
+    @property
+    def instruction(self) -> str:
+'''
+new = '''    @property
+    def dimensions(self) -> tuple[str, ...]:
+        return (ATTRIBUTED, DISTINCT, FILED, STATED)
+
+    @property
+    def requires_attribution_judge(self) -> bool:
+        return any(not page.is_ours for page in self.pages)
+
+    @property
+    def instruction(self) -> str:
+'''
+
+[[arm.replacements]]
+path = "evals/suites/wiki_generation.py"
+old = '''        if isinstance(case, ExtractionCase) and parts[ATTRIBUTED].passed:
+            parts = parts | {ATTRIBUTED: await self._judged(case, rows, parts[ATTRIBUTED], judge)}
+'''
+new = '''        if (
+            isinstance(case, ExtractionCase)
+            and parts[ATTRIBUTED].passed
+            and case.requires_attribution_judge
+        ):
+            parts = parts | {ATTRIBUTED: await self._judged(case, rows, parts[ATTRIBUTED], judge)}
+'''

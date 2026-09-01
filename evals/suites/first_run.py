@@ -189,20 +189,18 @@ def _goal_plan_scorer(goal: GoalCase) -> Grader:
         if max(memory[0], applications[0], loaded[0]) > ask_index:
             return CapabilityVerdict(False, "asked before reading workspace context")
         references = [
-            (index, str(call.input.get("file_path", "")))
+            (index, candidate.reference)
             for index, call in enumerate(output.calls)
             if call.name == READ_TOOL
             and call.succeeded
             and "/first-run/references/" in str(call.input.get("file_path", ""))
-            and any(
-                str(call.input.get("file_path", "")).endswith(candidate.reference)
-                for candidate in GOALS
-            )
+            for candidate in GOALS
+            if str(call.input.get("file_path", "")).endswith(candidate.reference)
         ]
-        selected = [item for item in references if item[1].endswith(goal.reference)]
-        if len(selected) != 1 or len(references) != 1:
+        selected = [index for index, reference in references if reference == goal.reference]
+        if not selected or {reference for _, reference in references} != {goal.reference}:
             return CapabilityVerdict(False, "did not read only the selected goal reference")
-        if selected[0][0] > ask_index:
+        if min(selected) > ask_index:
             return CapabilityVerdict(False, "asked before reading the selected goal reference")
         questions = ask.input.get("questions")
         if not isinstance(questions, list) or not 2 <= len(questions) <= 4:

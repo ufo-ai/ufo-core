@@ -25,6 +25,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import zipfile
@@ -378,6 +379,11 @@ class LocalCarrier:
         is how a turn starts a server."""
         root = _root(handle)
         rewritten = host_argv(argv, str(root))
+        if len(rewritten) >= 3 and rewritten[-3:-1] == ("bash", "-lc"):
+            rewritten = (
+                *rewritten[:-1],
+                f"export PATH={shlex.quote(handle.egress_env['PATH'])}\n{rewritten[-1]}",
+            )
         process = await asyncio.create_subprocess_exec(
             *rewritten,
             cwd=str(root),

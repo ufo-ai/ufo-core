@@ -316,14 +316,16 @@ class InProcessTarget:
         return await self.mcp_atlas.run(prompt, enabled_tools, tool_servers)
 
     async def run(self, case: CapabilityCase) -> TargetResult:
-        if case.cleanup is None:
-            return await self._run_case(case)
+        return await self._run_case(case)
+
+    async def cleanup(self, case: CapabilityCase) -> None:
+        """Clean a case after its grader has read the turn's durable effects."""
+        cleanup = case.cleanup
+        if cleanup is None:
+            return
         if self.blob is None:
             raise RuntimeError("a capability case with cleanup requires blob access")
-        try:
-            return await self._run_case(case)
-        finally:
-            await case.cleanup(ws_current().workspace_id, self.agent_id, self.blob)
+        await cleanup(ws_current().workspace_id, self.agent_id, self.blob)
 
     async def _run_case(self, case: CapabilityCase) -> TargetResult:
         if case.seed is not None:

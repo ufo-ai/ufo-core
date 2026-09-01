@@ -1,6 +1,6 @@
 ---
 name: task-scheduling
-description: Load when a member asks to create, change, pause, resume, or cancel a recurring task, notification, or reminder, or asks for a one-time reminder.
+description: Load when a member asks to create, change, pause, resume, or cancel a recurring task, notification, reminder, watch, or periodic check, or asks for a one-time reminder.
 ---
 # Task Scheduling
 

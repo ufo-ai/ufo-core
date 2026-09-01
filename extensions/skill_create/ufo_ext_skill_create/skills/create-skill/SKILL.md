@@ -30,7 +30,9 @@ replaces a built-in skill.
    The name must equal the directory and object name. Make the description a routing trigger of at
    most 50 words, beginning `Load when`; name member intent, not the workflow. To narrow the skill
    to specific agents, add `metadata:` with `agents: [<agent name>, ...]` — only those agents'
-   turns list and load it; omit it for every agent.
+   turns list and load it; omit it for every agent. "For this agent", "this app", and "current
+   agent" are explicit scope: read the current name with `object_get(kind="agent", name="")` and
+   put that one name in `metadata.agents`.
 4. Keep the body to procedure, judgment, and traps the agent would otherwise miss. Put repeated
    deterministic logic in `scripts/`, heavy conditional material in `references/`, and reusable
    output material in `assets/`; say exactly when to read each file.
@@ -47,8 +49,9 @@ replaces a built-in skill.
 
    `{from: <path>}` stores the file content, so the skill outlives the sandbox. Inline short text
    directly. Fix validation errors and re-apply.
-6. Confirm that the skill was saved for the workspace and that every agent whose
-   `use_workspace_skills` setting holds receives it.
+6. Confirm that the skill was saved and name its audience. A skill with `metadata.agents` reaches
+   only those agents; say plainly that another agent will not list or load it. Without that field,
+   every agent whose `use_workspace_skills` setting holds receives it.
 
 ## Revise
 
@@ -64,5 +67,6 @@ with `object_delete` using `kind: skill`.
 - Quote YAML descriptions; `:` and similar characters otherwise change their meaning.
 - Bundle only UTF-8 text.
 - Do not reuse a built-in skill name.
+- Never widen "for this agent" to every workspace agent.
 - A save refused for a stale generation means another writer saved first: `object_get` the skill
   again and re-apply from the current state — never retry the same manifest.

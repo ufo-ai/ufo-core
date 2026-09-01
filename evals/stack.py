@@ -55,6 +55,7 @@ APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy", "ufo-app-qa-replay"})
 CREATION_SUITES = frozenset({"new_application"})
 HOMEPAGE_SUITES = frozenset({"app_home_change"})
 APP_PAGE_SUITES = APP_SUITES | CREATION_SUITES | HOMEPAGE_SUITES
+SANDBOX_IMAGE_SUITES = APP_PAGE_SUITES | {"red_after_green"}
 CREATION_DISABLED_JOBS = ("web:seed_homepages",)
 ISOLATED_EXTERNAL_BILLING_JOBS = (
     "metronome:usage_shipper",
@@ -314,7 +315,7 @@ class EvalStack:
         )
         sandbox_image = None
         if (
-            not APP_PAGE_SUITES.isdisjoint(selected_suites)
+            not SANDBOX_IMAGE_SUITES.isdisjoint(selected_suites)
             and config.sandbox.backend == DOCKER_BACKEND
         ):
             sandbox_image = sandbox_image_plan(repo_root, root / "sandbox.Dockerfile")

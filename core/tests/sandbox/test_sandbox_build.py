@@ -96,9 +96,12 @@ EXPECTED_APT = (
 )
 EXPECTED_PIP = (
     "urllib3",
+    "brotli",
+    "fonttools",
     "markitdown[pptx]",
     "openpyxl",
     "lxml",
+    "python-docx",
     "PyMuPDF",
     "Pillow",
     "reportlab",
@@ -147,6 +150,12 @@ def test_pip_packages_match_the_expected_toolchain() -> None:
     """markitdown[pptx] carries the pptx extra the office skills need — the bare package would drop
     it silently."""
     assert PIP_PACKAGES == EXPECTED_PIP
+
+
+def test_ready_probe_imports_the_document_python_libraries() -> None:
+    assert (
+        "python3 -c 'import brotli, docx, fontTools, reportlab'" in SANDBOX_TEMPLATE_READY_COMMAND
+    )
 
 
 def test_npm_packages_match_the_expected_toolchain() -> None:

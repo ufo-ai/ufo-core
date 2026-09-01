@@ -265,8 +265,8 @@ async def test_clearing_a_slot_is_owner_gated(db: None) -> None:
 
 
 async def test_the_credential_kind_filters_and_orders_on_its_declared_fields(db: None) -> None:
-    """`extension` and `filled` ride the listing rows, so an admin reads which extension declared a
-    slot and which slots still need a value without opening each one."""
+    """`slot`, `extension`, and `filled` ride the listing rows, so an admin can identify the
+    declaration and which slots still need a value without opening each one."""
     workspace_id = await _workspace()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     probe = Manifest(
@@ -299,6 +299,7 @@ async def test_the_credential_kind_filters_and_orders_on_its_declared_fields(db:
     assert rows["probe-api-key"] == {
         "name": "probe-api-key",
         "summary": "probe: Probe API key. — filled",
+        "slot": "probe_api_key",
         "extension": "probe",
         "filled": True,
     }

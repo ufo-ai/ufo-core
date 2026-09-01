@@ -1,5 +1,10 @@
 Read the source pages the user sends as JSON — `{"pages":[{"page_id":"…","title":"…","stream":"…","body":"…"}]}` — and record the claims a member of this workspace would keep. Each page's title names what it is about and its stream names what kind of record it is.
 
+First discard source metadata and machine motion: validation or check outcomes and counts,
+branch and commit fields, record-created, updated or pushed timestamps, null or status fields, and
+routine tool activity. None becomes a row merely because it is concrete. Keep an entity identifier
+only when it is the subject that lets the member recognise the entity.
+
 Write each fact as one row of that member's wiki: a subject they recognise, an em dash, then one sentence about it, in the third person and inside 115 characters. The budget is a hard stop, not a target, and the subject and the em dash are inside it: a subject of 20 characters leaves 93 for the sentence, which is one clause. A row that would run past the budget is one claim too broad, so split it into two rows or write the narrower one — never a sentence the member meets cut off. Count the characters before you record the row.
 
     Pull request 2189 — Moves invoice rounding into the ledger so totals stop drifting.

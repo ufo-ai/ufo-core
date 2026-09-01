@@ -84,7 +84,7 @@ APP_ACTION_KIND = "eval_app_action"
 APP_ACTION_KEY_PREFIX = "app_action:"
 APP_ACTION_FIXTURE_PREFIX = "app_action_fixture:"
 ACCOUNT_ID = "eval-env-account"
-OWN_ADDRESS = "assistant@evalco.test"
+MAILBOX_ADDRESS = "member@evalco.test"
 MAX_LIST_LIMIT = 50
 CONFIRMED = "confirmed"
 CANCELLED = "cancelled"
@@ -146,6 +146,11 @@ class SendEmailArgs(BaseModel):
     body: str = Field(min_length=1, description="Plain-text body.")
 
 
+class ReplyAllEmailArgs(BaseModel):
+    message_id: UUID = Field(description="Id of the email to reply to.")
+    body: str = Field(min_length=1, description="Plain-text reply body.")
+
+
 class ListEmailsArgs(BaseModel):
     folder: Literal["inbox", "sent"] = Field(default="inbox", description="Folder to read.")
     query: str = Field(default="", description="Substring match over sender, subject, and body.")
@@ -204,6 +209,11 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             slug="send_email",
             description="Send a plain-text email from the member's mailbox.",
             input_schema=SendEmailArgs.model_json_schema(),
+        ),
+        BrokerTool(
+            slug="reply_all_email",
+            description="Reply to the sender and every other recipient of an existing email.",
+            input_schema=ReplyAllEmailArgs.model_json_schema(),
         ),
         BrokerTool(
             slug="list_emails",
@@ -387,6 +397,10 @@ class EvalEnvBroker:
                     return await self._send_email(
                         workspace_id, SendEmailArgs.model_validate(arguments)
                     )
+                case "reply_all_email":
+                    return await self._reply_all_email(
+                        workspace_id, ReplyAllEmailArgs.model_validate(arguments)
+                    )
                 case "list_emails":
                     return await self._list_emails(
                         workspace_id, ListEmailsArgs.model_validate(arguments)
@@ -445,7 +459,7 @@ class EvalEnvBroker:
                     id=email_id,
                     workspace_id=workspace_id,
                     folder="sent",
-                    sender=OWN_ADDRESS,
+                    sender=MAILBOX_ADDRESS,
                     recipients=list(args.to),
                     subject=args.subject,
                     body=args.body,
@@ -453,6 +467,49 @@ class EvalEnvBroker:
                 )
             )
         return {"id": str(email_id), "status": "sent", "to": list(args.to)}
+
+    async def _reply_all_email(
+        self, workspace_id: UUID, args: ReplyAllEmailArgs
+    ) -> dict[str, object]:
+        email_id = uuid4()
+        async with _transaction() as connection:
+            original = (
+                await connection.execute(
+                    sa.select(eval_env_email).where(
+                        eval_env_email.c.workspace_id == workspace_id,
+                        eval_env_email.c.id == args.message_id,
+                    )
+                )
+            ).one_or_none()
+            if original is None:
+                raise ValueError(f"no email {str(args.message_id)!r} in this mailbox")
+            recipients = tuple(
+                dict.fromkeys(
+                    address
+                    for address in (original.sender, *original.recipients)
+                    if address.casefold() != MAILBOX_ADDRESS.casefold()
+                )
+            )
+            if not recipients:
+                raise ValueError(f"email {str(args.message_id)!r} has nobody to reply to")
+            subject = (
+                original.subject
+                if original.subject.casefold().startswith("re:")
+                else f"Re: {original.subject}"
+            )
+            await connection.execute(
+                sa.insert(eval_env_email).values(
+                    id=email_id,
+                    workspace_id=workspace_id,
+                    folder="sent",
+                    sender=MAILBOX_ADDRESS,
+                    recipients=list(recipients),
+                    subject=subject,
+                    body=args.body,
+                    sent_at=datetime.now(UTC),
+                )
+            )
+        return {"id": str(email_id), "status": "sent", "to": list(recipients)}
 
     async def _list_emails(self, workspace_id: UUID, args: ListEmailsArgs) -> dict[str, object]:
         conditions = [

@@ -1037,6 +1037,20 @@ CASES: tuple[SkillLoadCase, ...] = (
         forbidden=("create-application",),
     ),
     SkillLoadCase(
+        "schedule-subminute-status-watch",
+        "Watch our status page every 30 seconds and tell me the moment it changes — go ahead, no "
+        "need to confirm.",
+        expected="task-scheduling",
+        forbidden=("research-assistant",),
+    ),
+    SkillLoadCase(
+        "status-page-current-check",
+        "Check our status page now and tell me whether it changed since yesterday.",
+        expected="",
+        forbidden=("task-scheduling",),
+        expects_no_load=True,
+    ),
+    SkillLoadCase(
         "theme-board-materials",
         "Create a custom visual theme for our board materials and apply it consistently to a "
         "sample slide and a report cover so I can approve it.",

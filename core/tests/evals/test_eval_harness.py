@@ -1501,7 +1501,7 @@ async def test_seed_candidate_agent_rejects_a_missing_proposal(db: None) -> None
         await seed_candidate_agent(uuid4(), workspace_id)
 
 
-async def test_a_capability_case_cleanup_runs_after_its_turn(db: None, tmp_path) -> None:
+async def test_a_capability_case_cleanup_runs_after_its_grader(db: None, tmp_path) -> None:
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
@@ -1522,10 +1522,14 @@ async def test_a_capability_case_cleanup_runs_after_its_turn(db: None, tmp_path)
     async def cleanup(cleaned_workspace: UUID, cleaned_agent: UUID, _blob: object) -> None:
         lifecycle.append(("cleaned", cleaned_workspace, cleaned_agent))
 
+    async def grade(_output: CapabilityOutput) -> CapabilityVerdict:
+        lifecycle.append(("graded", workspace_id, agent_id))
+        return CapabilityVerdict(True, "graded")
+
     case = CapabilityCase(
         "seeded-then-cleaned",
         "find the record then remember it",
-        required_tools_scorer(("search_web",)),
+        grade,
         seed=seed,
         cleanup=cleanup,
     )
@@ -1534,7 +1538,11 @@ async def test_a_capability_case_cleanup_runs_after_its_turn(db: None, tmp_path)
         result = await run_capability_case(case, target)
 
     assert result.passed
-    assert lifecycle == [("seeded", workspace_id, agent_id), ("cleaned", workspace_id, agent_id)]
+    assert lifecycle == [
+        ("seeded", workspace_id, agent_id),
+        ("graded", workspace_id, agent_id),
+        ("cleaned", workspace_id, agent_id),
+    ]
 
 
 def _research_transcript() -> tuple[Message, ...]:
@@ -2548,6 +2556,33 @@ async def test_a_turn_that_died_on_a_rejected_provider_key_is_excluded_not_score
     assert result.excluded is True
     assert result.passed is False
     assert "the eval configuration owns this fault" in result.reason
+
+
+async def test_a_turn_that_cannot_execute_the_local_client_is_excluded_not_scored() -> None:
+    case = CapabilityCase("crashed", "do the task", exact_scorer("done"))
+    target = CrashedTarget(
+        "RuntimeError",
+        "sh: /tmp/ufo-local/bin/ufo: cannot execute binary file",
+    )
+
+    result = await run_capability_case(case, target)  # type: ignore[arg-type]
+
+    assert result.excluded is True
+    assert result.passed is False
+    assert "the eval runner owns this fault" in result.reason
+
+
+async def test_a_turn_that_cannot_execute_a_workspace_binary_is_scored_as_failed() -> None:
+    case = CapabilityCase("crashed", "do the task", exact_scorer("done"))
+    target = CrashedTarget(
+        "RuntimeError",
+        "sh: /workspace/tool: cannot execute binary file",
+    )
+
+    result = await run_capability_case(case, target)  # type: ignore[arg-type]
+
+    assert result.excluded is False
+    assert result.passed is False
 
 
 async def test_a_turn_that_died_on_exhausted_provider_credit_is_excluded_not_scored() -> None:

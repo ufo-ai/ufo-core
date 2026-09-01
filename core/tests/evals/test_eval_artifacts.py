@@ -76,6 +76,7 @@ from evals.harness.scorers import (
     shared_artifact_scorer,
     site_archive_scorer,
 )
+from evals.suites.site_build import CASES as SITE_BUILD_CASES
 from evals.suites.ufo_app_bench import (
     ACTION_CASES,
     ACTION_CONTRACTS,
@@ -1732,6 +1733,87 @@ async def test_site_archive_scorer_reads_the_shared_tar_contents() -> None:
             )
         )
     ).passed
+
+
+@pytest.mark.parametrize(
+    "readback_command",
+    (
+        "cat /workspace/site/index.html && tar -czf /workspace/site.tar.gz site",
+        "set -e\ncat /workspace/site/index.html\ntar -czf /workspace/site.tar.gz site",
+        "set -e\n\ncat /workspace/site/index.html\ntar -czf /workspace/site.tar.gz site",
+        "set -e;\ncat /workspace/site/index.html\ntar -czf /workspace/site.tar.gz site",
+    ),
+)
+async def test_static_site_case_accepts_shell_creation_and_readback(
+    readback_command: str,
+) -> None:
+    output = CapabilityOutput(
+        "ANSWER: Ufo Status: Operational",
+        (
+            ToolInvocation(
+                "bash", {"command": "printf '<h1>Ufo Status: Operational</h1>'"}, "", True
+            ),
+            ToolInvocation("start_server", {"project_path": "/workspace/site"}, "served", True),
+            ToolInvocation(
+                "bash",
+                {"command": readback_command},
+                "<h1>Ufo Status: Operational</h1>",
+                True,
+            ),
+            ToolInvocation(
+                "share_file",
+                {"files": [{"file_path": "/workspace/site.tar.gz"}]},
+                '[{"name":"site.tar.gz"}]',
+                True,
+            ),
+        ),
+        artifacts=(SharedArtifact("site.tar.gz", _site("Ufo Status: Operational")),),
+    )
+
+    assert (await SITE_BUILD_CASES[0].grader(output)).passed
+
+
+@pytest.mark.parametrize(
+    "command, result",
+    (
+        ("tar -czf /workspace/site.tar.gz site", "archived"),
+        (
+            "printf 'Ufo Status: Operational' # index.html",
+            "Ufo Status: Operational",
+        ),
+        (
+            "tar -tf /workspace/site.tar.gz | grep index.html && echo 'Ufo Status: Operational'",
+            "index.html\nUfo Status: Operational",
+        ),
+    ),
+)
+async def test_static_site_case_rejects_an_archive_without_the_requested_readback(
+    command: str, result: str
+) -> None:
+    output = CapabilityOutput(
+        "ANSWER: Ufo Status: Operational",
+        (
+            ToolInvocation("start_server", {"project_path": "/workspace/site"}, "served", True),
+            ToolInvocation(
+                "bash",
+                {"command": command},
+                result,
+                True,
+            ),
+            ToolInvocation(
+                "share_file",
+                {"files": [{"file_path": "/workspace/site.tar.gz"}]},
+                '[{"name":"site.tar.gz"}]',
+                True,
+            ),
+        ),
+        artifacts=(SharedArtifact("site.tar.gz", _site("Ufo Status: Operational")),),
+    )
+
+    verdict = await SITE_BUILD_CASES[0].grader(output)
+
+    assert not verdict.passed
+    assert "did not read index.html back" in verdict.reason
 
 
 async def test_site_archive_rejects_an_oversized_member_before_reading_its_payload() -> None:

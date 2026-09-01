@@ -173,7 +173,11 @@ class CredentialObjects:
                     f"{slot.extension}: {slot.description or slot.name} — "
                     f"{'filled' if slot.name in filled else 'empty'}"
                 ),
-                fields={"extension": slot.extension, "filled": slot.name in filled},
+                fields={
+                    "slot": slot.name,
+                    "extension": slot.extension,
+                    "filled": slot.name in filled,
+                },
             )
             for name, slot in sorted(self._named().items())
         )

@@ -986,7 +986,10 @@ def test_a_remote_stack_pins_its_carried_client(
         return Fake()
 
     monkeypatch.setattr(ablate.asyncio, "create_subprocess_exec", fake_exec)
-    spec = _spec(remote=True)
+    spec = _spec(
+        remote=True,
+        template={"pack": {"name": "assistant_eval"}, "sandbox": {"backend": "local"}},
+    )
     root = tmp_path / "worktree"
     carried = (root / REMOTE_CLIENT_BINARY).resolve()
 
@@ -995,7 +998,7 @@ def test_a_remote_stack_pins_its_carried_client(
     environment = seen["env"]
     assert isinstance(environment, dict)
     assert environment["PATH"].split(os.pathsep)[0] == str(carried.parent)
-    assert environment["UFO_CLIENT_BINARY"] == "/build/linux/ufo"
+    assert environment["UFO_CLIENT_BINARY"] == str(carried)
 
 
 def test_record_gaps_name_the_repeat_and_the_suite_that_recorded_nothing() -> None:

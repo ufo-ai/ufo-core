@@ -40,6 +40,8 @@ def waiting_scorer(marker: str, workload_token: str, async_ok: bool = False) -> 
             command = str(call.input.get("command", ""))
             padded = flat_sleeps(command)
             if padded:
+                if call.is_error:
+                    continue
                 return CapabilityVerdict(False, f"padded the wait with sleep {max(padded)}")
             if marker in command and workload_token in command:
                 ran_workload = True

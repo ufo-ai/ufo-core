@@ -586,8 +586,8 @@ def test_app_eval_uses_the_template_parent_agent_and_rejects_matrix_model_knobs(
         )
 
 
-@pytest.mark.parametrize("suite", ("ufo-app-bench", "new_application"))
-def test_docker_app_page_eval_pins_the_current_sandbox_image_before_admission(
+@pytest.mark.parametrize("suite", ("ufo-app-bench", "new_application", "red_after_green"))
+def test_docker_eval_pins_the_current_sandbox_image_before_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suite: str
 ) -> None:
     template = tmp_path / "template.toml"

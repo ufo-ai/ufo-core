@@ -1,0 +1,123 @@
+name = "glm-reply-all-action"
+base = "e7a7e719ab496d13bd9da85416b6fc1639f5cc43"
+suites = ["scenario_env"]
+cases = ["reply-all-except-sender", "send-dinner-confirmation"]
+repeats = 10
+concurrency = 10
+max_stacks = 2
+remote = true
+model = "z-ai/glm-5.3-flash"
+budget_usd = 6.0
+est_usd_per_case = 0.15
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "typed-reply-all"
+
+[[arm.replacements]]
+path = "extensions/eval_env/ufo_ext_eval_env/manifest.py"
+old = '''ACCOUNT_ID = "eval-env-account"
+OWN_ADDRESS = "assistant@evalco.test"
+MAX_LIST_LIMIT = 50'''
+new = '''ACCOUNT_ID = "eval-env-account"
+MAILBOX_ADDRESS = "member@evalco.test"
+MAX_LIST_LIMIT = 50'''
+
+[[arm.replacements]]
+path = "extensions/eval_env/ufo_ext_eval_env/manifest.py"
+old = '''class ListEmailsArgs(BaseModel):'''
+new = '''class ReplyAllEmailArgs(BaseModel):
+    message_id: UUID = Field(description="Id of the email to reply to.")
+    body: str = Field(min_length=1, description="Plain-text reply body.")
+
+
+class ListEmailsArgs(BaseModel):'''
+
+[[arm.replacements]]
+path = "extensions/eval_env/ufo_ext_eval_env/manifest.py"
+old = '''        BrokerTool(
+            slug="list_emails",
+            description="List emails in a folder, newest first, optionally filtered.",'''
+new = '''        BrokerTool(
+            slug="reply_all_email",
+            description="Reply to the sender and every other recipient of an existing email.",
+            input_schema=ReplyAllEmailArgs.model_json_schema(),
+        ),
+        BrokerTool(
+            slug="list_emails",
+            description="List emails in a folder, newest first, optionally filtered.",'''
+
+[[arm.replacements]]
+path = "extensions/eval_env/ufo_ext_eval_env/manifest.py"
+old = '''                case "list_emails":
+                    return await self._list_emails('''
+new = '''                case "reply_all_email":
+                    return await self._reply_all_email(
+                        workspace_id, ReplyAllEmailArgs.model_validate(arguments)
+                    )
+                case "list_emails":
+                    return await self._list_emails('''
+
+[[arm.replacements]]
+path = "extensions/eval_env/ufo_ext_eval_env/manifest.py"
+old = '''                    sender=OWN_ADDRESS,'''
+new = '''                    sender=MAILBOX_ADDRESS,'''
+
+[[arm.replacements]]
+path = "extensions/eval_env/ufo_ext_eval_env/manifest.py"
+old = '''        return {"id": str(email_id), "status": "sent", "to": list(args.to)}
+
+    async def _list_emails(self, workspace_id: UUID, args: ListEmailsArgs) -> dict[str, object]:'''
+new = '''        return {"id": str(email_id), "status": "sent", "to": list(args.to)}
+
+    async def _reply_all_email(
+        self, workspace_id: UUID, args: ReplyAllEmailArgs
+    ) -> dict[str, object]:
+        email_id = uuid4()
+        async with _transaction() as connection:
+            original = (
+                await connection.execute(
+                    sa.select(eval_env_email).where(
+                        eval_env_email.c.workspace_id == workspace_id,
+                        eval_env_email.c.id == args.message_id,
+                    )
+                )
+            ).one_or_none()
+            if original is None:
+                raise ValueError(f"no email {str(args.message_id)!r} in this mailbox")
+            recipients = tuple(
+                dict.fromkeys(
+                    address
+                    for address in (original.sender, *original.recipients)
+                    if address.casefold() != MAILBOX_ADDRESS.casefold()
+                )
+            )
+            if not recipients:
+                raise ValueError(f"email {str(args.message_id)!r} has nobody to reply to")
+            subject = (
+                original.subject
+                if original.subject.casefold().startswith("re:")
+                else f"Re: {original.subject}"
+            )
+            await connection.execute(
+                sa.insert(eval_env_email).values(
+                    id=email_id,
+                    workspace_id=workspace_id,
+                    folder="sent",
+                    sender=MAILBOX_ADDRESS,
+                    recipients=list(recipients),
+                    subject=subject,
+                    body=args.body,
+                    sent_at=datetime.now(UTC),
+                )
+            )
+        return {"id": str(email_id), "status": "sent", "to": list(recipients)}
+
+    async def _list_emails(self, workspace_id: UUID, args: ListEmailsArgs) -> dict[str, object]:'''

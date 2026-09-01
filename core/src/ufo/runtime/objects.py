@@ -959,6 +959,15 @@ class ObjectActionInput(BaseModel):
     )
 
 
+class InstanceActionDiscovery(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    description: str
+    input_schema: dict[str, JsonValue]
+    target_name: str | None = None
+
+
 @dataclass(frozen=True)
 class ObjectVerbs:
     """The five CRUD verbs and the `object_action` dispatcher over one deploy's kind and action
@@ -1092,6 +1101,13 @@ class ObjectVerbs:
         actions = self._action_views(ctx, args.kind, "collection")
         if actions:
             listing["actions"] = actions
+        instance_actions = self._instance_action_discoveries(
+            ctx,
+            args.kind,
+            agent=None if target is None else target.name,
+        )
+        if instance_actions:
+            listing["instance_actions"] = instance_actions
         if target is not None:
             listing["agent"] = target.name
         if page.next_cursor is not None:
@@ -1310,6 +1326,30 @@ class ObjectVerbs:
                 action_view(kind, bound, name=name, agent=agent, generation=generation).model_dump(
                     mode="json", exclude_none=True
                 )
+            )
+        return views
+
+    def _instance_action_discoveries(
+        self,
+        ctx: ToolContext,
+        kind: str,
+        *,
+        agent: str | None,
+    ) -> list[JsonValue]:
+        views: list[JsonValue] = []
+        for _short_name, bound in sorted(self._granted_actions(ctx, kind).items()):
+            declared = bound.action.bound
+            if declared is None or declared.binding != "instance":
+                continue
+            if agent is not None and not bound.action.agent_targetable:
+                continue
+            views.append(
+                InstanceActionDiscovery(
+                    name=bound.action.name,
+                    description=bound.action.description,
+                    input_schema=bound.action.input_model.model_json_schema(),
+                    target_name=declared.name,
+                ).model_dump(mode="json", exclude_none=True)
             )
         return views
 

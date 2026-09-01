@@ -4,10 +4,11 @@ A skill is a folder of files — a `SKILL.md` (YAML frontmatter + markdown workf
 A skill folder MAY nest child skills: an immediate subdirectory that itself holds a `SKILL.md` is a
 child, registered under the path-form name `<parent>/<child-dir>` and loaded nested under the
 parent. Nesting is naming only: a child that needs its parent's files says so with `depends`, the
-one mechanism that pulls another skill in. Core's own skills teach its builtins and the house style
-every other skill defaults to, held to a fixed set by `CORE_SKILL_NAMES` and a CI gate. Packs
-contribute more through the manifest `skills` point, which the loader aggregates with core's into
-one `SkillRegistry` per boot.
+one mechanism that pulls another skill in. A child stays out of the global routing index unless its
+frontmatter sets `metadata.indexed`. Core's own skills teach its builtins and the house style every
+other skill defaults to, held to a fixed set by `CORE_SKILL_NAMES` and a CI gate. Packs contribute
+more through the manifest `skills` point, which the loader aggregates with core's into one
+`SkillRegistry` per boot.
 
 `load_skill` resolves the named skill and its transitive `depends` through `SkillRegistry.closure`,
 then loads each under `$UFO_HOME/skills/<name>/`: deploy skills from the verified startup bundle,
@@ -75,7 +76,8 @@ class RuntimeSkill:
     stored verbatim (no round-trip drift), and any bundled asset files. `name` is the registry
     name — plain for a top-level skill, the path form `<parent>/<child-dir>` for a child. `parent`,
     when set, is the enclosing skill the child's name and load path nest under — it carries no
-    pull. `depends` names the skills loaded alongside this one."""
+    pull. `depends` names the skills loaded alongside this one. `indexed` is the nested skill's
+    explicit route into the top-level index."""
 
     name: str
     description: str
@@ -85,6 +87,7 @@ class RuntimeSkill:
     files: tuple[tuple[str, bytes], ...] = ()
     raw_skill_md: str = ""
     agents: tuple[str, ...] = ()
+    indexed: bool = False
 
     def all_files(self) -> dict[str, bytes]:
         return {SKILL_MD: self.raw_skill_md.encode(), **dict(self.files)}
@@ -271,8 +274,11 @@ def parse_skill_content(
         raise ValueError(f"skill name {name!r} must match its directory {dir_name!r}")
     depends = tuple(front.get("metadata", {}).get("depends", ()))
     agents = tuple(front.get("metadata", {}).get("agents", ()))
+    indexed = front.get("metadata", {}).get("indexed", False)
     if any(not isinstance(agent, str) or not agent for agent in agents):
         raise ValueError(f"skill {dir_name!r} metadata.agents must be a list of agent names")
+    if not isinstance(indexed, bool):
+        raise ValueError(f"skill {dir_name!r} metadata.indexed must be a boolean")
     assets = tuple(
         (path, content)
         for path, content in sorted(files.items())
@@ -287,6 +293,7 @@ def parse_skill_content(
         files=assets,
         raw_skill_md=raw,
         agents=agents,
+        indexed=indexed,
     )
 
 
@@ -449,14 +456,14 @@ class SkillRegistry:
         return tuple(loaded)
 
     def index(self) -> tuple[tuple[str, str], ...]:
-        """The loadable-skill index the `{{skill_index}}` slot renders: each TOP-LEVEL deploy
-        skill's name and description, in registration order (core first, then packs in load order).
-        Child skills are reached through their parent's instructions, not this index; member skills
-        render into the turn message, never here, so a save cannot move the system prompt."""
+        """The loadable-skill index the `{{skill_index}}` slot renders: each top-level deploy skill
+        and each child that declares itself indexed, in registration order (core first, then packs
+        in load order). Other children are reached through their parent's instructions. Member
+        skills render into the turn message, never here, so a save cannot move the system prompt."""
         return tuple(
             (skill.name, skill.description)
             for skill in self.by_name.values()
-            if skill.parent is None
+            if skill.parent is None or skill.indexed
         )
 
     def merged_with(self, generated: tuple[RuntimeSkill, ...]) -> "SkillRegistry":

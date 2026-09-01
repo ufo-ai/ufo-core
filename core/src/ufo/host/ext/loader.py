@@ -609,7 +609,7 @@ def core_object_kinds(
         guidance=CREDENTIAL_GUIDANCE,
         spec_model=CredentialSpec,
         store=CredentialObjects(slots=declared_slots(manifests), credentials=credential_store),
-        list_fields=frozenset({"extension", "filled"}),
+        list_fields=frozenset({"slot", "extension", "filled"}),
     )
     extension = ObjectKind(
         name=EXTENSION_KIND,

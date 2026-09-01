@@ -30,6 +30,30 @@ async def test_flat_sleep_after_backgrounding_fails() -> None:
     assert "sleep 45" in verdict.reason
 
 
+async def test_refused_flat_sleep_after_backgrounding_does_not_fail() -> None:
+    refused = ToolInvocation(
+        name="bash",
+        input={"command": "sleep 45; cat /tmp/b.log"},
+        is_error=True,
+        has_result=True,
+    )
+    poll = ToolInvocation(
+        name="bash",
+        input={
+            "command": "timeout 90 bash -c 'until [ -s /tmp/b.log ]; do sleep 2; done; "
+            "cat /tmp/b.log'"
+        },
+    )
+    workload = ToolInvocation(
+        name="bash",
+        input={"command": FOREGROUND_WORKLOAD, "background": True},
+    )
+    verdict = await FOREGROUND(
+        CapabilityOutput(response="BUILD-OK-7391", calls=(workload, refused, poll))
+    )
+    assert verdict.passed, verdict.reason
+
+
 async def test_padding_beside_the_workload_in_one_call_fails() -> None:
     verdict = await FOREGROUND(_output(f"{FOREGROUND_WORKLOAD} & sleep 45; cat /tmp/b.log"))
     assert not verdict.passed

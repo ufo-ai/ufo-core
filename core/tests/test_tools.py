@@ -2,6 +2,8 @@ import asyncio
 import hashlib
 import json
 import shlex
+import shutil
+import sys
 from base64 import urlsafe_b64decode
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -312,6 +314,79 @@ async def test_bash_zero_exit_is_not_error(tmp_path: Path) -> None:
     result = await run("bash", ctx, command="echo ok")
     assert result.is_error is False
     assert result.content[0].text == "ok"
+
+
+@pytest.mark.integration
+async def test_bash_keeps_the_carrier_python_after_the_login_profile_resets_path(
+    tmp_path: Path, sandbox_client: Path
+) -> None:
+    scratch = tmp_path / "scratch"
+    home = scratch / "home"
+    bin_dir = scratch / "bin"
+    home.mkdir(parents=True)
+    bin_dir.mkdir()
+    shutil.copy2(sandbox_client, bin_dir / "ufo")
+    system_bin = tmp_path / "system-bin"
+    system_bin.mkdir()
+    decoy = system_bin / "python3"
+    decoy.write_text("#!/bin/sh\nprintf system-python\nexit 19\n")
+    decoy.chmod(0o755)
+    (home / ".bash_profile").write_text(f'export PATH="{system_bin}"\n')
+    carrier = LocalCarrier(_scratch=scratch)
+    workspace = tmp_path / "workspace"
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            workspace_host_path=str(workspace),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
+            run_token="run-token",
+        )
+    )
+    raw = await asyncio.create_subprocess_exec(
+        "bash",
+        "-lc",
+        "python3 -c 'import reportlab'",
+        cwd=workspace,
+        env=dict(handle.egress_env),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    raw_stdout, _ = await raw.communicate()
+    font_source = (
+        Path(__file__).parents[1]
+        / "src/ufo/runtime/skills/ufo-style/assets/fonts/Inter-VariableFont_wght.woff2"
+    )
+    program = (
+        "import brotli,reportlab,sys\n"
+        "from fontTools.ttLib import TTFont\n"
+        "from pathlib import Path\n"
+        "from reportlab.pdfgen import canvas\n"
+        f"font=TTFont({str(font_source)!r})\n"
+        "font.flavor=None\n"
+        "font.save('Inter.ttf')\n"
+        "pdf=canvas.Canvas('invoice.pdf')\n"
+        "pdf.drawString(72, 720, 'Invoice')\n"
+        "pdf.save()\n"
+        "Path('relative.txt').write_text('relative')\n"
+        "print(sys.executable)\n"
+        "print(reportlab.Version)\n"
+    )
+    await carrier.write(handle, "/workspace/generate.py", program.encode())
+
+    result = await run(
+        "bash",
+        make_context(SandboxSession(carrier=carrier, handle=handle), tmp_path),
+        command="python3 generate.py",
+    )
+
+    assert raw.returncode == 19
+    assert raw_stdout.decode() == "system-python"
+    assert result.is_error is False
+    output = result.content[0].text.splitlines()
+    assert Path(output[0]).parent == Path(sys.executable).parent
+    assert (workspace / "Inter.ttf").read_bytes().startswith(b"\x00\x01\x00\x00")
+    assert (workspace / "invoice.pdf").read_bytes().startswith(b"%PDF")
+    assert (workspace / "relative.txt").read_text() == "relative"
 
 
 def test_edit_and_write_state_the_read_first_rule_in_their_descriptions() -> None:

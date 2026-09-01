@@ -480,6 +480,13 @@ class CapabilityCase:
         return payload
 
 
+@runtime_checkable
+class CapabilityCleanupTarget(Protocol):
+    async def cleanup(self, case: CapabilityCase) -> None:
+        """Clean one case after its grader has read the state the turn produced."""
+        ...
+
+
 async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) -> EvalCaseResult:
     """Run the case's samples and fold them into one result. An excluded sample leaves the
     denominator, so a `samples=3` case whose third turn died on the provider's transport is scored
@@ -616,20 +623,40 @@ def _unclean_verdict(result: TargetResult) -> CapabilityVerdict:
     provider_configuration = result.error_class == "APIError" and bool(
         infra_error((result.error_message,))
     )
-    if not provider_configuration and not infra_owned_fault(
-        result.error_class, result.failure_reason, status
+    local_client_execution = (
+        result.error_class == "RuntimeError"
+        and "/tmp/ufo-local/bin/ufo" in result.error_message
+        and "cannot execute binary file" in result.error_message.casefold()
+    )
+    if (
+        not provider_configuration
+        and not local_client_execution
+        and not infra_owned_fault(result.error_class, result.failure_reason, status)
     ):
         return CapabilityVerdict(False, result.failure_reason)
     if is_transient_fault(result.error_class):
         owner = "the provider owns this fault"
     elif result.error_class == "CredentialValueInvalid" or provider_configuration:
         owner = "the eval configuration owns this fault"
+    elif local_client_execution:
+        owner = "the eval runner owns this fault"
     else:
         owner = "the harness's own wait expired on a working turn"
     return CapabilityVerdict(False, f"{result.failure_reason}; {owner}", excluded=True)
 
 
 async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> CapabilitySample:
+    if case.cleanup is None:
+        return await _sample_capability(case, target)
+    if not isinstance(target, CapabilityCleanupTarget):
+        raise RuntimeError("a capability case with cleanup requires a cleanup target")
+    try:
+        return await _sample_capability(case, target)
+    finally:
+        await target.cleanup(case)
+
+
+async def _sample_capability(case: CapabilityCase, target: CapabilityTarget) -> CapabilitySample:
     result = await target.run(case)
     if not result.clean:
         return CapabilitySample(result.output, _unclean_verdict(result), result.trajectory)

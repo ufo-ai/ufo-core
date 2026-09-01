@@ -51,6 +51,34 @@ def test_prepare_reuses_a_compatible_content_address(
     plan.prepare()
 
 
+def test_compatibility_probes_the_sandbox_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = SandboxImagePlan(
+        tmp_path / "sandbox.Dockerfile",
+        "ufo-sandbox-eval:0123456789abcdef",
+        "sha256:source",
+    )
+    commands: list[tuple[str, ...]] = []
+
+    def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, b"")
+
+    monkeypatch.setattr("evals.sandbox_image.subprocess.run", run)
+
+    assert plan._compatible()
+    assert commands[0] == ("docker", "image", "inspect", plan.reference)
+    assert commands[1][:6] == (
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        "linux/amd64",
+        "--entrypoint",
+    )
+
+
 def test_prepare_creates_the_lock_parent_for_a_registry_reference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -99,6 +127,8 @@ def test_prepare_replaces_a_stale_image_with_the_current_content_address(
         (
             "docker",
             "build",
+            "--platform",
+            "linux/amd64",
             "-t",
             plan.reference,
             "-f",

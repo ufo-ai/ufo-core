@@ -1,0 +1,65 @@
+name = "glm-wiki-source-metadata"
+base = "e7a7e719ab496d13bd9da85416b6fc1639f5cc43"
+suites = ["wiki_generation", "asd_writing"]
+cases = [
+  "pull-request-in-one-pass-stated",
+  "pull-request-across-passes-stated",
+  "wiki-history-beta-leads-readable",
+  "daily-sync-in-one-pass-stated",
+  "service-notice-in-one-pass-stated",
+  "waitlist-in-one-pass-stated",
+  "wiki-decisions-price-change-cut-readable",
+  "wiki-open-work-one-introduction-readable",
+]
+repeats = 3
+concurrency = 16
+max_stacks = 4
+budget_usd = 45.0
+est_usd_per_case = 0.50
+model = "z-ai/glm-5.3-flash"
+reasoning = "medium"
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "metadata-gate"
+[[arm.replacements]]
+path = "extensions/memory/ufo_ext_memory/prompts/fact_extract.md"
+old = '''Read the source pages the user sends as JSON — `{"pages":[{"page_id":"…","title":"…","stream":"…","body":"…"}]}` — and record the claims a member of this workspace would keep. Each page's title names what it is about and its stream names what kind of record it is.
+
+Write each fact as one row'''
+new = '''Read the source pages the user sends as JSON — `{"pages":[{"page_id":"…","title":"…","stream":"…","body":"…"}]}` — and record the claims a member of this workspace would keep. Each page's title names what it is about and its stream names what kind of record it is.
+
+First discard source metadata and machine motion: validation or check outcomes and counts,
+branch and commit fields, record-created, updated or pushed timestamps, null or status fields, and
+routine tool activity. None becomes a row merely because it is concrete. Keep an entity identifier
+only when it is the subject that lets the member recognise the entity.
+
+Write each fact as one row'''
+
+[[arm]]
+name = "gate-only"
+[[arm.replacements]]
+path = "extensions/memory/ufo_ext_memory/prompts/fact_extract.md"
+old = '''Read the source pages the user sends as JSON — `{"pages":[{"page_id":"…","title":"…","stream":"…","body":"…"}]}` — and record the claims a member of this workspace would keep. Each page's title names what it is about and its stream names what kind of record it is.
+
+Write each fact as one row'''
+new = '''Read the source pages the user sends as JSON — `{"pages":[{"page_id":"…","title":"…","stream":"…","body":"…"}]}` — and record the claims a member of this workspace would keep. Each page's title names what it is about and its stream names what kind of record it is.
+
+First discard source metadata and machine motion: validation or check outcomes and counts,
+branch and commit fields, record-created, updated or pushed timestamps, null or status fields, and
+routine tool activity. None becomes a row merely because it is concrete. Keep an entity identifier
+only when it is the subject that lets the member recognise the entity.
+
+Write each fact as one row'''
+
+[[arm.replacements]]
+path = "extensions/memory/ufo_ext_memory/prompts/fact_extract.md"
+old = '''Leave to the system the values it reports about itself and can report again on demand: a last-updated time, a record count, an identifier, a status flag, a field that holds nothing, the commit or branch a record sits on, the checks that ran over it and whatever they returned. Leave out the routine motion of the workspace's own tools — a review asked for, a label applied, a job queued, a page synced — which is how the work is carried and not what was settled or learned. Leave out greetings, pleasantries, generic advice, and questions.'''
+new = '''Leave out greetings, pleasantries, generic advice, and questions.'''

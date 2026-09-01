@@ -1,6 +1,6 @@
 ---
 name: sandbox
-description: Load when a task first requires running, building, or inspecting anything in /workspace, including executing a supplied script, surveying unfamiliar files, or using an installed sandbox command.
+description: Load when a member asks to run or repair a supplied script, inspect or change files in /workspace, build or diagnose a project, execute a workspace command, or use `ufo llm` or `ufo tool`. Do not load for an unexecuted snippet.
 metadata:
   tools:
   - bash

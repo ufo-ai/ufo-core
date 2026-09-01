@@ -1,0 +1,26 @@
+name = "glm-scheduling-watch-action-isolated"
+base = "e7a7e719ab496d13bd9da85416b6fc1639f5cc43"
+suites = ["object_tools"]
+cases = ["O02-sub-minute-floor", "O07-cadence-restraint"]
+repeats = 5
+concurrency = 2
+max_stacks = 1
+budget_usd = 15.0
+est_usd_per_case = 0.75
+model = "z-ai/glm-5.3-flash"
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "watch-routing"
+
+[[arm.replacements]]
+path = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/skills/task-scheduling/SKILL.md"
+old = "description: Load when a member asks to create, change, pause, resume, or cancel a recurring task, notification, or reminder, or asks for a one-time reminder."
+new = "description: Load when a member asks to create, change, pause, resume, or cancel a recurring task, notification, reminder, watch, or periodic check, or asks for a one-time reminder."

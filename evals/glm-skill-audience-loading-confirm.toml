@@ -1,0 +1,57 @@
+name = "glm-skill-audience-loading-confirm"
+base = "e7a7e719ab496d13bd9da85416b6fc1639f5cc43"
+suites = ["skill_loading"]
+cases = [
+  "createskill-capture-workflow",
+  "createskill-fix-draft-frontmatter",
+  "application-private-recruiting",
+]
+repeats = 3
+concurrency = 3
+max_stacks = 4
+remote = true
+budget_usd = 30.0
+est_usd_per_case = 1.50
+model = "z-ai/glm-5.3-flash"
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "audience-all"
+
+[[arm.replacements]]
+path = "extensions/skill_create/ufo_ext_skill_create/skills/create-skill/SKILL.md"
+old = """   to specific agents, add `metadata:` with `agents: [<agent name>, ...]` — only those agents'
+   turns list and load it; omit it for every agent.
+"""
+new = """   to specific agents, add `metadata:` with `agents: [<agent name>, ...]` — only those agents'
+   turns list and load it; omit it for every agent. "For this agent", "this app", and "current
+   agent" are explicit scope: read the current name with `object_get(kind="agent", name="")` and
+   put that one name in `metadata.agents`.
+"""
+
+[[arm.replacements]]
+path = "extensions/skill_create/ufo_ext_skill_create/skills/create-skill/SKILL.md"
+old = """6. Confirm that the skill was saved for the workspace and that every agent whose
+   `use_workspace_skills` setting holds receives it.
+"""
+new = """6. Confirm that the skill was saved and name its audience. A skill with `metadata.agents` reaches
+   only those agents; say plainly that another agent will not list or load it. Without that field,
+   every agent whose `use_workspace_skills` setting holds receives it.
+"""
+
+[[arm.replacements]]
+path = "extensions/skill_create/ufo_ext_skill_create/skills/create-skill/SKILL.md"
+old = """- Do not reuse a built-in skill name.
+"""
+new = """- Do not reuse a built-in skill name.
+- Never widen "for this agent" to every workspace agent.
+"""

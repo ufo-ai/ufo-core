@@ -45,20 +45,38 @@ HOUSE_STYLE_FONT_FILES = (
 
 
 def _write_nested_child(
-    parent_dir: Path, name: str, description: str, body: str, depends: tuple[str, ...] = ()
+    parent_dir: Path,
+    name: str,
+    description: str,
+    body: str,
+    depends: tuple[str, ...] = (),
+    *,
+    indexed: bool = False,
 ) -> Path:
     child_dir = parent_dir / name
     child_dir.mkdir()
-    (child_dir / "SKILL.md").write_text(_skill_md(name, description, body, depends))
+    (child_dir / "SKILL.md").write_text(
+        _skill_md(name, description, body, depends, indexed=indexed)
+    )
     return child_dir
 
 
-def _skill_md(name: str, description: str, body: str, depends: tuple[str, ...] = ()) -> str:
+def _skill_md(
+    name: str,
+    description: str,
+    body: str,
+    depends: tuple[str, ...] = (),
+    *,
+    indexed: bool = False,
+) -> str:
     lines = ["---", f"name: {name}", f"description: {description}"]
-    if depends:
+    if depends or indexed:
         lines.append("metadata:")
+    if depends:
         lines.append("  depends:")
         lines.extend(f"  - {dep}" for dep in depends)
+    if indexed:
+        lines.append("  indexed: true")
     lines.extend(("---", body))
     return "\n".join(lines) + "\n"
 
@@ -451,6 +469,35 @@ def test_nesting_alone_pulls_no_parent_and_the_index_hides_the_child(tmp_path: P
     registry = SkillRegistry(discover_skills(parent_dir))
     assert [ref.card.name for ref in registry.closure("site/app")] == ["site/app"]
     assert registry.index() == (("site", "a parent skill"),)
+
+
+def test_an_indexed_nested_child_routes_beside_its_parent(tmp_path: Path) -> None:
+    parent_dir = _write_skill(tmp_path, "site", "a parent skill", "p")
+    _write_nested_child(
+        parent_dir,
+        "app",
+        "a child skill",
+        "c",
+        depends=("site",),
+        indexed=True,
+    )
+    registry = SkillRegistry(discover_skills(parent_dir))
+
+    assert registry.named("site/app").indexed is True
+    assert registry.index() == (
+        ("site", "a parent skill"),
+        ("site/app", "a child skill"),
+    )
+
+
+def test_indexed_metadata_must_be_boolean(tmp_path: Path) -> None:
+    skill_dir = _write_skill(tmp_path, "probe", "a probe skill", "p")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: probe\ndescription: a probe skill\nmetadata:\n  indexed: sometimes\n---\np\n"
+    )
+
+    with pytest.raises(ValueError, match=r"metadata\.indexed must be a boolean"):
+        parse_skill(skill_dir)
 
 
 def test_a_nested_child_that_declares_its_parent_pulls_it(tmp_path: Path) -> None:

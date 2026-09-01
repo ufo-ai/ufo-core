@@ -191,9 +191,12 @@ NODE_INSTALL_COMMAND = (
 # Skill runtimes the office/pdf/media/document-review scripts assume pre-installed.
 PIP_PACKAGES = (
     "urllib3",
+    "brotli",
+    "fonttools",
     "markitdown[pptx]",
     "openpyxl",
     "lxml",
+    "python-docx",
     "PyMuPDF",
     "Pillow",
     "reportlab",
@@ -245,6 +248,7 @@ command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
 command -v soffice >/dev/null
 command -v gh >/dev/null
+python3 -c 'import brotli, docx, fontTools, reportlab'
 test "$(node --version)" = "v{NODE_VERSION}"
 test "$(pnpm --version)" = "{PNPM_VERSION}"
 test "$(TMPDIR={SANDBOX_TMPDIR} python3 -c 'import tempfile; print(tempfile.gettempdir())')" \\

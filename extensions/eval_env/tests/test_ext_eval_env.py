@@ -317,8 +317,54 @@ async def test_send_email_lands_a_durable_sent_row(db: None) -> None:
         ).one()
     assert row.folder == "sent"
     assert tuple(row.recipients) == (BOB,)
-    assert row.sender == env.OWN_ADDRESS
+    assert row.sender == env.MAILBOX_ADDRESS
     assert row.subject == "Dinner"
+
+
+async def test_reply_all_email_derives_recipients_from_the_workspace_message(db: None) -> None:
+    workspace_id = await _workspace()
+    message_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(env.eval_env_email).values(
+                id=message_id,
+                workspace_id=workspace_id,
+                folder="inbox",
+                sender="dana@evalco.test",
+                recipients=[env.MAILBOX_ADDRESS, BOB, "mara@evalco.test", BOB],
+                subject="Offsite planning",
+                body="Reply all with a yes or no.",
+                sent_at=datetime(2026, 7, 15, tzinfo=UTC),
+            )
+        )
+
+    result = await call_external_tool(
+        _ctx(workspace_id),
+        CallExternalToolInput(
+            tool_name="reply_all_email",
+            source_id=env.EMAIL_PROVIDER,
+            arguments={"message_id": str(message_id), "body": "Count me in."},
+        ),
+    )
+
+    assert _payload(result)["to"] == [
+        "dana@evalco.test",
+        BOB,
+        "mara@evalco.test",
+    ]
+    async with workspace_tx() as connection:
+        sent = (
+            await connection.execute(
+                sa.select(env.eval_env_email).where(
+                    env.eval_env_email.c.workspace_id == workspace_id,
+                    env.eval_env_email.c.folder == "sent",
+                )
+            )
+        ).one()
+    assert tuple(sent.recipients) == ("dana@evalco.test", BOB, "mara@evalco.test")
+    assert sent.sender == env.MAILBOX_ADDRESS
+    assert sent.subject == "Re: Offsite planning"
+    assert sent.body == "Count me in."
 
 
 async def test_list_emails_reads_the_seeded_folder_with_filtering(db: None) -> None:
@@ -327,7 +373,7 @@ async def test_list_emails_reads_the_seeded_folder_with_filtering(db: None) -> N
         for sender, subject, folder, sent_at in (
             ("dana@evalco.test", "Budget planning", "inbox", datetime(2026, 7, 14, tzinfo=UTC)),
             ("bob@evalco.test", "Lunch?", "inbox", datetime(2026, 7, 15, tzinfo=UTC)),
-            (env.OWN_ADDRESS, "Re: Lunch?", "sent", datetime(2026, 7, 15, 1, tzinfo=UTC)),
+            (env.MAILBOX_ADDRESS, "Re: Lunch?", "sent", datetime(2026, 7, 15, 1, tzinfo=UTC)),
         ):
             await connection.execute(
                 sa.insert(env.eval_env_email).values(
@@ -444,11 +490,13 @@ async def test_describe_exposes_the_catalog_schemas() -> None:
         _ctx(uuid4()),
         DescribeExternalToolsInput(
             source_id=env.EMAIL_PROVIDER,
-            tool_names=("send_email",),
+            tool_names=("send_email", "reply_all_email"),
         ),
     )
     schema = _payload(result)["schemas"]["send_email"]
+    reply_schema = _payload(result)["schemas"]["reply_all_email"]
     assert set(schema["input_schema"]["properties"]) == {"to", "subject", "body"}
+    assert set(reply_schema["input_schema"]["properties"]) == {"message_id", "body"}
 
 
 async def test_app_providers_return_only_the_seeded_tool_response(db: None) -> None:
@@ -639,7 +687,11 @@ async def test_describe_backfills_discovery_and_marks_unknown_unresolved() -> No
     payload = _payload(result)
     assert payload["unresolved"] == ["bogus"]
     assert set(payload["schemas"]) == {"send_email"}
-    assert {tool["slug"] for tool in payload["availableTools"]} == {"send_email", "list_emails"}
+    assert {tool["slug"] for tool in payload["availableTools"]} == {
+        "send_email",
+        "reply_all_email",
+        "list_emails",
+    }
 
 
 async def test_list_events_reads_the_calendar_with_filtering(db: None) -> None:

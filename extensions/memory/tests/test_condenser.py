@@ -1182,6 +1182,12 @@ async def test_the_extraction_compels_the_recording_tool_instead_of_asking_for_j
     assert request.tools[0].input_schema["properties"]["facts"]["type"] == "array"
     assert "notability" not in json.dumps(request.tools[0].input_schema)
     assert "Record them with the record_facts tool." in request.system
+    assert request.system.index("First discard source metadata") < request.system.index(
+        "Write each fact as one row"
+    )
+    assert "validation or check outcomes and counts" in request.system
+    assert "Keep an entity identifier" in request.system
+    assert "when it is the subject that lets the member recognise the entity" in request.system
     assert await _page_facts(page_id) == {body: 1}
 
 

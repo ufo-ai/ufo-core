@@ -1,0 +1,100 @@
+name = "glm-webapp-indexed-boundary"
+base = "e7a7e719ab496d13bd9da85416b6fc1639f5cc43"
+suites = ["skill_loading"]
+cases = [
+  "webapp-customer-portal",
+  "webapp-inventory",
+  "site-application-homepage",
+  "site-internal-project-board",
+]
+repeats = 10
+concurrency = 8
+max_stacks = 2
+remote = true
+model = "z-ai/glm-5.3-flash"
+budget_usd = 15.0
+est_usd_per_case = 0.15
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "fullstack-boundary"
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/skills/runtime.py"
+old = '''    raw_skill_md: str = ""
+    agents: tuple[str, ...] = ()
+
+    def all_files(self) -> dict[str, bytes]:'''
+new = '''    raw_skill_md: str = ""
+    agents: tuple[str, ...] = ()
+    indexed: bool = False
+
+    def all_files(self) -> dict[str, bytes]:'''
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/skills/runtime.py"
+old = '''    depends = tuple(front.get("metadata", {}).get("depends", ()))
+    agents = tuple(front.get("metadata", {}).get("agents", ()))
+    if any(not isinstance(agent, str) or not agent for agent in agents):
+        raise ValueError(f"skill {dir_name!r} metadata.agents must be a list of agent names")
+    assets = tuple('''
+new = '''    depends = tuple(front.get("metadata", {}).get("depends", ()))
+    agents = tuple(front.get("metadata", {}).get("agents", ()))
+    indexed = front.get("metadata", {}).get("indexed", False)
+    if any(not isinstance(agent, str) or not agent for agent in agents):
+        raise ValueError(f"skill {dir_name!r} metadata.agents must be a list of agent names")
+    if not isinstance(indexed, bool):
+        raise ValueError(f"skill {dir_name!r} metadata.indexed must be a boolean")
+    assets = tuple('''
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/skills/runtime.py"
+old = '''        raw_skill_md=raw,
+        agents=agents,
+    )'''
+new = '''        raw_skill_md=raw,
+        agents=agents,
+        indexed=indexed,
+    )'''
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/skills/runtime.py"
+old = '''    def index(self) -> tuple[tuple[str, str], ...]:
+        """The loadable-skill index the `{{skill_index}}` slot renders: each TOP-LEVEL deploy
+        skill's name and description, in registration order (core first, then packs in load order).
+        Child skills are reached through their parent's instructions, not this index; member skills
+        render into the turn message, never here, so a save cannot move the system prompt."""
+        return tuple(
+            (skill.name, skill.description)
+            for skill in self.by_name.values()
+            if skill.parent is None
+        )'''
+new = '''    def index(self) -> tuple[tuple[str, str], ...]:
+        """The loadable-skill index the `{{skill_index}}` slot renders: each top-level deploy skill
+        and each child that declares itself indexed, in registration order (core first, then packs
+        in load order). Other children are reached through their parent's instructions. Member
+        skills render into the turn message, never here, so a save cannot move the system prompt."""
+        return tuple(
+            (skill.name, skill.description)
+            for skill in self.by_name.values()
+            if skill.parent is None or skill.indexed
+        )'''
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/skills/website-building/webapp/SKILL.md"
+old = '''description: Load when building a fullstack web application — interactive, stateful frontend with a backend, data, and routing (Express + Vite + React + Tailwind + Drizzle), beyond a static informational site.
+metadata:
+  depends:'''
+new = '''description: Load when building a full-stack browser application that needs server-side authentication, an API, a persistent database, or durable multi-user data. Do not load for a homepage, project board, informational site, browser game, or frontend-only interaction.
+metadata:
+  indexed: true
+  depends:'''
