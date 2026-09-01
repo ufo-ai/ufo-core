@@ -121,7 +121,12 @@ from ufo.harness.untrusted import wall
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialRequests
 from ufo.runtime.access.grants import GrantStore
-from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, authority_from_member_id
+from ufo.runtime.authority import (
+    ExecutionAuthority,
+    MemberAuthority,
+    authority_from_member_id,
+    authority_member_id,
+)
 from ufo.runtime.billing.accounting import (
     ALLOW,
     TOKENS_DIMENSION,
@@ -2520,6 +2525,14 @@ class TurnEngine:
                 if not await Seats(self.turn.workspace_id).all_seated(connection, members):
                     raise TurnParked(SEAT_REVOKED_MESSAGE)
 
+    async def _enforce_authority_seat(self, authority: ExecutionAuthority) -> None:
+        member_id = authority_member_id(authority)
+        if member_id is None:
+            return
+        async with workspace_tx() as connection:
+            if not await Seats(self.turn.workspace_id).all_seated(connection, (member_id,)):
+                raise TurnParked(SEAT_REVOKED_MESSAGE)
+
     @DBOS.step(preemptible=True)
     async def _stream_once(self, round_input: _RoundInput) -> StreamResult:
         """One model round, memoized as a DBOS step: it streams the deltas live to the hub and
@@ -3273,6 +3286,7 @@ class TurnEngine:
         ready: _DispatchReady,
         find_usages: list[Usage],
     ) -> _HandlerOutput:
+        await self._enforce_authority_seat(ready.context.authority)
         tool = ready.effective.tool
         key = (
             f"{self.turn.id}/{ready.effective.call_id}/{bound.call.id}"

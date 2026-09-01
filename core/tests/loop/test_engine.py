@@ -1113,6 +1113,23 @@ async def _seed_turn(
     )
 
 
+async def _seat_member(workspace_id: UUID, email: str) -> UUID:
+    """One more seated member of this workspace. A call binds its requester as the authority the
+    dispatch seat gate reads, so a requester is a member row and not a bare id."""
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=email,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
+
+
 async def _unavailable_spawn(
     profile: str,
     payload: dict[str, object],
@@ -1257,7 +1274,9 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
         model_config = ConfigDict(extra="forbid")
 
     turn = await _seed_turn("queued", None)
-    founder, arrival = uuid4(), uuid4()
+    founder = await _seat_member(turn.workspace_id, "founder@example.com")
+    colleague = await _seat_member(turn.workspace_id, "colleague@example.com")
+    arrival = uuid4()
     seen: list[tuple[UUID | None, Audience, frozenset[str], dict[str, object]]] = []
     authorized: list[ExecutionAuthority] = []
 
@@ -1303,7 +1322,7 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
     )
     requesters = {
         turn.id: ActiveMessage(member_id=founder, rendered="founding request"),
-        arrival: ActiveMessage(member_id=uuid4(), rendered="arrival request"),
+        arrival: ActiveMessage(member_id=colleague, rendered="arrival request"),
     }
 
     bound = await _dispatch(
@@ -1396,15 +1415,16 @@ async def test_an_omitted_ref_binds_the_member_in_their_own_conversation_only(
         return ToolResult(content=(TextContent(text="ok"),))
 
     probe = ToolDef(name="bind_probe", description="d", input_model=StrictInput, handler=capture)
-    member = uuid4()
     own = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
     shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
     background = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
+    member = await _seat_member(own.workspace_id, "member@example.com")
+    sharer = await _seat_member(shared.workspace_id, "sharer@example.com")
     engines = (
         _engine(own, EchoModel(), tmp_path, member_id=member),
         replace(
             _engine(shared, EchoModel(), tmp_path),
-            turn=shared.model_copy(update={"speaker_member_id": member}),
+            turn=shared.model_copy(update={"speaker_member_id": sharer}),
         ),
         _engine(background, EchoModel(), tmp_path),
     )
@@ -1520,18 +1540,21 @@ async def test_a_speaker_refusal_names_the_member_refs_where_the_ref_was_offered
         raise SpeakerRequired("this act requires a speaking member")
 
     probe = ToolDef(name="gate_probe", description="d", input_model=StrictInput, handler=refuse)
-    founder, colleague, arrival = uuid4(), uuid4(), uuid4()
+    arrival = uuid4()
     shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
     own = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
     background = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
+    speaker = await _seat_member(shared.workspace_id, "speaker@example.com")
+    colleague = await _seat_member(shared.workspace_id, "colleague@example.com")
+    founder = await _seat_member(own.workspace_id, "founder@example.com")
     cases = (
         (
             replace(
                 _engine(shared, EchoModel(), tmp_path),
-                turn=shared.model_copy(update={"speaker_member_id": founder}),
+                turn=shared.model_copy(update={"speaker_member_id": speaker}),
             ),
             {
-                shared.id: ActiveMessage(member_id=founder, rendered="mine"),
+                shared.id: ActiveMessage(member_id=speaker, rendered="mine"),
                 arrival: ActiveMessage(member_id=colleague, rendered="no, mine"),
             },
         ),
@@ -6850,6 +6873,68 @@ async def test_a_revocation_during_the_model_call_stops_its_tool_dispatch(
                     side_effecting=True,
                 ),
             )
+        ),
+    )
+
+    with pytest.raises(TurnParked, match="seat was revoked"):
+        await engine.run()
+
+    assert called == []
+    assert await _turn_status(turn.id) == "parked"
+
+
+async def test_a_revocation_during_a_policy_hook_stops_its_tool_dispatch(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    member = await _seeded_member(turn.workspace_id)
+    called: list[bool] = []
+
+    @dataclass(frozen=True)
+    class WritingModel:
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            yield ToolCallStart(id="w1", name="write_after_revoke")
+            yield ToolCallDelta(id="w1", partial_json="{}")
+            yield Usage(input_tokens=1, output_tokens=1)
+
+    async def revoke(ctx: HookContext) -> HookOutcome:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.member)
+                .values(seated_at=None, updated_at=sa.func.now())
+                .where(tables.member.c.id == member)
+            )
+        return None
+
+    async def write_after_revoke(ctx: ToolContext, args: _NoArgs) -> ToolResult:
+        called.append(True)
+        return ToolResult(content=(TextContent(text="written"),))
+
+    engine = replace(
+        _engine(turn, WritingModel(), tmp_path, member_id=member),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="write_after_revoke",
+                    description="write",
+                    input_model=_NoArgs,
+                    handler=write_after_revoke,
+                    side_effecting=True,
+                ),
+            )
+        ),
+        hooks=HookChain(
+            hooks={
+                "pre_tool_use": (
+                    BoundHook(
+                        spec=HookSpec(event="pre_tool_use", handler=revoke),
+                        ext=context_for(
+                            "probe", frozenset(), audience=conversation_audience(member)
+                        ),
+                    ),
+                )
+            },
+            audience=conversation_audience(member),
         ),
     )
 

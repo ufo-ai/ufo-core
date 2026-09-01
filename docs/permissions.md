@@ -145,9 +145,10 @@ Admission (`core/src/ufo/runtime/surfaces/admission.py`) then holds four gates:
 - The seat gate: `seated_at` is set by the member row's own column default (no creation path can
   mint a member the agent refuses) and cleared only by an admin's revoke. The gate is the exact
   `MemberAuthority`; `WorkspaceAuthority` is always live. It is checked at admission, when a
-  message folds into a live turn, immediately before a probe token is minted, and again **every
-  model round** — a
-  revoke parks running turns. Three invariants protect the last admin: the last seated admin
+  message folds into a live turn, immediately before a probe token is minted, after every model
+  call, and against the exact call authority immediately before every tool handler — a revoke
+  during model or policy work parks the turn before its proposed side effect. Three invariants
+  protect the last admin: the last seated admin
   cannot be unseated, the last admin cannot be demoted, and a demotion may not leave zero seated
   admins.
 - Spend preflight (see [Spend caps](#spend-caps)). A refusal — seat or cap — parks instead of
