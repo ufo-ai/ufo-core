@@ -233,8 +233,9 @@ The audience atom is one rule; what each projection does with an admin differs b
 | Conversation rail | readable rows only; participation splits mine/others, never widens | same — the rail always reads as the member |
 | Per-agent conversations view | readable rows only | every row, but title/speakers/source are blanked on unreadable rows (label and owner email remain) |
 | Conversation search | label, owner, title, and speaker match over listable rows | title/speaker-words match only inside readable rows — search cannot probe a private thread without the audit |
-| Artifacts, portal listing | files of readable conversations | **every conversation's files, rooms and foreign included, no disclosure record** — the one read where private content reaches an admin unaudited; the `shared` scope toggle re-applies reader audiences even for admins |
+| Artifacts, portal listing | files of readable conversations under agents reached by visibility, ownership, or grant | same — admin-only agents and private conversations add no rows; a named agent read remains available |
 | Artifacts, `artifact` object kind | `audience_subjects` of own audience | same — the `admin` flag is accepted and ignored |
+| Sites, portal listing | own private sites plus workspace/public sites | same — another member's private site adds no row; its known detail and frame still admit an admin |
 | Radar / scheduled-runs feed | `readable_audiences`, unconditional | same — the projection takes no admin parameter |
 | Agent homepage, portal Home tab | the agent's own `visibility`: `workspace` → every member, `private` → the agent's owner | + private-agent homepages — admins reach every agent, so the frame admits them and the read hands out the link |
 | Memory (portal + `memory` kind) | `{shared, member:<me>}` | same — admin ignored |
@@ -256,11 +257,12 @@ Sites are the outlier by design: a hosted site carries its own `visibility` colu
 `private` (creator and workspace admins), `workspace` (any signed-in member), `public` (anyone
 with the link) — taken from the deploying member's request, defaulted from the conversation
 audience when unnamed (member or foreign audience → `private`, else `workspace`), and managed
-thereafter by its creator; an admin may only narrow to private. An agent's homepage is a pointer
-to one such site, and while bound the site's own column lies dormant: the frame, the read, and
-the `site` kind's listing all answer the agent's `visibility` instead — `workspace` admits every
-member, `private` the agent's owner and admins — so flipping the agent object is what moves the
-page. The bind itself is the re-gating act, so `set_homepage` gates like a visibility change:
+thereafter by its creator; an admin may only narrow to private. The frame and a named object read
+admit an admin to a private site, but a member listing does not use that role to discover it. An
+agent's homepage is a pointer to one such site, and while bound the site's own column lies dormant:
+the frame and read answer the agent's `visibility`, while the row stays out of ordinary listings —
+`workspace` admits every member, `private` the agent's owner and admins — so flipping the agent
+object is what moves the page. The bind itself is the re-gating act, so `set_homepage` gates like a visibility change:
 only the site's creator acting may bind it — another member's site would widen or narrow out
 from under its creator — another agent's page is bound only by that agent's owner or an admin,
 and a standing site needs a live speaker, a speakerless turn reaching

@@ -116,6 +116,7 @@ from ufo.sdk.models import (
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import (
     AGENT_KIND,
+    ARTIFACT_KIND,
     CREDENTIAL_KIND,
     MEMBER_KIND,
     ActionView,
@@ -4724,14 +4725,15 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
     """One object kind's rows for the signed-in member — the portal's index projection, answering
     through the kind's own visibility gate and searched, filtered, and ordered on the fields the
     kind declared. `agent` names one agent's namespace; without it the read fans out over every
-    agent the viewer's web audience holds, and every row names the agent that owns it either way,
-    so a section listing one kind across the workspace addresses each edit to the right lane. `q`
-    searches, `order_by`/`order` sort, `cursor` continues the walk, and every remaining
-    query parameter is an exact filter; a field the kind never declared is the kind's own refusal,
-    so the page offers only what the kind admits. A fanned-out read takes `OBJECT_FANOUT_LIMIT`
-    rows from each agent, re-ranks the merge, and continues on a compound token — one kind cursor
-    per agent still walking, so each agent's page resumes exactly where its own walk stopped and
-    an agent whose rows ran out leaves the token."""
+    agent the viewer's web audience holds, except that artifacts use the member's audience before
+    administration widens direct access. Every row names the agent that owns it either way, so a
+    section listing one kind across the workspace addresses each edit to the right lane. `q`
+    searches, `order_by`/`order` sort, `cursor` continues the walk, and every remaining query
+    parameter is an exact filter; a field the kind never declared is the kind's own refusal, so the
+    page offers only what the kind admits. A fanned-out read takes `OBJECT_FANOUT_LIMIT` rows from
+    each agent, re-ranks the merge, and continues on a compound token — one kind cursor per agent
+    still walking, so each agent's page resumes exactly where its own walk stopped and an agent
+    whose rows ran out leaves the token."""
     gated = await _object_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -4747,7 +4749,8 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
             return Response("order must be asc or desc", status_code=400)
     named = bool(request.query_params.get("agent", ""))
     cursor = request.query_params.get("cursor", "")
-    agents = audience.agents
+    fanout_agents = audience.member_agents if kind.kind == ARTIFACT_KIND else audience.agents
+    agents = fanout_agents
     continuations: dict[UUID, str] = {}
     if named:
         one = _object_agent(request, audience)
@@ -4759,7 +4762,7 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
         if walks is None:
             return Response("malformed fan-out cursor", status_code=400)
         continuations = walks
-        agents = tuple(agent for agent in audience.agents if agent.id in walks)
+        agents = tuple(agent for agent in fanout_agents if agent.id in walks)
     query = ObjectListQuery(
         query=request.query_params.get("q", ""),
         filters={
@@ -4780,7 +4783,7 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
                 kind.kind,
                 agent.id,
                 member_id,
-                admin=audience.admin,
+                admin=audience.admin and kind.kind != SITE_KIND,
                 query=(query if named else replace(query, cursor=continuations.get(agent.id, ""))),
             )
         except ValueError as error:

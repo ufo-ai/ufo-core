@@ -819,9 +819,11 @@ reads here, admin included, because participation there is the peer surface's li
 portal read can check it. What the data never scoped to an
 agent reads — and, where a verb exists, mutates:
 the team roster, source bindings, the deploy's member-fillable credential slots, memory, shared
-files, hosted sites, and usage. The wiki is a second reading of two of them, as a document rather
-than a listing: the workspace's shared memory set out under the kind that filed each item, and the
-roster as the way into one member's page, where that member's own memory answers to them alone.
+files, hosted sites, and usage. The Artifacts shelf is always a member browse: administration may
+open a known private agent, site, or link, but never adds that agent's files or another member's
+private site to the shelf. The wiki is a second reading of two of them, as a document rather than a
+listing: the workspace's shared memory set out under the kind that filed each item, and the roster
+as the way into one member's page, where that member's own memory answers to them alone.
 Four nightly passes write that document. One reads the whole page on the deploy model and retires
 the rows that repeat one another; the other three then write from what survived — the paragraph the
 page opens on, the paragraph over each band, and each member's part and what they carry. A page a

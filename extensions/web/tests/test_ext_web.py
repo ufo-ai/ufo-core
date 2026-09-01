@@ -3838,6 +3838,59 @@ async def test_artifact_objects_list_own_files_with_links_behind_one_fence(
     assert anonymous.status_code == 401
 
 
+async def test_artifact_fanout_does_not_discover_an_admin_only_agent(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The shelf's unnamed read uses the member's ordinary agent audience, so administration does
+    not expose a private agent's files. Naming that agent keeps the admin's direct access."""
+    client, workspace_id, _main_agent = web
+    creator_id, _creator_token = await _seed_member(workspace_id, "creator@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    private_agent = await _seed_status_agent(workspace_id, "private-files")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        private_agent,
+        queue_key="slack/private-agent",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    turn_id = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        private_agent,
+        seq=1,
+        inbound="share",
+        speaker_member_id=creator_id,
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                blob_key=f"artifacts/{uuid4()}/private-agent.txt",
+                workspace_id=workspace_id,
+                filename="private-agent.txt",
+                subject="private agent output",
+                media_type="text/plain",
+                size_bytes=3,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    headers = {"cookie": f"{SESSION_COOKIE}={admin_token}"}
+
+    shelf = (await client.get(OBJECT_ARTIFACTS_PATH, headers=headers)).json()
+    direct = (
+        await client.get(
+            f"{OBJECT_ARTIFACTS_PATH}?agent={private_agent}",
+            headers=headers,
+        )
+    ).json()
+
+    assert shelf["objects"] == []
+    assert _names(direct) == ["private-agent.txt"]
+
+
 async def test_artifacts_view_searches_media_and_shared_conversations(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -4668,9 +4721,9 @@ async def test_site_index_answers_through_the_kinds_own_gate(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """The generic index lists through the site kind's visibility gate: a shared site answers
-    every member, a private one only its creator and an admin — the same rows chat's `object_list`
-    answers, never a second ACL. Each row carries the kind's declared fields, and the page names
-    the vocabulary it filters and orders on."""
+    every member and a private one only its creator. An admin keeps the direct read but does not
+    discover the private row in a member listing. Each row carries the kind's declared fields, and
+    the page names the vocabulary it filters and orders on."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
@@ -4721,10 +4774,13 @@ async def test_site_index_answers_through_the_kinds_own_gate(
     admin_view = (
         await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()
-    assert sorted(row["name"].split("-")[0] for row in admin_view["objects"]) == [
-        "draft",
-        "landing",
-    ]
+    assert [row["name"].split("-")[0] for row in admin_view["objects"]] == ["landing"]
+    admin_private = await client.get(
+        f"/surface/web/objects/site/{site_object_name(conversation_id, 'draft')}?agent={agent_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
+    )
+    assert admin_private.status_code == 200
+    assert admin_private.json()["spec"] == {"visibility": "private"}
     by_name = {row["name"].split("-")[0]: row for row in m_view["objects"]}
     assert by_name["landing"]["visibility"] == "workspace"
     assert by_name["draft"]["visibility"] == "private"

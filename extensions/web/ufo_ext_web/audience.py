@@ -74,10 +74,13 @@ class WebAudience:
     """One member's view of the portal: whether they administer the workspace (and so see every
     agent), and the agents their web audience holds — every workspace-visible agent, an explicit
     grant, or a row they own, since the member who created an agent must be able to open it; a
-    member-private extension conversation grants only its agent chat."""
+    member-private extension conversation grants only its agent chat. `member_agents` is that
+    audience before the admin role widens direct access, so passive cross-agent listings never use
+    administration as discovery."""
 
     admin: bool
     agents: tuple[AgentSummary, ...]
+    member_agents: tuple[AgentSummary, ...]
     conversation_agents: tuple[AgentSummary, ...]
 
     def allows(self, agent_id: UUID) -> bool:
@@ -102,27 +105,25 @@ async def web_audience(
     )
     agents = await surface.list_agents()
     if member is None or not member.seated:
-        return WebAudience(admin=False, agents=(), conversation_agents=())
-    admin = member.admin
-    if admin:
-        return WebAudience(admin=True, agents=agents, conversation_agents=())
+        return WebAudience(admin=False, agents=(), member_agents=(), conversation_agents=())
     granted = await _granted_agent_ids(extension.store, lowered)
-    extension_agents = (
-        frozenset() if member is None else await surface.member_extension_agent_ids(member.id)
+    extension_agents = await surface.member_extension_agent_ids(member.id)
+    member_id = member.id
+    member_agents = tuple(
+        a
+        for a in agents
+        if a.visibility == "workspace"
+        or a.id in granted
+        or (member_id is not None and a.owner_member_id == member_id)
     )
-    member_id = None if member is None else member.id
+    conversation_agents = tuple(
+        agent for agent in agents if agent.id in extension_agents and agent.id not in granted
+    )
     return WebAudience(
-        admin=False,
-        agents=tuple(
-            a
-            for a in agents
-            if a.visibility == "workspace"
-            or a.id in granted
-            or (member_id is not None and a.owner_member_id == member_id)
-        ),
-        conversation_agents=tuple(
-            a for a in agents if a.id in extension_agents and a.id not in granted
-        ),
+        admin=member.admin,
+        agents=agents if member.admin else member_agents,
+        member_agents=member_agents,
+        conversation_agents=() if member.admin else conversation_agents,
     )
 
 
