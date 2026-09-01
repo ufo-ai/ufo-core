@@ -50,6 +50,7 @@ TASK_SCHEDULING_SKILL_MD = (
     "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/skills/task-scheduling/SKILL.md"
 )
 CREATE_APPLICATION_SKILL_MD = "core/src/ufo/runtime/skills/create-application/SKILL.md"
+CODING_SKILL_MD = "extensions/coding/ufo_ext_coding/skills/coding/SKILL.md"
 RADAR_HOME = "extensions/app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx"
 ARTIFACTS_HOME = "extensions/app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx"
 TASKS_VIEW = "extensions/web/frontend/src/views/Tasks.tsx"
@@ -689,6 +690,25 @@ CLAIMS = (
             r"\s+let subject = if self\.personal_domains\.contains\(domain\.as_str\(\)\) \{\n"
             r"\s+address\.clone\(\)"
         ),
+    ),
+    Claim(
+        claim="GitHub issue and pull-request reads/writes ride the connector account, never the"
+        " installed App",
+        corpus="references/troubleshooting.md",
+        phrase="a GitHub connector account that reads and writes issues and pull requests"
+        " through the API",
+        source=CODING_SKILL_MD,
+        pattern=r"Issue and pull-request reads and writes through the API ride the workspace's"
+        r" GitHub connector account",
+    ),
+    Claim(
+        claim="the installed GitHub App grants git clone/push, scoped to the repositories chosen"
+        " at install",
+        corpus="references/troubleshooting.md",
+        phrase="the installed ufo GitHub App that grants git access — clone and push — to the"
+        " repositories chosen when it was installed",
+        source=CODING_SKILL_MD,
+        pattern=r"choose the organization and which repositories the ufo App may reach",
     ),
 )
 
