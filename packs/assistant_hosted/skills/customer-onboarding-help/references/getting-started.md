@@ -62,8 +62,8 @@ when that address can enter more than one."
 - The invitation is spent atomically: if signup crashes partway, it is not silently lost and the team
   can confirm where it stands.
 - A customer cannot invite another company. Only the UFO team issues invitations.
-- One workspace per email domain. A colleague on a domain that already has a workspace joins it. A
-  second, separate workspace on the same domain is not something a customer can create today.
+- For a second workspace on the same email domain, read `not-yet.md` before answering. Do not infer
+  brand separation from agents, conversations, channels, members, or sources.
 - A workspace can have more than one admin, so "the admin" is not necessarily one person.
 - Do not name the command the team runs to issue an invitation, or where invitations are recorded.
   See `internal-only.md`.

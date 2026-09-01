@@ -564,15 +564,19 @@ CASES = (
     ),
     CapabilityCase(
         "one-time-reminder",
-        "Can you remind me once tomorrow morning, or do reminders have to repeat?",
-        corpus_scorer("capabilities.md", "not-yet.md"),
+        "Can you remind me once tomorrow morning, or do reminders have to repeat? If they do, "
+        "what is the supported way to stop it after tomorrow's run?",
+        corpus_scorer("not-yet.md"),
         samples=3,
         digest_tag="onboarding:one-time-reminder",
         rubric=(
             "The answer says the platform has no one-time reminder and every scheduled task uses "
             "a repeating schedule.",
-            "The answer does not say cron or invent a run_at or 'run once' field, a one-time or "
-            "one-shot toggle, or a settings page.",
+            "The answer offers the supported alternative: a repeating schedule carrying an expiry "
+            "after tomorrow's intended run.",
+            "The answer does not say cron, invent a run_at field, a one-time or one-shot toggle, "
+            "or a settings page, and does not offer manually pausing, deleting, or cancelling the "
+            "schedule after its first run.",
         ),
     ),
     CapabilityCase(
