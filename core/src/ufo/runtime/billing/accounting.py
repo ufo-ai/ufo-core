@@ -644,16 +644,8 @@ async def mint_usage_exports(
             )
         ).all()
     }
-    latest = (
-        sa.select(
-            tables.ledger_export.c.ledger_id,
-            sa.func.max(tables.ledger_export.c.to_amount).label("to_amount"),
-            sa.func.max(tables.ledger_export.c.to_micro_usd).label("to_micro_usd"),
-        )
-        .where(tables.ledger_export.c.consumer == consumer)
-        .group_by(tables.ledger_export.c.ledger_id)
-        .subquery()
-    )
+    latest_amount = sa.func.max(tables.ledger_export.c.to_amount)
+    latest_micro_usd = sa.func.max(tables.ledger_export.c.to_micro_usd)
     growth = (
         await connection.execute(
             sa.select(
@@ -667,17 +659,20 @@ async def mint_usage_exports(
                 tables.ledger.c.token_classes_complete,
                 tables.turn.c.byok.label("turn_byok"),
                 tables.ledger.c.updated_at,
-                sa.func.coalesce(latest.c.to_amount, 0).label("from_amount"),
-                sa.func.coalesce(latest.c.to_micro_usd, 0).label("from_micro_usd"),
+                sa.func.coalesce(latest_amount, 0).label("from_amount"),
+                sa.func.coalesce(latest_micro_usd, 0).label("from_micro_usd"),
             )
             .select_from(
                 tables.ledger.outerjoin(
                     tables.turn, tables.turn.c.id == tables.ledger.c.turn_id
-                ).outerjoin(latest, latest.c.ledger_id == tables.ledger.c.id)
+                ).outerjoin(
+                    tables.ledger_export,
+                    (tables.ledger_export.c.consumer == consumer)
+                    & (tables.ledger_export.c.ledger_id == tables.ledger.c.id),
+                )
             )
             .where(
                 tables.ledger.c.workspace_id == workspace_id,
-                sa.or_(latest.c.ledger_id.is_(None), tables.ledger.c.amount > latest.c.to_amount),
                 sa.or_(
                     (tables.ledger.c.dimension == TOKENS_DIMENSION)
                     & (tables.ledger.c.created_at >= floor),
@@ -689,6 +684,19 @@ async def mint_usage_exports(
                     & (tables.turn.c.updated_at >= floor),
                 ),
             )
+            .group_by(
+                tables.ledger.c.id,
+                tables.ledger.c.workspace_id,
+                tables.ledger.c.amount,
+                tables.ledger.c.priced_micro_usd,
+                tables.ledger.c.dimension,
+                tables.ledger.c.model,
+                tables.ledger.c.byok,
+                tables.ledger.c.token_classes_complete,
+                tables.turn.c.byok,
+                tables.ledger.c.updated_at,
+            )
+            .having(sa.or_(latest_amount.is_(None), tables.ledger.c.amount > latest_amount))
         )
     ).all()
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert

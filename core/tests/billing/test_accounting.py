@@ -870,6 +870,8 @@ async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> 
 
 CONSUMER = "metronome"
 PAST_EXPORT_MARGIN_SECONDS = accounting.EXPORT_SETTLE_MARGIN_SECONDS + 100
+QUERY_PLAN_HISTORY_ROWS = 5_000
+QUERY_PLAN_MAX_MS = 10.0
 
 
 async def _settle_turn(connection: AsyncConnection, turn_id: UUID, age_seconds: int) -> None:
@@ -1134,6 +1136,119 @@ async def test_usage_export_floor_consumer_and_workspace_scoping(db: None) -> No
 
     (theirs,) = await _pending(other_workspace)
     assert theirs.amount == 7
+
+
+async def test_usage_export_reads_latest_by_consumer_and_ledger(
+    db: None, database_url: str
+) -> None:
+    if not database_url.startswith("postgresql"):
+        pytest.skip("query plans are a PostgreSQL contract")
+    now = datetime.now(UTC)
+    target_ledger_id = UUID(int=(1 << 128) - 1)
+    async with workspace_tx() as connection:
+        target_workspace, _ = await _seed_turn(connection)
+        history_workspace, _ = await _seed_turn(connection)
+        history_ledger_ids = tuple(UUID(int=index + 1) for index in range(QUERY_PLAN_HISTORY_ROWS))
+        await connection.execute(
+            sa.insert(tables.ledger),
+            [
+                {
+                    "id": ledger_id,
+                    "workspace_id": history_workspace,
+                    "turn_id": None,
+                    "dimension": TOKENS_DIMENSION,
+                    "amount": 1,
+                    "prompt_tokens": 1,
+                    "input_tokens": 1,
+                    "byok": False,
+                    "token_classes_complete": True,
+                    "priced_micro_usd": 1,
+                    "model": "claude-opus-4-8",
+                    "price_digest": PRICE_DIGEST,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for ledger_id in history_ledger_ids
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.ledger_export),
+            [
+                {
+                    "consumer": CONSUMER,
+                    "ledger_id": ledger_id,
+                    "from_amount": 0,
+                    "workspace_id": history_workspace,
+                    "to_amount": 1,
+                    "from_micro_usd": 0,
+                    "to_micro_usd": 1,
+                    "byok": False,
+                    "occurred_at": now,
+                    "acked_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for ledger_id in history_ledger_ids
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=target_ledger_id,
+                workspace_id=target_workspace,
+                turn_id=None,
+                dimension=TOKENS_DIMENSION,
+                amount=1,
+                prompt_tokens=1,
+                input_tokens=1,
+                byok=False,
+                token_classes_complete=True,
+                priced_micro_usd=1,
+                model="claude-opus-4-8",
+                price_digest=PRICE_DIGEST,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        captured: list[tuple[str, tuple[object, ...]]] = []
+
+        def record(
+            sync_connection: sa.Connection,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            if statement.lstrip().startswith("SELECT") and "ledger_export" in statement:
+                assert isinstance(parameters, tuple)
+                captured.append((statement, parameters))
+
+        sa.event.listen(connection.sync_connection, "before_cursor_execute", record)
+        try:
+            await accounting.mint_usage_exports(
+                connection,
+                target_workspace,
+                CONSUMER,
+                now - timedelta(days=7),
+                lambda model: None,
+            )
+        finally:
+            sa.event.remove(connection.sync_connection, "before_cursor_execute", record)
+        assert len(captured) == 1
+        statement, parameters = captured[0]
+        explained = (
+            await connection.exec_driver_sql(
+                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {statement}", parameters
+            )
+        ).scalar_one()[0]
+    nodes = [explained["Plan"]]
+    for node in nodes:
+        nodes.extend(node.get("Plans", ()))
+    export_nodes = [node for node in nodes if node.get("Relation Name") == "ledger_export"]
+    assert export_nodes
+    assert all(node["Node Type"] != "Seq Scan" for node in export_nodes)
+    assert sum(node["Actual Rows"] * node["Actual Loops"] for node in export_nodes) <= 2
+    assert explained["Execution Time"] < QUERY_PLAN_MAX_MS
 
 
 async def _balance_of(connection: AsyncConnection, workspace_id: UUID) -> int:
