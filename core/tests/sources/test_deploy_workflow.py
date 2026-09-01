@@ -4451,24 +4451,23 @@ def test_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> None
     ranked = [query for query in census if query.startswith("top(")]
     assert len(ranked) == 5
     assert all("'max', 'desc')" in query for query in ranked)
-    reduced = dashboard.split("metric_query {")[1:]
-    assert len(reduced) == 8
-    assert all(block.splitlines()[3].strip() == 'aggregator = "max"' for block in reduced)
+    funnel_queries = dashboard.split("metric_query {")[1:]
+    assert len(funnel_queries) == 2
+    assert all(block.splitlines()[3].strip() == 'aggregator = "max"' for block in funnel_queries)
 
 
-def test_every_product_card_shows_its_count_and_prior_day_change() -> None:
+def test_every_product_card_shows_its_count_and_history() -> None:
     dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
 
     product = dashboard.split('resource "datadog_dashboard" "product" {', 1)[1]
 
-    assert product.count("change_definition {") == 6
+    assert product.count("query_value_definition {") == 6
     assert product.count('aggregator = "max"') == 8
-    assert product.count('compare_to    = "day_before"') == 6
-    assert product.count('change_type   = "relative"') == 6
-    assert product.count("show_present  = true") == 6
+    assert product.count("timeseries_background {") == 6
+    assert product.count('timeseries_background {\n        type = "bars"\n      }') == 6
+    assert "change_definition {" not in product
     for stage in ("seated", "connector", "invited", "chatted", "active_7d", "paid"):
-        assert f'name       = "{stage}"' in product
-        assert f'formula_expression = "{stage}"' in product
+        assert f"stage:{stage}" in product
 
 
 def test_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
