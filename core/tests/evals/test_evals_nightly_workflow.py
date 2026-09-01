@@ -501,6 +501,17 @@ def test_the_summary_requires_every_memory_ingestion_report(memory_nightly, tmp_
     assert all(name in rendered for name in memory_nightly.SMOKE_REPORT_CASES)
 
 
+def test_memory_ingestion_plans_one_shard_per_report(memory_nightly) -> None:
+    full = memory_nightly.ingestion_shards(smoke=False)
+    smoke = memory_nightly.ingestion_shards(smoke=True)
+
+    assert {shard.report: shard.cases for shard in full} == memory_nightly.FULL_REPORT_CASES
+    assert {shard.report: shard.cases for shard in smoke} == memory_nightly.SMOKE_REPORT_CASES
+    assert len(full) == 9
+    assert len(smoke) == 6
+    assert len({shard.artifact for shard in full}) == len(full)
+
+
 def test_memory_ingestion_inputs_pin_luna_and_the_corpus(memory_nightly, tmp_path: Path) -> None:
     root = tmp_path / "input"
     snapshot = tmp_path / "snapshot"
@@ -541,11 +552,14 @@ def test_memory_ingestion_smoke_uses_supported_cases(memory_nightly) -> None:
 
 def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly) -> None:
     job = workflow["jobs"]["memory-ingestion"]
+    plan = workflow["jobs"]["plan"]
+    plan_step = next(step for step in plan["steps"] if step.get("id") == "matrix")
     fetch = next(step for step in job["steps"] if step.get("name") == "Fetch the pinned corpora")
     prepare = next(
         step for step in job["steps"] if step.get("name") == "Prepare the memory-ingestion stack"
     )
     run = next(step for step in job["steps"] if step.get("name") == "Run memory ingestion")
+    verify = next(step for step in job["steps"] if step.get("name") == "Verify memory ingestion")
     uploads = [
         step["with"]["name"]
         for step in job["steps"]
@@ -555,22 +569,31 @@ def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly
     assert run["timeout-minutes"] < job["timeout-minutes"] < RUNNER_CEILING_MINUTES
     assert job["strategy"] == {
         "fail-fast": False,
-        "matrix": {"model": "${{ fromJSON(needs.plan.outputs.models) }}"},
+        "matrix": {
+            "model": "${{ fromJSON(needs.plan.outputs.models) }}",
+            "shard": "${{ fromJSON(needs.plan.outputs.memory_ingestion_shards) }}",
+        },
     }
+    assert plan["outputs"]["memory_ingestion_shards"] == (
+        "${{ steps.matrix.outputs.memory_ingestion_shards }}"
+    )
+    assert "nightly_memory_ingestion.py plan" in plan_step["run"]
     assert job["env"]["EVAL_MODEL"] == "${{ matrix.model.id }}"
     assert fetch["env"]["LONGMEM_URL"] == LONGMEM_CLEANED.url
     assert fetch["env"]["LOCOMO_URL"] == LOCOMO.url
-    assert '"$SWEEP_SMOKE"' in prepare["run"] and '"$SWEEP_SMOKE"' in run["run"]
+    assert '"$SWEEP_SMOKE"' in prepare["run"] and '"$SWEEP_SMOKE"' in verify["run"]
     assert '--model "$EVAL_MODEL"' in prepare["run"]
     assert '--reasoning "$EVAL_REASONING"' in prepare["run"]
-    assert '--model "$EVAL_MODEL"' in run["run"]
-    assert "nightly_memory_ingestion.py verify" in run["run"]
+    assert '--report "$REPORT"' in prepare["run"]
+    assert "nightly_memory_ingestion.py verify" in verify["run"]
+    assert '--model "$EVAL_MODEL" --report "$REPORT"' in verify["run"]
+    assert verify["if"] == "always()"
     assert uploads == [
-        "eval-run-records-memory-ingestion-${{ matrix.model.label }}",
-        "eval-memory-ingestion-state-${{ matrix.model.label }}",
-        "eval-stack-logs-memory-ingestion-${{ matrix.model.label }}",
+        "eval-run-records-memory-ingestion-${{ matrix.model.label }}-${{ matrix.shard.artifact }}",
+        "eval-memory-ingestion-state-${{ matrix.model.label }}-${{ matrix.shard.artifact }}",
+        "eval-stack-logs-memory-ingestion-${{ matrix.model.label }}-${{ matrix.shard.artifact }}",
     ]
-    assert "memory-ingestion-state/$MODEL_LABEL/readiness.json" in run["run"]
+    assert "memory-ingestion-state/$MODEL_LABEL/$REPORT/readiness.json" in verify["run"]
     state_upload = next(
         step
         for step in job["steps"]
@@ -580,18 +603,18 @@ def test_memory_ingestion_is_a_complete_independent_job(workflow, memory_nightly
     assert state_upload["with"]["path"] == "memory-ingestion-state"
 
 
-def test_a_failing_memory_ingestion_case_ends_the_step_red(workflow) -> None:
-    """`set +e` is there so `verify` still writes the state and the record over a failed stack, and
-    `verify` compares the record's shape and never reads `case.passed`. The stack's own code is the
-    only thing left that can turn the night red, so the step ends on it."""
-    run = next(
-        step
-        for step in workflow["jobs"]["memory-ingestion"]["steps"]
-        if step.get("name") == "Run memory ingestion"
+def test_memory_ingestion_verifies_after_the_run_step_fails(workflow) -> None:
+    steps = workflow["jobs"]["memory-ingestion"]["steps"]
+    run_index = next(
+        index for index, step in enumerate(steps) if step.get("name") == "Run memory ingestion"
+    )
+    verify_index = next(
+        index for index, step in enumerate(steps) if step.get("name") == "Verify memory ingestion"
     )
 
-    assert "stack_status=$?" in run["run"]
-    assert run["run"].rstrip().endswith('exit "$stack_status"')
+    assert steps[run_index]["timeout-minutes"] == 60
+    assert steps[verify_index]["if"] == "always()"
+    assert run_index < verify_index
 
 
 def test_memory_ingestion_verification_accepts_scores_and_rejects_missing_cases(
@@ -599,25 +622,24 @@ def test_memory_ingestion_verification_accepts_scores_and_rejects_missing_cases(
 ) -> None:
     reports = tmp_path / "reports"
     runs_root = tmp_path / "runs"
+    report_name = "memory_ingestion.locomo.information_extraction"
     report_rows = []
-    for name, count in memory_nightly.SMOKE_REPORT_CASES.items():
-        report_rows.append(
-            {
-                "name": name,
-                "suite": "capability",
-                "digest": f"sha256:{name}",
-                "target_model": "z-ai/glm-5.3",
-                "cases": [
-                    {
-                        "name": f"{name}-{index}",
-                        "passed": index % 2 == 0,
-                        "reason": "score",
-                        "evidence": {"prompt": "p", "response": "r"},
-                    }
-                    for index in range(count)
-                ],
-            }
-        )
+    report_rows.append(
+        {
+            "name": report_name,
+            "suite": "capability",
+            "digest": f"sha256:{report_name}",
+            "target_model": "z-ai/glm-5.3",
+            "cases": [
+                {
+                    "name": f"{report_name}-0",
+                    "passed": True,
+                    "reason": "score",
+                    "evidence": {"prompt": "p", "response": "r"},
+                }
+            ],
+        }
+    )
     run = {
         "id": str(uuid4()),
         "created_at": "2026-08-19T05:00:00Z",
@@ -647,19 +669,40 @@ def test_memory_ingestion_verification_accepts_scores_and_rejects_missing_cases(
     state.write_text(readiness.model_dump_json())
     output = tmp_path / "state" / "readiness.json"
 
-    memory_nightly.verify(reports, runs_root, output, smoke=True, model="z-ai/glm-5.3")
+    memory_nightly.verify(
+        reports,
+        runs_root,
+        output,
+        smoke=True,
+        model="z-ai/glm-5.3",
+        report=report_name,
+    )
     assert output.read_text() == state.read_text()
 
     report_rows[0]["target_model"] = "claude-opus-5"
     (reports / "runs" / "run.json").write_text(json.dumps(run))
     with pytest.raises(RuntimeError, match="memory ingestion recall used"):
-        memory_nightly.verify(reports, runs_root, output, smoke=True, model="z-ai/glm-5.3")
+        memory_nightly.verify(
+            reports,
+            runs_root,
+            output,
+            smoke=True,
+            model="z-ai/glm-5.3",
+            report=report_name,
+        )
     report_rows[0]["target_model"] = "z-ai/glm-5.3"
 
     report_rows[0]["cases"].pop()
     (reports / "runs" / "run.json").write_text(json.dumps(run))
     with pytest.raises(RuntimeError, match="report cases differ"):
-        memory_nightly.verify(reports, runs_root, output, smoke=True, model="z-ai/glm-5.3")
+        memory_nightly.verify(
+            reports,
+            runs_root,
+            output,
+            smoke=True,
+            model="z-ai/glm-5.3",
+            report=report_name,
+        )
 
 
 def test_the_archive_survives_a_memory_ingestion_job_that_wrote_no_state(workflow) -> None:
@@ -730,6 +773,101 @@ def _archive(
     }
     (root / "runs").mkdir(parents=True, exist_ok=True)
     (root / "runs" / f"{run['id']}.json").write_text(json.dumps(run))
+
+
+def _complete_memory_ingestion_smoke(
+    planner, memory_nightly, root: Path
+) -> dict[tuple[str, str], Path]:
+    tasks = {task.name: task for task in TASKS}
+    for job in planner.sweep_jobs(smoke=True):
+        for suite in job.shard.suites:
+            cases = len(tasks[suite].cases)
+            _archive(
+                root,
+                job.shard.label,
+                suite,
+                passed=cases,
+                scored=cases,
+                digest=f"sha256:{suite}",
+                target_model=job.expected_model or "google/gemini-3.7-flash",
+            )
+    states = {}
+    for model in planner.NIGHTLY_MODELS:
+        for report, cases in memory_nightly.SMOKE_REPORT_CASES.items():
+            _archive(
+                root,
+                "memory-ingestion",
+                report,
+                passed=cases,
+                scored=cases,
+                digest=f"sha256:{report}/{model.id}",
+                target_model=model.id,
+            )
+            readiness = IngestionReadiness(
+                snapshot_digest=f"snapshot:{report}",
+                corpus_digest=f"corpus:{report}/{model.id}",
+                derivation_model=DERIVATION_MODEL,
+                workspace_id=uuid4(),
+                source_id=uuid4(),
+                pages_root=root / "pages" / model.label / report,
+                page_count=5,
+                memory_count=7,
+                chunk_count=7,
+                asker_email="asker@example.com",
+                evidence=(),
+            )
+            state = root / "state" / model.label / report / "readiness.json"
+            state.parent.mkdir(parents=True)
+            state.write_text(readiness.model_dump_json())
+            states[model.id, report] = state
+    return states
+
+
+def test_a_complete_memory_cohort_allows_stochastic_producer_state(
+    planner, memory_nightly, tmp_path: Path
+) -> None:
+    summary = _script("eval_sweep_summary")
+    states = _complete_memory_ingestion_smoke(planner, memory_nightly, tmp_path)
+    report = next(iter(memory_nightly.SMOKE_REPORT_CASES))
+    readiness = [
+        IngestionReadiness.model_validate_json(states[model.id, report].read_bytes())
+        for model in planner.NIGHTLY_MODELS
+    ]
+
+    assert len({state.snapshot_digest for state in readiness}) == 1
+    assert len({state.corpus_digest for state in readiness}) == len(planner.NIGHTLY_MODELS)
+    summary.require_comparable(tmp_path, smoke=True, memory_ingestion=True)
+
+
+def test_a_memory_cohort_rejects_cross_model_snapshot_drift(
+    planner, memory_nightly, tmp_path: Path
+) -> None:
+    summary = _script("eval_sweep_summary")
+    states = _complete_memory_ingestion_smoke(planner, memory_nightly, tmp_path)
+    report = next(iter(memory_nightly.SMOKE_REPORT_CASES))
+    state = states[planner.NIGHTLY_MODELS[1].id, report]
+    readiness = IngestionReadiness.model_validate_json(state.read_bytes())
+    state.write_text(
+        readiness.model_copy(update={"snapshot_digest": "different"}).model_dump_json()
+    )
+
+    with pytest.raises(RuntimeError, match="memory ingestion snapshot mismatch") as error:
+        summary.require_comparable(tmp_path, smoke=True, memory_ingestion=True)
+    assert report in str(error.value)
+
+
+def test_a_memory_cohort_rejects_a_missing_report_readiness(
+    planner, memory_nightly, tmp_path: Path
+) -> None:
+    summary = _script("eval_sweep_summary")
+    states = _complete_memory_ingestion_smoke(planner, memory_nightly, tmp_path)
+    report = next(iter(memory_nightly.SMOKE_REPORT_CASES))
+    model = planner.NIGHTLY_MODELS[1]
+    states[model.id, report].unlink()
+
+    with pytest.raises(RuntimeError, match="missing memory ingestion readiness") as error:
+        summary.require_comparable(tmp_path, smoke=True, memory_ingestion=True)
+    assert report in str(error.value) and model.id in str(error.value)
 
 
 def test_the_trend_submits_counts_per_suite_never_a_rate(tmp_path: Path) -> None:
@@ -808,23 +946,48 @@ def test_memory_ingestion_state_reports_fact_and_empty_evidence_counts(tmp_path:
         ),
     )
     model = metrics.NIGHTLY_MODELS[0]
-    state = tmp_path / metrics.MEMORY_STATE_ROOT / model.label / "readiness.json"
+    report = "memory_ingestion.locomo.multi_hop"
+    state = tmp_path / metrics.MEMORY_STATE_ROOT / model.label / report / "readiness.json"
     state.parent.mkdir(parents=True)
     state.write_text(readiness.model_dump_json())
+    second_report = "memory_ingestion.longmem.abstention"
+    second_state = (
+        tmp_path / metrics.MEMORY_STATE_ROOT / model.label / second_report / "readiness.json"
+    )
+    second_state.parent.mkdir(parents=True)
+    second_state.write_text(
+        readiness.model_copy(
+            update={
+                "pages_root": tmp_path / "second-pages",
+                "page_count": 0,
+                "memory_count": 0,
+                "chunk_count": 0,
+                "evidence": (),
+            }
+        ).model_dump_json()
+    )
 
     payload = metrics.series(tmp_path, mode="sweep", timestamp=1)
     values = {
-        point["metric"]: point["points"][0]["value"]
+        (
+            next(tag for tag in point["tags"] if tag.startswith("memory_report:")),
+            point["metric"],
+        ): point["points"][0]["value"]
         for point in payload["series"]
         if point["metric"].startswith("ufo.evals.memory_ingestion.")
     }
 
     assert values == {
-        metrics.MEMORY_PAGE_METRIC: 9,
-        metrics.MEMORY_FACT_METRIC: 41,
-        metrics.MEMORY_CHUNK_METRIC: 41,
-        metrics.MEMORY_EVIDENCE_METRIC: 2,
-        metrics.MEMORY_EMPTY_EVIDENCE_METRIC: 1,
+        (f"memory_report:{report}", metrics.MEMORY_PAGE_METRIC): 9,
+        (f"memory_report:{report}", metrics.MEMORY_FACT_METRIC): 41,
+        (f"memory_report:{report}", metrics.MEMORY_CHUNK_METRIC): 41,
+        (f"memory_report:{report}", metrics.MEMORY_EVIDENCE_METRIC): 2,
+        (f"memory_report:{report}", metrics.MEMORY_EMPTY_EVIDENCE_METRIC): 1,
+        (f"memory_report:{second_report}", metrics.MEMORY_PAGE_METRIC): 0,
+        (f"memory_report:{second_report}", metrics.MEMORY_FACT_METRIC): 0,
+        (f"memory_report:{second_report}", metrics.MEMORY_CHUNK_METRIC): 0,
+        (f"memory_report:{second_report}", metrics.MEMORY_EVIDENCE_METRIC): 0,
+        (f"memory_report:{second_report}", metrics.MEMORY_EMPTY_EVIDENCE_METRIC): 0,
     }
     memory_points = [
         point
@@ -832,6 +995,9 @@ def test_memory_ingestion_state_reports_fact_and_empty_evidence_counts(tmp_path:
         if point["metric"].startswith("ufo.evals.memory_ingestion.")
     ]
     assert all(f"target_model:{model.id}" in point["tags"] for point in memory_points)
+    assert {
+        tag for point in memory_points for tag in point["tags"] if tag.startswith("memory_report:")
+    } == {f"memory_report:{report}", f"memory_report:{second_report}"}
 
 
 def test_a_sweep_that_scored_nothing_submits_nothing(tmp_path: Path) -> None:
@@ -850,9 +1016,14 @@ def test_the_trend_point_lands_after_the_archive_it_refers_to(workflow) -> None:
     ]
 
     assert named.index("Upload the sweep archive") < named.index("Archive the sweep")
-    assert named.index("Archive the sweep") < named.index("Require a comparable cohort")
-    assert named.index("Require a comparable cohort") < named.index("Report the scores to Datadog")
+    complete = "Require a complete fixed-case cohort"
+    assert named.index("Archive the sweep") < named.index(complete)
+    assert named.index(complete) < named.index("Report the scores to Datadog")
     assert named.index("Archive the sweep") < named.index("Report the scores to Datadog")
+    comparable = next(
+        step for step in workflow["jobs"]["archive"]["steps"] if step.get("name") == complete
+    )
+    assert comparable["if"] == "always()"
 
 
 def test_a_pull_request_smoke_is_not_a_trend_point(workflow) -> None:

@@ -255,6 +255,79 @@ def test_builder_matches_memory_100_and_builds_deterministic_locomo_cases(
     smoke_snapshot = load_snapshot(smoke_output)
     assert {case.id for case in smoke_snapshot.cases} == set(smoke_ids)
     assert all(case.samples == 3 for case in smoke_snapshot.cases)
+    smoke_report_key = (smoke_snapshot.cases[0].corpus, smoke_snapshot.cases[0].category)
+    smoke_report_output = tmp_path / "smoke-report"
+    MemoryIngestionBuilder(
+        longmem,
+        locomo,
+        smoke_report_output,
+        longmem_asset=longmem_asset,
+        locomo_asset=locomo_asset,
+        notices_file=notices,
+    ).run(smoke_ids, samples=3, report=smoke_report_key)
+    smoke_report = load_snapshot(smoke_report_output)
+    assert smoke_report.pages == smoke_snapshot.pages
+    assert {(case.corpus, case.category) for case in smoke_report.cases} == {smoke_report_key}
+    locomo_output = tmp_path / "locomo-report"
+    MemoryIngestionBuilder(
+        longmem,
+        locomo,
+        locomo_output,
+        longmem_asset=longmem_asset,
+        locomo_asset=locomo_asset,
+        notices_file=notices,
+    ).run(report=("locomo", "multi_hop"))
+    locomo_report = load_snapshot(locomo_output)
+    assert len(locomo_report.cases) == 18
+    assert {(case.corpus, case.category) for case in locomo_report.cases} == {
+        ("locomo", "multi_hop")
+    }
+    assert locomo_report.pages == snapshot.pages
+    locomo_readiness = tmp_path / "locomo-readiness.json"
+    locomo_readiness.write_text(
+        IngestionReadiness(
+            snapshot_digest=locomo_report.manifest.digest,
+            corpus_digest="sha256:" + "1" * 64,
+            derivation_model=DERIVATION_MODEL,
+            workspace_id=uuid4(),
+            source_id=uuid4(),
+            pages_root=tmp_path / "locomo-pages",
+            page_count=len(locomo_report.pages),
+            memory_count=0,
+            chunk_count=0,
+            asker_email="asker@eval.invalid",
+            evidence=tuple(
+                DerivedEvidence(source_ref=source_ref, memory_ids=())
+                for source_ref in sorted(
+                    {ref for case in locomo_report.cases for ref in case.evidence_refs}
+                )
+            ),
+        ).model_dump_json()
+    )
+    locomo_run = load_memory_ingestion(locomo_output, locomo_readiness)
+    assert tuple(task.name for task in locomo_run.tasks) == ("memory_ingestion.locomo.multi_hop",)
+    abstention_output = tmp_path / "abstention-report"
+    MemoryIngestionBuilder(
+        longmem,
+        locomo,
+        abstention_output,
+        longmem_asset=longmem_asset,
+        locomo_asset=locomo_asset,
+        notices_file=notices,
+    ).run(report=("longmem", "abstention"))
+    abstention_report = load_snapshot(abstention_output)
+    assert len(abstention_report.cases) == 6
+    assert not any(case.evidence_refs for case in abstention_report.cases)
+    assert abstention_report.pages == snapshot.pages
+    with pytest.raises(ValueError, match=r"report longmem\.unknown has no cases"):
+        MemoryIngestionBuilder(
+            longmem,
+            locomo,
+            tmp_path / "unknown-report",
+            longmem_asset=longmem_asset,
+            locomo_asset=locomo_asset,
+            notices_file=notices,
+        ).run(report=("longmem", "unknown"))
 
 
 def _snapshot(root: Path, samples: int = 1) -> None:

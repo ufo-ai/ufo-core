@@ -75,34 +75,34 @@ def series(root: Path, mode: str, timestamp: int) -> dict:
                         }
                     )
     for model in NIGHTLY_MODELS:
-        state_path = root / MEMORY_STATE_ROOT / model.label / "readiness.json"
-        if not state_path.exists():
-            continue
-        readiness = IngestionReadiness.model_validate_json(state_path.read_bytes())
-        tags = [
-            "suite:memory_ingestion",
-            "shard:memory-ingestion",
-            f"mode:{mode}",
-            f"target_model:{model.id}",
-        ]
-        for metric, value in (
-            (MEMORY_PAGE_METRIC, readiness.page_count),
-            (MEMORY_FACT_METRIC, readiness.memory_count),
-            (MEMORY_CHUNK_METRIC, readiness.chunk_count),
-            (MEMORY_EVIDENCE_METRIC, len(readiness.evidence)),
-            (
-                MEMORY_EMPTY_EVIDENCE_METRIC,
-                sum(not evidence.memory_ids for evidence in readiness.evidence),
-            ),
-        ):
-            points.append(
-                {
-                    "metric": metric,
-                    "type": GAUGE,
-                    "tags": tags,
-                    "points": [{"timestamp": timestamp, "value": value}],
-                }
-            )
+        state_root = root / MEMORY_STATE_ROOT / model.label
+        for state_path in sorted(state_root.glob("*/readiness.json")):
+            readiness = IngestionReadiness.model_validate_json(state_path.read_bytes())
+            tags = [
+                "suite:memory_ingestion",
+                "shard:memory-ingestion",
+                f"memory_report:{state_path.parent.name}",
+                f"mode:{mode}",
+                f"target_model:{model.id}",
+            ]
+            for metric, value in (
+                (MEMORY_PAGE_METRIC, readiness.page_count),
+                (MEMORY_FACT_METRIC, readiness.memory_count),
+                (MEMORY_CHUNK_METRIC, readiness.chunk_count),
+                (MEMORY_EVIDENCE_METRIC, len(readiness.evidence)),
+                (
+                    MEMORY_EMPTY_EVIDENCE_METRIC,
+                    sum(not evidence.memory_ids for evidence in readiness.evidence),
+                ),
+            ):
+                points.append(
+                    {
+                        "metric": metric,
+                        "type": GAUGE,
+                        "tags": tags,
+                        "points": [{"timestamp": timestamp, "value": value}],
+                    }
+                )
     if not points:
         raise SystemExit(f"no run record under {root} — the sweep recorded no score to submit")
     return {"series": points}

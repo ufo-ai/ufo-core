@@ -19,10 +19,12 @@ from nightly_eval_matrix import NIGHTLY_MODELS, sweep_jobs
 from nightly_memory_ingestion import FULL_REPORT_CASES, SMOKE_REPORT_CASES
 
 from evals.harness.viewer import load_runs, write_viewer
+from evals.memory_ingestion.materialize import IngestionReadiness
 from evals.registry import TASKS
 
 REASON_LIMIT = 240
 NOT_RECORDED = "Not recorded"
+MEMORY_STATE_ROOT = Path("state")
 EXPECTED_FULL_EXCLUSIONS = frozenset(
     {
         ("skill_loading_member", "bias-ach-explainer-block-off"),
@@ -54,6 +56,31 @@ def _matches(planned: PlannedRun, recorded: RecordedRun) -> bool:
 def _format_run(run: PlannedRun | RecordedRun) -> str:
     label, suite, model = run
     return f"{label}/{suite} ({model or 'fixed agent model'})"
+
+
+def _memory_readiness_errors(root: Path, smoke: bool) -> tuple[str, ...]:
+    reports = SMOKE_REPORT_CASES if smoke else FULL_REPORT_CASES
+    snapshots: dict[str, dict[str, str]] = {report: {} for report in reports}
+    missing = []
+    for model in NIGHTLY_MODELS:
+        for report in reports:
+            path = root / MEMORY_STATE_ROOT / model.label / report / "readiness.json"
+            if not path.is_file():
+                missing.append(f"{report} ({model.id})")
+                continue
+            readiness = IngestionReadiness.model_validate_json(path.read_bytes())
+            snapshots[report][model.id] = readiness.snapshot_digest
+    mismatched = [
+        f"{report}: " + ", ".join(f"{model} {digest}" for model, digest in sorted(by_model.items()))
+        for report, by_model in snapshots.items()
+        if len(set(by_model.values())) > 1
+    ]
+    errors = []
+    if missing:
+        errors.append("missing memory ingestion readiness: " + ", ".join(missing))
+    if mismatched:
+        errors.append("memory ingestion snapshot mismatch: " + "; ".join(mismatched))
+    return tuple(errors)
 
 
 def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
@@ -180,8 +207,10 @@ def require_comparable(root: Path, smoke: bool, memory_ingestion: bool = False) 
             "expected exclusions absent: "
             + ", ".join(f"{suite}/{case} ({model})" for suite, case, model in absent_exclusions)
         )
+    if memory_ingestion:
+        errors.extend(_memory_readiness_errors(root, smoke))
     if errors:
-        raise RuntimeError("incomparable sweep — " + "; ".join(errors))
+        raise RuntimeError("incomplete fixed-case cohort — " + "; ".join(errors))
 
 
 def main(argv: list[str] | None = None) -> None:

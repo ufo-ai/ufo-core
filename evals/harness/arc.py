@@ -24,7 +24,7 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from evals.harness.capability import WorkspaceFile, source_digest
-from evals.harness.harness import EvalCaseResult, Json, JsonObject
+from evals.harness.harness import EvalCaseResult, Json, JsonObject, infra_owned_fault
 from evals.harness.target import CapabilityTarget
 from ufo.db import workspace_tx
 from ufo.runtime.workspace import ws_current
@@ -186,11 +186,13 @@ class ArcRun:
                 conversation_id, self.case.message, f"{self.case.name}:{conversation_id}"
             )
             if not opening.clean:
+                status = opening.trajectory.status if opening.trajectory is not None else None
                 return EvalCaseResult(
                     name=self.case.name,
                     passed=False,
                     reason=f"opening turn did not settle cleanly: {opening.failure_reason}",
                     evidence={"grading": self.case.grading},
+                    excluded=infra_owned_fault(opening.error_class, opening.failure_reason, status),
                 )
             await self._quiesce(conversation_id)
         finally:

@@ -15,8 +15,8 @@ name: Nightly evals
 # It ends red when any case fails: a failing case is the finding, so read the job summary and the
 # archived records, not only the job status.
 #
-# Memory ingestion is its own job because it builds and materializes a fixed corpus before the
-# run. Other corpus suites (`--memory-100`, `--issue-recall`, `--dsqa-100`, `--gdpval-100`,
+# Each memory-ingestion report is its own job because it builds and materializes a fixed corpus
+# before the run. Other corpus suites (`--memory-100`, `--issue-recall`, `--dsqa-100`, `--gdpval-100`,
 # `--jobbench`, `--wandr`, `--hle-gold`, `--compaction`, `--handbook`, `--coding-repo`,
 # `mcp_atlas_100`) are not here.
 
@@ -102,6 +102,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       jobs: ${{ steps.matrix.outputs.jobs }}
+      memory_ingestion_shards: ${{ steps.matrix.outputs.memory_ingestion_shards }}
       models: ${{ steps.matrix.outputs.models }}
     steps:
       - uses: actions/checkout@v4
@@ -113,11 +114,16 @@ jobs:
       - id: matrix
         run: |
           jobs="$(uv run python .github/scripts/nightly_eval_matrix.py --jobs "$SWEEP_SMOKE" --reasoning "$EVAL_REASONING")"
+          memory_ingestion_shards="$(uv run python .github/scripts/nightly_memory_ingestion.py plan "$SWEEP_SMOKE")"
           models="$(uv run python .github/scripts/nightly_eval_matrix.py --models)"
           echo "$jobs"
+          echo "$memory_ingestion_shards"
           echo "$models"
-          echo "jobs=$jobs" >>"$GITHUB_OUTPUT"
-          echo "models=$models" >>"$GITHUB_OUTPUT"
+          {
+            echo "jobs=$jobs"
+            echo "memory_ingestion_shards=$memory_ingestion_shards"
+            echo "models=$models"
+          } >>"$GITHUB_OUTPUT"
 
   sandbox-client:
     name: sandbox client
@@ -291,7 +297,7 @@ jobs:
           retention-days: 14
 
   memory-ingestion:
-    name: memory ingestion (${{ matrix.model.id }})
+    name: memory ingestion / ${{ matrix.shard.report }} (${{ matrix.model.id }})
     needs: [credentials, plan]
     runs-on: linux-4-core
     timeout-minutes: 90
@@ -299,6 +305,7 @@ jobs:
       fail-fast: false
       matrix:
         model: ${{ fromJSON(needs.plan.outputs.models) }}
+        shard: ${{ fromJSON(needs.plan.outputs.memory_ingestion_shards) }}
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -356,41 +363,40 @@ jobs:
               mv "$ASSETS/locomo.tmp" "$ASSETS/locomo10.json"; }
 
       - name: Prepare the memory-ingestion stack
-        env:
-          ASSETS: ${{ runner.temp }}/memory-ingestion-assets
         run: |
           uv run python .github/scripts/nightly_memory_ingestion.py prepare \
             --longmem "$ASSETS/longmemeval_s_cleaned.json" \
             --locomo "$ASSETS/locomo10.json" \
             --dir "$RUNNER_TEMP/memory-ingestion" "$SWEEP_SMOKE" \
-            --model "$EVAL_MODEL" --reasoning "$EVAL_REASONING"
+            --model "$EVAL_MODEL" --reasoning "$EVAL_REASONING" \
+            --report "$REPORT"
           cat "$RUNNER_TEMP/memory-ingestion/ufo.toml" \
             "$RUNNER_TEMP/memory-ingestion/matrix.toml"
+        env:
+          ASSETS: ${{ runner.temp }}/memory-ingestion-assets
+          REPORT: ${{ matrix.shard.report }}
 
       - name: Run memory ingestion
         timeout-minutes: 60
+        run: uv run python -m evals.stack "$RUNNER_TEMP/memory-ingestion/matrix.toml"
+
+      - name: Verify memory ingestion
+        if: always()
         run: |
-          set +e
-          uv run python -m evals.stack "$RUNNER_TEMP/memory-ingestion/matrix.toml"
-          stack_status=$?
-          set -e
-          echo "eval stack exit $stack_status; verifying the complete score record"
           uv run python .github/scripts/nightly_memory_ingestion.py verify \
             --reports eval-reports --runs-root .local/evals \
-            --state-output "memory-ingestion-state/$MODEL_LABEL/readiness.json" \
+            --state-output "memory-ingestion-state/$MODEL_LABEL/$REPORT/readiness.json" \
             "$SWEEP_SMOKE" \
-            --model "$EVAL_MODEL"
-          # `verify` reads the record's shape, never `case.passed`, so a failing case reaches the
-          # job status only through the stack's own code — carried here so `verify` still runs.
-          exit "$stack_status"
+            --model "$EVAL_MODEL" --report "$REPORT"
         env:
           MODEL_LABEL: ${{ matrix.model.label }}
+          REPORT: ${{ matrix.shard.report }}
 
       - name: Upload the run records
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-run-records-memory-ingestion-${{ matrix.model.label }}
+          name: eval-run-records-memory-ingestion-${{ matrix.model.label }}-${{ matrix.shard.artifact }}
           path: eval-reports/runs/*.json
           if-no-files-found: warn
           retention-days: 90
@@ -399,7 +405,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-memory-ingestion-state-${{ matrix.model.label }}
+          name: eval-memory-ingestion-state-${{ matrix.model.label }}-${{ matrix.shard.artifact }}
           path: memory-ingestion-state
           if-no-files-found: warn
           retention-days: 90
@@ -408,7 +414,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-stack-logs-memory-ingestion-${{ matrix.model.label }}
+          name: eval-stack-logs-memory-ingestion-${{ matrix.model.label }}-${{ matrix.shard.artifact }}
           path: .local/evals/**/*.log
           if-no-files-found: warn
           retention-days: 14
@@ -487,7 +493,8 @@ jobs:
             "s3://$ARCHIVE_BUCKET/$ARCHIVE_PREFIX/$(date -u +%F)/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --recursive --no-progress
 
-      - name: Require a comparable cohort
+      - name: Require a complete fixed-case cohort
+        if: always()
         run: |
           uv run python .github/scripts/eval_sweep_summary.py eval-reports "$SWEEP_SMOKE" \
             --memory-ingestion --require-comparable
