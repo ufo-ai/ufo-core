@@ -974,20 +974,26 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-test("the workspace Apps tab opens the workspace settings", async () => {
-  wire({
-    "/settings": () => json({ ...SETTINGS, agent: { ...SETTINGS.agent, archivable: false } }),
+test("each workspace app opens its own settings", async () => {
+  const { calls } = wire({
+    "/settings": () =>
+      json({
+        ...SETTINGS,
+        agent: { ...SETTINGS.agent, name: RESEARCH.name, main: false, archivable: true },
+      }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents";
-  render(<App agents={[AGENT]} archived={[]} member={ADMIN} onAgents={() => {}} />);
+  render(<App agents={[AGENT, RESEARCH]} archived={[]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+  expect(screen.getByRole("button", { name: "Settings for Assistant" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Research" }));
 
   const dialog = await screen.findByRole("dialog");
-  expect(within(dialog).getAllByText("Assistant")).toHaveLength(2);
+  expect(within(dialog).getAllByText("Research")).toHaveLength(2);
   expect(await within(dialog).findByText("Profile")).toBeTruthy();
+  expect(calls).toContain(`/surface/web/agents/${SECOND_ID}/settings`);
 });
 
 test("the workspace Apps tab lists every app and narrows to the member's own", async () => {
