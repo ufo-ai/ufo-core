@@ -67,13 +67,16 @@ async def test_shared_preview_records_the_size_the_service_reports(
         ExecResult(stdout=json.dumps({"size_bytes": 5120, "page_count": 1}), stderr="", exit_code=0)
     )
     ctx = _ctx(WorkspaceBlobStore(backend=s3_store), sandbox)
+    artifact_id = uuid4()
     with ws(ctx.turn.workspace_id):
-        preview = await builtins._shared_preview(ctx, "/workspace/report.pdf", "report.pdf")
+        preview = await builtins._shared_preview(
+            ctx, "/workspace/report.pdf", "report.pdf", artifact_id, False
+        )
     assert preview is not None
     assert preview.media_type == "image/png"
     assert preview.size_bytes == 5120
-    assert preview.blob_key.startswith(ARTIFACT_KEY_PREFIX)
-    assert preview.blob_key.endswith("/report.png")
+    assert preview.blob_key == f"{ARTIFACT_KEY_PREFIX}{artifact_id}/report.preview.png"
+    assert preview.created is True
     assert "/render" in sandbox.command
     assert "put_url" in sandbox.command
     assert '"kind": "pdf"' in sandbox.command
@@ -86,7 +89,12 @@ async def test_shared_preview_nones_on_a_service_failure(
     sandbox = _ReplyingSandbox(ExecResult(stdout="", stderr="curl: (22) 502", exit_code=22))
     ctx = _ctx(WorkspaceBlobStore(backend=s3_store), sandbox)
     with ws(ctx.turn.workspace_id):
-        assert await builtins._shared_preview(ctx, "/workspace/report.pdf", "report.pdf") is None
+        assert (
+            await builtins._shared_preview(
+                ctx, "/workspace/report.pdf", "report.pdf", uuid4(), False
+            )
+            is None
+        )
 
 
 async def test_shared_preview_nones_on_an_unparseable_reply(
@@ -95,7 +103,12 @@ async def test_shared_preview_nones_on_an_unparseable_reply(
     sandbox = _ReplyingSandbox(ExecResult(stdout="not json", stderr="", exit_code=0))
     ctx = _ctx(WorkspaceBlobStore(backend=s3_store), sandbox)
     with ws(ctx.turn.workspace_id):
-        assert await builtins._shared_preview(ctx, "/workspace/report.pdf", "report.pdf") is None
+        assert (
+            await builtins._shared_preview(
+                ctx, "/workspace/report.pdf", "report.pdf", uuid4(), False
+            )
+            is None
+        )
 
 
 async def test_shared_preview_skips_an_ineligible_suffix(
@@ -104,5 +117,8 @@ async def test_shared_preview_skips_an_ineligible_suffix(
     sandbox = _ReplyingSandbox(ExecResult(stdout="", stderr="", exit_code=0))
     ctx = _ctx(WorkspaceBlobStore(backend=s3_store), sandbox)
     with ws(ctx.turn.workspace_id):
-        assert await builtins._shared_preview(ctx, "/workspace/notes.txt", "notes.txt") is None
+        assert (
+            await builtins._shared_preview(ctx, "/workspace/notes.txt", "notes.txt", uuid4(), False)
+            is None
+        )
     assert sandbox.command == ""

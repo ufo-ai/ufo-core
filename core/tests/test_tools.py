@@ -1,7 +1,10 @@
+import asyncio
 import hashlib
 import json
 import shlex
 from base64 import urlsafe_b64decode
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,7 +13,9 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+import ufo.runtime.tools.context as tool_context
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.local import LocalCarrier
@@ -224,6 +229,10 @@ def test_a_barrier_is_a_position_read_final_act_or_a_guard_that_reads_the_round(
         "share_file",
     }
     assert REQUEST_CREDENTIALS_TOOL_DEF.parallel_safe is False
+
+
+def test_share_file_dispatch_replays_under_one_idempotency_key() -> None:
+    assert REGISTRY.get("share_file").side_effecting is True
 
 
 def test_registry_schemas_cover_every_tool() -> None:
@@ -1006,7 +1015,7 @@ def test_the_audience_seal_holds_for_every_audience_and_speaker(
 
 
 async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
-    db: None, tmp_path: Path
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A tool that computes an image itself has no sandbox file to preflight, so the size is bounded
     at the call and the row is the same one `share_file` writes — which is what every surface
@@ -1115,6 +1124,29 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
             ).one()
         stored = await ctx.blob.get(row.blob_key)
         stored_preview = await ctx.blob.get(row.preview_blob_key)
+        opened = 0
+
+        @asynccontextmanager
+        async def commit_then_cancel() -> AsyncIterator[AsyncConnection]:
+            nonlocal opened
+            opened += 1
+            async with workspace_tx() as connection:
+                yield connection
+            if opened == 2:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(tool_context, "workspace_tx", commit_then_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await ctx.share_artifact("cancelled.svg", b"<svg>kept</svg>")
+        async with workspace_tx() as connection:
+            cancelled_key = (
+                await connection.execute(
+                    sa.select(tables.shared_artifact.c.blob_key).where(
+                        tables.shared_artifact.c.filename == "cancelled.svg"
+                    )
+                )
+            ).scalar_one()
+        assert await ctx.blob.exists(cancelled_key)
     assert row.turn_id == turn_id
     assert row.filename == "design.svg"
     assert row.subject == "A caption."

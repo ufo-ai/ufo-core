@@ -354,14 +354,8 @@ class ArtifactObjects:
         query: ObjectListQuery,
         shares: sa.Select,
     ) -> Sequence[tuple[str, tuple[sa.Row, ...]]]:
-        """The reader's shares grouped per file, off the newest `ARTIFACT_SCAN_LIMIT` share rows
-        their fence admits AFTER the read's own narrowing — the search and the column-expressible
-        filters run in the query, so the window bounds matching shares and an old file still
-        answers a search or a filtered listing; only an unfiltered browse is windowed to the
-        newest shares. `object_page` re-checks every filter over the rows regardless, so the
-        vocabulary stays core's and anything a column cannot express is narrowed there. `_find`
-        keeps answering any name whole, off its own unwindowed path. Names come off the whole
-        identity set, so a file is called the same thing on and off the shelf."""
+        """The reader's shares grouped per file, off the newest bounded scan after column filters.
+        `_find` answers a named identity whole, and names come off the whole identity set."""
         narrowed = shares
         if query.query:
             like = f"%{query.query}%"
@@ -379,6 +373,9 @@ class ArtifactObjects:
                 narrowed = narrowed.where(sa.false())
         if query.filters.get("mine") is True and viewer is not None:
             narrowed = narrowed.where(tables.conversation.c.member_id == viewer)
+        surface = query.filters.get("surface")
+        if isinstance(surface, str):
+            narrowed = narrowed.where(tables.conversation.c.surface == surface)
         match query.filters.get("media"):
             case "image":
                 narrowed = narrowed.where(
@@ -399,11 +396,11 @@ class ArtifactObjects:
                 )
             case _:
                 pass
-        windowed = narrowed.order_by(
+        ordered = narrowed.order_by(
             tables.shared_artifact.c.created_at.desc(), tables.shared_artifact.c.id.desc()
         ).limit(ARTIFACT_SCAN_LIMIT)
         async with workspace_tx() as connection:
-            rows = (await connection.execute(windowed)).all()
+            rows = (await connection.execute(ordered)).all()
         by_identity: dict[tuple[UUID, str], list[sa.Row]] = {}
         for row in rows:
             by_identity.setdefault((row.conversation_id, row.filename), []).append(row)

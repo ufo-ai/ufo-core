@@ -113,13 +113,16 @@ class ConversationObjects:
         screen. `portal` says whether the web chat transport carries the row — the portal's own
         surface and the extension-opened ones its composer answers — as a declared filter, because
         a filter must narrow the page before it is cut: cut first, a run of newer rows from other
-        surfaces renders an empty chat list."""
+        surfaces renders an empty chat list. It narrows in the directory read, ahead of each
+        side's own bound, so one rail read costs `CONVERSATION_MINE_LIMIT` plus
+        `CONVERSATION_OTHERS_LIMIT` rows whatever the workspace holds."""
         directory = ConversationDirectory(ws_current().workspace_id)
         agent_id = object_agent_id()
         sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
             ("mine", CONVERSATION_MINE_LIMIT),
             ("others", CONVERSATION_OTHERS_LIMIT),
         )
+        portal = query.filters.get("portal")
         rows: list[ObjectRow] = []
         for participation, limit in sides:
             for entry in await directory.list(
@@ -129,6 +132,7 @@ class ConversationObjects:
                 limit=limit,
                 participation=participation,
                 member_admitted=True,
+                portal=portal if isinstance(portal, bool) else None,
             ):
                 if entry.title:
                     rows.append(_member_row(entry, mine=participation == "mine"))

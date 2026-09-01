@@ -110,7 +110,12 @@ from ufo.runtime.seats import signup_workspace_id
 from ufo.runtime.sources.backend import binding_name
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.surfaces.hub_tail import HubTailer
-from ufo.runtime.turns.ambient_reply import AmbientMessage, AmbientReplyClassifier, MeteredModel
+from ufo.runtime.turns.ambient_reply import (
+    AMBIENT_MESSAGE_CHARS,
+    AmbientMessage,
+    AmbientReplyClassifier,
+    MeteredModel,
+)
 from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
     conversation_audience,
@@ -1656,6 +1661,12 @@ async def test_an_undecided_ambient_reply_admits_the_turn(
     assert "unreadable" in undecided[1]
     assert "TimeoutError" in undecided[2]
     assert not [r for r in caplog.records if r.getMessage() == "surface.ambient_reply"]
+
+
+async def test_an_oversized_ambient_message_is_admitted(tmp_path) -> None:
+    message = AmbientMessage(speaker="U2", text="x" * (AMBIENT_MESSAGE_CHARS + 1))
+
+    assert await _ambient_context(tmp_path, _Decides("NO_REPLY")).ambient_reply_wanted(message, ())
 
 
 def test_the_silence_sentinel_is_the_whole_answer_or_it_is_not_silence() -> None:

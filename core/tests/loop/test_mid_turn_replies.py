@@ -10,6 +10,7 @@ only path a durable surface (Slack) is delivered on. Every value is read back fr
 frames, `mid_turn_reply` rows, `writeback` rows, and the surface's own calls.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
@@ -57,6 +58,7 @@ from ufo.harness.models.interface import (
 from ufo.harness.replies import MarkedReply
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.engine import FORCE_FINAL_PROMPT
+from ufo.runtime.ext import surface as surface_module
 from ufo.runtime.ext.surface import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
@@ -497,6 +499,70 @@ async def test_a_second_worker_posts_nothing_a_delivered_row_already_carried(
 
     assert len(first.spoken) == 1
     assert second.spoken == []
+
+
+async def test_a_slow_mid_turn_batch_renews_every_claim_before_a_peer_can_recover_it(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, _, _ = await _seed()
+    blob = FilesystemBlobStore(root=tmp_path)
+    turn_id = await _seed_surface_turn(workspace_id, "CLEASE:1.0", "running", "")
+    reply_ids = (
+        await _seed_spoken_reply(workspace_id, turn_id, text="first"),
+        await _seed_spoken_reply(workspace_id, turn_id, text="second", span_index=1),
+    )
+    surface = RecordingSurface(ref="CLEASE:9.9")
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+    speak = surface.speak
+
+    async def blocking_speak(ctx, reply):
+        if not blocked.is_set():
+            blocked.set()
+            await release.wait()
+        return await speak(ctx, reply)
+
+    monkeypatch.setattr(surface, "speak", blocking_speak)
+    refresh_gate = asyncio.Event()
+    all_refreshed = asyncio.Event()
+    hold_refresh = asyncio.Event()
+    refreshed: set[UUID] = set()
+    refresh_claim = MidTurnReplyPoller._refresh_claim
+
+    async def controlled_refresh(self: MidTurnReplyPoller, reply_id: UUID) -> None:
+        await refresh_gate.wait()
+        await refresh_claim(self, reply_id)
+        refreshed.add(reply_id)
+        if refreshed == set(reply_ids):
+            all_refreshed.set()
+        await hold_refresh.wait()
+
+    monkeypatch.setattr(surface_module, "WRITEBACK_CLAIM_REFRESH_SECONDS", 0.0)
+    monkeypatch.setattr(MidTurnReplyPoller, "_refresh_claim", controlled_refresh)
+    first = _mid_turn_poller(workspace_id, surface, blob, worker_id="worker-1")
+    with ws(workspace_id):
+        running = asyncio.create_task(first.drain())
+        try:
+            await asyncio.wait_for(blocked.wait(), 5)
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.mid_turn_reply)
+                    .where(tables.mid_turn_reply.c.id.in_(reply_ids))
+                    .values(claim_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+                )
+            refresh_gate.set()
+            await asyncio.wait_for(all_refreshed.wait(), 5)
+            peer_surface = RecordingSurface(ref="CLEASE:peer")
+            await _mid_turn_poller(workspace_id, peer_surface, blob, worker_id="worker-2").drain()
+            assert peer_surface.spoken == []
+        finally:
+            release.set()
+            await running
+
+    rows = await _replies(turn_id)
+    assert [row.id for row in rows] == list(reply_ids)
+    assert [row.status for row in rows] == [WRITEBACK_DELIVERED, WRITEBACK_DELIVERED]
+    assert [text for _reply, _message, text in surface.spoken] == ["first", "second"]
 
 
 async def test_a_failed_send_retries_and_ages_out_without_holding_the_turn(

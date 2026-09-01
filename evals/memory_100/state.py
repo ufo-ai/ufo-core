@@ -13,7 +13,12 @@ from evals.memory_100.models import Snapshot, SnapshotPage
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, TextChunker
-from ufo.runtime.sources.sync import FOLDER_BACKEND, SOURCE_BLOB_PREFIX, page_id_for, source_row_id
+from ufo.runtime.sources.sync import (
+    FOLDER_BACKEND,
+    page_id_for,
+    source_body_ref_matches,
+    source_row_id,
+)
 from ufo.schema import tables
 
 memory_store = import_module("ufo_ext_memory.store")
@@ -114,11 +119,7 @@ class CorpusAttestor:
             if (
                 row.workspace_id != self.workspace_id
                 or row.source_id != self.source_id
-                or row.body_ref
-                != (
-                    f"{SOURCE_BLOB_PREFIX}/{self.source_id}/{page_id}/"
-                    f"{page.digest.removeprefix('sha256:')}"
-                )
+                or not source_body_ref_matches(row.body_ref, self.source_id, page_id, page.digest)
                 or row.digest != page.digest
                 or row.subject != subject
                 or row.tombstone

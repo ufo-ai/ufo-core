@@ -22,7 +22,12 @@ from ufo_ext_memory.store import mem_page, memory_item
 from evals.issue_recall.corpus import Ambient, RenderedPage, corpus_digest
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.runtime.sources.sync import FOLDER_BACKEND, SOURCE_BLOB_PREFIX, page_id_for, source_row_id
+from ufo.runtime.sources.sync import (
+    FOLDER_BACKEND,
+    page_id_for,
+    source_body_ref_matches,
+    source_row_id,
+)
 from ufo.schema import tables
 
 
@@ -185,11 +190,7 @@ class CorpusAttestor:
             if (
                 row.workspace_id != self.workspace_id
                 or row.source_id != self.source_id
-                or row.body_ref
-                != (
-                    f"{SOURCE_BLOB_PREFIX}/{self.source_id}/{row.id}/"
-                    f"{page.digest.removeprefix('sha256:')}"
-                )
+                or not source_body_ref_matches(row.body_ref, self.source_id, row.id, page.digest)
                 or row.digest != page.digest
                 or row.tombstone
             ):

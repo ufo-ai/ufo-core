@@ -85,17 +85,24 @@ async def test_the_window_keeps_the_newest_messages_and_bounds_each_one() -> Non
     pasting a report cannot grow the call."""
     classifier, model = _classifier()
     history = tuple(
-        AmbientMessage(speaker=MEMBER, text=f"message {index}")
+        AmbientMessage(
+            speaker=MEMBER,
+            text="x" * 5_000 if index == 4 else f"message {index}",
+        )
         for index in range(AMBIENT_HISTORY_MESSAGES + 4)
     )
 
-    await classifier.decide(AmbientMessage(speaker=OTHER, text="x" * 5_000), history)
+    await classifier.decide(AmbientMessage(speaker=OTHER, text="new message"), history)
 
     payload = _payload(model.requests[-1])
     kept = payload["history"]
     assert isinstance(kept, list)
     assert len(kept) == AMBIENT_HISTORY_MESSAGES
-    assert kept[0] == {"speaker": MEMBER, "own": False, "text": "message 4"}
+    assert kept[0] == {
+        "speaker": MEMBER,
+        "own": False,
+        "text": "x" * AMBIENT_MESSAGE_CHARS,
+    }
     assert kept[-1] == {
         "speaker": MEMBER,
         "own": False,
@@ -104,8 +111,19 @@ async def test_the_window_keeps_the_newest_messages_and_bounds_each_one() -> Non
     assert payload["message"] == {
         "speaker": OTHER,
         "own": False,
-        "text": "x" * AMBIENT_MESSAGE_CHARS,
+        "text": "new message",
     }
+
+
+async def test_an_oversized_new_message_is_not_classified_from_a_prefix() -> None:
+    classifier, model = _classifier("NO_REPLY")
+
+    with pytest.raises(ValueError, match="exceeds classifier input limit"):
+        await classifier.decide(
+            AmbientMessage(speaker=OTHER, text="answer me " + "x" * AMBIENT_MESSAGE_CHARS), ()
+        )
+
+    assert model.requests == []
 
 
 async def test_a_member_writing_the_fence_stays_inside_the_data() -> None:

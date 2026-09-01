@@ -8661,6 +8661,32 @@ async def test_the_repair_fallback_never_strands_the_record_the_run_wrote(
     assert _ran_commands(stored) == ["echo shipped"]
 
 
+async def test_transcript_write_failure_never_reopens_a_terminal(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn = await _seed_turn("queued", None)
+    attempts = 0
+
+    async def fail_write(self: Transcript, conversation: Conversation) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise OSError("blob store unavailable")
+
+    monkeypatch.setattr(Transcript, "write", fail_write)
+    monkeypatch.setattr("ufo.runtime.engine.TRANSCRIPT_WRITE_RETRY_SECONDS", 0)
+
+    await TranscriptRepair(
+        turn=turn,
+        transcript=Transcript(
+            blob=FilesystemBlobStore(root=tmp_path),
+            conversation_id=turn.conversation_id,
+        ),
+        hub=InProcessHub(),
+    ).persist_inbound()
+
+    assert attempts == 3
+
+
 async def test_the_run_record_replaces_a_fallback_that_landed_first(
     db: None, tmp_path: Path
 ) -> None:

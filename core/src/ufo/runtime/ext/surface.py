@@ -148,9 +148,11 @@ from ufo.runtime.turns.workspace_changes import (
 from ufo.runtime.workspace import MEMBER_ROUTED_SLOTS, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
+    EXTENSION_SURFACE_PREFIX,
     MEMBER_ADMISSION,
     NON_TERMINAL_STATUSES,
     PARKED,
+    PORTAL_SURFACE,
     SCHEDULED_ADMISSION,
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
@@ -1215,6 +1217,7 @@ class ConversationDirectory:
         admin: bool,
         limit: int,
         surface: str | None = None,
+        portal: bool | None = None,
         conversation_id: UUID | None = None,
         participation: Literal["mine", "others"] | None = None,
         search: str | None = None,
@@ -1224,6 +1227,8 @@ class ConversationDirectory:
         the member's own plus the workspace-shared ones, every one of the agent's for an admin.
         `surface` narrows to one surface's conversations in the query, before the bound, so a
         member's rows are never displaced by another surface's newer traffic under the cap.
+        `portal` narrows the same way to the surfaces the portal's own chat transport carries —
+        its own and the extension-opened ones its composer answers — or, false, to the rest.
         `participation` narrows the same way to one side of the member: `mine` is the ones they
         are in — `_participated` defines that — and `others` the readable ones somebody else spoke
         and they did not. A rail reads both, one bound each; an agent's directory reads neither.
@@ -1285,6 +1290,12 @@ class ConversationDirectory:
         )
         if surface is not None:
             query = query.where(tables.conversation.c.surface == surface)
+        if portal is not None:
+            carried = sa.or_(
+                tables.conversation.c.surface == PORTAL_SURFACE,
+                tables.conversation.c.surface.startswith(EXTENSION_SURFACE_PREFIX),
+            )
+            query = query.where(carried if portal else sa.not_(carried))
         if conversation_id is not None:
             query = query.where(tables.conversation.c.id == conversation_id)
         match participation:
@@ -5541,9 +5552,11 @@ class MidTurnReplyPoller:
     Three independent guards, because all three failures are real. The engine writes one row per
     span under the span's own identity; admission does the same for one portal comment, so a replay
     or request redelivery inserts nothing. This poller claims a row with its worker id and an expiry
-    and advances it only while it still holds the claim, so a second replica never delivers the row
-    this one has. The surface keys its own delivery record on `reply.id`, which closes the one
-    window where two workers can both call out — a claim that expires while a post is in flight.
+    and renews every row in the batch from the moment it is claimed, including rows waiting behind
+    an earlier send. It advances a row only while it still holds the claim, so a second replica
+    never delivers the row this one has. The surface keys its own delivery record on `reply.id`,
+    which closes the one window where two workers can both call out — a claim lost while a post is
+    in flight.
 
     Order is the model's: rows are claimed and delivered oldest first and, within one moment, in
     span order — a resumed run counts its rounds from one again, so the round and the span alone
@@ -5568,14 +5581,22 @@ class MidTurnReplyPoller:
     async def drain(self) -> None:
         for workspace_id in await self.candidates():
             with ws(workspace_id):
-                for row in await self._claim(workspace_id):
-                    if row.last_error is not None:
-                        log(
-                            "surface.mid_turn_reply_retry",
-                            reply_id=str(row.id),
-                            last_error=row.last_error,
-                        )
-                    await self._deliver(workspace_id, row)
+                rows = await self._claim(workspace_id)
+                renewals = [asyncio.create_task(self._renew_claim(row.id)) for row in rows]
+                try:
+                    for row, renewal in zip(rows, renewals, strict=True):
+                        if row.last_error is not None:
+                            log(
+                                "surface.mid_turn_reply_retry",
+                                reply_id=str(row.id),
+                                last_error=row.last_error,
+                            )
+                        await self._deliver(workspace_id, row, renewal)
+                finally:
+                    for renewal in renewals:
+                        if not renewal.done():
+                            renewal.cancel()
+                    await asyncio.gather(*renewals, return_exceptions=True)
 
     async def _claim(self, workspace_id: UUID) -> Sequence[sa.Row]:
         now = datetime.now(UTC)
@@ -5620,10 +5641,13 @@ class MidTurnReplyPoller:
             ).all()
         return sorted(claimed, key=lambda row: (row.created_at, row.round_index, row.span_index))
 
-    async def _deliver(self, workspace_id: UUID, row: sa.Row) -> None:
+    async def _deliver(self, workspace_id: UUID, row: sa.Row, renewal: asyncio.Task[None]) -> None:
         started_at = datetime.now(UTC)
         try:
-            reply_ref = await self._speak(workspace_id, row)
+            await self._deliver_with_lease(workspace_id, row, renewal)
+        except _WritebackClaimLost:
+            log("surface.mid_turn_reply_claim_lost", reply_id=str(row.id))
+            return
         except Exception as error:
             outcome, last_error, next_attempt_at = await self._fail_or_retry(row.id, error)
             log(
@@ -5636,7 +5660,6 @@ class MidTurnReplyPoller:
                 next_attempt_at=next_attempt_at,
             )
             return
-        await self._mark_delivered(row.id, reply_ref)
         log(
             "surface.mid_turn_reply_delivered",
             reply_id=str(row.id),
@@ -5644,6 +5667,29 @@ class MidTurnReplyPoller:
             message_ref=str(row.message_ref or ""),
             elapsed_ms=int((datetime.now(UTC) - started_at).total_seconds() * 1_000),
         )
+
+    async def _deliver_with_lease(
+        self, workspace_id: UUID, row: sa.Row, renewal: asyncio.Task[None]
+    ) -> None:
+        delivery = asyncio.create_task(self._speak(workspace_id, row))
+        try:
+            done, _pending = await asyncio.wait(
+                (delivery, renewal), return_when=asyncio.FIRST_COMPLETED
+            )
+            if delivery not in done:
+                if renewal.cancelled():
+                    raise asyncio.CancelledError
+                error = renewal.exception()
+                if error is None:
+                    raise RuntimeError("mid-turn reply claim renewal stopped")
+                raise error
+            reply_ref = await delivery
+        finally:
+            for task in (delivery, renewal):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(delivery, renewal, return_exceptions=True)
+        await self._mark_delivered(row.id, reply_ref)
 
     async def _speak(self, workspace_id: UUID, row: sa.Row) -> str | None:
         """The surface's own send, or None when this deploy has nothing to send it with. A recorded
@@ -5689,6 +5735,29 @@ class MidTurnReplyPoller:
             ),
         )
 
+    async def _renew_claim(self, reply_id: UUID) -> None:
+        while True:
+            await asyncio.sleep(WRITEBACK_CLAIM_REFRESH_SECONDS)
+            await self._refresh_claim(reply_id)
+
+    async def _refresh_claim(self, reply_id: UUID) -> None:
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            renewed = await connection.execute(
+                sa.update(tables.mid_turn_reply)
+                .where(
+                    tables.mid_turn_reply.c.id == reply_id,
+                    tables.mid_turn_reply.c.status == WRITEBACK_CLAIMED,
+                    tables.mid_turn_reply.c.claimed_by == self.worker_id,
+                )
+                .values(
+                    claim_expires_at=now + timedelta(seconds=WRITEBACK_CLAIM_SECONDS),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if renewed.rowcount != 1:
+            raise _WritebackClaimLost
+
     async def _mark_delivered(self, reply_id: UUID, reply_ref: str | None) -> None:
         async with workspace_tx() as connection:
             updated = await connection.execute(
@@ -5707,7 +5776,7 @@ class MidTurnReplyPoller:
                 )
             )
         if updated.rowcount != 1:
-            log("surface.mid_turn_reply_claim_lost", reply_id=str(reply_id))
+            raise _WritebackClaimLost
 
     async def _fail_or_retry(
         self, reply_id: UUID, error: Exception

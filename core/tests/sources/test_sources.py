@@ -68,6 +68,7 @@ from ufo.runtime.sources.sync import (
     SOURCE_SYNC_JOB,
     SOURCE_SYNC_PARKED_METRIC,
     SYNC_PROVIDER_FAULT_MAX_CHARS,
+    ClaimedSource,
     CorePageFeed,
     CursorExpired,
     FolderSource,
@@ -81,6 +82,7 @@ from ufo.runtime.sources.sync import (
     SyncResult,
     page_id_for,
     register_sources,
+    source_body_ref_matches,
     source_row_id,
 )
 from ufo.runtime.subagents import SubagentRegistry
@@ -545,6 +547,18 @@ def test_brokered_source_row_id_includes_connection_generation() -> None:
     assert source_row_id(
         workspace_id, "gmail", config, connection_id=first_connection
     ) != source_row_id(workspace_id, "gmail", config, connection_id=second_connection)
+
+
+def test_source_body_ref_matches_the_claim_scoped_page_digest() -> None:
+    source_id, page_id = uuid4(), uuid4()
+    digest = f"sha256:{'a' * 64}"
+
+    assert source_body_ref_matches(
+        f"sources/{source_id}/{page_id}/{'b' * 32}/{'a' * 64}", source_id, page_id, digest
+    )
+    assert not source_body_ref_matches(
+        f"sources/{source_id}/{page_id}/{'a' * 64}", source_id, page_id, digest
+    )
 
 
 def test_source_row_id_ignores_the_fields_a_config_model_declares_non_identity() -> None:
@@ -1927,6 +1941,69 @@ async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
     return source_id
 
 
+async def test_source_claims_renew_while_an_earlier_fetch_is_running(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _workspace()
+    source_ids = {
+        await _seed_scripted_source(workspace_id, None),
+        await _seed_scripted_source(workspace_id, None),
+    }
+    backend = _BlockingSource(SyncResult(pages=()))
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: backend},
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+    monkeypatch.setattr(sync, "CLAIM_REFRESH_SECONDS", 0.01)
+    refresh = SyncDriver._refresh_claim
+    claimed_at: dict[UUID, datetime] = {}
+    all_refreshed = asyncio.Event()
+
+    async def record_refresh(syncing: SyncDriver, source: ClaimedSource) -> None:
+        await refresh(syncing, source)
+        claimed_at[source.source_id] = source.claimed_at
+        if set(claimed_at) == source_ids:
+            all_refreshed.set()
+
+    monkeypatch.setattr(SyncDriver, "_refresh_claim", record_refresh)
+
+    with ws(workspace_id):
+        running = asyncio.create_task(driver.run())
+        try:
+            await backend.entered.wait()
+            await all_refreshed.wait()
+            async with workspace_tx() as connection:
+                expiries = dict(
+                    (
+                        await connection.execute(
+                            sa.select(
+                                tables.source.c.id,
+                                tables.source.c.claim_expires_at,
+                            ).where(tables.source.c.id.in_(source_ids))
+                        )
+                    ).all()
+                )
+            contender = await driver._claim_due("contender")
+        finally:
+            backend.release.set()
+            await running
+
+    assert contender == ()
+    assert all(
+        (
+            expiries[source_id]
+            if expiries[source_id].tzinfo is not None
+            else expiries[source_id].replace(tzinfo=UTC)
+        )
+        > claimed_at[source_id] + timedelta(seconds=sync.CLAIM_LEASE_SECONDS)
+        for source_id in source_ids
+    )
+
+
 async def test_sync_uses_source_subject_current_after_fetch(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
@@ -2076,6 +2153,49 @@ async def test_stale_sync_cannot_overwrite_a_re_registered_source(
             ).scalar_one()
     assert source == (bob, None, 0, None, None)
     assert pages == 0
+    assert await blob.list("sources/") == ()
+
+
+async def test_a_cancelled_commit_keeps_the_bodies_its_rows_name(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled write is not a failed one: `_opened` runs the commit to completion under
+    `asyncio.shield` and re-raises the cancellation, so the page rows stand and name the bodies
+    just written. The cleanup keeps them — a row whose body the store lacks stops the source's page
+    feed for every consumer, and the stored digest makes the next sync skip that page."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: _ScriptedSource([])},
+        blob=blob,
+        postgres=database_url.startswith("postgresql"),
+    )
+    result = SyncResult(
+        pages=(
+            Page(source_ref="docs/plan", body="launch plan", stream="docs", title="Launch plan"),
+        ),
+        next_cursor="plan-cursor",
+    )
+    write = SyncDriver._write
+
+    async def commit_then_cancel(syncing: SyncDriver, *args: object, **kwargs: object) -> int:
+        await write(syncing, *args, **kwargs)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(SyncDriver, "_write", commit_then_cancel)
+    with ws(workspace_id):
+        (claimed,) = await driver._claim_due("cancelled")
+        with pytest.raises(asyncio.CancelledError):
+            await driver._commit(claimed, result)
+        async with workspace_tx() as connection:
+            body_ref = (
+                await connection.execute(
+                    sa.select(tables.page.c.body_ref).where(tables.page.c.source_id == source_id)
+                )
+            ).scalar_one()
+
+    assert await blob.get(body_ref) == b"launch plan"
 
 
 async def test_page_feed_reads_one_immutable_page_version_during_a_sync(

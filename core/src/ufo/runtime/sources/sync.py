@@ -68,6 +68,7 @@ SOURCE_PARK_RETRY_SECONDS = 3600
 # path writes `next_sync_at = now()`, and a year out is the backstop for the day they all miss one.
 SOURCE_PARK_HOLD_SECONDS = 365 * 24 * 3600
 CLAIM_LEASE_SECONDS = 300
+CLAIM_REFRESH_SECONDS = 60
 DUE_BATCH_MAX_SOURCES = 50
 SOURCE_BLOB_PREFIX = "sources"
 SOURCE_SYNC_FAILED_METRIC = "source_sync_failed_total"
@@ -354,6 +355,19 @@ def page_id_for(source_id: UUID, source_ref: str) -> UUID:
     return uuid5(NAMESPACE_URL, f"{source_id}/page/{source_ref}")
 
 
+def source_body_ref_matches(body_ref: str, source_id: UUID, page_id: UUID, digest: str) -> bool:
+    """Whether a blob ref names this page's content under one source-sync claim."""
+    prefix = f"{SOURCE_BLOB_PREFIX}/{source_id}/{page_id}/"
+    suffix = f"/{digest.removeprefix('sha256:')}"
+    claim = body_ref.removeprefix(prefix).removesuffix(suffix)
+    return (
+        body_ref.startswith(prefix)
+        and body_ref.endswith(suffix)
+        and len(claim) == 32
+        and set(claim) <= set("0123456789abcdef")
+    )
+
+
 async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
     """Ensure a source row exists for each configured `[[sources]]` entry. The row id is derived
     from the workspace, backend, and config, so a restart re-registers the same rows without
@@ -492,6 +506,10 @@ class ChangedPage:
     digest: str
 
 
+class _SourceClaimLost(RuntimeError):
+    pass
+
+
 def _readers_remain() -> sa.ColumnElement[bool]:
     """A correlated predicate on `source`: the archive has not taken every agent that reads it.
     A source whose grantees are all archived costs a fetch, a page write and the model tokens its
@@ -525,7 +543,8 @@ def _readers_remain() -> sa.ColumnElement[bool]:
 class SyncDriver:
     """The core sync job: for the workspace the dispatcher bound, claim its due sources, fetch each
     backend, and commit its pages — the claim and every write go through RLS on that workspace. Runs
-    downward — claim, fetch, commit — one source at a time, so a slow backend never blocks the run.
+    downward — claim, fetch, commit — one source at a time. Every claimed row renews while it waits
+    or fetches, so a slow backend cannot let this worker's later claims expire into a second run.
     `candidate_workspaces` names the workspaces holding a due source through one `owner_tx` read, so
     the dispatcher binds only those and a workspace with nothing due is never opened. On a
     per-tenant deploy `owner_tx` resolves to the single workspace, unchanged. Due means readable
@@ -565,24 +584,82 @@ class SyncDriver:
 
     async def run(self) -> None:
         claim = uuid4().hex
-        for source in await self._claim_due(claim):
-            try:
-                result = await self._fetch(source)
-                await self._commit(source, result)
-            except StreamSkipped as skipped:
-                with suppress(Exception):
-                    log(
-                        "source_sync.skipped",
-                        source_id=str(source.source_id),
-                        **_stream_tags(source),
-                        reason=skipped.reason,
-                    )
-                await self._skip(source, skipped.reason, awaits_grant=skipped.awaits_grant)
-            except Exception as error:
-                cursor_reset = isinstance(error, CursorExpired)
-                errors, next_sync_at = self._error_backoff(source, datetime.now(UTC))
-                await self._report_failed(source, error, cursor_reset, errors, next_sync_at)
-                await self._release(source, cursor_reset, errors, next_sync_at)
+        sources = await self._claim_due(claim)
+        renewals = [asyncio.create_task(self._renew_claim(source)) for source in sources]
+        try:
+            for source, renewal in zip(sources, renewals, strict=True):
+                await self._run_with_lease(source, renewal)
+        finally:
+            for renewal in renewals:
+                if not renewal.done():
+                    renewal.cancel()
+            await asyncio.gather(*renewals, return_exceptions=True)
+
+    async def _run_with_lease(self, source: ClaimedSource, renewal: asyncio.Task[None]) -> None:
+        sync = asyncio.create_task(self._sync_claimed(source))
+        try:
+            done, _pending = await asyncio.wait(
+                (sync, renewal), return_when=asyncio.FIRST_COMPLETED
+            )
+            if sync not in done:
+                if renewal.cancelled():
+                    raise asyncio.CancelledError
+                error = renewal.exception()
+                if error is None:
+                    raise RuntimeError("source claim renewal stopped")
+                raise error
+            await sync
+        except _SourceClaimLost:
+            log("source_sync.claim_lost", source_id=str(source.source_id), **_stream_tags(source))
+        finally:
+            for task in (sync, renewal):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sync, renewal, return_exceptions=True)
+
+    async def _sync_claimed(self, source: ClaimedSource) -> None:
+        try:
+            result = await self._fetch(source)
+            await self._commit(source, result)
+        except _SourceClaimLost:
+            raise
+        except StreamSkipped as skipped:
+            with suppress(Exception):
+                log(
+                    "source_sync.skipped",
+                    source_id=str(source.source_id),
+                    **_stream_tags(source),
+                    reason=skipped.reason,
+                )
+            await self._skip(source, skipped.reason, awaits_grant=skipped.awaits_grant)
+        except Exception as error:
+            cursor_reset = isinstance(error, CursorExpired)
+            errors, next_sync_at = self._error_backoff(source, datetime.now(UTC))
+            await self._report_failed(source, error, cursor_reset, errors, next_sync_at)
+            await self._release(source, cursor_reset, errors, next_sync_at)
+
+    async def _renew_claim(self, source: ClaimedSource) -> None:
+        while True:
+            await asyncio.sleep(CLAIM_REFRESH_SECONDS)
+            await self._refresh_claim(source)
+
+    async def _refresh_claim(self, source: ClaimedSource) -> None:
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            renewed = await connection.execute(
+                sa.update(tables.source)
+                .where(
+                    tables.source.c.id == source.source_id,
+                    tables.source.c.claimed_by == source.claim,
+                    tables.source.c.removed_at.is_(None),
+                )
+                .values(
+                    claim_expires_at=now + timedelta(seconds=CLAIM_LEASE_SECONDS),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if renewed.rowcount != 1:
+            raise _SourceClaimLost(str(source.source_id))
 
     async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]:
         now = datetime.now(UTC)
@@ -659,6 +736,7 @@ class SyncDriver:
         return await backend.fetch(config, source.cursor, auth)
 
     async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:
+        await self._refresh_claim(source)
         prior, prior_by_identity = await self._prior_pages(source.source_id)
         resolved: dict[str, UUID] = {
             identity: value[2].id for identity, value in prior_by_identity.items()
@@ -671,66 +749,88 @@ class SyncDriver:
         fetched: list[UUID] = []
         changed: list[ChangedPage] = []
         metadata: list[PageBrowse] = []
-        for page in result.pages:
-            source_identity = page.source_identity or page.source_ref
-            fallback_id = page_id_for(source.source_id, page.source_ref)
-            existing = prior_by_identity.get(source_identity)
-            page_id = resolved.get(source_identity)
-            if page_id is None:
-                fallback = prior.get(fallback_id)
-                owner = claimed.get(fallback_id)
-                if fallback is not None and owner is None:
-                    existing = fallback
-                    page_id = fallback_id
-                elif fallback is None and owner is None:
-                    page_id = fallback_id
-                else:
-                    page_id = uuid5(
-                        NAMESPACE_URL,
-                        f"{source.source_id}/page-identity/{source_identity}",
+        written: list[str] = []
+        try:
+            for page in result.pages:
+                source_identity = page.source_identity or page.source_ref
+                fallback_id = page_id_for(source.source_id, page.source_ref)
+                existing = prior_by_identity.get(source_identity)
+                page_id = resolved.get(source_identity)
+                if page_id is None:
+                    fallback = prior.get(fallback_id)
+                    owner = claimed.get(fallback_id)
+                    if fallback is not None and owner is None:
+                        existing = fallback
+                        page_id = fallback_id
+                    elif fallback is None and owner is None:
+                        page_id = fallback_id
+                    else:
+                        page_id = uuid5(
+                            NAMESPACE_URL,
+                            f"{source.source_id}/page-identity/{source_identity}",
+                        )
+                        existing = prior.get(page_id)
+                    resolved[source_identity] = page_id
+                    claimed[page_id] = source_identity
+                fetched.append(page_id)
+                browse = PageBrowse(
+                    id=page_id,
+                    source_identity=source_identity,
+                    stream=page.stream,
+                    title=page.title,
+                    record_created_at=page.created_at,
+                    record_updated_at=page.updated_at,
+                )
+                if existing is None or existing[:2] != (page.digest, False):
+                    body_ref = (
+                        f"{SOURCE_BLOB_PREFIX}/{source.source_id}/{page_id}/{source.claim}/"
+                        f"{page.digest.removeprefix('sha256:')}"
                     )
-                    existing = prior.get(page_id)
-                resolved[source_identity] = page_id
-                claimed[page_id] = source_identity
-            fetched.append(page_id)
-            browse = PageBrowse(
-                id=page_id,
-                source_identity=source_identity,
-                stream=page.stream,
-                title=page.title,
-                record_created_at=page.created_at,
-                record_updated_at=page.updated_at,
+                    written.append(body_ref)
+                    await self.blob.put(body_ref, page.body.encode())
+                    changed.append(
+                        ChangedPage(
+                            browse=browse,
+                            body_ref=body_ref,
+                            digest=page.digest,
+                        )
+                    )
+                elif existing[2] != browse:
+                    metadata.append(browse)
+            deleted = [
+                existing[2].id
+                if (existing := prior_by_identity.get(ref)) is not None
+                else page_id_for(source.source_id, ref)
+                for ref in result.deletes
+            ]
+            try:
+                tombstoned = await self._write(
+                    source,
+                    result.next_cursor,
+                    changed,
+                    metadata,
+                    fetched,
+                    deleted,
+                    result.snapshot,
+                )
+            except asyncio.CancelledError:
+                # `_opened` runs the commit to completion under `asyncio.shield` and re-raises the
+                # cancellation, so rows naming these bodies may stand committed. A body no row
+                # names is garbage the next write replaces; a body a row names and the store lacks
+                # stops that source's page feed for every consumer.
+                written.clear()
+                raise
+        except BaseException as error:
+            results = await asyncio.gather(
+                *(self.blob.delete(body_ref) for body_ref in written),
+                return_exceptions=True,
             )
-            if existing is None or existing[:2] != (page.digest, False):
-                body_ref = (
-                    f"{SOURCE_BLOB_PREFIX}/{source.source_id}/{page_id}/"
-                    f"{page.digest.removeprefix('sha256:')}"
-                )
-                await self.blob.put(body_ref, page.body.encode())
-                changed.append(
-                    ChangedPage(
-                        browse=browse,
-                        body_ref=body_ref,
-                        digest=page.digest,
-                    )
-                )
-            elif existing[2] != browse:
-                metadata.append(browse)
-        deleted = [
-            existing[2].id
-            if (existing := prior_by_identity.get(ref)) is not None
-            else page_id_for(source.source_id, ref)
-            for ref in result.deletes
-        ]
-        tombstoned = await self._write(
-            source,
-            result.next_cursor,
-            changed,
-            metadata,
-            fetched,
-            deleted,
-            result.snapshot,
-        )
+            failures = [result for result in results if isinstance(result, BaseException)]
+            if failures:
+                raise BaseExceptionGroup(
+                    "source commit and blob cleanup failed", [error, *failures]
+                ) from None
+            raise
         await self._report_ok(
             source,
             len(result.pages),
@@ -811,7 +911,7 @@ class SyncDriver:
                 authority = authority.with_for_update()
             subject = (await connection.execute(authority)).scalar_one_or_none()
             if subject is None:
-                raise RuntimeError(f"source {source.source_id} disappeared during sync")
+                raise _SourceClaimLost(str(source.source_id))
             for changed_page in changed:
                 updated = await connection.execute(
                     sa.update(tables.page)

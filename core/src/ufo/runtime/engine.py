@@ -1404,7 +1404,8 @@ class TranscriptRepair:
                     attempt=attempt + 1,
                     error_class=type(error).__name__,
                 )
-                await asyncio.sleep(TRANSCRIPT_WRITE_RETRY_SECONDS)
+                if attempt + 1 < TRANSCRIPT_WRITE_ATTEMPTS:
+                    await asyncio.sleep(TRANSCRIPT_WRITE_RETRY_SECONDS)
 
 
 PREEMPTED = "preempted"

@@ -35,15 +35,18 @@ core-minted view of one hosted port and the resulting picture's one-key store ca
 extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin
 tool gets `ext=None`."""
 
+import asyncio
 import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Protocol
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from pydantic import BaseModel, Field
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.blob import S3BlobStore, WorkspaceBlobStore
 from ufo.browser import CdpProvider, FindCompleter
@@ -486,27 +489,63 @@ class ToolContext:
             not preview.blob_key.startswith(ARTIFACT_KEY_PREFIX) or preview_media_type is None
         ):
             raise ValueError("shared artifact preview is not a bounded stored raster")
-        key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{filename}"
+        artifact_id = (
+            uuid5(NAMESPACE_URL, f"{self.idempotency_key}/{filename}")
+            if self.idempotency_key is not None
+            else uuid4()
+        )
+        key = f"{ARTIFACT_KEY_PREFIX}{artifact_id}/{filename}"
+        async with workspace_tx() as connection:
+            recorded = (
+                await connection.execute(
+                    sa.select(tables.shared_artifact.c.id).where(
+                        tables.shared_artifact.c.turn_id == self.turn.id,
+                        tables.shared_artifact.c.blob_key == key,
+                    )
+                )
+            ).scalar_one_or_none()
         await self.blob.put(key, data)
         now = datetime.now(UTC)
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.shared_artifact).values(
-                    id=uuid4(),
-                    turn_id=self.turn.id,
-                    blob_key=key,
-                    workspace_id=self.turn.workspace_id,
-                    filename=filename,
-                    subject=subject,
-                    media_type=artifact_media_type(filename),
-                    size_bytes=len(data),
-                    preview_blob_key=None if preview is None else preview.blob_key,
-                    preview_media_type=preview_media_type,
-                    preview_size_bytes=None if preview is None else preview.size_bytes,
-                    created_at=now,
-                    updated_at=now,
+        try:
+            async with workspace_tx() as connection:
+                insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+                await connection.execute(
+                    insert(tables.shared_artifact)
+                    .values(
+                        id=uuid5(NAMESPACE_URL, key),
+                        turn_id=self.turn.id,
+                        blob_key=key,
+                        workspace_id=self.turn.workspace_id,
+                        filename=filename,
+                        subject=subject,
+                        media_type=artifact_media_type(filename),
+                        size_bytes=len(data),
+                        preview_blob_key=None if preview is None else preview.blob_key,
+                        preview_media_type=preview_media_type,
+                        preview_size_bytes=None if preview is None else preview.size_bytes,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            tables.shared_artifact.c.turn_id,
+                            tables.shared_artifact.c.blob_key,
+                        ]
+                    )
                 )
-            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            if recorded is None:
+                try:
+                    await self.blob.delete(key)
+                except Exception as error:
+                    log(
+                        "share_artifact.cleanup_failed",
+                        blob_key=key,
+                        error_class=type(error).__name__,
+                    )
+            raise
         if self.publish_artifacts is not None:
             await self.publish_artifacts()
 

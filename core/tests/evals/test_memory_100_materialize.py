@@ -521,10 +521,12 @@ async def test_materializes_snapshot_through_real_memory_and_page_pipelines(
         assert rematerialized.corpus_digest != readiness.corpus_digest
 
         runbook_id = page_id_for(readiness.source_id, "drive/runbook.md")
-        runbook_digest = content_digest("The shared incident commander is Captain Vega.")
-        canonical_body_ref = (
-            f"sources/{readiness.source_id}/{runbook_id}/{runbook_digest.removeprefix('sha256:')}"
-        )
+        async with workspace_tx() as connection:
+            canonical_body_ref = (
+                await connection.execute(
+                    sa.select(tables.page.c.body_ref).where(tables.page.c.id == runbook_id)
+                )
+            ).scalar_one()
         alternate_body_ref = f"eval-corruption/{runbook_id}"
         await blob.put(alternate_body_ref, await blob.get(canonical_body_ref))
         async with workspace_tx() as connection:

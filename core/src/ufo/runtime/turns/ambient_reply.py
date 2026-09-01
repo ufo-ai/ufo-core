@@ -16,10 +16,11 @@ cancels work the agent committed to (issue #129's rule 6) by construction rather
 
 The history window is what makes the call decidable: `<@U0BBYEHCT8F> :point_up_2:` is six characters
 and a mention of someone else, and only the thread around it says whether the agent is wanted. So
-every message carries its speaker, whether the agent itself wrote it, and its text — bounded to the
-last AMBIENT_HISTORY_MESSAGES messages and AMBIENT_MESSAGE_CHARS each, which holds the whole call
-under a cent per thousand decisions and far below the 272k-token line where the family's long-prompt
-rate begins."""
+every message carries its speaker, whether the agent itself wrote it, and its text. History is
+bounded to the last AMBIENT_HISTORY_MESSAGES messages and AMBIENT_MESSAGE_CHARS each. A new message
+over that bound is admitted without classification, so the text that decides whether it is heard is
+never a truncated substitute. This holds the whole classifier call under a cent per thousand
+decisions and far below the 272k-token line where the family's long-prompt rate begins."""
 
 import re
 from dataclasses import dataclass
@@ -117,6 +118,8 @@ class AmbientReplyClassifier:
     async def decide(
         self, message: AmbientMessage, history: tuple[AmbientMessage, ...]
     ) -> AmbientDecision:
+        if len(message.text) > AMBIENT_MESSAGE_CHARS:
+            raise ValueError("ambient message exceeds classifier input limit")
         answer = await self.model.complete(
             ModelRequest(
                 model=self.model.model,

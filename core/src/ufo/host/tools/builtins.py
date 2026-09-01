@@ -35,6 +35,8 @@ Subagents workflow that backs `spawn`, to cancel a running child or queue it a f
 that runs as its next turn — scoped to the children this turn
 spawned."""
 
+import asyncio
+import hashlib
 import json
 import mimetypes
 import shlex
@@ -43,10 +45,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.db import workspace_tx
@@ -624,9 +628,19 @@ class ArtifactPreview:
     blob_key: str
     media_type: str
     size_bytes: int
+    created: bool
 
 
-async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> ArtifactPreview | None:
+async def _discard_artifact(ctx: ToolContext, key: str) -> None:
+    try:
+        await ctx.blob.delete(key)
+    except Exception as error:
+        log("share_file.cleanup_failed", blob_key=key, error_class=type(error).__name__)
+
+
+async def _shared_preview(
+    ctx: ToolContext, scoped: str, safe_name: str, artifact_id: UUID, recorded: bool
+) -> ArtifactPreview | None:
     """Render the first page of a shared document so a member sees the file rather than its name.
 
     The picture is produced by the preview service (RFC 0037), not in the sandbox: the file streams
@@ -642,7 +656,7 @@ async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> Arti
     suffix = PurePosixPath(safe_name).suffix.lower()
     if suffix not in ARTIFACT_PREVIEW_SUFFIXES:
         return None
-    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{PurePosixPath(safe_name).stem}.png"
+    key = f"{ARTIFACT_KEY_PREFIX}{artifact_id}/{PurePosixPath(safe_name).stem}.preview.png"
     match ctx.blob.backend:
         case S3BlobStore():
             put_url = await ctx.blob.presigned_put_unmeasured(key, ARTIFACT_PUT_TTL_SECONDS)
@@ -665,6 +679,8 @@ async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> Arti
         timeout_s=ARTIFACT_PREVIEW_TIMEOUT_SECONDS,
     )
     if render.exit_code != 0:
+        if not recorded:
+            await _discard_artifact(ctx, key)
         log(
             "share_file.preview.refused",
             filename=safe_name,
@@ -674,6 +690,8 @@ async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> Arti
     try:
         size_bytes = int(json.loads(render.stdout)["size_bytes"])
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        if not recorded:
+            await _discard_artifact(ctx, key)
         log(
             "share_file.preview.unparsed",
             filename=safe_name,
@@ -681,7 +699,10 @@ async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> Arti
         )
         return None
     return ArtifactPreview(
-        blob_key=key, media_type=ARTIFACT_PREVIEW_MEDIA_TYPE, size_bytes=size_bytes
+        blob_key=key,
+        media_type=ARTIFACT_PREVIEW_MEDIA_TYPE,
+        size_bytes=size_bytes,
+        created=not recorded,
     )
 
 
@@ -698,6 +719,8 @@ class _StagedShare:
     is_text: bool
     subject: str | None
     preview: ArtifactPreview | None
+    request_fingerprint: str
+    created_blob_keys: tuple[str, ...]
 
 
 async def _packed_directory(ctx: ToolContext, scoped: str) -> str | None:
@@ -732,7 +755,67 @@ async def _packed_directory(ctx: ToolContext, scoped: str) -> str | None:
     return packed
 
 
-async def _staged_share(ctx: ToolContext, spec: SharedFileSpec) -> _StagedShare:
+def _share_request_fingerprint(spec: SharedFileSpec) -> str:
+    encoded = json.dumps(spec.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(encoded.encode()).hexdigest()
+
+
+async def _recorded_share(
+    ctx: ToolContext, spec: SharedFileSpec, artifact_id: UUID
+) -> _StagedShare | None:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.shared_artifact.c.filename,
+                    tables.shared_artifact.c.blob_key,
+                    tables.shared_artifact.c.size_bytes,
+                    tables.shared_artifact.c.request_fingerprint,
+                    tables.shared_artifact.c.digest,
+                    tables.shared_artifact.c.is_text,
+                    tables.shared_artifact.c.subject,
+                    tables.shared_artifact.c.preview_blob_key,
+                    tables.shared_artifact.c.preview_media_type,
+                    tables.shared_artifact.c.preview_size_bytes,
+                ).where(
+                    tables.shared_artifact.c.turn_id == ctx.turn.id,
+                    tables.shared_artifact.c.blob_key.startswith(
+                        f"{ARTIFACT_KEY_PREFIX}{artifact_id}/"
+                    ),
+                )
+            )
+        ).one_or_none()
+    if row is None:
+        return None
+    request_fingerprint = _share_request_fingerprint(spec)
+    if row.request_fingerprint != request_fingerprint:
+        raise ValueError("share_file idempotency key belongs to a different file request")
+    if row.digest is None or row.is_text is None:
+        raise ValueError("share_file idempotency record has no content identity")
+    preview = (
+        None
+        if row.preview_blob_key is None
+        else ArtifactPreview(
+            blob_key=row.preview_blob_key,
+            media_type=row.preview_media_type,
+            size_bytes=row.preview_size_bytes,
+            created=False,
+        )
+    )
+    return _StagedShare(
+        safe_name=row.filename,
+        key=row.blob_key,
+        size_bytes=row.size_bytes,
+        digest=row.digest,
+        is_text=row.is_text,
+        subject=row.subject,
+        preview=preview,
+        request_fingerprint=request_fingerprint,
+        created_blob_keys=(),
+    )
+
+
+async def _staged_share(ctx: ToolContext, spec: SharedFileSpec, artifact_id: UUID) -> _StagedShare:
     """Stage one file into the artifact store under `artifacts/<uuid>/<name>`. A directory is
     packed into a `.tar.gz` of itself first (`_packed_directory`) and the archive is what shares.
     A preflight in the container confines the path through the containment guard and streams the
@@ -740,6 +823,9 @@ async def _staged_share(ctx: ToolContext, spec: SharedFileSpec) -> _StagedShare:
     a link the agent planted at the name is refused rather than copied out, and the upload is then
     bound to those two measurements, so nothing crosses on the sandbox's word and no whole-file
     buffer ever forms in this process."""
+    recorded = await _recorded_share(ctx, spec, artifact_id)
+    if recorded is not None:
+        return recorded
     scoped = workspace_path(spec.file_path)
     normalized = spec.file_path.replace("\\", "/")
     packed = await _packed_directory(ctx, scoped)
@@ -763,9 +849,13 @@ async def _staged_share(ctx: ToolContext, spec: SharedFileSpec) -> _StagedShare:
         and not safe_name.lower().endswith(source_suffix.lower())
     ):
         safe_name += source_suffix
-    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{safe_name}"
-    await _store_artifact(ctx, source, key, int(stat["size"]), str(stat["digest"]))
-    preview = await _shared_preview(ctx, source, safe_name)
+    key = f"{ARTIFACT_KEY_PREFIX}{artifact_id}/{safe_name}"
+    try:
+        await _store_artifact(ctx, source, key, int(stat["size"]), str(stat["digest"]))
+        preview = await _shared_preview(ctx, source, safe_name, artifact_id, False)
+    except BaseException:
+        await _discard_artifact(ctx, key)
+        raise
     return _StagedShare(
         safe_name=safe_name,
         key=key,
@@ -774,6 +864,11 @@ async def _staged_share(ctx: ToolContext, spec: SharedFileSpec) -> _StagedShare:
         is_text=bool(stat["is_text"]),
         subject=spec.subject,
         preview=preview,
+        request_fingerprint=_share_request_fingerprint(spec),
+        created_blob_keys=(
+            key,
+            *((preview.blob_key,) if preview is not None and preview.created else ()),
+        ),
     )
 
 
@@ -788,40 +883,70 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     file's `subject` is an optional caption — absent, the file renders under its plain name."""
     if not ctx.artifact_token_secret:
         raise RuntimeError("artifact sharing is not configured (no artifact token secret set)")
-    staged = [await _staged_share(ctx, spec) for spec in args.files]
-    shared_at = datetime.now(UTC)
-    async with workspace_tx() as connection:
-        for index, share in enumerate(staged):
-            stamp = shared_at + timedelta(microseconds=index)
-            await connection.execute(
-                sa.insert(tables.shared_artifact).values(
-                    id=uuid4(),
-                    turn_id=ctx.turn.id,
-                    blob_key=share.key,
-                    workspace_id=ctx.turn.workspace_id,
-                    filename=share.safe_name,
-                    subject=share.subject,
-                    media_type=artifact_media_type(share.safe_name),
-                    size_bytes=share.size_bytes,
-                    preview_blob_key=None if share.preview is None else share.preview.blob_key,
-                    preview_media_type=None if share.preview is None else share.preview.media_type,
-                    preview_size_bytes=None if share.preview is None else share.preview.size_bytes,
-                    created_at=stamp,
-                    updated_at=stamp,
-                )
+    staged: list[_StagedShare] = []
+    try:
+        for index, spec in enumerate(args.files):
+            artifact_id = (
+                uuid5(NAMESPACE_URL, f"{ctx.idempotency_key}/{index}")
+                if ctx.idempotency_key is not None
+                else uuid4()
             )
-        identities = (
-            await connection.execute(
-                sa.select(tables.turn.c.conversation_id, tables.shared_artifact.c.filename)
-                .select_from(
-                    tables.shared_artifact.join(
-                        tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+            staged.append(await _staged_share(ctx, spec, artifact_id))
+        shared_at = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            for index, share in enumerate(staged):
+                stamp = shared_at + timedelta(microseconds=index)
+                await connection.execute(
+                    insert(tables.shared_artifact)
+                    .values(
+                        id=uuid5(NAMESPACE_URL, share.key),
+                        turn_id=ctx.turn.id,
+                        blob_key=share.key,
+                        workspace_id=ctx.turn.workspace_id,
+                        filename=share.safe_name,
+                        subject=share.subject,
+                        media_type=artifact_media_type(share.safe_name),
+                        size_bytes=share.size_bytes,
+                        request_fingerprint=share.request_fingerprint,
+                        digest=share.digest,
+                        is_text=share.is_text,
+                        preview_blob_key=None if share.preview is None else share.preview.blob_key,
+                        preview_media_type=None
+                        if share.preview is None
+                        else share.preview.media_type,
+                        preview_size_bytes=(
+                            None if share.preview is None else share.preview.size_bytes
+                        ),
+                        created_at=stamp,
+                        updated_at=stamp,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            tables.shared_artifact.c.turn_id,
+                            tables.shared_artifact.c.blob_key,
+                        ]
                     )
                 )
-                .where(tables.shared_artifact.c.workspace_id == ctx.turn.workspace_id)
-                .distinct()
-            )
-        ).all()
+            identities = (
+                await connection.execute(
+                    sa.select(tables.turn.c.conversation_id, tables.shared_artifact.c.filename)
+                    .select_from(
+                        tables.shared_artifact.join(
+                            tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+                        )
+                    )
+                    .where(tables.shared_artifact.c.workspace_id == ctx.turn.workspace_id)
+                    .distinct()
+                )
+            ).all()
+    except asyncio.CancelledError:
+        raise
+    except BaseException:
+        await asyncio.gather(
+            *(_discard_artifact(ctx, key) for share in staged for key in share.created_blob_keys)
+        )
+        raise
     object_names = artifact_object_names(
         [(row.conversation_id, row.filename) for row in identities]
     )
@@ -1166,6 +1291,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=ShareFileInput,
         handler=share_file_handler,
+        side_effecting=True,
     ),
     ToolDef(
         name="spawn",

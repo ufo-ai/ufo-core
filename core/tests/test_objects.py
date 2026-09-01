@@ -12,7 +12,7 @@ import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
 from urllib.parse import parse_qs, urlsplit
@@ -35,6 +35,7 @@ from ufo_ext_sources.tools import SOURCE_OBJECT
 
 import ufo.host.kinds.artifacts as artifacts
 import ufo.host.kinds.conversations as conversations
+import ufo.host.tools.builtins as builtin_tools
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.models.catalog import core_model_specs
@@ -2055,14 +2056,84 @@ async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
                 )
 
 
-async def test_a_name_read_answers_past_the_listing_window(
+async def test_a_replayed_share_file_call_reuses_its_blob_and_row(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        ctx, _ = await _workspace_context(turn, tmp_path)
+        ctx = replace(ctx, idempotency_key=f"{turn.id}/share_file/call-1")
+        await ctx.sandbox.bash("printf 'stable' > report.txt")
+
+        first = json.loads(
+            await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+        )[0]
+        await ctx.sandbox.bash("printf 'changed after the recorded share' > report.txt")
+        second = json.loads(
+            await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+        )[0]
+
+        async with workspace_tx() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        sa.select(tables.shared_artifact.c.blob_key).where(
+                            tables.shared_artifact.c.turn_id == turn.id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert first["url"] == second["url"]
+        assert first == second
+        assert rows == [urlsplit(first["url"]).path.removeprefix("/")]
+        assert len(await ctx.blob.list("artifacts/")) == 1
+        assert await ctx.blob.get(rows[0]) == b"stable"
+
+        await ctx.sandbox.bash("printf 'different' > other.txt")
+        with pytest.raises(ValueError, match="idempotency key belongs to a different file request"):
+            await _text(tools, "share_file", ctx, files=[{"file_path": "other.txt"}])
+        assert await ctx.blob.get(rows[0]) == b"stable"
+
+
+async def test_a_cancelled_share_file_commit_keeps_the_blob_its_row_names(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The scan window bounds the unfiltered browse alone: a file whose shares all fell past
-    the newest-N window leaves the plain listing, while a search or a column filter narrows the
-    query before the window and still answers it, its name reads whole, and a delete removes
-    every version — a bounded page must never make a named thing unreachable or half-deleted."""
-    monkeypatch.setattr(artifacts, "ARTIFACT_SCAN_LIMIT", 2)
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        ctx, _ = await _workspace_context(turn, tmp_path)
+        await ctx.sandbox.bash("printf 'stable' > report.txt")
+        opened = 0
+
+        @asynccontextmanager
+        async def commit_then_cancel() -> AsyncIterator[AsyncConnection]:
+            nonlocal opened
+            opened += 1
+            async with workspace_tx() as connection:
+                yield connection
+            if opened == 2:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(builtin_tools, "workspace_tx", commit_then_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+        async with workspace_tx() as connection:
+            blob_key = (
+                await connection.execute(
+                    sa.select(tables.shared_artifact.c.blob_key).where(
+                        tables.shared_artifact.c.turn_id == turn.id
+                    )
+                )
+            ).scalar_one()
+        assert await ctx.blob.exists(blob_key)
+
+
+async def test_an_interrupted_artifact_delete_commits_before_blob_cleanup(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
@@ -2073,13 +2144,70 @@ async def test_a_name_read_answers_past_the_listing_window(
         await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
         await ctx.sandbox.bash("printf 'v2' > report.txt")
         await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
-        later = await _turn_row(workspace_id, agent_id=turn.agent_id)
-        later_ctx, _ = await _workspace_context(later, tmp_path)
-        await later_ctx.sandbox.bash("printf 'c1' > chart.txt")
-        await _text(tools, "share_file", later_ctx, files=[{"file_path": "chart.txt"}])
-        await later_ctx.sandbox.bash("printf 'c2' > chart.txt")
-        await _text(tools, "share_file", later_ctx, files=[{"file_path": "chart.txt"}])
+        delete = FilesystemBlobStore.delete
+        attempts = 0
+
+        async def interrupted_delete(store: FilesystemBlobStore, key: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                raise OSError("blob store unavailable")
+            await delete(store, key)
+
+        monkeypatch.setattr(FilesystemBlobStore, "delete", interrupted_delete)
+        with pytest.raises(OSError, match="blob store unavailable"):
+            await _agent_text(
+                turn.agent_id, tools, "object_delete", ctx, kind=ARTIFACT_KIND, name=name
+            )
         async with workspace_tx() as connection:
+            remaining = (
+                await connection.execute(
+                    sa.select(sa.func.count()).select_from(tables.shared_artifact)
+                )
+            ).scalar_one()
+        assert remaining == 0
+        assert len(await ctx.blob.list("artifacts/")) == 1
+
+
+async def test_artifact_reads_reach_every_version(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.conversation)
+                .where(tables.conversation.c.id == turn.conversation_id)
+                .values(surface="slack")
+            )
+        name = f"{turn.conversation_id.hex[:8]}-report-txt"
+        ctx, _ = await _workspace_context(turn, tmp_path)
+        await ctx.sandbox.bash("printf 'v1' > report.txt")
+        await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+        await ctx.sandbox.bash("printf 'v2' > report.txt")
+        await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+        later = await _turn_row(workspace_id, agent_id=turn.agent_id)
+        chart_shares = artifacts.ARTIFACT_SCAN_LIMIT + 1
+        newer = datetime.now(UTC) + timedelta(seconds=1)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.shared_artifact),
+                [
+                    {
+                        "id": uuid4(),
+                        "turn_id": later.id,
+                        "blob_key": f"artifacts/{uuid4()}/chart.txt",
+                        "workspace_id": workspace_id,
+                        "filename": "chart.txt",
+                        "subject": None,
+                        "media_type": "text/plain",
+                        "size_bytes": 2,
+                        "created_at": newer + timedelta(microseconds=index),
+                        "updated_at": newer + timedelta(microseconds=index),
+                    }
+                    for index in range(chart_shares)
+                ],
+            )
             report_keys = (
                 (
                     await connection.execute(
@@ -2097,7 +2225,7 @@ async def test_a_name_read_answers_past_the_listing_window(
         listing = json.loads(
             await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
         )
-        assert [row["filename"] for row in listing["objects"]] == ["chart.txt"]
+        assert {row["filename"] for row in listing["objects"]} == {"chart.txt"}
         searched = json.loads(
             await _agent_text(
                 turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND, query="report"
@@ -2115,6 +2243,17 @@ async def test_a_name_read_answers_past_the_listing_window(
             )
         )
         assert {row["filename"] for row in narrowed["objects"]} == {"report.txt"}
+        by_surface = json.loads(
+            await _agent_text(
+                turn.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=ARTIFACT_KIND,
+                filters={"surface": "slack"},
+            )
+        )
+        assert {row["filename"] for row in by_surface["objects"]} == {"report.txt"}
         fetched = yaml.safe_load(
             await _agent_text(
                 turn.agent_id, tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name
@@ -3855,6 +3994,112 @@ async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
     assert bob_rows[str(shared_id)].fields["mine"] is True
     assert bob_rows[str(shared_id)].fields["speaker"] is None
     assert [row.name for row in portal_only.rows] == [str(mine_id)]
+
+
+async def test_conversation_member_filter_runs_before_paging(db: None) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        member_id = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        moved_at = datetime(2026, 1, 1, tzinfo=UTC)
+        portal_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Older portal conversation",
+            audience=conversation_audience(member_id),
+            member_id=member_id,
+            speaker_member_id=member_id,
+            admission="member",
+            moved_at=moved_at,
+            surface="web",
+        )
+        for offset in range(100):
+            await _rail_conversation(
+                workspace_id,
+                agent_id,
+                title=f"Newer Slack conversation {offset}",
+                audience=conversation_audience(member_id),
+                member_id=member_id,
+                speaker_member_id=member_id,
+                admission="member",
+                moved_at=moved_at + timedelta(seconds=offset + 1),
+                surface="slack",
+            )
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=member_id,
+                admin=False,
+                query=ObjectListQuery(
+                    filters={"portal": True},
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+
+    assert [row.name for row in page.rows] == [str(portal_id)]
+
+
+async def test_the_rail_reads_each_side_under_its_own_bound(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One rail read costs a bounded number of rows however many conversations the member holds:
+    each side is read under its own bound. A declared filter narrows the query ahead of that bound,
+    so the row it asks for answers from past the bound rather than from an empty page."""
+    monkeypatch.setattr(conversations, "CONVERSATION_MINE_LIMIT", 1)
+    workspace_id = await _workspace()
+    moved_at = datetime(2026, 1, 1, tzinfo=UTC)
+    with ws(workspace_id):
+        member_id = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        older_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Older portal conversation",
+            audience=conversation_audience(member_id),
+            member_id=member_id,
+            speaker_member_id=member_id,
+            admission="member",
+            moved_at=moved_at,
+            surface="web",
+        )
+        newer_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Newer Slack conversation",
+            audience=conversation_audience(member_id),
+            member_id=member_id,
+            speaker_member_id=member_id,
+            admission="member",
+            moved_at=moved_at + timedelta(seconds=1),
+            surface="slack",
+        )
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=member_id,
+                admin=False,
+                query=ObjectListQuery(
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+            portal_only = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=member_id,
+                admin=False,
+                query=ObjectListQuery(
+                    filters={"portal": True},
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+
+    assert [row.name for row in page.rows] == [str(newer_id)]
+    assert [row.name for row in portal_only.rows] == [str(older_id)]
 
 
 async def test_a_speaking_admin_reads_another_members_private_conversation_as_metadata(
