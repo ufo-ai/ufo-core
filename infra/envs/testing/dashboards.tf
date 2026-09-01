@@ -1483,9 +1483,7 @@ resource "datadog_dashboard" "product" {
         their volume over it rather than a standing count.
 
         Each card shows the count and its history over the selected period. The funnel below shows
-        the count and the share of seated workspaces that reached it. The share is against seated
-        rather than against every workspace: a workspace nobody sits in has nobody to move through
-        the funnel, and counting it would dilute every step below.
+        each exact count and a bar scaled against the largest stage.
 
         What this board cannot say, because the rows are not ours to read:
 
@@ -1587,14 +1585,6 @@ resource "datadog_dashboard" "product" {
     }
   }
 
-  # The funnel itself, as a count and the share of workspaces that reached it. Read downward: each
-  # step is a subset of the one above it, so the gap between two rows is where workspaces are
-  # stopping, and the share is what says whether that gap matters.
-  #
-  # `seated` is the denominator rather than a workspace count, because a workspace with no seated
-  # member has nobody to move through the funnel and would only dilute every share below.
-  # The two queries carry names that are not `stage`: Datadog refuses a formula name that collides
-  # with a group-by tag.
   widget {
     query_table_definition {
       title = "workspaces by funnel stage"
@@ -1602,22 +1592,12 @@ resource "datadog_dashboard" "product" {
         formula {
           formula_expression = "reached"
           alias              = "workspaces"
-        }
-        formula {
-          formula_expression = "100 * reached / denom"
-          alias              = "share of workspaces"
+          cell_display_mode  = "bar"
         }
         query {
           metric_query {
             name       = "reached"
             query      = "sum:ufo.product_stage_total{$env} by {stage}.as_count().rollup(sum, ${local.product_census_seconds})"
-            aggregator = "max"
-          }
-        }
-        query {
-          metric_query {
-            name       = "denom"
-            query      = "sum:ufo.product_stage_total{$env,stage:seated}.as_count().rollup(sum, ${local.product_census_seconds})"
             aggregator = "max"
           }
         }

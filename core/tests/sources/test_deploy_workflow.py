@@ -4340,7 +4340,7 @@ def _check_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> No
     )
 
     assert f"product_census_seconds = {PRODUCT_CENSUS_SECONDS}" in dashboard
-    assert len(census) == 13
+    assert len(census) == 12
     assert "as_rate()" not in dashboard
     for query in census:
         assert ".as_count().rollup(sum, ${local.product_census_seconds})" in query
@@ -4349,7 +4349,7 @@ def _check_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> No
     assert len(ranked) == 5
     assert all("'max', 'desc')" in query for query in ranked)
     funnel_queries = dashboard.split("metric_query {")[1:]
-    assert len(funnel_queries) == 2
+    assert len(funnel_queries) == 1
     assert all(block.splitlines()[3].strip() == 'aggregator = "max"' for block in funnel_queries)
 
 
@@ -4359,7 +4359,7 @@ def _check_every_product_card_shows_its_count_and_history() -> None:
     product = dashboard.split('resource "datadog_dashboard" "product" {', 1)[1]
 
     assert product.count("query_value_definition {") == 6
-    assert product.count('aggregator = "max"') == 8
+    assert product.count('aggregator = "max"') == 7
     assert product.count("timeseries_background {") == 6
     assert product.count('timeseries_background {\n        type = "bars"\n      }') == 6
     assert "change_definition {" not in product
@@ -4367,20 +4367,16 @@ def _check_every_product_card_shows_its_count_and_history() -> None:
         assert f"stage:{stage}" in product
 
 
-def _check_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
-    """A step is worth what it keeps, so the funnel carries the share beside the count. The
-    denominator is `seated` rather than every workspace: one nobody sits in has nobody to move
-    through the funnel, and counting it would dilute every step below. Neither formula name may be
-    `stage` — Datadog refuses a formula name that collides with a group-by tag."""
+def _check_the_product_funnel_shows_count_and_relative_bar() -> None:
     dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
 
-    assert 'formula_expression = "100 * reached / denom"' in dashboard
-    assert 'alias              = "share of workspaces"' in dashboard
-    assert 'name       = "denom"' in dashboard
-    assert '"denom"\n            query      = "sum:ufo.product_stage_total{$env,stage:seated}' in (
-        dashboard
-    )
-    assert re.search(r'formula_expression = "(stage|kind|name)"', dashboard) is None
+    product = dashboard.split('resource "datadog_dashboard" "product" {', 1)[1]
+    funnel = product.split('title = "workspaces by funnel stage"', 1)[1].split("widget {", 1)[0]
+
+    assert 'formula_expression = "reached"' in funnel
+    assert 'alias              = "workspaces"' in funnel
+    assert 'cell_display_mode  = "bar"' in funnel
+    assert "denom" not in funnel
 
 
 def _check_database_capacity_monitors() -> None:
@@ -4566,7 +4562,7 @@ def _check_deploy_workflow_static_contract() -> None:
         _check_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics,
         _check_the_product_board_counts_a_workspace_out_of_one_census_bucket,
         _check_every_product_card_shows_its_count_and_history,
-        _check_the_product_funnel_reads_its_share_against_seated_workspaces,
+        _check_the_product_funnel_shows_count_and_relative_bar,
         _check_edge_doors_use_separate_environment_origins,
         _check_edge_worker_artifact_substitutes_every_placeholder,
         _check_the_client_target_set_is_one_set_everywhere,
