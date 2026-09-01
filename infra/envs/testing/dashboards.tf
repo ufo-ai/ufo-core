@@ -1446,8 +1446,7 @@ resource "datadog_dashboard" "sandbox_health" {
 # Datadog sizes for itself holds as many ticks as it is wide, which multiplies the number. `max`
 # then picks a whole bucket over the one still filling at the right-hand edge, and every card, the
 # funnel and the toplists take that same `max` so a stage reads the same in the big number and in the
-# funnel. Each card therefore reads through a named query rather than a bare `q`: a request with no
-# aggregator reduces by the Datadog default over the whole board window, the edge bucket included.
+# funnel.
 #
 # One board for both fleets, in the root the deploy pipeline applies.
 
@@ -1483,12 +1482,10 @@ resource "datadog_dashboard" "product" {
         and dollars are the other kind of number — events counted as they happen — so a range shows
         their volume over it rather than a standing count.
 
-        Each card carries the count and how it moved against the same hour a week earlier, and the
-        funnel below carries the count and the share of seated workspaces that reached it. The
-        movement reads empty until the series is a week old — this metric started 2026-08-28, so
-        every card shows a bare number until 2026-09-04. The share is against seated rather than
-        against every workspace: a workspace nobody sits in has nobody to move through the funnel,
-        and counting it would dilute every step below.
+        Each card shows the count and its history over the selected period. The funnel below shows
+        the count and the share of seated workspaces that reached it. The share is against seated
+        rather than against every workspace: a workspace nobody sits in has nobody to move through
+        the funnel, and counting it would dilute every step below.
 
         What this board cannot say, because the rows are not ours to read:
 
@@ -1513,145 +1510,79 @@ resource "datadog_dashboard" "product" {
   }
 
   widget {
-    change_definition {
+    query_value_definition {
       title = "workspaces"
       request {
-        formula {
-          formula_expression = "seated"
-        }
-        query {
-          metric_query {
-            name       = "seated"
-            query      = "sum:ufo.product_stage_total{$env,stage:seated}.as_count().rollup(sum, ${local.product_census_seconds})"
-            aggregator = "max"
-          }
-        }
-        change_type   = "relative"
-        compare_to    = "week_before"
-        increase_good = true
-        order_by      = "change"
-        order_dir     = "desc"
-        show_present  = true
+        q          = "sum:ufo.product_stage_total{$env,stage:seated}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+      timeseries_background {
+        type = "bars"
       }
     }
   }
 
   widget {
-    change_definition {
+    query_value_definition {
       title = "attached a connector"
       request {
-        formula {
-          formula_expression = "connector"
-        }
-        query {
-          metric_query {
-            name       = "connector"
-            query      = "sum:ufo.product_stage_total{$env,stage:connector}.as_count().rollup(sum, ${local.product_census_seconds})"
-            aggregator = "max"
-          }
-        }
-        change_type   = "relative"
-        compare_to    = "week_before"
-        increase_good = true
-        order_by      = "change"
-        order_dir     = "desc"
-        show_present  = true
+        q          = "sum:ufo.product_stage_total{$env,stage:connector}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+      timeseries_background {
+        type = "bars"
       }
     }
   }
 
   widget {
-    change_definition {
+    query_value_definition {
       title = "invited a teammate"
       request {
-        formula {
-          formula_expression = "invited"
-        }
-        query {
-          metric_query {
-            name       = "invited"
-            query      = "sum:ufo.product_stage_total{$env,stage:invited}.as_count().rollup(sum, ${local.product_census_seconds})"
-            aggregator = "max"
-          }
-        }
-        change_type   = "relative"
-        compare_to    = "week_before"
-        increase_good = true
-        order_by      = "change"
-        order_dir     = "desc"
-        show_present  = true
+        q          = "sum:ufo.product_stage_total{$env,stage:invited}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+      timeseries_background {
+        type = "bars"
       }
     }
   }
 
   widget {
-    change_definition {
+    query_value_definition {
       title = "chatted at least once"
       request {
-        formula {
-          formula_expression = "chatted"
-        }
-        query {
-          metric_query {
-            name       = "chatted"
-            query      = "sum:ufo.product_stage_total{$env,stage:chatted}.as_count().rollup(sum, ${local.product_census_seconds})"
-            aggregator = "max"
-          }
-        }
-        change_type   = "relative"
-        compare_to    = "week_before"
-        increase_good = true
-        order_by      = "change"
-        order_dir     = "desc"
-        show_present  = true
+        q          = "sum:ufo.product_stage_total{$env,stage:chatted}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+      timeseries_background {
+        type = "bars"
       }
     }
   }
 
   widget {
-    change_definition {
+    query_value_definition {
       title = "chatted in the last 7 days"
       request {
-        formula {
-          formula_expression = "active_7d"
-        }
-        query {
-          metric_query {
-            name       = "active_7d"
-            query      = "sum:ufo.product_stage_total{$env,stage:active_7d}.as_count().rollup(sum, ${local.product_census_seconds})"
-            aggregator = "max"
-          }
-        }
-        change_type   = "relative"
-        compare_to    = "week_before"
-        increase_good = true
-        order_by      = "change"
-        order_dir     = "desc"
-        show_present  = true
+        q          = "sum:ufo.product_stage_total{$env,stage:active_7d}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+      timeseries_background {
+        type = "bars"
       }
     }
   }
 
   widget {
-    change_definition {
+    query_value_definition {
       title = "paid"
       request {
-        formula {
-          formula_expression = "paid"
-        }
-        query {
-          metric_query {
-            name       = "paid"
-            query      = "sum:ufo.product_stage_total{$env,stage:paid}.as_count().rollup(sum, ${local.product_census_seconds})"
-            aggregator = "max"
-          }
-        }
-        change_type   = "relative"
-        compare_to    = "week_before"
-        increase_good = true
-        order_by      = "change"
-        order_dir     = "desc"
-        show_present  = true
+        q          = "sum:ufo.product_stage_total{$env,stage:paid}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+      timeseries_background {
+        type = "bars"
       }
     }
   }

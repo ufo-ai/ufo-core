@@ -147,7 +147,6 @@ async def product_census() -> None:
         reached = (await connection.execute(stages)).mappings().one()
         holdings = (await connection.execute(attached)).all()
     for stage, arrived in reached.items():
-        if arrived:
-            emit_metric(PRODUCT_STAGE_METRIC, stage=stage)
+        emit_metric(PRODUCT_STAGE_METRIC, int(arrived), stage=stage)
     for holding in holdings:
         emit_metric(PRODUCT_ATTACH_METRIC, kind=holding.kind, name=holding.name)

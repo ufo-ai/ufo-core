@@ -727,12 +727,9 @@ def _census_reader(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
     return reader
 
 
-async def test_the_census_counts_only_the_stages_a_workspace_has_reached(
+async def test_the_census_reports_every_stage_and_counts_only_the_stages_reached(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stage is a claim about a row, so a workspace holding no connector, no invite and no
-    purchase must produce no such series at all — a stage that counts every workspace whatever it
-    did reads as progress that never happened."""
     workspace_id = await _seeded_workspace(member_turn_days_ago=0)
     reader = _census_reader(monkeypatch)
 
@@ -740,12 +737,26 @@ async def test_the_census_counts_only_the_stages_a_workspace_has_reached(
         await product_census()
 
     points = _census_points(reader)
-    assert {point.attributes["stage"] for point in points[f"ufo.{PRODUCT_STAGE_METRIC}"]} == {
+    stages = {
+        point.attributes["stage"]: point.value for point in points[f"ufo.{PRODUCT_STAGE_METRIC}"]
+    }
+    assert {stage for stage, value in stages.items() if value == 1} == {
         "seated",
         "chatted",
         "active_1d",
         "active_7d",
     }
+    assert set(stages) == {
+        "seated",
+        "connector",
+        "invited",
+        "app",
+        "chatted",
+        "active_1d",
+        "active_7d",
+        "paid",
+    }
+    assert stages["paid"] == 0
     assert f"ufo.{PRODUCT_ATTACH_METRIC}" not in points
 
 
@@ -796,6 +807,7 @@ async def test_the_census_counts_the_app_stage_off_an_app_the_workspace_made_its
     provisioned_stages = {
         point.attributes["stage"]
         for point in _census_points(provisioned_reader)[f"ufo.{PRODUCT_STAGE_METRIC}"]
+        if point.value == 1
     }
 
     built_reader = _census_reader(monkeypatch)
@@ -804,6 +816,7 @@ async def test_the_census_counts_the_app_stage_off_an_app_the_workspace_made_its
     built_stages = {
         point.attributes["stage"]
         for point in _census_points(built_reader)[f"ufo.{PRODUCT_STAGE_METRIC}"]
+        if point.value == 1
     }
 
     assert "app" not in provisioned_stages
@@ -823,11 +836,12 @@ async def test_the_census_ages_a_workspace_out_of_the_active_window_it_left(
         await product_census()
 
     stages = {
-        point.attributes["stage"] for point in _census_points(reader)[f"ufo.{PRODUCT_STAGE_METRIC}"]
+        point.attributes["stage"]: point.value
+        for point in _census_points(reader)[f"ufo.{PRODUCT_STAGE_METRIC}"]
     }
-    assert "chatted" in stages
-    assert "active_7d" in stages
-    assert "active_1d" not in stages
+    assert stages["chatted"] == 1
+    assert stages["active_7d"] == 1
+    assert stages["active_1d"] == 0
 
 
 async def test_the_census_names_what_is_attached_without_holding_its_name(
@@ -901,7 +915,9 @@ async def test_the_census_sees_only_the_workspace_it_is_bound_to(
         await product_census()
 
     points = _census_points(reader)
-    assert {point.attributes["stage"] for point in points[f"ufo.{PRODUCT_STAGE_METRIC}"]} == {
-        "seated"
-    }
+    assert {
+        point.attributes["stage"]
+        for point in points[f"ufo.{PRODUCT_STAGE_METRIC}"]
+        if point.value == 1
+    } == {"seated"}
     assert f"ufo.{PRODUCT_ATTACH_METRIC}" not in points

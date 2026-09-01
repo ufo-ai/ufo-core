@@ -4451,27 +4451,22 @@ def test_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> None
     ranked = [query for query in census if query.startswith("top(")]
     assert len(ranked) == 5
     assert all("'max', 'desc')" in query for query in ranked)
-    reduced = dashboard.split("metric_query {")[1:]
-    assert len(reduced) == 8
-    assert all(block.splitlines()[3].strip() == 'aggregator = "max"' for block in reduced)
+    funnel_queries = dashboard.split("metric_query {")[1:]
+    assert len(funnel_queries) == 2
+    assert all(block.splitlines()[3].strip() == 'aggregator = "max"' for block in funnel_queries)
 
 
-def test_every_product_card_carries_its_movement_beside_the_count() -> None:
-    """A count alone says where the funnel stands and nothing about where it is going, so each card
-    reads as a number and the change against the week before it. `show_present` is what keeps the
-    count on the card: without it the widget reports the movement alone, and the board would lose
-    the figure it exists to report. Each card reads its count through a named query rather than a
-    bare `q`, because that is the form the aggregator hangs off: the card and the funnel row for one
-    stage read the same number only where both reduce their buckets by `max`."""
+def test_every_product_card_shows_its_count_and_history() -> None:
     dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
 
-    assert dashboard.count("change_definition {") == 6
-    assert dashboard.count("show_present  = true") == 6
-    assert dashboard.count('compare_to    = "week_before"') == 6
-    assert dashboard.count('change_type   = "relative"') == 6
+    product = dashboard.split('resource "datadog_dashboard" "product" {', 1)[1]
+
+    assert product.count("query_value_definition {") == 6
+    assert product.count('aggregator = "max"') == 8
+    assert product.count("timeseries_background {") == 6
+    assert product.count('timeseries_background {\n        type = "bars"\n      }') == 6
     for stage in ("seated", "connector", "invited", "chatted", "active_7d", "paid"):
-        assert f'name       = "{stage}"' in dashboard
-        assert f'formula_expression = "{stage}"' in dashboard
+        assert f"stage:{stage}" in product
 
 
 def test_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
