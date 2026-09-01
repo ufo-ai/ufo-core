@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { expect, test } from "vitest";
 
 import type { ChartBar } from "@/components/ui/chart";
@@ -57,6 +57,14 @@ test("the plot draws no ground and no corner — the card it stands in owns both
 test("no colour is authored in the plot — every channel names a theme token", () => {
   const { container } = render(<Chart label="Open pull requests each day" points={SERIES} />);
   expect(AUTHORED.test(container.innerHTML)).toBe(false);
+});
+
+test("a measure read a period at a time draws one column per period, not a curve", async () => {
+  const { container } = render(<Chart label="Daily spend" points={SERIES} shape="bar" />);
+  await waitFor(() =>
+    expect(container.querySelectorAll(".recharts-bar-rectangle")).toHaveLength(SERIES.length),
+  );
+  expect(container.querySelector(".recharts-area-curve")).toBeNull();
 });
 
 const BANDED: ChartBar[] = [

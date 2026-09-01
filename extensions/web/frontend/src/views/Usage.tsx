@@ -221,19 +221,21 @@ function Figures({
   );
 }
 
-/** The range's tokens a day at a time, drawn by the kit's plot rather than by a polyline of this
- *  screen's own: one series, the wash under it, and the value of the day the pointer is on. The two
- *  ends of the period stand under it, because the plot itself draws no axis. */
+/** The range's spend a day at a time, drawn by the kit's plot as one column per day: a day is what
+ *  was billed on it, and a curve between two days would state a figure on the hours between them
+ *  that no bill carries. The value of the day the pointer is on is the money itself. The two ends of
+ *  the period stand under it, because the plot itself draws no axis. */
 function DailyHistory({ rows }: { rows: DailyLine[] }) {
-  if (!rows.length) return <PanelBlank body="No tokens were used in this range." />;
-  const total = rows.reduce((sum, row) => sum + row.tokens, 0);
+  if (!rows.length) return <PanelBlank body="Nothing was spent in this range." />;
+  const total = rows.reduce((sum, row) => sum + row.total_micro_usd, 0);
   return (
     <div className="rounded-panel border border-edge bg-surface p-xl">
       <Chart
         className="aspect-auto h-(--size-usage-chart)"
-        label={tokenCount(total) + " tokens across " + rows.length + " daily buckets"}
-        points={rows.map((row) => row.tokens)}
-        hover={(at) => dayLabel(rows[at].day) + " · " + tokenCount(rows[at].tokens) + " tokens"}
+        shape="bar"
+        label={money(total) + " across " + rows.length + " daily buckets"}
+        points={rows.map((row) => row.total_micro_usd)}
+        hover={(at) => dayLabel(rows[at].day) + " · " + money(rows[at].total_micro_usd)}
       />
       <div className="flex justify-between text-small text-ink-soft">
         <span>{dayLabel(rows[0].day)}</span>
@@ -363,7 +365,7 @@ export function WorkspaceUsage({
               <RangeControl range={range} onRange={(next) => onPlace({ range: next })} />
               <Figures details={report} range={range} windowSeconds={payload.window_seconds} />
             </Section>
-            <Section title="Daily tokens">
+            <Section title="Daily spend">
               <DailyHistory rows={report.daily} />
             </Section>
             {rollup ? (

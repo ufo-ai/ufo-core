@@ -805,7 +805,7 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   // agent id is the report's own word for work no agent ran, and stands as the report wrote it.
   expect(screen.getByText("Assistant")).toBeTruthy();
   expect(screen.getAllByText("Workspace jobs").length).toBe(2);
-  expect(screen.getByRole("img", { name: "7.2K tokens across 1 daily buckets" })).toBeTruthy();
+  expect(screen.getByRole("img", { name: "$9.00 across 1 daily buckets" })).toBeTruthy();
   expect(usageWire.calls.some((url) => url.includes("range=30d"))).toBe(true);
 
   // The range is a place the pane holds, not state the screen keeps to itself: the press reports it
@@ -815,7 +815,7 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   expect(screen.getByRole("button", { name: "90 days" }).getAttribute("aria-pressed")).toBe("true");
 });
 
-test("the usage range offers the last 24 hours, and the day history is the kit's plot", async () => {
+test("the usage range offers the last 24 hours, and the day history is the kit's bar plot", async () => {
   const usageWire = wire({
     "/workspace/usage": () =>
       json({
@@ -834,8 +834,9 @@ test("the usage range offers the last 24 hours, and the day history is the kit's
   );
 
   // The plot is the kit's chart rather than this screen's own polyline, so the point under the
-  // pointer can state its own value.
-  const plot = await screen.findByRole("img", { name: "1.2K tokens across 1 daily buckets" });
+  // pointer can state its own value. A day is what was billed on it, so the history states dollars
+  // and draws each day as its own column.
+  const plot = await screen.findByRole("img", { name: "$1.50 across 1 daily buckets" });
   expect(plot.getAttribute("data-slot")).toBe("chart");
 
   await userEvent.click(screen.getByRole("button", { name: "24 hours" }));

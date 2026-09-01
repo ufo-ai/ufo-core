@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type ComponentProps } from "react";
 import type {
   Area as AreaMark,
   AreaChart as AreaPlot,
+  Bar as BarMark,
+  BarChart as BarPlot,
   ResponsiveContainer as Box,
   Tooltip as Readout,
 } from "recharts";
@@ -24,6 +26,8 @@ const plotted = (points: readonly number[]) => points.map((value, at) => ({ at, 
 type Cartesian = {
   Area: typeof AreaMark;
   AreaChart: typeof AreaPlot;
+  Bar: typeof BarMark;
+  BarChart: typeof BarPlot;
   ResponsiveContainer: typeof Box;
   Tooltip: typeof Readout;
 };
@@ -44,6 +48,8 @@ function useCartesian(): Cartesian | null {
       .then((mark) => ({
         Area: mark.Area,
         AreaChart: mark.AreaChart,
+        Bar: mark.Bar,
+        BarChart: mark.BarChart,
         ResponsiveContainer: mark.ResponsiveContainer,
         Tooltip: mark.Tooltip,
       }))
@@ -78,6 +84,10 @@ function useCartesian(): Cartesian | null {
  *  itself, and the caller words it because the caller owns the units and the period. A plot given no
  *  `hover` draws no readout and no cursor, which is every plot read for its shape alone.
  *
+ *  `shape` is what the series is drawn as. A measure read for its direction is a curve; a measure
+ *  read a period at a time — what one day cost, against the day beside it — is a column per period,
+ *  because a curve between two days states a value on the hours between them that nothing measured.
+ *
  *  `label` is what the series plots, said once: the plot answers as one graphic rather than as a
  *  hundred unnamed points, and a member reading by ear hears the measure instead of the markup. It
  *  is a required argument because a chart nobody can hear is what this would otherwise ship.
@@ -97,15 +107,36 @@ export function Chart({
   label,
   points,
   hover,
+  shape = "area",
   className,
   ...props
 }: ComponentProps<"div"> & {
   label: string;
   points: readonly number[];
   hover?: (at: number) => string;
+  shape?: "area" | "bar";
 }) {
   const data = useMemo(() => plotted(points), [points]);
   const cartesian = useCartesian();
+  const readout =
+    cartesian === null || hover === undefined ? null : (
+      <cartesian.Tooltip
+        isAnimationActive={false}
+        cursor={
+          shape === "bar"
+            ? { fill: SERIES, fillOpacity: WASH }
+            : { stroke: SERIES, strokeWidth: HAIRLINE }
+        }
+        content={({ active, payload }) => {
+          const point = active ? payload?.[0]?.payload : undefined;
+          return point == null ? null : (
+            <span className="rounded-full bg-ink px-2xl py-sm text-small font-medium text-surface">
+              {hover(Number(point.at))}
+            </span>
+          );
+        }}
+      />
+    );
   return (
     <div
       data-slot="chart"
@@ -114,7 +145,20 @@ export function Chart({
       className={cn("aspect-video w-full min-w-0", className)}
       {...props}
     >
-      {cartesian === null ? null : (
+      {cartesian === null ? null : shape === "bar" ? (
+      <cartesian.ResponsiveContainer>
+        <cartesian.BarChart accessibilityLayer={false} data={data} margin={AIR}>
+          <cartesian.Bar
+            dataKey="value"
+            fill={SERIES}
+            radius={HAIRLINE}
+            activeBar={{ fill: SERIES }}
+            isAnimationActive={false}
+          />
+          {readout}
+        </cartesian.BarChart>
+      </cartesian.ResponsiveContainer>
+      ) : (
       <cartesian.ResponsiveContainer>
         <cartesian.AreaChart accessibilityLayer={false} data={data} margin={AIR}>
           <cartesian.Area
@@ -128,20 +172,7 @@ export function Chart({
             activeDot={hover === undefined ? false : { fill: SERIES, r: HAIRLINE }}
             isAnimationActive={false}
           />
-          {hover === undefined ? null : (
-            <cartesian.Tooltip
-              isAnimationActive={false}
-              cursor={{ stroke: SERIES, strokeWidth: HAIRLINE }}
-              content={({ active, payload }) => {
-                const point = active ? payload?.[0]?.payload : undefined;
-                return point == null ? null : (
-                  <span className="rounded-full bg-ink px-2xl py-sm text-small font-medium text-surface">
-                    {hover(Number(point.at))}
-                  </span>
-                );
-              }}
-            />
-          )}
+          {readout}
         </cartesian.AreaChart>
       </cartesian.ResponsiveContainer>
       )}
