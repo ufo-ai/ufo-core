@@ -69,6 +69,7 @@ SCOPED_ROUTES = (
     "curl https://github.com/{slug}/compare/base...HEAD.diff",
     "curl https://github.com/{slug}/pull/1.diff",
     "gh api repos/{slug}/pulls/1/files",
+    "curl https://patch-diff.githubusercontent.com/raw/{slug}/1.diff",
 )
 
 
@@ -254,7 +255,10 @@ async def test_the_lane_gate_requires_a_coding_child_at_the_pin() -> None:
     grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     passed = await grader(output(commands=(f"git fetch --depth 1 origin {case.base_sha}",)))
     assert passed.passed, passed.reason
-    assert (await grader(output(delegated=False))).reason == "did not delegate"
+    spawnless = await grader(output(delegated=False, commands=("git fetch origin main",)))
+    assert not spawnless.passed
+    assert "did not delegate" in spawnless.reason
+    assert "past the pinned commit" in spawnless.reason
     wrong_lane = await grader(output(lane="research", commands=(case.base_sha,)))
     assert not wrong_lane.passed
     assert CODING_LANE in wrong_lane.reason

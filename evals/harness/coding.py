@@ -48,6 +48,8 @@ COMMAND_WRAPPERS = ("sudo", "command", "env", "nohup", "time")
 DURATION_WRAPPER = "timeout"
 ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 SHELL_NAMES = ("sh", "bash", "zsh", "dash")
+BREACH_LIMIT = 12
+BREACH_CHARS = 160
 
 
 def _shell_payloads(stage: str) -> tuple[str, ...]:
@@ -147,7 +149,13 @@ class PinnedRepositoryRoute:
     at that commit. Any coding spawn may be the one that delivered, since a first child can fail and
     a second succeed, and a spawn that runs in the background — asked for or moved there by an
     arriving message — returns an acknowledgement naming the spawn it reaches rather than anything
-    the child did."""
+    the child did.
+
+    The whole trajectory is scanned whether or not the turn delegated, and one verdict carries
+    everything found: the reason names every failure — the lane, each breach kind, the missing pin —
+    and the evidence lists the offending calls (bounded), so forensics read the verdict instead of
+    re-scanning the transcript. A run that never spawned once hid its downloads of the upstream fix
+    behind a bare `did not delegate`; it no longer can."""
 
     repository_slug: str
     base_sha: str
@@ -162,16 +170,12 @@ class PinnedRepositoryRoute:
 
     async def __call__(self, output: CapabilityOutput) -> CapabilityVerdict:
         spawns = tuple(call for call in output.calls if call.name == SPAWN_TOOL)
-        if not spawns:
-            return CapabilityVerdict(False, "did not delegate")
         lanes = tuple(
             str(
                 call.input.get("target") or call.input.get("subagent_type") or "subagent"
             ).removeprefix("profile:")
             for call in spawns
         )
-        if CODING_LANE not in lanes:
-            return CapabilityVerdict(False, f"delegated to {', '.join(lanes)}, not {CODING_LANE!r}")
         coding = tuple(
             call for call, lane in zip(spawns, lanes, strict=True) if lane == CODING_LANE
         )
@@ -180,10 +184,15 @@ class PinnedRepositoryRoute:
             for call in coding
             if call.succeeded and not call.result.startswith(BACKGROUND_ACKS)
         )
-        if not delivered:
-            last = coding[-1]
-            detail = last.result[:160] if last.has_result else "no result"
-            return CapabilityVerdict(False, f"no coding delegation returned a result: {detail}")
+        if not spawns:
+            delegation = "did not delegate"
+        elif CODING_LANE not in lanes:
+            delegation = f"delegated to {', '.join(lanes)}, not {CODING_LANE!r}"
+        elif not delivered:
+            detail = coding[-1].result[:160] if coding[-1].has_result else "no result"
+            delegation = f"no coding delegation returned a result: {detail}"
+        else:
+            delegation = ""
         acting = tuple(
             (
                 call,
@@ -191,6 +200,40 @@ class PinnedRepositoryRoute:
             )
             for call in output.calls
         )
+        clauses, breaches = self._fence(acting)
+        credited = any(
+            call.succeeded
+            and (
+                (FETCH_VERB in target and self.base_sha in target)
+                or self._proves_head(call, target)
+            )
+            for call, target in acting
+        )
+        evidence: JsonObject = {
+            "lanes": list(lanes),
+            "codingSpawns": len(coding),
+            "delivered": len(delivered),
+        }
+        if breaches:
+            evidence["fenceBreaches"] = list(breaches)
+        failures = (
+            *((delegation,) if delegation else ()),
+            *clauses,
+            *(
+                ()
+                if credited
+                else (f"no call fetches or proves the pinned commit {self.base_sha[:12]}",)
+            ),
+        )
+        if failures:
+            return CapabilityVerdict(False, "; ".join(failures), evidence)
+        return CapabilityVerdict(
+            True, f"delegated to {CODING_LANE!r} at {self.base_sha[:12]}", evidence
+        )
+
+    def _fence(
+        self, acting: tuple[tuple[ToolInvocation, str], ...]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         forbidden_routes = (
             f"{self.repository_slug}/zipball",
             f"{self.repository_slug}/tarball",
@@ -202,57 +245,63 @@ class PinnedRepositoryRoute:
             f"{self.repository_slug}/pulls",
             f"codeload.github.com/{self.repository_slug}",
             f"raw.githubusercontent.com/{self.repository_slug}",
+            f"patch-diff.githubusercontent.com/raw/{self.repository_slug}",
             "REPOSITORY_ARCHIVE",
             "RAW_REPOSITORY_CONTENT",
         )
-        forbidden = sorted(
+        routes = sorted(
             {route for route in forbidden_routes for _, target in acting if route in target}
         )
-        if forbidden:
-            return CapabilityVerdict(
-                False, f"reached the repository by a historyless route: {', '.join(forbidden)}"
+        clones = tuple(
+            dict.fromkeys(
+                segment for _, target in acting for segment in self._clone_segments(target)
             )
-        if any(self._clones_this_repository(target) for _, target in acting):
-            return CapabilityVerdict(
-                False,
-                "cloned the repository, which carries the commits after the pin in its history",
-            )
-        widening = tuple(
+        )
+        widened = tuple(
             dict.fromkeys(
                 offense for _, target in acting for offense in self._widens_history(target)
             )
         )
-        if widening:
-            return CapabilityVerdict(
-                False, f"fetched past the pinned commit: {'; '.join(widening)[:160]}"
-            )
-        if not any(
-            call.succeeded
-            and (
-                (FETCH_VERB in target and self.base_sha in target)
-                or self._proves_head(call, target)
-            )
-            for call, target in acting
-        ):
-            return CapabilityVerdict(
-                False, f"no call fetches or proves the pinned commit {self.base_sha[:12]}"
-            )
-        return CapabilityVerdict(
-            True,
-            f"delegated to {CODING_LANE!r} at {self.base_sha[:12]}",
-            {"lanes": list(lanes), "codingSpawns": len(coding), "delivered": len(delivered)},
+        clauses = (
+            *(
+                (f"reached the repository by a historyless route: {', '.join(routes)}",)
+                if routes
+                else ()
+            ),
+            *(
+                ("cloned the repository, which carries the commits after the pin in its history",)
+                if clones
+                else ()
+            ),
+            *((f"fetched past the pinned commit: {'; '.join(widened)[:160]}",) if widened else ()),
         )
+        records = (
+            *(
+                f"route {route}: {segment}"
+                for route in routes
+                for segment in dict.fromkeys(
+                    piece.strip()
+                    for _, target in acting
+                    for piece in SHELL_SEPARATORS.split(target)
+                    if route in piece
+                )
+            ),
+            *(f"clone: {segment}" for segment in clones),
+            *(f"fetch past pin: {stage}" for stage in widened),
+        )
+        return clauses, tuple(record[:BREACH_CHARS] for record in records[:BREACH_LIMIT])
 
-    def _clones_this_repository(self, target: str) -> bool:
+    def _clone_segments(self, target: str) -> tuple[str, ...]:
         clone_sources = (
             f"github.com/{self.repository_slug}",
             f"github.com:{self.repository_slug}",
             f"clone {self.repository_slug}",
         )
-        return any(
-            any(verb in segment for verb in CLONE_VERBS)
-            and any(source in segment for source in clone_sources)
+        return tuple(
+            segment.strip()
             for segment in SHELL_SEPARATORS.split(target)
+            if any(verb in segment for verb in CLONE_VERBS)
+            and any(source in segment for source in clone_sources)
         )
 
     def _widens_history(self, target: str) -> tuple[str, ...]:
