@@ -57,5 +57,11 @@ export default defineConfig({
     // A half-hour offset with no daylight rule: a run under it proves a wall clock is converted
     // to an instant rather than passed along, which a run under UTC cannot tell apart.
     env: { TZ: "Asia/Kolkata" },
+    // One `vitest run` covers both shells: this config whole as the lanes suite, and the sidebar
+    // shell's own beside it.
+    projects: [
+      { extends: true, test: { name: "lanes" } },
+      "./sidebar/vite.config.ts",
+    ],
   },
 });

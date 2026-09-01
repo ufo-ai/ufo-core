@@ -89,12 +89,13 @@ from ufo_ext_web.panels import (
     _outcome,
 )
 from ufo_ext_web.surface import (
+    LANES_SHELL_FLAG,
     MAX_INBOUND_FILES,
     NO_MEMBER_FAULT,
     NO_SEAT_FAULT,
-    PORTAL_FILE,
     SESSION_COOKIE,
     SESSION_FAULT_HEADER,
+    SIDEBAR_FILE,
     SUBAGENT_EVENT_LIMIT,
     SubagentNode,
     _answer_key,
@@ -4127,6 +4128,37 @@ def test_a_build_that_declares_no_rum_block_is_refused_rather_than_served() -> N
         portal_shell("<head></head>", rum_config(RUM_DEPLOY))
 
 
+async def test_the_portal_serves_the_sidebar_shell_until_the_lanes_flag_answers(
+    web: tuple[AsyncClient, UUID, UUID], unbound_flags: None
+) -> None:
+    """Which shell a member sees is the deploy's call, read per workspace at the page: a flag
+    service holding no `enable-lanes-shell` key serves the sidebar shell — the closed state every
+    silence falls to — and the lanes shell reaches a member only where somebody turned it on."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    init_flags(InMemoryProvider({}))
+    silent = await client.get("/surface/web", headers=cookie)
+    assert silent.status_code == 200
+    assert "assets/sidebar-" in silent.text
+    assert "assets/index-" not in silent.text
+
+    init_flags(
+        InMemoryProvider(
+            {
+                LANES_SHELL_FLAG: InMemoryFlag(
+                    default_variant="on", variants={"on": SERVED_TRUE, "off": SERVED_FALSE}
+                )
+            }
+        )
+    )
+    lanes = await client.get("/surface/web", headers=cookie)
+    assert lanes.status_code == 200
+    assert "assets/index-" in lanes.text
+    assert "assets/sidebar-" not in lanes.text
+
+
 def _stub_openai(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -4466,7 +4498,7 @@ async def test_a_sessionless_arrival_is_sent_to_sign_in_and_the_posted_token_ope
     assert "SameSite=lax" in cookie
     shell = await client.get("/surface/web", headers={"cookie": f"{SESSION_COOKIE}={token}"})
     assert shell.status_code == 200
-    assert shell.text == PORTAL_FILE.read_text()
+    assert shell.text == SIDEBAR_FILE.read_text()
     assert shell.headers["cache-control"] == "no-store"
     client.cookies.clear()
     tokenless = await client.post("/surface/web", data={})

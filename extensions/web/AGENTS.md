@@ -1,5 +1,14 @@
 # Web surface — agent guidelines
 
+## Two shells
+
+`frontend/` builds two portal shells into one static tree: the lanes shell (`src/`, built to
+`static/index.html`) and the sidebar shell (`sidebar/`, apps and chats in one sidebar, built to
+`static/sidebar.html`). `portal_page` serves the sidebar shell unless `enable-lanes-shell` answers
+true for the workspace; every silence of the flag read serves the sidebar shell. The two trees
+share `package.json` and its lockfile; each carries its own `src`, `tests`, and vite config, and
+`pnpm test` runs both suites as vitest projects (`lanes`, `sidebar`).
+
 ## Local development
 
 `README.md` covers the zero-services run. These exports put the workspace outside the repo, so a
@@ -46,6 +55,12 @@ Frontend, reloading on every source change:
 pnpm -C "$FRONTEND" run dev -- --host ufo.localhost
 ```
 
+The sidebar shell has the same loop under its own config:
+
+```bash
+pnpm -C "$FRONTEND" run dev -- --config sidebar/vite.config.ts --host ufo.localhost
+```
+
 Run `uv run --project "$UFO_REPO" ufoctl portal` once from `$UFO_DEV_DIR` to land the session
 cookie, then edit against `http://ufo.localhost:5173/surface/web`. Use `ufo.localhost` on both:
 `init` writes `public_base_url = "http://ufo.localhost:8710"`, `portal` opens it, and the session
@@ -65,8 +80,8 @@ Two of these running at once need different `[serve] port` values in their `$UFO
   a dependency, never after an edit.
 - `pnpm install` earns a re-run when `pnpm-lock.yaml` changes.
 - `pnpm run build` earns a re-run only for something that reads the built tree: `docker compose`,
-  the five `test_ext_web.py` tests below, and `tests/agenticon.test.tsx`, which reads the built
-  page and serves the icon sprites out of `static/assets`.
+  the `test_ext_web.py` tests below, and each shell's `tests/agenticon.test.tsx`, which read the
+  built pages and serve the icon sprites out of `static/assets`.
 
 ### Focused checks
 
@@ -76,15 +91,16 @@ while iterating:
 
 ```bash
 uv run pytest extensions/web/tests/test_ext_web.py -k "sqlite and <name>"   # ~9s
-pnpm -C "$FRONTEND" test tests/chat.test.tsx                                # ~1s
+pnpm -C "$FRONTEND" test --project lanes tests/chat.test.tsx
 ```
 
-Pass the path bare. A `--` before it is swallowed by pnpm rather than handed to vitest, which then
-matches nothing and runs all 60 files — 1116 tests, 25s — while looking like it filtered.
+Pass the path bare, and name a project — a bare path runs its file in both shells' suites. A `--`
+before it is swallowed by pnpm rather than handed to vitest, which then matches nothing and runs
+both suites whole — 133 files, ~2500 tests — while looking like it filtered.
 
-The whole of `test_ext_web.py` is ~45s; save it for the finished change. Five of its tests read
-`ufo_ext_web/static/index.html` and fail with the build command named when the frontend has never
-been built in this worktree.
+The whole of `test_ext_web.py` is ~45s; save it for the finished change. Several of its tests read
+the built pages under `ufo_ext_web/static` and fail with the build command named when the frontend
+has never been built in this worktree.
 
 ### When a request is slow
 

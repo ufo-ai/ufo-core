@@ -298,6 +298,12 @@ PORTAL_BUILD = "make build"
 STATIC_DIR = Path(__file__).parent / "static"
 PORTAL_FILE = STATIC_DIR / "index.html"
 PORTAL_HTML = PORTAL_FILE.read_text() if PORTAL_FILE.is_file() else None
+SIDEBAR_FILE = STATIC_DIR / "sidebar.html"
+SIDEBAR_HTML = SIDEBAR_FILE.read_text() if SIDEBAR_FILE.is_file() else None
+# Which shell the portal serves: the lanes shell (`index.html`) where this flag answers true, the
+# sidebar shell (`sidebar.html`) everywhere else. It reads closed like a shipped app's flag —
+# offering the lanes shell is a deliberate act, and every silence serves the sidebar shell.
+LANES_SHELL_FLAG = "enable-lanes-shell"
 STATIC_PREFIX = f"{PORTAL_PATH}/static/"
 ASSET_MEDIA_TYPES = {
     ".css": "text/css; charset=utf-8",
@@ -583,7 +589,10 @@ async def _stored_asset(blob: BlobStore, request: Request) -> Response:
 
 
 async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
-    """Serve the portal shell to a request whose session resolved. A session that expires while the
+    """Serve the portal shell to a request whose session resolved: the lanes shell where
+    `enable-lanes-shell` answers true for the workspace, the sidebar shell — apps and chats in one
+    sidebar — everywhere else, including every silence the flag read fails closed through.
+    A session that expires while the
     page is open leaves the shell asking `api/agents`, which answers 401; the page sends the member
     to the same sign-in page an unresolved arrival is redirected to. A deploy that skipped the
     frontend build fails here, naming the command, rather than at import — an unbuilt tree still
@@ -595,10 +604,11 @@ async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
     the member reloads, the deploy they were told about is missing, and nothing in the page says
     why. Its assets revalidate and transfer only on a hash change, so the shell costs one request
     and no page is ever stale while looking current."""
-    if PORTAL_HTML is None or APPS is None:
+    if PORTAL_HTML is None or SIDEBAR_HTML is None or APPS is None:
         raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
     await _assets_published(ctx.fleet_blob, APPS)
-    shell = portal_shell(PORTAL_HTML, rum_config(os.environ))
+    lanes = await flag_enabled(LANES_SHELL_FLAG, default=False)
+    shell = portal_shell(PORTAL_HTML if lanes else SIDEBAR_HTML, rum_config(os.environ))
     return HTMLResponse(shell, headers={"cache-control": "no-store"})
 
 

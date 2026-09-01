@@ -40,6 +40,7 @@ locals {
       "enable-imessage-step"    = true
       "enable-installed-skills" = true
       "enable-issues-app"       = false
+      "enable-lanes-shell"      = false
       "enable-meetings-app"     = false
       "enable-memory-tab"       = true
       "enable-metrics-app"      = false
@@ -54,6 +55,7 @@ locals {
       "enable-imessage-step"    = false
       "enable-installed-skills" = false
       "enable-issues-app"       = false
+      "enable-lanes-shell"      = false
       "enable-meetings-app"     = false
       "enable-memory-tab"       = false
       "enable-metrics-app"      = false
