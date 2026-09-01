@@ -33,6 +33,7 @@ import {
   CHAT_APP_ID,
   CHAT_ROW,
   chatsOnWire,
+  conversationObject,
   CONVO_ID,
   json,
   MEMBER,
@@ -518,6 +519,32 @@ test("the chat lane's unsaid state stands the member's history over the new chat
   expect(rows.some((row) => row.includes(terminal.title) && row.includes("Terminal"))).toBe(true);
   // A portal chat states no source: the history is read in the portal.
   expect(rows.filter((row) => row.includes("Terminal"))).toHaveLength(1);
+});
+
+test("a new chat tab opens its history at the top after the rows load", async () => {
+  let answer!: (response: Response) => void;
+  const scroll = vi.spyOn(Element.prototype, "scrollTo");
+  wire({
+    "/objects/conversation$": () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve;
+      }),
+  });
+  drawHome([AGENT_ID]);
+
+  const lane = await screen.findByRole("region", { name: "Assistant" });
+  await within(lane).findByRole("heading", { name: "History", level: 3 });
+  const log = within(lane).getByTestId("log");
+  scroll.mockClear();
+  log.scrollTop = 100;
+
+  act(() => answer(json({ objects: [conversationObject(CHAT_ROW)] })));
+  await within(lane).findByText(CHAT_ROW.title);
+  await waitFor(() => {
+    const call = (scroll.mock.instances as unknown[]).findIndex((node) => node === log);
+    expect(call).not.toBe(-1);
+    expect(scroll.mock.calls[call][0]).toMatchObject({ top: 0 });
+  });
 });
 
 /** The stamp on a row is the moment its conversation last moved, read as the distance from now
