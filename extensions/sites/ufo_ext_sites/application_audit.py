@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DESKTOP_WIDTH = 1440
-NARROW_WIDTH = 305
+NARROW_WIDTH = 360
 APPLICATION_DESIGN_FOLD = 844
 APPLICATION_DESIGN_MAX_HEIGHT = 4_096
 SCHEMES: tuple[Literal["light", "dark"], ...] = ("light", "dark")

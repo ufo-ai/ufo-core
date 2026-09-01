@@ -32,6 +32,7 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_REGION_MIN_WIDTH,
     DESIGN_REGION_FOLD_SLOP,
     DESIGN_VISIBLE_TEXT_MAX_CHARS,
+    DESKTOP_WIDTH,
     KIT_QUIET_TEXT_MIN,
     MAX_PRODUCT_QA_CONTROLS,
     NARROW_WIDTH,
@@ -1054,7 +1055,7 @@ def test_application_audit_accepts_measured_interactive_facts() -> None:
                     "aboveFoldText": "Acme renewal Aug 27 #2042",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -1104,7 +1105,7 @@ def test_application_audit_uses_the_quiet_floor_only_for_exact_kit_slots() -> No
                         "aboveFoldText": "Open issues 42",
                         "regions": AUDIT_DESIGN_REGIONS,
                     }
-                    for width in (1440, 305)
+                    for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                     for scheme in ("light", "dark")
                 ],
                 "interaction": {
@@ -1192,7 +1193,7 @@ def test_application_design_fidelity_compares_only_the_separating_axis() -> None
                     "aboveFoldText": "Queue",
                     "regions": app_regions,
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {"controls": [], "successes": [], "console": []},
@@ -1246,7 +1247,7 @@ def test_application_design_fidelity_preserves_design_fold_placement() -> None:
                         "aboveFoldText": "Summary",
                         "regions": app_regions,
                     }
-                    for width in (1440, 305)
+                    for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                     for scheme in ("light", "dark")
                 ],
                 "interaction": {"controls": [], "successes": [], "console": []},
@@ -1299,7 +1300,7 @@ def test_application_design_fidelity_rejects_overlapping_regions() -> None:
                     "aboveFoldText": "Queue",
                     "regions": regions,
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {"controls": [], "successes": [], "console": []},
@@ -1629,7 +1630,7 @@ def _side_by_side_report(design_height: int, application_height: int) -> Applica
                     "aboveFoldText": "Stats",
                     "regions": _side_by_side_bands(application_height),
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -1737,7 +1738,7 @@ def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
                     "aboveFoldText": "Acme renewal",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -1801,7 +1802,7 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
                         "aboveFoldText": "#2042",
                         "regions": AUDIT_DESIGN_REGIONS,
                     }
-                    for width in (1440, 305)
+                    for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                     for scheme in ("light", "dark")
                 ],
                 "designRegions": AUDIT_DESIGN_REGIONS,
@@ -1854,12 +1855,13 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
     assert feedback.status == "repair_required"
     assert {issue.code for issue in feedback.issues} == {"contrast"}
     assert feedback.issues[0].message == (
-        'Fix text contrast: light 1440px "Needs review" at span.muted '
+        f'Fix text contrast: light {DESKTOP_WIDTH}px "Needs review" at span.muted '
         "rgb(120, 120, 120) on rgb(255, 255, 255) is 3.2:1; needs 4.5:1; "
-        'dark 1440px "Needs review" at span.muted rgb(120, 120, 120) on '
-        'rgb(255, 255, 255) is 3.2:1; needs 4.5:1; light 305px "Needs review" '
+        f'dark {DESKTOP_WIDTH}px "Needs review" at span.muted rgb(120, 120, 120) on '
+        f"rgb(255, 255, 255) is 3.2:1; needs 4.5:1; light {NARROW_WIDTH}px "
+        '"Needs review" '
         "at span.muted rgb(120, 120, 120) on rgb(255, 255, 255) is 3.2:1; needs 4.5:1; "
-        'dark 305px "Needs review" at span.muted rgb(120, 120, 120) on '
+        f'dark {NARROW_WIDTH}px "Needs review" at span.muted rgb(120, 120, 120) on '
         "rgb(255, 255, 255) is 3.2:1; needs 4.5:1."
     )
     assert store.values[key] == 1
@@ -3603,7 +3605,7 @@ async def test_application_product_qa_owns_the_fixed_root_and_records_passed_pro
                     "aboveFoldText": "#2042",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -3656,7 +3658,12 @@ async def test_application_product_qa_owns_the_fixed_root_and_records_passed_pro
     payload = json.loads(result.content[0].text)
     assert payload == {
         "status": "passed",
-        "views_checked": ["light 1440px", "dark 1440px", "light 305px", "dark 305px"],
+        "views_checked": [
+            f"light {DESKTOP_WIDTH}px",
+            f"dark {DESKTOP_WIDTH}px",
+            f"light {NARROW_WIDTH}px",
+            f"dark {NARROW_WIDTH}px",
+        ],
         "controls_checked": ["First", "Second"],
         "interactions_verified": ["First", "Second"],
     }
@@ -3707,7 +3714,7 @@ async def test_application_product_qa_bounds_dense_control_evidence_before_proof
                     "aboveFoldText": "Dense controls",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -4233,7 +4240,7 @@ async def test_write_application_design_recovers_each_partial_pair_and_passes_qa
                     "aboveFoldText": "Queue",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -4949,7 +4956,7 @@ async def test_application_builder_rejects_overlap_before_fixing_design(tmp_path
                     "aboveFoldText": "Queue",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -5712,7 +5719,7 @@ async def test_application_audit_uses_durable_turn_evidence_without_requesting_t
                     "aboveFoldText": "Queue",
                     "regions": AUDIT_DESIGN_REGIONS,
                 }
-                for width in (1440, 305)
+                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
                 for scheme in ("light", "dark")
             ],
             "interaction": {

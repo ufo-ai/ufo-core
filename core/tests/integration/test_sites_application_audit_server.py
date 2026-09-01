@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from ufo_ext_sites.application_audit import DESKTOP_WIDTH, NARROW_WIDTH
 from ufo_testsupport.plugin import docker_or_fail
 
 from evals.sandbox_image import SandboxImagePlan
@@ -370,10 +371,10 @@ fi
     assert completed.returncode == 0, completed.stderr or completed.stdout
     report = json.loads((tmp_path / "report.json").read_text())
     assert [(view["scheme"], view["width"]) for view in report["views"]] == [
-        ("light", 1440),
-        ("dark", 1440),
-        ("light", 305),
-        ("dark", 305),
+        ("light", DESKTOP_WIDTH),
+        ("dark", DESKTOP_WIDTH),
+        ("light", NARROW_WIDTH),
+        ("dark", NARROW_WIDTH),
     ]
     assert report["designRegions"] == evidence["regions"]
     assert [control["name"] for control in report["interaction"]["controls"]] == [

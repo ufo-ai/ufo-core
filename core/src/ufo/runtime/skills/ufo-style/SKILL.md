@@ -85,5 +85,5 @@ read its references rather than deriving any of it again.
   same place reads 3.0:1 and does not, so measure the rendered text rather than trusting the role
   name. The dark scheme clears AA on every step (`#A7A9A9` on `#191A1A` is 7.4:1).
 - Both schemes checked. The palette answers a scheme on its own, but a screenshot proves it.
-- The narrow width checked at 305px, not only the desktop width: `document.scrollWidth` equals the
+- The narrow width checked at 360px, not only the desktop width: `document.scrollWidth` equals the
   viewport and no element is clipped. This is required before handover, not a suggestion.

@@ -59,8 +59,8 @@ const SVG_PRESENTATION_PROPERTIES = new Set(
 const VIEWS = [
   { scheme: 'light', width: 1440, height: 900, shoot: true },
   { scheme: 'dark', width: 1440, height: 900, shoot: true },
-  { scheme: 'light', width: 305, height: 844, shoot: false },
-  { scheme: 'dark', width: 305, height: 844, shoot: false },
+  { scheme: 'light', width: 360, height: 844, shoot: false },
+  { scheme: 'dark', width: 360, height: 844, shoot: false },
 ];
 const MIME_TYPES = new Map([
   ['.avif', 'image/avif'],

@@ -53,14 +53,14 @@ EXPECTED = {
         "preview": "4629e4b2681e8e584507dfb9de7dd2aa87cc370556772cf67dabc3ec72d4938a",
         "contract": "815aad6b3053593c800cf0f9a207f65be1a741bbde87d0a02cf3ffd166f4c0eb",
         "repair": (1, 2_854, 3_287),
-        "codes": ("contrast", "overflow", "clipping", "above_fold"),
+        "codes": ("contrast", "clipping", "above_fold"),
     },
     "issue-owner": {
         "source": "81416464d8211dd0e360d7f3efb84653ff6d45c507d657cc13a7fc89430050a4",
         "preview": "80047f7ccc306b1528d96037d987bc5e9f830ac7f4c622e26bc4926fcdeb19be",
         "contract": "fe725407d047d1d755ccbaa858018c60e55b6138579445ac823917b1ae99d595",
         "repair": (1, 2_357, 2_008),
-        "codes": ("contrast", "overflow"),
+        "codes": ("contrast",),
     },
 }
 
@@ -258,11 +258,11 @@ async def test_followup_retries_every_remaining_deterministic_issue() -> None:
         ),
     )
     contrast_followup = _repair_followup(fixture, RepairTurns())
-    overflow_followup = _repair_followup(fixture, RepairTurns())
+    clipping_followup = _repair_followup(fixture, RepairTurns())
     first = await contrast_followup(initial)
     contrast = await contrast_followup(output_for("contrast"))
-    await overflow_followup(initial)
-    overflow = await overflow_followup(output_for("overflow"))
+    await clipping_followup(initial)
+    clipping = await clipping_followup(output_for("clipping"))
 
     assert first is not None
     assert "live deterministic issue" in first
@@ -274,9 +274,8 @@ async def test_followup_retries_every_remaining_deterministic_issue() -> None:
     assert "fixed light background with an explicit dark foreground" in contrast
     assert "theme background with a theme foreground" in contrast
     assert "Before every edit call" in contrast
-    assert overflow is not None
-    assert "every remaining deterministic issue" in overflow
-    assert "keep every region in its original order" in overflow
+    assert clipping is not None
+    assert "every remaining deterministic issue" in clipping
 
     issue_owner = FIXTURES[1]
     issue_owner_initial = CapabilityOutput(

@@ -767,6 +767,9 @@ async def test_app_bench_browser_probe_lock_spans_processes(monkeypatch, tmp_pat
 def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     source = AUDIT_CONTENT.decode()
 
+    assert NARROW_WIDTH == 360
+    assert f"{{ scheme: 'light', width: {NARROW_WIDTH}, height: 844, shoot: false }}" in source
+    assert f"{{ scheme: 'dark', width: {NARROW_WIDTH}, height: 844, shoot: false }}" in source
     assert "document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)" in source
     assert "document.caretRangeFromPoint" in source
     assert "renderedText,\n    renderedParts,\n    aboveFoldText," in source
@@ -1973,16 +1976,16 @@ async def test_measured_screen_scorer_fails_an_unmeasured_view_and_a_wide_docume
     grader = shared_artifact_scorer(".json", _measured_screen)
 
     partial = loads(_measured())
-    partial["views"] = [view for view in partial["views"] if view["width"] != 305]
+    partial["views"] = [view for view in partial["views"] if view["width"] != NARROW_WIDTH]
     short = await grader(_output("audit.json", dumps(partial).encode()))
     assert not short.passed
-    assert "measures no light at 305px, dark at 305px" in short.reason
+    assert f"measures no light at {NARROW_WIDTH}px, dark at {NARROW_WIDTH}px" in short.reason
 
     narrow = loads(_measured())
-    narrow["views"][2]["documentWidth"] = 306
+    narrow["views"][2]["documentWidth"] = NARROW_WIDTH + 1
     overflowing = await grader(_output("audit.json", dumps(narrow).encode()))
     assert not overflowing.passed
-    assert "305px document is 306px" in overflowing.reason
+    assert f"{NARROW_WIDTH}px document is {NARROW_WIDTH + 1}px" in overflowing.reason
 
     tall = loads(_measured())
     tall["views"][0]["documentHeight"] = DESKTOP_HEIGHT + 500

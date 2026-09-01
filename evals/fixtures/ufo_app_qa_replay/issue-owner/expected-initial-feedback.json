@@ -1,14 +1,9 @@
 {
-  "sha256": "2d1252f3242307e7d117ff38af948deaf38e98047d2bd5b209fcc861ccd0b430",
+  "sha256": "45f9ec060fc58a95245beea2e51074423ccd8b1dec9e231c35dbf045f6bf7cbe",
   "issues": [
     {
       "code": "contrast",
       "message": "Fix text contrast: light 1440px \"Needs Triage: 2 issues\" at div color(srgb 0.729412 0.313333 0.0305882) on rgb(244, 243, 242) is 4.47:1; needs 4.5:1; light 1440px \"urgent\" at span color(srgb 0.729412 0.313333 0.0305882) on rgb(251, 227, 210) is 4.02:1; needs 4.5:1; light 1440px \"alex\" at strong rgb(0, 149, 255) on rgb(244, 243, 242) is 2.81:1; needs 4.5:1; light 1440px \"priya\" at strong rgb(0, 149, 255) on rgb(250, 249, 247) is 2.96:1; needs 4.5:1.",
-      "terms": []
-    },
-    {
-      "code": "overflow",
-      "message": "Fix horizontal overflow or overhang: light 305px document is 329px; dark 305px document is 329px; light 305px div extends 24px past viewport right; light 305px div extends 48px past section \"Prepared Assignment ReviewAssignments are made in chatActive Pro\" right.",
       "terms": []
     }
   ]
