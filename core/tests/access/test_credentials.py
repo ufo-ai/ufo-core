@@ -313,6 +313,34 @@ async def test_a_member_key_serves_only_a_turn_bound_to_that_member(
         assert await ws_current().credential(OPENAI_KEY_SLOT) == "workspace-key"
 
 
+async def test_model_funding_tells_a_plan_apart_from_a_metered_key(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two things a member can connect cost different things. A grant is a subscription they
+    already bought, so its tokens carry no per-token price; a pasted API key is metered by the
+    provider, so its tokens cost real money that is simply not the deploy's to bill. Both make the
+    deploy's key idle, which is why one boolean could never answer for both."""
+    workspace_id = await _workspace()
+    store = _store()
+    init_workspace_credentials(store)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "platform-default")
+    async with workspace_tx() as connection:
+        planned = await create_member(connection, workspace_id, "planned@work.com")
+        keyed = await create_member(connection, workspace_id, "keyed@work.com")
+    grant = Grant(access="oat-token", refresh="refresh", expires_at=time.time() + 3600)
+    await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, planned), grant.stored())
+    await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, keyed), "sk-ant-api-pasted")
+    served = frozenset({OWN_ACCOUNT_MODEL})
+    with ws(workspace_id):
+        assert await ws_current().model_funding(ANTHROPIC_KEY_SLOT, OWN_ACCOUNT_MODEL) == "platform"
+        with model_authority(MemberAuthority(planned), served):
+            assert await ws_current().model_funding(ANTHROPIC_KEY_SLOT, OWN_ACCOUNT_MODEL) == "plan"
+        with model_authority(MemberAuthority(keyed), served):
+            assert await ws_current().model_funding(ANTHROPIC_KEY_SLOT, OWN_ACCOUNT_MODEL) == "key"
+        await store.put(workspace_id, ANTHROPIC_KEY_SLOT, "workspace-key")
+        assert await ws_current().model_funding(ANTHROPIC_KEY_SLOT, OWN_ACCOUNT_MODEL) == "key"
+
+
 async def test_a_members_key_never_serves_a_slot_that_is_not_member_routed(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

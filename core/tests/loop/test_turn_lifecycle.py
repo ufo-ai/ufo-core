@@ -3,6 +3,7 @@ import json
 import logging
 import subprocess
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -34,7 +35,13 @@ from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.harness import o11y
 from ufo.harness.durability import replay_safe_client
-from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING, OPENAI_KEY_SLOT
+from ufo.harness.models.catalog import (
+    ANTHROPIC_KEY_SLOT,
+    CORE_MODEL_SPECS,
+    CORE_PRICING,
+    OPENAI_KEY_SLOT,
+)
+from ufo.harness.models.grant import Grant
 from ufo.harness.models.interface import (
     ModelEvent,
     ModelRequest,
@@ -57,6 +64,7 @@ from ufo.host.assemble import HostEnvironment
 from ufo.host.environment import store_environment_document, store_environment_file
 from ufo.host.ext.loader import embed_backend, index_backend, skill_registry
 from ufo.runtime import queue as loop_queue
+from ufo.runtime import workspace as workspace_module
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.engine import (
@@ -1266,6 +1274,121 @@ async def test_only_a_turn_that_needs_the_members_account_runs_on_it(
             )
         ).scalar_one()
     assert byok is True
+
+
+class ConnectedAccountModel:
+    """One finishing round of a fixed size, so what the ledger says about the turn is decided by
+    the account that served it and by nothing else."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        yield ToolCallStart(id="p1", name=FINISH_TOOL)
+        yield ToolCallDelta(id="p1", partial_json=json.dumps({"echoed": 1}))
+        yield Usage(input_tokens=5, output_tokens=5)
+
+
+PLAN_ACCOUNT_MODEL = "claude-opus-4-8"
+
+PLAN_ACCOUNT_PROFILE = SubagentProfile(
+    name="plan_account",
+    prompt="Run on the provider account the member connected.",
+    tool_names=(),
+    input_model=RoundTripInput,
+    output_model=RoundTripOutput,
+    own_key_models={"anthropic": PLAN_ACCOUNT_MODEL},
+    needs_own_model_key=True,
+)
+
+KEYED_REGISTRY = ModelRegistry(
+    specs={
+        spec.id: replace(
+            spec,
+            client=lambda spec, key: ConnectedAccountModel(),
+            key_slot=ANTHROPIC_KEY_SLOT,
+            key_env="",
+        )
+        for spec in CORE_MODEL_SPECS
+    },
+    pricing=CORE_PRICING,
+    auto_model=PLAN_ACCOUNT_MODEL,
+)
+
+
+async def test_a_turn_a_members_plan_serves_costs_nothing_and_one_on_their_key_costs_its_rate(
+    surface: Turns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two accounts a member can connect are metered on different terms, and the same turn on
+    each is what tells them apart. A grant serves the turn under a subscription its holder already
+    bought, so its tokens are recorded against no money at all; a pasted API key is metered by the
+    provider, so its tokens carry their real rate. Neither debits the workspace, which is why
+    pricing both against the rate card would put a number on the member's screen that nobody is
+    owed."""
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seed = await _bootstrap()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    monkeypatch.setattr(workspace_module, "_store", store)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "platform-default")
+    monkeypatch.setattr(
+        loop_queue,
+        "_runtime",
+        replace(
+            runtime,
+            registry=KEYED_REGISTRY,
+            subagents=SubagentRegistry((PLAN_ACCOUNT_PROFILE,)),
+        ),
+    )
+
+    async def spend(email: str, connected: str) -> sa.Row[tuple[int, int, int]]:
+        conversation_id, turn_id = uuid4(), uuid4()
+        async with workspace_tx() as connection:
+            member = await create_member(connection, seed.workspace_id, email)
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=conversation_id,
+                    workspace_id=seed.workspace_id,
+                    agent_id=seed.agent_id,
+                    surface="subagent",
+                    queue_key=str(turn_id),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=seed.workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=seed.agent_id,
+                    seq=1,
+                    status="queued",
+                    inbound='{"value": 1}',
+                    on_behalf_of_member_id=member,
+                    subagent_profile=PLAN_ACCOUNT_PROFILE.name,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await store.put(seed.workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member), connected)
+        assert await loop_queue._execute_turn(str(seed.workspace_id), str(turn_id)) == "done"
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(
+                        tables.ledger.c.amount,
+                        tables.ledger.c.priced_micro_usd,
+                        tables.ledger.c.debited_micro_usd,
+                    ).where(tables.ledger.c.turn_id == turn_id)
+                )
+            ).one()
+
+    grant = Grant(access="oat-token", refresh="refresh", expires_at=time.time() + 3600)
+    on_plan = await spend("planned@work.com", grant.stored())
+    on_key = await spend("keyed@work.com", "sk-ant-api-pasted")
+
+    assert on_plan.amount == on_key.amount == 10
+    assert on_plan.priced_micro_usd == 0
+    assert on_key.priced_micro_usd > 0
+    assert on_plan.debited_micro_usd == on_key.debited_micro_usd == 0
 
 
 async def test_agent_scope_lookup_failure_commits_a_terminal(

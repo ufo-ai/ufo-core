@@ -19,7 +19,7 @@ from ufo.browser import CdpProvider
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
-from ufo.harness.models.pricing import ModelPrice, Pricing
+from ufo.harness.models.pricing import ModelPrice, Pricing, pricing_from
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.o11y import (
     emit_histogram,
@@ -117,7 +117,13 @@ from ufo.runtime.turns.activity import (
 from ufo.runtime.turns.audience import Audience, parse_audience
 from ufo.runtime.turns.contracts import Contract, output_contract
 from ufo.runtime.turns.dispatch import dispatch_next_turn
-from ufo.runtime.workspace import model_authority, ws, ws_current
+from ufo.runtime.workspace import (
+    PLAN_FUNDED,
+    PLATFORM_FUNDED,
+    model_authority,
+    ws,
+    ws_current,
+)
 from ufo.schema import tables
 from ufo.schema.records import (
     EXPRESS_QUEUE_NAME,
@@ -165,6 +171,15 @@ FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
 SKILL_OWNER_KIND = "skill"
 SKILL_SUBJECT = "workspace"
 SKILL_SHADOW_TIMEOUT_SECONDS = 4.0
+
+"""The rate card a plan-funded turn freezes. A connected account serves the turn under a
+subscription its holder already bought, so no per-token money exists to record: the tokens are
+metered as they are for any other turn and every rate that converts them to dollars is zero. The
+card is what the whole turn prices against — its rounds, its live cost ticks, its terminal frame,
+its cap arithmetic — so one card keeps every one of them saying the same true thing."""
+PLAN_SERVED_PRICE = ModelPrice(
+    input=0, output=0, cache_read=0, cache_write_5m=0, cache_write_30m=0, cache_write_1h=0
+)
 
 
 class _BillingIdentity(BaseModel):
@@ -802,13 +817,24 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             resolved_model = _subagent_model(
                 profile, connected, agent, runtime, pinned_model, document_model
             )
-        current_price = runtime.registry.pricing.prices[resolved_model]
+        key_slot = runtime.registry.spec(resolved_model).key_slot
+        funding = (
+            await ws_current().model_funding(key_slot, resolved_model)
+            if key_slot
+            else PLATFORM_FUNDED
+        )
+        card = (
+            pricing_from({resolved_model: PLAN_SERVED_PRICE})
+            if funding == PLAN_FUNDED
+            else runtime.registry.pricing
+        )
+        current_price = card.prices[resolved_model]
         billing = await _frozen_billing_identity(
             turn.id,
             _BillingIdentity(
                 attempt=attempt,
                 model=resolved_model,
-                price_digest=runtime.registry.pricing.digest,
+                price_digest=card.digest,
                 input=current_price.input,
                 output=current_price.output,
                 cache_read=current_price.cache_read,
@@ -884,12 +910,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             },
             digest=billing.price_digest,
         )
-        key_slot = runtime.registry.spec(resolved.model).key_slot
-        byok = await _frozen_byok(
-            turn.id,
-            bool(key_slot) and await ws_current().credential_is_stored(key_slot, resolved.model),
-            attempt,
-        )
+        byok = await _frozen_byok(turn.id, funding != PLATFORM_FUNDED, attempt)
         grants = GrantStore() if runtime.credentials is not None else None
         clis = runtime.environment.clis()
         sandbox = _LateSandbox(

@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import Literal
 from uuid import UUID
 
 from ufo.db import current_workspace, workspace_tx
@@ -43,6 +44,16 @@ from ufo.schema.records import Usage
 MEMBER_ROUTED_SLOTS: Mapping[str, str] = MappingProxyType(
     {ANTHROPIC_KEY_SLOT: PROVIDER_ANTHROPIC, OPENAI_KEY_SLOT: PROVIDER_OPENAI}
 )
+
+"""What buys a model call's tokens. `platform` is the deploy's own key, which the workspace is
+billed for. `key` is a metered provider key that is not the deploy's — the workspace's own row or a
+member's — whose tokens cost real money the provider charges its holder directly. `plan` is a
+connected account's grant, which serves calls under a subscription its holder already pays: those
+tokens cost nobody anything per token, so pricing them against a rate card invents money."""
+Funding = Literal["platform", "key", "plan"]
+PLATFORM_FUNDED: Funding = "platform"
+KEY_FUNDED: Funding = "key"
+PLAN_FUNDED: Funding = "plan"
 
 _current_model_authority: ContextVar[tuple[ExecutionAuthority, frozenset[str]] | None] = ContextVar(
     "ufo_model_authority", default=None
@@ -191,6 +202,23 @@ class WorkspaceScope:
                 return held.access
             grant = held
         raise GrantRefusedRefresh(slot)
+
+    async def model_funding(self, slot: str, model: str) -> Funding:
+        """What buys a call to `model` on `slot`, decided the way `model_credential` resolves it and
+        against the same candidate order, so the answer names the credential that will serve the
+        call rather than whichever one a later reader happens to find.
+
+        A grant is a subscription its holder already paid for and a stored key is metered by its
+        provider, which is why the two cannot share one answer: the first has no per-token price to
+        record and the second has a real one that is simply not the deploy's to bill."""
+        if _store is not None:
+            for candidate in self._slot_order(slot, model):
+                try:
+                    stored = await _store.get(self.workspace_id, candidate)
+                except CredentialSlotUnset:
+                    continue
+                return PLAN_FUNDED if read_grant(stored) is not None else KEY_FUNDED
+        return PLATFORM_FUNDED
 
     def member_routed_call(self, slot: str, model: str) -> bool:
         """Whether this call resolves the speaking member's own slot — which is the only slot that

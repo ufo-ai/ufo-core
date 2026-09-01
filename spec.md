@@ -1083,7 +1083,8 @@ workspace, its initial admin, and its main agent.
 Every model call and tool call meters into `ledger` in the same commit as the step. Realtime
 visibility: live per-turn cost on the stream, workspace/member/agent rollups in CLI and web. Caps
 evaluated at inbound and per-step; `reject` refuses new turns, `park` suspends. Prices are a pinned
-table per model; BYOK usage still meters (visibility without billing).
+table per model; usage a key that is not the deploy's paid for still meters (visibility without
+billing).
 
 A workspace may also hold a prepaid balance in micro-USD, credited once per `reference` so a repeated
 delivery of one payment adds nothing. An operator reads and moves it through `ufoctl balance`, which
@@ -1094,14 +1095,27 @@ turn, a background job, an in-sandbox call, and a generated image or video all m
 the one metered dimension that never does: it counts requests and prices at zero.
 
 A burn the workspace's own provider key paid for is metered but never debited, whether a turn or a
-background job spent it — BYOK meters without billing. So the balance is not a sum over the ledger:
+background job spent it — BYOK meters without billing.
+
+What served the call also decides what it cost. A stored key is metered by its provider, so its
+rows carry the rate card's real price: that money is owed, just not by us. A member's connected
+account is a subscription they already bought and it serves their coding turns under it, so no
+per-token money exists at all — that turn freezes a zero rate card beside the model it resolves,
+and every figure the card produces reads zero: its rounds, its live cost ticks, its terminal frame,
+the caps it counts against, the rollups, and the usage export. One card decides them together, so
+none of them can put a price on the member's screen that nobody is owed. The tokens are recorded in
+full either way, which is what makes plan usage visible without pricing it. Only a member slot can
+hold a grant, so a background job — which binds no member — is never plan-served.
+
+So the balance is not a sum over the ledger:
 lifetime `granted_micro_usd` less the ledger's priced total is an upper bound on what was taken, and
 the exempt rows are the difference. Each row records what it actually took as `debited_micro_usd` beside what it cost, so the
 reconstruction is exact and needs no window: lifetime `granted_micro_usd` less the ledger's whole
 debited total equals `balance_micro_usd`. A row written before the first credit debited nothing and
 carries zero, so counting only rows after it would discard real deductions on a row that spans the
-moment and hide a leak in exactly that direction. A BYOK row is priced and debits nothing, which is
-the difference between the two columns.
+moment and hide a leak in exactly that direction. A key-served row is priced and debits nothing,
+which is the difference between the two columns; a plan-served row is zero in both and stands
+outside it.
 
 A workspace with no balance row is unaffected, which is the self-host case. There is no floor: a
 turn that overshoots lands a negative balance the next credit absorbs, because failing the write
