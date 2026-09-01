@@ -32,6 +32,7 @@ from ufo.runtime.tools.bridge import (
     ToolBridgeToolList,
 )
 from ufo.runtime.tools.registry import ACTION_READ_TOOLS, OBJECT_ACTION_TOOL, ToolDef
+from ufo.runtime.turns.cancellation import cancel_one_turn
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -294,6 +295,7 @@ class ToolBridge:
                     case Terminal(frame=terminal):
                         return self._response(terminal)
                     case Parked(message=message):
+                        await cancel_one_turn(self.dbos, turn_id)
                         return ToolBridgeFailure(error=message)
         raise RuntimeError("tool bridge tail ended without a terminal")
 

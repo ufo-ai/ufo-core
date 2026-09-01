@@ -9,7 +9,7 @@ from pytest import raises
 
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import RunToken
-from ufo.runtime.hub import InProcessHub, Terminal
+from ufo.runtime.hub import InProcessHub, Parked, Terminal
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces.hub_tail import HubTailer
 from ufo.runtime.tool_bridge import ToolBridge
@@ -23,7 +23,7 @@ from ufo.runtime.tools.bridge import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import EXPRESS_QUEUE_NAME, TerminalFrame
+from ufo.schema.records import CANCELLED, EXPRESS_QUEUE_NAME, TerminalFrame
 
 
 @dataclass
@@ -31,11 +31,15 @@ class _DBOS:
     enqueued: asyncio.Event = field(default_factory=asyncio.Event)
     options: EnqueueOptions | None = None
     args: tuple[str, str] | None = None
+    cancelled: list[str] = field(default_factory=list)
 
     async def enqueue_async(self, options: EnqueueOptions, *args: str) -> None:
         self.options = options
         self.args = (args[0], args[1])
         self.enqueued.set()
+
+    async def cancel_workflow_async(self, workflow_id: str) -> None:
+        self.cancelled.append(workflow_id)
 
 
 async def _seed(tools: tuple[str, ...] | None = None) -> tuple[RunToken, UUID, UUID]:
@@ -216,3 +220,41 @@ async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: 
     assert child.sandbox_conversation_id == sandbox_id
     assert dbos.options["queue_name"] == EXPRESS_QUEUE_NAME
     assert response == ToolBridgeSuccess(result={"objects": []})
+
+
+async def test_a_parked_bridge_child_is_cancelled_before_the_caller_returns(db: None) -> None:
+    run, _, _ = await _seed()
+    dbos = _DBOS()
+    hub = InProcessHub()
+    request = ToolBridgeRequest(
+        request_id=uuid4(),
+        action="execute",
+        tool_name="object_delete",
+        arguments={"kind": "agent", "name": "archived"},
+    )
+    with ws(run.workspace_id):
+        waiting = asyncio.create_task(_bridge(dbos, hub).request(run, request))
+        await dbos.enqueued.wait()
+        assert dbos.args is not None
+        child_id = UUID(dbos.args[1])
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(status="parked", updated_at=sa.func.now())
+                .where(tables.turn.c.id == child_id)
+            )
+        await hub.publish(child_id, Parked(message="seat revoked"))
+        response = await waiting
+        async with workspace_tx() as connection:
+            child = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                        tables.turn.c.id == child_id
+                    )
+                )
+            ).one()
+
+    assert isinstance(response, ToolBridgeFailure)
+    assert dbos.cancelled == [str(child_id)]
+    assert child.status == CANCELLED
+    assert TerminalFrame.model_validate(child.terminal).status == CANCELLED

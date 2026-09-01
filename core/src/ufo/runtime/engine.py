@@ -1119,6 +1119,7 @@ class _RuntimeModel:
                 if path is not None:
                     feedback += TRUNCATION_SALVAGE_NOTICE.format(path=path)
             raise RecoverableModelError(feedback) from error
+        await self.engine._enforce_seats(self.requesters)
         await self.engine._publish_cost(self.usage_events)
         return HarnessModelRound(
             messages=_to_harness_messages(messages),
@@ -1819,6 +1820,7 @@ class TurnEngine:
                         member_id=self.turn.speaker_member_id, rendered=self.turn.inbound
                     )
                 }
+            await self._enforce_seats(requesters)
             semantic = self._resolve_call(call)
             if (
                 self.turn.speaker_member_id is not None
@@ -1865,6 +1867,10 @@ class TurnEngine:
             if frame is not None:
                 await self._publish_terminal(frame)
             return frame
+        except TurnParked as parked:
+            meter.exited(PARKED)
+            await self._park(parked.message, usage_events)
+            raise
         except DBOSWorkflowCancelledError:
             meter.exited(CANCELLED)
             await self._stop_sandbox_commands()
@@ -2420,14 +2426,6 @@ class TurnEngine:
         round-trip entirely once a recent decision confirmed no cap applies to this turn and the
         workspace holds no balance row to gate on.
 
-        The seat gate re-checks every member whose message the turn has absorbed, so revoking any
-        speaker's seat stops the aggregate before its next model call. A turn acting on behalf of
-        a member gates on them too, whatever admitted it — a scheduled fire, a subagent, a monitor
-        arrival. It costs one indexed read per round whatever the turn
-        absorbed, deliberately and with no fast-path: a seat is what an admin revokes to cut someone
-        off, so a cached answer would keep answering them for as long as it was held, and a
-        running turn is the case the revoke most needs to reach.
-
         The balance stops at zero rather than at the reserve — the reserve is the headroom a turn
         needs to begin, so testing it again mid-run would park a turn the moment it dipped under a
         line it was only ever required to clear once, and the credit that resumed it would buy one
@@ -2435,15 +2433,7 @@ class TurnEngine:
         burn the workspace's own key pays for costs it nothing, so the balance does not gate it.
         Holding a BYOK turn against a balance it never debits would park it, leave the balance
         untouched, let the dispatcher resume it, and park it again at the same point forever."""
-        members = {
-            message.member_id for message in requesters.values() if message.member_id is not None
-        }
-        if self.turn.on_behalf_of_member_id is not None:
-            members.add(self.turn.on_behalf_of_member_id)
-        if members:
-            async with workspace_tx() as connection:
-                if not await Seats(self.turn.workspace_id).all_seated(connection, members):
-                    raise TurnParked(SEAT_REVOKED_MESSAGE)
+        await self._enforce_seats(requesters)
         member_id = audience_member(self.audience)
         pending = (
             0 if self.byok else self.pricing.micro_usd(self.agent.model, _total_usage(usage_events))
@@ -2465,6 +2455,17 @@ class TurnEngine:
             )
         if decision.outcome != ALLOW:
             raise TurnParked(decision.message)
+
+    async def _enforce_seats(self, requesters: Mapping[UUID, ActiveMessage]) -> None:
+        members = {
+            message.member_id for message in requesters.values() if message.member_id is not None
+        }
+        if self.turn.on_behalf_of_member_id is not None:
+            members.add(self.turn.on_behalf_of_member_id)
+        if members:
+            async with workspace_tx() as connection:
+                if not await Seats(self.turn.workspace_id).all_seated(connection, members):
+                    raise TurnParked(SEAT_REVOKED_MESSAGE)
 
     @DBOS.step(preemptible=True)
     async def _stream_once(self, round_input: _RoundInput) -> StreamResult:

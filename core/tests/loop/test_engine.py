@@ -1187,6 +1187,15 @@ def _arrival_body(arrival: Arrival) -> str:
     return arrival.rendered.split("</context>\n", 1)[-1]
 
 
+async def _turn_status(turn_id: UUID) -> str:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+
+
 async def test_engine_carries_one_audience_through_extension_tool_context(
     db: None, tmp_path: Path
 ) -> None:
@@ -3526,6 +3535,45 @@ async def test_a_tool_bridge_intent_dispatches_under_its_inherited_member(
     assert frame is not None and frame.status == "done"
     assert frame.text == '{"objects":[]}'
     assert seen == [(None, turn.on_behalf_of_member_id)]
+
+
+async def test_a_queued_prepared_intent_rechecks_the_speakers_seat(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
+    owner = await _seeded_member(turn.workspace_id)
+    intent = ToolIntent(tool="connect_account", input={})
+    turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
+    called: list[bool] = []
+
+    async def connect_account(ctx: ToolContext, args: _NoArgs) -> ToolResult:
+        called.append(True)
+        return ToolResult(content=(TextContent(text="connected"),))
+
+    tool = ToolDef(
+        name="connect_account",
+        description="connect",
+        input_model=_NoArgs,
+        handler=connect_account,
+        side_effecting=True,
+        presentation=ActionPresentation(label="Connect"),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .values(seated_at=None, updated_at=sa.func.now())
+            .where(tables.member.c.id == owner)
+        )
+    engine = replace(
+        _engine(turn, object(), tmp_path, member_id=owner),
+        tools=ToolRegistry((tool,)),
+    )
+
+    with pytest.raises(TurnParked, match="seat was revoked"):
+        await engine.run_intent()
+
+    assert called == []
+    assert await _turn_status(turn.id) == "parked"
 
 
 async def test_an_interrupted_intent_turn_names_what_interrupted_it(
@@ -6754,6 +6802,52 @@ async def test_revoking_an_absorbed_speakers_seat_parks_the_aggregate(
             )
         ).scalar_one()
     assert status == "parked"
+
+
+async def test_a_revocation_during_the_model_call_stops_its_tool_dispatch(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    member = await _seeded_member(turn.workspace_id)
+    called: list[bool] = []
+
+    @dataclass(frozen=True)
+    class RevokingModel:
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.member)
+                    .values(seated_at=None, updated_at=sa.func.now())
+                    .where(tables.member.c.id == member)
+                )
+            yield ToolCallStart(id="w1", name="write_after_revoke")
+            yield ToolCallDelta(id="w1", partial_json="{}")
+            yield Usage(input_tokens=1, output_tokens=1)
+
+    async def write_after_revoke(ctx: ToolContext, args: _NoArgs) -> ToolResult:
+        called.append(True)
+        return ToolResult(content=(TextContent(text="written"),))
+
+    engine = replace(
+        _engine(turn, RevokingModel(), tmp_path, member_id=member),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="write_after_revoke",
+                    description="write",
+                    input_model=_NoArgs,
+                    handler=write_after_revoke,
+                    side_effecting=True,
+                ),
+            )
+        ),
+    )
+
+    with pytest.raises(TurnParked, match="seat was revoked"):
+        await engine.run()
+
+    assert called == []
+    assert await _turn_status(turn.id) == "parked"
 
 
 async def test_per_round_seat_gate_parks_a_scheduled_turn_for_an_unseated_member(
