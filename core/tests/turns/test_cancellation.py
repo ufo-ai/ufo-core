@@ -112,6 +112,52 @@ async def test_cancel_one_turn_cancels_the_workflow_then_commits_the_terminal(db
     assert TerminalFrame.model_validate(terminal).status == "cancelled"
 
 
+async def test_cancel_one_turn_targets_the_live_redispatch_attempt(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    turn_id = await _turn(workspace_id, agent_id, "running")
+    attempt = uuid4().hex
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(running_attempt=attempt)
+            .where(tables.turn.c.id == turn_id)
+        )
+    client = _RecordingClient()
+
+    assert await cancel_one_turn(client, turn_id) is not None
+
+    assert client.cancelled == [attempt]
+    assert await _status(turn_id) == "cancelled"
+
+
+async def test_cancel_one_turn_follows_a_claim_that_races_the_cancel(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    turn_id = await _turn(workspace_id, agent_id, "queued")
+    claimed_attempt = uuid4().hex
+
+    @dataclass
+    class _ClaimingClient:
+        cancelled: list[str] = field(default_factory=list)
+
+        async def cancel_workflow_async(self, workflow_id: str) -> None:
+            self.cancelled.append(workflow_id)
+            if len(self.cancelled) != 1:
+                return
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(status="running", running_attempt=claimed_attempt)
+                    .where(tables.turn.c.id == turn_id)
+                )
+
+    client = _ClaimingClient()
+
+    assert await cancel_one_turn(client, turn_id) is not None
+
+    assert client.cancelled == [str(turn_id), claimed_attempt]
+    assert await _status(turn_id) == "cancelled"
+
+
 async def test_cancel_one_turn_names_what_the_turn_already_created(db: None) -> None:
     """The turn row records its creations the round they happen, so the cancelled terminal — the
     one frame the turn's own execution never writes — still names them, on the committed row and
@@ -136,6 +182,28 @@ async def test_cancel_one_turn_names_what_the_turn_already_created(db: None) -> 
                 )
             ).scalar_one()
     assert TerminalFrame.model_validate(terminal).created == (made,)
+
+
+async def test_cancel_one_turn_names_work_committed_while_the_workflow_stops(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    turn_id = await _turn(workspace_id, agent_id, "running")
+    made = ObjectRef(kind="widget", name="anvil")
+
+    @dataclass
+    class _StoppingClient:
+        async def cancel_workflow_async(self, workflow_id: str) -> None:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(created_refs=[made.model_dump(mode="json")])
+                    .where(tables.turn.c.id == turn_id)
+                )
+
+    with ws(workspace_id):
+        frame = await cancel_one_turn(_StoppingClient(), turn_id)
+
+    assert frame is not None
+    assert frame.created == (made,)
 
 
 async def test_cancel_one_turn_cancels_a_queued_turn_with_no_live_workflow(db: None) -> None:

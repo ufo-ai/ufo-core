@@ -362,7 +362,7 @@ async def test_stranded_reconciler_cancels_a_turn_whose_workflow_cannot_reach_it
     await StrandedTurnReconciler(client=client).sweep()
     assert await _turn_status(ended) == "cancelled"
     assert await _turn_status(absent) == "cancelled"
-    assert set(client.cancelled) == {str(ended), str(absent)}
+    assert set(client.cancelled) == {"wf-ended", "wf-absent"}
 
 
 async def test_stranded_reconciler_spares_a_live_turn_under_a_terminal_parent(db: None) -> None:
@@ -382,7 +382,7 @@ async def test_stranded_reconciler_spares_a_live_turn_under_a_terminal_parent(db
     await StrandedTurnReconciler(client=client).sweep()
     assert await _turn_status(live) == "running"
     assert await _turn_status(sibling) == "cancelled"
-    assert client.cancelled == [str(sibling)]
+    assert client.cancelled == ["wf-dead"]
 
 
 async def test_stranded_reconciler_spares_a_turn_that_is_merely_idle(db: None) -> None:
