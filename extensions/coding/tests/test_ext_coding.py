@@ -173,35 +173,22 @@ def test_the_child_prompt_names_the_shared_workspace_and_checks_before_cloning()
     assert "you share the workspace with the parent and sibling subagents" in coding.CODING_PROMPT
     assert "Look at the path first" in coding.CODING_PROMPT
     assert "if not, clone once" in coding.CODING_PROMPT
-    assert "If the path is missing, clone <url> there once." in coding.CODING_PROMPT
-    assert "Do not clone or fetch; if it is missing, report it." in coding.CODING_PROMPT
+    assert "use the existing checkout at <path>, from <url>. Do not clone." in coding.CODING_PROMPT
 
 
 def test_the_setup_contract_fetches_the_repository_once_per_turn() -> None:
     instructions = skill_registry((coding.manifest(),)).named("coding").instructions
-    assert "Do not search outside that directory or\ncap the search depth" in instructions
-    assert "Use portable shell syntax; do not rely on platform-specific flags" in instructions
-    assert "When the request gives a path, URL, or commit, skip the lookup" in " ".join(
-        instructions.split()
-    )
     assert "One remote clone per turn" in instructions
     assert "the first remote clone is the only fetch" in instructions
     assert "You do not run the clone — the first child does" in instructions
     assert "The cloning child finishes before another child touches that path" in instructions
-    assert "**Existing checkout:** Use for a checkout found by the path lookup" in instructions
+    assert "**Existing checkout:** Use for any later spawn after the child using that path" in (
+        instructions
+    )
     assert (
-        "use the existing checkout at <absolute path>. Do not clone or fetch; if it is missing, "
-        "report it."
+        "use the existing checkout at /workspace/org-repo, from https://github.com/org/repo. "
+        "Do not clone."
     ) in instructions
-    assert (
-        "use the existing checkout at <absolute path>, from <url>. If the path is missing, clone "
-        "<url> there once."
-    ) in instructions
-    assert (
-        "from https://github.com/acme/cobbledb. If the path is missing, clone "
-        "https://github.com/acme/cobbledb there once."
-    ) in instructions
-    assert "from https://github.com/acme/cobbledb. Do not clone." not in instructions
 
 
 def test_the_setup_contract_isolates_parallel_writers() -> None:
@@ -417,8 +404,10 @@ def test_coding_skills_parse_and_index() -> None:
     assert tuple(skill.path.name for skill in manifest.skills) == ("coding",)
     assert "coding" in index
     instructions = registry.named("coding").instructions
-    assert "after the one permitted\ncheckout-location shell call" in instructions
-    assert "Do not call `update_todo_list`, file, web, or any setup tool first." in instructions
+    assert (
+        "Do not call\n`update_todo_list`, shell, file, web, or any setup tool first."
+        in instructions
+    )
     assert "only a workspace admin can do it" in instructions
     assert "only the owner" not in instructions
 

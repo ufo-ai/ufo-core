@@ -102,16 +102,10 @@ TASK_REPOSITORY = "dclm"
 FALLBACK_REPOSITORY = "source"
 TASK_REPOSITORY_FILES = ("README.md", "src/model.py", "tests/test_model.py")
 GIT_IDENTITY = ("-c", "user.email=evals@localhost", "-c", "user.name=evals")
-EXISTING_CHECKOUT_NO_URL_OBJECTIVE = (
-    "Repository setup: use the existing checkout at /workspace/dclm. Do not clone or fetch; "
-    "if it is missing, report it.\n\nReport the number of tracked files. Do not change the "
-    "checkout. Reply exactly `ANSWER: <count>`."
-)
 EXISTING_CHECKOUT_URL_FALLBACK_OBJECTIVE = (
     "Repository setup: use the existing checkout at /workspace/dclm, from "
-    "file:///workspace/source. If the path is missing, clone file:///workspace/source there "
-    "once.\n\nReport the number of tracked files. Do not change the checkout after setup. "
-    "Reply exactly `ANSWER: <count>`."
+    "file:///workspace/source. Do not clone.\n\nReport the number of tracked files. Do not "
+    "change the checkout after setup. Reply exactly `ANSWER: <count>`."
 )
 
 
@@ -239,58 +233,6 @@ def workspace_agent_result_scorer(objective: str, expected: JsonObject) -> Grade
     )
 
 
-def task_environment_scorer() -> Grader:
-    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        loads = tuple(
-            call
-            for call in output.own_calls
-            if call.name == "load_skill" and call.input.get("name") == "coding"
-        )
-        if not loads:
-            return CapabilityVerdict(False, "the parent did not load the coding workflow")
-        spawns = tuple(call for call in output.own_calls if call.name == "spawn")
-        if not spawns:
-            return CapabilityVerdict(False, "the parent did not delegate the existing checkout")
-        first = spawns[0]
-        earlier = output.own_calls[: output.own_calls.index(first)]
-        lookups = tuple(call for call in earlier if call.name == "bash")
-        if not lookups or any(
-            token in str(call.input.get("command", "")).casefold()
-            for call in lookups
-            for token in ("clone", "fetch", "ls-files", " cat ")
-        ):
-            return CapabilityVerdict(False, "the parent did not limit its shell use to path lookup")
-        checkout_paths = [f"/workspace/{TASK_REPOSITORY}"]
-        if output.workspace_dir is not None:
-            checkout_paths.append(str(output.workspace_dir / TASK_REPOSITORY))
-        payload = first.input.get("payload")
-        objective = payload.get("objective") if isinstance(payload, dict) else None
-        target = first.input.get("target")
-        if (
-            not isinstance(target, str)
-            or target.removeprefix("profile:") != "coding"
-            or not isinstance(objective, str)
-            or not any(
-                f"use the existing checkout at {path}".casefold() in objective.casefold()
-                for path in checkout_paths
-            )
-            or "do not clone or fetch" not in objective.casefold()
-        ):
-            return CapabilityVerdict(False, "the parent did not delegate the discovered path")
-        if any(
-            call.name in {"memory_search", "call_external_tool", "search_web"} for call in earlier
-        ):
-            return CapabilityVerdict(
-                False, "the parent searched remotely before using the checkout"
-            )
-        return CapabilityVerdict(True, "the discovered checkout was delegated by exact path")
-
-    return DescribedGrader(
-        "the parent locates a named checkout and delegates its exact path without repository work",
-        grade,
-    )
-
-
 def workspace_repository_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         loads = tuple(
@@ -364,20 +306,21 @@ def url_repository_scorer() -> Grader:
     )
 
 
-def existing_checkout_execution_scorer(*, clone: bool) -> Grader:
+def existing_checkout_execution_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         commands = tuple(
             str(call.input.get("command", "")) for call in output.calls if call.name == "bash"
         )
-        cloned = any(re.search(r"(?:^|\s)git\s+clone(?:\s|$)", command) for command in commands)
-        if cloned != clone:
-            return CapabilityVerdict(False, "the child chose the wrong missing-checkout behavior")
+        if not any(re.search(r"(?:^|\s)git\s+clone(?:\s|$)", command) for command in commands):
+            return CapabilityVerdict(False, "the child did not clone the missing checkout")
         if not any(TASK_REPOSITORY in command and "ls-files" in command for command in commands):
             return CapabilityVerdict(False, "the child did not inspect the requested checkout")
-        return CapabilityVerdict(True, "the child used the requested existing-checkout branch")
+        return CapabilityVerdict(True, "the child restored and read the requested checkout")
 
-    branch = "clones the supplied URL when missing" if clone else "does not clone without a URL"
-    return DescribedGrader(f"the coding child {branch} and reads the requested checkout", grade)
+    return DescribedGrader(
+        "the coding child clones the supplied URL when missing and reads the requested checkout",
+        grade,
+    )
 
 
 async def _prepare_repository(workspace_dir: Path, name: str) -> None:
@@ -1782,16 +1725,6 @@ CASES = (
         digest_tag="delegation:coding-subagent-parallel-checkouts",
     ),
     CapabilityCase(
-        "coding-subagent-task-environment",
-        "Use the coding workflow to report the number of tracked files in my repository dclm. Do "
-        "not change it. Stop after the first attempted route; do not retry failed tools or "
-        "delegate substitute workers.",
-        task_environment_scorer(),
-        samples=1,
-        prepare=prepare_task_repository,
-        digest_tag="delegation:coding-subagent-task-environment:v6",
-    ),
-    CapabilityCase(
         "coding-subagent-workspace-repository",
         "Use the coding workflow to report the tracked-file count for the existing checkout at "
         "/workspace/dclm. Do not change it. Stop after the first attempted route; do not retry "
@@ -1908,26 +1841,15 @@ def decision_case(
 
 PROFILE_CASES = (
     CapabilityCase(
-        "coding-profile-existing-checkout-no-url",
-        profile_proxy_message(EXISTING_CHECKOUT_NO_URL_OBJECTIVE),
-        profile_proxy_scorer(
-            EXISTING_CHECKOUT_NO_URL_OBJECTIVE,
-            combine(exact_scorer("3"), existing_checkout_execution_scorer(clone=False)),
-        ),
-        samples=1,
-        prepare=prepare_task_repository,
-        digest_tag="coding-profile:existing-checkout:no-url:v1",
-    ),
-    CapabilityCase(
         "coding-profile-existing-checkout-url-fallback",
         profile_proxy_message(EXISTING_CHECKOUT_URL_FALLBACK_OBJECTIVE),
         profile_proxy_scorer(
             EXISTING_CHECKOUT_URL_FALLBACK_OBJECTIVE,
-            combine(exact_scorer("3"), existing_checkout_execution_scorer(clone=True)),
+            combine(exact_scorer("3"), existing_checkout_execution_scorer()),
         ),
         samples=1,
         prepare=prepare_fallback_repository,
-        digest_tag="coding-profile:existing-checkout:url-fallback:v1",
+        digest_tag="coding-profile:existing-checkout:url-fallback:v2",
     ),
     CapabilityCase(
         "coding-subagent-structured-review-result",
