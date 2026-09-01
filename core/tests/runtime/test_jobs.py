@@ -2,13 +2,14 @@ import asyncio
 import logging
 import threading
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from dbos import DBOS
+from dbos import DBOS, SetWorkflowID
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
@@ -42,6 +43,11 @@ MARKER_KEY = "fired"
 MARKER_VALUE = {"ran": True}
 DORMANT_CRON = "0 0 5 * * *"
 BACKGROUND_MODEL = "gpt-5.6-luna"
+RECOVERY_RUNS_KEY = "recovery-runs"
+
+
+class _JobWorkerCrash(BaseException):
+    pass
 
 
 @dataclass(frozen=True)
@@ -398,6 +404,68 @@ async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: obj
             assert await _await_marker(scoped) == MARKER_VALUE
     finally:
         jobs_module._firing = None
+
+
+@pytest.mark.serial
+async def test_job_recovery_replays_a_completed_handler_step_without_running_it_again(
+    db: None,
+    dbos_launched: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _workspace()
+    key = f"{CORE_EXTENSION}:recover"
+
+    async def _count(context: ExtensionContext) -> None:
+        stored = await context.store.get(RECOVERY_RUNS_KEY)
+        if stored is not None and not isinstance(stored, int):
+            raise TypeError("recovery run count must be an integer")
+        await context.store.put(RECOVERY_RUNS_KEY, (stored or 0) + 1)
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    runner = _runner(
+        (
+            JobSpec(
+                name="recover",
+                schedule=DORMANT_CRON,
+                handler=_count,
+                candidates=_candidate,
+            ),
+        )
+    )
+    workflow_id = str(uuid4())
+    original_fire = jobs_module.job_fire
+    crashed = False
+
+    async def _crash_after_step(job_key: str, scoped_workspace_id: str) -> None:
+        nonlocal crashed
+        await original_fire(job_key, scoped_workspace_id)
+        if not crashed:
+            crashed = True
+            raise _JobWorkerCrash("worker stopped after the handler step")
+
+    monkeypatch.setattr(jobs_module, "job_fire", _crash_after_step)
+    saved = jobs_module._firing
+    jobs_module._firing = runner
+    scoped = ScopedStore(extension=CORE_EXTENSION)
+    try:
+        with SetWorkflowID(workflow_id), pytest.raises(_JobWorkerCrash):
+            await jobs_module.job_workflow(datetime.now(UTC), key, str(workspace_id))
+
+        with ws(workspace_id):
+            assert await scoped.get(RECOVERY_RUNS_KEY) == 1
+
+        DBOS._recover_pending_workflows(["local"])
+        handle = await DBOS.retrieve_workflow_async(workflow_id)
+        async with asyncio.timeout(FIRE_TIMEOUT_SECONDS):
+            await handle.get_result(polling_interval_sec=0.05)
+
+        with ws(workspace_id):
+            assert await scoped.get(RECOVERY_RUNS_KEY) == 1
+    finally:
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        jobs_module._firing = saved
 
 
 @dataclass

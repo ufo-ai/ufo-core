@@ -11,8 +11,9 @@ shut that pool down. Two durable workflows carry every fire: `job_tick` fans out
 `job_workflow` per candidate workspace, deduplicated on (job key, workspace) held from enqueue to
 terminal — a workspace still running its previous execution absorbs the tick alone, never stacked,
 never stalling its neighbors, and twin replica boots start a one-shot once — and each
-`job_workflow` runs exactly one workspace's handler through the extension's scoped
-ExtensionContext, so a core job and an extension job ride the identical path. `JOB_QUEUE` runs at
+`job_workflow` records exactly one workspace's handler as a DBOS step through the extension's
+scoped ExtensionContext, so recovery replays a completed handler instead of running it again and a
+core job and an extension job ride the identical path. `JOB_QUEUE` runs at
 most `JOB_WORKER_CONCURRENCY` `job_workflow` executions per process, bounded backpressure in
 Postgres, never a thread bloom; the tick itself rides DBOS's internal queue — one durable insert
 per candidate workspace, milliseconds — so a tick never waits behind a slow job for a worker
@@ -862,6 +863,11 @@ async def job_tick(scheduled_time: datetime, key: str) -> None:
 
 @DBOS.workflow(name=JOB_WORKFLOW_NAME)
 async def job_workflow(scheduled_time: datetime, key: str, workspace_id: str) -> None:
+    await job_fire(key, workspace_id)
+
+
+@DBOS.step(preemptible=True)
+async def job_fire(key: str, workspace_id: str) -> None:
     runner = _firing
     if runner is None:
         raise RuntimeError("jobs not registered (JobRunner.launch runs in serve)")
