@@ -415,10 +415,13 @@ function inOrder(entries: Entry[], opens: string[]): Entry[] {
  *  that emptied the field they were typing in would cost them the words. A lane arriving by a press
  *  does take focus, because the press was the ask to stand in it.
  *
- *  `onActive` names the lane the member is standing in — the one the walk landed on, the one
- *  holding their cursor, or the one a seek brought in — so a rail drawn outside the row can mark
- *  it. It is not the focus: pressing a rail tile takes focus off the row entirely, and a mark that
- *  went out under that press would say the member is in no lane at all.
+ *  `onActive` names the lane the member is standing in — the one the walk landed on, the one their
+ *  cursor or their pointer last landed in, or the one a seek brought in — so a rail drawn outside
+ *  the row can mark it. It is not the focus: pressing a rail tile takes focus off the row entirely,
+ *  and a mark that went out under that press would say the member is in no lane at all. It is read
+ *  against the row that is standing, so a lane that closes takes the name with it, and the track
+ *  names nothing on the way out — a rail that kept a home tile marked would say the member is in a
+ *  lane on every screen after home.
  *
  *  `[` and `]` walk the row: `]` toward the next lane, `[` toward the one before, so a row wider
  *  than the screen is reachable without a pointer or a tab through everything each lane holds. What
@@ -429,7 +432,10 @@ function inOrder(entries: Entry[], opens: string[]): Entry[] {
  *  The walk stops at the row's ends, and a press asking for a lane past one of them moves nothing
  *  and is answered by the end sound, so a member holding the key down hears where the row stops
  *  instead of finding themselves back at the other end of it. A row beside a body scrolls the lane
- *  into view where the whole-pane row translates itself, which is the only thing the two do
+ *  into view where the whole-pane row translates itself. Under an expansion the walk carries the
+ *  expansion instead: the lanes beside an expanded one wear `hidden`, so there is no lane to stand
+ *  in and no row to carry, and a member asking for the next thing means the lane after this one,
+ *  expanded as this one was. That, and the way a lane comes into view, is all the two rows do
  *  differently here. They are pressed bare, which is what Linear spends them on over its own lists:
  *  walking the row is the act a member repeats most, and a chord costs a hand for it every time.
  *  What a bare key costs instead is that it is also a character, so the row yields — a press inside
@@ -491,10 +497,13 @@ export function SlotTrack({
       }),
     [],
   );
-  const drop = useCallback(
-    (id: string) => setEntries((held) => held.filter((slot) => slot.id !== id)),
-    [],
-  );
+  const drop = useCallback((id: string) => {
+    setEntries((held) => held.filter((slot) => slot.id !== id));
+    /* Closing the lane is what ends the ask it stands on, so the mark goes out here rather than
+       wherever the row stops holding the lane: that same id opened again later is a lane the member
+       has not gone to, and a mark kept on it would say they had. */
+    setActive((held) => (held === id ? undefined : held));
+  }, []);
   // A lane is a drag handle only where a drag can land somewhere: one lane alone has no order to
   // restate, so its band is a band and not a grip.
   const move = useMemo(
@@ -530,6 +539,9 @@ export function SlotTrack({
   const panels = useRef<Map<string, HTMLElement>>(new Map());
   const named = useRef<Map<Element, string>>(new Map());
   const order = useRef<string[]>([]);
+  /* The lane standing expanded, read by the walk: it answers an event rather than a render, and
+     under an expansion every other lane wears `hidden`, which is not a thing to put focus on. */
+  const alone = useRef<string | undefined>(undefined);
   const watcher = useRef<IntersectionObserver | null>(null);
   const [row, setRow] = useState<HTMLElement | null>(null);
   const narrow = useNarrow();
@@ -594,10 +606,12 @@ export function SlotTrack({
     [row],
   );
   const [typing, setTyping] = useState<string | undefined>(undefined);
-  /* The lane the member is standing in: the one the bracket walk last landed on, the one holding
-     their cursor, or the one a seek brought in. It is what the rail marks, so unlike `typing` it
-     outlives the focus that set it — pressing a rail tile takes focus off the row, and a mark that
-     went out under that press would say the member is nowhere. */
+  /* The lane the member is standing in: the one the bracket walk last landed on, the one their
+     cursor or their pointer last landed in, or the one a seek brought in. It is what the rail
+     marks, so unlike `typing` it outlives the focus that set it — pressing a rail tile takes focus
+     off the row, and a mark that went out under that press would say the member is nowhere. The
+     press is read as well as the focus, because half of what a lane holds is prose that takes
+     none. */
   const [active, setActive] = useState<string | undefined>(undefined);
   const holding = useCallback((held: EventTarget | null) => {
     if (!(held instanceof HTMLElement)) return undefined;
@@ -623,16 +637,19 @@ export function SlotTrack({
       if (stood !== undefined) setActive(stood);
     };
     const left = (event: FocusEvent) => setTyping(writing(event.relatedTarget));
+    const pressed = (event: PointerEvent) => {
+      const stood = holding(event.target);
+      if (stood !== undefined) setActive(stood);
+    };
     row.addEventListener("focusin", entered);
     row.addEventListener("focusout", left);
+    row.addEventListener("pointerdown", pressed);
     return () => {
       row.removeEventListener("focusin", entered);
       row.removeEventListener("focusout", left);
+      row.removeEventListener("pointerdown", pressed);
     };
   }, [row, writing, holding]);
-  useEffect(() => {
-    onActive?.(active);
-  }, [active, onActive]);
   useLayoutEffect(() => {
     if (!over || !row || typeof ResizeObserver === "undefined") return;
     const sizes = new ResizeObserver(() => setFit(fitting(row)));
@@ -739,16 +756,16 @@ export function SlotTrack({
     },
     [],
   );
-  /* Carry the row toward `to`, held inside its ends. What comes back is whether the row had
-     anywhere left to go, which is what a press against an end is answered with. */
+  /* Carry the row toward `to`, held inside its ends. A carry to where the row already stands
+     starts no spring: the walk asks on every press, and most presses land on a lane already on the
+     screen. */
   const glide = useCallback(
     (to: number) => {
       const held = Math.min(Math.max(to, 0), far(rolling.current));
-      if (held === aimed.current) return false;
+      if (held === aimed.current) return;
       aimed.current = held;
       if (rolling.current.still) offset.jump(held);
       else settle(animate(offset, held, GLIDE));
-      return true;
     },
     [offset, settle],
   );
@@ -822,6 +839,7 @@ export function SlotTrack({
       const nearest = cursor?.closest(ROW_MARK) ?? null;
       const answers = nearest === null ? !row.parentElement?.closest(ROW_MARK) : nearest === row;
       if (!answers) return;
+      const wide = alone.current === undefined ? -1 : ids.indexOf(alone.current);
       const stood = ids.findIndex((id) => panels.current.get(id)?.contains(cursor));
       const port = row.getBoundingClientRect();
       const seen = ids.filter((id) => {
@@ -829,10 +847,19 @@ export function SlotTrack({
         return lane !== undefined && lane.right > port.left && lane.left < port.right;
       });
       const edge = seen.length === 0 ? 0 : ids.indexOf(way > 0 ? seen[0] : seen[seen.length - 1]);
-      const at = (stood < 0 ? edge : stood) + way;
+      const at = (wide >= 0 ? wide : stood < 0 ? edge : stood) + way;
       event.preventDefault();
       if (at < 0 || at >= ids.length) {
         soundEnded();
+        return;
+      }
+      /* Under an expansion the walk carries the expansion. The lanes beside an expanded one wear
+         `hidden`, so there is no lane to stand in and no row to carry — the member asked for the
+         next thing, and the next thing is the lane after this one, expanded as this one was. */
+      if (wide >= 0) {
+        expand(ids[at]);
+        setActive(ids[at]);
+        soundMoved();
         return;
       }
       const panel = panels.current.get(ids[at]);
@@ -844,7 +871,7 @@ export function SlotTrack({
     };
     document.addEventListener("keydown", rotate);
     return () => document.removeEventListener("keydown", rotate);
-  }, [row, over, carry]);
+  }, [row, over, carry, expand]);
   useEffect(() => {
     if (!row || !over) return;
     let quiet: ReturnType<typeof setTimeout> | undefined;
@@ -891,10 +918,22 @@ export function SlotTrack({
   if (prior.current !== null && (prior.current.size > 0 || ids.length === 1)) {
     for (const id of ids) if (!prior.current.has(id)) arrivals.current.add(id);
   }
+  /* The lane the mark stands on: the raw ask read against the row that is standing, since a lane
+     the row is not holding is no lane to mark. The ask itself is kept while the row catches up — a
+     seek names its lane a commit before that lane registers, and an ask dropped there is the seek
+     thrown away, leaving a rail tile the member pressed with no mark on it. */
+  const marked = active !== undefined && ids.includes(active) ? active : undefined;
   useEffect(() => {
     prior.current = new Set(ids);
     order.current = ids;
+    alone.current = focused;
   });
+  useEffect(() => {
+    onActive?.(marked);
+  }, [marked, onActive]);
+  /* A track that has gone stands no lane, so it says so on the way out. Without this the rail keeps
+     a home tile marked on every screen the member walks to after home. */
+  useEffect(() => () => onActive?.(undefined), [onActive]);
   const rolls = focused === undefined && over && !narrow && fit !== null && ids.length > fit.lanes;
   const share =
     focused === undefined

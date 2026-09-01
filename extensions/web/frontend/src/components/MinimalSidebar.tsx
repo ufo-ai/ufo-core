@@ -1,4 +1,11 @@
-import { useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import {
   IconCirclePlus,
   IconPlus,
@@ -106,18 +113,25 @@ export function MinimalSidebar({
   const list = useRef<HTMLUListElement>(null);
   const [mark, setMark] = useState<number | null>(null);
   const [held, setHeld] = useState(false);
+  /* Where the mark stands, re-read whenever the tiles or the lane they mark change: a tab opened
+     above the marked one moves it down the column without the member having gone anywhere. */
   useLayoutEffect(() => {
     const tile = list.current?.querySelector<HTMLElement>("[data-active]") ?? null;
-    if (!tile) {
+    setMark(tile === null ? null : tile.offsetTop + tile.offsetHeight / 2);
+  }, [active, lanes]);
+  /* Whether it is lit, which only the member going somewhere changes. The tiles are rebuilt on
+     every conversation spoken in, and a mark that relit itself on each of those would be a rail
+     blinking at a member who has not moved. */
+  useEffect(() => {
+    if (active === undefined) {
       setHeld(false);
       return;
     }
-    setMark(tile.offsetTop + tile.offsetHeight / 2);
     setHeld(true);
-    tile.scrollIntoView({ block: "nearest" });
+    list.current?.querySelector<HTMLElement>("[data-active]")?.scrollIntoView({ block: "nearest" });
     const fades = setTimeout(() => setHeld(false), MARK_HELD);
     return () => clearTimeout(fades);
-  }, [active, lanes]);
+  }, [active]);
   return (
     <nav
       aria-label="Tabs"
@@ -154,7 +168,11 @@ export function MinimalSidebar({
         ref={list}
         className="scrollbar-none relative -mx-2xs -my-2xs flex min-h-0 flex-1 list-none flex-col items-center gap-2xl self-stretch overflow-y-auto px-2xs py-2xs"
       >
-        <li aria-hidden className={cn(MARK, !held && "opacity-0")} style={SLID(mark)} />
+        <li
+          aria-hidden
+          className={cn(MARK, (!held || mark === null) && "opacity-0")}
+          style={SLID(mark)}
+        />
         {lanes.map(({ lane, agent }) => {
           const dot = statusDot(statuses[agent.id], agent.setup_due === true);
           const here = lane === active;

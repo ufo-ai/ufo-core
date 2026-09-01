@@ -296,6 +296,28 @@ test("the rail marks the lane the member is standing in, and the walk moves the 
   await waitFor(() => expect(marked()).toEqual(["Assistant"]));
 });
 
+/** The mark names a lane on home's row, so it goes when that row does: a tile still marked on the
+ *  workspace screen names a lane standing nowhere on it. */
+test("the rail drops its mark when the member leaves home", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([AGENT_ID, SECOND_ID]);
+  await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Second"]));
+  const rail = screen.getByRole("navigation", { name: "Tabs" });
+  const marked = () =>
+    within(rail)
+      .getAllByRole("button")
+      .filter((tile) => tile.getAttribute("aria-current") === "true").length;
+
+  fireEvent.keyDown(document, { key: LANE_NEXT });
+
+  await waitFor(() => expect(marked()).toBe(1));
+
+  await userEvent.click(within(rail).getByRole("button", { name: "Workspace" }));
+  await waitFor(() => expect(laneNames()).toEqual([]));
+
+  expect(marked()).toBe(0);
+});
+
 /** The mark answers a question the member asked by walking the row, so it stands long enough to be
  *  read and then leaves the rail alone. The tile stays the current one — what fades is the box, not
  *  the answer. */
@@ -344,14 +366,18 @@ test("the rail marks the lane its own tile was pressed for", async () => {
 
 /** The row may be wider than the screen, and the rail's tile is how a lane that scrolled off it is
  *  reached: the press brings that lane into view and leaves the row in the order the member arranged
- *  it. Two presses are two asks — the member scrolled away between them. */
+ *  it. Two presses are two asks — the member scrolled away between them. Every scroll the press
+ *  causes is written down, the rail's own mark included, so a stray one cannot hide behind a
+ *  narrower spy: the lane comes into view, then the mark does, and the second press moves the mark
+ *  nowhere because the member has not left the lane it already stands under. */
 test("the rail's tile brings its lane into view and leaves the row where it stood", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   const scrolled: string[] = [];
   const scrolls = vi
     .spyOn(Element.prototype, "scrollIntoView")
     .mockImplementation(function (this: Element) {
-      if (this.tagName === "SECTION") scrolled.push(this.getAttribute("aria-label") ?? "");
+      const named = this.getAttribute("aria-label");
+      scrolled.push(this.tagName + (named === null ? "" : ":" + named));
     });
   try {
     drawHome([AGENT_ID, SECOND_ID]);
@@ -361,26 +387,31 @@ test("the rail's tile brings its lane into view and leaves the row where it stoo
 
     await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
 
-    expect(scrolled).toEqual(["Second"]);
+    expect(scrolled).toEqual(["SECTION:Second", "LI"]);
     expect(location.hash).toBe(homeHash({ opens: [AGENT_ID, SECOND_ID] }));
     expect(laneNames()).toEqual(["Assistant", "Second"]);
 
     await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
 
-    expect(scrolled).toEqual(["Second", "Second"]);
+    expect(scrolled).toEqual(["SECTION:Second", "LI", "SECTION:Second"]);
     expect(location.hash).toBe(homeHash({ opens: [AGENT_ID, SECOND_ID] }));
   } finally {
     scrolls.mockRestore();
   }
 });
 
-test("the rail's tile from another screen lands home with that lane in view", async () => {
+/** The press places home and the lane it names lands with the row, a commit after home mounts. The
+ *  mark stands on the tile that was pressed all the same: the ask waits for its lane rather than
+ *  going out under a row that has not stood it yet, or the member is left on a rail marking
+ *  nothing. */
+test("the rail's tile from another screen lands home with that lane in view and marked", async () => {
   wire(chatsOnWire([CHAT_ROW]));
   const scrolled: string[] = [];
   const scrolls = vi
     .spyOn(Element.prototype, "scrollIntoView")
     .mockImplementation(function (this: Element) {
-      if (this.tagName === "SECTION") scrolled.push(this.getAttribute("aria-label") ?? "");
+      const named = this.getAttribute("aria-label");
+      scrolled.push(this.tagName + (named === null ? "" : ":" + named));
     });
   try {
     drawHome([AGENT_ID, SECOND_ID]);
@@ -388,12 +419,18 @@ test("the rail's tile from another screen lands home with that lane in view", as
     await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
     await waitFor(() => expect(laneNames()).toEqual([]));
     const rail = screen.getByRole("navigation", { name: "Tabs" });
+    const marked = () =>
+      within(rail)
+        .getAllByRole("button")
+        .filter((tile) => tile.getAttribute("aria-current") === "true")
+        .map((tile) => tile.getAttribute("aria-label"));
 
     await userEvent.click(within(rail).getByRole("button", { name: "Second" }));
 
     expect(location.hash).toBe(homeHash({ opens: [AGENT_ID, SECOND_ID] }));
     await waitFor(() => expect(laneNames()).toEqual(["Assistant", "Second"]));
-    expect(scrolled).toEqual(["Second"]);
+    await waitFor(() => expect(marked()).toEqual(["Second"]));
+    expect(scrolled).toEqual(["SECTION:Second", "LI"]);
   } finally {
     scrolls.mockRestore();
   }

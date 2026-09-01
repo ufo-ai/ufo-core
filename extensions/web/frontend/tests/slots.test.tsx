@@ -1205,22 +1205,67 @@ test("a pick that takes the expanded lane over leaves the lanes beside it drawn"
   expect(screen.getByText("Two body")).toBeTruthy();
 });
 
+/** Under an expansion the walk carries the expansion. Every lane beside an expanded one wears
+ *  `hidden`, and a browser puts no focus on one of those — a press reaching for a hidden lane would
+ *  sound the move and leave the member exactly where they stood, once per press, forever. */
+test("the walk under an expansion carries the expansion and reaches for no hidden lane", async () => {
+  const drawn: string[] = [];
+  render(<Taking opening={["One", "Two", "Three"]} coming="Four" drawn={drawn} />);
+  await userEvent.click(screen.getByRole("button", { name: "Expand One" }));
+  expect(standing()).toEqual(["One"]);
+
+  const reached: string[] = [];
+  const focuses = vi
+    .spyOn(HTMLElement.prototype, "focus")
+    .mockImplementation(function (this: HTMLElement) {
+      if (this.tagName === "SECTION") reached.push(this.getAttribute("aria-label") ?? "");
+    });
+  try {
+    heard();
+
+    press(LANE_NEXT);
+
+    expect(standing()).toEqual(["Two"]);
+    expect(reached).toEqual([]);
+    expect(soundMoved).toHaveBeenCalledTimes(1);
+
+    press(LANE_NEXT);
+
+    expect(standing()).toEqual(["Three"]);
+
+    press(LANE_NEXT);
+
+    expect(standing()).toEqual(["Three"]);
+    expect(soundEnded).toHaveBeenCalledTimes(1);
+
+    press(LANE_PRIOR);
+    press(LANE_PRIOR);
+
+    expect(standing()).toEqual(["One"]);
+    expect(reached).toEqual([]);
+  } finally {
+    focuses.mockRestore();
+  }
+});
+
 /** A screen whose track is sought from outside it — the rail's tile naming a lane. */
 function Seeking({
   names,
   opening,
   seeking,
+  onActive,
 }: {
   names: string[];
   opening: string[];
   seeking?: string;
+  onActive?: (id: string | undefined) => void;
 }) {
   const [opens, setOpens] = useState(opening);
   const [seek, setSeek] = useState<Seek | undefined>(
     seeking === undefined ? undefined : { id: seeking, expansion: "switch" },
   );
   return (
-    <SlotTrack opens={opens} onMove={setOpens} seek={seek}>
+    <SlotTrack opens={opens} onMove={setOpens} seek={seek} onActive={onActive}>
       {names.map((name) => (
         <button
           key={name}
@@ -1293,6 +1338,25 @@ test("a lane sought before it stands scrolls into view as it lands, and takes no
   } finally {
     scrolls.mockRestore();
   }
+});
+
+/** A track mounting with a seek is named a lane none of its entries has registered yet — the rail's
+ *  tile pressed from a screen that is not home, which places home and brings that lane in. The ask
+ *  waits for the lane and names it as it lands, so the tile the member pressed carries the mark. A
+ *  lane closing is what ends the ask, and the lane opened again after that is one the member has not
+ *  gone to. */
+test("a lane sought before it stands is the lane the track names as it lands", async () => {
+  const seen: (string | undefined)[] = [];
+  const note = (id: string | undefined) => void seen.push(id);
+  render(<Seeking names={["A", "B"]} opening={["A", "B"]} seeking="B" onActive={note} />);
+
+  expect(standing()).toEqual(["A", "B"]);
+  expect(seen.at(-1)).toBe("B");
+
+  await userEvent.click(screen.getByRole("button", { name: "Close B" }));
+
+  expect(standing()).toEqual(["A"]);
+  expect(seen.at(-1)).toBeUndefined();
 });
 
 function Fields({ names }: { names: string[] }) {
@@ -1804,6 +1868,41 @@ test("the horizontal wheel carries the row, and it settles on a lane boundary", 
     act(() => vi.advanceTimersByTime(200));
 
     expect(spotted("A")).toBe(0);
+  } finally {
+    done();
+    vi.useRealTimers();
+  }
+});
+
+/** The wheel is held by the two ends the walk is: a hand pushing the row past its first lane or
+ *  its last leaves it standing against that end rather than opening a gap beside it. */
+test("the wheel stops at both ends of the row", () => {
+  vi.useFakeTimers();
+  const done = rolling(NINE);
+  try {
+    const roll = (deltaX: number) =>
+      act(() =>
+        void track().dispatchEvent(
+          new WheelEvent("wheel", { deltaX, deltaY: 0, cancelable: true, bubbles: true }),
+        ),
+      );
+
+    roll(-400);
+
+    expect(spotted("A")).toBe(0);
+
+    roll(4000);
+
+    expect(spotted("A")).toBe(-5);
+    expect(spotted("I")).toBe(3);
+
+    roll(2000);
+
+    expect(spotted("A")).toBe(-5);
+
+    act(() => vi.advanceTimersByTime(200));
+
+    expect(spotted("A")).toBe(-5);
   } finally {
     done();
     vi.useRealTimers();
