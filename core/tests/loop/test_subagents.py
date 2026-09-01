@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,6 +27,7 @@ from ufo.runtime.billing.balance import BalanceExhausted, credit, set_reserve
 from ufo.runtime.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.runtime.ext.surface import conversation_name
 from ufo.runtime.hub import ArrivalQueued, InProcessHub
+from ufo.runtime.kinds.agents import ARCHIVED_AGENT_NAME_PREFIX
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.runtime.queue import _commit_failed_terminal, _load_turn, _subagent_tools
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, RuntimeSkill, SkillCard
@@ -2365,6 +2367,159 @@ async def test_spawn_refuses_another_members_agent(db: None, dbos_launched: Conf
     assert child.on_behalf_of_member_id == owner
 
 
+async def test_agent_spawn_rechecks_admin_authority_inside_child_admission(
+    db: None,
+    dbos_launched: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    owner = await _seeded_member(workspace_id)
+    admin = await _seeded_member(workspace_id, admin=True)
+    await _specialist(workspace_id, name="private-triage", owner_member_id=owner)
+    parent = (await _parent(workspace_id, agent_id)).model_copy(update={"speaker_member_id": admin})
+    original_admit = Subagents._admit
+
+    async def admit_after_demotion(self: Subagents, *args: Any, **kwargs: Any) -> bool:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.member)
+                .values(is_admin=False, updated_at=sa.func.now())
+                .where(tables.member.c.id == admin)
+            )
+        return await original_admit(self, *args, **kwargs)
+
+    monkeypatch.setattr(Subagents, "_admit", admit_after_demotion)
+
+    with pytest.raises(ValueError, match="not yours to spawn"):
+        await _spawner(workspace_id, parent, "research").spawn(
+            "private-triage", {"task": "acme"}, background=True, dedup_key="demoted"
+        )
+
+    async with workspace_tx() as connection:
+        children = (
+            await connection.execute(
+                sa.select(sa.func.count()).where(tables.turn.c.parent_turn_id == parent.id)
+            )
+        ).scalar_one()
+    assert children == 0
+
+
+async def test_agent_spawn_rechecks_target_liveness_inside_child_admission(
+    db: None,
+    dbos_launched: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    owner = await _seeded_member(workspace_id)
+    target_id = await _specialist(workspace_id, name="private-triage", owner_member_id=owner)
+    parent = (await _parent(workspace_id, agent_id)).model_copy(update={"speaker_member_id": owner})
+    original_admit = Subagents._admit
+
+    async def admit_after_archive(self: Subagents, *args: Any, **kwargs: Any) -> bool:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(
+                    name=f"{ARCHIVED_AGENT_NAME_PREFIX}{target_id}",
+                    archived_name="private-triage",
+                    archived_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .where(tables.agent.c.id == target_id)
+            )
+        return await original_admit(self, *args, **kwargs)
+
+    monkeypatch.setattr(Subagents, "_admit", admit_after_archive)
+
+    with pytest.raises(UnknownSpawnTarget):
+        await _spawner(workspace_id, parent, "research").spawn(
+            "private-triage", {"task": "acme"}, background=True, dedup_key="archived"
+        )
+
+    async with workspace_tx() as connection:
+        children = (
+            await connection.execute(
+                sa.select(sa.func.count()).where(tables.turn.c.parent_turn_id == parent.id)
+            )
+        ).scalar_one()
+    assert children == 0
+
+
+async def test_agent_spawn_replay_keeps_its_admitted_authority_and_target(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    owner = await _seeded_member(workspace_id)
+    admin = await _seeded_member(workspace_id, admin=True)
+    target_id = await _specialist(workspace_id, name="private-triage", owner_member_id=owner)
+    parent = (await _parent(workspace_id, agent_id)).model_copy(update={"speaker_member_id": admin})
+    spawner = _spawner(workspace_id, parent, "research")
+
+    first = await spawner.spawn(
+        "private-triage", {"task": "acme"}, background=True, dedup_key="replay"
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=False).where(tables.member.c.id == admin)
+        )
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"{ARCHIVED_AGENT_NAME_PREFIX}{target_id}",
+                archived_name="private-triage",
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == target_id)
+        )
+
+    replay = await spawner.spawn(
+        "private-triage", {"task": "acme"}, background=True, dedup_key="replay"
+    )
+
+    assert replay.turn_id == first.turn_id
+    async with workspace_tx() as connection:
+        children = (
+            await connection.execute(
+                sa.select(sa.func.count()).where(tables.turn.c.parent_turn_id == parent.id)
+            )
+        ).scalar_one()
+    assert children == 1
+
+
+async def test_agent_spawn_dedup_key_refuses_a_different_request(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    owner = await _seeded_member(workspace_id)
+    await _specialist(workspace_id, name="private-triage", owner_member_id=owner)
+    parent = (await _parent(workspace_id, agent_id)).model_copy(update={"speaker_member_id": owner})
+    spawner = _spawner(workspace_id, parent, "research")
+    await spawner.spawn("private-triage", {"task": "acme"}, background=True, dedup_key="shared")
+
+    with pytest.raises(ValueError, match="belongs to another request"):
+        await spawner.spawn(
+            "private-triage", {"task": "different"}, background=True, dedup_key="shared"
+        )
+
+
+async def test_agent_spawn_replay_compares_the_raw_request_before_contract_normalization(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    owner = await _seeded_member(workspace_id)
+    await _specialist(workspace_id, name="private-triage", owner_member_id=owner)
+    parent = (await _parent(workspace_id, agent_id)).model_copy(update={"speaker_member_id": owner})
+    spawner = _spawner(workspace_id, parent, "research")
+    payload = {"task": "acme", "note": "contract drops this field"}
+
+    first = await spawner.spawn("private-triage", payload, background=True, dedup_key="normalized")
+    replay = await spawner.spawn("private-triage", payload, background=True, dedup_key="normalized")
+
+    assert replay.turn_id == first.turn_id
+    child, _, _ = await _load_turn(first.turn_id)
+    assert child.inbound == '{"task":"acme"}'
+
+
 async def test_agent_child_payload_validates_against_the_declared_input_schema(
     db: None, dbos_launched: Config
 ) -> None:
@@ -3259,6 +3414,18 @@ async def test_an_arriving_member_message_moves_the_wait_to_the_background(
     assert (result.output, result.terminal) == (None, None)
     assert await _child_state(child.turn_id) == ("queued", "pending")
     assert client.cancelled == []
+
+    replay = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
+    assert replay.turn_id == child.turn_id
+    async with workspace_tx() as connection:
+        delivery_intent = (
+            await connection.execute(
+                sa.select(tables.turn.c.spawn_delivers_result).where(
+                    tables.turn.c.id == child.turn_id
+                )
+            )
+        ).scalar_one()
+    assert delivery_intent is False
 
 
 async def test_a_child_that_finished_as_the_message_arrived_answers_inline(

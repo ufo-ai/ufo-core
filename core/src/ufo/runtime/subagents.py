@@ -18,6 +18,8 @@ conversation is where its messages arrive; a profile child runs under the spawni
 it always has."""
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -158,11 +160,10 @@ class SubagentRegistry:
 @dataclass(frozen=True)
 class AgentTarget:
     """A workspace agent resolved as a spawn target: the row facts the spawn needs — identity,
-    owner, payload contract, and answer contract."""
+    payload contract, and answer contract."""
 
     id: UUID
     name: str
-    owner_member_id: UUID | None
     input_schema: dict[str, object] | None
     output_schema: dict[str, object] | None
 
@@ -275,7 +276,14 @@ class Subagents:
         moved to the background rather than cancelled, and the result says so instead of carrying
         an output — so the parent can answer the message while the work it already paid for runs
         on and delivers itself."""
-        resolved = await self._resolve(target)
+        conversation_id = (
+            uuid5(NAMESPACE_URL, f"{self.parent.id}/{dedup_key}")
+            if dedup_key is not None
+            else uuid4()
+        )
+        turn_id = turn_id_for(self.parent.workspace_id, conversation_id, 1)
+        replay = None if dedup_key is None else await self._existing_agent_spawn(turn_id, target)
+        resolved = replay[0] if replay is not None else await self._resolve(target)
         match resolved:
             case SubagentProfile():
                 if (
@@ -290,33 +298,49 @@ class Subagents:
                 input_model: Contract = resolved.input_model
                 output_model: Contract = resolved.output_model
                 untrusted = resolved.untrusted_output
+                agent_target: AgentTarget | None = None
             case AgentTarget():
-                if not await self._may_spawn(resolved.owner_member_id):
-                    raise ValueError(AGENT_SPAWN_REFUSAL.format(name=resolved.name))
                 agent_id = resolved.id
                 profile_name = None
                 inherits_sandbox = False
                 input_model = input_contract(resolved.input_schema)
                 output_model = output_contract(resolved.output_schema)
                 untrusted = True
+                agent_target = resolved
                 background = True
                 delivers_result = True
-        typed_input = input_model.model_validate(payload)
-        conversation_id = (
-            uuid5(NAMESPACE_URL, f"{self.parent.id}/{dedup_key}")
-            if dedup_key is not None
-            else uuid4()
+        request_fingerprint = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    {
+                        "agent_id": str(agent_id),
+                        "profile": profile_name,
+                        "payload": payload,
+                        "delivers_result": delivers_result,
+                        "name": name,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
         )
-        turn_id = turn_id_for(self.parent.workspace_id, conversation_id, 1)
+        inbound = (
+            replay[1]
+            if replay is not None
+            else input_model.model_validate(payload).model_dump_json()
+        )
         if await self._admit(
             conversation_id,
             turn_id,
             agent_id=agent_id,
             profile=profile_name,
             inherits_sandbox=inherits_sandbox,
-            inbound=typed_input.model_dump_json(),
+            inbound=inbound,
+            request_fingerprint=request_fingerprint,
             delivers_result=delivers_result,
             name=name,
+            agent_target=agent_target,
             model=(
                 self.parent.runtime_config.model
                 if self.parent.runtime_config is not None
@@ -599,6 +623,47 @@ class Subagents:
             return agent
         raise UnknownSpawnTarget(target, self._profile_names(), await self._agent_names())
 
+    async def _existing_agent_spawn(
+        self, turn_id: UUID, target: str
+    ) -> tuple[AgentTarget, str] | None:
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.parent_turn_id,
+                        tables.turn.c.on_behalf_of_member_id,
+                        tables.turn.c.subagent_profile,
+                        tables.turn.c.inbound,
+                        tables.agent.c.id,
+                        tables.agent.c.name.label("agent_name"),
+                        tables.agent.c.archived_name,
+                        tables.agent.c.input_schema,
+                        tables.agent.c.output_schema,
+                    )
+                    .join(tables.agent, tables.agent.c.id == tables.turn.c.agent_id)
+                    .where(tables.turn.c.id == turn_id)
+                )
+            ).one_or_none()
+        if row is None or row.subagent_profile is not None:
+            return None
+        original_name = row.archived_name or row.agent_name
+        if row.on_behalf_of_member_id != self.acting_member_id:
+            raise ValueError("spawn dedup key belongs to another member request")
+        if row.parent_turn_id != self.parent.id or target not in (
+            original_name,
+            f"{AGENT_TARGET_KIND}:{original_name}",
+        ):
+            raise ValueError("spawn dedup key belongs to another request")
+        return (
+            AgentTarget(
+                id=row.id,
+                name=original_name,
+                input_schema=row.input_schema,
+                output_schema=row.output_schema,
+            ),
+            row.inbound,
+        )
+
     def _profile_names(self) -> tuple[str, ...]:
         return tuple(sorted(profile.name for profile in self.registry.profiles))
 
@@ -623,7 +688,6 @@ class Subagents:
                     sa.select(
                         tables.agent.c.id,
                         tables.agent.c.name,
-                        tables.agent.c.owner_member_id,
                         tables.agent.c.input_schema,
                         tables.agent.c.output_schema,
                     ).where(
@@ -638,7 +702,6 @@ class Subagents:
         return AgentTarget(
             id=row.id,
             name=row.name,
-            owner_member_id=row.owner_member_id,
             input_schema=row.input_schema,
             output_schema=row.output_schema,
         )
@@ -650,20 +713,6 @@ class Subagents:
                     sa.select(tables.agent.c.output_schema).where(tables.agent.c.id == agent_id)
                 )
             ).scalar_one()
-
-    async def _may_spawn(self, owner_member_id: UUID | None) -> bool:
-        """The spawn side of ownership: the owner runs their own agent, and a workspace admin runs
-        any — including the ownerless rows (main, provisioned) that are the admins'. This mirrors
-        the portal's reach, which gives a non-admin only the main agent, their grants, and their
-        own rows, so chat opens no agent the portal would refuse."""
-        if owner_member_id is not None and owner_member_id == self.acting_member_id:
-            return True
-        if self.acting_member_id is None:
-            return False
-        async with workspace_tx() as connection:
-            return await member_is_admin(
-                connection, self.parent.workspace_id, self.acting_member_id
-            )
 
     def _untrusted_output(self, profile: str | None) -> bool:
         """Trust fails closed for profiles: a child whose profile is no longer registered walls as
@@ -728,8 +777,9 @@ class Subagents:
         """Refuse to start work the prepaid balance cannot cover. A turn passes this line once, at
         its own admission; a turn that fans out asks again per child, so an exhausted workspace
         stops at the first one instead of buying a free round per helper. Only genuinely new work
-        is asked: a recovery re-run that reconnects to a child already past `queued` never reaches
-        here, so a refusal can never strand a child that has already run.
+        is asked: an exact recovery re-run reconnects to the admitted row without re-deciding its
+        mutable balance or authority, so a later change cannot strand work admission already
+        accepted.
 
         The child is weighed under the model that will answer it — its profile's where the profile
         pins one, otherwise the model of the agent the child runs as, which is the child's own agent
@@ -751,8 +801,10 @@ class Subagents:
         profile: str | None,
         inherits_sandbox: bool,
         inbound: str,
+        request_fingerprint: str,
         delivers_result: bool = False,
         name: str = "",
+        agent_target: AgentTarget | None = None,
         model: str | None = None,
     ) -> bool:
         """Insert the child conversation and its first turn, stamped with the spawning turn's
@@ -765,6 +817,13 @@ class Subagents:
         recovery re-run of the spawning step settles on the rows already there — the first run's
         child stands, never a duplicate."""
         async with workspace_tx() as connection:
+            admitted = (
+                await connection.execute(
+                    sa.select(tables.turn.c.id).where(tables.turn.c.id == turn_id).with_for_update()
+                )
+            ).one_or_none()
+            if admitted is None and agent_target is not None:
+                await self._require_agent_spawn(connection, agent_target, inbound)
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             await connection.execute(
                 insert(tables.conversation)
@@ -803,6 +862,8 @@ class Subagents:
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     result_delivery=DELIVERY_PENDING if delivers_result else None,
+                    spawn_delivers_result=delivers_result,
+                    spawn_request_fingerprint=request_fingerprint,
                     subagent_profile=profile,
                     subagent_name=name or None,
                     traceparent=current_traceparent(),
@@ -821,6 +882,13 @@ class Subagents:
                     sa.select(
                         tables.turn.c.status,
                         tables.turn.c.on_behalf_of_member_id,
+                        tables.turn.c.parent_turn_id,
+                        tables.turn.c.agent_id,
+                        tables.turn.c.subagent_profile,
+                        tables.turn.c.inbound,
+                        tables.turn.c.spawn_delivers_result,
+                        tables.turn.c.spawn_request_fingerprint,
+                        tables.turn.c.subagent_name,
                     )
                     .where(tables.turn.c.id == turn_id)
                     .with_for_update()
@@ -828,15 +896,86 @@ class Subagents:
             ).one()
             if claimed.on_behalf_of_member_id != self.acting_member_id:
                 raise ValueError("spawn dedup key belongs to another member request")
+            if (
+                claimed.parent_turn_id != self.parent.id
+                or claimed.agent_id != agent_id
+                or claimed.subagent_profile != profile
+                or claimed.inbound != inbound
+                or claimed.subagent_name != (name or None)
+                or (
+                    claimed.spawn_delivers_result is not None
+                    and claimed.spawn_delivers_result != delivers_result
+                )
+                or (
+                    claimed.spawn_request_fingerprint is not None
+                    and claimed.spawn_request_fingerprint != request_fingerprint
+                )
+            ):
+                raise ValueError("spawn dedup key belongs to another request")
             if claimed.status != "queued":
                 return False
-            await self._require_balance(connection, model, agent_id)
+            if admitted is None:
+                await self._require_balance(connection, model, agent_id)
             await connection.execute(
                 sa.update(tables.turn)
                 .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
                 .where(tables.turn.c.id == turn_id, tables.turn.c.status == "queued")
             )
         return True
+
+    async def _require_agent_spawn(
+        self,
+        connection: AsyncConnection,
+        target: AgentTarget,
+        inbound: str,
+    ) -> None:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.agent.c.owner_member_id,
+                    tables.agent.c.input_schema,
+                    tables.agent.c.archived_at,
+                )
+                .where(
+                    tables.agent.c.workspace_id == self.parent.workspace_id,
+                    tables.agent.c.id == target.id,
+                )
+                .with_for_update()
+            )
+        ).one_or_none()
+        if row is None or row.archived_at is not None:
+            names = (
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.name)
+                        .where(
+                            tables.agent.c.workspace_id == self.parent.workspace_id,
+                            tables.agent.c.archived_at.is_(None),
+                        )
+                        .order_by(tables.agent.c.name)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            raise UnknownSpawnTarget(target.name, self._profile_names(), tuple(names))
+        owned = row.owner_member_id is not None and row.owner_member_id == self.acting_member_id
+        if not owned:
+            if self.acting_member_id is None:
+                raise ValueError(AGENT_SPAWN_REFUSAL.format(name=target.name))
+            await connection.execute(
+                sa.select(tables.member.c.id)
+                .where(
+                    tables.member.c.workspace_id == self.parent.workspace_id,
+                    tables.member.c.id == self.acting_member_id,
+                )
+                .with_for_update()
+            )
+            if not await member_is_admin(
+                connection, self.parent.workspace_id, self.acting_member_id
+            ):
+                raise ValueError(AGENT_SPAWN_REFUSAL.format(name=target.name))
+        input_contract(row.input_schema).model_validate_json(inbound)
 
     async def _enqueue(self, turn_id: UUID, conversation_id: UUID) -> None:
         options: EnqueueOptions = {

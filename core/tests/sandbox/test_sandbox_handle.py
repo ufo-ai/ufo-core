@@ -1562,6 +1562,7 @@ async def _admitted_child(workspace_id: UUID, parent: Turn) -> UUID | None:
             profile=GENERAL_PURPOSE,
             inherits_sandbox=True,
             inbound="{}",
+            request_fingerprint="sandbox-inheritance",
         )
         async with workspace_tx() as connection:
             return (
