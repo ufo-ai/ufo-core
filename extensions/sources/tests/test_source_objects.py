@@ -2480,12 +2480,38 @@ async def test_shared_trigger_conversation_carries_no_member_authority(db: None)
     assert turn["on_behalf_of_member_id"] is None
 
 
-async def test_unseated_trigger_creator_downgrades_without_losing_the_alert(db: None) -> None:
+async def test_existing_per_page_conversation_keeps_creator_authority_when_unseated(
+    db: None,
+) -> None:
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.member_id)
+    page_id = uuid4()
     with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
+        await _apply(
+            _context(state, None),
+            _trigger_manifest(name, state.conversation_id, delivery="per_page"),
+        )
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        await on_page_change(
+            HookContext(
+                ext=ext,
+                payload=PageChangeBatch(changes=(_change(source_id, "# first", page_id=page_id),)),
+            )
+        )
     async with workspace_tx() as connection:
+        [conversation_id] = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == state.workspace_id,
+                    tables.conversation.c.surface == NAME,
+                )
+            )
+        ).scalars()
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.conversation_id == conversation_id)
+            .values(status="done", terminal={"status": "done", "text": "Handled."})
+        )
         await connection.execute(
             sa.update(tables.member)
             .where(tables.member.c.id == state.owner_id)
@@ -2494,14 +2520,27 @@ async def test_unseated_trigger_creator_downgrades_without_losing_the_alert(db: 
     with ws(state.workspace_id), agent(state.agent_id):
         await on_page_change(
             HookContext(
-                ext=context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id)),
-                payload=PageChangeBatch(changes=(_change(source_id, "# still delivered"),)),
+                ext=ext,
+                payload=PageChangeBatch(
+                    changes=(
+                        _change(
+                            source_id,
+                            "# still delivered",
+                            changed_at=datetime(2026, 7, 21, tzinfo=UTC),
+                            disposition="updated",
+                            page_id=page_id,
+                            revision=2,
+                        ),
+                    )
+                ),
             )
         )
 
-    [turn] = await _turns(state.conversation_id)
-    assert turn["status"] == "queued"
-    assert turn["on_behalf_of_member_id"] is None
+    turns = await _turns(conversation_id)
+    assert len(turns) == 2
+    turn = turns[-1]
+    assert turn["status"] == "parked"
+    assert turn["on_behalf_of_member_id"] == state.owner_id
     assert "still delivered" in turn["inbound"]
 
 

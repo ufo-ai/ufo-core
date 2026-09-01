@@ -70,7 +70,6 @@ from ufo.sdk.objects import (
     VerbNotSupported,
     owner_emails,
 )
-from ufo.sdk.seats import Seats
 from ufo.sdk.sources import (
     ConnectorSourceConfig,
     PageChange,
@@ -1043,7 +1042,7 @@ async def _fire_trigger(
     match trigger.delivery:
         case "current":
             acting_member_id = (
-                await _seated_creator(ext, trigger)
+                trigger.created_by_member_id
                 if trigger.created_by_member_id is not None
                 and audience == conversation_audience(trigger.created_by_member_id)
                 else None
@@ -1064,7 +1063,6 @@ async def _fire_trigger(
                 standalone=True,
             )
         case "per_page":
-            acting_member_id = await _seated_creator(ext, trigger)
             member_key = (
                 "shared"
                 if trigger.created_by_member_id is None
@@ -1086,18 +1084,10 @@ async def _fire_trigger(
                         f"source-trigger:{trigger.id.hex}:{member_key}:"
                         f"{change.page_id.hex}:{change.revision}"
                     ),
-                    acting_member_id=acting_member_id,
+                    acting_member_id=trigger.created_by_member_id,
                     holds_work_already_done=True,
                     standalone=True,
                 )
-
-
-async def _seated_creator(ext: ExtensionContext, trigger: SourceTrigger) -> UUID | None:
-    member_id = trigger.created_by_member_id
-    if member_id is None:
-        return None
-    async with ext.transaction() as connection:
-        return member_id if await Seats(ext.workspace_id).admits(connection, member_id) else None
 
 
 async def _write_change_log(
