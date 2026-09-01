@@ -1,1443 +1,653 @@
-# Sandbox, terminal, browser, and document execution environments  `stage-12`
+# Source Sync, Memory, Indexing, and Knowledge Ingestion  `stage-12`
 
-This stage provides the controlled “rooms” where risky or practical work happens: running commands, browsing the web, opening documents, moving files, and showing terminals. It is mostly behind-the-scenes support used during the main work loop whenever a tool needs to act outside the chat itself.
+This stage is the system’s knowledge intake and recall pipeline. It runs mostly behind the scenes after accounts, folders, or API keys are connected. Its job is to bring in outside or workspace information, keep it fresh, and store it so agents can search it later.
 
-The conversation workspace file is the front door. It finds or creates the private sandbox for a conversation and keeps track of its location. The session layer is the safety wall: it offers one standard way to run commands, read files, write files, load skills, and reach services without leaving the allowed area. The execution-environment file prepares safe environment variables, giving tools placeholders instead of raw secret keys.
+External Source Connectors and Feed Sync are the front gate. Each connector knows how to talk to one service, such as Slack, Google, Git, or a CRM, and converts that service’s records into a common page-like format. Shared helpers handle routine web work like logins, retries, and “pagination,” which means fetching long result lists a page at a time.
 
-Below that, carrier and terminal code chooses where work runs: locally, in Docker, in a cloud sandbox, or through a user’s connected terminal. Browser adapters provide Chrome wherever it lives, while DevTools plumbing remotely controls tabs, JavaScript, dialogs, and downloads. The perception and interaction layer reads pages or rendered documents, finds buttons and fields, maps screen positions, and sends clicks, typing, uploads, scrolling, screenshots, and document actions.
+The sync worker in `core/src/ufo/runtime/sources/sync.py` is the pump. It pulls documents from configured sources, saves the newest content, notes what changed, and hands those changes to indexing.
+
+Memory, Embeddings, and Search Index Backends are the library shelves. They clean and condense information, turn text into meaning-based search numbers, and store chunks in searchable databases or external index services.
 
 ## Sub-stages
 
-- [Sandbox carrier implementations and terminal transports](stage-12.1.md) `stage-12.1` — 6 files
-- [Browser provider adapters and sandbox Chrome launchers](stage-12.2.md) `stage-12.2` — 4 files
-- [Chrome DevTools session plumbing](stage-12.3.md) `stage-12.3` — 8 files
-- [Rendered content perception and browser interaction primitives](stage-12.4.md) `stage-12.4` — 9 files
+- [External Source Connectors and Feed Sync](stage-12.1.md) `stage-12.1` — 65 files
+- [Memory, Embeddings, and Search Index Backends](stage-12.2.md) `stage-12.2` — 11 files
 
 ## Files in this stage
 
-### Sandbox workspace core
-Conversation sandboxes are opened or reconnected, prepared with safe execution environments, and backed by a consistent session boundary for files, commands, skills, and services.
+### Source Sync, Memory, Indexing, and Knowledge Ingestion
+### `core/src/ufo/runtime/sources/sync.py`
 
-### `core/src/ufo/harness/sandbox/conversation.py`
+`domain_logic` · `startup, scheduled sync polling, page-change replay`
 
-`orchestration` · `request handling and turn setup`
+This file turns many possible document sources into one steady, reliable stream of pages. A source backend is like a courier: it knows how to fetch documents from one place, such as a local folder or an external connector. The sync driver is the dispatcher: it finds sources that are due, claims one so another worker does not sync it at the same time, asks the right backend for pages, writes page bodies into blob storage, and updates database rows that describe those pages.
 
-A conversation’s `/workspace` is treated as the single real copy of its files. This file makes sure every write, browse, and tool run reaches that same place instead of creating stray copies. Think of it like a coat-check ticket: the database stores a sandbox handle, and future processes use that ticket to find the same sandbox again.
+The file is careful about safety. If a document has not changed, it avoids rewriting it by comparing a content digest, which is a fingerprint of the body. If a full source scan no longer sees a page, the page is tombstoned, meaning marked as deleted without simply vanishing. If an external provider refuses a stream because of permissions or plan limits, the driver records a skip instead of deleting old content. Repeated refusals are “parked,” meaning retried less often so the system does not waste requests.
 
-The main class, `ConversationSandbox`, can open a sandbox for active work, attach to an existing one for read-only style operations, bind a conversation to a user’s connected terminal, write files into the workspace, list files, read files, and prune old generated files. It also protects important boundaries. Reads never create a sandbox, because a harmless-looking file browse should not change system state. Off-turn writes use an unsigned run token, so they can do local file work without being allowed network access through the proxy. Local workspace directories are created carefully with containment checks, so a malicious or mistaken symbolic link cannot redirect the sandbox into the wrong part of the host filesystem.
-
-A key detail is race handling. Two tasks may try to create the first sandbox at the same time, such as an attachment upload and a turn starting. The file uses a compare-and-swap database update, meaning “write this handle only if the old value is still what I saw.” The loser reopens the winner’s sandbox, so the conversation ends up with one durable workspace.
+The second half exposes a page feed. Indexers read this feed using a cursor, like a bookmark, and receive changed pages in a stable order. This keeps syncing separate from indexing: the sync job only lands page changes, and downstream systems decide how to process them.
 
 #### Function details
 
-##### `ConversationSandbox._route`  (lines 105–116)
+##### `SourceRowConfig.requested_fields`  (lines 95–98)
 
 ```
-def _route(self, stored: str | None) -> tuple[Carrier, str, bool]
+def requested_fields(cls) -> frozenset[str]
 ```
 
-**Purpose**: Chooses which sandbox provider should be used for a stored sandbox handle. This matters because an old conversation may still live on a different backend, and opening it on the wrong backend would strand or overwrite its files.
+**Purpose**: This tells callers which non-identity settings must still match when a source is registered again. It separates fields a person asked for from fields the system resolved automatically.
 
-**Data flow**: It takes the stored handle string, if there is one. It reads the backend name embedded in that handle and checks whether this deployment has a special resume backend for it. It returns the carrier to use, the backend name, and whether that backend is off-cluster; if no special route applies, it returns the deployment’s normal carrier settings.
+**Data flow**: It reads the class-level sets of non-identity fields and resolved fields, subtracts the resolved ones, and returns the remaining field names. Nothing outside the class is changed.
 
-**Call relations**: When `ConversationSandbox.opened` or `ConversationSandbox.existing` needs to reach a non-terminal sandbox, they call this helper first. It gives them the provider choice before they create or attach to the sandbox.
+**Call relations**: This supports source registration rules for backends that use typed source configuration. It helps the surrounding source system decide whether a repeated registration is asking for the same live source row.
 
-*Call graph*: called by 2 (_opened, existing); 1 external calls (sandbox_handle_backend).
 
+##### `normalize_page_timestamp`  (lines 101–121)
 
-##### `ConversationSandbox.open`  (lines 118–170)
-
-```
-async def open(self, conversation_id: UUID, turn_id: UUID | None, run_token: str, env: Mapping[str, str]) -> SandboxSession
-```
-
-**Purpose**: Creates or resumes the sandbox for a conversation and makes sure the database stores the durable handle for it. It is the main path used when a turn or an off-turn writer needs a workspace it can write to.
-
-**Data flow**: It starts with a conversation id, optional turn id, run token, and environment variables. It reads the currently stored sandbox handle and sandbox size from the database, asks `_opened` to create or resume the sandbox, then tries to save the resulting handle. If another task saved a competing handle first, it adopts that winner and tries again. It returns a `SandboxSession`, which is the usable connection to the chosen sandbox.
-
-**Call relations**: The turn queue uses this through `_open_sandbox`, and this file’s `write` and `write_runtime` use it before copying bytes into a workspace. It relies on `_binding` for the database read, `_opened` for the actual sandbox opening, and `_claim` to safely persist the handle.
-
-*Call graph*: calls 3 internal fn (_binding, _claim, _opened); called by 3 (_open_sandbox, write, write_runtime); 1 external calls (__init__).
-
-
-##### `ConversationSandbox.existing`  (lines 172–234)
-
-```
-async def existing(self, conversation_id: UUID) -> SandboxSession | None
-```
-
-**Purpose**: Attaches to a sandbox only if the conversation already has one that can be reached. It is the safe read path: it will not create a new workspace just because someone asked to browse or read files.
-
-**Data flow**: It takes a conversation id and reads the stored handle. If there is no handle, it returns `None`. If the handle points to a client terminal, it tries to attach through a terminal carrier. Otherwise it routes to the right backend, checks the needed host directory without creating it, and asks the carrier to attach. It returns a `SandboxSession` when attachment succeeds, or `None` when there is no reachable sandbox.
-
-**Call relations**: `entries`, `read`, `prune`, and `prune_runtime` all call this because they should only act on an already-existing workspace. It uses `_stored` to get the saved handle, `_route` to pick the carrier, and carrier attach calls to reconnect.
-
-*Call graph*: calls 2 internal fn (_route, _stored); called by 4 (entries, prune, prune_runtime, read); 5 external calls (__init__, __init__, __init__, to_thread, sandbox_handle_id).
-
-
-##### `ConversationSandbox.claim_terminal`  (lines 236–246)
-
-```
-async def claim_terminal(self, conversation_id: UUID, cwd: str) -> bool
-```
-
-**Purpose**: Binds an unbound conversation to a user’s connected terminal directory. This lets the first later sandbox open use the user’s live terminal workspace instead of the default sandbox storage.
-
-**Data flow**: It takes a conversation id and a current working directory from the terminal. It builds a `client:` style handle for that directory, checks whether the conversation already has any stored handle, and if not tries to save this terminal handle. It returns `True` only if this call successfully made the claim.
-
-**Call relations**: No caller inside this file is listed; it is intended for the admission path while a member’s terminal connection is live. It uses `_stored` to avoid stealing an existing binding and `_claim` to save the terminal handle safely.
-
-*Call graph*: calls 2 internal fn (_claim, _stored).
-
-
-##### `ConversationSandbox.write`  (lines 248–259)
-
-```
-async def write(self, conversation_id: UUID, rel: str, content: bytes) -> str
-```
-
-**Purpose**: Writes an external byte payload, such as an uploaded attachment, into the conversation workspace. It enforces a maximum size so one write cannot consume too much memory.
-
-**Data flow**: It receives a conversation id, a relative path, and bytes to write. It rejects content over the configured size limit, opens the conversation sandbox off-turn, writes the bytes to the requested workspace-relative path, and returns the `/workspace/...` path the agent can later use.
-
-**Call relations**: This function calls `open` because a write is allowed to create the workspace if none exists yet. It also uses `workspace_path` to turn the relative path into the path format visible inside the sandbox.
-
-*Call graph*: calls 1 internal fn (open); 1 external calls (workspace_path).
-
-
-##### `ConversationSandbox.write_runtime`  (lines 261–273)
-
-```
-async def write_runtime(self, conversation_id: UUID, category: str, rel: str, content: bytes) -> str
-```
-
-**Purpose**: Writes internal runtime output under a named runtime category, separate from ordinary member-visible workspace files. It is used for bounded system-produced files that still need to live with the conversation.
-
-**Data flow**: It receives a conversation id, category, relative path, and bytes. It checks the size limit, opens the sandbox off-turn, prefixes the path with the category, writes the bytes into the runtime area, and returns a display path for that runtime file.
-
-**Call relations**: Like `write`, it calls `open` because runtime output may need to create or resume the sandbox before writing. After opening, it hands the actual file placement and display-path calculation to the `SandboxSession`.
-
-*Call graph*: calls 1 internal fn (open).
-
-
-##### `ConversationSandbox.prune`  (lines 275–286)
-
-```
-async def prune(self, conversation_id: UUID, rel_prefix: str, keep: int) -> None
-```
-
-**Purpose**: Deletes older files directly under a workspace subdirectory, keeping only a requested number of newest files. This prevents unattended off-turn writers, such as log appenders, from growing storage forever.
-
-**Data flow**: It takes a conversation id, a relative directory prefix, and a keep count. It attaches only to an existing sandbox; if there is none, it does nothing. Inside the sandbox it runs a small Python pruning program against the workspace path. If that program reports failure, it raises an operating-system style error.
-
-**Call relations**: It calls `existing` because pruning should not create a workspace. It uses `workspace_path` so the in-sandbox pruning program sees the same `/workspace` path the agent sees.
-
-*Call graph*: calls 1 internal fn (existing); 1 external calls (workspace_path).
-
-
-##### `ConversationSandbox.prune_runtime`  (lines 288–300)
-
-```
-async def prune_runtime(self, conversation_id: UUID, category: str, rel_prefix: str, keep: int) -> None
-```
-
-**Purpose**: Deletes older files under one internal runtime directory, keeping only the newest requested number. It is the runtime-area version of workspace pruning.
-
-**Data flow**: It takes a conversation id, runtime category, relative prefix, and keep count. It attaches to an existing sandbox, calculates the target runtime directory and its root through the session, runs the pruning program there, and raises an error if pruning fails.
-
-**Call relations**: It calls `existing` for the same reason as `prune`: cleanup should not create a new sandbox. It then relies on the session to translate runtime-relative names into real paths before running the pruning script.
-
-*Call graph*: calls 1 internal fn (existing).
-
-
-##### `ConversationSandbox.entries`  (lines 302–341)
-
-```
-async def entries(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]
-```
-
-**Purpose**: Lists the member-visible files in a conversation workspace. It returns simple records with relative path, size, and last modified time, suitable for a file browser.
-
-**Data flow**: It takes a conversation id and attaches to an existing sandbox. If none exists, it returns an empty tuple. It asks the sandbox to run `ufo fs glob`, a file-walking command, excluding names such as `.git`. It checks that the response contains a file list, warns if the list was truncated, converts absolute paths back to workspace-relative paths, and returns sorted `WorkspaceFile` objects.
-
-**Call relations**: File browsing calls this path through `existing`, so browsing does not create storage. It calls `_workspace_rel` for each returned path to remove the workspace root safely before building `WorkspaceFile` records.
-
-*Call graph*: calls 2 internal fn (_workspace_rel, existing); 3 external calls (__init__, fromtimestamp, warn).
-
-
-##### `ConversationSandbox._workspace_rel`  (lines 343–347)
-
-```
-def _workspace_rel(self, handle: SandboxHandle, path: str) -> str
-```
-
-**Purpose**: Turns an absolute path reported by a workspace walk into a path relative to the workspace root. This keeps file browser results from exposing container or host filesystem paths.
-
-**Data flow**: It receives a sandbox handle and a path string. It checks whether the path starts with either the container workspace root or the host workspace path recorded in the handle. If so, it strips that root and returns the relative part. If not, it raises an error because the file walk returned something outside the workspace.
-
-**Call relations**: `entries` calls this for each file returned by the sandbox’s file listing command. It acts as the final safety check before file paths are shown to callers.
-
-*Call graph*: called by 1 (entries).
-
-
-##### `ConversationSandbox.read`  (lines 349–357)
-
-```
-async def read(self, conversation_id: UUID, rel: str) -> AsyncIterator[bytes] | None
-```
-
-**Purpose**: Reads one file from an existing conversation workspace as a stream of byte chunks. It returns `None` instead of creating a workspace or pretending a missing file exists.
-
-**Data flow**: It receives a conversation id and a relative file path. It attaches to an existing sandbox; if none is reachable, it returns `None`. It asks the session whether the file exists; if not, it returns `None`. Otherwise it returns an async byte iterator that yields the file content in chunks.
-
-**Call relations**: It calls `existing` to preserve the no-side-effects rule for reads. Once a session is available, the actual existence check and byte streaming are delegated to the `SandboxSession`.
-
-*Call graph*: calls 1 internal fn (existing).
-
-
-##### `ConversationSandbox._opened`  (lines 359–418)
-
-```
-async def _opened(self, conversation_id: UUID, turn_id: UUID | None, stored: str | None, run_token: str, env: Mapping[str, str], size: str) -> tuple[str, Carrier, SandboxHandle]
-```
-
-**Purpose**: Chooses where a sandbox open should happen and performs the actual create-or-resume call. This is the central decision point for terminal-bound conversations, resumed backends, and normal deployment-owned sandboxes.
-
-**Data flow**: It receives the conversation id, turn id, stored handle, run token, environment variables, and sandbox size. It first checks whether the conversation is already bound to a client terminal or currently has a terminal workspace. If so, it creates a terminal-backed sandbox session. Otherwise it routes the stored handle to the right backend, prepares or chooses the host workspace directory, optionally changes ownership for the sandbox user when running as root, and asks the carrier to create or resume the sandbox. It returns the backend name, carrier, and handle.
-
-**Call relations**: `open` calls this after reading the database binding. `_opened` calls `_route` for non-terminal backends and uses sandbox specification objects to hand the chosen settings to either a terminal carrier or the routed carrier.
-
-*Call graph*: calls 1 internal fn (_route); called by 1 (open); 5 external calls (__init__, __init__, to_thread, geteuid, sandbox_handle_id).
-
-
-##### `ConversationSandbox._provisioned_dir`  (lines 420–435)
-
-```
-def _provisioned_dir(self, conversation_id: UUID) -> Path
-```
-
-**Purpose**: Creates and verifies the host directory used as a conversation’s workspace for local in-cluster sandboxes. It is careful to avoid being tricked by symbolic links inside the workspace root.
-
-**Data flow**: It takes a conversation id. It makes sure the configured workspace root exists, resolves and validates that configured root, then creates or opens the conversation-specific child directory using containment checks. It returns the safe directory path.
-
-**Call relations**: _opened calls this when a non-off-cluster sandbox needs a host workspace directory. It uses the containment helpers rather than plain path operations so the carrier later mounts a directory that is truly under the allowed root.
-
-*Call graph*: 3 external calls (suppress, configured_root, contained_dir).
-
-
-##### `ConversationSandbox._existing_dir`  (lines 437–448)
-
-```
-def _existing_dir(self, conversation_id: UUID) -> Path | None
-```
-
-**Purpose**: Finds the already-created host workspace directory for read-style operations without creating it. This preserves the rule that reads must not create new workspace state.
-
-**Data flow**: It takes a conversation id. It validates the configured workspace root and tries to resolve the conversation directory within it. If the directory is missing, it returns `None`; if the path exists but violates containment rules, the containment helper raises an error. Otherwise it returns the safe directory path.
-
-**Call relations**: `existing` calls this when attaching to a local in-cluster sandbox. It is the read-path counterpart to `_provisioned_dir`.
-
-*Call graph*: 2 external calls (configured_root, contained_dir).
-
-
-##### `ConversationSandbox._stored`  (lines 450–452)
-
-```
-async def _stored(self, conversation_id: UUID) -> str | None
-```
-
-**Purpose**: Fetches only the stored sandbox handle for a conversation. It is a small convenience wrapper around the fuller binding lookup.
-
-**Data flow**: It receives a conversation id, calls `_binding`, discards the sandbox size, and returns the handle string or `None`.
-
-**Call relations**: `existing`, `claim_terminal`, and `_claim` use this when they only need to know what handle the conversation row currently stores. It delegates the actual database query to `_binding`.
-
-*Call graph*: calls 1 internal fn (_binding); called by 3 (_claim, claim_terminal, existing).
-
-
-##### `ConversationSandbox._binding`  (lines 454–475)
-
-```
-async def _binding(self, conversation_id: UUID) -> tuple[str | None, str]
-```
-
-**Purpose**: Reads the conversation’s current sandbox handle and the owning agent’s requested sandbox size from the database. This gives sandbox opening enough information to resume the right place and size a new sandbox correctly.
-
-**Data flow**: It receives a conversation id. Inside a workspace-scoped database transaction, it joins the conversation row to its agent row and selects the sandbox handle plus sandbox size for the current workspace. If no matching conversation exists, it raises an error. Otherwise it returns the handle, which may be `None`, and the sandbox size.
-
-**Call relations**: `open` calls this at the start of the create-or-resume flow, and `_stored` calls it for handle-only reads. It uses `workspace_tx` for database access and `ws_current` so it only sees the active workspace.
-
-*Call graph*: called by 2 (_stored, open); 3 external calls (select, workspace_tx, ws_current).
-
-
-##### `ConversationSandbox._claim`  (lines 477–498)
-
-```
-async def _claim(self, conversation_id: UUID, stored: str | None, handle: str) -> str
-```
-
-**Purpose**: Safely writes a sandbox handle into the conversation row only if the row still contains the value this caller previously saw. This is what prevents two simultaneous first opens from both winning.
-
-**Data flow**: It receives a conversation id, the handle value the caller read earlier, and the new handle it wants to store. It runs a conditional database update: if the stored value still matches the earlier value, it saves the new handle and returns it. If not, it reads the current stored handle and returns that winner. If the handle somehow disappeared, it raises an error.
-
-**Call relations**: `open` uses this to settle races between concurrent sandbox creation attempts, and `claim_terminal` uses it to bind only an unclaimed conversation to a terminal. When it loses the update race, it calls `_stored` to discover the winning handle.
-
-*Call graph*: calls 1 internal fn (_stored); called by 2 (claim_terminal, open); 3 external calls (update, workspace_tx, ws_current).
-
-
-### `core/src/ufo/harness/sandbox/exec_env.py`
-
-`domain_logic` · `sandbox open for probe execution`
-
-A sandbox is a controlled place where the system runs commands. Those commands often need to talk to outside services, such as Git hosts or connector command-line tools. This file decides which environment variables should be present when a probe opens that sandbox.
-
-The key idea is that the sandbox never receives real passwords, API keys, or tokens. Instead, it receives sentinels: harmless marker strings. Think of a sentinel like a coat-check ticket. The sandbox carries the ticket, and the proxy at the door swaps it for the real credential only when making an approved network request.
-
-The main class, ProbeEnv, combines several sources of information. It adds the conversation ID, Git configuration, connector CLI credentials, and keyed provider variables such as API-key environment variables. It checks whether each declared credential slot is actually set before exporting anything for it, so the sandbox does not see misleading half-configured variables. It also resolves provider hosts, because some services have different regional or account-specific hosts.
-
-The file is careful about ambiguity. If more than one possible connector account could match a fixed environment variable, it logs the problem and exports nothing for that provider rather than silently choosing the wrong account. This protects probes from acting as an unintended user or account.
-
-#### Function details
-
-##### `ProbeEnv.exports`  (lines 60–74)
-
-```
-async def exports(self, conversation_id: UUID, probe_id: UUID, acting_member_id: UUID | None=None) -> dict[str, str]
-```
-
-**Purpose**: Builds the complete set of environment variables for a probe running inside a sandbox. It gathers safe placeholders for Git, connector CLIs, keyed providers, and the current conversation ID.
-
-**Data flow**: It receives a conversation ID, a probe ID, and optionally the member the probe is acting as. It reads the current workspace ID, then asks helper functions to produce Git settings, grant-based CLI variables, and keyed provider variables. It returns one dictionary of environment variable names and string values for the sandbox to use.
-
-**Call relations**: This is the top-level entry in this file. When a probe needs to open a sandbox, it calls this method, which then delegates the specialized pieces to _git_config_env, _git_credential_config, _grant_cli_env, and _keyed_provider_env. It also asks ws_current for the current workspace so every credential lookup is scoped to the right workspace.
-
-*Call graph*: calls 4 internal fn (_git_config_env, _git_credential_config, _grant_cli_env, _keyed_provider_env); 1 external calls (ws_current).
-
-
-##### `_git_config_env`  (lines 77–84)
-
-```
-def _git_config_env(settings: tuple[tuple[str, str], ...]) -> dict[str, str]
-```
-
-**Purpose**: Turns Git configuration settings into the special environment variable format that Git understands. This lets the sandbox configure Git without writing a Git config file.
-
-**Data flow**: It receives a tuple of Git setting pairs, where each pair is a setting name and value. It numbers those settings and creates variables such as the total count, each key, and each value. It returns a dictionary ready to merge into the sandbox environment.
-
-**Call relations**: ProbeEnv.exports calls this after collecting the Git settings. This function does not decide what Git should be told; it only packages already-chosen settings in the format Git expects.
-
-*Call graph*: called by 1 (exports).
-
-
-##### `_git_credential_config`  (lines 87–122)
-
-```
-async def _git_credential_config(credentials: CredentialStore | None, slots: tuple[CredentialSlot, ...], workspace_id: UUID) -> tuple[tuple[str, str], ...]
-```
-
-**Purpose**: Creates Git authentication configuration for credential slots that are actually available in the workspace. It uses sentinels instead of real secrets, so Git traffic can be authorized later by the proxy.
-
-**Data flow**: It receives an optional credential store, the declared credential slots, and a workspace ID. For each slot that declares Git basic authentication, it checks whether the workspace has a stored value, resolves the correct host, and adds a Git extra header containing the slot sentinel. If a slot cannot be checked or its host cannot be resolved, it logs a warning and skips that slot. It returns Git setting pairs for the slots that are safe to export.
-
-**Call relations**: ProbeEnv.exports calls this before passing its result into _git_config_env. Inside, it relies on slot_is_set to avoid exporting placeholders for missing credentials, credential_host to find the correct host, and warn to record recoverable problems without stopping the sandbox open.
-
-*Call graph*: called by 1 (exports); 3 external calls (credential_host, slot_is_set, warn).
-
-
-##### `_keyed_provider_env`  (lines 125–167)
-
-```
-async def _keyed_provider_env(credentials: CredentialStore | None, slots: tuple[CredentialSlot, ...], workspace_id: UUID) -> dict[str, str]
-```
-
-**Purpose**: Builds environment variables for external providers that use API keys or similar credentials. It exports only safe sentinels and resolved host names, never the actual secret values.
-
-**Data flow**: It receives an optional credential store, declared credential slots, and a workspace ID. It scans the slots for provider environment variables or host environment variables, checks whether each slot is set, resolves the provider host, and then adds the declared sentinel and host values to the returned environment dictionary. If checking or host resolution fails, it warns and skips that slot.
-
-**Call relations**: ProbeEnv.exports calls this as one part of the sandbox environment. This helper uses slot_is_set and credential_host to make sure exported variables match real, usable credentials, and uses warn when a declared credential cannot be safely turned into an environment variable.
-
-*Call graph*: called by 1 (exports); 3 external calls (credential_host, slot_is_set, warn).
-
-
-##### `_grant_cli_env`  (lines 170–212)
-
-```
-async def _grant_cli_env(grants: GrantStore | None, clis: Mapping[str, CliCredential], acting_member_id: UUID | None, run_id: UUID) -> dict[str, str]
-```
-
-**Purpose**: Builds environment variables for connector command-line tools that need to authenticate as a granted account. It chooses the probe actor's private grant when possible, otherwise a shared workspace grant.
-
-**Data flow**: It receives an optional grant store, the connector CLI declarations, the acting member ID, and the current run or probe ID. It reads active grants, groups them by provider, prefers a matching private account, falls back to shared accounts, and writes the connector's environment variable to a grant sentinel when exactly one account fits. If more than one account fits, it logs the ambiguity and exports nothing for that provider.
-
-**Call relations**: ProbeEnv.exports calls this while assembling the sandbox environment. This helper asks GrantStore.active_grants for the current usable grants, uses grant_sentinel to create the safe placeholder for the chosen account, and logs ambiguous cases so the failure is visible instead of silently using the wrong account.
-
-*Call graph*: calls 1 internal fn (active_grants); called by 1 (exports); 2 external calls (grant_sentinel, log).
-
-
-### `core/src/ufo/harness/sandbox/session.py`
-
-`domain_logic` · `cross-cutting during sandbox open, command execution, file access, skill loading, and proxy authorization`
-
-A sandbox is like a rented workshop for one conversation: tools can work on files in `/workspace`, run commands, and use installed skills, but they should not touch private records or host storage. This file is the rulebook and front desk for that workshop. It defines the `Carrier` interface, which is the small contract every backend must follow, whether the real sandbox is Docker, a remote provider, or something else. The rest of the system talks to `Sandbox`, not to Docker or any provider directly. The file also protects paths. User-supplied paths are normalized so `..` tricks or symlinks cannot steer reads and writes outside the intended area. It prepares proxy environment variables so network traffic from the sandbox can be measured and authorized with signed tokens. It also separates normal workspace files from UFO’s private runtime files, such as tool output and skill staging. There are two ways to hold a sandbox: `SandboxSession` wraps one that already exists, while `_LateSandbox` waits to create it until the first real operation. Both expose the same methods, so callers do not need to care when the container is actually opened.
-
-#### Function details
-
-##### `egress_proxy_env`  (lines 353–392)
-
-```
-def egress_proxy_env(proxy: 'ProxyEndpoint', run_token: str) -> dict[str, str]
-```
-
-**Purpose**: Builds the environment variables a sandbox command needs so its outbound internet traffic goes through UFO’s egress proxy. This lets the system meter and authorize network use instead of giving the sandbox open internet access.
-
-**Data flow**: It receives a proxy endpoint and a signed run token. It checks that the public proxy URL exists and is HTTPS, builds proxy URLs containing the token as the basic-auth username, and returns a dictionary of proxy, certificate, no-proxy, and sentinel model-key variables.
-
-**Call relations**: Carrier code uses this kind of environment when launching commands in off-cluster sandboxes. It relies on URL parsing to validate the proxy address before anything is handed to the sandbox.
-
-*Call graph*: 1 external calls (urlsplit).
-
-
-##### `_basic_username`  (lines 398–404)
-
-```
-def _basic_username(header: str) -> str
-```
-
-**Purpose**: Extracts the username from a `Proxy-Authorization: Basic ...` header. In this system, that username is where signed sandbox tokens travel.
-
-**Data flow**: It receives an authorization header string, verifies that it uses Basic authentication, decodes the base64 user-and-password text, and returns only the username part before the colon.
-
-**Call relations**: Both `RunTokenCodec.from_proxy_auth` and `ProbeTokenCodec.from_proxy_auth` call this first, then verify the signed token found in the username.
-
-*Call graph*: called by 2 (from_proxy_auth, from_proxy_auth); 1 external calls (b64decode).
-
-
-##### `RunTokenCodec.from_env`  (lines 423–427)
-
-```
-def from_env(cls) -> 'RunTokenCodec'
-```
-
-**Purpose**: Creates a run-token signer from the deployment secret stored in the environment. Without this secret, UFO cannot mint tokens that the proxy will trust.
-
-**Data flow**: It reads the token-secret environment variable. If missing, it raises an error; otherwise it encodes the value as bytes and returns a `RunTokenCodec` using it.
-
-**Call relations**: `core/src/ufo/serve.run` calls this at service startup so later sandbox opens can sign per-turn proxy tokens.
-
-*Call graph*: called by 1 (run).
-
-
-##### `RunTokenCodec.encode`  (lines 429–432)
-
-```
-def encode(self, run: RunToken) -> str
-```
-
-**Purpose**: Turns a run’s workspace, turn, and optional member identity into a signed token. The proxy later uses this token to know which turn a network request belongs to.
-
-**Data flow**: It receives a `RunToken`, formats its IDs into a domain-specific payload, signs that payload with the codec secret, and returns the signed string.
-
-**Call relations**: `core/src/ufo/loop/queue._open_sandbox` calls this when opening a sandbox, so commands launched for a turn carry the right proxy identity.
-
-*Call graph*: called by 1 (_open_sandbox); 1 external calls (sign_token).
-
-
-##### `RunTokenCodec.from_proxy_auth`  (lines 434–446)
-
-```
-def from_proxy_auth(self, header: str) -> RunToken
 ```
-
-**Purpose**: Reads and verifies a run token presented to the proxy. It refuses forged tokens and tokens from the wrong token family.
-
-**Data flow**: It extracts the Basic-auth username, verifies the signature with the deployment secret, splits the payload into IDs, converts them to UUIDs, and returns a `RunToken`. Bad decoding, signatures, formats, or UUIDs become a clear invalid-token error.
-
-**Call relations**: This is the inverse of `RunTokenCodec.encode`; proxy-side code uses it when a sandbox makes a proxied request.
-
-*Call graph*: calls 1 internal fn (_basic_username); 3 external calls (__init__, verify_token, UUID).
-
-
-##### `ProbeTokenCodec.encode`  (lines 481–487)
-
-```
-def encode(self, probe: ProbeToken) -> str
-```
-
-**Purpose**: Signs a token for a probe, which is a sandbox command that runs outside a normal turn. The token includes its own expiry time because there is no running turn row to authorize it.
-
-**Data flow**: It receives a `ProbeToken`, formats the workspace, conversation, probe ID, member ID, and expiry into a payload, signs it, and returns the signed string.
-
-**Call relations**: Probe-launching code mints these tokens before a probe command uses the egress proxy; `ProbeTokenCodec.from_proxy_auth` later checks them.
-
-*Call graph*: 1 external calls (sign_token).
-
-
-##### `ProbeTokenCodec.from_proxy_auth`  (lines 489–505)
-
-```
-def from_proxy_auth(self, header: str) -> ProbeToken
-```
-
-**Purpose**: Verifies a probe token received through proxy authentication. It makes sure the token was signed by this deployment and belongs to the probe-token family.
-
-**Data flow**: It extracts the Basic-auth username, verifies the signed payload, parses workspace, conversation, probe, member, and expiry values, and returns a `ProbeToken`. Invalid input is wrapped as an invalid signed probe-token error.
-
-**Call relations**: This mirrors `ProbeTokenCodec.encode` and is used by proxy-side authorization when off-turn probe traffic arrives.
-
-*Call graph*: calls 1 internal fn (_basic_username); 3 external calls (__init__, verify_token, UUID).
-
-
-##### `sandbox_handle_id`  (lines 593–598)
-
-```
-def sandbox_handle_id(backend: str, value: str) -> str | None
-```
-
-**Purpose**: Pulls the raw sandbox ID out of a stored handle only if it belongs to the requested backend. This prevents one sandbox provider from trying to resume another provider’s container.
-
-**Data flow**: It receives a backend name and a stored handle string like `backend:id`. If the prefix matches, it returns the ID after the separator; otherwise it returns `None`.
-
-**Call relations**: Carrier-opening code uses this when deciding whether a persisted conversation sandbox can be resumed by the current backend.
-
-
-##### `sandbox_handle_backend`  (lines 601–604)
-
-```
-def sandbox_handle_backend(value: str) -> str
-```
-
-**Purpose**: Finds which backend wrote a stored sandbox handle. This helps deployments route an existing conversation back to the right sandbox carrier.
-
-**Data flow**: It receives a stored handle string and returns the part before the first separator.
-
-**Call relations**: Higher-level sandbox routing can use this alongside `sandbox_handle_id` when more than one backend may still have live sandboxes.
-
-
-##### `Carrier.create`  (lines 642–642)
-
-```
-async def create(self, spec: SandboxSpec) -> SandboxHandle
-```
-
-**Purpose**: Defines the carrier operation for creating or attaching to a sandbox that may be newly provisioned. A concrete backend implements the actual Docker, local, or remote-provider work.
-
-**Data flow**: It receives a `SandboxSpec` describing the conversation, image, workspace, proxy, token, and optional size or resume ID. The implementation returns a `SandboxHandle` that later operations use.
-
-**Call relations**: The `Sandbox` abstraction depends on carriers offering this operation, but this file only states the contract; backend files provide the real behavior.
-
-
-##### `Carrier.attach`  (lines 644–650)
-
-```
-async def attach(self, spec: SandboxSpec) -> SandboxHandle | None
-```
-
-**Purpose**: Defines a read-only-style attach operation that should not create a new sandbox. It is used when the caller wants an existing sandbox if it is still reachable.
-
-**Data flow**: It receives a `SandboxSpec`, usually containing a resume ID or conversation identity. The implementation returns a `SandboxHandle` if the sandbox exists, or `None` if it is gone.
-
-**Call relations**: Late or read paths can call this through carrier implementations to avoid resurrecting a container just because someone looked for files.
-
-
-##### `Carrier.exec`  (lines 652–654)
-
-```
-async def exec(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> ExecResult
-```
-
-**Purpose**: Defines how to run one command inside a sandbox. Each backend decides how command execution actually reaches its container or remote environment.
-
-**Data flow**: It receives a sandbox handle, an argument list, and a timeout. The implementation runs the command and returns stdout, stderr, exit code, and timeout information in an `ExecResult`.
-
-**Call relations**: `ufo_fs_file_op` calls this directly, and many `Sandbox` methods call it through a bound carrier to run shell, Python, file-test, and supervisor commands.
-
-*Call graph*: called by 1 (ufo_fs_file_op).
-
-
-##### `Carrier.write`  (lines 656–668)
-
-```
-async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None
-```
-
-**Purpose**: Defines how to copy bytes into a sandbox file safely. The contract requires the backend to respect path containment rather than relying on unsafe shell redirection.
-
-**Data flow**: It receives a handle, a target path, and byte content. The implementation writes the bytes, creating parents when appropriate, and changes the sandbox filesystem.
-
-**Call relations**: `Sandbox.write_file`, runtime-file helpers, and skill staging use this through concrete carriers.
-
-
-##### `Carrier.read`  (lines 670–681)
-
-```
-def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]
-```
-
-**Purpose**: Defines how to stream a file out of the sandbox without loading the whole file into host memory. This matters for large files and for consistent file-access boundaries.
-
-**Data flow**: It receives a handle and a path. The implementation yields chunks of bytes asynchronously, or raises an appropriate file/access error.
-
-**Call relations**: `Sandbox.read_file`, runtime-read helpers, and lower-level private reads use this carrier method after path checks.
-
-
-##### `Carrier.dial`  (lines 683–692)
-
-```
-async def dial(self, handle: SandboxHandle, port: int) -> DialTarget
-```
-
-**Purpose**: Defines how outside code can reach a network port opened inside the sandbox. This supports things like browser debugging ports or preview servers.
-
-**Data flow**: It receives a handle and an in-sandbox port number. The implementation returns a `DialTarget` with host, TLS choice, and required headers, or raises `SandboxUnreachable`.
-
-**Call relations**: `Sandbox.dial` delegates to this, and browser-related extensions call `Sandbox.dial` when they need to connect to a service inside the sandbox.
-
-
-##### `Carrier.file_op`  (lines 694–704)
-
-```
-async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
-```
-
-**Purpose**: Defines a bounded, structured file-operation interface for workspace tools. It lets reads, edits, globs, greps, and change lists run inside the sandbox instead of pulling whole files to the host.
-
-**Data flow**: It receives a handle, an operation name, and JSON-like parameters. The implementation returns a JSON-like result object, or raises a recoverable value error for tool-level failures.
-
-**Call relations**: `Sandbox.run_ufo_fs` prepares safe parameters and then calls this method on the active carrier.
-
-
-##### `CommandStopping.stop_commands`  (lines 724–724)
-
-```
-async def stop_commands(self, handle: SandboxHandle) -> None
-```
-
-**Purpose**: Defines an optional carrier feature for stopping commands that may keep running after the original exec call is cancelled. Not every backend needs this.
-
-**Data flow**: It receives a sandbox handle, including turn identity, and the implementation stops only the command groups launched for that turn.
-
-**Call relations**: `Sandbox.stop_commands` and `_LateSandbox.stop_commands` call this only when the carrier declares that it supports command stopping.
-
-
-##### `SkillLoading.load_skills`  (lines 731–733)
-
-```
-async def load_skills(self, handle: SandboxHandle, payload: Mapping[str, object]) -> ExecResult
-```
-
-**Purpose**: Defines an optional native way for a carrier to load skills into the sandbox runtime. Some connected runtimes can do this more directly than running the staged Python loader.
-
-**Data flow**: It receives a handle and a skill payload. The implementation installs or resolves the skills and returns an `ExecResult` whose stdout describes loaded roots.
-
-**Call relations**: `Sandbox.load_skills` prefers this path when the active carrier implements `SkillLoading`; otherwise it falls back to staged skill loading.
-
-
-##### `SkillExecuting.exec_skill`  (lines 740–742)
-
-```
-async def exec_skill(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int) -> ExecResult
-```
-
-**Purpose**: Defines an optional privileged command path for running server-provided skill installation programs. This is separate from normal member commands.
-
-**Data flow**: It receives a handle, command arguments, and a timeout. The implementation runs the command with the authority needed to update the skill tree and returns an `ExecResult`.
-
-**Call relations**: `Sandbox._exec_skill` calls this for staged skill load and system-skill sync operations.
-
-
-##### `SystemSkillSeeding.seed_system_skills`  (lines 749–749)
-
-```
-def seed_system_skills(self, archive: bytes) -> None
-```
-
-**Purpose**: Defines an optional hook for carriers whose runtime filesystem is prepared in the current process. It lets the process seed baked system skills directly.
-
-**Data flow**: It receives skill archive bytes. The implementation stores or installs them in whatever runtime location that carrier controls.
-
-**Call relations**: Carrier setup code can use this protocol when it detects a backend capable of local system-skill seeding.
-
-
-##### `ufo_fs_file_op`  (lines 752–790)
-
-```
-async def ufo_fs_file_op(carrier: Carrier, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
-```
-
-**Purpose**: Implements the common carrier file-operation behavior for sandbox images that include the UFO file tool. It runs the file command inside the sandbox and parses its JSON answer.
-
-**Data flow**: It receives a carrier, handle, operation name, and parameters. It chooses a longer timeout for document reads, executes `ufo fs` or `sbxfs`, trims stdout, parses JSON, turns reported tool errors into `ValueError`, and returns the parsed object.
-
-**Call relations**: Concrete carriers can delegate their `file_op` implementation here instead of duplicating command construction, JSON parsing, and error handling.
-
-*Call graph*: calls 1 internal fn (exec); 3 external calls (dumps, loads, PurePosixPath).
-
-
-##### `host_argv`  (lines 798–810)
-
-```
-def host_argv(argv: tuple[str, ...], root: str) -> tuple[str, ...]
-```
-
-**Purpose**: Rewrites command arguments for carriers where `/workspace` is really a host directory. It carefully changes only real `/workspace` path segments, not similar text inside URLs or other names.
-
-**Data flow**: It receives an argument tuple and a host root path. It scans each argument and replaces standalone `/workspace` segments with the host root, returning a new tuple.
-
-**Call relations**: Host-path carriers use this before executing commands so tools can keep speaking in sandbox paths while the local backend runs against host files.
-
-
-##### `workspace_path`  (lines 813–821)
-
-```
-def workspace_path(path: str) -> str
+def normalize_page_timestamp(value: str) -> str
 ```
 
-**Purpose**: Normalizes a user- or tool-supplied path and proves it stays under `/workspace`. This is one of the main safety gates against path traversal.
+**Purpose**: This converts provider timestamps into one standard UTC format. It prevents different date styles, such as Unix milliseconds or ISO strings, from being stored inconsistently.
 
-**Data flow**: It receives a path that may be absolute or relative. It anchors relative paths under `/workspace`, resolves `.` and `..` pieces through `_resolve_parts`, rejects escapes, and returns the safe absolute workspace path.
+**Data flow**: It receives a timestamp string, parses it either as a number or an ISO date-time, checks that it has a real timezone unless it is a plain date, converts it to UTC, and returns a precise ISO-formatted string. Invalid or ambiguous values become clear errors.
 
-**Call relations**: File writes, file existence checks, scoped reads, `run_ufo_fs`, and `rooted_path` call this before handing paths to a carrier.
+**Call relations**: Page.normalize_timestamp calls this whenever a fetched page supplies created or updated times, so all page metadata is normalized before the sync driver stores it.
 
-*Call graph*: calls 1 internal fn (_resolve_parts); called by 5 (_read_scoped_file, file_exists, run_ufo_fs, write_file, rooted_path); 1 external calls (PurePosixPath).
+*Call graph*: called by 1 (normalize_timestamp); 2 external calls (fromisoformat, fromtimestamp).
 
 
-##### `runtime_relative`  (lines 824–834)
+##### `Page.digest`  (lines 138–139)
 
 ```
-def runtime_relative(path: str) -> PurePosixPath
+def digest(self) -> str
 ```
 
-**Purpose**: Checks that a runtime-internal relative path is safe and truly relative. Runtime files are private UFO files, so their names need containment too.
+**Purpose**: This creates a stable fingerprint of a page body. The sync driver uses it to tell whether the document text actually changed.
 
-**Data flow**: It receives a path string, asks the containment helper to resolve it under a fake `/runtime` root, rejects anything changed or escaping, and returns a `PurePosixPath` relative to that root.
+**Data flow**: It reads the page body text, encodes it as bytes, hashes it with SHA-256, and returns the hash with a `sha256:` prefix. It does not modify the page.
 
-**Call relations**: `_runtime_path` and `_runtime_display_path` call this before constructing real or display paths for runtime files.
+**Call relations**: SyncDriver._commit relies on this value when deciding whether to write a new blob and page row update, or skip content that is already current.
 
-*Call graph*: called by 2 (_runtime_display_path, _runtime_path); 2 external calls (PurePosixPath, contained_relative).
+*Call graph*: 1 external calls (sha256).
 
 
-##### `sandbox_runtime_root`  (lines 837–839)
+##### `Page.normalize_timestamp`  (lines 143–146)
 
 ```
-def sandbox_runtime_root(conversation_id: UUID) -> str
+def normalize_timestamp(cls, value: str | None) -> str | None
 ```
 
-**Purpose**: Builds the private runtime directory path for one conversation inside the sandbox. This keeps UFO’s internal files separate from the member workspace.
+**Purpose**: This validates and normalizes a page's created and updated timestamps as the Page model is built. It keeps messy provider date formats from leaking into stored page metadata.
 
-**Data flow**: It receives a conversation UUID and returns a path under `$UFO_HOME/runs/` using the UUID’s hex form.
+**Data flow**: It receives either a timestamp string or None. None stays None; a string is passed through normalize_page_timestamp and returned in normalized UTC form.
 
-**Call relations**: `_runtime_root` uses this as the default when a sandbox handle does not already carry a custom runtime root.
+**Call relations**: This is part of Page validation. Backends create Page objects, and this validator prepares their timestamps before the sync driver commits them.
 
-*Call graph*: called by 1 (_runtime_root).
+*Call graph*: calls 1 internal fn (normalize_page_timestamp).
 
 
-##### `shell_path`  (lines 842–847)
+##### `StreamSkipped.__init__`  (lines 196–199)
 
 ```
-def shell_path(path: str) -> str
+def __init__(self, reason: str, *, awaits_grant: bool=False) -> None
 ```
 
-**Purpose**: Quotes a sandbox path so it can be safely inserted into a shell command. It has special handling for paths beginning with `$UFO_HOME` so that variable can still expand inside the sandbox.
+**Purpose**: This creates a special exception for a source stream that should be skipped, not treated as broken. It records the human-readable reason and whether the problem waits for a credential or grant event.
 
-**Data flow**: It receives a path string. If it starts with `$UFO_HOME/`, it preserves that variable and quotes the remainder; otherwise it shell-quotes the whole path.
+**Data flow**: It receives a reason string and an optional awaits_grant flag, stores both on the exception, and passes the reason to the base RuntimeError. The caller gets an exception object carrying the skip details.
 
-**Call relations**: Other code can use this utility when building shell snippets that need to mention sandbox paths safely.
+**Call relations**: Many connector backends raise this when a provider refuses a stream for expected reasons, such as missing access. SyncDriver._sync_claimed catches it and routes the source through the skip-and-possibly-park path.
 
-*Call graph*: 1 external calls (quote).
+*Call graph*: called by 58 (_credential, paginate, paginate, paginate, _paginate_named, paginate, paginate, _org_stream, paginate, paginate (+15 more)).
 
 
-##### `_runtime_root`  (lines 850–851)
+##### `validation_fault`  (lines 202–208)
 
 ```
-def _runtime_root(handle: SandboxHandle) -> str
+def validation_fault(error: ValidationError) -> str
 ```
 
-**Purpose**: Finds the actual runtime root for a sandbox handle. It uses an explicit handle value if present, otherwise derives the standard per-conversation path.
+**Purpose**: This turns a Pydantic validation error into a safe, compact explanation. It names which fields failed and why, without copying rejected provider data into logs.
 
-**Data flow**: It receives a `SandboxHandle`. It returns `handle.runtime_root` when set, or calls `sandbox_runtime_root` with the handle’s conversation ID.
+**Data flow**: It reads the validation error's structured errors, formats each location and error type, joins them with semicolons, and returns the resulting text. It does not include raw values.
 
-**Call relations**: Runtime path construction, skill staging, scoped reads, writes, and file operations all use this so they agree on one private runtime location.
+**Call relations**: SyncDriver._report_failed uses this when bad fetched data fails model validation, so failure logs are useful but do not leak sensitive payloads.
 
-*Call graph*: calls 1 internal fn (sandbox_runtime_root); called by 7 (_read_scoped_file, _run_staged_skill_load, _sync_system_skills, run_ufo_fs, write_runtime_path, _runtime_display_path, _runtime_path).
+*Call graph*: called by 1 (_report_failed); 1 external calls (errors).
 
 
-##### `_runtime_path`  (lines 854–855)
+##### `response_fault`  (lines 211–237)
 
 ```
-def _runtime_path(handle: SandboxHandle, relative: str) -> str
+def response_fault(response: httpx.Response) -> str
 ```
-
-**Purpose**: Turns a safe runtime-relative name into the real absolute path inside the sandbox. This is used for UFO-owned files rather than user workspace files.
-
-**Data flow**: It receives a handle and relative path. It gets the runtime root, validates the relative path with `runtime_relative`, joins them as POSIX paths, and returns the string.
-
-**Call relations**: Runtime-file methods, skill staging, skill sync, tool-output directory creation, and runtime existence checks use this before carrier reads or writes.
-
-*Call graph*: calls 2 internal fn (_runtime_root, runtime_relative); called by 8 (_read_runtime_file, _run_staged_skill_load, _sync_system_skills, ensure_tool_output_dir, runtime_file_exists, runtime_path, write_runtime_file, write_runtime_path); 1 external calls (PurePosixPath).
-
-
-##### `_runtime_display_path`  (lines 858–862)
-
-```
-def _runtime_display_path(handle: SandboxHandle, relative: str) -> str
-```
-
-**Purpose**: Builds a user-facing name for a runtime file using `$UFO_HOME` instead of the full absolute sandbox path. This gives agents a stable-looking path they can reuse.
-
-**Data flow**: It receives a handle and a relative runtime path. It finds the run directory name, validates the relative path, and returns a path like `$UFO_HOME/runs/<id>/...`.
-
-**Call relations**: `Sandbox.runtime_display_path` calls this when outside code wants to show or hand back a readable runtime path.
-
-*Call graph*: calls 2 internal fn (_runtime_root, runtime_relative); called by 1 (runtime_display_path); 1 external calls (PurePosixPath).
-
-
-##### `rooted_path`  (lines 865–868)
-
-```
-def rooted_path(path: str, root: str) -> str
-```
-
-**Purpose**: Normalizes a path under a chosen root while still applying the workspace-style escape checks. It preserves the spelling of the root the caller supplied.
-
-**Data flow**: It receives a path and a root string. It maps the suffix onto `/workspace`, validates it with `workspace_path`, then maps the normalized suffix back under the original root.
-
-**Call relations**: `Sandbox.run_ufo_fs` and `_read_scoped_file` use this for allowed read-only roots such as the runtime directory or skill tree.
-
-*Call graph*: calls 1 internal fn (workspace_path); called by 2 (_read_scoped_file, run_ufo_fs).
-
-
-##### `_resolve_parts`  (lines 871–880)
-
-```
-def _resolve_parts(parts: tuple[str, ...]) -> list[str]
-```
-
-**Purpose**: Simplifies path pieces and rejects attempts to climb above the root. It is the small path-stack routine behind workspace containment.
-
-**Data flow**: It receives path parts, skips empty and `.` pieces, pops one segment for `..`, and raises an error if `..` would escape above the starting root. It returns the cleaned list of path segments.
-
-**Call relations**: `workspace_path` calls this before deciding whether the final path still sits under `/workspace`.
 
-*Call graph*: called by 1 (workspace_path).
+**Purpose**: This extracts a safe provider error message from an HTTP response body, especially GraphQL-style `errors` arrays. It avoids logging the whole response, which may contain secrets.
 
+**Data flow**: It tries to parse the response as JSON, looks for an `errors` list, pulls each error message and optional code, and returns a joined explanation. If the body is unreadable or not in that shape, it returns an empty string.
 
-##### `Sandbox.conversation_id`  (lines 892–896)
+**Call relations**: SyncDriver._report_failed calls this for HTTP status failures so logs can say what the provider refused without storing the provider's full response.
 
-```
-def conversation_id(self) -> UUID
-```
-
-**Purpose**: Declares that every sandbox object can report which conversation it belongs to. This can be known even before a late sandbox has actually been created.
+*Call graph*: called by 1 (_report_failed); 1 external calls (json).
 
-**Data flow**: As a base property, it takes no extra input and raises `NotImplementedError`; subclasses return the stored conversation UUID.
 
-**Call relations**: `SandboxSession`, `_LateSandbox`, and `_AuthorizedSandbox` provide the real value so callers can identify the workspace consistently.
+##### `StreamFault.__init__`  (lines 247–249)
 
-
-##### `Sandbox.created`  (lines 899–901)
-
 ```
-def created(self) -> bool
+def __init__(self, reason: str) -> None
 ```
-
-**Purpose**: Declares that sandbox objects can say whether a real sandbox session already exists. This helps callers avoid accidentally creating one just to ask.
-
-**Data flow**: As a base property, it has no output except raising `NotImplementedError`; subclasses return true or false from their own state.
 
-**Call relations**: `SandboxSession` always reports true, while `_LateSandbox` and `_AuthorizedSandbox` report whether the late session has been opened.
+**Purpose**: This creates a provider-stream failure with a backend-authored reason. It is used when a backend can describe a bad provider response safely and specifically.
 
+**Data flow**: It receives a reason string, stores it on the exception, and passes it to RuntimeError. The result is an exception that carries a safe failure explanation.
 
-##### `Sandbox.authorize`  (lines 903–911)
+**Call relations**: Several extension backends raise this when provider data has an unreadable shape. SyncDriver._report_failed recognizes it and logs its reason as the provider fault.
 
-```
-def authorize(self, run_token: str, cleared_env: frozenset[str], env: Mapping[str, str]) -> 'Sandbox'
-```
-
-**Purpose**: Declares how to view the same sandbox with a different run token and environment. This is how the same container can act with the right member’s network authority.
-
-**Data flow**: It receives a run token, names of environment variables to clear, and new environment values. The base method raises `NotImplementedError`; subclasses return an authorized sandbox wrapper or session.
+*Call graph*: called by 8 (_read, _markdown_entries, _spool_tarball, _refuse_client_error, decoded, _account_base, _sheet_value_records, _ensure_tenant).
 
-**Call relations**: `SandboxSession.authorize`, `_LateSandbox.authorize`, and `_AuthorizedSandbox.authorize` implement this behavior for already-open and not-yet-open sandboxes.
 
+##### `SourceBackend.config_model`  (lines 289–289)
 
-##### `Sandbox._bound`  (lines 913–914)
-
 ```
-async def _bound(self) -> 'SandboxSession'
+def config_model(self) -> type[ConfigT]
 ```
-
-**Purpose**: Declares the internal step that turns any sandbox wrapper into a concrete `SandboxSession`. Most public methods use this so they do not care whether creation is early or late.
 
-**Data flow**: It receives no extra input and, in the base class, raises `NotImplementedError`. Implementations return a live session with a carrier and handle.
+**Purpose**: This protocol property says every source backend must declare the typed configuration model it expects. That lets core validate each source row before calling the backend.
 
-**Call relations**: Almost every operation on `Sandbox` calls `_bound` before it delegates to carrier reads, writes, execs, or dials.
+**Data flow**: A backend supplies a model class; the sync driver reads that class and validates stored JSON config against it. The protocol itself does not run code.
 
-*Call graph*: called by 19 (_read_file, _read_runtime_file, _read_scoped_file, bash, bash_task, dial, ensure_tool_output_dir, file_exists, load_skills, python (+9 more)).
+**Call relations**: SyncDriver._fetch depends on this contract before it invokes SourceBackend.fetch. FolderSource and connector backends fulfill the contract with their own config models.
 
 
-##### `Sandbox.runtime_path`  (lines 916–918)
+##### `SourceBackend.fetch`  (lines 291–291)
 
 ```
-async def runtime_path(self, relative: str) -> str
+async def fetch(self, config: ConfigT, cursor: str | None, auth: SourceAuth) -> SyncResult
 ```
 
-**Purpose**: Returns the real internal path for one UFO runtime file. Callers use it when they need the absolute sandbox location, not a workspace path.
+**Purpose**: This protocol method defines the main job of a source backend: fetch pages from its source and return what changed or what exists now. It is the seam between core syncing and provider-specific code.
 
-**Data flow**: It receives a relative runtime name, binds the sandbox to get its handle, builds a contained runtime path, and returns the absolute string.
+**Data flow**: It receives typed config, the previous cursor or None, and source auth context. A backend returns a SyncResult containing pages, a next cursor, delete references, and whether the result is a full snapshot.
 
-**Call relations**: It uses `_bound` and `_runtime_path`, sharing the same validation as runtime reads, writes, and skill staging.
+**Call relations**: SyncDriver._fetch calls this after preparing config and credentials. Implementations such as FolderSource.fetch or connector fetchers do the real provider reading.
 
-*Call graph*: calls 2 internal fn (_bound, _runtime_path).
 
+##### `FolderSource.fetch`  (lines 305–316)
 
-##### `Sandbox.runtime_display_path`  (lines 920–922)
-
 ```
-async def runtime_display_path(self, relative: str) -> str
+async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult
 ```
 
-**Purpose**: Returns a readable `$UFO_HOME`-based path for a runtime file. This is useful when the path may be shown to or reused by an agent.
+**Purpose**: This fetches every file from a local folder and turns each file into a page. It gives the system a built-in source backend that does not need an external connector.
 
-**Data flow**: It receives a relative runtime name, binds the sandbox, converts the relative name into a display path, and returns that string.
+**Data flow**: It receives folder config, ignores the cursor and auth, reads files on a worker thread, builds Page objects whose references are relative file paths, and returns a full-snapshot SyncResult. The caller receives all current files as pages.
 
-**Call relations**: It delegates to `_runtime_display_path`, so display paths line up with the same runtime root used by actual file operations.
+**Call relations**: SyncDriver._fetch can call this through the SourceBackend interface when a source row uses the folder backend. It delegates the disk scan to FolderSource._read.
 
-*Call graph*: calls 2 internal fn (_bound, _runtime_display_path).
+*Call graph*: 4 external calls (__init__, __init__, to_thread, Path).
 
 
-##### `Sandbox.write_runtime_file`  (lines 924–927)
+##### `FolderSource._read`  (lines 319–326)
 
 ```
-async def write_runtime_file(self, relative: str, content: bytes) -> None
+def _read(root: Path) -> tuple[tuple[str, str], ...]
 ```
 
-**Purpose**: Writes bytes to a UFO-owned runtime file outside the user workspace. This is for internal files such as staged skill payloads or tool outputs.
+**Purpose**: This performs the actual local folder scan for FolderSource. It reads all files below the root in a stable order.
 
-**Data flow**: It receives a runtime-relative name and bytes. It binds the sandbox, turns the relative name into a safe runtime path, and asks the carrier to write the bytes there.
+**Data flow**: It receives a root path, checks that it is a directory, walks all files below it, reads each as UTF-8 text, and returns pairs of relative path and text. If the folder is missing, it raises an error rather than pretending all files were deleted.
 
-**Call relations**: It uses `_bound`, `_runtime_path`, and the carrier’s `write` method, avoiding workspace path handling because the target is in the private runtime area.
+**Call relations**: FolderSource.fetch calls this inside a thread so blocking disk reads do not stall the async event loop.
 
-*Call graph*: calls 2 internal fn (_bound, _runtime_path).
+*Call graph*: 2 external calls (is_dir, rglob).
 
 
-##### `Sandbox.write_runtime_path`  (lines 929–937)
+##### `source_row_id`  (lines 329–349)
 
 ```
-async def write_runtime_path(self, path: str, content: bytes) -> None
+def source_row_id(workspace_id: UUID, backend: str, config: Mapping[str, object], *, connection_id: UUID | None=None, non_identity_keys: frozenset[str]=frozenset()) -> UUID
 ```
 
-**Purpose**: Writes bytes to an already-resolved path, but only if that path is inside this sandbox’s runtime root. This prevents callers from using absolute paths to escape.
+**Purpose**: This creates a repeatable database id for a source row. The same workspace, backend, and identity-defining config produce the same id, so restarts do not create duplicate sources.
 
-**Data flow**: It receives an absolute path and bytes. It binds the sandbox, checks that the path is under the runtime root and not the root itself, converts it back to a relative name, and writes through the carrier.
+**Data flow**: It receives workspace id, backend name, config, optional connection id, and config keys that should not affect identity. It removes non-identity config keys, serializes the rest in sorted order, and returns a UUID derived from that text.
 
-**Call relations**: It combines `_bound`, `_runtime_root`, `_runtime_path`, and POSIX path checks to safely support callers that already have a runtime path.
+**Call relations**: register_sources uses this when inserting configured sources at startup. Connector registration code can use the same idea so one dataset maps to one row.
 
-*Call graph*: calls 3 internal fn (_bound, _runtime_path, _runtime_root); 1 external calls (PurePosixPath).
+*Call graph*: called by 1 (register_sources); 2 external calls (dumps, uuid5).
 
 
-##### `Sandbox.runtime_file_exists`  (lines 939–946)
+##### `page_id_for`  (lines 352–355)
 
 ```
-async def runtime_file_exists(self, relative: str) -> bool
+def page_id_for(source_id: UUID, source_ref: str) -> UUID
 ```
 
-**Purpose**: Checks whether a specific runtime-owned file exists and is a regular file. It is a small safe existence test for UFO’s private runtime area.
+**Purpose**: This creates a repeatable id for one page inside one source. It lets updates, refetches, and deletes all point at the same page row.
 
-**Data flow**: It receives a runtime-relative name, binds the sandbox, builds the runtime path, runs `test -f` inside the sandbox with a short timeout, and returns true when the exit code is zero.
+**Data flow**: It receives a source id and source reference string, combines them into a stable name, and returns a UUID derived from that name. It changes no stored data.
 
-**Call relations**: It uses carrier `exec` after `_runtime_path`; callers do not need to run their own shell checks.
+**Call relations**: SyncDriver._commit uses this as the fallback page identity when a backend has no separate provider identity for the document.
 
-*Call graph*: calls 2 internal fn (_bound, _runtime_path).
+*Call graph*: called by 1 (_commit); 1 external calls (uuid5).
 
 
-##### `Sandbox.read_runtime_file`  (lines 948–950)
+##### `source_body_ref_matches`  (lines 358–368)
 
 ```
-def read_runtime_file(self, relative: str) -> AsyncIterator[bytes]
+def source_body_ref_matches(body_ref: str, source_id: UUID, page_id: UUID, digest: str) -> bool
 ```
-
-**Purpose**: Starts streaming a UFO-owned runtime file. It returns an asynchronous stream so large files do not need to be loaded all at once.
 
-**Data flow**: It receives a runtime-relative name and returns the async iterator produced by `_read_runtime_file`.
+**Purpose**: This checks whether a blob-storage reference looks like it belongs to a particular source page and digest. It is a guard for recognizing body objects written by the source sync process.
 
-**Call relations**: This is the public wrapper; `_read_runtime_file` performs the binding, path construction, and carrier read.
+**Data flow**: It receives a body reference, source id, page id, and digest. It checks the expected prefix, claim-shaped middle piece, and digest suffix, then returns true or false.
 
-*Call graph*: calls 1 internal fn (_read_runtime_file).
+**Call relations**: This helper is available to code that needs to validate source blob references. It follows the same naming pattern SyncDriver._commit uses when writing page bodies.
 
 
-##### `Sandbox._read_runtime_file`  (lines 952–955)
+##### `register_sources`  (lines 371–436)
 
 ```
-async def _read_runtime_file(self, relative: str) -> AsyncIterator[bytes]
+async def register_sources(configured: tuple[SourceEntry, ...]) -> None
 ```
 
-**Purpose**: Streams a private runtime file from the sandbox in chunks. It applies runtime path validation before reading.
+**Purpose**: This ensures configured source entries exist in the database when the system starts. It makes declarative config turn into live source rows ready for the sync driver.
 
-**Data flow**: It receives a runtime-relative name, binds the sandbox, converts the name into an absolute runtime path, reads chunks through the carrier, and yields each chunk onward.
+**Data flow**: It receives configured source entries, opens a workspace transaction, finds the workspace and main agent, computes each source id, skips removed rows, inserts missing source rows, and grants the main agent access. It returns nothing but changes the database.
 
-**Call relations**: `Sandbox.read_runtime_file` calls this to do the actual streaming work.
+**Call relations**: This runs at boot, outside the normal sync polling loop. It uses source_row_id so the same configured source is registered idempotently.
 
-*Call graph*: calls 2 internal fn (_bound, _runtime_path); called by 1 (read_runtime_file).
+*Call graph*: calls 1 internal fn (source_row_id); 4 external calls (now, insert, select, workspace_tx).
 
 
-##### `Sandbox.bash`  (lines 957–963)
+##### `_rescheduled`  (lines 454–465)
 
 ```
-async def bash(self, command: str, timeout_s: int | None=None) -> ExecResult
+def _rescheduled(claimed: ClaimedSource, when: datetime | sa.Case[datetime]) -> sa.Case[datetime]
 ```
 
-**Purpose**: Runs a Bash command inside the sandbox through UFO’s command supervisor. This is the simple entry point for shell work in the conversation workspace.
+**Purpose**: This decides what `next_sync_at` should become when a claimed source finishes. It protects a manual resync request that arrived while the current sync was still running.
 
-**Data flow**: It receives a command string and optional timeout. It binds the sandbox, runs `ufo run -- bash -lc <command>` through the carrier, and returns the command result.
+**Data flow**: It receives a claimed source and a proposed future time. It builds a database expression: use the proposed time only if the row was not rescheduled after the claim began; otherwise keep the newer existing due time.
 
-**Call relations**: Browser sandbox extension code calls this when bringing up or diagnosing services; internally it relies on `_bound` and carrier `exec`.
+**Call relations**: SyncDriver._write, SyncDriver._release, and SyncDriver._skip all use this when freeing a claim, so successful, failed, and skipped runs do not accidentally bury a newer resync request.
 
-*Call graph*: calls 1 internal fn (_bound); called by 2 (lease, _bring_up_failure).
+*Call graph*: called by 3 (_release, _skip, _write); 1 external calls (case).
 
 
-##### `Sandbox.bash_task`  (lines 965–975)
+##### `_stream_tags`  (lines 468–473)
 
 ```
-async def bash_task(self, command: str, base: str, *, detach: bool, timeout_s: int | None=None) -> ExecResult
+def _stream_tags(source: ClaimedSource) -> dict[str, str]
 ```
 
-**Purpose**: Runs or reattaches to a journaled Bash task through the sandbox supervisor. Detached tasks can continue or be revisited by task name.
+**Purpose**: This builds low-cardinality telemetry tags that identify the provider and stream. These tags help metrics group failures and successes without exploding into one series per source row.
 
-**Data flow**: It receives a command, task base name, detach flag, and optional timeout. It binds the sandbox, builds the `ufo run --task ...` command, and returns the exec result.
+**Data flow**: It receives a claimed source, reads its backend and `stream` config value if present, and returns a small dictionary of tag strings.
 
-**Call relations**: Higher-level task-running code can use this when shell work needs UFO’s task journal rather than a one-off command.
+**Call relations**: The sync driver uses this across success, failure, skip, claim-lost, and parked reporting. _check_tags builds on it when service checks need the specific source id too.
 
-*Call graph*: calls 1 internal fn (_bound).
+*Call graph*: calls 1 internal fn (_config_value); called by 6 (_report_failed, _report_ok, _report_parked, _run_with_lease, _sync_claimed, _check_tags).
 
 
-##### `Sandbox.sh`  (lines 977–986)
+##### `_check_tags`  (lines 476–484)
 
 ```
-async def sh(self, script: str, *args: str, timeout_s: int | None=None) -> ExecResult
+def _check_tags(source: ClaimedSource) -> dict[str, str]
 ```
 
-**Purpose**: Runs a POSIX shell script with arguments passed as separate command-line values. This avoids unsafe string interpolation and lets host-path carriers rewrite workspace arguments.
+**Purpose**: This builds service-check tags that identify one exact source row. Service checks need this precision so one healthy source does not hide another failing source with the same provider stream.
 
-**Data flow**: It receives a script, positional arguments, and optional timeout. It binds the sandbox, runs `sh -c` with the script and arguments through the carrier, and returns an `ExecResult`.
+**Data flow**: It receives a claimed source, starts with _stream_tags, adds the source id, and returns the combined tag dictionary.
 
-**Call relations**: Other sandbox operations can use this for portable shell snippets while still going through `_bound` and carrier execution.
+**Call relations**: SyncDriver._report_ok and SyncDriver._report_failed use this when sending health status for a source row.
 
-*Call graph*: calls 1 internal fn (_bound).
+*Call graph*: calls 1 internal fn (_stream_tags); called by 2 (_report_failed, _report_ok).
 
 
-##### `Sandbox.python`  (lines 988–1003)
+##### `_config_value`  (lines 487–489)
 
 ```
-async def python(self, program: str, *args: str, timeout_s: int | None=None) -> ExecResult
+def _config_value(source: ClaimedSource, key: str) -> str
 ```
 
-**Purpose**: Runs a Python program inside the sandbox with UFO’s containment guard injected. This lets small helper programs safely check paths using the exact guard shipped by the host process.
+**Purpose**: This safely pulls a string value from a claimed source's config. It avoids putting non-string config values directly into telemetry tags.
 
-**Data flow**: It receives Python source, arguments, and optional timeout. It binds the sandbox, prepends the containment bootstrap, runs isolated `python3 -I -c ...`, and returns the exec result.
+**Data flow**: It receives a claimed source and config key, reads the value, and returns it only if it is a string; otherwise it returns an empty string.
 
-**Call relations**: Copying and skill-related helpers rely on this style of safe in-sandbox Python; the method delegates final execution to the carrier.
+**Call relations**: _stream_tags uses this for the stream tag, and reporting functions use it for account-related logging.
 
-*Call graph*: calls 1 internal fn (_bound).
+*Call graph*: called by 3 (_report_failed, _report_ok, _stream_tags).
 
 
-##### `Sandbox.stop_commands`  (lines 1005–1011)
+##### `_readers_remain`  (lines 513–539)
 
 ```
-async def stop_commands(self) -> None
+def _readers_remain() -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: Stops commands launched for this sandbox turn when the carrier supports stopping. It avoids killing sibling turns sharing the same container.
+**Purpose**: This builds a database condition that says a source still has at least one live reader, or has no explicit grants. It prevents syncing feeds that no active agent can use.
 
-**Data flow**: It binds the sandbox. If the carrier implements `CommandStopping`, it calls `stop_commands` with the current handle; otherwise it does nothing.
+**Data flow**: It constructs SQL that checks source grants and agent archive status. The output is a SQL condition, not a true-or-false value yet; the database evaluates it inside later queries.
 
-**Call relations**: Cancellation handling calls this after it knows a member deliberately stopped work, not for every internal cancellation.
+**Call relations**: SyncDriver.candidate_workspaces and SyncDriver._claim_due include this condition so archived-only sources are not selected for work.
 
-*Call graph*: calls 1 internal fn (_bound).
+*Call graph*: called by 2 (_claim_due, candidate_workspaces); 5 external calls (and_, exists, literal, or_, select).
 
 
-##### `Sandbox.write_file`  (lines 1013–1015)
+##### `SyncDriver.candidate_workspaces`  (lines 562–583)
 
 ```
-async def write_file(self, path: str, content: bytes) -> None
+async def candidate_workspaces(self) -> tuple[UUID, ...]
 ```
 
-**Purpose**: Writes bytes into the conversation workspace at a safe path. It is the main public workspace copy-in method.
+**Purpose**: This finds workspaces that currently have at least one source due for syncing. It lets the scheduler avoid opening per-workspace work when nothing is ready.
 
-**Data flow**: It receives a path and bytes. It binds the sandbox, normalizes and confines the path with `workspace_path`, and asks the carrier to write the content.
+**Data flow**: It reads the current time, queries the owner-level database view for due, unremoved, unclaimed-or-expired sources with remaining readers, and returns distinct workspace ids.
 
-**Call relations**: File-upload or tool-output flows use this instead of calling carrier `write` directly, because it enforces workspace containment first.
+**Call relations**: A higher-level dispatcher can call this before binding work to a workspace. It uses _readers_remain to skip sources that no active agent can read.
 
-*Call graph*: calls 2 internal fn (_bound, workspace_path).
+*Call graph*: calls 1 internal fn (_readers_remain); 4 external calls (now, or_, select, owner_tx).
 
 
-##### `Sandbox.load_skills`  (lines 1017–1059)
+##### `SyncDriver.run`  (lines 585–596)
 
 ```
-async def load_skills(self, payload: Mapping[str, object]) -> dict[str, str]
+async def run(self) -> None
 ```
 
-**Purpose**: Loads system and user skills into the sandbox’s skill directory and returns their installed roots. It supports both carrier-native loading and a portable staged loader.
+**Purpose**: This is one sync-driver pass for the currently bound workspace. It claims due sources, starts lease-renewal tasks, and syncs each claimed source.
 
-**Data flow**: It receives a skill payload. It binds the sandbox, uses native carrier loading if available or stages and executes the loader, validates the JSON response, refreshes system skills if needed, and returns a name-to-root mapping.
+**Data flow**: It creates a claim token, claims due source rows, starts a background renewal task for each, runs each source under its lease, then cancels and gathers renewal tasks during cleanup. Its main effects are database and blob-store writes done by deeper methods.
 
-**Call relations**: `core/src/ufo/runtime/skills/runtime.install_skill` and `core/src/ufo/runtime/skills/runtime.load_skills` call this when preparing skills for execution.
+**Call relations**: This is the top-level method used by the scheduled sync job. It hands each source to _run_with_lease and relies on _claim_due and _renew_claim to keep ownership safe.
 
-*Call graph*: calls 3 internal fn (_bound, _run_staged_skill_load, _sync_system_skills); called by 2 (install_skill, load_skills); 1 external calls (loads).
+*Call graph*: calls 3 internal fn (_claim_due, _renew_claim, _run_with_lease); 3 external calls (create_task, gather, uuid4).
 
 
-##### `Sandbox._run_staged_skill_load`  (lines 1061–1083)
+##### `SyncDriver._run_with_lease`  (lines 598–618)
 
 ```
-async def _run_staged_skill_load(self, bound: 'SandboxSession', payload: Mapping[str, object]) -> ExecResult
+async def _run_with_lease(self, source: ClaimedSource, renewal: asyncio.Task[None]) -> None
 ```
 
-**Purpose**: Implements the portable fallback for loading skills by writing a JSON payload into the runtime area and running the bundled loader program inside the sandbox.
+**Purpose**: This runs one claimed source while watching that the claim renewal stays alive. It stops the sync if the worker loses the right to own the source.
 
-**Data flow**: It receives a bound session and payload. It serializes the payload, writes it to a random staging path, computes its hash, and executes the skill loader with the path, roots, runtime root, and expected hash.
+**Data flow**: It starts the actual sync and waits for either the sync or the renewal task to finish first. If renewal fails, it raises that problem; if the claim is lost, it logs that fact; in all cases it cancels unfinished tasks.
 
-**Call relations**: `Sandbox.load_skills` calls this when the carrier lacks native skill loading, and again after system-skill refresh if needed.
+**Call relations**: SyncDriver.run calls this for each claimed source. It wraps _sync_claimed with the lease-renewal safety net provided by _renew_claim.
 
-*Call graph*: calls 3 internal fn (_exec_skill, _runtime_path, _runtime_root); called by 1 (load_skills); 3 external calls (sha256, dumps, uuid4).
+*Call graph*: calls 2 internal fn (_sync_claimed, _stream_tags); called by 1 (run); 4 external calls (create_task, gather, wait, log).
 
 
-##### `Sandbox._sync_system_skills`  (lines 1085–1102)
+##### `SyncDriver._sync_claimed`  (lines 620–639)
 
 ```
-async def _sync_system_skills(self, bound: 'SandboxSession') -> None
+async def _sync_claimed(self, source: ClaimedSource) -> None
 ```
 
-**Purpose**: Copies the current system-skill archive into the sandbox and installs it safely. This refreshes baked or cached system skills when the loader cannot find the expected ones.
+**Purpose**: This is the decision point for one claimed source: fetch, commit, skip, or fail. It turns backend outcomes into the right database updates and telemetry.
 
-**Data flow**: It receives a bound session. It writes the system-skill zip archive to a random runtime staging path, runs the bundled sync program with an expected hash, and raises an error if the command fails.
+**Data flow**: It receives a claimed source, fetches a SyncResult, and commits it on success. If the backend says the stream was skipped, it records a skip path; for other errors it computes backoff, reports failure, and releases the claim.
 
-**Call relations**: `Sandbox.load_skills` calls this when missing system skill roots suggest the sandbox needs a refresh.
+**Call relations**: _run_with_lease calls this after a source has been claimed. It delegates normal work to _fetch and _commit, skip handling to _skip, and failure handling to _report_failed and _release.
 
-*Call graph*: calls 3 internal fn (_exec_skill, _runtime_path, _runtime_root); called by 1 (load_skills); 2 external calls (sha256, uuid4).
+*Call graph*: calls 7 internal fn (_commit, _error_backoff, _fetch, _release, _report_failed, _skip, _stream_tags); called by 1 (_run_with_lease); 3 external calls (suppress, now, log).
 
 
-##### `Sandbox._exec_skill`  (lines 1104–1109)
+##### `SyncDriver._renew_claim`  (lines 641–644)
 
 ```
-async def _exec_skill(self, bound: 'SandboxSession', argv: tuple[str, ...]) -> ExecResult
+async def _renew_claim(self, source: ClaimedSource) -> None
 ```
 
-**Purpose**: Runs a privileged skill-management command through carriers that explicitly support it. It keeps skill installation separate from ordinary sandbox commands.
+**Purpose**: This keeps a source claim alive during a long fetch or commit. It is like periodically saying, “I am still working on this; do not give it to another worker.”
 
-**Data flow**: It receives a bound session and command arguments. It verifies the carrier implements `SkillExecuting`, then calls `exec_skill` with the default timeout and returns the result.
+**Data flow**: It loops forever, sleeps for the refresh interval, then calls _refresh_claim. It ends only if cancelled or if refreshing fails.
 
-**Call relations**: `Sandbox._run_staged_skill_load` and `Sandbox._sync_system_skills` use this to execute their Python loader programs.
+**Call relations**: SyncDriver.run starts this as a background task for each claimed source. _run_with_lease watches it alongside the actual sync.
 
-*Call graph*: called by 2 (_run_staged_skill_load, _sync_system_skills).
+*Call graph*: calls 1 internal fn (_refresh_claim); called by 1 (run); 1 external calls (sleep).
 
 
-##### `Sandbox.ensure_tool_output_dir`  (lines 1111–1135)
+##### `SyncDriver._refresh_claim`  (lines 646–662)
 
 ```
-async def ensure_tool_output_dir(self) -> bool
+async def _refresh_claim(self, source: ClaimedSource) -> None
 ```
 
-**Purpose**: Makes sure UFO’s private tool-output directory exists in the runtime area. If a file or broken link is squatting on that fixed internal name, it removes it and recreates the directory.
+**Purpose**: This extends the database lease for a claimed source. If the row no longer belongs to this claim, it raises a special claim-lost error.
 
-**Data flow**: It binds the sandbox, builds the runtime path for the tool-output directory, runs a shell script that checks, removes squatters, and creates the directory, then returns whether cleanup happened.
+**Data flow**: It reads the current time, updates the source row's claim expiration if the claim token still matches and the row is not removed, and checks that exactly one row changed. If not, it signals that the claim was lost.
 
-**Call relations**: Tool offload code can call this before writing private outputs so one bad filesystem entry does not break later offloads.
+**Call relations**: _renew_claim calls this repeatedly, and _commit calls it once before doing heavier writes. _run_with_lease treats _SourceClaimLost as a normal race outcome to log.
 
-*Call graph*: calls 2 internal fn (_bound, _runtime_path).
+*Call graph*: called by 2 (_commit, _renew_claim); 5 external calls (__init__, now, timedelta, update, workspace_tx).
 
 
-##### `Sandbox.file_exists`  (lines 1137–1143)
+##### `SyncDriver._claim_due`  (lines 664–715)
 
 ```
-async def file_exists(self, path: str) -> bool
+async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]
 ```
 
-**Purpose**: Checks whether a workspace path exists as a regular file. It applies workspace containment before running the check.
+**Purpose**: This claims a batch of due sources for the current worker. Claiming prevents two workers from syncing the same source at once.
 
-**Data flow**: It receives a path, normalizes it with `workspace_path`, binds the sandbox, runs `test -f` inside the sandbox, and returns true when the exit code is zero.
+**Data flow**: It queries due, readable, unremoved sources whose claim is empty or expired, optionally locks rows in PostgreSQL, writes the new claim token and expiration, and returns ClaimedSource objects describing the rows.
 
-**Call relations**: Callers use this lightweight check instead of opening or reading a file just to learn whether it exists.
+**Call relations**: SyncDriver.run calls this at the start of a pass. The returned ClaimedSource values drive every later step, from fetching to telemetry.
 
-*Call graph*: calls 2 internal fn (_bound, workspace_path).
+*Call graph*: calls 1 internal fn (_readers_remain); called by 1 (run); 7 external calls (__init__, now, timedelta, or_, select, update, workspace_tx).
 
 
-##### `Sandbox.run_ufo_fs`  (lines 1145–1186)
+##### `SyncDriver._fetch`  (lines 717–736)
 
 ```
-async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]
+async def _fetch(self, source: ClaimedSource) -> SyncResult
 ```
 
-**Purpose**: Runs a structured file operation inside the sandbox after deciding which safe root the path belongs to. Workspace paths can be edited, while runtime and skill-tree paths are only allowed for read-like operations.
+**Purpose**: This prepares and calls the correct backend for one source. It is where stored source config becomes typed config and where credential context is attached.
 
-**Data flow**: It receives an operation name and argument object. It copies the arguments, normalizes any path to `/workspace`, the current runtime root, or the skills root, rejects disallowed escapes or writes outside workspace, sets the workspace root parameter, and calls carrier `file_op`.
+**Data flow**: It receives a claimed source, looks up its backend, validates the source config with that backend's model, resolves optional identity and credential helpers, builds SourceAuth, and awaits the backend's fetch result.
 
-**Call relations**: File tools use this as their main bridge to in-sandbox `ufo fs` behavior, relying on it for path policy before the carrier runs the operation.
+**Call relations**: SyncDriver._sync_claimed calls this before committing. It is the bridge from generic core scheduling into backend-specific provider reading.
 
-*Call graph*: calls 4 internal fn (_bound, _runtime_root, rooted_path, workspace_path); 1 external calls (PurePosixPath).
+*Call graph*: called by 1 (_sync_claimed); 1 external calls (__init__).
 
 
-##### `Sandbox.read_file`  (lines 1188–1190)
+##### `SyncDriver._commit`  (lines 738–840)
 
 ```
-def read_file(self, path: str) -> AsyncIterator[bytes]
+async def _commit(self, source: ClaimedSource, result: SyncResult) -> None
 ```
 
-**Purpose**: Streams a workspace file, or an allowed current-runtime file, in bounded chunks. It is the public read method for scoped sandbox files.
+**Purpose**: This turns fetched pages into blob writes and database changes. It decides which pages are new, changed, metadata-only updates, or deleted.
 
-**Data flow**: It receives a path and returns the async iterator created by `_read_scoped_file`.
+**Data flow**: It refreshes the claim, loads prior pages, assigns stable page ids, writes changed bodies to blob storage, prepares changed and metadata records, computes deletes, and calls _write. If a later database write fails, it deletes newly written blobs to avoid orphaned data when possible.
 
-**Call relations**: Callers use this wrapper; `_read_scoped_file` performs binding, root selection, containment checks, and carrier streaming.
+**Call relations**: SyncDriver._sync_claimed calls this after a successful fetch. It relies on _prior_pages, page_id_for, and _write, then reports success through _report_ok.
 
-*Call graph*: calls 1 internal fn (_read_scoped_file).
+*Call graph*: calls 5 internal fn (_prior_pages, _refresh_claim, _report_ok, _write, page_id_for); called by 1 (_sync_claimed); 4 external calls (__init__, __init__, gather, uuid5).
 
 
-##### `Sandbox._read_scoped_file`  (lines 1192–1205)
+##### `SyncDriver._prior_pages`  (lines 842–886)
 
 ```
-async def _read_scoped_file(self, path: str) -> AsyncIterator[bytes]
+async def _prior_pages(self, source_id: UUID) -> tuple[dict[UUID, tuple[str, bool, PageBrowse]], dict[str, tuple[str, bool, PageBrowse]]]
 ```
 
-**Purpose**: Does the actual safe streaming for `read_file`. It permits normal workspace reads and current-runtime reads, but normalizes both before touching the carrier.
+**Purpose**: This loads the existing page state for a source before committing a new fetch. The sync driver needs this to compare digests, reuse ids, and avoid unnecessary writes.
 
-**Data flow**: It receives a path, binds the sandbox, computes the runtime display path, chooses runtime or workspace handling, validates with `rooted_path` or `workspace_path`, then yields chunks from carrier `read`.
+**Data flow**: It receives a source id, queries page rows for that source, builds one lookup by page id and another by source identity, and returns both maps with digest, tombstone state, and browsing metadata.
 
-**Call relations**: `Sandbox.read_file` calls this whenever a caller wants file bytes without loading the entire file into memory.
+**Call relations**: SyncDriver._commit calls this at the start of reconciliation. Its results guide whether each fetched page is treated as unchanged, changed, renamed, or newly inserted.
 
-*Call graph*: calls 4 internal fn (_bound, _runtime_root, rooted_path, workspace_path); called by 1 (read_file); 1 external calls (PurePosixPath).
+*Call graph*: called by 1 (_commit); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `Sandbox._read_file`  (lines 1207–1210)
+##### `SyncDriver._write`  (lines 888–1016)
 
 ```
-async def _read_file(self, target: str) -> AsyncIterator[bytes]
+async def _write(self, source: ClaimedSource, next_cursor: str | None, changed: list[ChangedPage], metadata: list[PageBrowse], fetched: list[UUID], deleted: list[UUID], snapshot: bool) -> int
 ```
 
-**Purpose**: Streams a file from an already-chosen target path through the carrier. It is a lower-level helper that assumes the caller has already chosen a safe target.
+**Purpose**: This performs the database transaction that lands one fetched batch. It updates page rows, tombstones deleted pages, updates the source cursor and schedule, and releases the claim.
 
-**Data flow**: It receives a target path, binds the sandbox, calls carrier `read`, and yields each chunk.
+**Data flow**: It receives changed pages, metadata-only updates, fetched ids, delete ids, snapshot mode, and next cursor. Inside a workspace transaction it verifies the claim, upserts changed pages, updates metadata, tombstones explicit deletes and snapshot-missing pages, refreshes page subjects, resets error/refusal state, and returns how many pages were tombstoned.
 
-**Call relations**: Internal code can use this when path validation has happened elsewhere and only carrier streaming is needed.
+**Call relations**: SyncDriver._commit calls this after writing needed blobs. It uses _rescheduled so a manual resync request made during the run is not lost.
 
-*Call graph*: calls 1 internal fn (_bound).
+*Call graph*: calls 1 internal fn (_rescheduled); called by 1 (_commit); 7 external calls (__init__, now, timedelta, insert, select, update, workspace_tx).
 
 
-##### `Sandbox.dial`  (lines 1212–1216)
+##### `SyncDriver._report_ok`  (lines 1018–1041)
 
 ```
-async def dial(self, port: int) -> DialTarget
+async def _report_ok(self, source: ClaimedSource, fetched: int, written: int, tombstoned: int, dropped: int) -> None
 ```
 
-**Purpose**: Asks the carrier how to reach a port opened inside the sandbox from outside. This supports interactive services started by commands.
+**Purpose**: This records a successful source-sync run in logs and service checks. It says how many pages were fetched, written, tombstoned, or dropped.
 
-**Data flow**: It receives a port number, binds the sandbox, delegates to carrier `dial`, and returns the resulting host, TLS, and header information.
+**Data flow**: It receives counts from the completed commit, builds telemetry tags, logs the success details, and sends an OK service check. Telemetry failures are suppressed so reporting cannot break the sync.
 
-**Call relations**: The sandbox Chrome extension calls this after starting browser services, so it can connect to the sandbox-published endpoint.
+**Call relations**: SyncDriver._commit calls this after _write succeeds. Its OK service check clears the critical status produced by earlier failed runs for the same source row.
 
-*Call graph*: calls 1 internal fn (_bound); called by 1 (lease).
+*Call graph*: calls 3 internal fn (_check_tags, _config_value, _stream_tags); called by 1 (_commit); 3 external calls (suppress, emit_service_check, log).
 
 
-##### `SandboxSession.conversation_id`  (lines 1230–1231)
+##### `SyncDriver._error_backoff`  (lines 1043–1051)
 
 ```
-def conversation_id(self) -> UUID
+def _error_backoff(self, source: ClaimedSource, now: datetime) -> tuple[int, datetime]
 ```
 
-**Purpose**: Returns the conversation ID stored on an already-open sandbox handle. For a session, this value is always immediately available.
-
-**Data flow**: It reads `handle.conversation_id` from the session and returns it.
-
-**Call relations**: This implements the base `Sandbox.conversation_id` property for concrete, bound sessions.
-
-
-##### `SandboxSession.created`  (lines 1234–1235)
-
-```
-def created(self) -> bool
-```
-
-**Purpose**: Reports that a `SandboxSession` already has a real sandbox. Unlike a late sandbox, no creation is pending.
-
-**Data flow**: It receives no input and returns `True`.
-
-**Call relations**: This implements the base `Sandbox.created` property for already-bound sessions.
-
-
-##### `SandboxSession._bound`  (lines 1237–1238)
-
-```
-async def _bound(self) -> 'SandboxSession'
-```
+**Purpose**: This computes how long to wait after a failed sync before trying again. Repeated failures wait longer, up to a fixed cap, so the system does not hammer a broken provider.
 
-**Purpose**: Returns this session as the bound sandbox. Since it already contains a carrier and handle, no opening work is needed.
+**Data flow**: It receives the claimed source and current time, increments the consecutive error count, calculates an exponential backoff from the normal sync interval, caps it, and returns the new count plus next retry time.
 
-**Data flow**: It receives no input and returns `self`.
+**Call relations**: SyncDriver._sync_claimed calls this on ordinary failures before reporting and releasing the source. _report_failed logs the same values that _release writes.
 
-**Call relations**: All inherited `Sandbox` operations call `_bound`; on `SandboxSession`, that step is a no-op.
+*Call graph*: called by 1 (_sync_claimed); 1 external calls (timedelta).
 
 
-##### `SandboxSession.authorize`  (lines 1240–1268)
+##### `SyncDriver._report_failed`  (lines 1053–1111)
 
 ```
-def authorize(self, run_token: str, cleared_env: frozenset[str], env: Mapping[str, str]) -> 'SandboxSession'
+async def _report_failed(self, source: ClaimedSource, error: Exception, cursor_reset: bool, errors: int, next_sync_at: datetime) -> None
 ```
 
-**Purpose**: Creates a new view of the same sandbox with a different run token and environment. This lets a shared container execute as the correct member without changing the original session.
+**Purpose**: This records a failed source-sync run safely. It provides enough information to diagnose the provider stream without logging raw credentials or full provider payloads.
 
-**Data flow**: It receives a new token, environment names to remove, and environment values to add. It replaces the old token inside proxy environment variables, verifies the old token was present, merges the new environment, and returns a new `SandboxSession` with an updated handle.
+**Data flow**: It receives the source, exception, cursor-reset flag, error count, and next retry time. It builds a safe provider fault message for known error types, logs the failure, increments a failure metric, and sends a critical service check; each reporting step is protected from raising.
 
-**Call relations**: _AuthorizedSandbox uses this after a late sandbox is opened, and direct callers can use it to re-scope network authority for a session.
+**Call relations**: SyncDriver._sync_claimed calls this on failures after _error_backoff. It uses response_fault and validation_fault for safe details, and _check_tags so the service check belongs to the exact source row.
 
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: calls 5 internal fn (_check_tags, _config_value, _stream_tags, response_fault, validation_fault); called by 1 (_sync_claimed); 5 external calls (suppress, isoformat, emit_metric, emit_service_check, log_error).
 
 
-##### `_LateSandbox.__init__`  (lines 1272–1284)
+##### `SyncDriver._release`  (lines 1113–1139)
 
 ```
-def __init__(self, conversation_id: UUID, turn_id: UUID, open: Callable[[], Awaitable[SandboxSession]], existing: Callable[[], Awaitable[SandboxSession | None]]) -> None
+async def _release(self, source: ClaimedSource, cursor_reset: bool, errors: int, next_sync_at: datetime) -> None
 ```
 
-**Purpose**: Creates a sandbox wrapper that delays opening the real sandbox until an operation actually needs it. This avoids provisioning work for code paths that never touch the sandbox.
+**Purpose**: This frees a source claim after a failed sync and schedules the next attempt. It also clears a dead cursor when the provider said the cursor expired.
 
-**Data flow**: It receives the conversation ID, turn ID, an async open function, and an async existing-session lookup. It stores them, creates an async lock, and starts with no session.
+**Data flow**: It receives the claimed source, whether to reset the cursor, the new error count, and retry time. It updates the source row with the cursor choice, rescheduled next sync time, error count, and no active claim.
 
-**Call relations**: Higher-level sandbox orchestration constructs `_LateSandbox` for turns; inherited `Sandbox` methods later call `_bound` to force creation.
+**Call relations**: SyncDriver._sync_claimed calls this after reporting a failure. It uses _rescheduled so a resync request made during the failed run can still take priority.
 
-*Call graph*: 1 external calls (Lock).
+*Call graph*: calls 1 internal fn (_rescheduled); called by 1 (_sync_claimed); 2 external calls (update, workspace_tx).
 
 
-##### `_LateSandbox.conversation_id`  (lines 1287–1288)
+##### `SyncDriver._skip`  (lines 1141–1206)
 
 ```
-def conversation_id(self) -> UUID
+async def _skip(self, source: ClaimedSource, reason: str, *, awaits_grant: bool) -> None
 ```
 
-**Purpose**: Returns the conversation ID known before the sandbox is opened. This lets callers identify the workspace without creating the sandbox.
+**Purpose**: This handles a provider refusal that is not treated as a data failure. It releases the claim without changing pages, counts the refusal, and may park the source so it retries less often.
 
-**Data flow**: It reads the stored `_conversation_id` and returns it.
+**Data flow**: It receives the source, reason, and awaits_grant flag. It updates the source row to reset error count, increment refusal count, choose the next sync time, record parked fields if the threshold is reached, and clear the claim. If the row was parked, it reports that fact.
 
-**Call relations**: This implements `Sandbox.conversation_id` for delayed sandboxes and is reused by `_AuthorizedSandbox` through its late sandbox.
+**Call relations**: SyncDriver._sync_claimed calls this when a backend raises StreamSkipped. It calls _report_parked only after the database confirms the source actually parked.
 
+*Call graph*: calls 2 internal fn (_report_parked, _rescheduled); called by 1 (_sync_claimed); 5 external calls (now, timedelta, case, update, workspace_tx).
 
-##### `_LateSandbox.created`  (lines 1291–1292)
 
-```
-def created(self) -> bool
-```
-
-**Purpose**: Reports whether this late sandbox has already opened a real session. It does not create anything while answering.
-
-**Data flow**: It checks whether `_session` is no longer `None` and returns that boolean.
-
-**Call relations**: This implements `Sandbox.created`; `_AuthorizedSandbox.created` delegates to it.
-
-
-##### `_LateSandbox.authorize`  (lines 1294–1300)
+##### `SyncDriver._report_parked`  (lines 1208–1233)
 
 ```
-def authorize(self, run_token: str, cleared_env: frozenset[str], env: Mapping[str, str]) -> Sandbox
+async def _report_parked(self, source: ClaimedSource, reason: str, refusals: int) -> None
 ```
 
-**Purpose**: Builds an authorized wrapper around this not-yet-open sandbox. The authorization will be applied after the real session is opened.
-
-**Data flow**: It receives a run token, names of environment variables to clear, and new environment values, then returns an `_AuthorizedSandbox` carrying those values.
-
-**Call relations**: Calls to `authorize` on delayed sandboxes do not force creation; `_AuthorizedSandbox._bound` applies the authorization later.
-
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_LateSandbox._bound`  (lines 1302–1307)
-
-```
-async def _bound(self) -> SandboxSession
-```
+**Purpose**: This records that a repeatedly refused stream has been parked. A park is a warning and metric, not an alert, because the system will keep retrying slowly or wait for a grant event.
 
-**Purpose**: Opens the sandbox on first use and returns the resulting session. A lock makes sure two concurrent first operations do not open two sandboxes.
+**Data flow**: It receives the source, refusal reason, and refusal count, builds stream tags, writes a warning log, and emits a parked counter metric. Reporting failures are suppressed.
 
-**Data flow**: It checks whether `_session` exists. If not, it enters an async lock, checks again, awaits the stored open function, saves the session, and returns it.
+**Call relations**: SyncDriver._skip calls this after updating the source row into a parked state. It uses _stream_tags so the metric groups by provider and stream.
 
-**Call relations**: All inherited `Sandbox` operations eventually call this when used on a late sandbox.
+*Call graph*: calls 1 internal fn (_stream_tags); called by 1 (_skip); 3 external calls (suppress, emit_metric, warn).
 
 
-##### `_LateSandbox.stop_commands`  (lines 1309–1312)
+##### `PageFeed.pages_changed_since`  (lines 1273–1273)
 
 ```
-async def stop_commands(self) -> None
+async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch
 ```
 
-**Purpose**: Stops commands for this turn even if the late sandbox was not opened through this wrapper yet. It can attach to an existing session just for stopping.
+**Purpose**: This protocol method defines how indexers ask for page changes after a saved cursor. It gives extensions a stable way to replay source-sync output.
 
-**Data flow**: It uses the cached session if present, otherwise awaits the existing-session lookup. If it gets a session with a stoppable carrier, it replaces the handle’s turn ID with this late sandbox’s turn ID and calls carrier stop.
+**Data flow**: A caller supplies a cursor and limit. An implementation returns a PageBatch containing ordered page changes and the next cursor to save.
 
-**Call relations**: Cancellation flows use this so a deliberate stop can reach already-running work without accidentally creating a fresh sandbox.
+**Call relations**: CorePageFeed.pages_changed_since is the core implementation. Indexing extensions read through this protocol instead of querying source tables directly.
 
-*Call graph*: 1 external calls (replace).
 
+##### `page_cursor`  (lines 1276–1285)
 
-##### `_AuthorizedSandbox.conversation_id`  (lines 1323–1324)
-
 ```
-def conversation_id(self) -> UUID
+def page_cursor(cursor: object) -> tuple[int, UUID]
 ```
-
-**Purpose**: Returns the conversation ID of the wrapped late sandbox. Authorization does not change which conversation the sandbox belongs to.
-
-**Data flow**: It reads `late.conversation_id` and returns it.
 
-**Call relations**: This implements the base property for authorized late wrappers.
-
-
-##### `_AuthorizedSandbox.created`  (lines 1327–1328)
-
-```
-def created(self) -> bool
-```
+**Purpose**: This parses a page-feed cursor into its revision number and page id. It protects the feed from malformed bookmarks.
 
-**Purpose**: Reports whether the wrapped late sandbox has been created. The authorized wrapper itself does not own a separate session.
+**Data flow**: It receives an object, requires it to be a string shaped like `revision|uuid`, converts the revision to an integer and the page id to a UUID, and returns both. Bad input raises ValueError.
 
-**Data flow**: It reads `late.created` and returns that boolean.
+**Call relations**: CorePageFeed.pages_changed_since calls this when a caller provides a cursor, so the database query can resume just after that saved position.
 
-**Call relations**: This keeps creation-state checks consistent after calling `_LateSandbox.authorize`.
+*Call graph*: called by 1 (pages_changed_since); 1 external calls (UUID).
 
 
-##### `_AuthorizedSandbox.authorize`  (lines 1330–1336)
+##### `CorePageFeed.pages_changed_since`  (lines 1297–1355)
 
 ```
-def authorize(self, run_token: str, cleared_env: frozenset[str], env: Mapping[str, str]) -> Sandbox
+async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch
 ```
-
-**Purpose**: Re-authorizes the same late sandbox with a new token and environment. The newest authorization replaces the wrapper rather than stacking wrappers.
-
-**Data flow**: It receives new authorization inputs and forwards them to the underlying late sandbox’s `authorize` method, returning the resulting sandbox.
-
-**Call relations**: This avoids nested authorization layers; later `_bound` will apply only the current authorization to the opened session.
 
-
-##### `_AuthorizedSandbox._bound`  (lines 1338–1339)
-
-```
-async def _bound(self) -> SandboxSession
-```
+**Purpose**: This returns a bounded, ordered batch of page changes for downstream indexers. It inlines live page bodies from blob storage and uses an empty body for tombstones.
 
-**Purpose**: Opens or retrieves the underlying late sandbox, then applies this wrapper’s authorization to the resulting session. This is where delayed authorization becomes a concrete session.
+**Data flow**: It receives an optional cursor and requested limit, caps the limit, queries page rows ordered by revision and id, filters after the cursor if present, reads blob bodies for non-deleted pages, builds PageChange objects, and returns them with a next cursor from the last row.
 
-**Data flow**: It awaits `late._bound()` to get a `SandboxSession`, calls that session’s `authorize` with the stored token and environment changes, and returns the authorized session.
+**Call relations**: Indexers call this through the PageFeed interface. It depends on page_cursor for resume positions and on the blob store for the actual stored document text.
 
-**Call relations**: Inherited `Sandbox` operations call this on authorized late sandboxes before executing commands, reads, writes, or dials.
+*Call graph*: calls 1 internal fn (page_cursor); 7 external calls (__init__, __init__, fromisoformat, and_, or_, select, workspace_tx).
 
 ## 📊 State Registers Touched
 
-- `reg-deployment-config` — The merged deployment settings that tell the system what product, services, addresses, databases, sandboxes, and safety defaults to use.
-- `reg-cancellation-state` — The shared brake state that marks work as stopping or cancelled so model calls, tools, workflows, and retries do not continue stale work.
-- `reg-credentials-and-grants` — The encrypted secrets, account connections, and grants that say which member or agent may use an outside service.
-- `reg-egress-network-policy` — The outbound network permission state that decides which external hosts, proxies, and secret injections are allowed for a workspace or agent.
-- `reg-sandbox-handles` — The remembered sandbox or workspace handle for each conversation so tools can resume the same isolated files, terminals, browsers, and services.
-- `reg-execution-environment` — The controlled runtime environment given to commands, files, terminals, browsers, and documents, including safe environment variables and containment rules.
-- `reg-tool-catalog-policy` — The current tool catalog and allowlist rules that say which built-in, extension, connector, MCP, and sandbox tools may be called.
-- `reg-artifact-blob-store` — The shared file, blob, attachment, artifact, signed download, and media-preview storage used to publish and recover produced work.
-- `reg-skill-store` — The saved and selected skills that can be provisioned by packs, loaded into agent sandboxes, or created by users inside a workspace.
-- `reg-hosted-site-registry` — The hosted-site records that remember who owns each site, which conversation created it, where it runs, and how previews or sharing are allowed.
-- `reg-request-actor-scope` — Context-local current workspace, member, acting agent, and object/action scope carried through authorization, database boundaries, object APIs, tools, and egress checks.
-- `reg-turn-resource-budget` — In-flight per-turn resource budget and usage accumulator for spend, model tokens, cache reads, sandbox tokens, egress, retries, and stop conditions before final ledger reconciliation.
-- `reg-conversation-workspace-changes` — Durable git-like summaries of files added, edited, or removed inside a conversation workspace during a turn.
-- `reg-backend-provider-registry` — Process-local registry mapping provider names to active backend implementations for models, search, embeddings, memory, connectors, browser access, auth, billing, and feature services.
-- `reg-sandbox-runtime-cache` — Built sandbox client/runtime image and reusable sandbox cache artifacts used when launching isolated execution environments.
+- `reg-selected-pack-services` — The chosen product pack and the shared service objects it wires up for the rest of the app.
+- `reg-durable-database` — The main long-term database where shared business and runtime records are stored.
+- `reg-workspace-member-agent-state` — The saved list of workspaces, people, memberships, seats, and agents.
+- `reg-extension-registry` — The loaded set of extensions and the routes, tools, hooks, jobs, skills, agents, and backends they contribute.
+- `reg-extension-install-store` — The saved record of which extensions are installed, removed, or holding extension-specific data.
+- `reg-credential-connections` — The encrypted accounts, secrets, connection grants, and credential fulfillments that let agents use outside services safely.
+- `reg-access-permissions-audience` — The shared rules for who may read, use, share, or act on workspace content and conversations.
+- `reg-egress-policy-proxy` — The network allowlist and proxy state that decide which outside hosts sandboxed work may contact.
+- `reg-feature-flags` — The rollout switches that turn product and infrastructure behavior on or off across the system.
+- `reg-search-provider-catalog` — The common search and page-fetching service state used when the system needs outside web information.
+- `reg-memory-index-state` — The stored knowledge, embeddings, chunks, and memory indexes that agents can search later.
+- `reg-source-config-sync-state` — The configured external sources plus their sync progress, errors, backoff, ownership, and access grants.
+- `reg-background-jobs` — The shared job schedule, due-work candidates, claims, retries, and worker state for background and autonomous work.
+- `reg-object-journal` — The shared naming and change history for workspace objects such as tasks, prompts, skills, monitors, memories, and reports.
+- `reg-source-page-corpus` — The canonical stored page/document records fetched from sources, including content and browse metadata before they are chunked, embedded, searched, or displayed.
+- `reg-provider-rate-limit-budgets` — Shared per-provider throttle, retry, and backoff budget state for model, search, connector, and external API calls so workers avoid overrunning provider limits.
+- `reg-evaluation-fixture-backends` — Deterministic fake connector/backend data for evaluation packs, such as mailbox, calendar, code-search, and business records used across test routes and tools.

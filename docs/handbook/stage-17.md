@@ -1,141 +1,251 @@
-# Teardown, cancellation, retry recovery, and resource cleanup  `stage-17`
+# Security, Identity, Credentials, Egress Policy, and Billing  `stage-17` (cross-cutting infrastructure)
 
-This stage is the system’s clean-up and recovery area. It runs when a turn, request, job, or whole process is finishing, failing, being cancelled, or restarting after a crash. Its job is to leave the system in a safe, understandable state: save what must be remembered, stop work that should no longer run, release outside resources like browsers, terminals, sandboxes, or containers, and make retries safe so the same cleanup can happen more than once without causing damage.
+This stage is shared safety and accounting support used across the whole system. It is not one single startup or shutdown step. Instead, it acts like the building’s security desk, network guard, and cashier during everyday use.
 
-The file `workspace_changes.py` handles one important piece of that story: it records what changed in a conversation’s workspace during a turn. It does this by scanning files in a git-like way, meaning it compares the workspace before and after to find added, edited, or removed files. This creates a durable record of “what this turn left behind.” That record remains useful even if detailed tool output is later shortened, compacted, or missing from the chat history.
+Authentication and Signed Links proves who someone is and creates safe temporary links. It uses signed tokens, which are small messages with a tamper-proof stamp, for login, shared pages, sandbox app access, and file downloads. It also completes outside account sign-ins, such as Anthropic login.
+
+Network, Secret, and Spend Enforcement decides what an agent is allowed to use. It checks the active workspace and agent, unlocks only approved connected accounts, protects stored credentials, tells the network proxy which outside hosts are allowed, and records paid usage so billing limits and balances are respected.
+
+The directly assigned files add privacy boundaries inside conversations. untrusted.py marks outside text as information to read, not commands to follow. audience.py labels who a message is meant for, such as private or shared. subjects.py gives a standard way to say who may read content, like one member or the whole workspace.
+
+## Sub-stages
+
+- [Authentication and Signed Links](stage-17.1.md) `stage-17.1` — 11 files
+- [Network, Secret, and Spend Enforcement](stage-17.2.md) `stage-17.2` — 15 files
 
 ## Files in this stage
 
-### Teardown, cancellation, retry recovery, and resource cleanup
-### `core/src/ufo/runtime/turns/workspace_changes.py`
+### Conversation Safety Boundaries
+Defines how untrusted text and conversation visibility labels are represented and constrained so content is interpreted and shared safely.
 
-`domain_logic` · `turn-end background refresh`
+### `core/src/ufo/harness/untrusted.py`
 
-A conversation can change files in ways that are not fully captured by chat messages. For example, a shell command may rename a file, delete a directory, or modify many files without listing each one. This file keeps a separate, durable record of those workspace changes.
+`util` · `cross-cutting`
 
-It first works out which parts of the workspace are worth checking. File tools like `write` and `edit` point to a specific path, while a `bash` command might change anything, so it watches the workspace root. It also keeps watching directories that were changed in the previous scan until a later scan says they are clean. This is like leaving sticky notes on shelves that were recently disturbed, then removing them only after checking the shelf again.
+This file solves a prompt-safety problem. Some text given to an agent may come from an untrusted place, such as a web page, a third-party tool, or a background subagent result. That text might contain instructions like “ignore previous rules.” Without a consistent wrapper, the model could confuse those outside words with real directions from the system.
 
-The main worker is `WorkspaceChangeRecorder`. At the end of a turn, it asks the sandbox’s file system helper for changes in the selected directories. The answer is validated into strict data shapes, then stored in the database. If two recorders update the same workspace around the same time, the stored results are merged carefully so one scan does not erase changes found by another. If scanning fails, the error is logged, but the turn is not failed; an old change report is considered better than no report.
+The file defines one shared way to “wall off” that content. Think of it like putting a suspicious letter inside a clear evidence bag: the reader can inspect it, but the bag is labeled so everyone knows it is not an instruction sheet. The wrapper includes a warning notice, an opening marker that names the source, the content itself, and a closing marker.
+
+One important detail is that the function escapes any closing marker already inside the content. This prevents hostile or accidental text from ending the wrapper early and then placing fake instructions after it. By keeping this logic in one small module, different parts of the system do not invent slightly different safety wrappers.
 
 #### Function details
 
-##### `change_targets`  (lines 37–55)
+##### `wall`  (lines 22–30)
 
 ```
-def change_targets(calls: Iterable[ToolUseBlock]) -> tuple[str, ...]
+def wall(source: str, content: str) -> str
 ```
 
-**Purpose**: This function looks at the tool calls from a turn and picks the workspace paths that may need to be checked for file changes. It is used to narrow the later git-style scan to likely affected areas instead of scanning everything blindly.
+**Purpose**: This function wraps outside content in a standard warning and delimiter so the agent treats it as untrusted data. It is used when the system needs to pass external text to an agent without letting that text masquerade as instructions.
 
-**Data flow**: It receives a sequence of tool-use records. For `write` and `edit`, it reads the `file_path`, verifies that the path belongs inside the workspace, and stores it relative to the workspace root. For `bash`, it adds `.` because a shell command may alter the workspace without naming files in a structured way. Duplicate paths are removed while keeping the first-seen order, and the function returns the final tuple of target paths.
+**Data flow**: It receives a source name and the content from that source. It builds a warning, adds an opening untrusted-content marker, copies in the content after replacing any fake closing marker with a harmless escaped version, and then adds the real closing marker. The result is one string that clearly labels and contains the untrusted text.
 
-**Call relations**: This is an early filtering step before recording workspace changes. It relies on `workspace_path` to reject paths outside the allowed workspace and on `PurePosixPath` to produce clean relative paths that later scans can use.
-
-*Call graph*: 2 external calls (PurePosixPath, workspace_path).
+**Call relations**: When other parts of the system need to deliver tool output or a background child agent’s returned content to an agent, they can call this function first. The function does not decide whether content is trusted; it only provides the shared wrapping format so every caller uses the same safety boundary.
 
 
-##### `WorkspaceChangeRecorder.record`  (lines 101–114)
+### `core/src/ufo/runtime/turns/audience.py`
 
-```
-async def record(self) -> None
-```
+`domain_logic` · `conversation turn processing and member-facing reads`
 
-**Purpose**: This is the top-level action that refreshes the stored change report for a conversation’s workspace. It is meant to run after a turn has finished, so the user-facing turn can complete even if this background scan has trouble.
+A conversation can be visible to different “audiences”: everyone in the workspace, one specific member, a room, or a room shared with an outside organization. This file gives those audiences a strict text format and provides the rules for using them safely. Without it, two parts of the system might spell the same audience differently, or worse, accidentally let internal shared information appear in an external channel.
 
-**Data flow**: It starts with the recorder’s sandbox, conversation IDs, and target paths. If there is no created sandbox and no targets, it does nothing. Otherwise it loads the last recorded changes, decides which directories should be scanned, asks the sandbox for a fresh scan, and stores the merged result in the database. If anything goes wrong, it logs the failure instead of raising it further.
+The central idea is an Audience, which is just a string with a special meaning. For example, the shared audience is the same as the shared subject, a member audience is based on that member’s UUID, and room audiences are written with prefixes like room: or foreign:. The helper functions build these strings in one approved way, then parse and validate them when they come back from storage or another part of the system.
 
-**Call relations**: This method ties the whole file together. It calls `recorded_workspace_changes` to learn what was known before, `_directories` to decide what to ask about, `_scan` to get the sandbox’s current answer, and `_store` to save it. When an error interrupts that story, it hands details to the logging system.
+The file also answers practical questions: “Which audiences can this member read?”, “Is this audience tied to a member?”, and “Which stored subjects may this audience recall?” The foreign-room rule is especially important: an externally shared room can read only its own material, not the workspace-wide shared subject. The narrowing logic acts like a one-way gate: it allows a request to become more specific, but rejects changes that would jump to an unrelated audience.
 
-*Call graph*: calls 4 internal fn (_directories, _scan, _store, recorded_workspace_changes); 1 external calls (log).
+#### Function details
 
-
-##### `WorkspaceChangeRecorder._directories`  (lines 116–129)
+##### `conversation_audience`  (lines 14–15)
 
 ```
-def _directories(self, recorded: WorkspaceChanges) -> list[str]
+def conversation_audience(member_id: UUID | None) -> Audience
 ```
 
-**Purpose**: This helper decides which directories should be scanned this time. It combines newly touched paths with paths that were already reported as changed, so changed areas stay watched until they become clean.
+**Purpose**: Builds the audience label for a normal conversation. If there is no specific member, it returns the workspace-shared audience; otherwise it returns the private audience for that member.
 
-**Data flow**: It receives the previously recorded change report. It takes each new target path and each previously changed file path, converts each one to its parent directory, removes duplicates, sorts the list, and caps it at a fixed maximum size. If too many directories were found, it logs how many were dropped. It returns the final list of directories to scan.
+**Data flow**: It receives either a member UUID or None. None becomes the shared audience label, while a UUID is added after the member prefix to make a member-specific label. The result is returned as an Audience value.
 
-**Call relations**: `record` calls this after loading the previous scan. The result becomes the direct input to `_scan`, and later the same set is used by `_store` to know which old entries are safe to replace.
+**Call relations**: Other functions use this as the one trusted way to create member audience labels. parse_audience uses it to check that a member label is canonical, and readable_audiences uses it to include a member’s own private audience.
 
-*Call graph*: called by 1 (record); 2 external calls (PurePosixPath, log).
-
-
-##### `WorkspaceChangeRecorder._scan`  (lines 131–136)
-
-```
-async def _scan(self, directories: list[str]) -> WorkspaceChanges
-```
-
-**Purpose**: This helper asks the sandbox to report file changes for selected directories. It also checks that the sandbox’s answer has the expected shape before the result is trusted.
-
-**Data flow**: It receives a list of workspace-relative directories. It sends those paths to the sandbox’s `ufo fs changes` command. The sandbox returns raw structured data, which is validated as a `WorkspaceChanges` object. A valid scan is returned; malformed data is turned into a clear runtime error.
-
-**Call relations**: `record` calls this after `_directories` chooses what to inspect. Its returned `WorkspaceChanges` object is handed to `_store`, which makes it the new durable projection of workspace changes.
-
-*Call graph*: called by 1 (record).
+*Call graph*: called by 2 (parse_audience, readable_audiences).
 
 
-##### `WorkspaceChangeRecorder._store`  (lines 138–161)
+##### `room_audience`  (lines 18–19)
 
 ```
-async def _store(self, scanned: WorkspaceChanges, asked: frozenset[str]) -> None
+def room_audience(surface: str, room: str) -> Audience
 ```
 
-**Purpose**: This helper saves a new scan in the database without accidentally deleting another recorder’s work. It is careful because two turns sharing the same sandbox may finish and record changes at nearly the same time.
+**Purpose**: Builds the audience label for a normal internal room. This is used when a conversation belongs to a named room on a named surface.
 
-**Data flow**: It receives the freshly scanned changes and the set of directories that were scanned. It opens a workspace database transaction, creates the conversation-change row if it does not already exist, locks and reads the current stored scan, merges the fresh and stored data, then writes the merged result back. The database is changed; the function itself returns nothing.
+**Data flow**: It receives a surface name and a room name. It passes them, along with the normal room prefix, to the shared room-building helper. The returned value is an Audience such as a room-scoped label.
 
-**Call relations**: `record` calls this after `_scan` succeeds. Inside, it calls `_merged` to decide which old entries should survive beside the new scan, then writes the final answer through SQLAlchemy database operations.
+**Call relations**: This is the public helper for internal room audiences. It relies on _room_audience for validation and formatting, and parse_audience calls it when checking whether a room audience string is valid.
 
-*Call graph*: calls 1 internal fn (_merged); called by 1 (record); 5 external calls (model_dump, and_, select, update, workspace_tx).
-
-
-##### `WorkspaceChangeRecorder._merged`  (lines 163–178)
-
-```
-def _merged(self, scanned: WorkspaceChanges, stored: WorkspaceChanges, asked: frozenset[str]) -> WorkspaceChanges
-```
-
-**Purpose**: This helper combines a fresh scan with the scan already stored in the database. Its job is to replace entries for directories that were just checked, while keeping entries from directories this scan did not cover.
-
-**Data flow**: It receives the new scan, the stored scan, and the set of directories that were asked about. It keeps all fresh changes. From the old scan, it keeps only changes whose parent directory was not part of this scan and whose exact path was not already found fresh. It trims the final list to the maximum allowed number of changes and sets the `truncated` flag if information may have been left out.
-
-**Call relations**: `_store` calls this while holding the database row lock. This makes it the decision point that protects concurrent scans from overwriting each other’s unrelated findings.
-
-*Call graph*: called by 1 (_store); 2 external calls (__init__, PurePosixPath).
+*Call graph*: calls 1 internal fn (_room_audience); called by 1 (parse_audience).
 
 
-##### `recorded_workspace_changes`  (lines 181–205)
+##### `foreign_room_audience`  (lines 22–23)
 
 ```
-async def recorded_workspace_changes(conversation_id: UUID) -> WorkspaceChanges
+def foreign_room_audience(surface: str, room: str) -> Audience
 ```
 
-**Purpose**: This function reads the last stored workspace-change scan for a conversation. If the conversation is a subagent that shares a parent workspace, it resolves to the owning conversation so there is one shared answer for that workspace.
+**Purpose**: Builds the audience label for a room that is shared outside the workspace. The separate label matters because external rooms must not be allowed to read internal shared memory.
 
-**Data flow**: It receives a conversation ID. It opens a workspace database transaction, looks up the conversation’s sandbox owner, then fetches the saved scan for that owner. If there is no conversation or no saved scan, it returns a shared “nothing changed” value. If a scan is found, it validates it as a `WorkspaceChanges` object and returns it.
+**Data flow**: It receives a surface name and room name. It passes them, with the foreign-room prefix, to the common room-building helper. The result is a foreign Audience label.
 
-**Call relations**: `WorkspaceChangeRecorder.record` calls this before deciding what to scan next. The previous result feeds `_directories`, so old changed paths continue to be checked until a later scan removes them.
+**Call relations**: This mirrors room_audience but marks the room as external. It uses _room_audience for the common checks, and parse_audience uses it to verify foreign-room audience strings.
 
-*Call graph*: called by 1 (record); 2 external calls (select, workspace_tx).
+*Call graph*: calls 1 internal fn (_room_audience); called by 1 (parse_audience).
+
+
+##### `_room_audience`  (lines 26–29)
+
+```
+def _room_audience(prefix: str, surface: str, room: str) -> Audience
+```
+
+**Purpose**: Creates the actual room-style audience string after checking that the pieces are safe to combine. It prevents ambiguous labels by rejecting empty names and names containing colons.
+
+**Data flow**: It receives a prefix, a surface, and a room. If the surface or room is empty, or either contains a colon, it raises a ValueError. Otherwise it joins them into one Audience string in the form prefix + surface + ':' + room.
+
+**Call relations**: This is the shared worker behind room_audience and foreign_room_audience. Those two functions choose the meaning of the prefix, while this helper enforces the common formatting rule.
+
+*Call graph*: called by 2 (foreign_room_audience, room_audience).
+
+
+##### `parse_audience`  (lines 32–55)
+
+```
+def parse_audience(value: str) -> Audience
+```
+
+**Purpose**: Checks whether a raw string is a valid audience label and returns it as an Audience. It rejects malformed labels instead of letting questionable audience values move through the system.
+
+**Data flow**: It receives a string. It first accepts the exact shared audience, then splits the string to inspect its prefix. Member labels must contain a valid UUID and match the canonical output of conversation_audience. Room and foreign-room labels must have the right two-part room form and match the canonical room builder. If anything is wrong, it raises ValueError; otherwise it returns the Audience.
+
+**Call relations**: This is the file’s main safety checkpoint. audience_member, audience_subjects, and narrow_audience call it before making decisions, so those decisions are based only on known-good audience labels. It delegates canonical reconstruction to conversation_audience, room_audience, and foreign_room_audience, and uses UUID parsing to validate member IDs.
+
+*Call graph*: calls 3 internal fn (conversation_audience, foreign_room_audience, room_audience); called by 3 (audience_member, audience_subjects, narrow_audience); 1 external calls (UUID).
+
+
+##### `readable_audiences`  (lines 58–63)
+
+```
+def readable_audiences(member_id: UUID) -> tuple[Audience, ...]
+```
+
+**Purpose**: Lists the conversation audiences a member is allowed to read from normal member-facing views. A member can read workspace-shared content and their own private content.
+
+**Data flow**: It receives a member UUID. It returns a two-item tuple: the shared audience and the member-specific audience built from that UUID. It does not include room or foreign-room audiences because this layer does not know room membership.
+
+**Call relations**: This function uses conversation_audience to produce the member-specific label in the same format used everywhere else. It is meant for read paths that list conversations or objects visible to a member.
+
+*Call graph*: calls 1 internal fn (conversation_audience).
+
+
+##### `audience_member`  (lines 66–70)
+
+```
+def audience_member(audience: Audience) -> UUID | None
+```
+
+**Purpose**: Finds out whether an audience belongs to one specific member. If it does, it returns that member’s UUID; if not, it returns None.
+
+**Data flow**: It receives an Audience value. It first validates and normalizes it through parse_audience. If the parsed label does not start with the member prefix, the result is None. If it does, the member UUID text is removed from the prefix and converted into a UUID object.
+
+**Call relations**: This function depends on parse_audience so it never extracts a member ID from an invalid label. It is useful when later code needs to know whether an audience is private to a member or represents something broader like shared or room content.
+
+*Call graph*: calls 1 internal fn (parse_audience); 1 external calls (UUID).
+
+
+##### `audience_subjects`  (lines 73–80)
+
+```
+def audience_subjects(audience: Audience) -> frozenset[str]
+```
+
+**Purpose**: Returns the stored subjects that a conversation audience is allowed to read. This is the rule that prevents an externally shared room from pulling in internal workspace-shared information.
+
+**Data flow**: It receives an Audience and validates it with parse_audience. If it is a foreign-room audience, the result is a frozen set containing only that audience itself. For all other audiences, the result contains both the workspace-shared subject and the audience’s own subject.
+
+**Call relations**: This function uses parse_audience as its safety gate before applying access rules. It is likely used by recall or lookup code that needs to know which memory subjects are visible to a conversation.
+
+*Call graph*: calls 1 internal fn (parse_audience).
+
+
+##### `narrow_audience`  (lines 83–98)
+
+```
+def narrow_audience(current: Audience, requested: Audience) -> Audience
+```
+
+**Purpose**: Combines a current audience and a requested audience without allowing an unsafe audience switch. It permits staying the same, falling back to shared, becoming more specific from shared, or choosing the stricter form between matching internal and foreign room labels.
+
+**Data flow**: It receives the current Audience and the requested Audience. Both are validated with parse_audience. If the request does not change anything, or merely asks for shared, it keeps the current audience. If the current audience is shared, it accepts the requested one. If both are room-like labels for the same surface and room, it chooses the safer matching room form, favoring the foreign label when needed. If the two audiences are unrelated, it raises ValueError.
+
+**Call relations**: This function is the guardrail used when one part of a turn asks to restrict or adjust the audience. It calls parse_audience on both sides first, then uses simple string partitioning to compare room kinds and room keys before returning the allowed audience or rejecting the change.
+
+*Call graph*: calls 1 internal fn (parse_audience); 1 external calls (partition).
+
+
+### `core/src/ufo/runtime/turns/subjects.py`
+
+`data_model` · `cross-cutting`
+
+This file is a small but important naming helper for visibility rules. In this system, a “subject” is a text label that represents who some content was disclosed to. One special subject, `shared`, means the content is readable by every member of the workspace. A member-specific subject starts with `member:` followed by that member’s unique ID, like putting a name tag on a private envelope.
+
+Without this file, different parts of the code might invent slightly different labels for the same idea, such as `shared`, `all`, or `member-123`. That would make permission checks unreliable. By keeping the shared label and the member label format in one place, the rest of the system can speak the same language when deciding what a person is allowed to see.
+
+There are only two actions here. `member_subject` turns a member’s UUID, which is a unique identifier, into the standard member subject string. `subject_shared` checks whether a subject is exactly the shared workspace-wide subject. The longer comment on `subject_shared` clarifies an important boundary: not every group-like place counts as “shared.” Rooms or externally shared channels are not treated as shared just because more than one person might see them; they need their own membership facts elsewhere.
+
+#### Function details
+
+##### `member_subject`  (lines 9–10)
+
+```
+def member_subject(member_id: UUID) -> str
+```
+
+**Purpose**: This function creates the standard subject label for one workspace member. Code uses it when it needs to mark content as belonging to, or readable by, a specific member rather than everyone.
+
+**Data flow**: It takes in a member UUID, which is a unique ID for that person. It places that ID after the fixed text prefix `member:`. It returns the finished subject string, such as `member:<uuid>`, without changing anything else.
+
+**Call relations**: Other parts of the visibility and conversation system can call this when they need a reliable member-scoped label. It hands back a string in the shared format expected by later permission checks and storage records.
+
+
+##### `subject_shared`  (lines 13–18)
+
+```
+def subject_shared(subject: str) -> bool
+```
+
+**Purpose**: This function answers the question: does this subject mean content is shared with every member of the workspace? It is used when the system needs to distinguish workspace-wide visibility from member-specific or other kinds of visibility.
+
+**Data flow**: It takes in a subject string. It compares that string to the single official shared subject value, `shared`. It returns `true` if they match exactly and `false` otherwise; it does not modify any data.
+
+**Call relations**: Other visibility-related code can call this before treating content as readable by all workspace members. It does not delegate to other functions; it simply acts as the small yes-or-no test for the shared half of the visibility model.
 
 ## 📊 State Registers Touched
 
-- `reg-conversation-turn-state` — The conversation and turn queue state that tracks each unit of agent work from admission through running, completion, cancellation, or recovery.
-- `reg-transcript-history` — The saved conversation transcript, including compacted summaries and durable final results that later stages read instead of relying on memory.
-- `reg-live-update-hub` — The live activity stream that carries turn progress, tool status, cancellations, mid-turn replies, and final updates to connected viewers.
-- `reg-runtime-fleet-liveness` — The heartbeat and listener-claim records that show which long-running service instances are alive and what work they currently own.
-- `reg-workflow-claims` — The workflow attempt and run-claim state that prevents two workers from running the same turn, scheduled task, listener, or cleanup job at once.
-- `reg-cancellation-state` — The shared brake state that marks work as stopping or cancelled so model calls, tools, workflows, and retries do not continue stale work.
-- `reg-sandbox-handles` — The remembered sandbox or workspace handle for each conversation so tools can resume the same isolated files, terminals, browsers, and services.
-- `reg-execution-environment` — The controlled runtime environment given to commands, files, terminals, browsers, and documents, including safe environment variables and containment rules.
-- `reg-observability-traces` — The shared logs, metrics, traces, traceparent links, and safety-filtered operator views used to understand what the system is doing.
-- `reg-artifact-blob-store` — The shared file, blob, attachment, artifact, signed download, and media-preview storage used to publish and recover produced work.
-- `reg-conversation-workspace-changes` — Durable git-like summaries of files added, edited, or removed inside a conversation workspace during a turn.
-- `reg-background-runner-handles` — Process-local async task handles, wakeup queues, and scheduler loop state for live background workers distinct from their durable job records.
-- `reg-durable-workflow-store` — Serialized durable workflow/checkpoint objects used to reload or resume long-running turns, jobs, and recovery work after crashes or code changes.
-- `reg-sandbox-runtime-cache` — Built sandbox client/runtime image and reusable sandbox cache artifacts used when launching isolated execution environments.
+- `reg-effective-config` — The merged settings that tell the whole system how it should run in this deployment.
+- `reg-durable-database` — The main long-term database where shared business and runtime records are stored.
+- `reg-workspace-member-agent-state` — The saved list of workspaces, people, memberships, seats, and agents.
+- `reg-agent-configuration` — Each agent’s saved settings, such as model choice, reasoning mode, tools, visibility, internet access, sandbox size, and setup needs.
+- `reg-surface-routing` — The shared routing state that maps browser, Slack, iMessage, terminal, site, and object requests to the right workspace, agent, and conversation.
+- `reg-auth-identity-sessions` — The current proof of who a person, operator, shared-link visitor, or external service caller is.
+- `reg-credential-connections` — The encrypted accounts, secrets, connection grants, and credential fulfillments that let agents use outside services safely.
+- `reg-access-permissions-audience` — The shared rules for who may read, use, share, or act on workspace content and conversations.
+- `reg-egress-policy-proxy` — The network allowlist and proxy state that decide which outside hosts sandboxed work may contact.
+- `reg-billing-spend-ledger` — The shared accounting state for spend caps, usage charges, prepaid balances, BYOK billing, and ledger exports.
+- `reg-feature-flags` — The rollout switches that turn product and infrastructure behavior on or off across the system.
+- `reg-model-catalog-providers` — The shared catalog of available AI models, their prices and limits, and the provider clients used to call them.
+- `reg-source-config-sync-state` — The configured external sources plus their sync progress, errors, backoff, ownership, and access grants.
+- `reg-tool-catalog-allowlists` — The shared list of tools and actions an agent may see or run, including extension tools and sandbox bridge tools.
+- `reg-conversation-turn-queue` — The durable state of conversations and turns, including admission, ordering, current runner, lifecycle status, and queued work.
+- `reg-transcript-history` — The saved conversation transcript, summaries, compactions, and access records that preserve what happened in a chat.
+- `reg-sandbox-runtime` — The durable sandbox and browser workspace handles where agent commands, files, web browsing, and hosted previews run safely.
+- `reg-blob-artifact-store` — The shared file, blob, artifact, preview, download, and hosted media storage used by turns and surfaces.
+- `reg-observability-trace` — The logs, metrics, traces, health signals, and trace links used to understand what the system is doing.
+- `reg-turn-context-token-budget` — The active per-turn context-window and token/image budget accounting used to choose prompt contents, trigger compaction, constrain model rounds, and reconcile usage.

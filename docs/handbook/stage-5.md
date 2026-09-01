@@ -1,878 +1,659 @@
-# Serve runtime startup, liveness registration, and scheduler activation  `stage-5`
+# Server Startup, Route Mounting, and Control Surfaces  `stage-5`
 
-This stage is part of starting up the long-running UFO service. It is the moment when the process stops being just a program on disk and becomes a live worker in the system. The main entry point, core/src/ufo/serve.py, wires together the pieces the service needs: the web server, workflow runner, database access, extensions, credentials, sandboxes, connectors, live update hub, and background jobs. It also starts workspace-level schedulers, so each workspace can run its own timed or queued work.
+This stage is the front door for the Python service. It belongs to startup: the moment when the service reads its settings, connects to the things it depends on, and makes its web addresses available. The main file, `core/src/ufo/serve.py`, is the entry point, meaning it is the place the process starts from.
 
-The runtime_instance.py file acts like the service’s attendance sheet and cleanup crew. It registers that this process is alive, keeps that status fresh, and helps the rest of the system know which workers can still be trusted. It also runs repair loops in the background. These loops look for work left behind by crashes, cancelled tasks, or lost workflow attempts, then reclaim or clean it up. Together, these files turn on the service, announce it, start its background machinery, and prevent abandoned jobs from staying stuck forever.
+During startup, it loads configuration, opens database connections, and starts or connects to background workers that do jobs outside the main request flow. It then wires in extensions and mounts HTTP routes. A route is the rule that says, “when a request comes to this web address, send it to this code.” These routes make many surfaces reachable: the main web app, Slack and iMessage integrations, terminal and debugger tools, memory exploration, billing, artifact downloads, OAuth login callbacks, and private operator control APIs. In short, this stage assembles the service’s control panel and public doorways before normal traffic begins.
 
 ## Files in this stage
 
-### Serve Runtime Activation
-Starts the shared serve process, registers the runtime as alive, and activates background repair loops for abandoned work.
-
+### Server Startup, Route Mounting, and Control Surfaces
 ### `core/src/ufo/serve.py`
 
-`entrypoint` · `startup, main loop, background work, shutdown`
+`entrypoint` · `startup, request handling, background work, shutdown`
 
-This is the service’s main assembly point. Its job is to turn configuration and installed extension manifests into a live server that can serve many workspaces safely from one process. Without this file, the parts of the system would exist, but they would not be connected: HTTP routes would not be mounted, background jobs would not run, sandboxes would not know how to reach the proxy, and requests might read data from the wrong workspace.
+Think of this file as the control room for one running UFO fleet process. It does not implement every feature itself. Instead, it gathers all the parts the service needs: the database, encrypted credential storage, blob storage, model registry, sandbox runner, live message hub, extension routes, connector login flow, background jobs, and HTTP server.
 
-The file starts by loading configuration, setting up logging and health checks, opening the database, loading extensions, preparing encrypted credential storage, and registering this process as an active worker. It then chooses concrete backends for things that can vary by deployment, such as the live-message hub, browser control provider, search provider, blob storage, terminal transport, feature flags, and connector authentication.
+The most important job here is safe sharing. One process can serve many workspaces, so every incoming request or background action must be tied to the correct workspace before it reads or writes data. The file installs a small boundary around HTTP requests to clear old workspace state, set the right one, and clear it again when the response is fully finished.
 
-A major theme is safe workspace scoping. One fleet serves every workspace, so each request or workflow must prove which workspace it belongs to before touching data. The `WorkspaceScopeBoundary` middleware acts like a doorman who clears the room before and after each visitor, preventing one request’s workspace identity from leaking into another.
+Startup is deliberately strict. If two extensions register the same backend name, if a required browser or search provider is missing, if credentials are needed but no encryption key is set, or if the public OAuth callback URL is unusable, the process fails immediately. That is safer than discovering the problem during a user action.
 
-The file also mounts extension routes and shared surface routes, starts DBOS workflow jobs, runs long-lived recovery and delivery loops, and shuts down carefully so unfinished workflows are not accidentally run twice by another process.
+At the end, `run` launches DBOS workflow execution and Uvicorn, the web server. On shutdown it drains work carefully so another process does not accidentally run the same workflow at the same time.
 
 #### Function details
 
-##### `_assert_no_reserved_routes`  (lines 202–218)
+##### `_payload_digest`  (lines 218–220)
+
+```
+def _payload_digest(payload: object) -> str
+```
+
+**Purpose**: Creates a stable fingerprint for a piece of JSON-like data. This lets the service record exactly which configuration or sandbox settings it booted with.
+
+**Data flow**: It receives any payload that can be turned into JSON, writes it in a consistent key order, hashes those bytes with SHA-256, and returns a string like `sha256:...`.
+
+**Call relations**: It is used by `_runtime_identity` when building the runtime identity reported for this service instance.
+
+*Call graph*: called by 1 (_runtime_identity); 2 external calls (sha256, dumps).
+
+
+##### `_runtime_identity`  (lines 223–241)
+
+```
+def _runtime_identity(config: Config, carrier: CarrierSpec) -> RuntimeIdentity
+```
+
+**Purpose**: Builds a compact identity card for the running runtime. It records the code revision, container image digest, configuration fingerprint, and sandbox fingerprint.
+
+**Data flow**: It reads the runtime revision and image from environment variables, reads the config and carrier settings, hashes the relevant data, and returns a `RuntimeIdentity` object. If only one of revision or image is set, it raises an error because the pair would be misleading.
+
+**Call relations**: `run` calls this during startup after selecting the sandbox carrier, then passes the result into shared surface contexts so clients can see what runtime they are talking to.
+
+*Call graph*: calls 1 internal fn (_payload_digest); called by 1 (run); 3 external calls (__init__, model_dump, runtime_digest).
+
+
+##### `_assert_no_reserved_routes`  (lines 244–260)
 
 ```
 def _assert_no_reserved_routes(app: FastAPI) -> None
 ```
 
-**Purpose**: Checks that this service has not mounted web routes under paths reserved for the onboarding and login gateway. This prevents a route from appearing to exist in the app while being hidden by the front-door proxy.
+**Purpose**: Protects routes that belong to the onboarding and sign-in gateway. It makes startup fail if this service accidentally registers paths such as `/login`, `/logout`, `/join`, `/v1/onboard`, or `/ufo`.
 
-**Data flow**: It reads the FastAPI app’s registered routes, compares each route path with the reserved prefixes, and either returns quietly or raises an error listing the conflicting paths.
+**Data flow**: It inspects the FastAPI app's registered routes, looks for any route path starting with a reserved prefix, and either returns silently or raises a clear startup error listing the conflicts.
 
-**Call relations**: The main `run` function calls this near the end of startup, after routes have been mounted. It acts as a final safety inspection before the server begins accepting traffic.
+**Call relations**: `run` calls it after all routes are mounted and before the web server starts, making route ownership a checked rule instead of an assumption.
 
 *Call graph*: called by 1 (run).
 
 
-##### `run`  (lines 221–464)
+##### `run`  (lines 263–519)
 
 ```
 def run() -> None
 ```
 
-**Purpose**: Starts the shared fleet process. It builds all major services, registers jobs and routes, launches DBOS workflows, runs the web server, and performs careful shutdown.
+**Purpose**: Starts the shared service process. It is the main assembly point that loads settings, creates all major runtime objects, mounts web routes, starts workflow workers, and runs the HTTP server.
 
-**Data flow**: It reads configuration, environment variables, extension manifests, database settings, credentials, and deployment options. From those inputs it creates stores, registries, runtime objects, route handlers, background workers, and finally a running Uvicorn web server; on exit it drains and retires the worker when safe.
+**Data flow**: It reads configuration and environment variables, initializes logging, databases, credentials, extensions, storage, models, sandboxes, connectors, jobs, and FastAPI routes. It then starts Uvicorn and, when the server stops, drains workflow execution and retires the process heartbeat if safe.
 
-**Call relations**: This is the central caller for almost every helper in the file. It calls selection helpers to choose backends, mounting helpers to expose routes, job helpers to start workflow work, and shutdown helpers when Uvicorn stops.
+**Call relations**: This is the top-level story for the file. Almost every helper in this file exists to keep `run` readable: selecting backends, validating extension requirements, mounting routes, registering jobs, preparing proxy access, and shutting down safely.
 
-*Call graph*: calls 22 internal fn (from_env, _assert_no_reserved_routes, _connect_flow, _connector_registry, _launch_jobs, _mount_ext_routes, _mount_shared_surfaces, _one_shot, _preview_settings, _proxy_endpoint (+12 more)); 59 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__ (+15 more)).
+*Call graph*: calls 23 internal fn (from_env, from_skills, _assert_no_reserved_routes, _connect_flow, _connector_registry, _launch_jobs, _mount_ext_routes, _mount_shared_surfaces, _one_shot, _preview_settings (+13 more)); 60 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__ (+15 more)).
 
 
-##### `run.invoker_for`  (lines 286–287)
+##### `run.invoker_for`  (lines 329–330)
 
 ```
 def invoker_for(workspace_id: UUID) -> AdmissionInvoker
 ```
 
-**Purpose**: Creates an admission invoker for one workspace. An admission invoker is the object used to submit or resume work on behalf of that specific workspace.
+**Purpose**: Creates an admission invoker tied to one workspace. This is used when background or runtime code needs to admit work for a specific workspace.
 
-**Data flow**: It receives a workspace ID, combines it with the shared admission service built by `run`, and returns a workspace-bound invoker.
+**Data flow**: It receives a workspace ID, combines it with the shared `Admission` object created by `run`, and returns an `AdmissionInvoker` scoped to that workspace.
 
-**Call relations**: It is defined inside `run` because it depends on the admission object created during startup. `run` passes it into the runtime and job launch code so later jobs can admit work for the right workspace.
+**Call relations**: `run` defines it while assembling admission. It passes this factory into the runtime and job launch code so later work can be admitted under the correct workspace.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `_one_shot`  (lines 467–479)
+##### `_one_shot`  (lines 522–534)
 
 ```
 def _one_shot(coro: Coroutine[Any, Any, T]) -> T
 ```
 
-**Purpose**: Runs a single asynchronous setup or cleanup task on a temporary event loop, then cleans up database engines tied to that loop. This avoids leaving database connections attached to a loop that has already been closed.
+**Purpose**: Runs one asynchronous setup or cleanup step on a temporary event loop. It also makes sure database engines tied to that temporary loop are disposed before the loop disappears.
 
-**Data flow**: It receives a coroutine, wraps it in a cleanup step, runs that wrapper with `asyncio.run`, and returns the coroutine’s result after loop-specific database resources are disposed.
+**Data flow**: It receives a coroutine, wraps it in a small cleanup coroutine, runs it with `asyncio.run`, and returns the coroutine's result. Any loop-local database resources are cleaned up afterward.
 
-**Call relations**: `run`, `_proxy_endpoint`, and `_stop_executor` use this for isolated database-touching actions during startup and shutdown. It delegates the actual awaited work to `_one_shot.step`.
+**Call relations**: `run`, `_proxy_endpoint`, and `_stop_executor` use it for one-time database-touching work outside the long-lived server loop.
 
 *Call graph*: called by 3 (_proxy_endpoint, _stop_executor, run); 1 external calls (run).
 
 
-##### `_one_shot.step`  (lines 473–477)
+##### `_one_shot.step`  (lines 528–532)
 
 ```
 async def step() -> T
 ```
 
-**Purpose**: Performs the actual await inside `_one_shot` and guarantees cleanup afterward. It is the small inner routine that makes the temporary event loop safe to discard.
+**Purpose**: Performs the actual awaited work for `_one_shot` and guarantees cleanup. It is the small inner routine that makes the temporary loop safe.
 
-**Data flow**: It awaits the original coroutine and captures its result. Whether that coroutine succeeds or fails, it then asks the database layer to dispose engines for the current loop before returning or re-raising.
+**Data flow**: It awaits the original coroutine. Whether that succeeds or fails, it then calls the database cleanup routine for the current loop before returning or re-raising.
 
-**Call relations**: It is only used by `_one_shot`. Its cleanup call protects callers such as `run` and `_stop_executor` from leaking unusable database connections.
+**Call relations**: It is created and run only by `_one_shot`; callers do not use it directly.
 
 *Call graph*: 1 external calls (dispose_loop_engines).
 
 
-##### `_stop_executor`  (lines 482–496)
+##### `_stop_executor`  (lines 537–551)
 
 ```
 def _stop_executor(dbos: DBOS, heartbeat: Heartbeat, graceful_shutdown_seconds: int) -> None
 ```
 
-**Purpose**: Stops DBOS workflow execution and retires this worker’s seat only if no workflows are still active. This prevents another process from picking up the same work while it is still running here.
+**Purpose**: Shuts down DBOS workflow execution without creating duplicate work. It only retires this process's worker seat if no workflows are still active.
 
-**Data flow**: It receives the DBOS object, heartbeat object, and shutdown timeout. It asks DBOS to drain and destroy execution, checks the active workflow set, logs and keeps the seat if work remains, or retires the heartbeat seat if the process is empty.
+**Data flow**: It asks DBOS to drain workflows for a configured time. It then checks whether any workflows are still active; if so, it keeps the seat alive for safety, otherwise it retires the heartbeat record.
 
-**Call relations**: `run` calls this in its final shutdown block. It uses `_one_shot` to run the asynchronous heartbeat retirement safely.
+**Call relations**: `run` calls it in a `finally` block after Uvicorn exits. It uses `_one_shot` to retire the heartbeat through async database code.
 
 *Call graph*: calls 2 internal fn (retire, _one_shot); called by 1 (run); 2 external calls (destroy, log).
 
 
-##### `_shared_owner_dsn`  (lines 499–513)
+##### `_shared_owner_dsn`  (lines 554–568)
 
 ```
 def _shared_owner_dsn(config: Config) -> str
 ```
 
-**Purpose**: Finds the database connection string used for owner-level cross-workspace reads. This special connection can enumerate work across workspaces before each item is re-scoped safely.
+**Purpose**: Finds the special database connection string used for cross-workspace owner-level reads. This is needed for sweep jobs that first enumerate workspaces and then re-enter each one safely.
 
-**Data flow**: It reads the owner DSN from an environment variable or configuration. If neither is set, it raises a clear startup error; otherwise it returns the DSN string.
+**Data flow**: It reads `UFO_OWNER_DSN` from the environment or falls back to the configured owner database URL. If neither exists, it raises a startup error explaining why shared serving cannot continue.
 
-**Call relations**: `run` calls this before initializing the owner database engine. The value is needed by background sweeps that must first find work across all workspaces.
+**Call relations**: `run` calls it before initializing the owner database connection.
 
 *Call graph*: called by 1 (run).
 
 
-##### `_launch_jobs`  (lines 516–583)
+##### `_launch_jobs`  (lines 571–638)
 
 ```
 def _launch_jobs(runtime: Runtime, invoker_for: InvokerFactory, sync_driver: SyncDriver, page_feed: CorePageFeed) -> None
 ```
 
-**Purpose**: Registers and starts the system’s DBOS-backed background jobs. These include source syncing, turn dispatch, page-change handling, delivery cleanup, preview rendering, and extension-defined jobs.
+**Purpose**: Registers and starts scheduled and queued background jobs. These include source syncing, turn dispatch, delivery cleanup, page indexing, preview rendering, and extension-provided jobs.
 
-**Data flow**: It receives the runtime, an invoker factory, a sync driver, and a page feed. It builds probe access, page-change and preview runners, combines core and extension job bindings, disables configured jobs, and launches a `JobRunner`.
+**Data flow**: It receives the assembled runtime, an admission factory, a sync driver, and a page feed. It builds helper objects for probes, page-change handling, preview rendering, and job bindings, then launches a `JobRunner`.
 
-**Call relations**: `run` calls this after the runtime is initialized and sources are configured. The launched job runner hands work to DBOS schedules and to handlers that use runtime services such as blobs, sandboxes, models, indexes, and credentials.
+**Call relations**: `run` calls it after the runtime and source sync pieces exist. It hands work off to DBOS job machinery and runtime job runners.
 
 *Call graph*: called by 1 (run); 13 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, connector_clis (+3 more)).
 
 
-##### `_source_backends`  (lines 586–600)
+##### `_source_backends`  (lines 641–655)
 
 ```
 def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend]
 ```
 
-**Purpose**: Builds the map of source-sync backends that can import pages or files into UFO. It includes the built-in folder source and any source providers declared by extensions.
+**Purpose**: Builds the list of source-sync backends available to the service. A source backend is code that knows how to read pages or files from a particular kind of source.
 
-**Data flow**: It reads each manifest’s source providers and credential declarations. It creates a backend object for each unique backend name, raising an error if two extensions claim the same name, and returns the finished map.
+**Data flow**: It starts with the built-in folder backend, then walks extension manifests and adds each declared source provider. It gives each provider credential access limited to that extension's declared credential slots and rejects duplicate backend names.
 
-**Call relations**: `run` passes this map into `SyncDriver`. The sync driver later uses the selected backend name from configured sources to know how to fetch content.
+**Call relations**: `run` uses it when constructing the `SyncDriver` for configured sources.
 
 *Call graph*: called by 1 (run); 2 external calls (__init__, __init__).
 
 
-##### `_source_identity_resolvers`  (lines 603–644)
+##### `_source_identity_resolvers`  (lines 658–699)
 
 ```
 def _source_identity_resolvers(manifests: tuple[Manifest, ...], credentials: CredentialStore | None, blob: WorkspaceBlobStore) -> dict[str, SourceIdentityResolver]
 ```
 
-**Purpose**: Builds functions that can discover a surface’s current user identity for source syncing. This lets synced content be tied to the correct external account when a surface supports that lookup.
+**Purpose**: Builds functions that can discover the current user identity for source syncing on each surface. This is useful when a synced source needs to know which account it is acting as.
 
-**Data flow**: It reads manifests, credential storage, and the workspace blob store. For each surface that declares a self-user lookup, it creates a resolver function and returns a map from surface name to resolver.
+**Data flow**: It scans surfaces in extension manifests. For each surface that declares a self-user lookup, it creates a resolver that will later bind a workspace, provide safe credential reads, and call the surface's identity handler.
 
-**Call relations**: `run` gives these resolvers to `SyncDriver`. The nested resolver functions later bind the correct workspace before calling extension-provided identity code.
+**Call relations**: `run` passes the resulting resolver map into the `SyncDriver`.
 
 *Call graph*: called by 1 (run).
 
 
-##### `_source_identity_resolvers.resolve`  (lines 617–641)
+##### `_source_identity_resolvers.resolve`  (lines 672–696)
 
 ```
 async def resolve(workspace_id: UUID, handler=surface.self_user_id, slots=declared, store=credentials) -> str | None
 ```
 
-**Purpose**: Runs one surface’s identity lookup inside a specific workspace. It lets an extension ask, “who is the current user for this surface in this workspace?”
+**Purpose**: Looks up a surface-specific user identity inside one workspace. It wraps an extension's identity handler with workspace scoping and safe credential access.
 
-**Data flow**: It receives a workspace ID, creates a credential-reading helper limited to the extension’s declared slots, binds the workspace, builds a `SurfaceIdentityContext`, and returns the handler’s user ID result or `None`.
+**Data flow**: It receives a workspace ID, creates a credential-reading helper, binds the workspace for database safety, builds a `SurfaceIdentityContext`, and returns the identity string or `None` from the handler.
 
-**Call relations**: This function is created by `_source_identity_resolvers` and later used by source syncing. It hands credential access and blob access to the extension’s identity handler.
+**Call relations**: It is generated by `_source_identity_resolvers` and later called by source-sync code when it needs to resolve identity for a surface.
 
 *Call graph*: 2 external calls (__init__, ws).
 
 
-##### `_source_identity_resolvers.resolve.credential`  (lines 623–632)
+##### `_source_identity_resolvers.resolve.credential`  (lines 678–687)
 
 ```
 async def credential(credential_slot: str) -> str
 ```
 
-**Purpose**: Reads one credential slot for a surface identity lookup, while enforcing that the surface declared permission to use that slot.
+**Purpose**: Reads one credential slot for a source identity lookup, but only if that slot was declared by the extension. This prevents an extension from quietly reading secrets it did not ask for.
 
-**Data flow**: It receives a credential slot name, checks that the slot is declared, checks that a credential store exists, then retrieves the encrypted credential value for the current workspace.
+**Data flow**: It receives a credential slot name, checks that the slot is allowed and that a credential store exists, then reads the stored value for the current workspace.
 
-**Call relations**: It is used only inside `_source_identity_resolvers.resolve`. It protects extension identity code from reading undeclared credentials.
+**Call relations**: It is used inside the generated `resolve` function and handed to the surface identity handler through its context.
 
 
-##### `_select_hub`  (lines 647–665)
+##### `_select_hub`  (lines 702–720)
 
 ```
 def _select_hub(config: Config, manifests: tuple[Manifest, ...]) -> Hub
 ```
 
-**Purpose**: Chooses the live-message hub backend for this process. The hub is how surfaces receive live updates, similar to a switchboard for real-time messages.
+**Purpose**: Chooses the live message hub for the process. The hub is the shared channel used to stream live updates between running work and connected clients.
 
-**Data flow**: It starts with the built-in in-process hub, adds hub builders from manifests, checks for duplicate backend names, looks up the configured backend, and returns a built hub or raises if the name is unknown.
+**Data flow**: It builds a table of hub builders from the built-in in-process hub and any extension-provided hubs, rejects duplicate names, looks up the configured backend, and returns the built hub.
 
-**Call relations**: `run` calls this during startup. The selected hub is later shared with admissions, tailers, surfaces, and runtime components.
+**Call relations**: `run` calls it during startup before creating tailers, admission, runtime, and surfaces that depend on live updates.
 
 *Call graph*: called by 1 (run); 1 external calls (__init__).
 
 
-##### `_select_terminal_transport`  (lines 668–710)
+##### `_select_terminal_transport`  (lines 723–765)
 
 ```
 def _select_terminal_transport(config: Config, manifests: tuple[Manifest, ...], blob: FleetBlobStore) -> TerminalTransport
 ```
 
-**Purpose**: Chooses how terminal sessions communicate between browser connections and running workflows. It refuses unsafe combinations where a multi-process fleet would use a process-local terminal channel.
+**Purpose**: Chooses how sandbox terminals connect back to users. It also prevents an unsafe mix where live messages are cross-process but terminal rendezvous is only local to one process.
 
-**Data flow**: It reads hub and terminal configuration, validates that an in-process terminal is not paired with a cross-process hub, gathers extension-provided terminal transport builders, and returns the selected transport.
+**Data flow**: It checks the terminal and hub backend combination, builds a table of terminal transport builders, rejects duplicates, looks up the configured backend, and returns the chosen transport using the shared hub URL and blob store.
 
-**Call relations**: `run` uses this when constructing sandbox support. The chosen transport is passed into `ConversationSandbox` so terminal operations can reach the right running environment.
+**Call relations**: `run` calls it while constructing `ConversationSandbox`, so sandboxes know how terminal input and output will travel.
 
 *Call graph*: called by 1 (run); 1 external calls (__init__).
 
 
-##### `_select_cdp_provider`  (lines 713–741)
+##### `_select_cdp_provider`  (lines 768–796)
 
 ```
 def _select_cdp_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> CdpProvider | None
 ```
 
-**Purpose**: Chooses the browser automation provider, if one is configured and installed. CDP means Chrome DevTools Protocol, a way to control a browser programmatically.
+**Purpose**: Selects the browser automation provider, if one is installed and configured. CDP means Chrome DevTools Protocol, a way to control a browser programmatically.
 
-**Data flow**: It gathers CDP provider specs from manifests, checks for duplicate names, finds the configured provider, validates credential key availability when needed, and returns a built provider or `None`.
+**Data flow**: It scans extension manifests for CDP providers, rejects duplicate backend names, finds the configured provider, checks credential-key availability if needed, and returns the built provider or `None`.
 
-**Call relations**: `run` calls this to give browser capability to the runtime. `_require_cdp_provider` also calls it when an extension declares that browser control is mandatory.
+**Call relations**: `run` uses it when creating the runtime. `_require_cdp_provider` calls it during extension requirement validation.
 
 *Call graph*: called by 2 (_require_cdp_provider, run); 1 external calls (__init__).
 
 
-##### `_validate_requires`  (lines 744–768)
+##### `_validate_requires`  (lines 799–823)
 
 ```
 def _validate_requires(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: Checks each extension’s declared required seams before the server starts. A seam is a pluggable capability, such as search or browser control, that an extension depends on.
+**Purpose**: Checks that every active extension's declared requirements are actually available. This turns missing backends into clear startup errors instead of later user-facing failures.
 
-**Data flow**: It reads every manifest’s required seam names, finds the matching checker, runs it, and wraps any failure in an error that names the extension and missing capability.
+**Data flow**: It reads each manifest's required seam names, finds the matching check function, runs it, and wraps any failure with the extension name and the missing seam.
 
-**Call relations**: `run` calls this during startup after validating extension tools. It delegates specific checks to functions such as `_require_cdp_provider`, `_require_search_provider`, and `_require_memory_search`.
+**Call relations**: `run` calls it soon after loading manifests and credentials, before assembling the rest of the service.
 
 *Call graph*: called by 1 (run).
 
 
-##### `_require_cdp_provider`  (lines 771–785)
+##### `_require_cdp_provider`  (lines 826–840)
 
 ```
 def _require_cdp_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: Enforces that browser automation is actually available when an extension requires it. It turns a missing optional browser backend into a clear startup failure.
+**Purpose**: Enforces that a browser extension has a usable browser automation provider. If no active extension registered the selected provider, startup fails.
 
-**Data flow**: It calls `_select_cdp_provider` with the current configuration and manifests. If selection returns `None`, it raises an error naming the configured provider.
+**Data flow**: It calls `_select_cdp_provider`; if the result is `None`, it raises an error naming the configured provider.
 
-**Call relations**: _validate_requires uses this when a manifest lists the `cdp_providers` seam. It relies on `_select_cdp_provider` for the detailed backend and credential checks.
+**Call relations**: _validate_requires uses this check when an extension says it requires `cdp_providers`.
 
 *Call graph*: calls 1 internal fn (_select_cdp_provider).
 
 
-##### `_select_search_provider`  (lines 788–823)
+##### `_select_search_provider`  (lines 843–878)
 
 ```
 def _select_search_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> SearchProvider | None
 ```
 
-**Purpose**: Chooses the external search backend for research features. It can return no provider when search is not configured, unless another check requires it.
+**Purpose**: Selects the research search backend, if configured. This is the service that research tools use to search outside information.
 
-**Data flow**: It gathers search provider specs from manifests, checks for duplicate backend names, reads the configured search provider, validates that credentials are available, and builds the selected provider.
+**Data flow**: It scans manifests for search providers, rejects duplicate names, returns `None` if no search provider is configured, otherwise validates the selected name and credential key, then builds the provider with scoped credential access.
 
-**Call relations**: `run` calls this to install search capability into the runtime. `_require_search_provider` calls it when an extension says search is required.
+**Call relations**: `run` uses it when creating the runtime. `_require_search_provider` uses it to enforce extensions that require search.
 
 *Call graph*: called by 2 (_require_search_provider, run); 2 external calls (__init__, __init__).
 
 
-##### `_require_search_provider`  (lines 826–839)
+##### `_require_search_provider`  (lines 881–894)
 
 ```
 def _require_search_provider(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: Enforces that a search backend is configured and usable when research tools require one.
+**Purpose**: Enforces that research tools have a configured and working search provider. It gives a clear startup error if the search setting is missing or invalid.
 
-**Data flow**: It checks that the search provider setting is present, then calls `_select_search_provider` to verify the named backend exists and can be built.
+**Data flow**: It checks that the search provider setting is present, then delegates the detailed validation and construction check to `_select_search_provider`.
 
-**Call relations**: _validate_requires uses this for the `search_providers` seam. It turns missing or broken research search setup into a startup error.
+**Call relations**: _validate_requires calls it for extensions that declare the `search_providers` requirement.
 
 *Call graph*: calls 1 internal fn (_select_search_provider).
 
 
-##### `_select_flag_provider`  (lines 842–869)
+##### `_select_flag_provider`  (lines 897–924)
 
 ```
 def _select_flag_provider(config: Config, manifests: tuple[Manifest, ...]) -> FeatureProvider | None
 ```
 
-**Purpose**: Chooses the feature-flag provider, if configured. Feature flags are deployment switches that let code choose between enabled and disabled behavior.
+**Purpose**: Chooses the feature-flag provider, if configured. Feature flags are switches that let the service turn behavior on or off without changing code.
 
-**Data flow**: It gathers flag provider specs from manifests, rejects duplicate backend names, returns `None` if no backend is configured, builds the selected provider, and warns if the provider cannot be keyed.
+**Data flow**: It scans extension manifests for flag providers, rejects duplicate names, returns `None` if no backend is configured, otherwise builds the selected provider. If the provider cannot be built because it lacks a key, it logs a warning and returns `None`.
 
-**Call relations**: `run` calls this before initializing flags. Its output is passed to the flag system, which then answers feature checks during runtime.
+**Call relations**: `run` calls it before initializing the feature-flag system.
 
 *Call graph*: called by 1 (run); 2 external calls (__init__, warn).
 
 
-##### `_require_memory_search`  (lines 872–898)
+##### `_require_memory_search`  (lines 927–953)
 
 ```
 def _require_memory_search(_config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: Checks that exactly one usable default memory-search provider is installed when an extension requires memory search.
+**Purpose**: Checks that the default memory-search provider exists exactly once and can be used. Memory search is the part that retrieves stored knowledge from prior context.
 
-**Data flow**: It scans manifests for providers with the default memory-search name, raises if none or more than one are found, then checks that credentials are available if that provider declares credential slots.
+**Data flow**: It looks through manifests for the default memory-search provider name, rejects none or more than one, then checks whether any declared credential slots require a configured credential store.
 
-**Call relations**: _validate_requires calls this for the `memory_search` seam. It does not build the provider itself; it verifies that the installed extension set and credential setup can support it.
+**Call relations**: _validate_requires calls it when an extension declares that memory search is required.
 
 
-##### `_select_auth_proxy`  (lines 910–947)
+##### `_select_auth_proxy`  (lines 965–1002)
 
 ```
 def _select_auth_proxy(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> AuthProxy | None
 ```
 
-**Purpose**: Chooses the fallback authentication proxy for connector credentials. This is used when a connector does not have its own broker and needs host-side credential access.
+**Purpose**: Chooses the fallback authentication proxy for connector credentials. This is used when a connector does not have its own broker and needs the host to resolve credentials safely.
 
-**Data flow**: It gathers auth proxy specs from manifests, applies the configured backend or auto-selects when only one exists, validates credentials, builds the selected proxy, and returns it or `None`.
+**Data flow**: It scans manifests for auth proxy backends, rejects duplicate names, chooses the configured backend or the only available backend, checks that credentials are configured, and builds the proxy with scoped credential access.
 
-**Call relations**: _connector_registry calls this while building connector routing. The selected proxy becomes the fallback path for connector feed-sync credential resolution.
+**Call relations**: _connector_registry calls it while building the registry used by connector tools and source syncing.
 
 *Call graph*: called by 1 (_connector_registry); 2 external calls (__init__, __init__).
 
 
-##### `_mount_ext_routes`  (lines 950–998)
+##### `_mount_ext_routes`  (lines 1005–1053)
 
 ```
 def _mount_ext_routes(app: FastAPI, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, index: IndexBackend, embed: EmbedClient, public_base_url: str | None) -> None
 ```
 
-**Purpose**: Adds extension-defined HTTP routes under `/ext/<extension>/...`. Each route must identify the workspace before extension code can run.
+**Purpose**: Adds extension-owned HTTP routes under `/ext/<extension>/...`. Each route must first identify a workspace so the handler cannot touch shared data without a workspace scope.
 
-**Data flow**: It reads manifests and their route specs, creates an extension context with limited credential and index access, wraps each route in an endpoint that checks authorization and binds the workspace, then adds the route to FastAPI.
+**Data flow**: It scans manifests for route specs, builds an extension context, creates a FastAPI endpoint for each route, and registers it. If routes need credentials but no credential key exists, startup fails.
 
-**Call relations**: `run` calls this after core jobs and before shared surfaces are mounted. The nested endpoint hands verified requests to extension handlers.
+**Call relations**: `run` calls it after jobs are launched and before shared surfaces are mounted. The generated endpoints call extension handlers after authorization and workspace binding.
 
 *Call graph*: calls 1 internal fn (home_surface); called by 1 (run); 2 external calls (add_route, context_for).
 
 
-##### `_mount_ext_routes.endpoint`  (lines 982–992)
+##### `_mount_ext_routes.endpoint`  (lines 1037–1047)
 
 ```
 async def endpoint(request: Request, handler=spec.handler, identify=spec.identify, extension_context=context) -> Response
 ```
 
-**Purpose**: Processes one request to an extension route. It refuses unidentified requests and runs authorized extension code inside the identified workspace.
+**Purpose**: Serves one extension route after checking which workspace the request belongs to. Unauthorized requests are stopped before the extension handler runs.
 
-**Data flow**: It receives a web request, asks the route’s identify function for a workspace, returns a 401 response if none is found, or binds that workspace and awaits the extension handler’s response.
+**Data flow**: It receives a web request, asks the route's identify function for a workspace ID, returns a 401 response if identification fails, otherwise binds that workspace and awaits the extension handler.
 
-**Call relations**: This endpoint is created by `_mount_ext_routes` for each extension route. It hands control to the extension handler only after workspace scoping is established.
+**Call relations**: It is created inside `_mount_ext_routes` for each extension route and invoked by FastAPI when that URL is requested.
 
 *Call graph*: 2 external calls (Response, ws).
 
 
-##### `WorkspaceScopeBoundary.__call__`  (lines 1019–1027)
+##### `WorkspaceScopeBoundary.__call__`  (lines 1074–1082)
 
 ```
 async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None
 ```
 
-**Purpose**: Clears workspace identity before and after each HTTP request. This prevents accidental leakage of one request’s workspace into another request handled by the same process.
+**Purpose**: Clears workspace state at the start and end of every HTTP request. This prevents one workspace's context from leaking into another request in the shared fleet.
 
-**Data flow**: It receives the ASGI request scope, receive channel, and send channel. Non-HTTP traffic passes through unchanged; HTTP traffic has `current_workspace` set to `None`, then the downstream app runs, and finally the workspace is cleared again.
+**Data flow**: It receives the ASGI request scope, receive function, and send function. For non-HTTP traffic it passes through; for HTTP it clears the current workspace, runs the downstream app, and clears the workspace again in a `finally` block.
 
-**Call relations**: _mount_shared_surfaces installs this as middleware. Surface endpoints set the workspace during request handling, and this boundary guarantees cleanup after the full response has been sent.
+**Call relations**: _mount_shared_surfaces installs this as middleware. It surrounds all later HTTP route handling and protects surface streaming responses too.
 
 *Call graph*: 1 external calls (set).
 
 
-##### `_mount_shared_surfaces`  (lines 1030–1225)
+##### `_mount_shared_surfaces`  (lines 1085–1284)
 
 ```
 def _mount_shared_surfaces(app: FastAPI, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, blob: WorkspaceBlobStore, sandboxes: ConversationSandbox, hub: Hub, dbos_client: DBOSClie
 ```
 
-**Purpose**: Mounts all shared-fleet-capable surface routes and starts surface-related delivery helpers. A surface is a user-facing interface, such as a browser UI or integration endpoint.
+**Purpose**: Mounts member-facing shared surface routes, such as chat or browser surfaces, in a way that resolves the workspace on every request. It also starts pollers and listeners for durable surface delivery.
 
-**Data flow**: It receives the app plus runtime services such as credentials, blobs, sandboxes, hub, DBOS client, models, skills, memory, and connectors. It builds common surface context factories, adds middleware, registers routes and listeners, mounts the home redirect, and creates writeback pollers when surfaces can post back.
+**Data flow**: It installs the workspace boundary middleware, prepares shared helpers such as admission, tailing, stopping, skills, connector registry, object schemas, and conversation slots, then registers each surface route. It also creates writeback and mid-turn reply pollers when surfaces support durable posting.
 
-**Call relations**: `run` calls this after extension routes are mounted. It uses `_connector_entries`, `_mount_home`, `home_surface`, and the nested `context_for` and `endpoint` functions to connect incoming surface requests to workspace-scoped runtime services.
+**Call relations**: `run` calls it after building the runtime and extension routes. It uses `_connector_entries`, `home_surface`, `_mount_home`, and nested helpers to build per-workspace surface contexts.
 
-*Call graph*: calls 5 internal fn (_connector_entries, _mount_home, home_surface, bundled_skills, from_skills); called by 1 (run); 24 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__ (+14 more)).
+*Call graph*: calls 5 internal fn (bundled_skills, from_skills, _connector_entries, _mount_home, home_surface); called by 1 (run); 24 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__ (+14 more)).
 
 
-##### `_mount_shared_surfaces.context_for`  (lines 1123–1160)
+##### `_mount_shared_surfaces.context_for`  (lines 1179–1219)
 
 ```
 def context_for(workspace_id: UUID, surface: str) -> SurfaceContext
 ```
 
-**Purpose**: Builds the full `SurfaceContext` for one workspace and one surface. This context is the toolbox a surface handler uses to admit turns, read blobs, access skills, stop work, use credentials, and describe deployment capabilities.
+**Purpose**: Builds the full surface context for one workspace and one surface. This context is the toolbox a surface handler uses to admit turns, read blobs, access credentials, list skills, stop runs, and more.
 
-**Data flow**: It receives a workspace ID and surface name, combines them with the shared services prepared by `_mount_shared_surfaces`, computes items such as home surface and admissible frames, and returns a ready-to-use context object.
+**Data flow**: It receives a workspace ID and surface name, combines them with shared objects prepared by `_mount_shared_surfaces`, and returns a `SurfaceContext` filled with workspace-scoped services and deployment metadata.
 
-**Call relations**: Surface endpoints, listeners, and pollers call this when they need to run surface code. It creates workspace-bound admission and passes along shared runtime objects in a controlled shape.
+**Call relations**: Surface endpoints, listeners, writeback pollers, and mid-turn reply pollers use this helper whenever they need to run surface code for a particular workspace.
 
 *Call graph*: calls 1 internal fn (home_surface); 3 external calls (__init__, __init__, frame_admissible).
 
 
-##### `_mount_shared_surfaces.endpoint`  (lines 1188–1202)
+##### `_mount_shared_surfaces.endpoint`  (lines 1247–1261)
 
 ```
 async def endpoint(request: Request, handler=route.handler, identify=resolver, surface=spec.name, surface_auth=auth) -> Response
 ```
 
-**Purpose**: Processes one request to a mounted surface route. It verifies the request, binds the workspace, and calls the surface’s route handler with a workspace-specific context.
+**Purpose**: Serves one shared surface route after authenticating the request and binding the correct workspace. This is the main request wrapper for member-facing surfaces.
 
-**Data flow**: It receives a request, asks the surface’s identify function to resolve it using surface authentication, returns an immediate response or 401 when appropriate, or sets the current workspace and awaits the surface handler.
+**Data flow**: It receives a web request, asks the surface's identify function to resolve it, returns a response directly if identification does so, returns 401 if unresolved, otherwise sets the current workspace and calls the route handler with a freshly built surface context.
 
-**Call relations**: This endpoint is created inside `_mount_shared_surfaces` for each surface route. It is protected by `WorkspaceScopeBoundary`, which cleans up the workspace after the response finishes.
+**Call relations**: It is created inside `_mount_shared_surfaces` for each surface route and called by FastAPI when members interact with those surface URLs.
 
 *Call graph*: 2 external calls (Response, set).
 
 
-##### `home_surface`  (lines 1228–1235)
+##### `home_surface`  (lines 1287–1294)
 
 ```
 def home_surface(manifests: tuple[Manifest, ...]) -> str | None
 ```
 
-**Purpose**: Finds the single surface marked as the browser home. This lets the bare service URL redirect users to the right user interface.
+**Purpose**: Finds which installed surface should be treated as the browser home page. It makes sure there is at most one such home surface.
 
-**Data flow**: It scans all manifests for surfaces marked as home. It raises if more than one claims that role, returns the one name if found, or returns `None` when there is no browser home.
+**Data flow**: It scans all manifests for surfaces marked as home, raises an error if more than one is found, and returns the single home surface name or `None`.
 
-**Call relations**: `run`, `_mount_ext_routes`, `_mount_shared_surfaces`, `_mount_shared_surfaces.context_for`, and `_mount_home` all use this to build URLs and contexts that point users back to the main surface.
+**Call relations**: `run`, `_mount_ext_routes`, `_mount_shared_surfaces`, `_mount_shared_surfaces.context_for`, and `_mount_home` use it whenever they need the browser's default landing surface.
 
 *Call graph*: called by 5 (_mount_ext_routes, _mount_home, _mount_shared_surfaces, context_for, run).
 
 
-##### `_mount_home`  (lines 1238–1250)
+##### `_mount_home`  (lines 1297–1309)
 
 ```
 def _mount_home(app: FastAPI, manifests: tuple[Manifest, ...]) -> None
 ```
 
-**Purpose**: Adds a simple `GET /` route that redirects to the configured home surface. This turns the service root into a useful front door instead of a dead end.
+**Purpose**: Turns the bare root URL `/` into a redirect to the configured home surface. Without this, visiting the service host directly would likely be a dead end.
 
-**Data flow**: It asks `home_surface` for the home surface name. If one exists, it creates a redirect endpoint and adds it to the FastAPI app; otherwise it does nothing.
+**Data flow**: It calls `home_surface`; if there is no home surface it does nothing. Otherwise it registers a GET route for `/` that redirects to `/surface/<home>`.
 
-**Call relations**: _mount_shared_surfaces calls this after mounting surface routes. The nested `home` function performs the actual redirect when a browser visits `/`.
+**Call relations**: _mount_shared_surfaces calls it after mounting all surface routes.
 
 *Call graph*: calls 1 internal fn (home_surface); called by 1 (_mount_shared_surfaces); 1 external calls (add_route).
 
 
-##### `_mount_home.home`  (lines 1247–1248)
+##### `_mount_home.home`  (lines 1306–1307)
 
 ```
 async def home(_request: Request) -> Response
 ```
 
-**Purpose**: Redirects a browser from `/` to the selected home surface path.
+**Purpose**: Responds to `GET /` by redirecting the browser to the home surface. It uses a 303 redirect, which tells the browser to fetch the target page with GET.
 
-**Data flow**: It ignores the request details and returns a 303 redirect response pointing at `/surface/<home-surface>`.
+**Data flow**: It ignores the request body and returns a redirect response pointing at the selected surface path.
 
-**Call relations**: This endpoint is registered by `_mount_home`. It relies on `_mount_home` having already chosen a valid home surface.
+**Call relations**: It is created and registered by `_mount_home`, then invoked by FastAPI for root-path browser visits.
 
 *Call graph*: 1 external calls (RedirectResponse).
 
 
-##### `_serve_lifespan`  (lines 1254–1283)
+##### `_serve_lifespan`  (lines 1313–1342)
 
 ```
 async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]
 ```
 
-**Purpose**: Runs app-loop background tasks for as long as the web server is alive. These tasks recover abandoned workflows, reconcile cancellations, handle stranded turns, run surface delivery pollers, and run surface listeners.
+**Purpose**: Runs background tasks that should live for the same lifetime as the web app loop. These include recovery, cancellation cleanup, stranded-turn cleanup, surface writeback polling, and surface listeners.
 
-**Data flow**: At startup it registers configured sources, creates an async task group, starts recovery, reconciliation, poller, and listener tasks, then yields control to FastAPI. On shutdown it cancels all tasks it started.
+**Data flow**: On startup it registers configured sources, then opens an asyncio task group and starts the long-running background tasks. On shutdown it cancels those tasks.
 
-**Call relations**: `run` gives this function to FastAPI as the app lifespan manager. It uses state values that `run` and `_mount_shared_surfaces` placed on the app.
+**Call relations**: `run` passes it as the FastAPI lifespan handler when creating the app, so Uvicorn activates it while the server is running.
 
 *Call graph*: 5 external calls (__init__, __init__, __init__, TaskGroup, register_sources).
 
 
-##### `_preview_settings`  (lines 1286–1295)
+##### `_preview_settings`  (lines 1345–1354)
 
 ```
 def _preview_settings(config: Config) -> tuple[tuple[str, int], str] | None
 ```
 
-**Purpose**: Reads and validates sandbox preview-service settings. The preview service renders documents or sites for sandbox-related features.
+**Purpose**: Reads and validates sandbox preview-service settings. The preview service renders sandbox content for viewing outside the sandbox.
 
-**Data flow**: It parses the configured preview service address. If disabled, it returns `None`; if enabled, it requires a preview token from the environment and returns the service address plus token.
+**Data flow**: It parses the configured preview service address. If preview is disabled it returns `None`; if enabled, it requires a preview token from the environment and returns the address plus token.
 
-**Call relations**: `run` calls this when building renderers and site preview support. `_proxy_endpoint` also calls it so egress policy can allow preview traffic with the right token.
+**Call relations**: `run` uses it when setting up document rendering and site previewing. `_proxy_endpoint` uses it so egress rules can allow preview access.
 
 *Call graph*: called by 2 (_proxy_endpoint, run); 1 external calls (parse_preview_service).
 
 
-##### `_proxy_endpoint`  (lines 1298–1376)
+##### `_proxy_endpoint`  (lines 1357–1434)
 
 ```
 def _proxy_endpoint(app: FastAPI, config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None, pricing: Pricing, run_tokens: RunTokenCodec, blob: FilesystemBlobStore | S3BlobS
 ```
 
-**Purpose**: Sets up sandbox egress control and returns the proxy information that sandboxes need. Egress means outbound network access from a sandbox, which must be filtered, authorized, and metered.
+**Purpose**: Sets up the sandbox egress proxy connection and the server-side policy endpoint that proxy calls. Egress here means network traffic leaving a sandbox.
 
-**Data flow**: It reads proxy, certificate, token, cache, preview, connector, model, artifact, and credential settings. It builds per-agent network rules, mounts control and git-credential routes on the FastAPI app, and returns a `ProxyEndpoint` containing the proxy port, public URL, and trusted certificate.
+**Data flow**: It determines the certificate authority and control token, validates cache and preview settings, builds per-agent egress rules from models, artifacts, credentials, grants, manifests, and connector tools, mounts egress-control routers on the FastAPI app, and returns the proxy endpoint details given to sandboxes.
 
-**Call relations**: `run` calls this while constructing `ConversationSandbox`. It uses `_preview_settings`, `_ephemeral_egress_ca`, and `_one_shot`, then hands routing rules to `EgressControl` so the separate egress proxy can ask serve what to allow.
+**Call relations**: `run` calls it while constructing `ConversationSandbox`. It uses `_ephemeral_egress_ca`, `_preview_settings`, and `_one_shot`, then hands off enforcement to `EgressControl`.
 
-*Call graph*: calls 3 internal fn (_ephemeral_egress_ca, _one_shot, _preview_settings); called by 1 (run); 13 external calls (__init__, __init__, __init__, __init__, include_router, token_urlsafe, connector_transfer_hosts, derive_artifact_store_rules, derive_manifest_rules, connector_clis (+3 more)).
+*Call graph*: calls 3 internal fn (_ephemeral_egress_ca, _one_shot, _preview_settings); called by 1 (run); 13 external calls (__init__, __init__, __init__, __init__, include_router, token_urlsafe, parse_cache_daemon, connector_clis, injecting_slots, model_rule_base (+3 more)).
 
 
-##### `_ephemeral_egress_ca`  (lines 1379–1398)
+##### `_ephemeral_egress_ca`  (lines 1437–1456)
 
 ```
 def _ephemeral_egress_ca() -> str
 ```
 
-**Purpose**: Creates a temporary certificate authority certificate for local runs without a shared egress proxy certificate. A certificate authority is a trust anchor used to decide whether proxy-made certificates should be trusted.
+**Purpose**: Creates a temporary certificate authority certificate for local development when no shared egress proxy certificate is provided. A certificate authority is a trust anchor used to verify proxy-made certificates.
 
-**Data flow**: It generates a private key, builds a self-signed CA certificate named for local UFO egress, serializes only the certificate to PEM text, and returns that text.
+**Data flow**: It generates a private key, creates a self-signed CA certificate named `ufo-egress-local`, valid for a long period, and returns the certificate text in PEM format. The signing key is not returned.
 
-**Call relations**: _proxy_endpoint calls this only when no hosted proxy URL is configured and no shared CA certificate is supplied. In that local default, the certificate is well-formed even though no real proxy may be running.
+**Call relations**: _proxy_endpoint calls it only for local boots that do not provide a shared egress CA.
 
 *Call graph*: called by 1 (_proxy_endpoint); 9 external calls (generate_private_key, SHA256, BasicConstraints, CertificateBuilder, Name, NameAttribute, random_serial_number, now, timedelta).
 
 
-##### `_connector_registry`  (lines 1404–1418)
+##### `_connector_registry`  (lines 1462–1476)
 
 ```
 def _connector_registry(config: Config, manifests: tuple[Manifest, ...], credentials: CredentialStore | None) -> ConnectorRegistry
 ```
 
-**Purpose**: Builds the registry that routes connector-related work. Connectors are integrations with outside services, often using OAuth, a browser-based permission flow.
+**Purpose**: Builds the central connector registry. Connectors are integrations, often OAuth-based, that let UFO access outside services on a member's behalf.
 
-**Data flow**: It reads connector declarations from manifests, builds connector entries, selects a fallback auth proxy, opens the connector namespace resolver, and returns a `ConnectorRegistry`.
+**Data flow**: It gathers connector entries from manifests, builds a namespace resolver, selects any fallback auth proxy, and returns a `ConnectorRegistry`.
 
-**Call relations**: `run` calls this during startup. `_mount_shared_surfaces`, runtime tools, and source syncing use the resulting registry to understand available connector providers.
+**Call relations**: `run` calls it during startup. `_mount_shared_surfaces` may also build a default registry using `_connector_entries` if one is not supplied.
 
 *Call graph*: calls 2 internal fn (_connector_entries, _select_auth_proxy); called by 1 (run); 2 external calls (__init__, open_connector_namespace).
 
 
-##### `_connector_entries`  (lines 1421–1431)
+##### `_connector_entries`  (lines 1479–1489)
 
 ```
 def _connector_entries(manifests: tuple[Manifest, ...]) -> dict[str, ConnectorEntry]
 ```
 
-**Purpose**: Collects connector provider metadata from all manifests and checks that no provider name is registered twice.
+**Purpose**: Collects connector provider metadata from extension manifests. It ensures each provider name belongs to only one extension.
 
-**Data flow**: It scans each manifest’s connectors, extracts the OAuth provider name, label, and broker, creates a `ConnectorEntry` for each, and returns a provider-to-entry map.
+**Data flow**: It scans all manifest connectors, rejects duplicate OAuth provider names, and returns a dictionary of provider names to `ConnectorEntry` objects containing provider, label, and broker information.
 
-**Call relations**: _connector_registry uses this for the main registry. `_mount_shared_surfaces` also uses it when it needs a default connector registry.
+**Call relations**: _connector_registry uses it to build the main registry. `_mount_shared_surfaces` uses it when it needs to create a fallback registry.
 
 *Call graph*: called by 2 (_connector_registry, _mount_shared_surfaces); 1 external calls (__init__).
 
 
-##### `_connect_flow`  (lines 1434–1472)
+##### `_connect_flow`  (lines 1492–1530)
 
 ```
 def _connect_flow(credentials: CredentialStore | None, config: Config, manifests: tuple[Manifest, ...], index: IndexBackend | None=None, embed: EmbedClient | None=None, resumption: ConnectResume | Non
 ```
 
-**Purpose**: Creates the OAuth connect flow for installed connectors. This flow starts authorization, protects state, stores grants, and completes browser callbacks.
+**Purpose**: Creates the OAuth connection flow used to authorize connectors and store grants. OAuth is the common browser-based sign-in handoff used by many external services.
 
-**Data flow**: It receives the credential store, config, manifests, and optional index, embed, and resume support. If credentials are absent it returns `None`; otherwise it gathers OAuth providers, validates the redirect URI, builds connection hooks, and returns a `ConnectFlow`.
+**Data flow**: If there is no credential store, it returns `None` because tokens cannot be safely encrypted. Otherwise it gathers OAuth providers, checks duplicates, computes the redirect URI, builds connection hooks and labels, and returns a `ConnectFlow`.
 
-**Call relations**: `run` calls this and installs the result as the global connect flow. It delegates redirect URL validation to `_connect_redirect_uri` and uses extension connection hooks to publish newly completed connections.
+**Call relations**: `run` calls it and installs the result with the global connect-flow installer, so tools, private surface authorization, and OAuth callbacks share the same flow.
 
 *Call graph*: calls 1 internal fn (_connect_redirect_uri); called by 1 (run); 4 external calls (__init__, __init__, connection_hooks, open_connector_namespace).
 
 
-##### `_connect_redirect_uri`  (lines 1475–1501)
+##### `_connect_redirect_uri`  (lines 1533–1559)
 
 ```
 def _connect_redirect_uri(config: Config, providers: Mapping[str, OAuthProvider]) -> str
 ```
 
-**Purpose**: Builds and validates the public OAuth callback URL for connector login flows. This must be a real browser-openable URL because outside providers redirect the user back to it.
+**Purpose**: Builds and validates the public OAuth callback URL. This URL must be reachable by the member's browser after an external provider redirects back.
 
-**Data flow**: It reads `connect.public_base_url` from config and the set of registered providers. If there are no providers it returns an inert or derived callback; otherwise it requires a scheme, host, and non-wildcard hostname, then appends the callback path.
+**Data flow**: It reads `connect.public_base_url`, returns an inert value if no providers exist, otherwise requires a real HTTP or HTTPS URL with a host that is not a wildcard bind, and appends the callback path.
 
-**Call relations**: _connect_flow calls this while building the OAuth flow. Its result is shared by both halves of the connector authorization handoff: the initial request and the provider callback.
+**Call relations**: _connect_flow calls it while creating the connector authorization flow.
 
 *Call graph*: called by 1 (_connect_flow); 1 external calls (urlparse).
 
-
-### `core/src/ufo/runtime/runtime_instance.py`
-
-`orchestration` · `background during serve runtime`
-
-This file is the shared fleet’s safety crew. Each serve process records a “seat” in the database and refreshes it every few seconds, like tapping a card reader to say “I am still here.” Other processes use that heartbeat to decide whether work owned by that process is still alive or has been abandoned.
-
-There are three repair loops. ExecutorRecovery looks at DBOS workflows, where DBOS is the durable workflow system that remembers queued work across crashes. If a workflow is still pending under an executor id whose heartbeat has gone stale, it asks DBOS to recover that work so another live process can continue it. CancelReconciler spreads cancellation downward through a tree of turns: cancelling a parent turn only stops that one row at first, so this sweep finds still-live descendant turns and cancels them too. StrandedTurnReconciler fixes a narrower problem: a turn marked running may point to a workflow attempt that DBOS no longer knows how to advance. After a grace period, that turn is cancelled so the conversation no longer treats it as active work.
-
-All loops tolerate temporary database or DBOS errors by logging the failure and trying again later. That is important because these loops are guardians; one bad tick should not stop the whole safety system.
-
-#### Function details
-
-##### `record_fleet_seat`  (lines 42–57)
-
-```
-async def record_fleet_seat(instance_id: UUID) -> None
-```
-
-**Purpose**: Creates the database row that says this serve process exists. This is done before durable workflow execution starts, so other repair loops do not mistake this new process’s work for abandoned work.
-
-**Data flow**: It receives this process’s unique instance id. It opens an owner database transaction, inserts a runtime_instance row with no workspace attached, stamps the current time as its heartbeat and creation time, then logs that the fleet seat was recorded. Nothing is returned; the database row is the result.
-
-**Call relations**: This is the first visible sign of a serve process joining the shared fleet. Later, Heartbeat.beat keeps the same row fresh, ExecutorRecovery._live_executors reads these rows to decide which executors are alive, and Heartbeat.retire removes the row during graceful shutdown.
-
-*Call graph*: 3 external calls (insert, owner_tx, log).
-
-
-##### `Heartbeat.run`  (lines 70–80)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Runs the endless heartbeat loop for one serve process. It repeatedly refreshes the process’s liveness row so peers know the process is still alive.
-
-**Data flow**: It uses the instance id stored on the Heartbeat object. Each cycle it calls Heartbeat.beat, logs a database error if that one refresh fails, then sleeps for the heartbeat interval before trying again. It normally does not return because it is a background loop.
-
-**Call relations**: This loop is the driver for Heartbeat.beat. It is meant to run for the lifetime of the serve process, so ExecutorRecovery can safely treat a fresh heartbeat as proof that an executor should not be recovered by another process.
-
-*Call graph*: calls 1 internal fn (beat); 2 external calls (sleep, log).
-
-
-##### `Heartbeat.beat`  (lines 82–92)
-
-```
-async def beat(self) -> None
-```
-
-**Purpose**: Writes one fresh liveness timestamp for this process. This small update is what tells the rest of the fleet, “do not recover my work; I am still here.”
-
-**Data flow**: It reads the instance id from the Heartbeat object. It opens an owner database transaction, updates the matching runtime_instance row, and sets heartbeat_at and updated_at to the database’s current time. It returns nothing; the changed timestamp is the output.
-
-**Call relations**: Heartbeat.run calls this once per loop cycle. ExecutorRecovery._live_executors later reads the timestamps this function writes, and uses them to avoid recovering workflows that belong to still-running processes.
-
-*Call graph*: called by 1 (run); 2 external calls (update, owner_tx).
-
-
-##### `Heartbeat.retire`  (lines 94–100)
-
-```
-async def retire(self) -> None
-```
-
-**Purpose**: Removes this process’s liveness row during a clean shutdown. This lets other processes see immediately that the seat is gone instead of waiting for the heartbeat to become stale.
-
-**Data flow**: It reads the instance id from the Heartbeat object. It opens an owner database transaction and deletes the matching runtime_instance row. It returns nothing; the database no longer lists this process as live.
-
-**Call relations**: The serve shutdown path calls this when stopping the executor. It complements Heartbeat.run: the run loop keeps the row fresh while alive, and retire removes it when the process exits normally.
-
-*Call graph*: called by 1 (_stop_executor); 2 external calls (delete, owner_tx).
-
-
-##### `ExecutorRecovery.run`  (lines 120–126)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Runs the repeating sweep that rescues pending workflows left behind by dead serve processes. It keeps the durable workflow queue from getting stuck after a crash.
-
-**Data flow**: It reads the interval settings from the ExecutorRecovery object. Each cycle it sleeps, calls ExecutorRecovery.sweep, logs database or DBOS workflow errors if the sweep fails, and then continues. It does not produce a normal return value because it is a long-running background loop.
-
-**Call relations**: This is the scheduler for ExecutorRecovery.sweep. Every serve process can run it, so any surviving process can notice and recover work that belonged to a crashed peer.
-
-*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
-
-
-##### `ExecutorRecovery.sweep`  (lines 128–136)
-
-```
-async def sweep(self) -> None
-```
-
-**Purpose**: Finds executor ids that still have pending DBOS workflows but no fresh process heartbeat, then asks DBOS to recover those workflows. This is how abandoned durable work gets re-dispatched.
-
-**Data flow**: It asks ExecutorRecovery._pending_executors for executors with pending workflows, and ExecutorRecovery._live_executors for executors whose heartbeat is still fresh. It subtracts live executors from pending executors. For each remaining dead-looking executor, it calls DBOS recovery in a worker thread and logs how many workflows were recovered.
-
-**Call relations**: ExecutorRecovery.run calls this on a timer. It depends on heartbeat rows maintained by Heartbeat.beat and on pending workflow information from DBOS, then hands stranded executor ids back to DBOS recovery.
-
-*Call graph*: calls 2 internal fn (_live_executors, _pending_executors); called by 1 (run); 2 external calls (to_thread, log).
-
-
-##### `ExecutorRecovery._pending_executors`  (lines 138–150)
-
-```
-async def _pending_executors(self) -> set[str]
-```
-
-**Purpose**: Reads DBOS to find which executor ids currently own pending workflows. These are candidates for recovery, but only if their executor is no longer alive.
-
-**Data flow**: It asks DBOS for up to a fixed limit of workflows in PENDING status, without loading large inputs or outputs. If the result hits the limit, it logs that the scan may be capped. It returns a set of executor id strings taken from the workflow statuses.
-
-**Call relations**: ExecutorRecovery.sweep uses this as the “work that might be stranded” side of its comparison. The result is later checked against ExecutorRecovery._live_executors so live executors are not recovered by mistake.
-
-*Call graph*: called by 1 (sweep); 2 external calls (to_thread, log).
-
-
-##### `ExecutorRecovery._live_executors`  (lines 152–162)
-
-```
-async def _live_executors(self) -> set[str]
-```
-
-**Purpose**: Reads the runtime_instance table to find which executors have refreshed their heartbeat recently. These executors are treated as alive and are protected from recovery.
-
-**Data flow**: It calculates a cutoff time by subtracting the stale window from the current time. It opens an owner database transaction, selects runtime_instance ids whose heartbeat_at is newer than that cutoff, and returns those ids as strings in a set.
-
-**Call relations**: ExecutorRecovery.sweep uses this as the “still alive” side of its comparison. The timestamps it reads are written by Heartbeat.beat and initially created by record_fleet_seat.
-
-*Call graph*: called by 1 (sweep); 4 external calls (now, timedelta, select, owner_tx).
-
-
-##### `CancelReconciler.run`  (lines 186–192)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Runs the repeating sweep that carries cancellation from a cancelled turn down to its still-live dependent descendants. This makes cancellation eventually cover the whole dependent turn tree.
-
-**Data flow**: It reads the DBOS client and interval from the CancelReconciler object. Each cycle it sleeps, calls CancelReconciler.sweep, logs database or DBOS errors if the sweep fails, and continues running. It normally has no final output because it is a background loop.
-
-**Call relations**: This is the timer-driven wrapper around CancelReconciler.sweep. It runs in each serve process so a cancellation left half-finished by a crash can still be completed by another process.
-
-*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
-
-
-##### `CancelReconciler.sweep`  (lines 194–201)
-
-```
-async def sweep(self) -> None
-```
-
-**Purpose**: Finds live turns that sit underneath a cancelled ancestor, then cancels each one. This prevents child or grandchild work from continuing after the work it depends on has been cancelled.
-
-**Data flow**: It builds and runs the query from CancelReconciler._orphans_query to get affected turn ids and their workspaces. For each row, it enters that workspace context and calls cancel_one_turn with the DBOS client and turn id. If a turn was actually cancelled, it logs the reconciliation.
-
-**Call relations**: CancelReconciler.run calls this periodically. It uses CancelReconciler._orphans_query to find the targets, then hands each target to the shared cancellation primitive, cancel_one_turn, rather than editing the turn directly.
-
-*Call graph*: calls 1 internal fn (_orphans_query); called by 1 (run); 4 external calls (owner_tx, log, cancel_one_turn, ws).
-
-
-##### `CancelReconciler._orphans_query`  (lines 203–243)
-
-```
-def _orphans_query(self) -> sa.Select
-```
-
-**Purpose**: Builds the database query that identifies non-terminal turns with a cancelled dependent ancestor. In plain terms, it asks, “which still-live turns are below something cancelled?”
-
-**Data flow**: It starts from live, non-terminal turns and recursively walks upward through parent_turn_id links that count as dependent parent links. If the walk reaches a cancelled ancestor, the original turn is selected along with its workspace id. The output is a SQLAlchemy Select object, which is a database query description rather than the query results themselves.
-
-**Call relations**: CancelReconciler.sweep calls this before reading the database. The query uses CancelReconciler._dependent_parent to decide when a parent link should be followed, because not every parent relationship means cancellation should spread.
-
-*Call graph*: calls 1 internal fn (_dependent_parent); called by 1 (sweep); 1 external calls (select).
-
-
-##### `CancelReconciler._dependent_parent`  (lines 245–255)
-
-```
-def _dependent_parent(self, turn: sa.Table | sa.FromClause) -> sa.ColumnElement
-```
-
-**Purpose**: Describes which parent link counts as a cancellation dependency. It lets cancellation climb through ordinary dependent turns, but not into independent spawned agents.
-
-**Data flow**: It receives a turn table or table-like alias. It returns a SQL expression: use parent_turn_id when the turn has a subagent profile or came from an intent admission, otherwise treat the parent as null so the upward search stops there.
-
-**Call relations**: CancelReconciler._orphans_query calls this while building its recursive parent walk. This small rule is what keeps the cancellation sweep from crossing boundaries into independent agent work.
-
-*Call graph*: called by 1 (_orphans_query); 3 external calls (case, null, or_).
-
-
-##### `StrandedTurnReconciler.run`  (lines 289–295)
-
-```
-async def run(self) -> None
-```
-
-**Purpose**: Runs the repeating sweep that fixes running turns whose workflow attempt can no longer move them forward. It prevents conversations from being blocked by turns that look active but are actually unreachable.
-
-**Data flow**: It reads the DBOS client, interval, and grace settings from the StrandedTurnReconciler object. Each cycle it sleeps, calls StrandedTurnReconciler.sweep, logs database or DBOS errors if the sweep fails, and keeps going. It normally does not return.
-
-**Call relations**: This is the timer for StrandedTurnReconciler.sweep. It runs alongside the heartbeat, executor recovery, and cancellation reconciliation loops as part of the serve process’s background maintenance.
-
-*Call graph*: calls 1 internal fn (sweep); 2 external calls (sleep, log).
-
-
-##### `StrandedTurnReconciler.sweep`  (lines 297–313)
-
-```
-async def sweep(self) -> None
-```
-
-**Purpose**: Cancels running turns whose recorded workflow attempt is no longer pending, enqueued, or delayed in DBOS. This clears rows that would otherwise remain running forever.
-
-**Data flow**: It queries old enough RUNNING turns using StrandedTurnReconciler._claimed_query. If the scan reaches its limit, it logs that fact. It then asks StrandedTurnReconciler._advancing_attempts which recorded workflow attempts are still carried by DBOS. For any claimed turn whose attempt is not advancing, it enters the turn’s workspace, calls cancel_one_turn, and logs if cancellation happened.
-
-**Call relations**: StrandedTurnReconciler.run calls this on a timer. It uses _claimed_query to find possible stranded rows, _advancing_attempts to separate live workflow attempts from lost ones, and cancel_one_turn to safely terminalize only the turns that are still eligible.
-
-*Call graph*: calls 2 internal fn (_advancing_attempts, _claimed_query); called by 1 (run); 4 external calls (owner_tx, log, cancel_one_turn, ws).
-
-
-##### `StrandedTurnReconciler._claimed_query`  (lines 315–332)
-
-```
-def _claimed_query(self) -> sa.Select
-```
-
-**Purpose**: Builds the database query for RUNNING turns that have held the same workflow claim longer than the grace period. These are possible stranded turns, not yet proven stranded.
-
-**Data flow**: It calculates a cutoff time by subtracting the grace window from the current time. It returns a SQL query selecting turn id, workspace id, and running_attempt for turns that are RUNNING, have a running_attempt, were last updated before the cutoff, and are among the oldest rows up to the scan limit.
-
-**Call relations**: StrandedTurnReconciler.sweep calls this before reading candidate rows from the database. The query deliberately includes only old RUNNING claims so a brand-new claim is not mistaken for abandoned work during a race.
-
-*Call graph*: called by 1 (sweep); 3 external calls (now, timedelta, select).
-
-
-##### `StrandedTurnReconciler._advancing_attempts`  (lines 334–345)
-
-```
-async def _advancing_attempts(self, attempts: list[str]) -> set[str]
-```
-
-**Purpose**: Asks DBOS which workflow attempts from a given list are still in a status that can advance. This is the final check before deciding that a running turn is stranded.
-
-**Data flow**: It receives a list of workflow attempt ids. If the list is empty, it returns an empty set immediately, avoiding a broad DBOS query. Otherwise it asks the DBOS client for those workflow ids with advancing statuses only, and returns the workflow ids DBOS still reports as carried.
-
-**Call relations**: StrandedTurnReconciler.sweep calls this after collecting candidate running turns. Its result tells the sweep which turns to skip because their workflow is still alive, and which turns can be handed to cancel_one_turn as stranded.
-
-*Call graph*: called by 1 (sweep).
-
 ## 📊 State Registers Touched
 
-- `reg-deployment-config` — The merged deployment settings that tell the system what product, services, addresses, databases, sandboxes, and safety defaults to use.
-- `reg-extension-catalog` — The installed extension and pack catalog that says which extra tools, routes, agents, skills, jobs, and backends are available.
-- `reg-database-schema-version` — The database migration state that records which durable tables and columns the running code can rely on.
-- `reg-workspace-records` — The saved workspace records that identify each customer space and hold its limits, setup state, balance settings, and routing boundaries.
-- `reg-surface-routing` — The shared mapping from external surfaces such as Slack, iMessage, web, terminal, and hosted sites to the right workspace, agent, and conversation.
-- `reg-live-update-hub` — The live activity stream that carries turn progress, tool status, cancellations, mid-turn replies, and final updates to connected viewers.
-- `reg-runtime-fleet-liveness` — The heartbeat and listener-claim records that show which long-running service instances are alive and what work they currently own.
-- `reg-workflow-claims` — The workflow attempt and run-claim state that prevents two workers from running the same turn, scheduled task, listener, or cleanup job at once.
-- `reg-egress-network-policy` — The outbound network permission state that decides which external hosts, proxies, and secret injections are allowed for a workspace or agent.
-- `reg-sandbox-handles` — The remembered sandbox or workspace handle for each conversation so tools can resume the same isolated files, terminals, browsers, and services.
-- `reg-feature-flags` — The workspace feature switches that let the system turn capabilities on or off without changing the code.
-- `reg-observability-traces` — The shared logs, metrics, traces, traceparent links, and safety-filtered operator views used to understand what the system is doing.
-- `reg-scheduled-jobs` — The durable background-job state for scheduled tasks, pauses, monitor checks, report writing, thumbnail repair, product metrics, and self-improvement runs.
-- `reg-service-connection-pools` — Process-local shared connection/client pools for database, Redis/pubsub, HTTP/provider calls, and other long-lived service clients reused by requests, workers, tools, and jobs.
-- `reg-background-runner-handles` — Process-local async task handles, wakeup queues, and scheduler loop state for live background workers distinct from their durable job records.
-- `reg-http-route-registry` — Process-local mounted HTTP, WebSocket, callback, and extension route dispatch table used by the running web server.
-- `reg-backend-provider-registry` — Process-local registry mapping provider names to active backend implementations for models, search, embeddings, memory, connectors, browser access, auth, billing, and feature services.
-- `reg-durable-workflow-store` — Serialized durable workflow/checkpoint objects used to reload or resume long-running turns, jobs, and recovery work after crashes or code changes.
-- `reg-sandbox-runtime-cache` — Built sandbox client/runtime image and reusable sandbox cache artifacts used when launching isolated execution environments.
+- `reg-effective-config` — The merged settings that tell the whole system how it should run in this deployment.
+- `reg-selected-pack-services` — The chosen product pack and the shared service objects it wires up for the rest of the app.
+- `reg-durable-database` — The main long-term database where shared business and runtime records are stored.
+- `reg-extension-registry` — The loaded set of extensions and the routes, tools, hooks, jobs, skills, agents, and backends they contribute.
+- `reg-extension-install-store` — The saved record of which extensions are installed, removed, or holding extension-specific data.
+- `reg-surface-routing` — The shared routing state that maps browser, Slack, iMessage, terminal, site, and object requests to the right workspace, agent, and conversation.
+- `reg-auth-identity-sessions` — The current proof of who a person, operator, shared-link visitor, or external service caller is.
+- `reg-egress-policy-proxy` — The network allowlist and proxy state that decide which outside hosts sandboxed work may contact.
+- `reg-feature-flags` — The rollout switches that turn product and infrastructure behavior on or off across the system.
+- `reg-model-catalog-providers` — The shared catalog of available AI models, their prices and limits, and the provider clients used to call them.
+- `reg-conversation-turn-queue` — The durable state of conversations and turns, including admission, ordering, current runner, lifecycle status, and queued work.
+- `reg-inbound-message-queue` — The saved queue of incoming external messages waiting to be rendered, ordered, deduplicated, and admitted as turns.
+- `reg-live-turn-stream` — The live event feed that lets clients and other processes watch a running turn and learn how it ended.
+- `reg-sandbox-runtime` — The durable sandbox and browser workspace handles where agent commands, files, web browsing, and hosted previews run safely.
+- `reg-blob-artifact-store` — The shared file, blob, artifact, preview, download, and hosted media storage used by turns and surfaces.
+- `reg-background-jobs` — The shared job schedule, due-work candidates, claims, retries, and worker state for background and autonomous work.
+- `reg-runtime-fleet-heartbeats` — The fleet-wide record of which runtime processes are alive and what work they may be responsible for.
+- `reg-observability-trace` — The logs, metrics, traces, health signals, and trace links used to understand what the system is doing.
+- `reg-schema-migration-version` — The Alembic/database schema version state that records which migrations have been applied and gates safe startup against the expected database shape.
+- `reg-database-connection-pool` — The shared SQLAlchemy engine/session and connection-pool state used by requests, turns, workers, migrations, and persistence helpers to access the database safely.
+- `reg-surface-listener-leases` — The stored claims/leases that coordinate which runtime instance is allowed to listen on a shared surface installation or address, avoiding duplicate external listeners.
+- `reg-redis-service-pool` — The shared Redis client/connection and stream/cache coordination state used by live turn streaming, workers, and Redis-backed extension stores.
+- `reg-extension-catalog-cache` — The extension app-store/catalog metadata and update availability state used when discovering, installing, removing, or bundling extensions.
+- `reg-server-route-mounts` — The in-process ASGI route, middleware, static mount, and extension route table assembled at startup and used to dispatch later HTTP/webhook/control requests.

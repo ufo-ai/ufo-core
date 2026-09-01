@@ -1,703 +1,835 @@
-# Backend provider and external service registration  `stage-3.2`
+# Workspace Onboarding and Seating  `stage-3.2`
 
-This stage is shared startup plumbing. It teaches the system what outside services and plug-in providers are available before the main work begins. The model registry is the central catalog: given a model name, it knows the provider, required key, client setup, and price. The Bedrock extension adds Amazon Bedrock-hosted models to that catalog. The OpenAI embedding extension adds the default service for turning text into number vectors used for search, but waits to contact OpenAI until work is needed.
+This stage is part of startup and early workspace use. It prepares a new installation so people have a place to work, and it controls who is allowed to sit in that workspace and use the assistant. The package marker simply makes the onboarding folder importable by the rest of the program.
 
-Several files register connector options. Composio and Pipedream manifests announce which services they can connect to and which OAuth sign-in routes they use. The Composio resolver is a flexible front desk that can recognize many Composio toolkits by name and send them through one shared broker. Keyed connectors cover simpler services that use API keys, with rules for storing and sending those keys safely.
+The main setup file runs first-time onboarding. It creates the first workspace, the first administrator, and the main assistant agent, then lets installed extensions add their own setup steps. The control file is the trusted doorway used by the Rust control plane, the outer service that coordinates the system. Through it, that layer can create or find workspaces, list sign-in choices, count workspaces, and read invitations without copying sensitive rules.
 
-Flagship connects feature flags to Cloudflare so behavior can be switched on or off. Redis Hub registers Redis as shared live communication support for frames and terminal traffic.
+The seats file is the gatekeeper. It creates members, grants or removes seats, decides which members the agent may answer, and prevents the last seated administrator from being removed. The seed file adds a realistic demo conversation to permanent storage, like a showroom display, so the web portal can be tested with rich sample data.
 
 ## Files in this stage
 
-### Model and embedding providers
-Registers the central model catalog, Bedrock-hosted model clients, and OpenAI-backed embedding generation.
+### Workspace setup entry points
+Package setup and private onboarding entry points create or find workspaces, initialize first-run state, expose sign-in and invitation reads, and let extensions hook into setup.
 
-### `core/src/ufo/harness/models/registry.py`
+### `core/src/ufo/onboard/__init__.py`
 
-`domain_logic` · `startup for building and validation; request handling whenever model facts or clients are needed`
+`other` · `import/package discovery`
 
-This file solves a coordination problem. Many parts of the system need to know about models: routing needs to choose the right provider, billing needs prices, and runtime calls need credentials. If each part guessed on its own, a typo or missing model could show up later as a failed API call, a wrong bill, or a confusing crash. The registry makes model lookup a single front door.
-
-The main class, `ModelRegistry`, is a frozen data holder, meaning its fields are not meant to change after creation. It contains a table of model specifications keyed by exact model id, a combined pricing table, and the configured default model used when something asks for `auto` instead of naming a real model.
-
-The file also knows how to create a model client at the moment it is needed. That matters because credentials may come from the current workspace's bring-your-own-key storage, or from platform environment variables. In everyday terms, it checks the right key ring only when someone actually opens that model's door.
-
-The top-level `model_registry` function builds the table from built-in model definitions plus extension manifests. It refuses duplicate ids, and it checks that important configured model names are real during startup. That turns configuration mistakes into early, clear failures instead of surprises halfway through a user request.
-
-#### Function details
-
-##### `ModelRegistry.resolve`  (lines 31–34)
-
-```
-def resolve(self, model: str) -> str
-```
-
-**Purpose**: This turns the special model value `auto` into the concrete default model configured for this deployment. If the caller already supplied a specific model id, it leaves it alone.
-
-**Data flow**: It receives a model name. If that name is the shared `auto` marker, it replaces it with `self.auto_model`; otherwise it returns the original name unchanged. It does not change the registry.
-
-**Call relations**: Other methods use this before asking questions where `auto` would be too vague. `key_slot_for` uses it to find the real model whose key slot matters, and `model_key_env` uses it to check which provider key onboarding should ask for.
-
-*Call graph*: called by 2 (key_slot_for, model_key_env).
+This is an empty package file. In Python, a folder can be treated as an importable package when it contains an `__init__.py` file. That means other parts of the project can refer to code inside this directory using names like `ufo.onboard.something`. Think of it like a label on a drawer: the drawer may contain useful tools, but this label simply tells Python, “this drawer is part of the organized system.” Without this file, depending on the Python version and packaging setup, imports from `ufo.onboard` might not work reliably or might be harder for tools to understand. Because it is empty, it does not run setup code, expose shortcuts, or change any settings when imported.
 
 
-##### `ModelRegistry.spec`  (lines 36–42)
+### `core/src/ufo/onboard/onboard_control.py`
 
-```
-def spec(self, model: str) -> ModelSpec
-```
+`orchestration` · `request handling`
 
-**Purpose**: This looks up the full stored description for a model id. It exists so every part of the system fails in the same clear way when someone names a model that is not registered.
+This file is the guarded front desk for hosted onboarding. A sign-in gateway can call these routes only if it presents a special bearer token, like showing a staff badge before being allowed behind the counter. Once inside, the file applies the project’s core rules for what a workspace is, who belongs to it, and how a new workspace starts.
 
-**Data flow**: It receives a model id and checks the registry's `specs` table. If the id exists, it returns the matching `ModelSpec`, which contains facts such as provider, key requirements, price, and client factory. If the id is missing, it raises a `ValueError` explaining that no model is registered for that id.
+The main route, called “seat,” takes a verified email and a workspace ID. It checks that the email, domain, and signup subject agree, creates the workspace if it is truly the one that subject owns, creates or finds the member, adds the default main agent, and gives a new workspace its starting balance. If an operator supplied a model-provider key, it stores that key in the new member’s own credential slot after the database work is safely committed.
 
-**Call relations**: `client_for`, `provider_for`, and `model_key_env` all go through this lookup rather than reading the table directly. That makes this method the common checkpoint before model-specific work continues.
-
-*Call graph*: called by 3 (client_for, model_key_env, provider_for).
-
-
-##### `ModelRegistry.client_for`  (lines 44–69)
-
-```
-async def client_for(self, model: str) -> ModelClient
-```
-
-**Purpose**: This creates the actual client object used to call a model provider, such as OpenAI or Anthropic. It also finds and validates the credential the provider needs, so a missing or unusable key becomes a clear error before the provider call is attempted.
-
-**Data flow**: It receives a model id, looks up that model's specification, and checks whether the model needs a key. If no key is required, it builds the client with an empty key. If a key is required, it asks the current workspace for the credential, allowing either a workspace-specific bring-your-own-key value or a platform environment value. If no key is found, it raises a helpful runtime error. If the key contains non-ASCII characters, which provider network protocols may not carry safely, it raises `CredentialValueInvalid`. On success, it returns a new model client built from the spec and key.
-
-**Call relations**: When some later part of the system is ready to make a model call, it asks this method for the correct client. This method first relies on `spec` to confirm the model is known, then calls `ws_current` to reach the active workspace's credential lookup, and finally hands the finished spec-plus-key pair to the model's client factory.
-
-*Call graph*: calls 1 internal fn (spec); 2 external calls (__init__, ws_current).
-
-
-##### `ModelRegistry.provider_for`  (lines 71–75)
-
-```
-def provider_for(self, model: str) -> str
-```
-
-**Purpose**: This returns the provider name for a model, such as the backend company or service that serves it. That is useful for routing, metrics, and billing labels.
-
-**Data flow**: It receives a model id, looks up the model specification through `spec`, and returns the provider field from that specification. If the model id is unknown, the lookup raises the shared clear error.
-
-**Call relations**: Code that needs to record or split work by provider calls this method instead of duplicating model lookup rules. It delegates the hard part, checking that the model exists, to `spec`.
-
-*Call graph*: calls 1 internal fn (spec).
-
-
-##### `ModelRegistry.key_slot_for`  (lines 77–88)
-
-```
-def key_slot_for(self, model: str) -> str | None
-```
-
-**Purpose**: This tells the caller which workspace bring-your-own-key slot would pay for a model, if any. It is intentionally forgiving: for unknown historical models or keyless models, it returns `None` rather than crashing.
-
-**Data flow**: It receives a model name, first resolving `auto` to the concrete configured model. It then does a soft lookup in the registry table. If there is no spec, or the spec has no key slot, it returns `None`. Otherwise it returns the key slot name stored on the spec.
-
-**Call relations**: This method uses `resolve` because stored agent settings may say `auto`, but billing and key labeling need the real model behind it. Unlike `spec`, it avoids loud failure so exports or old ledger rows can still be described even if a model has since been removed.
-
-*Call graph*: calls 1 internal fn (resolve).
-
-
-##### `ModelRegistry.model_key_env`  (lines 90–100)
-
-```
-def model_key_env(self, model: str, config: Config) -> str | None
-```
-
-**Purpose**: This tells onboarding which environment variable should be set before a first run for a given model. It only answers for built-in providers whose key environment names are known in core configuration.
-
-**Data flow**: It receives a model name and the application configuration. It resolves `auto` to the configured real model, looks up that model's spec, and reads its provider. For Anthropic it returns the configured Anthropic key environment variable name; for OpenAI it returns the configured OpenAI key environment variable name; for other contributed providers it returns `None` because core may not know how that provider obtains credentials.
-
-**Call relations**: Onboarding or setup checks call this when they want to warn early about missing keys. It uses `resolve` so `auto` points to the actual first model, and `spec` so a bad model id still fails clearly.
-
-*Call graph*: calls 2 internal fn (resolve, spec).
-
-
-##### `model_registry`  (lines 103–136)
-
-```
-def model_registry(config: Config, manifests: tuple[Manifest, ...]) -> ModelRegistry
-```
-
-**Purpose**: This builds the complete model registry for the running system. It combines built-in model definitions with model definitions contributed by extension manifests, checks for conflicts and bad configuration, and produces the ready-to-use `ModelRegistry`.
-
-**Data flow**: It receives the loaded configuration and a tuple of extension manifests. It asks `core_model_specs` for the built-in models, then adds those plus every manifest-provided model into one dictionary keyed by model id. If two specs claim the same id, it raises a `ValueError`. It then checks that the configured default, ambient reply, and background job models all exist. Finally it builds a combined pricing table from every spec's price and returns a new `ModelRegistry` containing the specs, pricing, and configured auto model.
-
-**Call relations**: This is the startup assembly point for model knowledge. It gathers built-in specs through `core_model_specs`, folds in manifest contributions, uses `pricing_from` to prepare billing data, and constructs the `ModelRegistry` that the rest of the system consults during later model selection and calls.
-
-*Call graph*: 3 external calls (__init__, core_model_specs, pricing_from).
-
-
-### `extensions/bedrock/ufo_ext_bedrock.py`
-
-`config` · `startup / provider discovery`
-
-This file is a provider plug-in for Amazon Bedrock Mantle. A provider plug-in is like a catalog page plus connection instructions: it lists the models the system can use, says how large their context windows are, records pricing and knowledge cutoff dates, and tells the rest of the system how to build the right client when someone actually calls a model.
-
-Bedrock Mantle exposes two kinds of model APIs here. Anthropic model IDs, such as Claude models, are connected through the Anthropic Bedrock Mantle client. OpenAI-style model IDs, such as GPT models, are connected through an OpenAI-compatible client. The file does not translate prompts or responses itself. Instead, each `ModelSpec` points to the core client code that already knows how to speak the right API shape.
-
-The file also defines the credential and region rules. It expects an API key in `AWS_BEARER_TOKEN_BEDROCK`, and it expects an AWS region from `AWS_REGION` or `AWS_DEFAULT_REGION`. If no region is set, it stops with a clear error, because Bedrock endpoints are regional.
-
-At the bottom, `manifest()` packages everything into a `Manifest`, which is the object the larger UFO system reads to discover this extension’s name, required credential, and supported models.
+Other routes answer questions needed during sign-in: whether a chosen membership still exists, which workspaces an address may enter, how many workspaces exist, and which invited teammates need email follow-up. Some of these reads intentionally look across all workspaces, so they use the owner-level database path and log warnings where the code comments say operators should notice that kind of access.
 
 #### Function details
 
-##### `bedrock_region`  (lines 46–52)
+##### `MemberModelKey._served`  (lines 120–123)
 
 ```
-def bedrock_region() -> str
+def _served(cls, provider: str) -> str
 ```
 
-**Purpose**: Finds the AWS region that Bedrock Mantle should use. Bedrock URLs depend on region, so the system cannot safely create a client without this value.
+**Purpose**: This validates that a supplied model-provider name is one the system knows how to route for a member. It prevents storing a credential under a provider label that no later code can use.
 
-**Data flow**: It reads the process environment, first looking for `AWS_REGION` and then `AWS_DEFAULT_REGION`. If it finds one, it returns that region string. If both are missing, it raises an error telling the user which environment variable to set.
+**Data flow**: It receives a provider string from the incoming request. It compares that string with the allowed provider names from the member routing table. If it is allowed, the same string comes back; if not, request validation fails with a clear error.
 
-**Call relations**: When either Bedrock client builder needs to create a real network client, it calls `bedrock_region` first. `_anthropic_client` uses the result for the Anthropic Bedrock Mantle client, and `_openai_client` uses it to build the correct OpenAI-compatible Bedrock Mantle base URL.
+**Call relations**: This runs automatically as part of Pydantic request validation when a `MemberModelKey` is built. It consults `MEMBER_ROUTED_SLOTS.values` so the accepted names stay tied to the runtime credential routing table.
 
-*Call graph*: called by 2 (_anthropic_client, _openai_client).
-
-
-##### `_anthropic_client`  (lines 55–67)
-
-```
-def _anthropic_client(spec: ModelSpec, key: str) -> AnthropicClient
-```
-
-**Purpose**: Builds the client used to call Anthropic models through Amazon Bedrock Mantle. Someone would use this indirectly when a `ModelSpec` for an Anthropic model needs a working API connection.
-
-**Data flow**: It receives a model specification and an API key. It looks up the AWS region, creates an Anthropic Bedrock Mantle async client with that key, region, no automatic retries, and a provider timeout, then wraps it in UFO’s `AnthropicClient` together with the model specification. The result is a ready-to-use Anthropic model client.
-
-**Call relations**: Anthropic model specs created by `_anthropic` store this function as their client builder. Later, when the core system wants to use one of those models, it calls this builder. The builder asks `bedrock_region` for the region, hands the key and region to Anthropic’s Bedrock Mantle client, and then hands that lower-level client to UFO’s `AnthropicClient` wrapper.
-
-*Call graph*: calls 1 internal fn (bedrock_region); 3 external calls (__init__, AsyncAnthropicBedrockMantle, cast).
+*Call graph*: 1 external calls (values).
 
 
-##### `_openai_client`  (lines 70–77)
+##### `MemberModelKey.slot`  (lines 125–126)
 
 ```
-def _openai_client(spec: ModelSpec, key: str) -> OpenAIClient
+def slot(self) -> str
 ```
 
-**Purpose**: Builds the client used to call OpenAI-compatible models through Amazon Bedrock Mantle. It chooses the correct Bedrock Mantle URL depending on whether the model uses the chat completions style API or the newer responses style API.
+**Purpose**: This turns a human-facing provider name into the internal credential slot name where that member’s key should be stored. Someone uses it when they have a provider like an AI model vendor and need the matching storage location.
 
-**Data flow**: It receives a model specification and an API key. It gets the AWS region, builds a base URL for Bedrock Mantle, creates an OpenAI SDK-style client pointed at that URL, and wraps it in UFO’s `OpenAIClient` with the model specification. The output is a ready-to-use OpenAI-compatible model client.
+**Data flow**: It reads the validated provider already stored on the object. It walks the member routing table until it finds the internal slot whose served provider matches. It returns that slot name as a string.
 
-**Call relations**: OpenAI-compatible model specs created by `_openai` store this function as their client builder. When the larger system needs to call one of those models, this function is invoked. It relies on `bedrock_region` for the regional endpoint and delegates actual SDK client creation to `openai_sdk_client` before returning UFO’s `OpenAIClient` wrapper.
+**Call relations**: The seating route calls this after the member has been created and before saving the model key. It uses `MEMBER_ROUTED_SLOTS.items` to reverse the same mapping that validation checked earlier.
 
-*Call graph*: calls 1 internal fn (bedrock_region); 2 external calls (__init__, openai_sdk_client).
-
-
-##### `_anthropic`  (lines 80–99)
-
-```
-def _anthropic(id: str, price: ModelPrice, cutoff: str, *, context_window: int=ANTHROPIC_CONTEXT_WINDOW, reasoning: ReasoningSupport=REASONS) -> ModelSpec
-```
-
-**Purpose**: Creates a `ModelSpec` entry for one Anthropic model available through Bedrock. A `ModelSpec` is the catalog record that tells UFO how the model is named, priced, authenticated, and connected.
-
-**Data flow**: It receives the Bedrock model ID, price information, knowledge cutoff date, and optional context-window and reasoning settings. It combines those with shared Bedrock constants such as provider name, credential slot, API key environment variable, and the `_anthropic_client` builder. It returns a complete `ModelSpec` for that Anthropic model.
-
-**Call relations**: This helper is used while building `BEDROCK_MODEL_SPECS`, the file’s model catalog. It does not open a network connection itself. Instead, it records `_anthropic_client` inside each model spec so the real client can be created later, only when that model is used.
-
-*Call graph*: 1 external calls (__init__).
+*Call graph*: 1 external calls (items).
 
 
-##### `_openai`  (lines 102–116)
+##### `_inert`  (lines 193–207)
 
 ```
-def _openai(id: str, price: ModelPrice, cutoff: str, window: int, api_surface: ApiSurface) -> ModelSpec
+def _inert(answer: str) -> str
 ```
 
-**Purpose**: Creates a `ModelSpec` entry for one OpenAI-compatible model available through Bedrock. It keeps the repeated provider, credential, pricing, context, reasoning, and API-surface details consistent across these model entries.
+**Purpose**: This defuses intake-form text so it cannot accidentally look like a prompt variable later. It protects a workspace from being broken by public form input containing special double braces such as `{{name}}`.
 
-**Data flow**: It receives the model ID, price, knowledge cutoff, context window size, and API surface name. It combines those with shared Bedrock constants and the `_openai_client` builder. It returns a complete `ModelSpec` that the rest of UFO can list and later use to create a client.
+**Data flow**: It receives one free-text answer from the intake form. It repeatedly thins doubled opening and closing braces until no doubled brace remains. It returns readable text that still resembles what the person typed, but no longer contains the special pattern that prompt rendering treats as a variable.
 
-**Call relations**: This helper is used to populate `BEDROCK_MODEL_SPECS` with GPT-style Bedrock Mantle models. Like `_anthropic`, it only creates catalog data at import time. The actual network client is created later through `_openai_client` when the model is selected for use.
+**Call relations**: `agent_prompt` calls this before placing public intake answers into the main agent’s prompt. It is a small safety step in the larger flow that turns unauthenticated form data into cautious background context.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: called by 1 (agent_prompt).
 
 
-##### `manifest`  (lines 197–208)
+##### `agent_prompt`  (lines 210–229)
 
 ```
-def manifest() -> Manifest
+def agent_prompt(profile: SignupProfile | None) -> str
 ```
 
-**Purpose**: Returns the extension manifest that tells UFO what this provider offers. The manifest includes the extension name and version, the credential the user must provide, and the complete list of Bedrock model specs.
+**Purpose**: This builds the first system prompt for a new workspace’s main agent. If the signup included intake answers, it includes them as untrusted background information rather than as instructions the agent should blindly obey.
 
-**Data flow**: It creates a credential slot named `bedrock_api_key` with a human-readable description, then packages that credential requirement together with the provider name, version, and `BEDROCK_MODEL_SPECS`. The returned `Manifest` is the single object the host system reads to discover this extension.
+**Data flow**: It receives either no profile or a profile with business and goals text. With no profile, it returns the normal default agent prompt unchanged. With a profile, it defuses the answers with `_inert`, wraps them with `wall` to mark them as untrusted outside text, and returns a combined prompt.
 
-**Call relations**: This is the public discovery point for the file. During provider discovery or startup, the larger system calls `manifest`; `manifest` hands back the model catalog built earlier by `_anthropic` and `_openai`, plus the credential requirement created with `CredentialSlot`.
+**Call relations**: `OnboardControl._seat` calls this while creating the default agent for a new or newly seated workspace. It hands off to `_inert` for brace safety and to `wall` for the project’s standard “this text came from outside” protection.
 
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: calls 1 internal fn (_inert); called by 1 (_seat); 1 external calls (wall).
 
 
-### `extensions/embed_openai/ufo_ext_embed_openai.py`
+##### `_labelled`  (lines 232–268)
 
-`io_transport` · `startup registration and background embedding/indexing work`
+```
+def _labelled(rows: Sequence[sa.RowMapping], subject: str) -> list[WorkspaceChoice]
+```
 
-This extension gives the project a ready-made embedding backend: it sends text to OpenAI’s `text-embedding-3-large` model and gets back vectors, which are long lists of numbers that capture meaning for search and indexing. Without this file, a deployment that expects the default embedding backend would not know how to create those vectors.
+**Purpose**: This turns raw database rows about possible workspaces into a clean list a signing-in person can choose from. It also refuses an ambiguous case where one signup subject appears to map to more than one workspace.
 
-The file does three main things. First, it defines safety limits for embedding requests. OpenAI calls can fail or become too large if too much text is sent at once, so `plan_embed_batches` clips very long text items and groups them into batches that stay under size limits. Think of it like packing boxes for shipping: each box can only hold so many items and so much total weight.
+**Data flow**: It receives database rows and the verified signup subject. It computes each workspace’s display subject from its first member, filters subject matches so only the correct workspace remains, notes which workspaces the email is already a member of, and adds a short UUID prefix when two labels would look the same. It returns a list of `WorkspaceChoice` objects, or raises an HTTP error if the subject is ambiguous.
 
-Second, `OpenAIEmbedClient` performs the actual embedding call. It reads the deploy API key from the environment at the moment embedding is requested, not when the server starts. That means a local development server can boot without an OpenAI key, but if someone tries to embed without a key, it fails clearly.
+**Call relations**: `OnboardControl._choices` calls this after doing the cross-workspace query. It relies on `workspace_subject` to derive the same label the rest of onboarding uses, then packages the result for the API response.
 
-Third, `manifest` advertises this extension to the host system. It says: “I provide the default embedding backend, and I need an OpenAI API key to do real work.”
+*Call graph*: called by 1 (_choices); 3 external calls (__init__, HTTPException, workspace_subject).
+
+
+##### `_verified_signup`  (lines 271–290)
+
+```
+def _verified_signup(email: str, domain: str | None, signup_subject: str | None) -> tuple[str, str, str]
+```
+
+**Purpose**: This checks that the claimed domain or signup subject really follows from the verified email address. It stops a caller from using one verified address to claim someone else’s company domain or exact email subject.
+
+**Data flow**: It receives an email, an optional domain, and an optional signup subject. It trims and lowercases them, derives the email’s domain, checks that the stated values are either the verified domain or the exact email where allowed, and fills in the missing subject when needed. It returns the normalized member email, verified domain, and signup subject, or raises an HTTP validation error.
+
+**Call relations**: Both `OnboardControl._seat` and `OnboardControl._choices` call this before trusting signup identity information. It delegates only the basic domain extraction to `email_domain` and performs the policy checks here.
+
+*Call graph*: called by 2 (_choices, _seat); 2 external calls (HTTPException, email_domain).
+
+
+##### `OnboardControl.router`  (lines 300–307)
+
+```
+def router(self) -> APIRouter
+```
+
+**Purpose**: This creates the FastAPI router for the private onboarding endpoints. It is the place where the five URL paths are connected to the methods that answer them.
+
+**Data flow**: It starts with the control token stored on the `OnboardControl` object. It creates an API router under `/internal/onboard`, attaches the token guard as a required dependency, registers the seat, membership, choices, fleet, and invitations routes, and returns the router to be mounted by the application.
+
+**Call relations**: During API setup, the application asks this object for its router. The router uses FastAPI’s dependency mechanism so `OnboardControl._guard` runs before any registered route method is allowed to read or write data.
+
+*Call graph*: 2 external calls (APIRouter, Depends).
+
+
+##### `OnboardControl._guard`  (lines 309–311)
+
+```
+async def _guard(self, authorization: Annotated[str, Header()]='') -> None
+```
+
+**Purpose**: This is the lock on the private onboarding API. It rejects any request that does not present exactly the configured bearer token.
+
+**Data flow**: It receives the HTTP `Authorization` header, or an empty string if none was provided. It compares that header with `Bearer <control_token>`. If they match, nothing is returned and the request continues; if not, it raises a 401 unauthorized error.
+
+**Call relations**: `OnboardControl.router` attaches this guard to every onboarding route. FastAPI calls it before route methods like `_seat`, `_choices`, or `_fleet`, so failed authentication stops the request before any database access.
+
+*Call graph*: 1 external calls (HTTPException).
+
+
+##### `OnboardControl._seat`  (lines 313–406)
+
+```
+async def _seat(self, request: SeatRequest) -> EnsuredWorkspace
+```
+
+**Purpose**: This creates or confirms a workspace for a verified signup and seats the member in it. It is the central onboarding write path: workspace creation, first admin selection, default agent creation, signup credit, and optional member model key storage all happen here.
+
+**Data flow**: It receives a `SeatRequest` containing a workspace ID, email identity fields, optional intake profile, and optional model key. It verifies the signup identity, enters the workspace context, opens a workspace-scoped database transaction, creates the workspace if missing, locks it, checks that the workspace belongs to the signup subject, creates or finds the member, inserts the default agent prompt, credits a newly founded workspace, and reads whether the member is an admin. After the transaction, it stores the optional model key in the member’s credential slot. It returns an `EnsuredWorkspace` saying which workspace was used, whether the member is an admin, and whether this sign-in founded it.
+
+**Call relations**: This route is called through the router after `_guard` succeeds. It calls `_verified_signup` for identity safety, `agent_prompt` for the default agent text, database insert/select helpers for persistent records, `create_member` for seat rules, billing helpers for the signup grant, and credential helpers if a model key was supplied.
+
+*Call graph*: calls 2 internal fn (_verified_signup, agent_prompt); 14 external calls (__init__, HTTPException, insert, select, workspace_tx, member_slot, credit, set_reserve, create_member, signup_workspace_id (+4 more)).
+
+
+##### `OnboardControl._membership`  (lines 408–428)
+
+```
+async def _membership(self, workspace_id: UUID, email: str) -> Membership
+```
+
+**Purpose**: This checks whether an email is still a member of a chosen workspace and whether that member is an admin. It prevents a removed user from being silently recreated during sign-in.
+
+**Data flow**: It receives a workspace ID and email address. It normalizes the email, enters that workspace’s context, and queries the workspace-scoped database for the matching member’s admin flag. If no member exists, it raises a 404 error; otherwise it returns a `Membership` object containing the admin status.
+
+**Call relations**: This route is used after a person has picked a workspace from the choices list. It uses the workspace-scoped transaction path rather than the owner path, because it is checking one known workspace, and it returns only the small fact the sign-in flow needs next.
+
+*Call graph*: 5 external calls (__init__, HTTPException, select, workspace_tx, ws).
+
+
+##### `OnboardControl._choices`  (lines 430–455)
+
+```
+async def _choices(self, email: str, domain: str | None=None, signup_subject: str | None=None) -> WorkspaceChoices
+```
+
+**Purpose**: This lists every workspace a verified address may enter. That includes workspaces where the exact email is already a member and, when appropriate, the deterministic workspace named by the verified signup subject.
+
+**Data flow**: It receives an email plus optional domain and signup subject. It normalizes and verifies those fields, logs that a cross-workspace read is happening, runs an owner-level SQL query to find matching memberships and subject-owned workspaces, converts the raw rows into user-facing choices with `_labelled`, and returns them inside `WorkspaceChoices`.
+
+**Call relations**: This route is called during sign-in before the person chooses where to go. It calls `_verified_signup` to keep identity claims honest, uses `owner_tx` because the answer may span many workspaces, and hands the database rows to `_labelled` so the response has safe labels and membership flags.
+
+*Call graph*: calls 2 internal fn (_labelled, _verified_signup); 5 external calls (__init__, text, owner_tx, warn, signup_workspace_id).
+
+
+##### `OnboardControl._fleet`  (lines 457–464)
+
+```
+async def _fleet(self) -> Fleet
+```
+
+**Purpose**: This returns the total number of workspaces, called “craft” in the response. It supports a landing-page style view that wants a live count of the fleet.
+
+**Data flow**: It takes no request-specific data. It logs that a cross-workspace read is happening, opens an owner-level database transaction, counts rows in the workspace table, and returns a `Fleet` object with that count.
+
+**Call relations**: This route is exposed through the onboarding router and protected by `_guard`. It uses `owner_tx` because counting all workspaces is outside any single workspace boundary, and it records a warning for operator visibility.
+
+*Call graph*: 4 external calls (__init__, select, owner_tx, warn).
+
+
+##### `OnboardControl._invitations`  (lines 466–539)
+
+```
+async def _invitations(self, after_invited_at: datetime | None=None, after_workspace_id: UUID | None=None, after_email: str | None=None) -> Invitations
+```
+
+**Purpose**: This returns one page of pending teammate invitations, oldest first. It lets an external sweeper send or process invitation emails without loading the entire table at once.
+
+**Data flow**: It receives an optional cursor made of three parts: invited time, workspace ID, and email. If only part of the cursor is present, it rejects the request because paging would be unsafe. It builds a database query for invited members, joins to the inviter and first workspace member for email and label details, applies the cursor if present, limits the result to one page, and returns `Invitation` objects inside `Invitations`.
+
+**Call relations**: This route is called by a repeating invitation sweep rather than by an interactive sign-in. It uses `owner_tx` because invitations can belong to any workspace, builds the page with SQLAlchemy query pieces, and uses `workspace_subject` so each invitation names the workspace the same way the choices screen does.
+
+*Call graph*: 9 external calls (__init__, __init__, HTTPException, DateTime, literal, select, tuple_, owner_tx, workspace_subject).
+
+
+### `core/src/ufo/onboard/onboarding.py`
+
+`orchestration` · `first-run startup/init`
+
+This is the “cold start” path behind initialization. When a brand-new installation is set up, the system needs a safe, repeatable way to create its permanent basics: a workspace, an admin member, and the main agent the user will talk to. Without this file, first run could leave the system half-created, missing credentials, or accidentally create duplicate workspaces and admins.
+
+The flow is deliberately cautious. Before touching the database, it checks that the chosen model has the needed environment variable for its API key, if the system knows one is required. It also checks whether extension onboarding steps need a credential store key. This is like checking that you have the house keys before pouring the foundation.
+
+Once those checks pass, it opens a database transaction and creates the workspace, admin member, and main agent together. A transaction means the database changes are treated as one unit: either the important pieces are saved together, or the operation fails. If a member already exists, it raises `AlreadyInitialized` instead of creating duplicates.
+
+After the core workspace exists, extensions are allowed to run onboarding steps using their own scoped context. Extension failures are logged and skipped, so a broken add-on cannot prevent the main workspace from existing or stop other extensions from trying their setup.
 
 #### Function details
 
-##### `plan_embed_batches`  (lines 33–49)
+##### `run_onboarding_steps`  (lines 51–79)
 
 ```
-def plan_embed_batches(texts: tuple[str, ...]) -> tuple[tuple[str, ...], ...]
+async def run_onboarding_steps(manifests: tuple[Manifest, ...], workspace_id: UUID, credentials: CredentialStore | None) -> None
 ```
 
-**Purpose**: This function prepares text for OpenAI embedding requests without exceeding request size limits. It shortens any single text that is too long, then groups texts into batches that are small enough to send safely.
+**Purpose**: Runs the first-time setup steps provided by installed extensions for a newly created workspace. It keeps extension failures isolated, so one bad extension does not break the core setup or block other extensions.
 
-**Data flow**: It receives a tuple of text strings. For each string, it keeps only the allowed maximum number of characters, then adds it to the current batch unless that batch would have too many items or too many total characters. It returns a tuple of batches, where each batch is a tuple of clipped text strings ready to send to OpenAI.
+**Data flow**: It receives the installed extension manifests, the new workspace ID, and an optional credential store. It enters that workspace’s context, walks through each extension, builds the extension’s scoped context from its declared credential slots, and calls each onboarding step. If credentials are missing, it logs that the steps were skipped for that extension; if a step fails, it logs the failure and continues.
 
-**Call relations**: When `OpenAIEmbedClient.embed` is about to call OpenAI, it first asks this function how to split the input. The returned batches control how many separate OpenAI requests are made and help prevent oversized payloads.
+**Call relations**: After the main workspace has been created, `Onboarding.run_steps` calls this function to let extensions finish their own setup. Inside that flow, it uses the workspace context helper to make the workspace current, asks `context_for` for the extension-specific view of credentials and services, and uses logging to record skipped or failed steps.
 
-*Call graph*: called by 1 (embed).
-
-
-##### `OpenAIEmbedClient.embed`  (lines 63–75)
-
-```
-async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]
-```
-
-**Purpose**: This is the main workhorse that turns text into embedding vectors using OpenAI. Someone uses it when the system needs numeric representations of text for indexing or search.
-
-**Data flow**: It receives a tuple of text strings. It reads the OpenAI API key from the deployment environment, and if no key is available it raises a clear error. It creates an async OpenAI client, splits the text with `plan_embed_batches`, sends each batch to OpenAI, sorts the returned rows back into input order, converts the embedding values to plain floats, and returns all vectors as tuples.
-
-**Call relations**: The wider embedding system calls this method through the `EmbedClient` interface when embeddings are needed. Inside the method, it relies on `deploy_env` to find the API key, `plan_embed_batches` to keep requests within limits, and `openai.AsyncOpenAI` to make the actual network calls to OpenAI.
-
-*Call graph*: calls 1 internal fn (plan_embed_batches); 2 external calls (AsyncOpenAI, deploy_env).
+*Call graph*: called by 1 (run_steps); 3 external calls (log, context_for, ws).
 
 
-##### `build`  (lines 78–83)
+##### `Onboarding.run`  (lines 95–98)
 
 ```
-def build(ctx: ExtensionContext) -> EmbedClient
+async def run(self) -> Onboarded
 ```
 
-**Purpose**: This function creates the embedding client object that the host system will use. It deliberately does not require an API key at construction time, so the service can start even before embedding is used.
+**Purpose**: Runs the full onboarding process from start to finish. It is the high-level method for creating the core workspace and then running extension setup.
 
-**Data flow**: It receives an extension context from the host system, but this backend does not need to read anything from that context. It returns a new `OpenAIEmbedClient` instance with the default model settings.
+**Data flow**: It starts with the onboarding object’s stored configuration, email address, model choice, credentials, manifests, and reasoning setting. It first creates the core workspace and receives the IDs of the new workspace and member. It then runs follow-up steps for provisioning and extensions, and finally returns the created workspace/member identity.
 
-**Call relations**: The extension manifest points to this function as the factory for the default embedding backend. During startup, the host system calls it to obtain a client, and later that client’s `embed` method performs the real OpenAI work.
+**Call relations**: This is the top-level method other code would call when it wants initialization to happen. It delegates the careful core creation to `Onboarding.create`, then hands the result to `Onboarding.run_steps` so post-creation work happens only after the essentials exist.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (create, run_steps).
 
 
-##### `manifest`  (lines 86–92)
+##### `Onboarding.create`  (lines 100–106)
 
 ```
-def manifest() -> Manifest
+async def create(self) -> Onboarded
 ```
 
-**Purpose**: This function describes the extension to the host system. It tells the system the extension’s name and version, which deployment key it needs, and which embedding backend it provides.
+**Purpose**: Creates only the durable core of the installation: required checks, workspace, first admin, and main agent. It intentionally does this before extension steps so the system is usable even if an add-on later fails.
 
-**Data flow**: It takes no input. It builds and returns a `Manifest` object containing the extension metadata, the required OpenAI API key name, and an `EmbedBackendSpec` that connects the backend name `default` to the `build` function.
+**Data flow**: It reads the onboarding object’s model, configuration, credentials, manifests, email, and reasoning choice. First it checks for the model key, then checks whether extension steps require a credential key, and only then writes the core records to the database. The result is an `Onboarded` value containing the new workspace ID and member ID.
 
-**Call relations**: The host system calls this during extension discovery or startup. The manifest is how the rest of the project learns that this file supplies the default embedding backend and should use `build` when that backend is requested.
+**Call relations**: `Onboarding.run` calls this as the first phase of initialization. This method coordinates three smaller checks/actions: `_require_model_key`, `_require_credentials_for_steps`, and `_create_workspace`.
 
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: calls 3 internal fn (_create_workspace, _require_credentials_for_steps, _require_model_key); called by 1 (run).
 
 
-### Brokered connector providers
-Declares broker-managed connector extensions and the dynamic Composio resolver used to route toolkit connections.
+##### `Onboarding.run_steps`  (lines 108–110)
 
-### `extensions/composio/ufo_ext_composio/manifest.py`
+```
+async def run_steps(self, onboarded: Onboarded) -> None
+```
 
-`config` · `startup / extension registration`
+**Purpose**: Runs the setup that happens after the core workspace exists. This includes provisioning agents from extensions and running extension onboarding steps.
 
-This file is the extension’s front desk. When the main system loads the Composio extension, it calls this file to ask: “What do you provide, and how should I reach it?” The answer is a `Manifest`, which is a package of registration information.
+**Data flow**: It receives the `Onboarded` result from core creation, mainly using the workspace ID. It applies agent provisioning based on the installed manifests, then calls the shared extension onboarding function with the manifests, workspace ID, and credential store. It does not return a value; its effect is the extra setup it performs.
 
-Composio is a service that can connect to many external tools, such as GitHub, and keep each user’s tokens on Composio’s servers. That matters because this deployment does not need to store those secrets itself. Most Composio tools can be found dynamically through a resolver, using just their Composio slug, which is like looking up a tool by its catalog name. A smaller set of explicitly listed connectors is also declared here, mainly for cases that need command-line credentials or a real provider host.
+**Call relations**: `Onboarding.run` calls this after `Onboarding.create` succeeds. It first hands control to `AgentProvisioning` for extension-provided agent setup, then hands control to `run_onboarding_steps` so each extension can run its declared onboarding tasks.
 
-The file creates one shared `ComposioBroker`, which is the piece that later brokers access to server-side Composio accounts. It also creates a request forwarder for command-line credential use. For each known connector in `CONNECTORS`, it builds a `ConnectorProvider` with its OAuth sign-in description, user-facing label, broker, allowed transfer hosts, and optional CLI credential settings. Finally, it registers a browser route for the OAuth callback/bridge, so the user’s consent flow has a place to return to.
+*Call graph*: calls 1 internal fn (run_onboarding_steps); called by 1 (run); 1 external calls (__init__).
+
+
+##### `Onboarding._require_credentials_for_steps`  (lines 112–123)
+
+```
+def _require_credentials_for_steps(self) -> None
+```
+
+**Purpose**: Stops initialization early if installed extensions have onboarding steps but no credential store is available. This prevents creating a workspace that immediately cannot complete required extension setup.
+
+**Data flow**: It looks at the onboarding object’s credential store and extension manifests. If a credential store exists, it allows the process to continue. If no store exists but at least one extension has onboarding steps, it raises an error explaining which environment setting is needed.
+
+**Call relations**: `Onboarding.create` calls this before any database write. It acts as an early gate, similar to the model-key check, so the system avoids leaving behind a half-initialized workspace.
+
+*Call graph*: called by 1 (create).
+
+
+##### `Onboarding._require_model_key`  (lines 125–133)
+
+```
+def _require_model_key(self) -> None
+```
+
+**Purpose**: Checks whether the selected model needs an environment-provided key before the first conversation can work. If the key is required but missing, it stops initialization with a clear error.
+
+**Data flow**: It asks `_model_key_env` for the name of the environment variable needed by the selected model. If no known key is required, it does nothing. If a key name is returned, it checks the deployment environment for that value and raises an error if it is absent.
+
+**Call relations**: `Onboarding.create` calls this before creating database records. It relies on `_model_key_env` to identify the needed key and on `deploy_env` to read the environment in the same way the deployed system expects.
+
+*Call graph*: calls 1 internal fn (_model_key_env); called by 1 (create); 1 external calls (deploy_env).
+
+
+##### `Onboarding._model_key_env`  (lines 135–138)
+
+```
+def _model_key_env(self) -> str | None
+```
+
+**Purpose**: Finds the environment variable name that supplies the API key for the chosen model, when the system knows it ahead of time. Some extension-provided model providers resolve their keys later, so this can return nothing.
+
+**Data flow**: It reads the configuration, installed manifests, and selected model name from the onboarding object. It builds or consults the model registry, then asks that registry what environment variable is associated with the model. It returns the variable name, or `None` if there is no eager check to perform.
+
+**Call relations**: `Onboarding._require_model_key` calls this to decide whether there is a model key to check before initialization. It delegates provider knowledge to `model_registry`, rather than hard-coding every model’s credential rules here.
+
+*Call graph*: called by 1 (_require_model_key); 1 external calls (model_registry).
+
+
+##### `Onboarding._create_workspace`  (lines 140–167)
+
+```
+async def _create_workspace(self) -> Onboarded
+```
+
+**Purpose**: Writes the first permanent records for a new installation: the workspace, the first admin member, and the main agent. It also prevents accidental double-initialization.
+
+**Data flow**: It opens a workspace database transaction, checks whether any member already exists, and stops with `AlreadyInitialized` if one does. Otherwise it creates fresh IDs, inserts the workspace, creates the admin member using the provided email address, inserts the main agent with the chosen model and default prompt/icon/name, and returns an `Onboarded` value with the new workspace and member IDs.
+
+**Call relations**: `Onboarding.create` calls this only after credential and model checks pass. It uses the database transaction helper so the core records are created together, calls `create_member` for the member-specific work, uses SQLAlchemy to build database inserts and selects, and returns the identity that later steps need.
+
+*Call graph*: called by 1 (create); 7 external calls (__init__, __init__, insert, select, workspace_tx, create_member, uuid4).
+
+
+### Demo durable records
+Sample onboarding data seeds a realistic conversation into durable storage so the portal can be inspected with representative records.
+
+### `core/src/ufo/onboard/seed.py`
+
+`domain_logic` · `onboarding/demo seed run`
+
+This file is a seed writer: it builds a complete fake-but-realistic conversation directly in the database and blob storage. That matters because the normal extension interface is not allowed to invent finished conversation history. Finished turns, transcripts, costs, and audit-like records are sensitive internal state, so this code lives next to the system code that is already trusted to write those rows.
+
+The main class, KitchenSink, acts like a careful stage crew. First it removes earlier demo runs that it knows it created. It identifies them using private queue keys, not by title, so it does not delete a real user’s conversation just because it has the same name. It also refuses to delete a prior run if a real member spoke in it or if transcript access was disclosed, because then it has become real workspace history.
+
+After cleanup, it opens a new web conversation, inserts three completed turns, creates nested subagent conversations, stores two shared files, and writes the final transcript blob. The result is one conversation titled “Kitchen sink” that exercises many portal display paths at once. Without this file, testing visual changes to the conversation UI would require manually producing many hard-to-reach states.
 
 #### Function details
 
-##### `manifest`  (lines 24–53)
+##### `_framed`  (lines 74–75)
 
 ```
-def manifest() -> Manifest
+def _framed(turn_id: UUID, said: str) -> Message
 ```
 
-**Purpose**: Builds and returns the Composio extension manifest, which is the object the host application reads to register this extension. It describes the available connectors, the dynamic connector resolver, and the web route used for OAuth sign-in.
+**Purpose**: This helper creates a user message that includes a hidden reference to the turn it belongs to. It is used so the transcript can connect a visible user prompt back to the stored turn record.
 
-**Data flow**: It starts with fixed extension constants, the `CONNECTORS` catalog, and Composio-specific helper classes. It creates a shared broker, creates a request forwarder, turns each connector specification into a `ConnectorProvider`, attaches an optional command-line credential when that connector has an environment variable configured, adds a resolver for dynamically discovered Composio tools, and adds the OAuth route. The result is a complete `Manifest` object returned to the host application.
+**Data flow**: It takes a turn ID and the words the user supposedly said. It wraps the turn ID in a small context block, appends the user’s text, and returns a Message object marked as coming from the user.
 
-**Call relations**: The host system calls this function when it loads the extension. Inside, it constructs the broker, OAuth provider objects, connector provider objects, resolver, route specification, and final manifest. Those constructed pieces are then used later by the wider system: the connector registry can list and resolve Composio connectors, the broker can support grants, the CLI credential can forward authorization when needed, and the registered route can receive the browser-based OAuth consent flow.
+**Call relations**: KitchenSink._said calls this when building the final transcript. It hands back framed user messages that become part of the conversation history written by KitchenSink.write.
 
-*Call graph*: 9 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, items).
+*Call graph*: called by 1 (_said); 1 external calls (__init__).
 
 
-### `extensions/composio/ufo_ext_composio/resolver.py`
+##### `KitchenSink.write`  (lines 106–116)
 
-`domain_logic` · `connector discovery and connection setup`
+```
+async def write(self) -> UUID
+```
 
-Composio offers access to many outside services, called toolkits. Registering each one separately would be brittle and a lot of work, so this file creates an open resolver for them. A resolver is the part of the system that answers questions like: “Does this provider name belong here?”, “How should a user connect it?”, and “Where should tool calls go after connection?”
+**Purpose**: This is the top-level action that creates one fresh kitchen-sink conversation. Someone would use it when they want the workspace to contain a realistic demo conversation for checking the web portal.
 
-The central piece is `ComposioResolver`, a small frozen data class that keeps only one thing: a shared `ConnectorBroker`. The broker is the worker that later runs Composio-backed tools. The resolver itself stays mostly stateless, which matters because it asks for a fresh Composio client each time. That means tests or runtime configuration can swap the client behavior without stale connections hanging around.
+**Data flow**: It starts with the KitchenSink object’s workspace, agent, member, email, and blob store. It creates new random IDs, clears safe-to-delete older demo data, writes the conversation rows, subagent runs, attached files, and final transcript, then returns the new conversation ID.
 
-When asked about a provider, the resolver first rejects names that are locally banned. For anything else, it asks Composio’s live catalog whether the toolkit is connectable. If it is, the resolver can build an OAuth description, create a connector entry with a readable label, and search Composio’s catalog for discoverable services. It also exposes Composio’s approved file-transfer hosts, so tool files can safely move through the sandbox while the actual service token remains with Composio.
+**Call relations**: This function is the main coordinator for the file. It calls _clear before writing anything, then _open, _runs, _files, and _said, and finally sends the encoded transcript to blob storage under the transcript key.
+
+*Call graph*: calls 5 internal fn (_clear, _files, _open, _runs, _said); 4 external calls (__init__, encode, transcript_key, uuid4).
+
+
+##### `KitchenSink._clear`  (lines 118–124)
+
+```
+async def _clear(self) -> None
+```
+
+**Purpose**: This removes previous kitchen-sink demo runs that are safe to delete. It keeps repeated seed runs tidy without touching conversations that may have become real workspace history.
+
+**Data flow**: It asks _prior for earlier seed-created runs. For each one, it deletes database rows through _drop, removes the web chat row from the extension store, and deletes related blobs such as artifacts and transcripts.
+
+**Call relations**: KitchenSink.write calls this before creating the new demo. It relies on _prior to decide what is safe and on _drop to remove database records, then it finishes cleanup in the extension store and blob store.
+
+*Call graph*: calls 2 internal fn (_drop, _prior); called by 1 (write); 2 external calls (__init__, transcript_key).
+
+
+##### `KitchenSink._prior`  (lines 126–204)
+
+```
+async def _prior(self) -> tuple[_PriorRun, ...]
+```
+
+**Purpose**: This searches for earlier kitchen-sink runs that this seed code created and that are still safe to erase. Its safety checks prevent the cleanup step from deleting records that now involve a real user action or transcript disclosure.
+
+**Data flow**: It reads the workspace database. It finds root web conversations with the seed queue prefix, follows child subagent conversations through their queue keys, collects their turns, and then checks for any non-seed turn or transcript access row. It returns only the runs that pass those checks.
+
+**Call relations**: KitchenSink._clear calls this at the start of cleanup. It produces _PriorRun records that tell _clear and _drop exactly which conversations and turns belong to a removable old seed run.
+
+*Call graph*: called by 1 (_clear); 5 external calls (__init__, not_, or_, select, workspace_tx).
+
+
+##### `KitchenSink._drop`  (lines 206–235)
+
+```
+async def _drop(self, run: _PriorRun) -> tuple[str, ...]
+```
+
+**Purpose**: This deletes the database records for one old seed run. It also reports which blob keys belonged to shared artifacts so the caller can remove the matching stored files afterward.
+
+**Data flow**: It receives a _PriorRun containing conversation IDs and turn IDs. It reads shared artifact blob keys, deletes shared artifact rows, conversation change rows, turn rows, and conversation rows, then returns the artifact blob keys it found.
+
+**Call relations**: KitchenSink._clear calls this after _prior has declared a run safe to remove. _drop removes database state, and _clear uses its returned blob keys to clean up blob storage too.
+
+*Call graph*: called by 1 (_clear); 3 external calls (delete, select, workspace_tx).
+
+
+##### `KitchenSink._open`  (lines 237–275)
+
+```
+async def _open(self, conversation_id: UUID, turns: tuple[UUID, ...]) -> None
+```
+
+**Purpose**: This creates the main web conversation and its three completed turns. It also gives the conversation its visible title and creates the chat row the web portal expects.
+
+**Data flow**: It receives a new conversation ID and three turn IDs. It inserts a conversation row, inserts one completed turn for each terminal frame from _terminals, retitles the conversation to “Kitchen sink,” and writes a small chat record containing the agent ID and user email.
+
+**Call relations**: KitchenSink.write calls this after cleanup. It uses _terminals to get the finished-turn summaries, writes rows inside a workspace database transaction, then calls the surface retitling helper and the scoped extension store so the web surface can find the conversation.
+
+*Call graph*: calls 1 internal fn (_terminals); called by 1 (write); 5 external calls (__init__, insert, workspace_tx, retitle_conversation, uuid4).
+
+
+##### `KitchenSink._terminals`  (lines 277–333)
+
+```
+def _terminals(self) -> tuple[TerminalFrame, ...]
+```
+
+**Purpose**: This builds the final summary frames for the three demo turns. These frames include model name, token count, cost, and, for the last turn, a still-open question for the user.
+
+**Data flow**: It takes no outside input beyond the KitchenSink object. It creates three TerminalFrame objects: two plain completed frames and one completed frame that contains multiple user questions with options and free text. It returns them as a tuple.
+
+**Call relations**: KitchenSink._open calls this while inserting the turn rows. The terminal frames become the stored end state for the demo turns, which lets the portal display costs and pending user-input UI.
+
+*Call graph*: called by 1 (_open); 4 external calls (__init__, __init__, __init__, __init__).
+
+
+##### `KitchenSink._runs`  (lines 335–371)
+
+```
+async def _runs(self, conversation_id: UUID, parent: UUID) -> None
+```
+
+**Purpose**: This creates nested subagent activity for the demo conversation. It shows the portal what it looks like when a turn launches a subagent, and that subagent launches another one.
+
+**Data flow**: It receives the main conversation ID and the parent turn ID that should appear to spawn work. It creates child and grandchild IDs, calls _run twice to insert the subagent conversations and their turns, then writes a transcript blob for the child subagent conversation.
+
+**Call relations**: KitchenSink.write calls this after opening the main conversation. It delegates row creation to _run, then builds and stores a small transcript using message, text, tool-use, and tool-result blocks.
+
+*Call graph*: calls 1 internal fn (_run); called by 1 (write); 8 external calls (__init__, __init__, __init__, __init__, __init__, encode, transcript_key, uuid4).
+
+
+##### `KitchenSink._run`  (lines 373–408)
+
+```
+async def _run(self, turn_id: UUID, parent: UUID, profile: str, answered: str) -> UUID
+```
+
+**Purpose**: This inserts one completed subagent conversation and its single completed turn. It is the small reusable piece that lets _runs build both the child and grandchild subagent examples.
+
+**Data flow**: It receives a turn ID, a parent turn ID, a subagent profile name, and the answer text the subagent should report. It creates a new conversation ID, inserts a subagent conversation tied to the parent, inserts one completed turn with a JSON-like result in its terminal frame, and returns the new conversation ID.
+
+**Call relations**: KitchenSink._runs calls this once for the first subagent and once for the nested subagent. The returned conversation ID is used when _runs writes the child transcript blob.
+
+*Call graph*: called by 1 (_runs); 4 external calls (__init__, insert, workspace_tx, uuid4).
+
+
+##### `KitchenSink._files`  (lines 410–431)
+
+```
+async def _files(self, turn_id: UUID) -> None
+```
+
+**Purpose**: This attaches two example files to one of the demo turns. The files let the portal show shared artifacts such as a Markdown report and a CSV data file.
+
+**Data flow**: It receives the turn ID that should own the attachments. For each built-in file body, it encodes the text, writes the bytes to blob storage under a new artifact key, and inserts a shared_artifact database row with filename, media type, size, and ownership information.
+
+**Call relations**: KitchenSink.write calls this after creating the conversation and subagent runs. It connects stored blob content to the selected turn so the web portal can list and open the attachments.
+
+*Call graph*: called by 1 (write); 3 external calls (insert, workspace_tx, uuid4).
+
+
+##### `KitchenSink._said`  (lines 433–499)
+
+```
+def _said(self, turns: tuple[UUID, ...]) -> tuple[Message, ...]
+```
+
+**Purpose**: This builds the visible transcript messages for the main conversation. It gives the demo realistic back-and-forth chat, including tool calls, tool results, assistant explanations, and the final request for user input.
+
+**Data flow**: It receives the three turn IDs created for the conversation. It uses those IDs to frame user prompts, creates message objects for assistant tool use and user tool results, and returns the full ordered message tuple.
+
+**Call relations**: KitchenSink.write calls this at the end, wraps its returned messages in a Conversation object, encodes it, and stores it in blob storage. It uses _framed for the user messages that need to point back to specific turns.
+
+*Call graph*: calls 1 internal fn (_framed); called by 1 (write); 3 external calls (__init__, __init__, __init__).
+
+
+### Member seating rules
+Seat management logic creates members, grants or removes seats, decides who agents may answer, and preserves at least one seated administrator.
+
+### `core/src/ufo/runtime/seats.py`
+
+`domain_logic` · `cross-cutting: admission, member creation, seat changes, and per-turn access checks`
+
+A “seat” here means permission for a workspace member to receive answers from the agent. The member record itself is treated like an identity record: removing a seat does not delete the person, it only stops the agent from answering them. This matters because a revoked person may still appear in old work, scheduled tasks, or history, and the system needs one consistent answer everywhere: no seat, no response.
+
+The file provides two main kinds of tools. The Seats class works inside one workspace. It can check whether one member, or a group of members, is still seated; show a snapshot of all members and their seat status; grant a seat back; or revoke a seat. Revoking is careful: it locks the workspace row before counting admins, like asking everyone to line up at one counter, so two admins cannot both remove the other at the same time and leave no seated admin.
+
+The rest of the file supports member lookup and creation. It normalizes and checks email addresses, derives workspace identity from email domains or exact signup addresses, finds members safely within a workspace, and inserts new members in one shared path. That shared path prevents different entry points from applying different rules.
 
 #### Function details
 
-##### `ComposioResolver.transfer_hosts`  (lines 32–33)
+##### `gate_member`  (lines 37–48)
 
 ```
-def transfer_hosts(self) -> tuple[str, ...]
+def gate_member(speaker_member_id: UUID | None, on_behalf_of_member_id: UUID | None) -> UUID | None
 ```
 
-**Purpose**: This property tells the rest of the system which Composio file-store hosts are allowed for file transfers. It matters because tools may read or write files, and the sandbox needs a clear allow-list of safe hosts.
+**Purpose**: Chooses which member a turn should be checked against for seat access. If there is a direct speaker, that person is checked; otherwise the member the work is being done for is checked.
 
-**Data flow**: It takes no outside input beyond the resolver object. It reads the shared Composio transfer-host list and returns it unchanged as a tuple of host names. It does not change any state.
+**Data flow**: It receives a possible speaker member ID and a possible “on behalf of” member ID. It returns the speaker ID when present, otherwise the on-behalf-of ID, or nothing if neither exists. It changes no stored data.
 
-**Call relations**: When the connector system needs to know which external hosts are permitted for a Composio-backed connection, it asks this property. The answer is handed back directly to the surrounding sandbox or connector flow so file inputs and outputs can pass through approved Composio storage.
-
-
-##### `ComposioResolver.claims`  (lines 35–38)
-
-```
-async def claims(self, provider: str) -> bool
-```
-
-**Purpose**: This function decides whether a given provider name should be treated as a Composio toolkit. It prevents banned names from being accepted and checks Composio’s live catalog before saying yes.
-
-**Data flow**: It receives a provider slug, such as a short service name. First it lowercases the name and compares it with the local banned list; if it is banned, the result is `False`. Otherwise it creates or retrieves a Composio client, asks whether that toolkit is connectable, and returns `True` only if Composio reports a matching connectable toolkit.
-
-**Call relations**: The wider connector registry calls this when no explicitly registered connector has already claimed the provider. If the provider passes this check, later connection steps can ask this same resolver for an OAuth descriptor and connector entry; if it fails, the name is left for other resolvers or rejected.
-
-*Call graph*: 1 external calls (composio_client).
+**Call relations**: This small rule is shared by admission and later checks so the system does not disagree about whose seat matters for a turn. It does not call out to the database; it simply gives the rest of the seating flow one member ID to use.
 
 
-##### `ComposioResolver.descriptor`  (lines 40–41)
+##### `SeatSnapshot.seated`  (lines 72–73)
 
 ```
-def descriptor(self, provider: str) -> OAuthProvider
+def seated(self) -> int
 ```
 
-**Purpose**: This function builds the connection description used for OAuth, the standard flow where a user grants access to an outside service. For Composio, it creates a descriptor that points to the toolkit slug but leaves the provider host blank because Composio keeps and uses the account token on its own side.
+**Purpose**: Counts how many members in a snapshot currently have seats. It is a convenient summary for screens or tools that show seat status.
 
-**Data flow**: It receives a provider slug. It places that slug into a `ComposioOAuthProvider` object and sets the host to an empty string. The result is an OAuth provider description that the rest of the connection flow can use.
+**Data flow**: It reads the snapshot’s member entries, counts entries whose seated flag is true, and returns that number. It does not change the snapshot.
 
-**Call relations**: After `claims` has confirmed that a slug belongs to Composio, the connect flow can call this to learn how to start the authorization process. It hands off to `ComposioOAuthProvider`, which packages the provider information in the shape expected by the connector system.
-
-*Call graph*: 1 external calls (__init__).
+**Call relations**: Seats.snapshot builds the snapshot that contains these entries. This property then gives callers a simple total without making them repeat the counting logic.
 
 
-##### `ComposioResolver.entry`  (lines 43–46)
+##### `Seats.admits`  (lines 84–98)
 
 ```
-def entry(self, provider: str) -> ConnectorEntry
+async def admits(self, connection: AsyncConnection, member_id: UUID) -> bool
 ```
 
-**Purpose**: This function creates the connector entry that represents a Composio toolkit inside the system. It gives the provider a human-friendly label and attaches it to the shared Composio broker that will later run its tools.
+**Purpose**: Answers the basic access question: may the agent answer this member right now? A member is admitted only if they belong to this workspace and their seat has not been revoked.
 
-**Data flow**: It receives a provider slug. It keeps the original slug as the provider id, turns underscores into spaces and title-cases the result for display, and combines that with the resolver’s broker in a new `ConnectorEntry`. The returned entry is ready for the connector registry or UI to use.
+**Data flow**: It receives a database connection and a member ID. It looks up that member row inside this workspace and checks whether the seated_at field is filled in. It returns true for a seated workspace member and false for an unknown or unseated member.
 
-**Call relations**: Once a provider has been accepted as a Composio toolkit, the registry or connection flow calls this to create the concrete connector record. That record points future tool execution toward the one shared `ConnectorBroker`, rather than creating a separate broker for every possible toolkit.
+**Call relations**: This is the quick single-person check used whenever the system needs to decide if one member can proceed. It asks the database directly through the provided connection so the answer matches the current transaction.
 
-*Call graph*: 1 external calls (__init__).
-
-
-##### `ComposioResolver.catalog`  (lines 48–51)
-
-```
-async def catalog(self, query: str, limit: int=TOOLKIT_SEARCH_LIMIT, after: str | None=None) -> CatalogPage
-```
-
-**Purpose**: This function searches Composio’s toolkit catalog so users or discovery tools can find services they may connect. It keeps the system from advertising random names by relying on Composio’s own list of connectable toolkits.
-
-**Data flow**: It receives a search query, a maximum number of results, and optionally an `after` marker used to fetch the next page of results. It gets a Composio client, asks that client to list matching toolkits, and returns the resulting catalog page. It does not store the results itself.
-
-**Call relations**: Discovery features call this when they need to show or search available Composio-backed services. The function delegates the actual lookup to the Composio client, then passes the catalog page back to the caller so the caller can display results or continue paging.
-
-*Call graph*: 1 external calls (composio_client).
+*Call graph*: 2 external calls (execute, select).
 
 
-### `extensions/pipedream/ufo_ext_pipedream/manifest.py`
-
-`config` · `startup / extension discovery`
-
-This file is the extension’s “front desk sign.” When the main application loads extensions, it asks each one for a manifest, which is a plain declaration of what the extension provides. Here, the Pipedream extension declares a set of connectors, such as services whose accounts are authorized through Pipedream rather than directly through this app.
-
-The file creates one shared PipedreamBroker. A broker is the server-side helper that knows how to use connected accounts without handing secret tokens to the agent or browser. For every connector listed in CONNECTORS, the manifest builds a ConnectorProvider. Each provider includes three important things: an OAuth provider, which describes how the user grants access; a human-friendly label; and the shared broker that later performs actions and credential-backed work.
-
-It also registers one browser-facing route for the OAuth bridge. OAuth is the common “let this app access my account” consent process. This route is where the consent flow redirects so the app can finish connecting the account to the correct workspace.
-
-In short, this file does not perform Pipedream actions itself. It declares the menu of available Pipedream-backed connections and the route needed to finish login, so the rest of the system can discover and use them safely.
-
-#### Function details
-
-##### `manifest`  (lines 25–47)
+##### `Seats.all_seated`  (lines 100–120)
 
 ```
-def manifest() -> Manifest
+async def all_seated(self, connection: AsyncConnection, member_ids: Collection[UUID]) -> bool
 ```
 
-**Purpose**: Builds and returns the Pipedream extension’s manifest, which is the object the host application reads to discover this extension’s connectors and routes. Someone would use it during extension loading so the app can add Pipedream-backed services to its connection registry.
+**Purpose**: Checks whether every member in a given group still has a seat. This is useful for work that may involve several members and must stop if any required person loses access.
 
-**Data flow**: It starts with the connector catalog from CONNECTORS and creates one shared PipedreamBroker. For each catalog entry, it turns the provider name and connector details into a ConnectorProvider with an OAuth setup, display label, broker, and allowed transfer hosts. It then adds a route for the OAuth bridge and returns one Manifest object containing the extension name, version, connector list, and route list.
+**Data flow**: It receives a database connection and a collection of member IDs. If the collection is empty, it returns true. Otherwise it counts how many of those IDs are seated members of this workspace and returns true only when the count matches the requested set.
 
-**Call relations**: When the host system loads this extension, it calls manifest to ask, “What do you provide?” The function creates PipedreamOAuthProvider objects for each connector, wraps them in ConnectorProvider entries, creates a RouteSpec for the OAuth redirect path, and hands everything to Manifest so the wider connector and routing systems can register them.
+**Call relations**: This is the group version of Seats.admits. Larger flows can call it during repeated turn checks, resume checks, or dispatch checks to avoid doing one database trip per person.
 
-*Call graph*: 6 external calls (__init__, __init__, __init__, __init__, __init__, items).
+*Call graph*: 2 external calls (execute, select).
 
 
-### Direct-key connector providers
-Registers services that authenticate through user-supplied API keys and outbound-proxy-safe credential handling.
-
-### `extensions/keyed_connectors/ufo_ext_keyed_connectors.py`
-
-`config` · `startup / extension manifest load`
-
-Some outside services cannot be connected through a broker-style “click to authorize” flow. Instead, the workspace already owns an API key, like a special password for that service. This file describes those services in a controlled way so the agent can call them without ever seeing the real key.
-
-The main idea is a table of supported providers, such as Datadog, PostHog, Mercury, Apollo, and PandaDoc. Each row says which web host may be contacted, which HTTP header carries the key, what environment variable the sandbox should use, and what text to show when asking a workspace admin for the credential. For providers whose API host depends on region or account, the file lists the allowed hosts and asks the member to choose one. That prevents a key meant for one region from being sent somewhere else.
-
-The safety trick is a “sentinel”: the sandbox receives a harmless placeholder value in an environment variable. When the sandbox makes an outgoing request, the egress proxy replaces that placeholder with the real secret only for the approved host and header. Like handing someone a claim ticket instead of the actual valuables, the agent can use the credential path without being able to read or copy the secret.
-
-At the end, the file builds a manifest: the package of credential slots plus a prompt section explaining how agents should use these keyed providers.
-
-#### Function details
-
-##### `KeyedSecret.__post_init__`  (lines 56–61)
+##### `Seats.snapshot`  (lines 122–145)
 
 ```
-def __post_init__(self) -> None
+async def snapshot(self, connection: AsyncConnection) -> SeatSnapshot
 ```
 
-**Purpose**: This checks that a declared API key uses only an authentication prefix the outbound proxy knows how to safely replace. It protects the provider table from accidentally describing a kind of header value the system cannot swap correctly.
+**Purpose**: Builds a read-only picture of every member in the workspace and whether each one is seated and an admin. It is meant for reporting or seat-management views.
 
-**Data flow**: After a KeyedSecret object is created, it reads its own scheme field. If there is no scheme, it accepts the secret as a plain header value. If there is a scheme, it compares it with the small approved set, and raises an error if the scheme is not supported. Nothing new is returned; the object is either accepted or rejected.
+**Data flow**: It receives a database connection. It reads all member rows for this workspace in creation order, turns each row into a SeatEntry, wraps them in a SeatSnapshot, and returns that snapshot.
 
-**Call relations**: This runs automatically whenever the provider table creates a KeyedSecret. Later, KeyedProvider.slots relies on these already-checked secrets when it creates credential slots and injection rules, so bad schemes are caught early instead of becoming unsafe proxy behavior.
+**Call relations**: Seat-management tools call this when they need to show the current state instead of changing it. It hands the result to SeatSnapshot, whose seated property can then summarize the count.
 
-
-##### `KeyedProvider.__post_init__`  (lines 79–88)
-
-```
-def __post_init__(self) -> None
-```
-
-**Purpose**: This checks that each provider describes its API address in exactly one safe way: either one fixed host, or a closed list of selectable hosts. It also makes sure region-based providers include the extra information needed to ask the user for the right host and pass that choice into the sandbox.
-
-**Data flow**: After a KeyedProvider object is created, it reads its host, sites, host_env, and site_description fields. If both a fixed host and selectable sites are present, or neither is present, it raises an error. If selectable sites are used but the environment variable or user-facing description is missing, it also raises an error. Otherwise the provider declaration is left unchanged and considered valid.
-
-**Call relations**: This runs as the KEYED_PROVIDERS table is built. KeyedProvider.target_host and KeyedProvider.slots depend on the provider having a clear host shape, so this validation keeps the later manifest-building code simple and safe.
+*Call graph*: 4 external calls (__init__, __init__, execute, select).
 
 
-##### `KeyedProvider.target_host`  (lines 91–100)
+##### `Seats.grant`  (lines 147–157)
 
 ```
-def target_host(self) -> str | HostChoice
+async def grant(self, connection: AsyncConnection, email: str) -> None
 ```
 
-**Purpose**: This turns a provider’s host declaration into the exact form the rest of the manifest needs. For a simple provider it returns the fixed hostname; for a region-based provider it returns a HostChoice, meaning a user must choose from approved hostnames.
+**Purpose**: Restores access for a workspace member with a given email address. If the member already has a seat, it quietly does nothing.
 
-**Data flow**: It reads the provider’s sites, host, provider name, site description, and host environment variable. If there are no selectable sites, it outputs the fixed host string. If there are selectable sites, it creates and returns a HostChoice containing the credential slot name, description, allowed hosts, default host, and environment variable name.
+**Data flow**: It receives a database connection and an email address. It first finds the member in this workspace by email. If the member is unseated, it writes the current time into seated_at and updates the row timestamp; otherwise there is no change.
 
-**Call relations**: KeyedProvider.slots calls this when building credential slots, because each secret must be tied to the right approved host. KeyedProvider.usage also calls it when writing human-readable instructions, so the examples show either a fixed host or an environment variable for the selected host.
+**Call relations**: It relies on Seats._member_by_email to ensure the email belongs to this workspace and to get the current seat state. Admin-facing tools can call this to let an unseated member speak to the agent again.
 
-*Call graph*: 1 external calls (__init__).
-
-
-##### `KeyedProvider.slots`  (lines 102–120)
-
-```
-def slots(self) -> tuple[CredentialSlot, ...]
-```
-
-**Purpose**: This converts one provider declaration into the credential slots the system exposes to users. Each slot tells the system what secret to ask for and exactly where that secret may be injected into an outgoing request.
-
-**Data flow**: It starts with a KeyedProvider and reads its secrets plus its target host. For every secret, it creates a CredentialSlot with a name, a user-facing description, and an InjectionTarget saying the allowed host, HTTP header, sentinel placeholder, sandbox environment variable, and request-counting dimension. If the host is selectable, it also adds a separate credential slot for the host choice. The output is a tuple of all slots for that provider.
-
-**Call relations**: The top-level manifest function calls this for every provider in KEYED_PROVIDERS and gathers the results into the extension manifest. It hands off to CredentialSlot and InjectionTarget objects from the SDK, which are the shared format the rest of the system understands.
-
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: calls 1 internal fn (_member_by_email); 2 external calls (execute, update).
 
 
-##### `KeyedProvider.usage`  (lines 122–135)
+##### `Seats.revoke`  (lines 159–182)
 
 ```
-def usage(self) -> str
+async def revoke(self, connection: AsyncConnection, email: str) -> None
 ```
 
-**Purpose**: This writes a short instruction line explaining how to call one provider from the sandbox. It is meant for the prompt text shown to the agent, so the agent knows which slots exist and how to place the environment variables into a REST API call.
+**Purpose**: Removes access for a workspace member with a given email address. It refuses to remove the last seated admin, because then nobody left in chat could restore seats.
 
-**Data flow**: It reads the provider name, label, secrets, schemes, headers, environment variable names, and host information. It builds a curl-style example using the right headers and either the fixed host or the selected host environment variable. It returns one formatted string naming the slots and showing the request pattern.
+**Data flow**: It receives a database connection and an email address. It first locks the workspace row so competing revokes happen one at a time, finds the member by email, and returns early if they are already unseated. If they are the only seated admin, it raises an error; otherwise it clears seated_at and updates the row timestamp.
 
-**Call relations**: The module uses this while building SECTION_BODY, the prompt section included in the manifest. It depends on KeyedProvider.target_host so its instructions match the same host rules used by KeyedProvider.slots.
+**Call relations**: It uses Seats._member_by_email to identify the target and Seats._seated_admin_count when the target is an admin. It does not stop running work directly; instead, later admission and per-round checks see the revoked seat and refuse or park the work.
 
-
-##### `manifest`  (lines 268–274)
-
-```
-def manifest() -> Manifest
-```
-
-**Purpose**: This is the extension’s public assembly point. It packages the keyed-provider credential slots and the explanatory prompt text into a Manifest object that the larger system can load.
-
-**Data flow**: It reads the extension name, version, provider table, and prepared prompt body. It asks each provider for its credential slots, flattens them into one tuple, creates a PromptSection with the keyed-connector guidance, and returns a Manifest containing all of that. It does not mutate the provider table or store secrets.
-
-**Call relations**: The extension loader calls this when it wants to discover what this extension contributes. Inside, it calls KeyedProvider.slots for the credential declarations and constructs SDK Manifest and PromptSection objects so the rest of the platform receives the data in its standard extension format.
-
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: calls 2 internal fn (_member_by_email, _seated_admin_count); 4 external calls (__init__, execute, select, update).
 
 
-### Feature flag backend
-Connects feature-flag reads and operator writes to the Cloudflare Flagship service.
-
-### `extensions/flagship/ufo_ext_flagship.py`
-
-`io_transport` · `startup for flag reads; CLI flag-write commands for admin changes`
-
-Feature flags let the product change behavior without shipping new code. This file makes Cloudflare Flagship the place where those choices live. At startup, the main system asks this extension for an OpenFeature provider. OpenFeature is a common interface for reading flags, so the rest of the code can ask “is this flag on?” without knowing it is backed by Cloudflare.
-
-The file expects deploy-level environment values: the Flagship app id, the Cloudflare account id, and a token that is allowed to evaluate flags. If any of these are missing, it does not crash the product. Instead, it logs a warning and returns no provider, so flags fall back to their code defaults. That means a missing or unreachable flag service makes features behave as if they are off or at their safe default.
-
-There is a separate `FlagshipAdmin` path for writes, used by `ufoctl flags set`. This uses a different token because changing flags is more powerful than reading them. To change one flag, it first reads the full current flag record from Cloudflare, changes only the default served variation, and sends the whole record back. This is like editing one line on a form while carefully copying the rest unchanged, so Terraform-owned settings are not accidentally erased.
-
-#### Function details
-
-##### `build`  (lines 52–73)
+##### `Seats._member_by_email`  (lines 184–201)
 
 ```
-def build(cache_ttl_seconds: float) -> FeatureProvider | None
+async def _member_by_email(self, connection: AsyncConnection, email: str) -> tuple[UUID, datetime | None, bool]
 ```
 
-**Purpose**: Creates the Cloudflare Flagship provider that the rest of the system uses to read feature flags. If the deploy is missing the needed Cloudflare settings, it returns nothing so the system uses each flag’s built-in default instead.
+**Purpose**: Finds one member of this workspace by email and returns the facts needed for seat changes. It raises a clear error when the email is not a member of the workspace.
 
-**Data flow**: It reads the Flagship app id, account id, and read token from deploy environment variables. If any are absent, it writes a warning that says which pieces are missing and returns `None`. If all are present, it builds a `FlagshipServerProvider` with the app details, a short timeout, no retries, and the requested cache lifetime, then returns that provider.
+**Data flow**: It receives a database connection and an email address. It trims and lowercases the email for comparison, reads the matching member row in this workspace, and returns the member ID, current seated_at value, and admin flag. If no row is found, it raises UnknownMember.
 
-**Call relations**: This function is registered in the extension manifest as the builder for the `flagship` flag backend. During startup, core flag setup calls it through that registration; it then hands back either a ready OpenFeature provider or `None` to signal safe fallback behavior.
+**Call relations**: Seats.grant and Seats.revoke use this helper before changing a seat. Keeping the lookup here means both operations apply the same email matching and workspace boundary.
 
-*Call graph*: 3 external calls (FlagshipServerProvider, deploy_env, warn).
-
-
-##### `FlagshipAdmin.serve`  (lines 95–103)
-
-```
-def serve(self, key: str, *, on: bool) -> None
-```
-
-**Purpose**: Changes which variation of one Flagship flag is served by default, choosing either the configured “on” or “off” variation. It is meant for operator-driven writes, not for normal per-request flag checks.
-
-**Data flow**: It receives a flag key and a desired boolean state. First it asks Cloudflare for the current full flag record. It checks that the record is readable and that the requested variation, either `on` or `off`, really exists. Then it copies the current record while leaving out read-only answer fields, swaps in the new `default_variation`, and sends the updated flag back to Cloudflare. It returns nothing if the write succeeds, and raises an error if the flag cannot be read or changed safely.
-
-**Call relations**: This method is the public action on `FlagshipAdmin`. A command such as `ufoctl flags set` would call it after `build_admin` creates the admin client. It relies on `FlagshipAdmin._call` for both the read request and the write request, so all Cloudflare communication and error parsing stays in one place.
-
-*Call graph*: calls 1 internal fn (_call).
+*Call graph*: called by 2 (grant, revoke); 3 external calls (__init__, execute, select).
 
 
-##### `FlagshipAdmin._call`  (lines 105–120)
+##### `Seats._seated_admin_count`  (lines 203–212)
 
 ```
-def _call(self, method: str, path: str, body: dict[str, object] | None=None) -> dict[str, object]
+async def _seated_admin_count(self, connection: AsyncConnection) -> int
 ```
 
-**Purpose**: Sends one HTTP request to the Cloudflare Flagship flags API and turns Cloudflare’s response into either a usable dictionary or a clear runtime error. It centralizes the low-level web request details for admin writes.
+**Purpose**: Counts how many admins in this workspace currently have seats. It exists to protect the rule that at least one seated admin must remain.
 
-**Data flow**: It takes an HTTP method such as `GET` or `PUT`, a flag API path, and an optional JSON body. It builds the full Cloudflare URL from the stored account id and app id, adds the bearer token for authorization, and sends the request through the stored `httpx` client. It parses the JSON response when present. If Cloudflare reports failure through the HTTP status or response body, it raises an error containing the method, path, status code, and Cloudflare’s error details. Otherwise it returns the parsed response dictionary.
+**Data flow**: It receives a database connection, counts member rows in this workspace where the member is both seated and an admin, and returns the count as a number.
 
-**Call relations**: It is called by `FlagshipAdmin.serve` whenever that method needs to read or update a flag. Because `serve` calls this helper twice, `_call` is the shared doorway to Cloudflare for the admin path.
+**Call relations**: Seats.revoke calls this only when someone is trying to unseat an admin. The count is checked after the workspace row is locked, so concurrent revokes cannot both think another admin will remain.
 
-*Call graph*: called by 1 (serve).
-
-
-##### `build_admin`  (lines 123–140)
-
-```
-def build_admin() -> FlagshipAdmin
-```
-
-**Purpose**: Creates the write-capable Flagship admin client used by flag-setting commands. Unlike read setup, it fails loudly if required write credentials are missing, because an operator asked for a change and needs to know why it cannot happen.
-
-**Data flow**: It reads the Cloudflare account id, Flagship app id, and write token from deploy environment variables. It collects the names of any missing values. If anything is missing, it raises an error naming the missing settings. If everything is present, it returns a `FlagshipAdmin` instance loaded with those credentials.
-
-**Call relations**: This function is the setup step for the flag-writing command path, such as `ufoctl flags set`. After it returns a `FlagshipAdmin`, that caller can invoke `FlagshipAdmin.serve` to actually change which variation a flag serves.
-
-*Call graph*: 2 external calls (__init__, deploy_env).
+*Call graph*: called by 1 (revoke); 2 external calls (execute, select).
 
 
-##### `manifest`  (lines 143–149)
+##### `email_domain`  (lines 215–228)
 
 ```
-def manifest() -> Manifest
+def email_domain(email: str) -> str
 ```
 
-**Purpose**: Describes this extension to the host system: its name, version, required deploy environment keys, and the feature-flag provider it offers. This is how the wider project discovers and plugs in the Flagship backend.
+**Purpose**: Extracts a safe, lowercased domain from an email address, such as “example.com” from “me@example.com”. If the value is not exactly one simple local@domain address with no whitespace, it returns an empty string.
 
-**Data flow**: It uses the constants in this file to create a `Manifest`. The manifest lists the deploy keys needed for reading flags and registers a `FlagProviderSpec` that says the backend is named `flagship` and should be built with `build`. The finished manifest is returned to the extension loader.
+**Data flow**: It receives a string, trims and lowercases it, splits it around the @ sign, rejects missing parts, extra @ signs, or whitespace, and returns the domain when valid. It changes no stored data.
 
-**Call relations**: The extension system calls this during discovery or startup. The returned manifest points the core feature-flag setup toward `build`, which then creates the actual OpenFeature provider if the deploy has the needed Cloudflare credentials.
+**Call relations**: create_member uses this as the shared shape check before any member row is created. Workspace identity helpers also call it so domain matching and member creation agree about what counts as a usable email.
 
-*Call graph*: 2 external calls (__init__, __init__).
+*Call graph*: called by 4 (create_member, workspace_by_domain, workspace_domain, workspace_subject).
 
 
-### Shared Redis transports
-Registers Redis as the shared backend for live-frame hub traffic and terminal transport.
-
-### `extensions/redis_hub/ufo_ext_redis_hub/manifest.py`
-
-`config` · `startup/config load`
-
-This is the extension’s registration card. The main system does not automatically know that a Redis-backed hub or Redis-backed terminal transport exists, so this file describes them in a standard shape called a manifest. A manifest is like a menu entry: it gives the extension a name and version, then says, “if the user asks for backend redis, build this object.”
-
-The problem it solves is coordination across more than one running server instance. The normal in-process hub only works inside one process. By selecting the Redis hub backend, live frames can be shared through Redis Streams, so different server instances can participate. The terminal transport does a related job for connected user terminals: if a turn is accepted by a server that does not directly hold the user’s terminal connection, Redis and the blob store help route the terminal data to the right place.
-
-Both builders require `hub.url`, the Redis connection address. They deliberately fail immediately if that URL is missing. This is important because a bad deployment should break clearly at startup or configuration time, not later during a user request when the system first tries to send a frame or reach a terminal.
-
-#### Function details
-
-##### `_build_hub`  (lines 24–29)
+##### `signup_workspace_id`  (lines 231–233)
 
 ```
-def _build_hub(url: str | None) -> Hub
+def signup_workspace_id(subject: str) -> UUID
 ```
 
-**Purpose**: Builds the Redis-backed live-frame hub when the system has been configured to use `hub.backend = "redis"`. It also checks that the Redis URL was actually provided, so the system does not start with a half-configured backend.
+**Purpose**: Creates the deterministic workspace ID for a hosted signup subject. Deterministic means the same subject always produces the same UUID, like a repeatable label rather than a random ticket.
 
-**Data flow**: It receives a Redis URL, or `None` if no URL was configured. If the URL is missing, it raises a clear error explaining that `hub.url` is required. If the URL is present, it creates and returns a `RedisStreamHub`, which is the object that will use Redis Streams to share hub messages across server instances.
+**Data flow**: It receives a subject string, lowercases it, feeds it into UUID version 5 generation using the DNS namespace, and returns the resulting UUID. It does not read or write the database.
 
-**Call relations**: The manifest points the core system to this builder through a hub specification. When the core sees that the selected hub backend is `redis`, it calls this function, and this function hands off the actual hub work to `RedisStreamHub`.
+**Call relations**: workspace_subject, workspace_domain, and workspace_by_domain use this to tell whether a workspace is identified by one exact email address or by a domain. That keeps signup addressing consistent across the file.
 
-*Call graph*: 1 external calls (__init__).
-
-
-##### `_build_terminal`  (lines 32–37)
-
-```
-def _build_terminal(url: str | None, blob: BlobStore) -> TerminalTransport
-```
-
-**Purpose**: Builds the Redis-backed terminal transport when the system has been configured to use `terminal.backend = "redis"`. This lets terminal traffic reach the right connected user even when different server instances are involved.
-
-**Data flow**: It receives a Redis URL and a blob store, which is shared storage for larger pieces of terminal-related data. If the URL is missing, it raises a clear configuration error. If the URL is present, it creates and returns `RedisTerminals`, giving it both the Redis address and the blob store it needs to coordinate terminal delivery.
-
-**Call relations**: The manifest registers this function as the builder for the Redis terminal transport. When the core selects the `redis` terminal backend, it calls this function, which then delegates the real transport behavior to `RedisTerminals`.
-
-*Call graph*: 1 external calls (__init__).
+*Call graph*: called by 3 (workspace_by_domain, workspace_domain, workspace_subject); 1 external calls (uuid5).
 
 
-##### `manifest`  (lines 40–48)
+##### `workspace_subject`  (lines 236–245)
 
 ```
-def manifest() -> Manifest
+def workspace_subject(first_email: str, workspace_id: UUID) -> str
 ```
 
-**Purpose**: Creates the extension manifest that the main system reads to discover what this Redis extension provides. It declares the extension name, version, hub backend, and terminal transport backend.
+**Purpose**: Returns the signup subject that represents a workspace: either the first member’s exact email address or that email’s domain. This gives invitations and workspace choices one shared label.
 
-**Data flow**: It takes no input. It packages the constants from this file together with two builder functions: one for the Redis hub and one for the Redis terminal transport. It returns a `Manifest` object that the host application can inspect during extension loading.
+**Data flow**: It receives the first member’s email and the workspace ID. It checks whether that exact email would generate this workspace ID; if so, it returns the email. Otherwise it returns the email’s domain.
 
-**Call relations**: This is the public entry point for the extension metadata. The extension loader calls it to learn that the backend name `redis` is available, and the returned hub and terminal specifications tell the core system which builder functions to call later when those backends are selected.
+**Call relations**: It combines signup_workspace_id and email_domain. Other code can use this one answer instead of separately guessing how a workspace should be named.
 
-*Call graph*: 3 external calls (__init__, __init__, __init__).
+*Call graph*: calls 2 internal fn (email_domain, signup_workspace_id).
+
+
+##### `workspace_domain`  (lines 248–266)
+
+```
+async def workspace_domain(connection: AsyncConnection, workspace_id: UUID) -> str | None
+```
+
+**Purpose**: Finds the email domain that owns a workspace, but only when the workspace is actually domain-based. Personal-email workspaces do not claim a whole provider domain like gmail.com.
+
+**Data flow**: It receives a database connection and workspace ID. It reads the workspace’s first member email, extracts its domain, and checks whether the workspace ID was created from the exact email instead. It returns the domain for a domain workspace, or None when there is no member, no valid domain, or the workspace is personal-email based.
+
+**Call relations**: It uses email_domain and signup_workspace_id to apply the same identity rule used elsewhere. Callers can ask this when deciding whether an email domain should automatically point to a workspace.
+
+*Call graph*: calls 2 internal fn (email_domain, signup_workspace_id); 2 external calls (execute, select).
+
+
+##### `workspace_by_domain`  (lines 269–302)
+
+```
+async def workspace_by_domain(connection: AsyncConnection, domain: str) -> UUID | None
+```
+
+**Purpose**: Looks up which workspace, if any, is addressed by a given email domain. It deliberately skips personal-email workspaces so shared email providers do not accidentally map to one user’s workspace.
+
+**Data flow**: It receives a database connection and a domain string. It validates the domain by pretending it is part of an email, searches for workspaces whose first member email ends with that domain, orders candidates predictably, skips any workspace whose ID comes from the exact first email, and returns the first matching workspace ID or None.
+
+**Call relations**: It uses email_domain to clean the input and signup_workspace_id to filter out personal-email workspaces. This supports join or signup flows that need to find a workspace from someone’s verified email domain.
+
+*Call graph*: calls 2 internal fn (email_domain, signup_workspace_id); 2 external calls (execute, select).
+
+
+##### `member_by_email`  (lines 305–321)
+
+```
+async def member_by_email(connection: AsyncConnection, workspace_id: UUID, email: str) -> UUID | None
+```
+
+**Purpose**: Finds the member ID for an email address inside one specific workspace. It returns None rather than creating anything when the address is not already a member.
+
+**Data flow**: It receives a database connection, a workspace ID, and an email address. It lowercases and trims the email for comparison, searches only within the given workspace, and returns the matching member ID or None.
+
+**Call relations**: This is a safe lookup helper for flows that have a verified email and a workspace and need to see whether the person is already a member. Its query includes the workspace boundary so it does not accidentally read a member from another workspace.
+
+*Call graph*: 2 external calls (execute, select).
+
+
+##### `member_is_admin`  (lines 324–335)
+
+```
+async def member_is_admin(connection: AsyncConnection, workspace_id: UUID, member_id: UUID) -> bool
+```
+
+**Purpose**: Checks whether a given seated member is an admin in a workspace. Unseated admins do not count for this answer.
+
+**Data flow**: It receives a database connection, workspace ID, and member ID. It searches for a matching member row that is in the workspace, seated, and marked as admin, then returns true or false.
+
+**Call relations**: Admin-only actions can call this before allowing a change. It reads the same member table used by seat checks, so admin power depends on still holding a seat.
+
+*Call graph*: 2 external calls (execute, select).
+
+
+##### `create_member`  (lines 338–409)
+
+```
+async def create_member(connection: AsyncConnection, workspace_id: UUID, email: str, *, is_admin: bool=False, invited_by: UUID | None=None) -> UUID
+```
+
+**Purpose**: Creates a workspace member through the one shared path used by onboarding, invitations, and joins. New members are seated by default through the database row, and duplicate creation races return the already-created member instead of making a second identity.
+
+**Data flow**: It receives a database connection, workspace ID, email, optional admin flag, and optional inviter ID. It validates the email shape, lowercases it, locks the workspace row, tries to insert a new member with timestamps and invitation details when present, and returns the new member ID. If another caller already created the same workspace/email row, it reads and returns that existing member ID instead.
+
+**Call relations**: It calls email_domain so every member creation route obeys the same email rule. It uses a database insert that ignores uniqueness conflicts, which lets two simultaneous attempts for the same email safely collapse into one member.
+
+*Call graph*: calls 1 internal fn (email_domain); 3 external calls (execute, select, uuid4).
+
+
+##### `member_workspaces`  (lines 412–420)
+
+```
+def member_workspaces() -> WorkspaceCandidates
+```
+
+**Purpose**: Builds a candidate source for jobs that need to run once for every workspace that has at least one member. It keeps knowledge of the member table inside core code.
+
+**Data flow**: It defines a small query that selects distinct workspace IDs from the member table, wraps that query as WorkspaceCandidates, and returns it. It does not run the query immediately.
+
+**Call relations**: Extensions can ask for these candidates without writing their own direct member-table query. The nested member_workspaces.with_a_member function supplies the actual database selection when the candidate system needs it.
+
+*Call graph*: 1 external calls (owner_candidates).
+
+
+##### `member_workspaces.with_a_member`  (lines 417–418)
+
+```
+def with_a_member() -> sa.Select[tuple[UUID]]
+```
+
+**Purpose**: Defines the database query for “all workspaces that have at least one member.” It is intentionally broad because the later job can decide what to do with each workspace.
+
+**Data flow**: It takes no inputs from the caller. It builds and returns a SQL query selecting distinct workspace IDs from member rows. It does not execute the query itself.
+
+**Call relations**: member_workspaces passes this query builder to owner_candidates. The candidate framework can later call it to find which workspaces should be considered for a member-related job.
+
+*Call graph*: 1 external calls (select).
