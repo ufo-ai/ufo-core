@@ -50,6 +50,7 @@ from ufo.runtime.access.grants import (
     install_connect_flow,
 )
 from ufo.runtime.agent_scope import AgentUnbound, agent
+from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
 from ufo.runtime.surfaces.admission import Admission, ConnectResume
 from ufo.runtime.surfaces.cli import CONNECT_LOGO_CACHE, CONNECT_LOGO_FILE, callback_router
@@ -297,7 +298,7 @@ async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) 
     resolver = PerAgentRules(
         base=(), grants=store, transfer_hosts=ConnectorTransferHosts({"stub": (TRANSFER_HOST,)})
     )
-    rules = await resolver.resolve(RunToken(workspace_id, turn_id))
+    rules = await resolver.resolve(RunToken(workspace_id, turn_id, WORKSPACE_AUTHORITY))
     assert any(isinstance(r, ScopeRule) and TRANSFER_HOST in r.allowed_hosts for r in rules)
     assert not any(isinstance(r, InjectionRule) for r in rules)
 
@@ -876,7 +877,7 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
             )
         },
     )
-    rules_a = await resolver.resolve(RunToken(workspace_id, turn_a))
+    rules_a = await resolver.resolve(RunToken(workspace_id, turn_a, WORKSPACE_AUTHORITY))
     assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_a)
     assert not any(isinstance(r, ScopeRule) and HOST_B in r.allowed_hosts for r in rules_a)
     assert not any(isinstance(r, ForwardRule) and r.host == HOST_B for r in rules_a)
@@ -894,7 +895,7 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
     store = GrantStore()
     resolver = PerAgentRules(base=(), grants=store)
 
-    rules_1 = await resolver.resolve(RunToken(workspace_id, turn_1))
+    rules_1 = await resolver.resolve(RunToken(workspace_id, turn_1, WORKSPACE_AUTHORITY))
     assert not any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_1)
     await _record(
         store,
@@ -907,7 +908,7 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
         conversation_id=conversation_id,
         shared=False,
     )
-    rules_2 = await resolver.resolve(RunToken(workspace_id, turn_2))
+    rules_2 = await resolver.resolve(RunToken(workspace_id, turn_2, WORKSPACE_AUTHORITY))
     assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_2)
 
 

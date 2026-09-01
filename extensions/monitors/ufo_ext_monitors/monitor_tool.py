@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_monitors.monitors import (
@@ -117,7 +118,7 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
         reason=args.reason,
         next_steps=args.next_steps,
         metadata=args.metadata,
-        created_by_member_id=ctx.acting_member_id,
+        created_by_member_id=authority_member_id(ctx.authority),
         baseline=baseline,
         next_probe_at=now + timedelta(minutes=args.interval_minutes),
     )

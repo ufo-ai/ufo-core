@@ -15,7 +15,6 @@ import json
 import shlex
 from dataclasses import dataclass, replace
 from typing import Any
-from uuid import UUID
 
 from pydantic import BaseModel, Field, create_model
 
@@ -42,6 +41,7 @@ from ufo.host.ext.loader import (
 from ufo.host.spawn_catalog import spawn_catalog_skill
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
 from ufo.runtime.ext.context import ExtensionContext
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest
@@ -117,10 +117,10 @@ class HostEnvironment:
             document = await load_environment_document(self._document_blob(), request.environment)
         all_tools, tool_ext, verbs = self.tools(
             audience=request.audience,
-            scheduled_member_id=(
-                turn.on_behalf_of_member_id
+            member_context_authority=(
+                turn.authority
                 if turn.admission_source == SCHEDULED_ADMISSION
-                else None
+                else WORKSPACE_AUTHORITY
             ),
         )
         hooks = self.hooks(audience=request.audience)
@@ -129,12 +129,7 @@ class HostEnvironment:
         if agent.use_workspace_skills:
             member_cards, materialize_member = await self.member_skills(agent_name=agent.name)
         skills = request.skills.merged_with(
-            (
-                await spawn_catalog_skill(
-                    request.subagents,
-                    turn.speaker_member_id or turn.on_behalf_of_member_id,
-                ),
-            )
+            (await spawn_catalog_skill(request.subagents, turn.authority),)
         ).with_member(member_cards, materialize_member)
         sections = tuple(
             (section.name, section.body)
@@ -223,7 +218,7 @@ class HostEnvironment:
         )
 
     def tools(
-        self, *, audience: Audience, scheduled_member_id: UUID | None
+        self, *, audience: Audience, member_context_authority: ExecutionAuthority
     ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]:
         return turn_tools(
             self.manifests,
@@ -234,7 +229,7 @@ class HostEnvironment:
             public_base_url=self.public_base_url,
             home_surface=self.home_surface,
             artifact_token_secret=self.artifact_token_secret,
-            scheduled_member_id=scheduled_member_id,
+            member_context_authority=member_context_authority,
             member_context_blob=self.blob,
         )
 

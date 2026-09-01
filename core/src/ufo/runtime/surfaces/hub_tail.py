@@ -20,10 +20,11 @@ import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.harness.o11y import log
+from ufo.runtime.authority import turn_authority
 from ufo.runtime.billing.accounting import ALLOW, SpendEvaluator, applicable_caps_absent
 from ufo.runtime.billing.balance import balance_refusal_message, read_headroom
 from ufo.runtime.hub import Activity, ArrivalQueued, Hub, LiveFrame, Parked, Terminal
-from ufo.runtime.seats import SEAT_REVOKED_MESSAGE, Seats, gate_member
+from ufo.runtime.seats import SEAT_REVOKED_MESSAGE, Seats
 from ufo.schema import tables
 from ufo.schema.records import PARKED, TerminalFrame
 
@@ -149,8 +150,8 @@ async def turn_status_frame(turn_id: UUID, billing_url: str | None = None) -> Li
             return Terminal(frame=TerminalFrame.model_validate(row.terminal))
         if row.status != PARKED:
             return None
-        gate = gate_member(row.speaker_member_id, row.on_behalf_of_member_id)
-        if gate is not None and not await Seats(row.workspace_id).admits(connection, gate):
+        authority = turn_authority(row.speaker_member_id, row.on_behalf_of_member_id)
+        if not await Seats(row.workspace_id).admits(connection, authority):
             return Parked(message=SEAT_REVOKED_MESSAGE)
         headroom = await read_headroom(connection, row.workspace_id)
         if (

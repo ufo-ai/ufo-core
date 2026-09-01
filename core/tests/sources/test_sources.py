@@ -27,6 +27,7 @@ from ufo.harness import o11y
 from ufo.product import PRODUCT_CENSUS_JOB
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import authority_member_id
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import (
     ExtensionContext,
@@ -1753,7 +1754,7 @@ async def test_main_reads_an_owned_source_only_while_its_exact_owner_is_speaking
 
 async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db: None) -> None:
     """A scheduled run and a subagent both act with their initiator's authority and neither has a
-    speaker, so both reach `source_reader` as one shape: `acting_member_id` is the owner while
+    speaker, so both reach `source_reader` as one shape: member authority names the owner while
     `requesting_member_id` is None. The exception is the live speaker's alone, so the main agent
     reaches nothing on either."""
     state = await _authority()
@@ -1778,7 +1779,7 @@ async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db
             audience=conversation_audience(None),
             artifact_token_secret="",
         )
-        assert ctx.acting_member_id == on_behalf_of_member_id
+        assert authority_member_id(ctx.authority) == on_behalf_of_member_id
         assert member_subject(on_behalf_of_member_id) in ctx.read_subjects
         assert ctx.source_reader().requesting_member_id is None
         assert await _reachable(state, ctx.source_reader()) == frozenset()

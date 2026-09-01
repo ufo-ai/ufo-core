@@ -36,6 +36,7 @@ from ufo.runtime.access.credentials import (
     deploy_env,
     member_slot,
 )
+from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, authority_member_id
 from ufo.runtime.billing.accounting import record_workspace_usage
 from ufo.schema.records import Usage
 
@@ -43,24 +44,26 @@ MEMBER_ROUTED_SLOTS: Mapping[str, str] = MappingProxyType(
     {ANTHROPIC_KEY_SLOT: PROVIDER_ANTHROPIC, OPENAI_KEY_SLOT: PROVIDER_OPENAI}
 )
 
-_current_speaker: ContextVar[tuple[UUID, frozenset[str]] | None] = ContextVar(
-    "ufo_speaker", default=None
+_current_model_authority: ContextVar[tuple[ExecutionAuthority, frozenset[str]] | None] = ContextVar(
+    "ufo_model_authority", default=None
 )
 
 
 @contextmanager
-def speaker(member_id: UUID | None, models: frozenset[str] = frozenset()) -> Iterator[None]:
+def model_authority(
+    authority: ExecutionAuthority, models: frozenset[str] = frozenset()
+) -> Iterator[None]:
     """Bind the member whose own provider account serves `models`, so those models resolve the key
     they connected. The binding names the models and not the provider, because the member's account
     and the deploy's own background work can want the same slot inside one turn — a coding turn
     summarizing its tool calls asks for an OpenAI key twice, and only one of those two calls is the
-    member's to pay for. Every other turn binds None and spends the workspace's key, because a
-    member connects an account for coding and not for normal operation."""
-    token = _current_speaker.set(None if member_id is None else (member_id, models))
+    member's to pay for. Every other turn binds workspace authority and spends the workspace's key,
+    because a member connects an account for coding and not for normal operation."""
+    token = _current_model_authority.set((authority, models))
     try:
         yield
     finally:
-        _current_speaker.reset(token)
+        _current_model_authority.reset(token)
 
 
 _store: CredentialStore | None = None
@@ -195,24 +198,29 @@ class WorkspaceScope:
         return len(self._slot_order(slot, model)) > 1
 
     def _slot_order(self, slot: str, model: str | None) -> list[str]:
-        bound = _current_speaker.get()
+        bound = _current_model_authority.get()
         if slot not in MEMBER_ROUTED_SLOTS or bound is None:
             return [slot]
-        speaking, models = bound
+        authority, models = bound
         if model is None or model not in models:
             return [slot]
-        return [member_slot(slot, speaking), slot]
+        match authority:
+            case MemberAuthority(member_id):
+                return [member_slot(slot, member_id), slot]
+            case _:
+                return [slot]
 
-    async def member_holds_own_model_key(self, member_id: UUID | None) -> bool:
-        """Whether `member_id` signed in with a provider account of their own — either one, since
-        the coding subagent runs on whichever they connected."""
-        return await self.member_model_provider(member_id) is not None
+    async def member_holds_own_model_key(self, authority: ExecutionAuthority) -> bool:
+        """Whether the authority's member signed in with a provider account of their own — either
+        one, since the coding subagent runs on whichever they connected."""
+        return await self.member_model_provider(authority) is not None
 
-    async def member_model_provider(self, member_id: UUID | None) -> str | None:
-        """The provider `member_id` signed in with, or None if they connected neither. A member who
-        skipped that step in onboarding holds no key of their own, and the workspace's own is not
-        theirs: this asks about the person, not the deploy, so it never reads the admin or platform
-        fallbacks. Declaration order decides for a member who connected both."""
+    async def member_model_provider(self, authority: ExecutionAuthority) -> str | None:
+        """The provider the authority's member signed in with, or None if they connected neither.
+        A member who skipped that step in onboarding holds no key of their own, and the workspace's
+        own is not theirs: this asks about the person, not the deploy, so it never reads the admin
+        or platform fallbacks. Declaration order decides for a member who connected both."""
+        member_id = authority_member_id(authority)
         if _store is None or member_id is None:
             return None
         for slot, provider in MEMBER_ROUTED_SLOTS.items():

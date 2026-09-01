@@ -21,6 +21,7 @@ from pydantic import (
     model_validator,
 )
 
+from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.manifest import (
     Deny,
@@ -806,7 +807,7 @@ class ApplicationBuildAcceptance:
                 "The worker returned no site deployed by this build.",
                 browser_batches,
             )
-        if site.creator_member_id != self.ctx.acting_member_id:
+        if site.creator_member_id != authority_member_id(self.ctx.authority):
             return self._blocked(
                 result,
                 "The deployed site does not belong to the application owner.",

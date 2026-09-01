@@ -121,6 +121,7 @@ from ufo.harness.untrusted import wall
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialRequests
 from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, authority_from_member_id
 from ufo.runtime.billing.accounting import (
     ALLOW,
     TOKENS_DIMENSION,
@@ -275,8 +276,8 @@ FINISH_SCHEMA_ERROR = (
     "finish failed the output schema — fix the payload and call it again:\n{error}"
 )
 
-SandboxFor = Callable[[UUID | None], Awaitable[Sandbox]]
-SubagentsFor = Callable[[UUID | None], tuple[Spawn, SubagentControl | None]]
+SandboxFor = Callable[[ExecutionAuthority], Awaitable[Sandbox]]
+SubagentsFor = Callable[[ExecutionAuthority], tuple[Spawn, SubagentControl | None]]
 SCHEDULED_MEMORY_CONTEXT = "<recalled_memory>\n{recalled}\n</recalled_memory>"
 SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
 _NOTHING_SPENT = TurnCost(tokens=0, micro_usd=0, model="", cache_percent=0)
@@ -2968,14 +2969,16 @@ class TurnEngine:
                 raise ValueError(f"{REQUESTED_BY} message has no member requester")
         elif (member := self._own_member(requesters)) is not None:
             requester = member
-        acting_member = requester if requester is not None else self.turn.on_behalf_of_member_id
-        sandbox = (
-            self.sandbox if self.sandbox_for is None else await self.sandbox_for(acting_member)
+        authority = (
+            MemberAuthority(requester)
+            if requester is not None
+            else authority_from_member_id(self.turn.on_behalf_of_member_id)
         )
+        sandbox = self.sandbox if self.sandbox_for is None else await self.sandbox_for(authority)
         spawn, subagents = (
             (context.spawn, context.subagents)
             if self.subagents_for is None
-            else self.subagents_for(acting_member)
+            else self.subagents_for(authority)
         )
         return (
             replace(

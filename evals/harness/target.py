@@ -43,6 +43,7 @@ from evals.harness.judge import JudgeLeg
 from evals.harness.timing import CaseTiming, TurnSteps, TurnTiming, case_timing, turn_timing
 from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
 from ufo.runtime.ext.context import ConversationProbes
 from ufo.runtime.tools.registry import OBJECT_ACTION_TOOL
 from ufo.runtime.turns.transcript import (
@@ -125,9 +126,12 @@ class _Settled:
 class _ConversationWorkspaceProbe(WorkspaceProbe):
     probes: ConversationProbes
     conversation_id: UUID
+    authority: ExecutionAuthority
 
     async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
-        result = await self.probes.run(self.conversation_id, command, timeout_s)
+        result = await self.probes.run(
+            self.conversation_id, command, timeout_s, authority=self.authority
+        )
         return ProbeCommandResult(
             exit_code=result.exit_code,
             stdout=result.stdout,
@@ -232,7 +236,7 @@ class CapabilityTarget(Protocol):
         message: str,
         idempotency_key: str,
         *,
-        acting_member_id: UUID | None,
+        authority: ExecutionAuthority,
         as_scheduled: bool,
     ) -> TargetResult: ...
 
@@ -398,7 +402,9 @@ class InProcessTarget:
         """Run one grader-owned workspace probe and join its bounded artifacts."""
 
         if self.ctx.probes is not None:
-            probe: WorkspaceProbe = _ConversationWorkspaceProbe(self.ctx.probes, conversation_id)
+            probe: WorkspaceProbe = _ConversationWorkspaceProbe(
+                self.ctx.probes, conversation_id, WORKSPACE_AUTHORITY
+            )
         elif self.workspace_probe_for is not None:
             probe = self.workspace_probe_for(conversation_id)
         else:
@@ -773,7 +779,7 @@ class InProcessTarget:
         message: str,
         idempotency_key: str,
         *,
-        acting_member_id: UUID | None,
+        authority: ExecutionAuthority,
         as_scheduled: bool,
     ) -> TargetResult:
         """Drive and reconstruct one internal turn admitted by a multi-flow eval case."""
@@ -784,7 +790,7 @@ class InProcessTarget:
                 agent_id,
                 message,
                 idempotency_key,
-                acting_member_id=acting_member_id,
+                authority=authority,
                 as_scheduled=as_scheduled,
             )
         except Exception as error:

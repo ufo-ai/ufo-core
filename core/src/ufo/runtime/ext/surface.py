@@ -86,6 +86,7 @@ from ufo.runtime.access.grants import (
     installed_connect_flow,
 )
 from ufo.runtime.agent_scope import agent as bind_agent
+from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.accounting import (
     ALLOW,
     AgentSpendReport,
@@ -2286,7 +2287,7 @@ class SurfaceContext:
 
     async def member_has_access(self, member_id: UUID) -> bool:
         async with workspace_tx() as connection:
-            return await Seats(self.workspace_id).admits(connection, member_id)
+            return await Seats(self.workspace_id).admits(connection, MemberAuthority(member_id))
 
     async def is_operator_workspace(self) -> bool:
         """Whether this workspace is the fleet operator's own — the workspace whose own domain

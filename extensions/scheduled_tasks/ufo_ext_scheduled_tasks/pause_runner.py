@@ -18,6 +18,7 @@ admits the turn already admitted rather than a second one. A tick with failures 
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from ufo.sdk.authority import authority_from_member_id
 from ufo.sdk.context import AgentArchived, ExtensionContext
 from ufo_ext_scheduled_tasks.pauses import Pause, PauseStore
 
@@ -50,7 +51,7 @@ class PauseRunner:
                 row.agent_id,
                 row.prompt,
                 f"{FIRE_KEY_PREFIX}{row.id}",
-                acting_member_id=row.created_by_member_id,
+                authority=authority_from_member_id(row.created_by_member_id),
                 as_scheduled=True,
                 unless_member_since=row.origin_seq,
                 unless_member_arrival_since=row.origin_arrival_seq,

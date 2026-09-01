@@ -881,6 +881,7 @@ async def test_spawn_unknown_target_is_an_error_naming_the_valid_targets(
         client=_IdleSpawnClient(),
         registry=SubagentRegistry((_spawn_profile("research"), _spawn_profile("coding"))),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)

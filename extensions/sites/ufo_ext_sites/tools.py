@@ -56,6 +56,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ufo.sdk.authority import authority_member_id
 from ufo.sdk.objects import AGENT_KIND
 from ufo.sdk.sandbox import WORKSPACE_DIR, serve_port, shell_path, workspace_path
 from ufo.sdk.tools import (
@@ -762,7 +763,7 @@ async def _refuse_before_serving(
     spawns."""
     if ctx.ext is None:
         raise RuntimeError("the website tools dispatched without their ExtensionContext")
-    creator_member_id = ctx.acting_member_id
+    creator_member_id = authority_member_id(ctx.authority)
     if creator_member_id is None:
         raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
     if visibility is not None and ctx.speaker_member_id is None:
@@ -801,7 +802,7 @@ async def _host(
     conversation — where it outlives the child turn, and where a rebuild lands on the same link."""
     if ctx.ext is None:
         raise RuntimeError("the website tools dispatched without their ExtensionContext")
-    creator_member_id = ctx.acting_member_id
+    creator_member_id = authority_member_id(ctx.authority)
     if creator_member_id is None:
         raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
     if visibility is not None and ctx.speaker_member_id is None:
@@ -1219,25 +1220,26 @@ async def _redeploy_homepage(
         not requested_by_speaker
         and ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME
         and ctx.turn.parent_turn_id is not None
-        and ctx.acting_member_id is not None
+        and authority_member_id(ctx.authority) is not None
         and ctx.ext is not None
     ):
         requester = await ctx.ext.store.get(
             APPLICATION_BUILDER_REDEPLOY_KEY.format(turn_id=ctx.turn.parent_turn_id)
         )
-        requested_by_speaker = requester == str(ctx.acting_member_id)
+        requested_by_speaker = requester == str(authority_member_id(ctx.authority))
     if not requested_by_speaker:
         raise RuntimeError(HOMEPAGE_REDEPLOY_NEEDS_A_SPEAKER)
     if args.visibility is not None:
         raise ValueError(HOMEPAGE_KEEPS_THE_AGENTS_VISIBILITY)
-    if ctx.acting_member_id is None:
+    member_id = authority_member_id(ctx.authority)
+    if member_id is None:
         raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
     sites = _sites_registry(ctx)
     displaced = await sites.refuse_or_pass(
         ctx.sandbox.conversation_id,
         bound.name,
         scratch_port,
-        ctx.acting_member_id,
+        member_id,
         None,
         True,
     )
@@ -1316,7 +1318,8 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
     if agent is None:
         raise ValueError(f"no live agent is named {ctx.target.name!r}")
     agent_id = agent.id
-    owns = ctx.acting_member_id is not None and agent.owner_member_id == ctx.acting_member_id
+    member_id = authority_member_id(ctx.authority)
+    owns = member_id is not None and agent.owner_member_id == member_id
     if agent_id != ctx.turn.agent_id and not owns and not await ctx.speaker_is_admin():
         raise ValueError(HOMEPAGE_NEEDS_THE_AGENTS_OWNER.format(agent=ctx.target.name))
     workspace_id = ctx.ext.store.workspace_id
@@ -1328,7 +1331,7 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
             f"no hosted site is named {args.site!r}: deploy the site and bind the name its "
             "result carries"
         )
-    if ctx.acting_member_id != site.creator_member_id:
+    if authority_member_id(ctx.authority) != site.creator_member_id:
         raise ValueError(HOMEPAGE_NEEDS_ITS_CREATOR.format(site=args.site))
     deployed_this_turn = (
         site.conversation_id == ctx.sandbox.conversation_id

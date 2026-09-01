@@ -9,6 +9,7 @@ from pytest import raises
 
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import RunToken
+from ufo.runtime.authority import MemberAuthority, authority_member_id
 from ufo.runtime.hub import InProcessHub, Parked, Terminal
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces.hub_tail import HubTailer
@@ -101,7 +102,7 @@ async def _seed(tools: tuple[str, ...] | None = None) -> tuple[RunToken, UUID, U
                 updated_at=sa.func.now(),
             )
         )
-    return RunToken(workspace_id, turn_id, member_id), conversation_id, sandbox_id
+    return RunToken(workspace_id, turn_id, MemberAuthority(member_id)), conversation_id, sandbox_id
 
 
 def _bridge(dbos: _DBOS, hub: InProcessHub) -> ToolBridge:
@@ -215,7 +216,7 @@ async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: 
     assert intent.tool == "object_list"
     assert intent.input == {"kind": "agent"}
     assert child.parent_turn_id == run.turn_id
-    assert child.on_behalf_of_member_id == run.acting_member_id
+    assert child.on_behalf_of_member_id == authority_member_id(run.authority)
     assert child.admission_source == "intent"
     assert child.sandbox_conversation_id == sandbox_id
     assert dbos.options["queue_name"] == EXPRESS_QUEUE_NAME

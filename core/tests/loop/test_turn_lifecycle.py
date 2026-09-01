@@ -1742,6 +1742,7 @@ async def test_a_background_child_wakes_its_parent_with_its_own_result(surface: 
         client=runtime.dbos,
         registry=runtime.subagents,
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     (finished,) = await subagents.wait((child_id,))
@@ -2324,6 +2325,7 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         client=runtime.dbos,
         registry=runtime.subagents,
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     queued = await subagents.message(

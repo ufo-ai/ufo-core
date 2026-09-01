@@ -137,7 +137,6 @@ from ufo.sdk.hub import (
 )
 from ufo.sdk.manifest import HookContext, HookOutcome
 from ufo.sdk.o11y import log, warn
-from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
     NOTHING_DELIVERED,
@@ -1710,9 +1709,8 @@ async def _folds_into_live_turn(ctx: SurfaceContext, bot_token: str, inbound: In
     speaker = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
     if speaker is None:
         return False
-    async with ctx.transaction() as connection:
-        if not await Seats(ctx.workspace_id).admits(connection, speaker):
-            return False
+    if not await ctx.member_has_access(speaker):
+        return False
     channel, _, thread_ts = inbound.queue_key.partition(":")
     log(
         "slack.ambient_gate_skipped",

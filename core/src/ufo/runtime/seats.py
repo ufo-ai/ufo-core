@@ -3,10 +3,9 @@ an admin revokes it to remove that person's access, which is the only way to rem
 `member` kind refuses delete, because the row is an identity and a memory subject that outlives
 the access. Nothing bounds how many members hold one: the workspace pays one flat fee and the
 count is an outreach figure, never a gate. Core owns seating, the last seated admin's irrevocable
-seat, and member creation, so the admission gate, per-round enforcement, resume sweep, and an
-extension's tools apply the same rules; an extension only decides when to call them. An unseated
-member still exists: the gate answers their turn with the refusal, and seating them again simply
-lets them speak."""
+seat, member creation, and liveness enforcement at each capability boundary. An extension carries
+the immutable authority into core and cannot change or enforce it. An unseated member still exists:
+the gate answers their turn with the refusal, and seating them again simply lets them speak."""
 
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, WorkspaceAuthority
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.schema import tables
 
@@ -32,20 +32,6 @@ UNRESOLVED_SPEAKER_MESSAGE = (
 SEAT_REVOKED_MESSAGE = (
     "This turn is parked: the speaker's seat was revoked. It resumes if the seat is granted again."
 )
-
-
-def gate_member(
-    speaker_member_id: UUID | None,
-    on_behalf_of_member_id: UUID | None,
-) -> UUID | None:
-    """The member a turn is seat-gated on: its speaker, else the member it acts on behalf of — a
-    scheduled fire's creator, a subagent's requester, a monitor's armer — so an unseated member's
-    work is refused however it was admitted; a turn acting for nobody gates on nobody. The one
-    derivation admission, the fold resume, the dispatch sweep, and the per-round check all share —
-    the gate cannot fork on who it means."""
-    if speaker_member_id is not None:
-        return speaker_member_id
-    return on_behalf_of_member_id
 
 
 class UnknownMember(LookupError):
@@ -81,12 +67,15 @@ class Seats:
 
     workspace_id: UUID
 
-    async def admits(self, connection: AsyncConnection, member_id: UUID) -> bool:
-        """Whether the gate answers this member: only while they hold a seat, and never for an id
-        that is not a member of this workspace. One indexed read of the member's own row, paid on
-        every admission, on every round of a running turn, and on every resume — which is what
-        makes an admin's revoke stop the agent answering that person everywhere at once, rather
-        than only at the next thing that happens to re-read the workspace."""
+    async def admits(self, connection: AsyncConnection, authority: ExecutionAuthority) -> bool:
+        """Whether this immutable execution authority is live in the workspace."""
+        match authority:
+            case WorkspaceAuthority():
+                return True
+            case MemberAuthority(member_id):
+                pass
+            case _:
+                raise TypeError("execution authority must be MemberAuthority or WorkspaceAuthority")
         row = (
             await connection.execute(
                 sa.select(tables.member.c.seated_at).where(

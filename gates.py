@@ -73,6 +73,8 @@ ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
 AMBIENT_SCHEDULE_METHODS = frozenset({"create", "cancel", "list", "inspect"})
+RAW_EXECUTION_AUTHORITY_NAME = "acting_member_id"
+CORE_AUTHORITY_METHOD = "admits"
 PORTAL_SOURCE = Path("extensions/web/frontend/src")
 APP_PAGE_GLOB = "extensions/app_*/ufo_ext_*/skills/*/**/*.tsx"
 APP_EXTENSION = re.compile(r"app_(?P<slug>[a-z0-9]+)$")
@@ -666,6 +668,38 @@ def _schedule_authority_failures(trees: dict[Path, ast.Module]) -> list[str]:
                     f"{SCHEDULING_MODULE}: ScheduleStore.{method.name} accepts an agent selector — "
                     "member-facing schedule authority is ambient"
                 )
+    return failures
+
+
+def _execution_authority_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """Executable work carries the authority value; nullable member ids are storage and wire
+    encodings only. Core owns authority liveness, so extensions cannot fork that policy."""
+    failures = []
+    for rel, tree in trees.items():
+        if "tests" in rel.parts:
+            continue
+        if any(
+            (isinstance(node, ast.Name) and node.id == RAW_EXECUTION_AUTHORITY_NAME)
+            or (isinstance(node, ast.arg) and node.arg == RAW_EXECUTION_AUTHORITY_NAME)
+            or (isinstance(node, ast.keyword) and node.arg == RAW_EXECUTION_AUTHORITY_NAME)
+            for node in ast.walk(tree)
+        ):
+            failures.append(
+                f"{rel}: {RAW_EXECUTION_AUTHORITY_NAME} is a nullable identity, not an execution "
+                "capability — carry ExecutionAuthority"
+            )
+        if rel.parts[0] not in (EXTENSIONS_ROOT, PACKS_ROOT) or _is_ext_scaffold(rel):
+            continue
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == CORE_AUTHORITY_METHOD
+            for node in ast.walk(tree)
+        ):
+            failures.append(
+                f"{rel}: extensions do not enforce authority liveness — invoke the core "
+                "capability with its immutable authority"
+            )
     return failures
 
 
@@ -2106,6 +2140,7 @@ def main() -> int:
     failures.extend(_conformance_failures(trees))
     failures.extend(_job_selector_failures(trees))
     failures.extend(_schedule_authority_failures(trees))
+    failures.extend(_execution_authority_failures(trees))
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))
     failures.extend(_live_frame_consumer_failures(trees))

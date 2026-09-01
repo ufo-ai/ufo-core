@@ -9,11 +9,10 @@ a third consecutive failure fires, and an unreachable sandbox is a counted skip.
 always moves to one interval from this tick, so an overdue monitor — a deploy roll, a stalled
 runner — probes once instead of replaying a backlog.
 
-Each probe acts as the member who armed the watch, so a command reaching that member's own connected
-account off-turn reaches it exactly as it did in the arming turn — the same authority a scheduled
-fire carries for its creator. A monitor armed with no acting member reaches only the connections
-shared with the whole workspace. A fire carries the armer's authority only while they hold a seat:
-an unseated member's deadline arrival still lands, acting for nobody.
+Each probe and fire carries the immutable authority of the work that armed the watch. A command
+under member authority reaches that member's private connections while their seat is live; an
+unseated member's probe is skipped and a deadline fire parks until the same authority is live.
+Workspace authority reaches only connections shared with the workspace.
 
 A fire invokes first and retires second: a crash between the two re-posts under the same
 idempotency key, which admits nothing. A tick with failures raises their names."""
@@ -22,8 +21,8 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from ufo.sdk.authority import AuthorityUnavailable, authority_from_member_id
 from ufo.sdk.context import AgentArchived, ExtensionContext
-from ufo.sdk.seats import Seats
 from ufo.sdk.terminal import TerminalGone
 from ufo.sdk.untrusted import wall
 from ufo_ext_monitors.monitors import (
@@ -73,9 +72,6 @@ class MonitorRunner:
         if row.deadline_at <= datetime.now(UTC):
             await self._fire(store, row, DEADLINE, "", None, row.probes_run)
             return
-        if not await self._acts_for_a_seated_member(row):
-            await store.skipped_tick(row, datetime.now(UTC) + spacing)
-            return
         if self.ctx.probes is None:
             raise RuntimeError("the monitor runner requires the probes capability; none is wired")
         try:
@@ -83,9 +79,9 @@ class MonitorRunner:
                 row.conversation_id,
                 row.command,
                 PROBE_TIMEOUT_SECONDS,
-                acting_member_id=row.created_by_member_id,
+                authority=authority_from_member_id(row.created_by_member_id),
             )
-        except TerminalGone:
+        except (AuthorityUnavailable, TerminalGone):
             await store.skipped_tick(row, datetime.now(UTC) + spacing)
             return
         probed_at = datetime.now(UTC)
@@ -111,20 +107,6 @@ class MonitorRunner:
         spill = None if output == probe.stdout else probe.stdout
         await self._fire(store, row, CHANGED, output, spill, row.probes_run + 1)
 
-    async def _acts_for_a_seated_member(self, row: Monitor) -> bool:
-        """Whether the watch may still act as the member who armed it. A probe runs a command
-        off-turn under that member's forwarded connections and spends on every tick, so an admin's
-        revoke stops their access everywhere at once: an unseated member's watch stops probing and
-        the tick counts as a skip — the row stands, seating them again resumes it, and its deadline
-        still ends the watch with the one arrival the arming turn is owed. The fire asks the same
-        question, so that owed arrival lands acting for nobody rather than carrying an authority
-        the revoke ended. A watch armed for nobody reaches only what the whole workspace shares,
-        so there is no seat to ask about."""
-        if row.created_by_member_id is None:
-            return True
-        async with self.ctx.transaction() as connection:
-            return await Seats(self.ctx.workspace_id).admits(connection, row.created_by_member_id)
-
     async def _fire(
         self,
         store: MonitorStore,
@@ -136,14 +118,13 @@ class MonitorRunner:
     ) -> None:
         if not await store.claim_holds(row):
             return
-        acts_for = row.created_by_member_id if await self._acts_for_a_seated_member(row) else None
         try:
             await self.ctx.invoke(
                 row.conversation_id,
                 row.agent_id,
                 await self._body(row, cause, payload, spill, probes_run),
                 f"{FIRE_KEY_PREFIX}{row.id}",
-                acting_member_id=acts_for,
+                authority=authority_from_member_id(row.created_by_member_id),
                 holds_work_already_done=True,
             )
         except AgentArchived:

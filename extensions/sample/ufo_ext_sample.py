@@ -23,6 +23,7 @@ from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvid
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.authority import WORKSPACE_AUTHORITY
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.bearer import workspace_claim
 from ufo.sdk.browser import CdpEndpoint, CdpLease, FileBytes
@@ -400,7 +401,9 @@ async def _tick(ctx: ExtensionContext) -> None:
     await ctx.store.put(JOB_WORKSPACE_KEY, {"path": path})
     if ctx.probes is None:
         return
-    probed = await ctx.probes.run(target.conversation_id, JOB_PROBE_COMMAND)
+    probed = await ctx.probes.run(
+        target.conversation_id, JOB_PROBE_COMMAND, authority=WORKSPACE_AUTHORITY
+    )
     await ctx.store.put(JOB_PROBE_KEY, {"stdout": probed.stdout, "exit_code": probed.exit_code})
 
 

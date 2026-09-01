@@ -57,6 +57,7 @@ from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.grants import GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.runtime.queue import (
@@ -345,7 +346,7 @@ async def test_open_sandbox_resumes_from_the_stored_handle_without_rewriting(
 
     assert carrier.specs[0].resume_id == "sbx-1"
     basic = "Basic " + base64.b64encode(f"{carrier.specs[0].run_token}:".encode()).decode()
-    assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(workspace_id, turn.id)
+    assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(workspace_id, turn.id, WORKSPACE_AUTHORITY)
     assert await _stored_handle(conversation_id) == "e2b:sbx-1"
 
 
@@ -538,7 +539,9 @@ async def test_open_sandbox_exports_the_acting_members_grant_sentinels(
             None,
             (),
         )
-        scoped = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, member_id, turn.id)
+        scoped = await _grant_cli_env(
+            GrantStore(), {"hub": HUB_CLI}, MemberAuthority(member_id), turn.id
+        )
 
     assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
     assert scoped == {"HUB_TOKEN": grant_sentinel("acct-1")}
@@ -550,7 +553,7 @@ async def test_sandbox_authorizer_binds_run_token_and_cli_grants_to_the_acting_m
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
-    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
+    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id, WORKSPACE_AUTHORITY))
     proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
     base = SandboxSession(
         carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
@@ -575,7 +578,7 @@ async def test_sandbox_authorizer_binds_run_token_and_cli_grants_to_the_acting_m
     )
 
     with ws(workspace_id), agent(agent_id):
-        authorized = await authorizer.authorize(member_id)
+        authorized = await authorizer.authorize(MemberAuthority(member_id))
 
     basic = (
         "Basic "
@@ -584,7 +587,7 @@ async def test_sandbox_authorizer_binds_run_token_and_cli_grants_to_the_acting_m
     assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(
         workspace_id=workspace_id,
         turn_id=turn.id,
-        acting_member_id=member_id,
+        authority=MemberAuthority(member_id),
     )
     assert authorized.handle.egress_env["HUB_TOKEN"] == grant_sentinel("acct-1")
     assert "HUB_TOKEN" not in base.handle.egress_env
@@ -606,7 +609,7 @@ async def test_open_sandbox_exports_the_conversation_identity_stable_across_turn
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
-    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
+    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id, WORKSPACE_AUTHORITY))
     proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
 
     with ws(workspace_id), agent(agent_id):
@@ -633,7 +636,7 @@ async def test_open_sandbox_exports_the_conversation_identity_stable_across_turn
             grants=GrantStore(),
             clis={"hub": HUB_CLI},
             turn=turn,
-        ).authorize(member_id)
+        ).authorize(MemberAuthority(member_id))
 
     followup = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
     with ws(workspace_id), agent(agent_id):
@@ -706,7 +709,9 @@ async def test_open_sandbox_exports_the_private_sentinel_over_the_shared_one(
             None,
             (),
         )
-        scoped = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, member_id, turn.id)
+        scoped = await _grant_cli_env(
+            GrantStore(), {"hub": HUB_CLI}, MemberAuthority(member_id), turn.id
+        )
 
     assert _derived_env(carrier.specs[0]) == {
         **GIT_PROXY_AUTH_ENV,
@@ -1356,7 +1361,7 @@ async def test_an_acting_members_view_binds_the_turns_one_create(db: None, tmp_p
             clis={"hub": HUB_CLI},
             turn=turn,
         )
-        authorized = await authorizer.authorize(member_id)
+        authorized = await authorizer.authorize(MemberAuthority(member_id))
         assert carrier.created == 0
         await authorized.bash("true")
         await sandbox.bash("true")
@@ -1366,9 +1371,17 @@ async def test_an_acting_members_view_binds_the_turns_one_create(db: None, tmp_p
     assert member_token is not None and turn_token is not None
     basic = "Basic " + base64.b64encode(f"{member_token}:".encode()).decode()
     assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(
-        workspace_id=workspace_id, turn_id=turn.id, acting_member_id=member_id
+        workspace_id=workspace_id,
+        turn_id=turn.id,
+        authority=MemberAuthority(member_id),
     )
-    assert turn_token == RUN_TOKENS.encode(RunToken(workspace_id=workspace_id, turn_id=turn.id))
+    assert turn_token == RUN_TOKENS.encode(
+        RunToken(
+            workspace_id=workspace_id,
+            turn_id=turn.id,
+            authority=WORKSPACE_AUTHORITY,
+        )
+    )
 
 
 async def test_a_recovered_cancel_stops_commands_without_creating_a_sandbox(
@@ -1552,6 +1565,7 @@ async def _admitted_child(workspace_id: UUID, parent: Turn) -> UUID | None:
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
         audience=SHARED_AUDIENCE,
+        authority=parent.authority,
     )
     conversation_id, turn_id = uuid4(), uuid4()
     with ws(workspace_id):

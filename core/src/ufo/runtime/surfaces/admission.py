@@ -56,11 +56,17 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
 from ufo.harness.o11y import current_traceparent, emit_metric, log, span
+from ufo.runtime.authority import (
+    ExecutionAuthority,
+    authority_from_member_id,
+    authority_member_id,
+    turn_authority,
+)
 from ufo.runtime.billing.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
 from ufo.runtime.ext.context import AgentArchived
 from ufo.runtime.ext.surface import Admitted, conversation_name
 from ufo.runtime.hub import ArrivalQueued, Hub, Reply
-from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE, Seats, gate_member
+from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE, Seats
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -106,6 +112,7 @@ class _Inbound:
     body: str
     speaker_member_id: UUID | None
     context: TurnContext | None
+    authority: ExecutionAuthority
     admitted_at: datetime | None = None
 
 
@@ -129,6 +136,10 @@ class _FoldResult:
     parked_turn_id: UUID | None = None
     arrival_id: UUID | None = None
     admitted: Admitted | None = None
+    waits_for_live_turn: bool = False
+    """The arrival founds its own turn and that turn waits for the live one to end. The turn is
+    left unstamped rather than enqueued, so the live turn's own exit offers it — a conversation
+    runs one turn at a time, and work that could not fold does not become a second runner."""
 
 
 @dataclass(frozen=True)
@@ -188,6 +199,7 @@ class Admission:
                 speaker_member_id,
                 idempotency_key,
                 context,
+                authority=authority_from_member_id(speaker_member_id),
                 member_admission=True,
                 intent=intent,
                 comment=comment,
@@ -266,7 +278,8 @@ class Admission:
         body: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
-        on_behalf_of_member_id: UUID | None = None,
+        *,
+        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
@@ -274,8 +287,8 @@ class Admission:
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
     ) -> UUID | None:
-        """Admit an internal turn. `on_behalf_of_member_id` carries forward the authority the work
-        already held — a subagent hands its result back to the conversation that delegated it, and
+        """Admit an internal turn. `authority` carries forward the authority the work already held
+        — a subagent hands its result back to the conversation that delegated it, and
         a turn woken to read that result must not be able to do less than the turn that spawned it,
         or the shortfall surfaces later as a refusal no member can place.
 
@@ -331,7 +344,7 @@ class Admission:
                 None,
                 idempotency_key,
                 context,
-                on_behalf_of_member_id=on_behalf_of_member_id,
+                authority=authority,
                 holds_work_already_done=holds_work_already_done,
                 as_scheduled=as_scheduled,
                 standalone=standalone,
@@ -352,7 +365,7 @@ class Admission:
         speaker_member_id: UUID | None,
         idempotency_key: str | None,
         context: TurnContext | None,
-        on_behalf_of_member_id: UUID | None = None,
+        authority: ExecutionAuthority,
         member_admission: bool = False,
         intent: ToolIntent | None = None,
         holds_work_already_done: bool = False,
@@ -365,13 +378,14 @@ class Admission:
     ) -> Admitted:
         self._validate_member_watermarks(unless_member_since, unless_member_arrival_since)
         dispatch_now = False
+        waits_for_live_turn = False
         opened_run = False
         counted_source: TurnAdmissionSource | None = None
         folded_parked_turn: UUID | None = None
         status: TurnStatus | None = None
         arrival_id: UUID | None = None
         redispatch_workflow_id: str | None = None
-        inbound = _Inbound(body, speaker_member_id, context)
+        inbound = _Inbound(body, speaker_member_id, context, authority)
         async with workspace_tx() as connection:
             conversation = (
                 await connection.execute(
@@ -434,6 +448,7 @@ class Admission:
             body = inbound.body
             context = inbound.context
             speaker_member_id = inbound.speaker_member_id
+            authority = inbound.authority
             await self._guard_member_watermark(
                 connection,
                 workspace_id,
@@ -451,6 +466,7 @@ class Admission:
                     agent_id,
                     archived,
                     member_admission,
+                    authority,
                     holds_work_already_done,
                     runtime_config,
                     idempotency_key,
@@ -461,6 +477,7 @@ class Admission:
                     return folded.admitted
                 folded_parked_turn = folded.parked_turn_id
                 arrival_id = folded.arrival_id
+                waits_for_live_turn = folded.waits_for_live_turn
             if deduped is not None:
                 turn_id = deduped.id
                 turn_seq = deduped.seq
@@ -488,7 +505,7 @@ class Admission:
                     intent,
                     holds_work_already_done,
                     as_scheduled,
-                    on_behalf_of_member_id,
+                    authority,
                     idempotency_key,
                     runtime_config,
                     inbound,
@@ -498,7 +515,7 @@ class Admission:
                 status = created.status
                 opened_run = True
                 counted_source = created.admission_source
-            if folded_parked_turn is None and status == QUEUED:
+            if folded_parked_turn is None and status == QUEUED and not waits_for_live_turn:
                 earlier_turn = tables.turn.alias("earlier_turn")
                 earlier_queued = (
                     await connection.execute(
@@ -635,6 +652,13 @@ class Admission:
         inbound: _Inbound,
         comment: str | None,
     ) -> _DedupeResult:
+        """Settle a repeated idempotency key: the turn it already founded, the live turn it already
+        arrived on, or the orphaned arrival it re-founds here.
+
+        A re-founded arrival takes the queued row's body, context, and speaker. It keeps this
+        call's authority when the row names no speaker, because an internal arrival records no
+        member: the caller carries the authority the work already held, and reading it off a
+        speakerless row would found the turn as workspace work."""
         if idempotency_key is None:
             return _DedupeResult(None, inbound)
         row = (
@@ -727,6 +751,11 @@ class Admission:
                     None if queued.context is None else TurnContext.model_validate(queued.context)
                 ),
                 speaker_member_id=queued.speaker_member_id,
+                authority=(
+                    authority_from_member_id(queued.speaker_member_id)
+                    if queued.speaker_member_id is not None
+                    else inbound.authority
+                ),
                 admitted_at=queued.created_at,
             ),
         )
@@ -740,6 +769,7 @@ class Admission:
         agent_id: UUID,
         archived: bool,
         member_admission: bool,
+        authority: ExecutionAuthority,
         holds_work_already_done: bool,
         runtime_config: TurnRuntimeConfig | None,
         idempotency_key: str | None,
@@ -778,12 +808,19 @@ class Admission:
         ):
             raise ValueError("running turn has a different runtime config")
         effective_runtime_config = live_runtime_config if live_turn is not None else runtime_config
-        parked_gate = (
+        live_authority = (
             None
-            if live_turn is None or live_turn.status != PARKED
-            else gate_member(live_turn.speaker_member_id, live_turn.on_behalf_of_member_id)
+            if live_turn is None
+            else turn_authority(live_turn.speaker_member_id, live_turn.on_behalf_of_member_id)
         )
-        parked_members = {parked_gate} if parked_gate is not None else set()
+        if live_authority is not None and not member_admission and authority != live_authority:
+            return _FoldResult(waits_for_live_turn=True)
+        parked_member = (
+            None
+            if live_turn is None or live_turn.status != PARKED or live_authority is None
+            else authority_member_id(live_authority)
+        )
+        parked_members = {parked_member} if parked_member is not None else set()
         if live_turn is not None and live_turn.status == PARKED:
             parked_members.update(
                 (
@@ -807,7 +844,7 @@ class Admission:
             live_turn is not None
             and not archived
             and (
-                await seats.admits(connection, inbound.speaker_member_id)
+                await seats.admits(connection, authority_from_member_id(inbound.speaker_member_id))
                 if inbound.speaker_member_id is not None
                 else not member_admission
             )
@@ -902,7 +939,7 @@ class Admission:
         intent: ToolIntent | None,
         holds_work_already_done: bool,
         as_scheduled: bool,
-        on_behalf_of_member_id: UUID | None,
+        authority: ExecutionAuthority,
         idempotency_key: str | None,
         runtime_config: TurnRuntimeConfig | None,
         inbound: _Inbound,
@@ -939,18 +976,16 @@ class Admission:
             if as_scheduled
             else INTERNAL_ADMISSION
         )
-        gate = gate_member(inbound.speaker_member_id, on_behalf_of_member_id)
         terminal: TerminalFrame | None
-        if archived:
-            status, terminal = _refused(holds_work_already_done, ARCHIVED_REFUSAL_MESSAGE)
-        elif gate is None and member_admission:
-            status, terminal = (
-                CANCELLED,
-                TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE),
-            )
-        elif gate is not None and not await Seats(workspace_id).admits(connection, gate):
-            status, terminal = _refused(holds_work_already_done, SEAT_REFUSAL_MESSAGE)
-        else:
+        refusal = await self._authority_refusal(
+            connection,
+            workspace_id,
+            authority,
+            archived,
+            member_admission,
+            holds_work_already_done,
+        )
+        if refusal is None:
             decision = await SpendEvaluator(workspace_id, conversation_member_id, agent_id).decide(
                 connection, 0
             )
@@ -973,6 +1008,8 @@ class Admission:
                     status, terminal = PARKED, None
                 case _:
                     status, terminal = _refused(holds_work_already_done, decision.message)
+        else:
+            status, terminal = refusal
         await connection.execute(
             sa.insert(tables.turn).values(
                 id=turn_id,
@@ -984,7 +1021,11 @@ class Admission:
                 inbound=inbound.body,
                 admission_source=admission_source,
                 speaker_member_id=inbound.speaker_member_id,
-                on_behalf_of_member_id=on_behalf_of_member_id,
+                on_behalf_of_member_id=(
+                    None
+                    if inbound.speaker_member_id is not None
+                    else authority_member_id(authority)
+                ),
                 parent_turn_id=(
                     None if spawned_identity is None else spawned_identity.parent_turn_id
                 ),
@@ -1034,6 +1075,23 @@ class Admission:
                 )
             )
         return _CreatedTurn(turn_id, seq, status, admission_source)
+
+    async def _authority_refusal(
+        self,
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        authority: ExecutionAuthority,
+        archived: bool,
+        member_admission: bool,
+        holds_work_already_done: bool,
+    ) -> tuple[TurnStatus, TerminalFrame | None] | None:
+        if archived:
+            return _refused(holds_work_already_done, ARCHIVED_REFUSAL_MESSAGE)
+        if authority_member_id(authority) is None and member_admission:
+            return CANCELLED, TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE)
+        if not await Seats(workspace_id).admits(connection, authority):
+            return _refused(holds_work_already_done, SEAT_REFUSAL_MESSAGE)
+        return None
 
     async def _record_comment(
         self,
@@ -1145,7 +1203,8 @@ class AdmissionInvoker:
         message: str,
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
-        on_behalf_of_member_id: UUID | None = None,
+        *,
+        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
@@ -1160,7 +1219,7 @@ class AdmissionInvoker:
             message,
             idempotency_key=idempotency_key,
             context=context,
-            on_behalf_of_member_id=on_behalf_of_member_id,
+            authority=authority,
             holds_work_already_done=holds_work_already_done,
             as_scheduled=as_scheduled,
             standalone=standalone,

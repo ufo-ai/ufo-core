@@ -1,5 +1,5 @@
 """Seat rules proven against the real schema on both dialects: creation seats the member it
-writes, the last seated admin is irrevocable, the gate answers a seated member and no one else,
+writes, the last seated admin is irrevocable, member authority requires a live seat,
 the parked-resume sweep holds a revoked speaker's turn, and the migration seats every existing
 member and takes the seat bounds off the workspace."""
 
@@ -17,6 +17,7 @@ from dbos import EnqueueOptions
 
 from ufo.db import MIGRATIONS_DIR, owner_tx, workspace_tx
 from ufo.host.ext.loader import migration_locations
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.hub import Parked
 from ufo.runtime.jobs import TurnDispatcher
 from ufo.runtime.seats import (
@@ -25,7 +26,6 @@ from ufo.runtime.seats import (
     Seats,
     UnknownMember,
     create_member,
-    gate_member,
     member_by_email,
     member_is_admin,
     signup_workspace_id,
@@ -139,10 +139,11 @@ async def test_admits_only_a_seated_member_of_this_workspace(db: None) -> None:
     unseated = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     elsewhere = await _member(await _workspace(), ADMIN_EMAIL)
     async with workspace_tx() as connection:
-        assert await Seats(workspace_id).admits(connection, seated)
-        assert not await Seats(workspace_id).admits(connection, unseated)
-        assert not await Seats(workspace_id).admits(connection, elsewhere)
-        assert not await Seats(workspace_id).admits(connection, uuid4())
+        assert await Seats(workspace_id).admits(connection, WORKSPACE_AUTHORITY)
+        assert await Seats(workspace_id).admits(connection, MemberAuthority(seated))
+        assert not await Seats(workspace_id).admits(connection, MemberAuthority(unseated))
+        assert not await Seats(workspace_id).admits(connection, MemberAuthority(elsewhere))
+        assert not await Seats(workspace_id).admits(connection, MemberAuthority(uuid4()))
 
 
 async def test_snapshot_orders_members_and_flags_admin(db: None) -> None:
@@ -333,14 +334,6 @@ def test_migration_seats_every_member_and_drops_the_seat_bounds(tmp_path: Path) 
     assert row.seated_at == row.created_at
     assert "seat_limit" not in columns
     assert "included_seats" not in columns
-
-
-def test_gate_member_is_the_speaker_else_the_acting_member() -> None:
-    speaker, acting = uuid4(), uuid4()
-    assert gate_member(speaker, acting) == speaker
-    assert gate_member(speaker, None) == speaker
-    assert gate_member(None, acting) == acting
-    assert gate_member(None, None) is None
 
 
 async def test_sweep_holds_a_scheduled_turn_for_an_unseated_creator(db: None) -> None:

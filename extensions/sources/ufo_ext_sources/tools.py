@@ -43,6 +43,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ufo.sdk.audience import Audience, conversation_audience
+from ufo.sdk.authority import authority_from_member_id, authority_member_id
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import (
@@ -442,9 +443,9 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
             )
         owner = await self._owner(ctx, name)
         is_admin = await ctx.speaker_is_admin()
-        if owner is None or not self._visible(owner, ctx.acting_member_id, is_admin):
+        if owner is None or not self._visible(owner, authority_member_id(ctx.authority), is_admin):
             raise UnknownObject(f"no {SOURCE_KIND} object named {name!r}")
-        if not self._owned(owner, ctx.acting_member_id) and not is_admin:
+        if not self._owned(owner, authority_member_id(ctx.authority)) and not is_admin:
             raise AdminRequired(RESYNC_GATE)
         binding = await _binding_named(ctx.ext, name)
         if binding is None:
@@ -902,7 +903,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             "delivery": listed.trigger.delivery,
             "origin": listed.surface_label or "Portal",
             "owner_email": emails.get(listed.trigger.created_by_member_id),
-            "mine": listed.trigger.created_by_member_id == ctx.acting_member_id,
+            "mine": listed.trigger.created_by_member_id == authority_member_id(ctx.authority),
         }
 
     async def _apply_owned(
@@ -938,7 +939,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             conversation_id=ctx.turn.conversation_id,
             binding=spec.source,
             delivery=spec.delivery,
-            created_by_member_id=ctx.acting_member_id,
+            created_by_member_id=authority_member_id(ctx.authority),
         )
         if await _binding_named(ctx.ext, spec.source) is None:
             await triggers.remove_binding(spec.source)
@@ -1041,7 +1042,7 @@ async def _fire_trigger(
     until the app is restored."""
     match trigger.delivery:
         case "current":
-            acting_member_id = (
+            member_id = (
                 trigger.created_by_member_id
                 if trigger.created_by_member_id is not None
                 and audience == conversation_audience(trigger.created_by_member_id)
@@ -1058,7 +1059,7 @@ async def _fire_trigger(
                 idempotency_key=(
                     f"source-trigger:{binding.name}:{trigger.conversation_id.hex}:{latest}"
                 ),
-                acting_member_id=acting_member_id,
+                authority=authority_from_member_id(member_id),
                 holds_work_already_done=True,
                 standalone=True,
             )
@@ -1084,7 +1085,7 @@ async def _fire_trigger(
                         f"source-trigger:{trigger.id.hex}:{member_key}:"
                         f"{change.page_id.hex}:{change.revision}"
                     ),
-                    acting_member_id=trigger.created_by_member_id,
+                    authority=authority_from_member_id(trigger.created_by_member_id),
                     holds_work_already_done=True,
                     standalone=True,
                 )

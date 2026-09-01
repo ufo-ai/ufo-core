@@ -31,6 +31,7 @@ from ufo_ext_scheduled_tasks.tools import (
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.engine import FRESH_CLAIM, _claim_turn
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
@@ -405,7 +406,13 @@ async def test_an_internal_arrival_does_not_supersede_the_timer(db: None) -> Non
     with ws(workspace_id), agent(agent_id):
         await pause_and_wait(ctx, _wait())
         [row] = await _rows(workspace_id)
-        await invoker.invoke(conversation_id, agent_id, "background note", "internal-1")
+        await invoker.invoke(
+            conversation_id,
+            agent_id,
+            "background note",
+            "internal-1",
+            authority=WORKSPACE_AUTHORITY,
+        )
         await _due_now(row["id"])
         await PauseRunner(ctx=_runner_ctx(invoker)).run()
         turns = await _turns(conversation_id)
@@ -828,7 +835,13 @@ async def test_a_member_message_the_live_turn_absorbed_supersedes_the_timer(db: 
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
     with ws(workspace_id), agent(agent_id):
-        arming = await invoker.invoke(conversation_id, agent_id, "the arming work", "arming")
+        arming = await invoker.invoke(
+            conversation_id,
+            agent_id,
+            "the arming work",
+            "arming",
+            authority=WORKSPACE_AUTHORITY,
+        )
         [arming_row] = await _turns(conversation_id)
         base = _tool_ctx(
             workspace_id,
@@ -877,7 +890,13 @@ async def test_a_fold_the_agent_had_already_read_does_not_kill_the_timer(db: Non
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
     with ws(workspace_id), agent(agent_id):
-        arming = await invoker.invoke(conversation_id, agent_id, "the arming work", "arming")
+        arming = await invoker.invoke(
+            conversation_id,
+            agent_id,
+            "the arming work",
+            "arming",
+            authority=WORKSPACE_AUTHORITY,
+        )
         folded = (
             await MemberAdmission(admission=admission, workspace_id=workspace_id).admit(
                 conversation_id, "some context first", "folded-early", speaker_member_id=member_id
@@ -926,7 +945,13 @@ async def test_re_arming_moves_both_watermarks_forward(db: None) -> None:
     invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
     member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
     with ws(workspace_id), agent(agent_id):
-        live = await invoker.invoke(conversation_id, agent_id, "the arming work", "arming")
+        live = await invoker.invoke(
+            conversation_id,
+            agent_id,
+            "the arming work",
+            "arming",
+            authority=WORKSPACE_AUTHORITY,
+        )
         [live_row] = await _turns(conversation_id)
         base = _tool_ctx(
             workspace_id,

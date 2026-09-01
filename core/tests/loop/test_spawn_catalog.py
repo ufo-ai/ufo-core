@@ -21,6 +21,7 @@ from ufo.host.spawn_catalog import (
     spawn_catalog_skill,
 )
 from ufo.runtime.access.credentials import CredentialStore, member_slot
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.manifest import SubagentProfile
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
 from ufo.runtime.subagents import SubagentRegistry
@@ -98,7 +99,7 @@ async def test_catalog_lists_profiles_and_agents_with_payload_keys(db: None) -> 
     registry = SubagentRegistry((_profile("scout"), *CORE_SUBAGENT_PROFILES))
     with ws(workspace_id):
         admin = await _catalog_member(workspace_id, admin=True)
-        skill = await spawn_catalog_skill(registry, admin)
+        skill = await spawn_catalog_skill(registry, MemberAuthority(admin))
 
     assert skill.name == SPAWN_CATALOG_SKILL_NAME
     for profile in registry.profiles:
@@ -117,7 +118,7 @@ async def test_an_agent_shadowed_by_a_profile_is_listed_qualified(db: None) -> N
     registry = SubagentRegistry((_profile("scout"),))
     with ws(workspace_id):
         admin = await _catalog_member(workspace_id, admin=True)
-        skill = await spawn_catalog_skill(registry, admin)
+        skill = await spawn_catalog_skill(registry, MemberAuthority(admin))
 
     assert "| `scout` | profile |" in skill.instructions
     assert "| `agent:scout` | agent |" in skill.instructions
@@ -134,7 +135,7 @@ async def test_a_profile_on_the_members_own_key_shadows_their_agent(db: None) ->
 
     with ws(workspace_id):
         keyless = await _catalog_member(workspace_id, admin=True)
-        listed = await spawn_catalog_skill(registry, keyless)
+        listed = await spawn_catalog_skill(registry, MemberAuthority(keyless))
         assert "| `coding` | profile |" in listed.instructions
         assert "| `agent:coding` | agent |" in listed.instructions
         assert "| `coding` | agent |" not in listed.instructions
@@ -173,8 +174,8 @@ async def test_the_catalog_gives_a_member_their_own_agents_and_an_admin_all(db: 
         )
     registry = SubagentRegistry(CORE_SUBAGENT_PROFILES)
     with ws(workspace_id):
-        member_view = await spawn_catalog_skill(registry, mine)
-        admin_view = await spawn_catalog_skill(registry, admin)
+        member_view = await spawn_catalog_skill(registry, MemberAuthority(mine))
+        admin_view = await spawn_catalog_skill(registry, MemberAuthority(admin))
 
     assert "`mine`" in member_view.instructions
     assert "theirs" not in member_view.instructions
@@ -191,7 +192,9 @@ async def test_the_catalog_stands_on_its_own_in_the_index(db: None) -> None:
     nothing, which is what makes it reachable by name."""
     workspace_id = await _workspace_with_agents({})
     with ws(workspace_id):
-        catalog = await spawn_catalog_skill(SubagentRegistry(CORE_SUBAGENT_PROFILES), None)
+        catalog = await spawn_catalog_skill(
+            SubagentRegistry(CORE_SUBAGENT_PROFILES), WORKSPACE_AUTHORITY
+        )
     registry = skill_registry((), (catalog,))
     assert [ref.card.name for ref in registry.closure(SPAWN_CATALOG_SKILL_NAME)] == [
         SPAWN_CATALOG_SKILL_NAME
@@ -219,14 +222,14 @@ async def test_a_profile_on_the_members_own_key_is_listed_whether_or_not_they_co
     )
 
     with ws(workspace_id):
-        skipped = await spawn_catalog_skill(registry, member_id)
+        skipped = await spawn_catalog_skill(registry, MemberAuthority(member_id))
         assert "`research`" in skipped.instructions
         assert "`coding`" in skipped.instructions
 
         await store.put(
             workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-connected"
         )
-        connected = await spawn_catalog_skill(registry, member_id)
+        connected = await spawn_catalog_skill(registry, MemberAuthority(member_id))
         assert "`research`" in connected.instructions
         assert "`coding`" in connected.instructions
 
@@ -242,14 +245,14 @@ async def test_either_provider_is_enough_to_earn_the_profile(db: None) -> None:
     init_workspace_credentials(store)
 
     with ws(workspace_id):
-        assert not await ws_current().member_holds_own_model_key(member_id)
+        assert not await ws_current().member_holds_own_model_key(MemberAuthority(member_id))
 
         await store.put(workspace_id, ANTHROPIC_KEY_SLOT, "sk-ant-workspace")
         await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, admin_id), "sk-admin")
-        assert not await ws_current().member_holds_own_model_key(member_id)
+        assert not await ws_current().member_holds_own_model_key(MemberAuthority(member_id))
 
         await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member_id), "sk-member")
-        assert await ws_current().member_holds_own_model_key(member_id)
+        assert await ws_current().member_holds_own_model_key(MemberAuthority(member_id))
 
 
 async def test_the_provider_a_member_connected_is_the_one_they_are_read_as(db: None) -> None:
@@ -262,13 +265,18 @@ async def test_the_provider_a_member_connected_is_the_one_they_are_read_as(db: N
     init_workspace_credentials(store)
 
     with ws(workspace_id):
-        assert await ws_current().member_model_provider(member_id) is None
+        assert await ws_current().member_model_provider(MemberAuthority(member_id)) is None
 
         await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member_id), "sk-openai")
-        assert await ws_current().member_model_provider(member_id) == PROVIDER_OPENAI
+        assert (
+            await ws_current().member_model_provider(MemberAuthority(member_id)) == PROVIDER_OPENAI
+        )
 
         await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant")
-        assert await ws_current().member_model_provider(member_id) == PROVIDER_ANTHROPIC
+        assert (
+            await ws_current().member_model_provider(MemberAuthority(member_id))
+            == PROVIDER_ANTHROPIC
+        )
 
 
 def test_a_member_key_outranks_the_profiles_own_model_pin() -> None:

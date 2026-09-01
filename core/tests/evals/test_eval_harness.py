@@ -260,6 +260,7 @@ from ufo.runtime.access.credentials import (
     open_installation,
     seal_installation,
 )
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority, MemberAuthority
 from ufo.runtime.billing.accounting import BalanceGate, Pricing, record_workspace_usage
 from ufo.runtime.billing.balance import credit, set_reserve
 from ufo.runtime.delivery import DeliverySweep
@@ -1626,7 +1627,13 @@ class StubWorker:
                     )
                 )
             ).scalar_one()
-        return await self.invoke(conversation_id, agent_id, message, idempotency_key or "")
+        return await self.invoke(
+            conversation_id,
+            agent_id,
+            message,
+            idempotency_key or "",
+            authority=WORKSPACE_AUTHORITY,
+        )
 
     async def invoke(
         self,
@@ -1635,11 +1642,13 @@ class StubWorker:
         message: str,
         idempotency_key: str,
         *,
-        on_behalf_of_member_id: UUID | None = None,
+        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
+        standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
     ) -> UUID | None:
         self.idempotency_keys.append(idempotency_key)
         if self.order is not None:
@@ -2223,7 +2232,7 @@ async def test_in_process_target_runs_an_artifact_probe_after_the_turn(db: None,
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
     worker = StubWorker(blob, workspace_id, _research_transcript())
-    commands: list[tuple[UUID, str, int]] = []
+    commands: list[tuple[UUID, str, int, ExecutionAuthority]] = []
 
     class Probes:
         async def run(
@@ -2231,9 +2240,9 @@ async def test_in_process_target_runs_an_artifact_probe_after_the_turn(db: None,
             conversation_id: UUID,
             command: str,
             timeout_s: int,
-            acting_member_id: UUID | None = None,
+            authority: ExecutionAuthority,
         ) -> SimpleNamespace:
-            commands.append((conversation_id, command, timeout_s))
+            commands.append((conversation_id, command, timeout_s, authority))
             return SimpleNamespace(
                 exit_code=0, stdout="captured", stderr="", timed_out_after_s=None
             )
@@ -2288,7 +2297,7 @@ async def test_in_process_target_runs_an_artifact_probe_after_the_turn(db: None,
         "last.bin",
     ]
     assert len(commands) == 1
-    assert commands[0][1:] == ("capture app", 17)
+    assert commands[0][1:] == ("capture app", 17, WORKSPACE_AUTHORITY)
 
 
 async def test_artifact_probe_deduplicates_a_shared_artifact(db: None, tmp_path) -> None:
@@ -2304,7 +2313,7 @@ async def test_artifact_probe_deduplicates_a_shared_artifact(db: None, tmp_path)
             conversation_id: UUID,
             command: str,
             timeout_s: int,
-            acting_member_id: UUID | None = None,
+            authority: ExecutionAuthority,
         ) -> SimpleNamespace:
             raise AssertionError("the artifact probe does not run a command")
 
@@ -7886,7 +7895,7 @@ async def test_the_provisioned_member_holds_their_own_model_key(
                 ).scalar_one()
             stored = await store.get(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id))
             assert stored == "sk-ant-eval-seed"
-            assert await ws_current().member_holds_own_model_key(member_id)
+            assert await ws_current().member_holds_own_model_key(MemberAuthority(member_id))
     finally:
         init_workspace_credentials(None)
 
@@ -11730,9 +11739,10 @@ async def test_capability_workflow_cancellation_settles_deferred_delivery_before
             message: str,
             idempotency_key: str,
             *,
-            on_behalf_of_member_id: UUID | None = None,
+            authority: ExecutionAuthority,
             holds_work_already_done: bool = False,
             as_scheduled: bool = False,
+            standalone: bool = False,
             unless_member_since: int | None = None,
             unless_member_arrival_since: int | None = None,
             runtime_config: TurnRuntimeConfig | None = None,

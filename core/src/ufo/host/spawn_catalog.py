@@ -5,11 +5,11 @@ is why the catalog is built per turn rather than at boot. It carries its own ind
 agent reaching for how to delegate loads it by name and has the targets before its first spawn."""
 
 from collections.abc import Mapping
-from uuid import UUID
 
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
+from ufo.runtime.authority import ExecutionAuthority, authority_member_id
 from ufo.runtime.ext.manifest import SubagentProfile
 from ufo.runtime.seats import member_is_admin
 from ufo.runtime.skills.runtime import RuntimeSkill
@@ -49,7 +49,9 @@ def _schema_payload(schema: Mapping[str, object] | None) -> str:
     )
 
 
-async def spawn_catalog_skill(registry: SubagentRegistry, member_id: UUID | None) -> RuntimeSkill:
+async def spawn_catalog_skill(
+    registry: SubagentRegistry, authority: ExecutionAuthority
+) -> RuntimeSkill:
     """One `RuntimeSkill` listing every profile and every spawnable workspace agent with the
     payload keys each requires, built beside the dispatch so the catalog and the spawn read the
     same records. Agents are the set the spawn gate admits: the turn's member's own rows, and for
@@ -63,6 +65,7 @@ async def spawn_catalog_skill(registry: SubagentRegistry, member_id: UUID | None
     spawn refusal is what carries that — it names the account the profile needs and the screen that
     connects one — so the member meets the requirement by reaching for the thing and being told,
     rather than by never being offered it."""
+    member_id = authority_member_id(authority)
     profiles = registry.profiles
     profile_names = frozenset(profile.name for profile in profiles)
     async with workspace_tx() as connection:

@@ -23,6 +23,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
+from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import (
     AdminRequired,
@@ -242,7 +243,7 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
             taken = await _registered_named(ctx.ext, _origin(spec).name)
             if taken is not None and not (
                 subject_shared(taken.subject)
-                or taken.owner_member_id == ctx.acting_member_id
+                or taken.owner_member_id == authority_member_id(ctx.authority)
                 or await ctx.speaker_is_admin()
             ):
                 raise VerbNotSupported(
@@ -281,9 +282,9 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
             )
         owner = await self._owner(ctx, name)
         is_admin = await ctx.speaker_is_admin()
-        if owner is None or not self._visible(owner, ctx.acting_member_id, is_admin):
+        if owner is None or not self._visible(owner, authority_member_id(ctx.authority), is_admin):
             raise UnknownObject(f"no {GBRAIN_KIND} object named {name!r}")
-        if not self._owned(owner, ctx.acting_member_id) and not is_admin:
+        if not self._owned(owner, authority_member_id(ctx.authority)) and not is_admin:
             raise AdminRequired(RESYNC_GATE)
         registered = await _registered_named(ctx.ext, name)
         if registered is None:

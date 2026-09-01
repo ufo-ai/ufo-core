@@ -35,6 +35,7 @@ from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.o11y import emit_metric, formatted_stack, log, log_error, warn
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.product import PRODUCT_CENSUS_JOB, PRODUCT_CENSUS_SCHEDULE, product_census
+from ufo.runtime.authority import authority_member_id, turn_authority
 from ufo.runtime.billing.accounting import ALLOW, BalanceGate, SpendEvaluator
 from ufo.runtime.candidates import WorkspaceCandidates
 from ufo.runtime.ext.context import (
@@ -55,7 +56,7 @@ from ufo.runtime.ext.manifest import (
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.provisioning import AgentProvisioning
 from ufo.runtime.media.preview_renderer import PreviewRenderer
-from ufo.runtime.seats import Seats, gate_member
+from ufo.runtime.seats import Seats
 from ufo.runtime.sources.sync import (
     SOURCE_SYNC_JOB,
     SOURCE_SYNC_SCHEDULE,
@@ -155,8 +156,10 @@ class TurnDispatcher:
         for turn in await self._dispatchable_turns():
             if turn.status == PARKED:
                 async with workspace_tx() as connection:
-                    gate = gate_member(turn.speaker_member_id, turn.on_behalf_of_member_id)
-                    members = {gate} if gate is not None else set()
+                    member_id = authority_member_id(
+                        turn_authority(turn.speaker_member_id, turn.on_behalf_of_member_id)
+                    )
+                    members = {member_id} if member_id is not None else set()
                     members.update(
                         (
                             await connection.execute(

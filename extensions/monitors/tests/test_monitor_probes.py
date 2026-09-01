@@ -32,6 +32,7 @@ from ufo.harness.sandbox.session import SANDBOX_HANDLE_SEP, ProbeTokenCodec, Pro
 from ufo.harness.sandbox.terminal import CLIENT_BACKEND
 from ufo.harness.untrusted import UNTRUSTED_OPEN
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import ExecutionAuthority, authority_from_member_id
 from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, context_for
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.turns.audience import SHARED_AUDIENCE
@@ -232,13 +233,13 @@ async def test_a_probe_acts_as_the_member_who_armed_the_watch(
     await _probe_state(tmp_path, conversation_id, "queued\n")
     creator = member_id if armed_by_a_member else None
     env = ProbeEnv()
-    acted_as: list[UUID | None] = []
+    authorities: list[ExecutionAuthority] = []
 
     async def recording(
-        conversation: UUID, probe_id: UUID, acting_member_id: UUID | None = None
+        conversation: UUID, probe_id: UUID, authority: ExecutionAuthority
     ) -> dict[str, str]:
-        acted_as.append(acting_member_id)
-        return await env.exports(conversation, probe_id, acting_member_id)
+        authorities.append(authority)
+        return await env.exports(conversation, probe_id, authority)
 
     sandboxes = _sandboxes(tmp_path)
     ext = context_for(
@@ -255,7 +256,7 @@ async def test_a_probe_acts_as_the_member_who_armed_the_watch(
         await MonitorRunner(ctx=ext).run()
         row = await _row(armed.id)
 
-    assert acted_as == [creator]
+    assert authorities == [authority_from_member_id(creator)]
     assert row is not None
     assert row["probes_run"] == 1
 
@@ -317,9 +318,10 @@ async def test_changed_output_founds_one_turn_and_retires_the_monitor(
     assert "passed\n" in body
 
 
-async def test_a_fire_folds_into_a_live_turn(db: None, tmp_path: Path) -> None:
-    """A fire into a busy conversation is an arrival, not a second turn: it lands on the running
-    turn's inbound queue for the next round boundary to absorb."""
+async def test_a_fire_with_different_authority_founds_its_own_turn(
+    db: None, tmp_path: Path
+) -> None:
+    """A member's monitor cannot inherit workspace authority by folding into its live turn."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     await _probe_state(tmp_path, conversation_id, "passed\n")
     running = uuid4()
@@ -349,10 +351,12 @@ async def test_a_fire_folds_into_a_live_turn(db: None, tmp_path: Path) -> None:
         row = await _row(armed.id)
 
     assert row is None
-    assert [turn["id"] for turn in turns] == [running]
-    [arrival] = arrivals
-    assert f'cause="{CHANGED}"' in arrival
-    assert "passed\n" in arrival
+    assert len(turns) == 2
+    assert turns[0]["id"] == running
+    assert turns[1]["on_behalf_of_member_id"] == member_id
+    assert f'cause="{CHANGED}"' in turns[1]["inbound"]
+    assert "passed\n" in turns[1]["inbound"]
+    assert arrivals == []
 
 
 async def test_three_consecutive_failures_fire_and_a_success_resets_the_streak(

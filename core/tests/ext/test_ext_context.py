@@ -51,6 +51,11 @@ from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
 from ufo.runtime.access.grants import GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import (
+    WORKSPACE_AUTHORITY,
+    ExecutionAuthority,
+    MemberAuthority,
+)
 from ufo.runtime.billing.balance import credit
 from ufo.runtime.ext.context import (
     PROBE_TIMEOUT_MAX_SECONDS,
@@ -1361,7 +1366,11 @@ async def test_probe_runs_in_the_conversations_own_sandbox(db: None, tmp_path: P
         conversation_id = await _conversation(workspace_id)
         sandboxes = _sandboxes(root)
         await _files(sandboxes).write(conversation_id, "ci/status.txt", b"queued\n")
-        result = await _probes(sandboxes).run(conversation_id, "cat /workspace/ci/status.txt")
+        result = await _probes(sandboxes).run(
+            conversation_id,
+            "cat /workspace/ci/status.txt",
+            authority=WORKSPACE_AUTHORITY,
+        )
 
     assert (result.stdout, result.exit_code) == ("queued\n", 0)
 
@@ -1373,7 +1382,9 @@ async def test_a_probes_nonzero_exit_is_a_result_not_a_raise(db: None, tmp_path:
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
         result = await _probes(_sandboxes(tmp_path / "workspaces")).run(
-            conversation_id, "echo nope >&2; exit 3"
+            conversation_id,
+            "echo nope >&2; exit 3",
+            authority=WORKSPACE_AUTHORITY,
         )
 
     assert (result.exit_code, result.stdout, result.stderr.strip()) == (3, "", "nope")
@@ -1386,7 +1397,9 @@ async def test_a_probe_names_its_conversation_in_the_environment(db: None, tmp_p
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
         result = await _probes(_sandboxes(tmp_path / "workspaces")).run(
-            conversation_id, f"printenv {CONVERSATION_ID_ENV}"
+            conversation_id,
+            f"printenv {CONVERSATION_ID_ENV}",
+            authority=WORKSPACE_AUTHORITY,
         )
 
     assert result.stdout.strip() == str(conversation_id)
@@ -1438,38 +1451,54 @@ async def test_a_probe_runs_under_the_jobs_role_binding_production_provides(
                 },
             ).exports,
         )
-        result = await probes.run(conversation_id, "printenv HUB_TOKEN")
+        result = await probes.run(
+            conversation_id, "printenv HUB_TOKEN", authority=WORKSPACE_AUTHORITY
+        )
 
     assert result.exit_code == 0
     assert result.stdout.strip() == grant_sentinel("acct-1")
 
 
-async def test_a_probes_acting_member_reaches_the_environment_and_the_token(
+async def test_a_probes_authority_reaches_the_environment_and_the_token(
     db: None, tmp_path: Path
 ) -> None:
     """The member a probe acts as has to reach both ends or it buys nothing: the signed token, so
     the proxy derives that member's forwards, and the environment, so the CLI inside the sandbox has
     a sentinel to send. This pins the second — the first is the proxy's own test — by recording what
     the env derivation was asked for."""
-    asked: list[tuple[UUID, UUID | None]] = []
+    asked: list[tuple[UUID, ExecutionAuthority]] = []
 
     async def env(
-        conversation_id: UUID, probe_id: UUID, acting_member_id: UUID | None = None
+        conversation_id: UUID, probe_id: UUID, authority: ExecutionAuthority
     ) -> dict[str, str]:
-        asked.append((probe_id, acting_member_id))
+        asked.append((probe_id, authority))
         return {}
 
     workspace_id = await _workspace()
     member_id = uuid4()
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=member_id,
+                    workspace_id=workspace_id,
+                    email="probe-member@x.test",
+                    seated_at=sa.func.now(),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
         probes = ConversationProbes(
             _sandboxes(tmp_path / "workspaces"), ProbeTokenCodec(b"probe-token-test-secret"), env
         )
-        await probes.run(conversation_id, "true", acting_member_id=member_id)
-        await probes.run(conversation_id, "true")
+        await probes.run(conversation_id, "true", authority=MemberAuthority(member_id))
+        await probes.run(conversation_id, "true", authority=WORKSPACE_AUTHORITY)
 
-    assert [member for _, member in asked] == [member_id, None]
+    assert [authority for _, authority in asked] == [
+        MemberAuthority(member_id),
+        WORKSPACE_AUTHORITY,
+    ]
     assert len({probe_id for probe_id, _ in asked}) == 2
 
 
@@ -1498,8 +1527,10 @@ async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_
         ),
     )
     with ws(workspace_id):
-        exports = await ProbeEnv(credentials=store, slots=slots).exports(uuid4(), uuid4())
-        bare = await ProbeEnv().exports(uuid4(), uuid4())
+        exports = await ProbeEnv(credentials=store, slots=slots).exports(
+            uuid4(), uuid4(), WORKSPACE_AUTHORITY
+        )
+        bare = await ProbeEnv().exports(uuid4(), uuid4(), WORKSPACE_AUTHORITY)
 
     assert exports["DD_API_KEY"] == "UFO_SENTINEL_DATADOG_API_KEY"
     assert "dd-real" not in exports.values()
@@ -1522,7 +1553,9 @@ async def test_a_probe_refuses_another_workspaces_conversation(db: None, tmp_pat
         foreign = await _conversation(other)
     with ws(await _workspace()):
         with pytest.raises(ValueError, match="not in this workspace"):
-            await _probes(_sandboxes(root)).run(foreign, "echo reached")
+            await _probes(_sandboxes(root)).run(
+                foreign, "echo reached", authority=WORKSPACE_AUTHORITY
+            )
 
 
 async def test_a_probe_refuses_a_timeout_over_the_ceiling(db: None, tmp_path: Path) -> None:
@@ -1533,9 +1566,14 @@ async def test_a_probe_refuses_a_timeout_over_the_ceiling(db: None, tmp_path: Pa
         conversation_id = await _conversation(workspace_id)
         probes = _probes(_sandboxes(tmp_path / "workspaces"))
         with pytest.raises(ValueError, match="outside"):
-            await probes.run(conversation_id, "true", timeout_s=PROBE_TIMEOUT_MAX_SECONDS + 1)
+            await probes.run(
+                conversation_id,
+                "true",
+                timeout_s=PROBE_TIMEOUT_MAX_SECONDS + 1,
+                authority=WORKSPACE_AUTHORITY,
+            )
         with pytest.raises(ValueError, match="outside"):
-            await probes.run(conversation_id, "true", timeout_s=0)
+            await probes.run(conversation_id, "true", timeout_s=0, authority=WORKSPACE_AUTHORITY)
 
 
 async def test_a_probe_says_so_when_the_bound_terminal_is_gone(
@@ -1556,7 +1594,9 @@ async def test_a_probe_says_so_when_the_bound_terminal_is_gone(
                 .where(tables.conversation.c.id == conversation_id)
             )
         with pytest.raises(TerminalGone):
-            await _probes(_sandboxes(tmp_path / "workspaces")).run(conversation_id, "echo hi")
+            await _probes(_sandboxes(tmp_path / "workspaces")).run(
+                conversation_id, "echo hi", authority=WORKSPACE_AUTHORITY
+            )
 
 
 def test_a_context_wired_without_probe_deps_has_no_probes() -> None:

@@ -32,6 +32,7 @@ from ufo.runtime.access.credentials import (
     seal_installation,
 )
 from ufo.runtime.access.egress_rules import InjectionRule, ScopeRule, derive_credential_rules
+from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.context import CredentialAccess
 from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.runtime.workspace import init_workspace_credentials, ws
@@ -227,7 +228,9 @@ async def test_the_api_credential_exports_a_sentinel_and_injects_the_app_bearer(
 
     rules = await derive_credential_rules((slot,), workspace_id, store)
     with ws(workspace_id):
-        exported = await ProbeEnv(credentials=store, slots=(slot,)).exports(uuid4(), uuid4())
+        exported = await ProbeEnv(credentials=store, slots=(slot,)).exports(
+            uuid4(), uuid4(), WORKSPACE_AUTHORITY
+        )
 
     assert (
         InjectionRule(
@@ -264,7 +267,9 @@ async def test_the_api_credential_uses_the_git_pat_without_a_second_member_slot(
 
     rules = await derive_credential_rules((slot,), workspace_id, store)
     with ws(workspace_id):
-        exported = await ProbeEnv(credentials=store, slots=(slot,)).exports(uuid4(), uuid4())
+        exported = await ProbeEnv(credentials=store, slots=(slot,)).exports(
+            uuid4(), uuid4(), WORKSPACE_AUTHORITY
+        )
 
     assert (
         InjectionRule(

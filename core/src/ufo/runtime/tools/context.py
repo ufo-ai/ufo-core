@@ -58,6 +58,12 @@ from ufo.harness.sandbox.session import Sandbox, shell_path
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialRequests
 from ufo.runtime.access.grants import ConnectUnavailable, Grant, GrantStore
+from ufo.runtime.authority import (
+    ExecutionAuthority,
+    MemberAuthority,
+    authority_from_member_id,
+    authority_member_id,
+)
 from ufo.runtime.billing.accounting import record_image_usage, record_video_usage
 from ufo.runtime.ext.context import ExtensionContext, SourceReader
 from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
@@ -339,15 +345,13 @@ class ToolContext:
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
 
     @property
-    def acting_member_id(self) -> UUID | None:
-        """The member whose authority and capabilities this call may use: the author of its
-        validated `requested_by` message, otherwise the initiator carried by a scheduled turn or
-        subagent. Granting acts stay live-member-only."""
-        return (
-            self.speaker_member_id
-            if self.speaker_member_id is not None
-            else self.turn.on_behalf_of_member_id
-        )
+    def authority(self) -> ExecutionAuthority:
+        """The exact authority this tool call carries: its active requester, a delegated turn's
+        member, or the workspace. A founding speaker grants no call that their admitted message did
+        not reach."""
+        if self.speaker_member_id is not None:
+            return MemberAuthority(self.speaker_member_id)
+        return authority_from_member_id(self.turn.on_behalf_of_member_id)
 
     @property
     def effective_audience(self) -> Audience:
@@ -357,7 +361,7 @@ class ToolContext:
         stamping it with the requester would carry it into every other conversation that member
         speaks in, leaking a private room's fact to the next room and another org's to the
         workspace. A member who wants a private note makes it in their own conversation."""
-        acting = self.acting_member_id
+        acting = authority_member_id(self.authority)
         if acting is None or self.audience != SHARED_AUDIENCE:
             return self.audience
         return conversation_audience(acting)
@@ -369,7 +373,7 @@ class ToolContext:
         never the workspace-shared atom their private audience also reads — a Slack Connect
         audience is sealed against internal content, and speaking there does not unseal it."""
         subjects = audience_subjects(self.audience)
-        acting = self.acting_member_id
+        acting = authority_member_id(self.authority)
         if acting is None:
             return subjects
         return subjects | {member_subject(acting)}
@@ -434,7 +438,7 @@ class ToolContext:
     def source_reader(self) -> SourceReader:
         """Who is asking for a source's synced pages: this turn's agent, the member speaking right
         now, and what the two may jointly read. The requester is the live speaker rather than
-        `acting_member_id`, because the main agent's owner exception is a live-work privilege — a
+        member authority, because the main agent's owner exception is a live-work privilege — a
         scheduled run or a subagent carries its initiator's authority everywhere else, but reaches
         a source only through that agent's own grant."""
         return SourceReader(
@@ -612,10 +616,10 @@ class ToolContext:
         execute API (the broker holds the account's token and injects it itself, so no sentinel and
         no egress proxy). Resolved strictly from the turn's own workspace and agent, so a tool
         executes only against the turn-agent's accounts, never another agent's. `account_id`
-        targets any account this turn may use; omitted, the acting member's own private grants are
-        preferred and agent-shared ones are the fallback — exactly one account must exist in the
-        winning tier. Fails loud when no grant subsystem is configured or the selection is absent
-        or ambiguous."""
+        targets any account this turn may use; omitted, MemberAuthority prefers that member's own
+        private grants and agent-shared ones are the fallback, while WorkspaceAuthority admits only
+        agent-shared grants — exactly one account must exist in the winning tier. Fails loud when no
+        grant subsystem is configured or the selection is absent or ambiguous."""
         return (await self.connector_connection(provider, account_id)).account_id
 
     async def connector_connection(
@@ -658,20 +662,17 @@ class ToolContext:
         )
 
     async def connector_accounts(self, provider: str) -> tuple[str, ...]:
-        """The connected-account ids this turn may use for one provider: the acting member's own
-        grants plus any grant shared with the agent's audience — the runtime check that makes
-        a connection private by default. The acting member is the speaker, or the member the turn
-        acts on behalf of (the turn's `on_behalf_of_member_id`) for a speakerless scheduled fire or
-        subagent,
-        so a member's own scheduled job and delegated subagents keep their private connections; a
-        turn with no member at all resolves only shared grants."""
+        """The connected-account ids this call may use for one provider. `MemberAuthority` admits
+        that member's own grants plus grants shared with the agent; `WorkspaceAuthority` admits
+        shared grants only. A member's scheduled job and delegated subagents therefore keep their
+        private connections without turning workspace work into member work."""
         private, shared = await self._connector_account_tiers(provider)
         return tuple(sorted({grant.account_id for grant in (*private, *shared)}))
 
     async def _connector_account_tiers(self, provider: str) -> tuple[list[Grant], list[Grant]]:
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
-        acting = self.acting_member_id
+        acting = authority_member_id(self.authority)
         granted = await self.grants.active_grants()
         private = sorted(
             (

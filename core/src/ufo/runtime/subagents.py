@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo.db import workspace_tx
 from ufo.harness.o11y import current_traceparent, log
 from ufo.harness.untrusted import wall
+from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, authority_member_id
 from ufo.runtime.billing.accounting import REJECT, BalanceGate
 from ufo.runtime.billing.balance import BalanceExhausted
 from ufo.runtime.ext.context import TurnInvoker
@@ -227,6 +228,7 @@ class Subagents:
     registry: SubagentRegistry
     parent: Turn
     audience: Audience
+    authority: ExecutionAuthority
     hub: Hub | None = None
     key_slot_for: Callable[[str], str | None] | None = None
     billing_url: str | None = None
@@ -235,22 +237,17 @@ class Subagents:
     extension that connects one has no member to refuse: the profile runs on the deploy's own key
     there, so refusing work nobody could ever enable would take the capability away entirely."""
     member_accounts_connectable: bool = True
-    requester_member_id: UUID | None = None
 
-    def authorize(self, requester_member_id: UUID | None) -> "Subagents":
-        return replace(self, requester_member_id=requester_member_id)
-
-    @property
-    def acting_member_id(self) -> UUID | None:
-        """The member whose authority a spawn carries: the bound requester, else the turn's
-        founding speaker, else the initiator a speakerless turn acts on behalf of — the same fold
-        `ToolContext.acting_member_id` applies, so the ownership gate, the catalog, and the
-        child's own stamp all read one member."""
-        return (
-            self.requester_member_id
-            or self.parent.speaker_member_id
-            or self.parent.on_behalf_of_member_id
-        )
+    def authorize(self, authority: ExecutionAuthority) -> "Subagents":
+        """Bind a tool call's authority to the spawns it makes: the call's own bound requester, else
+        the authority the spawning turn already holds. A call that names no requester carries
+        workspace authority even on a member-spoken turn, and a spawn there is still that speaker's
+        — the ownership gate, the catalog, and the child's own stamp read one authority."""
+        match authority:
+            case MemberAuthority():
+                return replace(self, authority=authority)
+            case _:
+                return replace(self, authority=self.parent.authority)
 
     async def spawn(
         self,
@@ -289,7 +286,7 @@ class Subagents:
                 if (
                     resolved.needs_own_model_key
                     and self.member_accounts_connectable
-                    and not await ws_current().member_holds_own_model_key(self.acting_member_id)
+                    and not await ws_current().member_holds_own_model_key(self.authority)
                 ):
                     raise SpawnNeedsOwnModelKey(target, self.connect_url)
                 agent_id = self.parent.agent_id
@@ -573,7 +570,7 @@ class Subagents:
                         admission_source=INTERNAL_ADMISSION,
                         idempotency_key=dedup_key,
                         speaker_member_id=None,
-                        on_behalf_of_member_id=self.acting_member_id,
+                        on_behalf_of_member_id=authority_member_id(self.authority),
                         terminal=None,
                         parent_turn_id=self.parent.id,
                         result_delivery=(
@@ -647,7 +644,7 @@ class Subagents:
         if row is None or row.subagent_profile is not None:
             return None
         original_name = row.archived_name or row.agent_name
-        if row.on_behalf_of_member_id != self.acting_member_id:
+        if row.on_behalf_of_member_id != authority_member_id(self.authority):
             raise ValueError("spawn dedup key belongs to another member request")
         if row.parent_turn_id != self.parent.id or target not in (
             original_name,
@@ -758,7 +755,7 @@ class Subagents:
             row is None
             or row.parent_turn_id is None
             or not spawned_here
-            or row.on_behalf_of_member_id != self.acting_member_id
+            or row.on_behalf_of_member_id != authority_member_id(self.authority)
         ):
             raise ValueError(f"{turn_id} is not a spawn of this conversation")
         return row.subagent_profile
@@ -858,7 +855,7 @@ class Subagents:
                     inbound=inbound,
                     admission_source=INTERNAL_ADMISSION,
                     speaker_member_id=None,
-                    on_behalf_of_member_id=self.acting_member_id,
+                    on_behalf_of_member_id=authority_member_id(self.authority),
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     result_delivery=DELIVERY_PENDING if delivers_result else None,
@@ -894,7 +891,7 @@ class Subagents:
                     .with_for_update()
                 )
             ).one()
-            if claimed.on_behalf_of_member_id != self.acting_member_id:
+            if claimed.on_behalf_of_member_id != authority_member_id(self.authority):
                 raise ValueError("spawn dedup key belongs to another member request")
             if (
                 claimed.parent_turn_id != self.parent.id
@@ -959,21 +956,20 @@ class Subagents:
                 .all()
             )
             raise UnknownSpawnTarget(target.name, self._profile_names(), tuple(names))
-        owned = row.owner_member_id is not None and row.owner_member_id == self.acting_member_id
+        member_id = authority_member_id(self.authority)
+        owned = row.owner_member_id is not None and row.owner_member_id == member_id
         if not owned:
-            if self.acting_member_id is None:
+            if member_id is None:
                 raise ValueError(AGENT_SPAWN_REFUSAL.format(name=target.name))
             await connection.execute(
                 sa.select(tables.member.c.id)
                 .where(
                     tables.member.c.workspace_id == self.parent.workspace_id,
-                    tables.member.c.id == self.acting_member_id,
+                    tables.member.c.id == member_id,
                 )
                 .with_for_update()
             )
-            if not await member_is_admin(
-                connection, self.parent.workspace_id, self.acting_member_id
-            ):
+            if not await member_is_admin(connection, self.parent.workspace_id, member_id):
                 raise ValueError(AGENT_SPAWN_REFUSAL.format(name=target.name))
         input_contract(row.input_schema).model_validate_json(inbound)
 
@@ -1220,7 +1216,7 @@ class SubagentResult:
             parent.agent_id,
             self._body(child, child_agent),
             f"{SPAWN_RESULT_KEY_PREFIX}{child.id}",
-            on_behalf_of_member_id=child.on_behalf_of_member_id,
+            authority=child.authority,
             holds_work_already_done=True,
             runtime_config=child.runtime_config,
         )

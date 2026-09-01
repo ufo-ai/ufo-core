@@ -20,6 +20,7 @@ from ufo.runtime.access.credentials import (
     slot_secret,
 )
 from ufo.runtime.access.grants import Grant, grant_sentinel
+from ufo.runtime.authority import ExecutionAuthority, authority_member_id
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest, open_connector_namespace
 
 REQUEST_METER_DIMENSION = "requests"
@@ -246,13 +247,13 @@ def derive_grant_rules(
 
 def derive_cli_rules(
     grants: tuple[Grant, ...],
-    acting_member_id: UUID | None,
+    authority: ExecutionAuthority,
     clis: Mapping[str, CliCredential],
 ) -> tuple[Rule, ...]:
-    """Each grant whose connector declares a CLI credential and whose account the acting member may
-    use — their own grant, or one shared with the workspace — forwards its sentinel-carrying
-    requests through the broker. Use gates on the acting member exactly as connector tools do: a
-    foreign private grant derives nothing, and a memberless turn forwards only shared grants."""
+    """Each grant whose connector declares a CLI credential and whose account the execution
+    authority may use forwards its sentinel-carrying requests through the broker. Member authority
+    admits its own and shared grants; workspace authority admits shared grants only."""
+    member_id = authority_member_id(authority)
     return tuple(
         ForwardRule(
             host=grant.host,
@@ -263,7 +264,7 @@ def derive_cli_rules(
         )
         for grant in grants
         if (cli := clis.get(grant.provider)) is not None
-        and (grant.connection_shared or grant.owner_member_id == acting_member_id)
+        and (grant.connection_shared or grant.owner_member_id == member_id)
     )
 
 

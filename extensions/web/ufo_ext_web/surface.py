@@ -48,6 +48,7 @@ from ufo_ext_slack.surface import SURFACE_SLACK
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import SHARED_AUDIENCE, audience_subjects, conversation_audience
+from ufo.sdk.authority import MemberAuthority
 from ufo.sdk.balance import read_headroom
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
@@ -998,7 +999,7 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
             agent.id,
             SEED_PROMPT,
             f"homepage-seed:{agent.id}:{bucket}",
-            acting_member_id=acting,
+            authority=MemberAuthority(acting),
             as_scheduled=True,
         )
         if turn_id is None:

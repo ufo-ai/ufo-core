@@ -32,6 +32,7 @@ from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSessio
 from ufo.host.ext.loader import turn_tools
 from ufo.host.kinds.workspace_kind import WORKSPACE_KIND
 from ufo.runtime.access.credentials import CredentialRequests, CredentialStore
+from ufo.runtime.authority import ExecutionAuthority
 from ufo.runtime.billing.accounting import (
     record_egress_request,
     record_sandbox_tokens,
@@ -771,7 +772,7 @@ class _RecordingInvoker:
         message: str,
         idempotency_key: str,
         *,
-        on_behalf_of_member_id: UUID | None = None,
+        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         unless_member_since: int | None = None,
@@ -783,7 +784,7 @@ class _RecordingInvoker:
             agent_id,
             message,
             idempotency_key,
-            on_behalf_of_member_id=on_behalf_of_member_id,
+            authority=authority,
             holds_work_already_done=holds_work_already_done,
             as_scheduled=as_scheduled,
             unless_member_since=unless_member_since,

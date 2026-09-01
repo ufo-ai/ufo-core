@@ -19,6 +19,7 @@ from pydantic import (
     model_validator,
 )
 
+from ufo.runtime.authority import ExecutionAuthority, turn_authority
 from ufo.runtime.object_name import ObjectRef
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
@@ -585,6 +586,11 @@ class Turn(BaseModel):
         child (parent linkage alone). Only the spawn path writes `parent_turn_id`."""
         return self.parent_turn_id is not None
 
+    @property
+    def authority(self) -> ExecutionAuthority:
+        """The immutable member or workspace authority this turn executes under."""
+        return turn_authority(self.speaker_member_id, self.on_behalf_of_member_id)
+
     @field_validator("created_refs", mode="before")
     @classmethod
     def _nothing_created(cls, value: object) -> object:
@@ -603,6 +609,7 @@ class Turn(BaseModel):
 
     @model_validator(mode="after")
     def _terminal_matches_status(self) -> "Turn":
+        _ = self.authority
         if (self.status in NON_TERMINAL_STATUSES) != (self.terminal is None):
             raise ValueError("terminal is present exactly when the turn is terminal")
         if self.terminal is not None and self.terminal.status != self.status:

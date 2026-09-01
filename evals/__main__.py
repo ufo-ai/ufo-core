@@ -189,6 +189,7 @@ from ufo.runtime.access.credentials import (
     install_credential_requests,
 )
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.kinds.agent_setup import setup_skill
 from ufo.runtime.kinds.governance import prompt_digest
@@ -1096,7 +1097,7 @@ async def _run(
                         (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
                     )
                     loadable_skills |= frozenset(
-                        ((await spawn_catalog_skill(subagents, None)).name,)
+                        ((await spawn_catalog_skill(subagents, WORKSPACE_AUTHORITY)).name,)
                     )
                     async with workspace_tx() as connection:
                         main_agent = (

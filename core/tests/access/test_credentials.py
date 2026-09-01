@@ -51,6 +51,7 @@ from ufo.runtime.access.egress_rules import (
     ScopeRule,
     derive_credential_rules,
 )
+from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.accounting import workspace_owns_the_key
 from ufo.runtime.ext.manifest import (
     ConnectorProvider,
@@ -59,7 +60,7 @@ from ufo.runtime.ext.manifest import (
     Manifest,
 )
 from ufo.runtime.seats import create_member
-from ufo.runtime.workspace import init_workspace_credentials, speaker, ws, ws_current
+from ufo.runtime.workspace import init_workspace_credentials, model_authority, ws, ws_current
 from ufo.schema import tables
 
 
@@ -292,19 +293,19 @@ async def test_a_member_key_serves_only_a_turn_bound_to_that_member(
     with ws(workspace_id):
         assert await ws_current().credential(OPENAI_KEY_SLOT) == "platform-default"
         assert not await ws_current().credential_is_stored(OPENAI_KEY_SLOT)
-        with speaker(teammate, served):
+        with model_authority(MemberAuthority(teammate), served):
             assert (
                 await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
                 == "teammate-key"
             )
             assert await ws_current().credential_is_stored(OPENAI_KEY_SLOT, OWN_ACCOUNT_MODEL)
-        with speaker(keyless, served):
+        with model_authority(MemberAuthority(keyless), served):
             assert (
                 await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
                 == "platform-default"
             )
         await store.put(workspace_id, OPENAI_KEY_SLOT, "workspace-key")
-        with speaker(keyless, served):
+        with model_authority(MemberAuthority(keyless), served):
             assert (
                 await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
                 == "workspace-key"
@@ -325,7 +326,7 @@ async def test_a_members_key_never_serves_a_slot_that_is_not_member_routed(
     async with workspace_tx() as connection:
         member = await create_member(connection, workspace_id, "member@work.com", is_admin=True)
     await store.put(workspace_id, member_slot("sample_api", member), "member-key")
-    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         assert await ws_current().credential("sample_api", None, OWN_ACCOUNT_MODEL) == (
             "platform-default"
         )
@@ -1226,7 +1227,7 @@ async def test_a_bound_account_serves_its_own_models_and_no_other_call_in_the_tu
         member = await create_member(connection, workspace_id, "coder@work.com")
     await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), "member-account")
 
-    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         assert (
             await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
             == "member-account"
@@ -1257,7 +1258,7 @@ async def test_a_spent_grant_is_refreshed_in_place_before_a_call_gets_it(
         return Grant(access="fresh-access", refresh="refresh-2", expires_at=time.time() + 3600)
 
     monkeypatch.setattr(workspace_module, "refreshed", buys)
-    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         assert (
             await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
             == "fresh-access"
@@ -1285,7 +1286,7 @@ async def test_a_live_grant_is_spent_as_it_stands(
         raise AssertionError("a live grant must not be refreshed")
 
     monkeypatch.setattr(workspace_module, "refreshed", never)
-    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         assert (
             await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
             == "live-access"
@@ -1321,7 +1322,10 @@ async def test_two_turns_finding_one_grant_spent_exchange_its_token_once(
     monkeypatch.setattr(workspace_module, "refreshed", buys)
 
     async def turn() -> str:
-        with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+        with (
+            ws(workspace_id),
+            model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})),
+        ):
             return await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
 
     served = await asyncio.gather(turn(), turn())
@@ -1364,7 +1368,7 @@ async def test_no_transaction_is_held_open_across_the_provider_refresh(
         return Grant(access="fresh", refresh="refresh-2", expires_at=time.time() + 3600)
 
     monkeypatch.setattr(workspace_module, "refreshed", buys)
-    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         assert (
             await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL) == "fresh"
         )
@@ -1461,7 +1465,7 @@ async def test_a_token_rejected_mid_turn_is_refreshed_and_the_round_carries_on(
         auto_model=OWN_ACCOUNT_MODEL,
     )
 
-    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         client = await registry.client_for(OWN_ACCOUNT_MODEL)
         assert [event async for event in client.complete(object())] == ["round"]
 
@@ -1502,7 +1506,7 @@ async def test_a_rejection_the_rebuild_cannot_fix_is_raised_after_one_retry(
         auto_model=OWN_ACCOUNT_MODEL,
     )
 
-    with ws(workspace_id), speaker(member, frozenset({OWN_ACCOUNT_MODEL})):
+    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
         client = await registry.client_for(OWN_ACCOUNT_MODEL)
         with pytest.raises(CredentialValueInvalid):
             [event async for event in client.complete(object())]

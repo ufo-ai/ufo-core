@@ -56,6 +56,11 @@ from ufo.runtime.access.credentials import (
 )
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import (
+    WORKSPACE_AUTHORITY,
+    ExecutionAuthority,
+    turn_authority,
+)
 from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import (
     ADOPTED_CLAIM,
@@ -112,7 +117,7 @@ from ufo.runtime.turns.activity import (
 from ufo.runtime.turns.audience import Audience, parse_audience
 from ufo.runtime.turns.contracts import Contract, output_contract
 from ufo.runtime.turns.dispatch import dispatch_next_turn
-from ufo.runtime.workspace import speaker, ws, ws_current
+from ufo.runtime.workspace import model_authority, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
     EXPRESS_QUEUE_NAME,
@@ -639,10 +644,9 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                 if row.subagent_profile is not None
                 else None
             )
-            own_account_member = (
-                (row.speaker_member_id or row.on_behalf_of_member_id)
-                if profile is not None and profile.needs_own_model_key
-                else None
+            authority = turn_authority(
+                row.speaker_member_id,
+                row.on_behalf_of_member_id,
             )
             own_account_models = (
                 frozenset() if profile is None else frozenset(profile.own_key_models.values())
@@ -657,7 +661,7 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                 await _apply_provisions(runtime, workspace_uuid)
                 with (
                     agent(row.agent_id),
-                    speaker(own_account_member, own_account_models),
+                    model_authority(authority, own_account_models),
                     turn_span(
                         turn_uuid,
                         row.conversation_id,
@@ -759,6 +763,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             registry=runtime.subagents,
             parent=turn,
             audience=audience,
+            authority=turn.authority,
             hub=runtime.hub,
             key_slot_for=runtime.registry.key_slot_for,
             billing_url=runtime.billing_url,
@@ -766,10 +771,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             member_accounts_connectable=_member_accounts_connectable(runtime),
         )
 
-        def subagents_for(
-            acting_member_id: UUID | None,
-        ) -> tuple[Spawn, Subagents]:
-            authorized = subagents.authorize(acting_member_id)
+        def subagents_for(authority: ExecutionAuthority) -> tuple[Spawn, Subagents]:
+            authorized = subagents.authorize(authority)
             return authorized.spawn, authorized
 
         payload: dict[str, Any] = (
@@ -795,8 +798,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 pinned_model if pinned_model is not None else runtime.registry.resolve(agent.model)
             )
         else:
-            own_account_member = turn.speaker_member_id or turn.on_behalf_of_member_id
-            connected = await ws_current().member_model_provider(own_account_member)
+            connected = await ws_current().member_model_provider(turn.authority)
             resolved_model = _subagent_model(
                 profile, connected, agent, runtime, pinned_model, document_model
             )
@@ -1358,7 +1360,11 @@ async def _open_sandbox(
 
     The credential derivations run here rather than at the turn's start, so a turn that never
     touches the sandbox reads no credential slot either."""
-    run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
+    run = RunToken(
+        workspace_id=turn.workspace_id,
+        turn_id=turn.id,
+        authority=WORKSPACE_AUTHORITY,
+    )
     cache_config = cache_git_config() if cache_rewrite else ()
     with span("sandbox.open"):
         return await sandboxes.open(
@@ -1375,7 +1381,7 @@ async def _open_sandbox(
                         *await _git_credential_config(credentials, slots, turn.workspace_id),
                     )
                 ),
-                **await _grant_cli_env(grants, clis, None, turn.id),
+                **await _grant_cli_env(grants, clis, WORKSPACE_AUTHORITY, turn.id),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },
         )
@@ -1389,16 +1395,21 @@ class SandboxAuthorizer:
     clis: Mapping[str, CliCredential]
     turn: Turn
 
-    async def authorize(self, acting_member_id: UUID | None) -> Sandbox:
+    async def authorize(self, authority: ExecutionAuthority) -> Sandbox:
         run_token = self.run_tokens.encode(
             RunToken(
                 workspace_id=self.turn.workspace_id,
                 turn_id=self.turn.id,
-                acting_member_id=acting_member_id,
+                authority=authority,
             )
         )
         return self.sandbox.authorize(
             run_token,
             frozenset(cli.env for cli in self.clis.values()),
-            await _grant_cli_env(self.grants, self.clis, acting_member_id, self.turn.id),
+            await _grant_cli_env(
+                self.grants,
+                self.clis,
+                authority,
+                self.turn.id,
+            ),
         )

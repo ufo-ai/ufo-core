@@ -8,6 +8,7 @@ from dbos import EnqueueOptions
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
+from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.billing.accounting import (
     SpendEvaluator,
     record_sandbox_tokens,
@@ -450,7 +451,7 @@ async def test_admission_parks_over_cap_member_without_enqueue(db: None) -> None
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi"
+        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
     )
     assert dbos.enqueued == []
     assert await _status(turn_id) == "parked"
@@ -463,7 +464,7 @@ async def test_admission_rejects_over_cap_member_with_reason(db: None) -> None:
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "reject")
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi"
+        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
     )
     assert dbos.enqueued == []
     async with workspace_tx() as connection:
@@ -485,7 +486,7 @@ async def test_admission_under_cap_enqueues(db: None) -> None:
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 100, "park")
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi"
+        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
     )
     assert dbos.enqueued == [str(turn_id)]
     assert await _status(turn_id) == "queued"

@@ -19,6 +19,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
+from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
@@ -225,7 +226,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         excerpt. The member's own read carries it whole: a cut arrives at a reader
         indistinguishable from a prompt that ended, and the screen that draws it cannot undo it."""
         return await self._rows(
-            ctx.ext, member_id=ctx.acting_member_id, prompt_max=PROMPT_EXCERPT_MAX
+            ctx.ext, member_id=authority_member_id(ctx.authority), prompt_max=PROMPT_EXCERPT_MAX
         )
 
     async def _rows(
@@ -323,7 +324,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 "turn_id": str(inspection.last_turn_id),
                 "turn_status": inspection.last_turn_status,
             }
-            if task_content_visible(listed, ctx.acting_member_id):
+            if task_content_visible(listed, authority_member_id(ctx.authority)):
                 last_run["response"] = (
                     None
                     if inspection.last_response is None
@@ -350,7 +351,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         owner: GeneratedObjectOwner | None,
     ) -> None:
         validated_schedule = None if spec.schedule is None else validate_cron(spec.schedule)
-        acting_member = ctx.acting_member_id
+        acting_member = authority_member_id(ctx.authority)
         if acting_member is None:
             raise AdminRequired(SCHEDULE_REQUESTER_GATE)
         found = await self._find(ctx.ext, name)
@@ -499,7 +500,7 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
         origin_seq=ctx.turn.seq,
         origin_arrival_seq=await ext.conversation_arrival_seq(ctx.turn.conversation_id),
         prompt="Resume the paused workflow.\n" + json.dumps(wakeup),
-        created_by_member_id=ctx.acting_member_id,
+        created_by_member_id=authority_member_id(ctx.authority),
     )
     payload = {
         "awaiting": "timer",

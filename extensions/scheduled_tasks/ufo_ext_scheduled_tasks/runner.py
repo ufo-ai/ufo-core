@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+from ufo.sdk.authority import authority_from_member_id
 from ufo.sdk.context import AgentArchived, ExtensionContext
 from ufo.sdk.scheduled_fire import scheduled_fire_key
 from ufo_ext_scheduled_tasks.cron import next_fire
@@ -102,7 +103,7 @@ class ScheduledTaskRunner:
                 task.agent_id,
                 inbound,
                 key,
-                acting_member_id=task.created_by_member_id,
+                authority=authority_from_member_id(task.created_by_member_id),
                 as_scheduled=True,
             )
         except AgentArchived:

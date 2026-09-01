@@ -51,6 +51,7 @@ from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
+from ufo.runtime.authority import ExecutionAuthority
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.schema import tables
@@ -377,7 +378,7 @@ async def test_bind_failure_keeps_dispatch_step_count_stable_on_recovery(
     second_bind_started = asyncio.Event()
     binds = 0
 
-    async def authorize(authorizer: loop_queue.SandboxAuthorizer, acting_member_id: UUID | None):
+    async def authorize(authorizer: loop_queue.SandboxAuthorizer, authority: ExecutionAuthority):
         nonlocal binds
         binds += 1
         if binds == 1:
@@ -385,7 +386,7 @@ async def test_bind_failure_keeps_dispatch_step_count_stable_on_recovery(
                 await second_bind_started.wait()
             raise RuntimeError("transient bind")
         second_bind_started.set()
-        return await original_authorize(authorizer, acting_member_id)
+        return await original_authorize(authorizer, authority)
 
     monkeypatch.setattr(loop_queue.SandboxAuthorizer, "authorize", authorize)
     saved = loop_queue._runtime

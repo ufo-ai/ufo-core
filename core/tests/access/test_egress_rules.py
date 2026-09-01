@@ -28,6 +28,7 @@ from ufo.runtime.access.egress_rules import (
     provider_host,
 )
 from ufo.runtime.access.grants import Grant, grant_sentinel
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.manifest import ConnectorProvider, Manifest
 
 
@@ -194,7 +195,7 @@ def test_grant_sentinel_is_deterministic_per_account() -> None:
 
 
 def test_cli_rule_for_the_acting_members_own_grant() -> None:
-    rules = derive_cli_rules((_grant(),), ACTING, {"hub": CLI})
+    rules = derive_cli_rules((_grant(),), MemberAuthority(ACTING), {"hub": CLI})
     forward = next(r for r in rules if isinstance(r, ForwardRule))
     assert forward.host == CLI_HOST
     assert forward.header == "authorization"
@@ -204,21 +205,23 @@ def test_cli_rule_for_the_acting_members_own_grant() -> None:
 
 
 def test_cli_rule_for_a_shared_grant_of_another_member() -> None:
-    rules = derive_cli_rules((_grant(grantor=OTHER, shared=True),), ACTING, {"hub": CLI})
+    rules = derive_cli_rules(
+        (_grant(grantor=OTHER, shared=True),), MemberAuthority(ACTING), {"hub": CLI}
+    )
     assert any(isinstance(r, ForwardRule) for r in rules)
 
 
 def test_no_cli_rule_for_a_foreign_private_grant() -> None:
-    assert derive_cli_rules((_grant(grantor=OTHER),), ACTING, {"hub": CLI}) == ()
+    assert derive_cli_rules((_grant(grantor=OTHER),), MemberAuthority(ACTING), {"hub": CLI}) == ()
 
 
 def test_no_cli_rule_for_a_provider_without_a_declared_cli() -> None:
-    assert derive_cli_rules((_grant(),), ACTING, {}) == ()
+    assert derive_cli_rules((_grant(),), MemberAuthority(ACTING), {}) == ()
 
 
 def test_a_memberless_turn_forwards_only_shared_grants() -> None:
     grants = (_grant(), _grant(account="acct-2", grantor=OTHER, shared=True))
-    rules = derive_cli_rules(grants, None, {"hub": CLI})
+    rules = derive_cli_rules(grants, WORKSPACE_AUTHORITY, {"hub": CLI})
     accounts = [r.account_id for r in rules if isinstance(r, ForwardRule)]
     assert accounts == ["acct-2"]
 

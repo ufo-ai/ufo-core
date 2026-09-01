@@ -49,12 +49,18 @@ from ufo_ext_monitors.monitors import monitor as monitor_table
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import (
+    ProbeTokenCodec,
+    ProxyEndpoint,
+    SandboxSession,
+    SandboxSpec,
+)
 from ufo.harness.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, context_for
 from ufo.runtime.objects import AdminRequired, VerbNotSupported
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import SpawnResult, ToolContext
@@ -221,7 +227,18 @@ async def _tool_ctx(
 
 
 def _runner_ctx(invoker: AdmissionInvoker, root: Path) -> ExtensionContext:
-    return context_for(NAME, frozenset(), invoker=invoker, sandboxes=_sandboxes(root))
+    sandboxes = _sandboxes(root)
+    return context_for(
+        NAME,
+        frozenset(),
+        invoker=invoker,
+        sandboxes=sandboxes,
+        probes=ConversationProbes(
+            sandboxes,
+            ProbeTokenCodec(secret=b"probe-test-secret"),
+            ProbeEnv().exports,
+        ),
+    )
 
 
 def _input(slug: str, command: str, **overrides: object) -> MonitorInput:
@@ -454,12 +471,10 @@ async def test_the_deadline_fires_once_and_retires_the_monitor(db: None, tmp_pat
     assert body.endswith("</monitor_fired>")
 
 
-async def test_a_deadline_fire_for_an_unseated_member_carries_no_authority(
+async def test_a_deadline_fire_for_an_unseated_member_parks_with_its_authority(
     db: None, tmp_path: Path
 ) -> None:
-    """The deadline still ends an unseated member's watch with the one arrival the arming turn is
-    owed, but an admin's revoke stopped that member's authority everywhere at once — so the fire
-    lands as common work, acting for nobody."""
+    """The deadline keeps the arming member's identity and parks until their seat is restored."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     ctx = await _tool_ctx(
         workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
@@ -479,9 +494,10 @@ async def test_a_deadline_fire_for_an_unseated_member_carries_no_authority(
 
     [turn] = turns
     assert remaining == []
-    assert turn["on_behalf_of_member_id"] is None
+    assert turn["on_behalf_of_member_id"] == member_id
     assert turn["speaker_member_id"] is None
-    assert dbos.enqueued == [str(turn["id"])]
+    assert turn["status"] == "parked"
+    assert dbos.enqueued == []
 
 
 async def test_a_fire_that_crashed_before_retiring_admits_one_turn(

@@ -1,9 +1,10 @@
 # Permission model
 
 Every action in ufo carries four facts: the **workspace** it belongs to, the **agent** it runs as,
-the **member authority** it acts with, and the **audience** that may read what it produces. Each
-fact is established once at a trusted boundary and enforced by a different layer. Where two
-things that look alike are governed differently, this document says so.
+the **execution authority** it acts with, and the **audience** that may read what it produces.
+Authority is exactly `MemberAuthority(member_id)` or `WorkspaceAuthority()` from admission to the
+capability boundary. Nullable member ids exist only in database columns and signed-token claims.
+Each fact is established once at a trusted boundary and enforced by a different layer.
 
 ```mermaid
 flowchart TD
@@ -11,8 +12,8 @@ flowchart TD
     IN --> WS["tenancy — ws()/agent() contextvars bind the scope;<br/>Postgres RLS re-enforces it on every query"]
     WS --> ID["identity — surface external id resolves one member<br/>(surface_identity, signed bearer)"]
     ID --> ADM["admission — a caller-asserted agent id must match the<br/>conversation binding; speaker is a member of this workspace;<br/>seat gate; spend preflight (reject or park)"]
-    ADM --> RUN["turn — every model round rechecks seats and caps<br/>(a mid-run breach parks, never cancels)"]
-    RUN --> TOOLS["tool dispatch — the agent's tool set;<br/>requested_by binds the acting member per call"]
+    ADM --> RUN["turn — exact authority selects model credentials;<br/>every model round rechecks seats and caps"]
+    RUN --> TOOLS["tool dispatch — requested_by binds exact call authority;<br/>otherwise delegated or workspace authority"]
     TOOLS --> WIRE["egress proxy — default-deny wire; grant-scoped hosts;<br/>sentinel swap; metering"]
     WIRE --> READS["reads — the conversation's audience gates<br/>everything anchored to it, per kind"]
 ```
@@ -22,7 +23,7 @@ flowchart TD
 | Tenancy | which workspace | `ws()` / `agent()` contextvars + Postgres RLS + blob key prefix | `core/src/ufo/runtime/workspace.py`, `db.py`, `blob.py`, `servers/control/src/rls.rs` |
 | Identity | which human | `surface_identity` row + HMAC bearer (`ufo_session` cookie / CLI token) | `core/src/ufo/runtime/ext/surface.py`, `core/src/ufo/harness/auth/bearer.py` |
 | Admission | may this turn start | membership, agent-binding assertion, seat gate, spend preflight | `core/src/ufo/runtime/surfaces/admission.py`, `core/src/ufo/runtime/seats.py` |
-| Authority | who does this act speak for | `speaker_member_id` per message, `on_behalf_of_member_id` for background work, `requested_by` per tool call | `core/src/ufo/runtime/engine.py`, `tools/context.py` |
+| Authority | who does this act speak for | `ExecutionAuthority`; nullable ids only at admission, persistence, and signed-token codecs | `core/src/ufo/runtime/authority.py`, `surfaces/admission.py`, `engine.py`, `tools/context.py` |
 | Grants | which external capability | `connector_grant`, `source_grant`, `credential`, web-audience grant, agent tool set | `core/src/ufo/runtime/access/grants.py`, `credentials.py` |
 | Wire | what leaves the sandbox | egress proxy rules derived from manifests and grants, keyed by a signed run token | `core/src/ufo/harness/sandbox/proxy/` |
 | Reads | who may see it | the conversation `Audience` atom, per-kind gates | `core/src/ufo/runtime/turns/audience.py`, `objects.py` |
@@ -37,10 +38,11 @@ flowchart TD
 | Main agent | `agent.is_main` | member/agent kind writes, cross-agent object verbs, workspace roster, the source-owner exception |
 | Child agent | its `agent` row | its own grants and conversations; in chat it may edit no agent, not even itself (an admin's intent lane may edit it) |
 | Scheduled fire / subagent | no speaker; `on_behalf_of_member_id` (task creator / spawn requester / monitor armer / the member a first-party job names — an agent's owner, else the workspace's earliest-seated admin) | that member's *use* capabilities — never granting acts, never admin |
+| Workspace work | no speaker or delegated member | shared credentials and grants only |
 | Extension | `ExtensionContext`, scoped at construction | its declared slots, its own store, the ambient workspace — never a blob handle, never another workspace; its raw DB transaction is bound by RLS |
 | Operator | local process access for `ufoctl`; `OPERATOR_EMAIL_DOMAIN` bearer for the debug/memory surfaces | fleet-wide, outside the member model |
 
-### Speaker, acting member, admin — three distinct authorities
+### Speaker, execution authority, admin
 
 The engine builds each turn's tool context with **no speaker**. A tool call names the member it
 acts for via `requested_by` — a message ref the model copies from a visible, absorbed member
@@ -49,10 +51,18 @@ inbound — and the engine re-binds the call's context and sandbox run token to 
 audience is theirs — an omitted ref binds that member while one of their messages is active, since
 nobody else can be asking there, and the schema does not offer the field; a denied message is absent
 from those, so a denial withholds that member's authority here exactly as it does for a named ref.
-Elsewhere omission means common work, except a turn carrying a durable `on_behalf_of` member — a
-scheduled fire, a subagent, a monitor's arrival — retains it; a handler that refuses for want of a
-member raises `SpeakerRequired`, and the tool error then lists the active member refs so the model
-retries with the right one.
+Elsewhere omission means `WorkspaceAuthority`, except a turn carrying a durable `on_behalf_of`
+member — a scheduled fire, a subagent, a monitor's arrival — retains `MemberAuthority`; a handler
+that refuses for want of a member raises `SpeakerRequired`, and the tool error then lists the active
+member refs so the model retries with the right one.
+
+`speaker_member_id` and `on_behalf_of_member_id` are mutually exclusive durable encodings. Core
+decodes them once, passes the exact value through model selection, internal invocation, probes,
+subagents, connector resolution, sandbox authorization, and egress, and encodes it only at a wire
+or persistence boundary. A seat check may refuse, park, or skip work under `MemberAuthority`; it
+never converts it to `WorkspaceAuthority`. Work with different authorities cannot fold into one
+live turn. Extensions invoke core with the authority they hold and cannot enforce seat liveness
+themselves; the repository gate holds both rules.
 
 ```mermaid
 flowchart TD
@@ -61,17 +71,17 @@ flowchart TD
     RB -->|omitted| OWN{"the member's own conversation,<br/>with a live message of theirs?"}
     OWN -->|yes| SP
     OWN -->|no| OB{"turn carries an<br/>on_behalf_of member?"}
-    OB -->|yes| BEH["acting member = on_behalf_of member<br/>(task creator, spawn requester, monitor armer)"]
-    OB -->|no| NONE["no member — common work:<br/>shared grants only"]
-    SP --> ACT["acting member"]
+    OB -->|yes| BEH["MemberAuthority(on_behalf_of)<br/>(task creator, spawn requester, monitor armer)"]
+    OB -->|no| NONE["WorkspaceAuthority — common work:<br/>shared grants only"]
+    SP --> ACT["MemberAuthority"]
     BEH --> ACT
-    ACT --> USE["use: connector accounts, private read subjects,<br/>member-stamped sandbox token"]
+    ACT --> USE["use: connector accounts, private read subjects,<br/>member-authorized sandbox token"]
     SP --> GR["granting acts: connect_account, attach, share,<br/>revoke, disconnect, request_credentials —<br/>refused without a live speaker"]
     SP --> AD["admin authority: speaker_is_admin —<br/>false for every speakerless turn"]
 ```
 
-The asymmetry is the doctrine: **granting gates on the live speaker; use gates on the acting
-member.** A scheduled run may *use* its creator's private connection but can never connect,
+The asymmetry is the doctrine: **granting gates on the live speaker; use gates on execution
+authority.** A scheduled run may *use* its creator's private connection but can never connect,
 share, revoke, or fill a credential — each granting verb gates on the live speaker, the kinds
 that disclose or revoke access declare speaker-required mutation on the shared object base
 (`core/src/ufo/runtime/objects.py`), and `speaker_is_admin` is false whenever `speaker_member_id` is None
@@ -133,9 +143,10 @@ Admission (`core/src/ufo/runtime/surfaces/admission.py`) then holds four gates:
 - The speaker must be a member of the bound workspace; a member admission whose speaker never
   resolved is cancelled outright.
 - The seat gate: `seated_at` is set by the member row's own column default (no creation path can
-  mint a member the agent refuses) and cleared only by an admin's revoke. The gate member is the
-  turn's speaker, else its on-behalf member, whatever admitted it. It is checked
-  at admission, when a message folds into a live turn, and again **every model round** — a
+  mint a member the agent refuses) and cleared only by an admin's revoke. The gate is the exact
+  `MemberAuthority`; `WorkspaceAuthority` is always live. It is checked at admission, when a
+  message folds into a live turn, immediately before a probe token is minted, and again **every
+  model round** — a
   revoke parks running turns. Three invariants protect the last admin: the last seated admin
   cannot be unseated, the last admin cannot be demoted, and a demotion may not leave zero seated
   admins.
@@ -281,11 +292,12 @@ member-requested call, and only when that speaker owns the connection or it is s
 just the edge. The portal's Attach connection control is the same act on the target agent's own
 intent lane.
 
-At use time, account resolution admits the **acting member's private attachments plus shared
-connections, preferring private wholesale**; two candidates inside the winning tier is a hard
-error naming them (the sandbox env export skips instead of guessing). The connector tools and
-the sandbox CLI env each derive that tiering independently; the proxy applies the same
-own-or-shared rule per grant without tiering — its sentinel already names one account.
+At use time, account resolution admits **`MemberAuthority`'s private attachments plus shared
+connections, preferring private wholesale**; `WorkspaceAuthority` admits shared connections only.
+Two candidates inside the winning tier is a hard error naming them (the sandbox env export skips
+instead of guessing). Connector tools, the sandbox CLI environment, and the proxy all receive the
+same authority value; the proxy applies own-or-shared per grant without tiering because its
+sentinel already names one account.
 
 **Sources and source grants.** A source is one member-owned, agent-neutral synced dataset. Its
 member visibility is its `subject` (`shared` or `member:<uuid>`); its agent
@@ -355,7 +367,7 @@ flowchart TD
     L -->|yes| S{"host in a derived rule?"}
     S -->|"credential slot host"| INJ["admit + swap sentinel for the real value + meter"]
     S -->|"granted connector, transfer,<br/>or artifact-store host"| TUN0["admit + meter — opaque tunnel"]
-    S -->|"connector CLI sentinel<br/>in the header"| FWD["forward through the broker<br/>under the acting member's account + meter"]
+    S -->|"connector CLI sentinel<br/>in the header"| FWD["forward through the broker<br/>under MemberAuthority's account + meter"]
     S -->|"model host"| MOD["admit + inject model key + meter tokens<br/>(run token only — a probe never resolves it)"]
     S -->|no| I{"an extension declares sandbox_internet<br/>AND the agent's internet_access_allowed?"}
     I -->|no| R3["403"]
@@ -369,12 +381,12 @@ flowchart TD
   slots — member-filled or deploy-minted (the GitHub App's installation token) — and the
   deployment model key. A brokered connection injects nothing, because the token never exists on
   this deploy: a connector that declares a CLI credential exports its sentinel, and a request
-  carrying it forwards through the broker under the acting member's account; every other granted
+  carrying it forwards through the broker under `MemberAuthority`'s account; every other granted
   host is an opaque tunnel, admitted and metered, never terminated.
-- **Tokens.** Each tool command carries a deployment-signed run token naming its turn and acting
-  member; every CONNECT requires the named turn to still be running. A probe token (the off-turn
-  exec a jobs-role handler runs) names a conversation and the member whose work armed it, expires
-  on its own deadline, and **never** resolves the model key.
+- **Tokens.** Each tool command carries a deployment-signed run token naming its turn and exact
+  execution authority; the codec stores workspace authority as a null member claim. Every CONNECT
+  requires the named turn to still be running. A probe token names a conversation and exact
+  authority, expires on its own deadline, and **never** resolves the model key.
 - **Public internet** requires two independent grants: a manifest-level `sandbox_internet`
   declaration by an active extension, and the agent row's `internet_access_allowed` (an admin
   narrows it per agent; the proxy snapshots it per turn).

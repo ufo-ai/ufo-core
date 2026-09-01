@@ -26,6 +26,7 @@ from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.manifest import SubagentProfile
 from ufo.runtime.ext.surface import SurfaceContext
 from ufo.runtime.hub import InProcessHub
@@ -172,7 +173,13 @@ async def test_invoke_refuses_a_conversation_bound_to_another_agent(db: None) ->
         context = _context(workspace_id, "cli")
         conversation_id = await context.conversation_for("session", conversation_audience(None))
         with pytest.raises(ValueError, match="bound to another agent"):
-            await admission.invoke(workspace_id, conversation_id, second_agent, "job")
+            await admission.invoke(
+                workspace_id,
+                conversation_id,
+                second_agent,
+                "job",
+                authority=WORKSPACE_AUTHORITY,
+            )
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(
@@ -201,6 +208,7 @@ async def test_a_scheduled_fire_refuses_a_conversation_bound_to_another_agent(db
                 second_agent,
                 "run",
                 "task:cross-agent",
+                authority=WORKSPACE_AUTHORITY,
                 as_scheduled=True,
             )
     async with workspace_tx() as connection:
@@ -264,6 +272,7 @@ async def test_subagent_conversation_inherits_the_parents_agent(db: None) -> Non
         client=_SilentClient(),
         registry=SubagentRegistry((profile,)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with ws(workspace_id):

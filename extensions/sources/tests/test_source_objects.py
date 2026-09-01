@@ -46,6 +46,7 @@ from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.runtime.access.credentials import CredentialStore, credential_object_name, named_slots
 from ufo.runtime.access.grants import GrantStore, account_object_name
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.ext.context import JsonValue, context_for
 from ufo.runtime.ext.manifest import declared_slots
 from ufo.runtime.ext.surface import _binding_fields
@@ -2434,7 +2435,7 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
             state.agent_id,
             "Existing work.",
             "existing-work",
-            acting_member_id=state.owner_id,
+            authority=MemberAuthority(state.owner_id),
         )
         shipped = _change(source_id, "# asana tasks: Ship the launch list")
         legal = _change(source_id, "# asana tasks: Follow up with legal")

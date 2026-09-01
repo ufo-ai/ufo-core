@@ -28,6 +28,11 @@ from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.auth.token_signing import SignedTokenError, sign_token, verify_token
 from ufo.harness.containment import ContainmentError, contained_relative
 from ufo.harness.sandbox.protocol import SandboxCommands, SandboxFileOperations
+from ufo.runtime.authority import (
+    ExecutionAuthority,
+    authority_from_member_id,
+    authority_member_id,
+)
 
 WORKSPACE_DIR = "/workspace"
 WORKSPACE_WRITE_MODE = 0o644
@@ -420,7 +425,7 @@ class RunToken:
 
     workspace_id: UUID
     turn_id: UUID
-    acting_member_id: UUID | None = None
+    authority: ExecutionAuthority
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,7 +442,8 @@ class RunTokenCodec:
         return cls(secret=value.encode())
 
     def encode(self, run: RunToken) -> str:
-        member = "-" if run.acting_member_id is None else str(run.acting_member_id)
+        member_id = authority_member_id(run.authority)
+        member = "-" if member_id is None else str(member_id)
         payload = f"ufo-run/{run.workspace_id}/{run.turn_id}/{member}".encode()
         return sign_token(self.secret, payload)
 
@@ -450,7 +456,7 @@ class RunTokenCodec:
             return RunToken(
                 workspace_id=UUID(workspace),
                 turn_id=UUID(turn),
-                acting_member_id=None if member == "-" else UUID(member),
+                authority=authority_from_member_id(None if member == "-" else UUID(member)),
             )
         except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
             raise ValueError("invalid signed run token") from error
@@ -466,17 +472,15 @@ class ProbeToken:
     it is still live — the token carries its own deadline, minted per exec for that exec's timeout,
     and the proxy compares it fresh per CONNECT. `probe_id` names the one exec.
 
-    `acting_member_id` is the member the probe acts as: whoever armed the watch this exec serves, so
-    a command that reached their own connected account in the arming turn keeps reaching it on every
-    probe after it. Unset means nobody, and then only connections shared with the whole workspace
-    are forwarded — the same authority a turn's own sandbox open carries before a tool call
-    re-authorizes it for its speaker."""
+    Member authority names whoever armed the watch this exec serves, so a command that reached
+    their own connected account in the arming turn keeps reaching it on every probe after it.
+    Workspace authority reaches only connections shared with the whole workspace."""
 
     workspace_id: UUID
     conversation_id: UUID
     probe_id: UUID
     expires_at: int
-    acting_member_id: UUID | None = None
+    authority: ExecutionAuthority
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,7 +493,8 @@ class ProbeTokenCodec:
     secret: bytes
 
     def encode(self, probe: ProbeToken) -> str:
-        member = "-" if probe.acting_member_id is None else str(probe.acting_member_id)
+        member_id = authority_member_id(probe.authority)
+        member = "-" if member_id is None else str(member_id)
         payload = (
             f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}"
             f"/{probe.probe_id}/{member}/{probe.expires_at}"
@@ -509,7 +514,7 @@ class ProbeTokenCodec:
                 conversation_id=UUID(conversation),
                 probe_id=UUID(probe),
                 expires_at=int(expires),
-                acting_member_id=None if member == "-" else UUID(member),
+                authority=authority_from_member_id(None if member == "-" else UUID(member)),
             )
         except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
             raise ValueError("invalid signed probe token") from error
@@ -891,8 +896,8 @@ class Sandbox:
         cleared_env: frozenset[str],
         env: Mapping[str, str],
     ) -> "Sandbox":
-        """The same sandbox as one acting member reaches it: their run token on the proxy
-        environment, the connector variables of any other member dropped, and theirs exported."""
+        """The same sandbox under one exact authority: its run token on the proxy environment,
+        connector variables outside that authority dropped, and its admitted variables exported."""
         raise NotImplementedError
 
     async def _bound(self) -> "SandboxSession":

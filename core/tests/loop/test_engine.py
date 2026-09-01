@@ -95,6 +95,12 @@ from ufo.runtime.access.grants import (
     OAuthAccount,
     install_connect_flow,
 )
+from ufo.runtime.authority import (
+    WORKSPACE_AUTHORITY,
+    ExecutionAuthority,
+    MemberAuthority,
+    authority_member_id,
+)
 from ufo.runtime.billing.accounting import TurnUsageConflict, record_turn_usage
 from ufo.runtime.billing.balance import credit, debit, set_reserve
 from ufo.runtime.compaction import (
@@ -1253,7 +1259,7 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
     turn = await _seed_turn("queued", None)
     founder, arrival = uuid4(), uuid4()
     seen: list[tuple[UUID | None, Audience, frozenset[str], dict[str, object]]] = []
-    authorized: list[UUID | None] = []
+    authorized: list[ExecutionAuthority] = []
 
     async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
         seen.append(
@@ -1280,8 +1286,8 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
         ),
     )
 
-    async def sandbox_for(member_id: UUID | None) -> SandboxSession:
-        authorized.append(member_id)
+    async def sandbox_for(authority: ExecutionAuthority) -> SandboxSession:
+        authorized.append(authority)
         return engine.sandbox
 
     engine = replace(engine, sandbox_for=sandbox_for)
@@ -1351,7 +1357,11 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
             {},
         ),
     ]
-    assert authorized == [requesters[arrival].member_id, None, founder]
+    assert authorized == [
+        MemberAuthority(requesters[arrival].member_id),
+        WORKSPACE_AUTHORITY,
+        MemberAuthority(founder),
+    ]
 
     for index, invalid in enumerate((str(uuid4()), "not-a-ref", None)):
         result = await _dispatch(
@@ -1382,7 +1392,7 @@ async def test_an_omitted_ref_binds_the_member_in_their_own_conversation_only(
     seen: list[tuple[UUID | None, UUID | None]] = []
 
     async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
-        seen.append((ctx.speaker_member_id, ctx.acting_member_id))
+        seen.append((ctx.speaker_member_id, authority_member_id(ctx.authority)))
         return ToolResult(content=(TextContent(text="ok"),))
 
     probe = ToolDef(name="bind_probe", description="d", input_model=StrictInput, handler=capture)
@@ -1584,7 +1594,7 @@ async def test_profile_tool_keeps_inherited_authority_when_it_sends_requested_by
     seen: list[tuple[UUID | None, UUID | None, dict[str, object]]] = []
 
     async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
-        seen.append((ctx.speaker_member_id, ctx.acting_member_id, args.model_dump()))
+        seen.append((ctx.speaker_member_id, authority_member_id(ctx.authority), args.model_dump()))
         return ToolResult(content=(TextContent(text="ok"),))
 
     engine = replace(
@@ -2101,7 +2111,7 @@ async def test_a_denied_message_withholds_authority_from_a_call_in_the_members_o
         pass
 
     async def capture(ctx: ToolContext, args: AuthorityInput) -> ToolResult:
-        seen.append((ctx.speaker_member_id, ctx.acting_member_id))
+        seen.append((ctx.speaker_member_id, authority_member_id(ctx.authority)))
         return ToolResult(content=(TextContent(text="ok"),))
 
     @dataclass
@@ -3515,7 +3525,7 @@ async def test_a_tool_bridge_intent_dispatches_under_its_inherited_member(
     seen: list[tuple[UUID | None, UUID | None]] = []
 
     async def object_list(ctx: ToolContext, args: _NoArgs) -> ToolResult:
-        seen.append((ctx.speaker_member_id, ctx.acting_member_id))
+        seen.append((ctx.speaker_member_id, authority_member_id(ctx.authority)))
         return ToolResult(content=(TextContent(text='{"objects":[]}'),))
 
     engine = replace(

@@ -63,6 +63,7 @@ from evals.suites.app_audit_probe import app_audit_command
 from evals.suites.ufo_app_bench import APP_WORKSPACE_FILES
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.context import ScopedStore
 from ufo.runtime.kinds.agents import AGENT_KIND
 from ufo.runtime.objects import ENVELOPE_KEYS
@@ -691,7 +692,7 @@ async def _creation_failure(outcome: ScenarioOutcome, visibility: str) -> Capabi
 
 async def _prepare_created_homepage(
     outcome: ScenarioOutcome, target: CapabilityTarget
-) -> tuple[_ApplicationRecord, UUID]:
+) -> tuple[_ApplicationRecord, UUID, UUID]:
     created, failure = await _created_application(outcome.output)
     if created is None:
         raise RuntimeError(failure or "homepage followup found no created application")
@@ -749,7 +750,7 @@ async def _prepare_created_homepage(
         await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(path.write_bytes, item.content)
     await _sync_active_application_workspace(conversation_id, workspace / "ufo-app")
-    return application, conversation_id
+    return application, conversation_id, application.owner_member_id
 
 
 async def _sync_active_application_workspace(conversation_id: UUID, source: Path) -> None:
@@ -778,25 +779,25 @@ async def _sync_active_application_workspace(conversation_id: UUID, source: Path
 
 
 async def _build_created_homepage(outcome: ScenarioOutcome, target: CapabilityTarget):
-    application, conversation_id = await _prepare_created_homepage(outcome, target)
+    application, conversation_id, owner_member_id = await _prepare_created_homepage(outcome, target)
     return await target.invoke(
         conversation_id,
         application.id,
         SEED_PROMPT,
         f"homepage-seed:{application.id}:{datetime.now(UTC).date().isoformat()}",
-        acting_member_id=application.owner_member_id,
+        authority=MemberAuthority(owner_member_id),
         as_scheduled=True,
     )
 
 
 async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityTarget):
-    application, conversation_id = await _prepare_created_homepage(outcome, target)
+    application, conversation_id, owner_member_id = await _prepare_created_homepage(outcome, target)
     first = await target.invoke(
         conversation_id,
         application.id,
         SEED_PROMPT,
         f"homepage-seed:{application.id}:without-authority",
-        acting_member_id=None,
+        authority=WORKSPACE_AUTHORITY,
         as_scheduled=True,
     )
     workspace = target.conversations.workspace_path(conversation_id, "")
@@ -824,7 +825,7 @@ async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityT
         application.id,
         SEED_PROMPT,
         f"homepage-seed:{application.id}:with-authority",
-        acting_member_id=application.owner_member_id,
+        authority=MemberAuthority(owner_member_id),
         as_scheduled=True,
     )
     return first, second

@@ -23,6 +23,7 @@ from ufo.runtime.access.credentials import (
     slot_is_set,
 )
 from ufo.runtime.access.grants import GrantStore, grant_sentinel
+from ufo.runtime.authority import ExecutionAuthority, authority_member_id
 from ufo.runtime.ext.manifest import CredentialSlot
 from ufo.runtime.workspace import ws_current
 
@@ -47,10 +48,9 @@ class ProbeEnv:
     BYOK model key needs nothing here either — those slots declare no injection target at all and
     are read in-process by the model registry, never exported to a sandbox.
 
-    `acting_member_id` is the member the probe acts as — whoever armed the watch. It selects the
-    connector CLI sentinel exactly as a turn's re-authorization does, so a probe of a member's own
-    connected account exports that account's sentinel and the proxy forwards it; unset exports only
-    the sentinels of connections shared with the whole workspace."""
+    The probe's immutable authority selects connector CLI sentinels exactly as a turn's
+    re-authorization does. Member authority exports that member's account; workspace authority
+    exports only connections shared with the workspace."""
 
     grants: GrantStore | None = None
     clis: Mapping[str, CliCredential] = field(default_factory=dict)
@@ -58,7 +58,10 @@ class ProbeEnv:
     slots: tuple[CredentialSlot, ...] = ()
 
     async def exports(
-        self, conversation_id: UUID, probe_id: UUID, acting_member_id: UUID | None = None
+        self,
+        conversation_id: UUID,
+        probe_id: UUID,
+        authority: ExecutionAuthority,
     ) -> dict[str, str]:
         workspace_id = ws_current().workspace_id
         return {
@@ -69,7 +72,7 @@ class ProbeEnv:
                     *await _git_credential_config(self.credentials, self.slots, workspace_id),
                 )
             ),
-            **await _grant_cli_env(self.grants, self.clis, acting_member_id, probe_id),
+            **await _grant_cli_env(self.grants, self.clis, authority, probe_id),
             **await _keyed_provider_env(self.credentials, self.slots, workspace_id),
         }
 
@@ -170,7 +173,7 @@ async def _keyed_provider_env(
 async def _grant_cli_env(
     grants: GrantStore | None,
     clis: Mapping[str, CliCredential],
-    acting_member_id: UUID | None,
+    authority: ExecutionAuthority,
     run_id: UUID,
 ) -> dict[str, str]:
     """Each connector-declared CLI env var whose provider this process may use — its member's
@@ -183,6 +186,7 @@ async def _grant_cli_env(
     instead of acting as an unintended account."""
     if grants is None or not clis:
         return {}
+    member_id = authority_member_id(authority)
     granted = await grants.active_grants()
     env: dict[str, str] = {}
     for provider, cli in clis.items():
@@ -191,7 +195,7 @@ async def _grant_cli_env(
             for grant in granted
             if grant.provider == provider
             and not grant.connection_shared
-            and grant.owner_member_id == acting_member_id
+            and grant.owner_member_id == member_id
         )
         shared = sorted(
             grant.account_id

@@ -415,6 +415,37 @@ def test_schedule_authority_gate_allows_ambient_agent_selection() -> None:
     assert gates._schedule_authority_failures(trees) == []
 
 
+def test_execution_authority_gate_rejects_nullable_identity_in_shipped_code() -> None:
+    for source in (
+        "use(acting_member_id)\n",
+        "def use(acting_member_id): ...\n",
+        "invoke(acting_member_id=member_id)\n",
+    ):
+        failures = gates._execution_authority_failures({CORE_FILE: ast.parse(source)})
+        assert len(failures) == 1
+        assert "ExecutionAuthority" in failures[0]
+
+
+def test_execution_authority_gate_leaves_durable_identity_fields_alone() -> None:
+    tree = ast.parse("persist(speaker_member_id=speaker, on_behalf_of_member_id=delegated)\n")
+    assert gates._execution_authority_failures({CORE_FILE: tree}) == []
+
+
+def test_execution_authority_gate_keeps_extension_liveness_in_core() -> None:
+    trees = {ROGUE: ast.parse("await Seats(workspace_id).admits(connection, authority)\n")}
+    failures = gates._execution_authority_failures(trees)
+    assert len(failures) == 1
+    assert "core capability" in failures[0]
+
+
+def test_execution_authority_gate_allows_core_liveness_and_extension_access_reads() -> None:
+    trees = {
+        CORE_FILE: ast.parse("await Seats(workspace_id).admits(connection, authority)\n"),
+        ROGUE: ast.parse("await ctx.member_has_access(member_id)\n"),
+    }
+    assert gates._execution_authority_failures(trees) == []
+
+
 def test_wiring_gate_counts_database_program_reads_and_writes() -> None:
     trees = {
         gates.SCHEMA_TABLES: ast.parse(

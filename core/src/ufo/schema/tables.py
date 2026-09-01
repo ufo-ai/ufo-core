@@ -269,6 +269,10 @@ turn = sa.Table(
         name="turn_admission_source",
     ),
     sa.CheckConstraint(
+        "speaker_member_id is null or on_behalf_of_member_id is null",
+        name="turn_authority",
+    ),
+    sa.CheckConstraint(
         "(status in ('queued', 'running', 'parked')) = (terminal is null)", name="turn_terminal"
     ),
     sa.CheckConstraint(

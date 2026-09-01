@@ -28,6 +28,7 @@ from ufo.runtime.access.egress_rules import (
 )
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, WorkspaceAuthority
 from ufo.runtime.ext.manifest import CredentialSlot
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_HOST
 from ufo.runtime.workspace import ws
@@ -40,18 +41,24 @@ signed by the one deploy secret and name their own domain, so the wire cannot pa
 other."""
 
 
-def _seat_scope(workspace_id: UUID, member_id: UUID | None) -> tuple[sa.ColumnElement[bool], ...]:
-    if member_id is None:
-        return ()
-    return (
-        sa.exists(
-            sa.select(tables.member.c.id).where(
-                tables.member.c.workspace_id == workspace_id,
-                tables.member.c.id == member_id,
-                tables.member.c.seated_at.is_not(None),
+def _seat_scope(
+    workspace_id: UUID, authority: ExecutionAuthority
+) -> tuple[sa.ColumnElement[bool], ...]:
+    match authority:
+        case WorkspaceAuthority():
+            return ()
+        case MemberAuthority(member_id):
+            return (
+                sa.exists(
+                    sa.select(tables.member.c.id).where(
+                        tables.member.c.workspace_id == workspace_id,
+                        tables.member.c.id == member_id,
+                        tables.member.c.seated_at.is_not(None),
+                    )
+                ),
             )
-        ),
-    )
+        case _:
+            raise TypeError("execution authority must be MemberAuthority or WorkspaceAuthority")
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +68,7 @@ class _Authority:
 
     agent_id: UUID
     internet_access_allowed: bool
-    acting_member_id: UUID | None
+    execution: ExecutionAuthority
 
 
 @dataclass(frozen=True)
@@ -144,7 +151,7 @@ class PerAgentRules:
                     rules = (
                         *rules,
                         *derive_grant_rules(granted, self.transfer_hosts),
-                        *derive_cli_rules(granted, authority.acting_member_id, self.clis),
+                        *derive_cli_rules(granted, authority.execution, self.clis),
                     )
                 if isinstance(principal, ProbeToken):
                     return self._without_the_model_key(rules)
@@ -171,7 +178,7 @@ class PerAgentRules:
                         tables.turn.c.workspace_id == run.workspace_id,
                         tables.turn.c.status == RUNNING,
                         tables.agent.c.workspace_id == run.workspace_id,
-                        *_seat_scope(run.workspace_id, run.acting_member_id),
+                        *_seat_scope(run.workspace_id, run.authority),
                     )
                 )
             ).one_or_none()
@@ -185,7 +192,7 @@ class PerAgentRules:
         internet_access_allowed = row.internet_access_allowed and (
             runtime_config is None or runtime_config.internet_access is None
         )
-        return _Authority(row.agent_id, internet_access_allowed, run.acting_member_id)
+        return _Authority(row.agent_id, internet_access_allowed, run.authority)
 
     async def _conversation_of(self, probe: ProbeToken) -> _Authority | None:
         """The probed conversation's agent and snapshotted internet policy — the same two columns
@@ -213,13 +220,13 @@ class PerAgentRules:
                         tables.conversation.c.id == probe.conversation_id,
                         tables.conversation.c.workspace_id == probe.workspace_id,
                         tables.agent.c.workspace_id == probe.workspace_id,
-                        *_seat_scope(probe.workspace_id, probe.acting_member_id),
+                        *_seat_scope(probe.workspace_id, probe.authority),
                     )
                 )
             ).one_or_none()
         if row is None:
             return None
-        return _Authority(row.agent_id, row.internet_access_allowed, probe.acting_member_id)
+        return _Authority(row.agent_id, row.internet_access_allowed, probe.authority)
 
     def _without_the_model_key(self, rules: tuple[Rule, ...]) -> tuple[Rule, ...]:
         """`rules` minus the deployment's own model-key injection. A probe's environment exports
@@ -236,13 +243,13 @@ class PerAgentRules:
 
     async def turn_live(self, run: RunToken) -> int | None:
         """The egress-authorization gate: the workspace's egress-rules generation while the run
-        token names a turn the DB still reports running and its acting member still holds a seat,
-        None otherwise. A keyed host's real-key injection is applied only for a live turn, so a
-        token for a turn that has ended, a turn that never existed, or a revoked member is denied
-        at CONNECT and the key never reaches the wire. Read fresh per request — never the per-turn
-        rule cache — so a turn that ends between requests can no longer draw the key; the generation
-        rides the same one indexed read, so the rule cache pins what it derived from without a
-        second round-trip."""
+        token names a turn the DB still reports running and any exact member authority still holds
+        a seat, None otherwise. A keyed host's real-key injection is applied only for a live turn,
+        so a token for a turn that has ended, a turn that never existed, or a revoked member is
+        denied at CONNECT and the key never reaches the wire. Read fresh per request — never the
+        per-turn rule cache — so a turn that ends between requests can no longer draw the key; the
+        generation rides the same one indexed read, so the rule cache pins what it derived from
+        without a second round-trip."""
         with ws(run.workspace_id):
             async with workspace_tx() as connection:
                 row = (
@@ -260,7 +267,7 @@ class PerAgentRules:
                         .where(
                             tables.turn.c.id == run.turn_id,
                             tables.turn.c.workspace_id == run.workspace_id,
-                            *_seat_scope(run.workspace_id, run.acting_member_id),
+                            *_seat_scope(run.workspace_id, run.authority),
                         )
                     )
                 ).one_or_none()
@@ -270,7 +277,7 @@ class PerAgentRules:
 
     async def probe_live(self, probe: ProbeToken) -> int | None:
         """The current rules generation while the probe is unexpired, its conversation exists,
-        and its acting member still holds a seat."""
+        and any exact member authority still holds a seat."""
         if probe.expires_at <= int(datetime.now(UTC).timestamp()):
             return None
         with ws(probe.workspace_id):
@@ -287,7 +294,7 @@ class PerAgentRules:
                         .where(
                             tables.conversation.c.id == probe.conversation_id,
                             tables.conversation.c.workspace_id == probe.workspace_id,
-                            *_seat_scope(probe.workspace_id, probe.acting_member_id),
+                            *_seat_scope(probe.workspace_id, probe.authority),
                         )
                     )
                 ).scalar_one_or_none()

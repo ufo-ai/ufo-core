@@ -23,6 +23,7 @@ from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT
 from ufo.harness.o11y import current_traceparent
 from ufo.host.tools.builtins import BUILTIN_TOOLS, SPAWN_BACKGROUND_DIRECTIVE, _spawn_handles
 from ufo.runtime.access.credentials import CredentialStore, member_slot
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.billing.balance import BalanceExhausted, credit, set_reserve
 from ufo.runtime.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
 from ufo.runtime.ext.surface import conversation_name
@@ -600,6 +601,7 @@ async def test_message_admits_the_running_childs_next_turn_for_its_exit(
         client=client,
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(member_id),
     )
     with trace.use_span(_spawning_span()):
@@ -654,6 +656,7 @@ async def test_message_refuses_a_turn_this_parent_did_not_spawn(
         client=_RecordingClient(),
         registry=SubagentRegistry(()),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(ValueError, match="not a spawn of this conversation"):
@@ -675,6 +678,7 @@ async def test_message_refuses_a_followup_whose_profile_is_no_longer_registered(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(UnknownSubagentProfile) as caught:
@@ -712,6 +716,7 @@ async def test_a_child_that_dies_in_setup_ends_its_foreground_parents_wait(
         client=_RecordingClient(workflow_finished=workflow_finished),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn(
@@ -753,6 +758,7 @@ async def test_messages_dispatch_in_child_conversation_order(
         client=client,
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     first = await subagents.message(
@@ -820,6 +826,7 @@ async def test_message_reexecuted_with_its_dedup_key_reconnects_to_its_followup(
         client=client,
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     first = await subagents.message(
@@ -864,6 +871,7 @@ async def test_message_reconnect_past_queued_reports_status_without_redispatch(
         client=client,
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     first = await subagents.message(child_id, "go deeper", dedup_key="turn-1/message_spawn/call-4")
@@ -897,6 +905,7 @@ async def test_message_reconnect_behind_an_earlier_queued_followup_stays_undispa
         client=client,
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     front = await subagents.message(child_id, "first", dedup_key="turn-1/message_spawn/call-4")
@@ -938,6 +947,7 @@ async def test_message_dedup_key_reused_for_another_child_is_refused(
         client=_RecordingClient(),
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     await subagents.message(child_a, "follow-up", dedup_key="shared-key")
@@ -1040,6 +1050,7 @@ async def test_spawn_inherits_a_private_audience_from_a_speakerless_parent(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(member_id),
     ).spawn("research", {"task": "acme"}, background=True)
 
@@ -1088,10 +1099,11 @@ async def test_message_bound_spawn_keeps_shared_audience_and_member_authority(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
 
-    spawned = await common.authorize(requester).spawn(
+    spawned = await common.authorize(MemberAuthority(requester)).spawn(
         "research", {"task": "acme"}, background=True, dedup_key="acme"
     )
     child, _, child_audience = await _load_turn(spawned.turn_id)
@@ -1100,11 +1112,34 @@ async def test_message_bound_spawn_keeps_shared_audience_and_member_authority(
     assert child.on_behalf_of_member_id == requester
 
     with pytest.raises(ValueError, match="belongs to another member request"):
-        await common.authorize(other).spawn(
+        await common.authorize(MemberAuthority(other)).spawn(
             "research", {"task": "acme"}, background=True, dedup_key="acme"
         )
     with pytest.raises(ValueError, match="not a spawn of this conversation"):
-        await common.authorize(other).cancel(spawned.turn_id)
+        await common.authorize(MemberAuthority(other)).cancel(spawned.turn_id)
+
+
+async def test_an_unattributed_call_spawns_under_the_founding_speaker(
+    db: None, dbos_launched: Config
+) -> None:
+    """A call that names no requester carries workspace authority, but the spawn it makes is still
+    the speaker's: their own agent admits it and the child is stamped for them, so the catalog that
+    offered the target and the gate that admits it read the same member."""
+    workspace_id, agent_id = await _workspace_agent()
+    speaker = await _seeded_member(workspace_id)
+    specialist_id = await _specialist(workspace_id, name="private-triage", owner_member_id=speaker)
+    parent = (await _parent(workspace_id, agent_id)).model_copy(
+        update={"speaker_member_id": speaker}
+    )
+
+    spawned = await (
+        _spawner(workspace_id, parent, "research").authorize(WORKSPACE_AUTHORITY)
+    ).spawn("private-triage", {"task": "acme"}, background=True, dedup_key="unattributed")
+
+    child, _, _ = await _load_turn(spawned.turn_id)
+    assert child.agent_id == specialist_id
+    assert child.speaker_member_id is None
+    assert child.on_behalf_of_member_id == speaker
 
 
 @pytest.mark.parametrize(
@@ -1115,10 +1150,12 @@ async def test_subagent_inherits_room_audience(
     db: None, dbos_launched: Config, audience: Audience
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
     subagents = Subagents(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
-        parent=await _parent(workspace_id, agent_id),
+        parent=parent,
+        authority=parent.authority,
         audience=audience,
     )
 
@@ -1164,8 +1201,9 @@ async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_res
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(speaker),
-    ).authorize(speaker)
+    ).authorize(MemberAuthority(speaker))
 
     first = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
     loaded, _, child_audience = await _load_turn(first.turn_id)
@@ -1224,6 +1262,7 @@ async def test_spawn_distinct_dedup_keys_admit_distinct_children(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     a = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="a")
@@ -1249,6 +1288,7 @@ async def test_spawn_enqueue_failure_leaves_the_child_in_the_outbox(
         client=_FailingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     ).spawn("research", {"task": "acme"}, background=True)
     async with workspace_tx() as connection:
@@ -1272,6 +1312,7 @@ async def test_spawn_without_a_dedup_key_mints_a_fresh_child_each_call(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     first = await subagents.spawn("research", {"task": "x"}, background=True)
@@ -1305,6 +1346,7 @@ async def test_spawn_stamps_the_spawning_spans_traceparent_on_the_child_turn(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with trace.use_span(_spawning_span()):
@@ -1360,6 +1402,7 @@ async def test_wait_reports_every_already_finished_childs_status(
         client=client,
         registry=SubagentRegistry(()),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     statuses = await subagents.wait((first, second))
@@ -1389,6 +1432,7 @@ async def test_spawn_and_wait_carry_the_profiles_untrusted_output_declaration(
         client=_RecordingClient(),
         registry=registry,
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
 
@@ -1446,6 +1490,7 @@ async def test_result_returns_the_exact_child_terminal(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("review"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("review", {"task": "acme"}, background=True, dedup_key="review")
@@ -1490,6 +1535,7 @@ async def test_untrusted_profile_validation_failure_raises_a_walled_error(
         client=_RecordingClient(),
         registry=registry,
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     for profile, expected in (("webby", UntrustedContentError), ("plain", ValidationError)):
@@ -1521,6 +1567,7 @@ async def test_spawn_raises_loud_on_a_prose_terminal(db: None, dbos_launched: Co
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("plain"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     text = "I could not complete this task in full, so here is what I found instead."
@@ -1548,6 +1595,7 @@ async def test_spawn_surfaces_a_failed_childs_diagnostic(db: None, dbos_launched
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="boom")
@@ -1593,6 +1641,7 @@ async def test_wait_refuses_a_turn_this_parent_did_not_spawn(
         client=client,
         registry=SubagentRegistry(()),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(ValueError, match="not a spawn of this conversation"):
@@ -1620,6 +1669,7 @@ async def test_cancel_cancels_the_childs_workflow_and_commits_its_terminal(db: N
         client=client,
         registry=SubagentRegistry(()),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     status = await subagents.cancel(child)
@@ -1636,6 +1686,7 @@ async def test_cancel_refuses_a_turn_this_parent_did_not_spawn(db: None) -> None
         client=_RecordingClient(),
         registry=SubagentRegistry(()),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(ValueError, match="not a spawn of this conversation"):
@@ -1999,6 +2050,7 @@ async def test_the_woken_turn_can_address_the_child_that_woke_it(db: None) -> No
         client=_RecordingClient(),
         registry=registry,
         parent=woken,
+        authority=woken.authority,
         audience=conversation_audience(None),
     )
     assert await from_woken._require_child(child_id) == "plain"
@@ -2008,6 +2060,7 @@ async def test_the_woken_turn_can_address_the_child_that_woke_it(db: None) -> No
         client=_RecordingClient(),
         registry=registry,
         parent=stranger,
+        authority=stranger.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(ValueError, match="not a spawn of this conversation"):
@@ -2131,6 +2184,7 @@ async def test_a_spawned_run_is_called_the_words_it_was_spawned_with(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=SHARED_AUDIENCE,
     ).spawn("research", {"task": "chase the warehouse rollout"}, background=True)
 
@@ -2195,6 +2249,7 @@ def _spawner(workspace_id: UUID, parent: Turn, *profiles: str) -> Subagents:
         client=_RecordingClient(),
         registry=SubagentRegistry(tuple(_profile(name) for name in profiles)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
 
@@ -2703,6 +2758,7 @@ async def test_message_can_mark_a_foreground_childs_followup_delivering(
         client=_RecordingClient(),
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await spawner.spawn(
@@ -2801,11 +2857,13 @@ async def test_an_arrival_founding_a_turn_on_a_spawned_conversation_inherits_its
         admission=Admission(dbos=_RecordingClient(), durable_surfaces=frozenset()),
         workspace_id=workspace_id,
     )
+    spawned_turn, _, _ = await _load_turn(spawned.turn_id)
     woken = await invoker.invoke(
         spawned.conversation_id,
-        (await _load_turn(spawned.turn_id))[0].agent_id,
+        spawned_turn.agent_id,
         "<spawn_result …>",
         "subagent-result:grandchild-1",
+        authority=spawned_turn.authority,
     )
     assert woken is not None
     continuation, _, _ = await _load_turn(woken)
@@ -2832,7 +2890,11 @@ async def test_a_profile_childs_continuation_keeps_its_profile_and_delivery(
         workspace_id=workspace_id,
     )
     woken = await invoker.invoke(
-        spawned.conversation_id, agent_id, "<spawn_result …>", "subagent-result:grandchild-2"
+        spawned.conversation_id,
+        agent_id,
+        "<spawn_result …>",
+        "subagent-result:grandchild-2",
+        authority=parent.authority,
     )
     assert woken is not None
     continuation, _, _ = await _load_turn(woken)
@@ -2856,6 +2918,7 @@ async def test_a_fan_out_stops_at_the_first_child_an_exhausted_balance_cannot_co
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
         billing_url="https://ufo.example.com/surface/web#/workspace/billing",
     )
@@ -2906,6 +2969,7 @@ async def test_a_child_pinned_to_another_provider_is_not_exempted_by_its_agents_
         client=_RecordingClient(),
         registry=SubagentRegistry((own, other)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
         key_slot_for=lambda model: (
             "anthropic_api_key" if model == "anthropic-model" else "openai_api_key"
@@ -2929,6 +2993,7 @@ async def test_a_foreground_child_that_parks_does_not_hold_its_parent_open(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("research", {"task": "a"}, background=True)
@@ -2960,6 +3025,7 @@ async def test_a_foreground_wait_reads_the_terminal_only_after_workflow_completi
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="wait")
@@ -3019,9 +3085,10 @@ async def test_an_interruptible_foreground_wait_uses_the_workflow_until_completi
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(member_id)
+    ).authorize(MemberAuthority(member_id))
     spawned = await subagents.spawn(
         "research", {"task": "acme"}, background=True, dedup_key="interruptible"
     )
@@ -3075,6 +3142,7 @@ async def test_a_committed_detach_wins_when_both_waits_are_ready(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
         hub=hub,
     )
@@ -3117,6 +3185,7 @@ async def test_a_hub_read_failure_leaves_the_foreground_child_wait_intact(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
         hub=InProcessHub(),
     )
@@ -3153,9 +3222,10 @@ async def test_a_consumed_replay_keeps_watching_for_a_fresh_arrival(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(member_id)
+    ).authorize(MemberAuthority(member_id))
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn).values(status="running").where(tables.turn.c.id == parent.id)
@@ -3197,6 +3267,7 @@ async def test_a_foreground_wait_failure_cancels_its_child(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     waited: list[UUID] = []
@@ -3230,6 +3301,7 @@ async def test_a_foreground_wait_follows_the_workflow_that_resumes_its_child(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="resume")
@@ -3353,15 +3425,21 @@ async def test_a_foreground_spawn_answers_inline_while_no_member_speaks(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(member_id)
+    ).authorize(MemberAuthority(member_id))
     child = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
     awaiting = asyncio.create_task(
         subagents.spawn("research", {"task": "acme"}, dedup_key="acme", detach_on_arrival=True)
     )
     await admission.invoke(
-        workspace_id, parent.conversation_id, agent_id, "a sibling finished", "internal:1"
+        workspace_id,
+        parent.conversation_id,
+        agent_id,
+        "a sibling finished",
+        "internal:1",
+        authority=parent.authority,
     )
     await asyncio.sleep(0)
     assert not awaiting.done()
@@ -3391,9 +3469,10 @@ async def test_an_arriving_member_message_moves_the_wait_to_the_background(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(member_id)
+    ).authorize(MemberAuthority(member_id))
     child = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
     awaiting = asyncio.create_task(
         subagents.spawn("research", {"task": "acme"}, dedup_key="acme", detach_on_arrival=True)
@@ -3443,9 +3522,10 @@ async def test_a_child_that_finished_as_the_message_arrived_answers_inline(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(member_id)
+    ).authorize(MemberAuthority(member_id))
     child = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
     folded = await admission.admit_member(
         workspace_id, parent.conversation_id, "one more thing", member_id, "C:2"
@@ -3478,9 +3558,10 @@ async def test_a_background_spawn_is_unaffected_by_a_waiting_member_message(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(member_id)
+    ).authorize(MemberAuthority(member_id))
     await admission.admit_member(
         workspace_id, parent.conversation_id, "and this too", member_id, "C:2"
     )
@@ -3549,6 +3630,7 @@ async def test_a_speakerless_turn_spawns_on_the_account_the_member_it_acts_for_c
         client=_RecordingClient(),
         registry=SubagentRegistry((own_account,)),
         parent=parent,
+        authority=parent.authority,
         audience=conversation_audience(member_id),
     )
 

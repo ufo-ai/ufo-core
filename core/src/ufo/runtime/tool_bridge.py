@@ -16,6 +16,7 @@ from ufo.db import workspace_tx
 from ufo.harness.models.interface import ToolSchema
 from ufo.harness.o11y import current_traceparent, log
 from ufo.harness.sandbox.session import RunToken
+from ufo.runtime.authority import authority_member_id
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.hub import Parked, Terminal
 from ufo.runtime.objects import BoundAction
@@ -176,6 +177,7 @@ class ToolBridge:
             tool=TypeAdapter(BridgeToolName).validate_python(request.tool_name),
             input=request.arguments,
         ).model_dump_json()
+        member_id = authority_member_id(run.authority)
         async with workspace_tx() as connection:
             live = (
                 await connection.execute(
@@ -222,7 +224,7 @@ class ToolBridge:
                     inbound=intent,
                     admission_source=INTENT_ADMISSION,
                     speaker_member_id=None,
-                    on_behalf_of_member_id=run.acting_member_id,
+                    on_behalf_of_member_id=member_id,
                     terminal=None,
                     parent_turn_id=run.turn_id,
                     subagent_profile=parent.subagent_profile,
@@ -248,7 +250,7 @@ class ToolBridge:
             if (
                 existing.inbound != intent
                 or existing.parent_turn_id != run.turn_id
-                or existing.on_behalf_of_member_id != run.acting_member_id
+                or existing.on_behalf_of_member_id != member_id
             ):
                 raise ValueError("tool bridge request id was reused for another call")
             await connection.execute(
