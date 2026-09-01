@@ -20,6 +20,8 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.db import workspace_tx
 from ufo.schema import tables
@@ -310,6 +312,95 @@ class CredentialStore:
                         ciphertext=ciphertext,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
+                    )
+                )
+
+    async def fulfill(
+        self,
+        workspace_id: UUID,
+        slot: str,
+        submitted: str,
+        request_id: UUID | None,
+        member_id: UUID,
+        merge: Callable[[str | None, str], str] | None,
+    ) -> None:
+        """Write while the sealed member is a seated admin, claiming a member prompt once."""
+        if not submitted:
+            raise ValueError("credential value is empty")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.select(tables.workspace.c.id)
+                .where(tables.workspace.c.id == workspace_id)
+                .with_for_update()
+            )
+            authority = (
+                await connection.execute(
+                    sa.select(tables.member.c.id).where(
+                        tables.member.c.workspace_id == workspace_id,
+                        tables.member.c.id == member_id,
+                        tables.member.c.is_admin,
+                        tables.member.c.seated_at.is_not(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if authority is None:
+                raise CredentialRequestInvalid(
+                    "credential request requires a seated workspace admin"
+                )
+            if request_id is not None:
+                insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+                claimed = (
+                    await connection.execute(
+                        insert(tables.credential_fulfillment)
+                        .values(
+                            workspace_id=workspace_id,
+                            request_id=request_id,
+                            slot=slot,
+                            member_id=member_id,
+                            fulfilled_at=sa.func.now(),
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=[
+                                tables.credential_fulfillment.c.workspace_id,
+                                tables.credential_fulfillment.c.request_id,
+                                tables.credential_fulfillment.c.slot,
+                            ]
+                        )
+                        .returning(tables.credential_fulfillment.c.request_id)
+                    )
+                ).scalar_one_or_none()
+                if claimed is None:
+                    raise CredentialRequestInvalid("credential request was already fulfilled")
+            row = (
+                await connection.execute(
+                    sa.select(tables.credential.c.ciphertext).where(
+                        tables.credential.c.workspace_id == workspace_id,
+                        tables.credential.c.slot == slot,
+                    )
+                )
+            ).one_or_none()
+            current = None if row is None else self.fernet.decrypt(row.ciphertext).decode()
+            plaintext = submitted if merge is None else merge(current, submitted)
+            if not plaintext:
+                raise ValueError("credential value is empty")
+            ciphertext = self.fernet.encrypt(plaintext.encode())
+            if row is None:
+                await connection.execute(
+                    sa.insert(tables.credential).values(
+                        workspace_id=workspace_id,
+                        slot=slot,
+                        ciphertext=ciphertext,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            else:
+                await connection.execute(
+                    sa.update(tables.credential)
+                    .values(ciphertext=ciphertext, updated_at=sa.func.now())
+                    .where(
+                        tables.credential.c.workspace_id == workspace_id,
+                        tables.credential.c.slot == slot,
                     )
                 )
 

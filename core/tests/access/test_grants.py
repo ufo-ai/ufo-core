@@ -72,6 +72,7 @@ UNGRANTED_HOST = "api.ungranted.test"
 HOST_A = "api.aaa.test"
 HOST_B = "api.bbb.test"
 REDIRECT_URI = "http://surface/v1/connect/callback"
+LOCK_WAIT_TIMEOUT_SECONDS = 5
 
 
 @pytest.fixture(autouse=True)
@@ -525,6 +526,103 @@ async def test_connect_flow_records_a_durable_grant_with_account_label(db: None)
         GRANTED_HOST,
         member_id,
     )
+
+
+async def test_connect_flow_cannot_land_after_the_grantor_loses_access(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    flow = ConnectFlow(
+        providers={"stub": StubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri=REDIRECT_URI,
+    )
+    url = flow.authorize(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        provider="stub",
+        grantor_member_id=member_id,
+        conversation_id=conversation_id,
+        shared=True,
+    )
+    state = parse_qs(urlparse(url).query)["state"][0]
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == member_id)
+            .values(seated_at=None, updated_at=sa.func.now())
+        )
+
+    with pytest.raises(ConnectionPermissionDenied, match="no longer has workspace access"):
+        await flow.complete(state=state, code="the-code")
+
+    async with workspace_tx() as connection:
+        connections = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.connection))
+        ).scalar_one()
+        grants = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.connector_grant))
+        ).scalar_one()
+    assert (connections, grants) == (0, 0)
+
+
+async def test_record_takes_no_lock_that_conflicts_with_a_concurrent_workspace_write(
+    db: None,
+    database_url: str,
+) -> None:
+    """`record` completes a callback whose provider code is already spent, so it must never be the
+    side Postgres aborts to break a lock cycle. What keeps it out of one is that it takes no
+    explicit row lock: a seat change, an `attach` and an admission all reach the `workspace`,
+    `member` and `conversation` rows of this workspace in `FOR KEY SHARE` through a foreign key,
+    and `FOR UPDATE` is the mode that conflicts with theirs — held here while `record` waits for a
+    row one of them holds, it closes the cycle.
+
+    So another transaction holds all three rows in exactly that mode across the whole of `record`.
+    With no explicit lock, `record`'s own foreign keys ask for `FOR KEY SHARE` too, the two sides
+    share it, and `record` lands the connection. A `FOR UPDATE` on any of those rows — the grantor's
+    member row, the workspace row — waits here instead, which is the edge that deadlocks in
+    production."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("row-lock modes require PostgreSQL")
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    with ws(workspace_id):
+        async with workspace_tx() as other:
+            for held in (
+                sa.select(tables.workspace.c.id).where(tables.workspace.c.id == workspace_id),
+                sa.select(tables.member.c.id).where(tables.member.c.id == member_id),
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.id == conversation_id
+                ),
+            ):
+                await other.execute(held.with_for_update(read=True, key_share=True))
+            try:
+                async with asyncio.timeout(LOCK_WAIT_TIMEOUT_SECONDS):
+                    await _record(
+                        store,
+                        workspace_id,
+                        agent_id,
+                        provider="stub",
+                        account_id="acct-42",
+                        host=GRANTED_HOST,
+                        grantor_member_id=member_id,
+                        conversation_id=conversation_id,
+                        shared=False,
+                    )
+            except TimeoutError:
+                pytest.fail("record waited on a row a concurrent workspace write holds KEY SHARE")
+    async with workspace_tx() as connection:
+        owner = (
+            await connection.execute(
+                sa.select(tables.connection.c.owner_member_id).where(
+                    tables.connection.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+    assert owner == member_id
 
 
 async def test_a_landed_connection_reaches_every_extension_that_derives_from_it(db: None) -> None:

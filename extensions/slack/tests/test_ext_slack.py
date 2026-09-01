@@ -530,6 +530,7 @@ async def _seed(*, member_email: str | None = DEFAULT_MEMBER_EMAIL) -> tuple[UUI
                     id=member_id,
                     workspace_id=workspace_id,
                     email=member_email,
+                    is_admin=True,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )

@@ -1909,7 +1909,19 @@ class SurfaceContext:
         if state.workspace_id != self.workspace_id or slot not in state.slots:
             return False
         request_id = _credential_request_id(state, sealed)
-        return not await self.blob.exists(_fulfilled_marker_key(request_id, slot))
+        async with workspace_tx() as connection:
+            fulfilled = (
+                await connection.execute(
+                    sa.select(tables.credential_fulfillment.c.fulfilled_at).where(
+                        tables.credential_fulfillment.c.workspace_id == self.workspace_id,
+                        tables.credential_fulfillment.c.request_id == request_id,
+                        tables.credential_fulfillment.c.slot == slot,
+                    )
+                )
+            ).scalar_one_or_none()
+        return fulfilled is None and not await self.blob.exists(
+            _fulfilled_marker_key(request_id, slot)
+        )
 
     async def renew_credential_request(self, sealed: str, member_id: UUID) -> str | None:
         """Renew one authenticated member's pending request for a page reload."""
@@ -1988,15 +2000,26 @@ class SurfaceContext:
         )
         if marker is not None and await self.blob.exists(marker):
             raise CredentialRequestInvalid("credential request was already fulfilled")
-        if declared.merge is None:
-            await self._credentials.put(self.workspace_id, slot, value)
-        else:
-            await self._credentials.update(self.workspace_id, slot, value, declared.merge)
+        await self._credentials.fulfill(
+            self.workspace_id,
+            slot,
+            value,
+            _credential_request_id(state, sealed) if private_prompt else None,
+            member_id,
+            declared.merge,
+        )
         if marker is not None:
-            await self.blob.put(
-                marker,
-                json.dumps({"at": datetime.now(UTC).timestamp()}).encode(),
-            )
+            try:
+                await self.blob.put(
+                    marker,
+                    json.dumps({"at": datetime.now(UTC).timestamp()}).encode(),
+                )
+            except Exception as error:
+                warn(
+                    "credential.fulfillment_marker_failed",
+                    slot=slot,
+                    error_class=type(error).__name__,
+                )
 
     async def bind_installation(self, installation_id: str) -> None:
         """Bind this surface's external installation identity (a Slack team) to this workspace,

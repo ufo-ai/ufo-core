@@ -356,10 +356,37 @@ class GrantStore:
         cursors and pages intact — the hour they would otherwise have waited, spent. Nothing here is
         load-bearing for recovery: a refused stream reads once an hour on its own and the run that
         succeeds releases it. This only makes it immediate, which is what the member who just
-        re-granted the scope expects."""
+        re-granted the scope expects.
+
+        The grantor's seat is a plain read, and this holds no explicit row lock at all: the only
+        locks it takes on the `workspace`, `member` and `conversation` rows are the `FOR KEY SHARE`
+        the writes below ask for through their foreign keys. A `FOR UPDATE` on any of those rows
+        conflicts with that same mode, and closes a lock cycle with every transaction that reaches
+        them through a foreign key of its own: `attach` holds the connection row and then needs
+        `FOR KEY SHARE` on the workspace row through `connector_grant`, and `Admission._admit`
+        holds the conversation row and then needs it through `turn` and `inbound_message`, while
+        this side would hold the workspace row and wait for the very row each of them holds.
+        Postgres breaks such a cycle by aborting one side, and the side it aborts may be this
+        callback, whose provider code is already spent and cannot be exchanged again — the
+        connection and its grant never land, and the member starts the whole handoff again. Sharing
+        the `FOR KEY SHARE` mode queues those pairs instead, and a seat change that takes the
+        workspace row `FOR UPDATE` (`Seats.revoke`) is one this waits behind while holding nothing
+        that side needs."""
         if any(ord(char) < 0x20 or ord(char) == 0x7F for char in account_id):
             raise ValueError("account_id has a control character; refusing to record the grant")
         async with workspace_tx() as connection:
+            grantor = (
+                await connection.execute(
+                    sa.select(tables.member.c.seated_at).where(
+                        tables.member.c.id == grantor_member_id,
+                        tables.member.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).one_or_none()
+            if grantor is None or grantor.seated_at is None:
+                raise ConnectionPermissionDenied(
+                    "the member who started this connection no longer has workspace access"
+                )
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             await connection.execute(
                 insert(tables.connection)

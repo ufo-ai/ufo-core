@@ -61,6 +61,7 @@ from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_TTL_SECONDS,
     CredentialRequestInvalid,
     CredentialRequestState,
+    CredentialSlotUnset,
     CredentialStore,
     DeclaredSlot,
     open_credential_request,
@@ -2763,7 +2764,12 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
     that prompt — its sibling keeps asking, so a disconnect mid-entry or a rotation over
     already-stored slots never strands a prompt. Expiry is proven where the seal contract lives
     (test_credentials)."""
-    workspace_id, _, _ = await _seed()
+    workspace_id, _, member_id = await _seed(member_email="owner@example.com")
+    assert member_id is not None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=True).where(tables.member.c.id == member_id)
+        )
     blob = FilesystemBlobStore(root=tmp_path)
     context = replace(
         _context(workspace_id, StubDbos(), blob),
@@ -2772,7 +2778,6 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
             DeclaredSlot(name="b", description="", extension="sample"),
         ),
     )
-    member_id = uuid4()
     sealed = seal_credential_request(
         context._credentials.fernet,
         CredentialRequestState(workspace_id=workspace_id, member_id=member_id, slots=("a", "b")),
@@ -2815,7 +2820,12 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
 
 
 async def test_credential_fulfillment_uses_the_declared_merge(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
+    workspace_id, _, member_id = await _seed(member_email="owner@example.com")
+    assert member_id is not None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=True).where(tables.member.c.id == member_id)
+        )
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
 
     def merge(current: str | None, submitted: str) -> str:
@@ -2827,7 +2837,6 @@ async def test_credential_fulfillment_uses_the_declared_merge(db: None, tmp_path
             DeclaredSlot(name="structured", description="", extension="sample", merge=merge),
         ),
     )
-    member_id = uuid4()
     first = seal_credential_request(
         context._credentials.fernet,
         CredentialRequestState(
@@ -2886,6 +2895,77 @@ async def test_credential_fulfillment_uses_the_declared_merge(db: None, tmp_path
         await context.fulfill_credential_request(authorization, "provider", "one", member_id)
         await context.fulfill_credential_request(authorization, "provider", "two", member_id)
         assert await context._credentials.get(workspace_id, "provider") == "two"
+
+
+async def test_credential_fulfillment_rechecks_live_admin_authority(db: None, tmp_path) -> None:
+    workspace_id, _, member_id = await _seed(member_email="owner@example.com")
+    assert member_id is not None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=True).where(tables.member.c.id == member_id)
+        )
+    context = replace(
+        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _declared_slots=(DeclaredSlot(name="secret", description="", extension="sample"),),
+    )
+    sealed = seal_credential_request(
+        context._credentials.fernet,
+        CredentialRequestState(
+            workspace_id=workspace_id,
+            member_id=member_id,
+            slots=("secret",),
+            request_id=uuid4(),
+        ),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == member_id)
+            .values(is_admin=False, updated_at=sa.func.now())
+        )
+
+    with ws(workspace_id), pytest.raises(CredentialRequestInvalid, match="seated workspace admin"):
+        await context.fulfill_credential_request(sealed, "secret", "value", member_id)
+
+    with pytest.raises(CredentialSlotUnset):
+        await context._credentials.get(workspace_id, "secret")
+
+
+async def test_one_credential_request_cannot_race_two_values_into_a_slot(
+    db: None, tmp_path
+) -> None:
+    workspace_id, _, member_id = await _seed(member_email="owner@example.com")
+    assert member_id is not None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=True).where(tables.member.c.id == member_id)
+        )
+    context = replace(
+        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _declared_slots=(DeclaredSlot(name="secret", description="", extension="sample"),),
+    )
+    sealed = seal_credential_request(
+        context._credentials.fernet,
+        CredentialRequestState(
+            workspace_id=workspace_id,
+            member_id=member_id,
+            slots=("secret",),
+            request_id=uuid4(),
+        ),
+    )
+
+    with ws(workspace_id):
+        outcomes = await asyncio.gather(
+            context.fulfill_credential_request(sealed, "secret", "first", member_id),
+            context.fulfill_credential_request(sealed, "secret", "second", member_id),
+            return_exceptions=True,
+        )
+
+    assert sum(outcome is None for outcome in outcomes) == 1
+    [refused] = [outcome for outcome in outcomes if outcome is not None]
+    assert isinstance(refused, CredentialRequestInvalid)
+    assert "already fulfilled" in str(refused)
+    assert await context._credentials.get(workspace_id, "secret") in {"first", "second"}
 
 
 async def test_credential_request_renewal_requires_the_requesting_admin(db: None, tmp_path) -> None:

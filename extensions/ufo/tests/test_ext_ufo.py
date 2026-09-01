@@ -763,7 +763,7 @@ async def _seed_workspace() -> UUID:
     return workspace_id
 
 
-async def _seed_member(workspace_id: UUID, email: str) -> UUID:
+async def _seed_member(workspace_id: UUID, email: str, *, is_admin: bool = False) -> UUID:
     member_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -771,6 +771,7 @@ async def _seed_member(workspace_id: UUID, email: str) -> UUID:
                 id=member_id,
                 workspace_id=workspace_id,
                 email=email,
+                is_admin=is_admin,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -2075,7 +2076,7 @@ async def test_secret_fulfillment_lands_in_the_store_never_the_transcript(
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     dbos_client = replay_safe_client(config.database.system_url)
     workspace_id = await _seed_workspace()
-    owner = await _seed_member(workspace_id, "owner@example.com")
+    owner = await _seed_member(workspace_id, "owner@example.com", is_admin=True)
     await _seed_member(workspace_id, "late@example.com")
     sealed = seal_credential_request(
         store.fernet,

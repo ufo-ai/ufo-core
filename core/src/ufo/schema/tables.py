@@ -496,6 +496,20 @@ credential = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
 
+credential_fulfillment = sa.Table(
+    "credential_fulfillment",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True),
+    sa.Column("request_id", sa.Uuid, primary_key=True),
+    sa.Column("slot", sa.Text, primary_key=True),
+    sa.Column("member_id", sa.Uuid, nullable=False),
+    sa.Column("fulfilled_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "member_id"],
+        ["member.workspace_id", "member.id"],
+    ),
+)
+
 connection = sa.Table(
     "connection",
     metadata,
