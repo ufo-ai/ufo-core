@@ -62,6 +62,9 @@ def test_coding_manifest_registers_the_coding_profile() -> None:
     assert profile.input_model.model_validate({"objective": "fix it"}).objective == "fix it"
     assert profile.output_model.model_validate({"result": "fixed"}).result == "fixed"
     assert manifest.hooks == ()
+    assert [(fact.name, fact.holds) for fact in manifest.workspace_facts] == [
+        ("github", connect.github_app_installed)
+    ]
 
 
 def test_coding_manifest_declares_dependency_install_internet() -> None:

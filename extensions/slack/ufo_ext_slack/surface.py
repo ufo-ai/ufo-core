@@ -122,7 +122,7 @@ from ufo.sdk.audience import (
     room_audience,
 )
 from ufo.sdk.callback_page import PageLink, callback_page
-from ufo.sdk.context import ExtensionContext, JsonValue, ScopedStore
+from ufo.sdk.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import (
     Absorbed,
@@ -489,12 +489,40 @@ def _identity_unavailable(ctx: SurfaceContext, bot_token: str | None) -> Respons
 
 
 URL_VERIFIED_BLOB_KEY = "surfaces/slack/url_verified"
+URL_VERIFIED_STORE_KEY = "url_verified"
 
 
 def signing_secret_fingerprint(signing_secret: str) -> str:
     """A non-reversible fingerprint of the verifying secret — stamped into the url-verified marker
     so `slack_connect` can tell a live verification from one left over from a rotated-out secret."""
     return hashlib.sha256(signing_secret.encode()).hexdigest()
+
+
+async def verifying_fingerprint(credentials: CredentialAccess) -> str | None:
+    """The fingerprint a stamped proof must carry to count as live: the secret this workspace
+    verifies with now — its own slot, else the deploy's env default. None when neither is
+    configured, and none is what a rotated-out proof no longer matches."""
+    try:
+        return signing_secret_fingerprint(await credentials.get(SLACK_SIGNING_SECRET_SLOT))
+    except CredentialSlotUnset:
+        return None
+
+
+async def install_is_live(ext: ExtensionContext) -> bool:
+    """Whether Slack reaches this deploy for the workspace bound now — the state `slack_connect`
+    reports as `connected`, read from the mirror rather than the marker blob, since a scoped
+    extension context carries a `ScopedStore` and no `BlobStore`. An install still `pending`, and
+    one whose signing secret was rotated after its last proof, both read false.
+
+    The bot token is the other half and is checked here too: the proof says Slack reaches us, the
+    token is what reaches back. An admin who empties the slot leaves a workspace that receives
+    events and can answer none of them, and a line claiming it answers would be false."""
+    fingerprint = await verifying_fingerprint(ext.credentials)
+    if fingerprint is None:
+        return False
+    if not await ext.credentials.stored(SLACK_BOT_TOKEN_SLOT):
+        return False
+    return await ext.store.get(URL_VERIFIED_STORE_KEY) == fingerprint
 
 
 @dataclass(frozen=True)
@@ -1567,9 +1595,13 @@ _URL_VERIFIED_WRITTEN: dict[UUID, str] = {}
 
 async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
     """Record that Slack reached this deploy with a request the current secret verified — the signal
-    a manifest workspace's `slack_connect` reads as `connected`. Best effort with a per-process
-    fingerprint cache so the write stays off the hot path yet a rotation re-stamps on the next
-    proof; a blob hiccup must not fail the request Slack needs answered."""
+    a manifest workspace's `slack_connect` reads as `connected`. The same fingerprint is mirrored
+    into this extension's own scoped store, the one place a turn-time reader can reach it: the
+    workspace fact that states Slack answers here holds a `ScopedStore` and no `BlobStore`.
+
+    Best effort, so the write stays off the hot path and a blob hiccup does not fail the request
+    Slack needs answered. The marker is written first, so a half-done pair leaves the fact claiming
+    less than the install has rather than more."""
     fingerprint = signing_secret_fingerprint(signing_secret)
     if _URL_VERIFIED_WRITTEN.get(ctx.workspace_id) == fingerprint:
         return
@@ -1579,7 +1611,25 @@ async def _mark_url_verified(ctx: SurfaceContext, signing_secret: str) -> None:
     except Exception:
         _LOG.warning("slack url_verified marker write failed", exc_info=True)
         return
-    _URL_VERIFIED_WRITTEN[ctx.workspace_id] = fingerprint
+    await mirror_url_verified(ctx.workspace_id, fingerprint)
+
+
+async def mirror_url_verified(workspace_id: UUID, fingerprint: str) -> None:
+    """Copy a proof the marker blob carries into this extension's own scoped store, the mirror
+    `install_is_live` reads. Called by every reader that holds the blob, not only the request that
+    stamps it: a workspace whose install was proved under an image that wrote the marker alone holds
+    no mirror row, and a reader of the blob is the only place that row can come from.
+
+    Best effort, and cached per process on the fingerprint both places then carry — a store hiccup
+    must not fail the request Slack needs answered, and a rotation re-stamps on the next proof."""
+    if _URL_VERIFIED_WRITTEN.get(workspace_id) == fingerprint:
+        return
+    try:
+        await ScopedStore(SLACK_EXTENSION).put(URL_VERIFIED_STORE_KEY, fingerprint)
+    except Exception:
+        _LOG.warning("slack url_verified mirror write failed", exc_info=True)
+        return
+    _URL_VERIFIED_WRITTEN[workspace_id] = fingerprint
 
 
 async def ingest(ctx: SurfaceContext, request: Request) -> Response:

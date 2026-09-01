@@ -518,6 +518,60 @@ async def test_connect_reads_pending_then_connected(db: None, tmp_path: Path) ->
             assert result["team_id"] == TEAM_ID
 
 
+async def test_connect_stamps_the_mirror_an_install_made_before_it_never_wrote(
+    db: None, tmp_path: Path
+) -> None:
+    """A workspace that completed its install under an image which wrote the marker blob alone holds
+    no `ext_store` row, so the workspace fact reads the install absent while this tool reads it
+    connected off the same proof. The tool's read stamps the mirror, and the fact states the line
+    the install has earned from there."""
+    workspace_id, owner_id, _ = await _seed()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    registry, ext_by_tool = _registry(store)
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(workspace_id):
+        await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-installed")
+    await _write_identity(blob, workspace_id, "xoxb-installed")
+    await _mark_verified(blob, workspace_id)
+    ext = ext_by_tool["slack_connect"]
+    assert ext is not None
+    with ws(workspace_id):
+        before = await slack.install_is_live(ext)
+        result = json.loads(
+            await _run(
+                registry, "slack_connect", _context(workspace_id, ext, blob, owner_id, store)
+            )
+        )
+        after = await slack.install_is_live(ext)
+    assert result["state"] == "connected"
+    assert (before, after) == (False, True)
+
+
+async def test_the_install_reads_dead_once_the_bot_token_slot_is_emptied(
+    db: None, tmp_path: Path
+) -> None:
+    """The proof says Slack reaches us; the bot token is what reaches back. An admin who empties the
+    slot leaves a workspace that receives events and answers none of them, so the workspace fact
+    must stop claiming it answers — the signing secret and the stamped mirror both still match."""
+    workspace_id, owner_id, _ = await _seed()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    registry, ext_by_tool = _registry(store)
+    blob = FilesystemBlobStore(root=tmp_path)
+    with ws(workspace_id):
+        await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-installed")
+    await _write_identity(blob, workspace_id, "xoxb-installed")
+    await _mark_verified(blob, workspace_id)
+    ext = ext_by_tool["slack_connect"]
+    assert ext is not None
+    with ws(workspace_id):
+        await _run(registry, "slack_connect", _context(workspace_id, ext, blob, owner_id, store))
+        assert await slack.install_is_live(ext) is True
+        await store.clear(workspace_id, SLACK_BOT_TOKEN_SLOT)
+        assert await slack.install_is_live(ext) is False
+
+
 async def test_oauth_default_falls_back_to_manifest_when_unconfigured(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

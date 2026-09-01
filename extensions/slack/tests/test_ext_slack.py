@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import sqlalchemy as sa
+import ufo_ext_slack.manifest as manifest_module
 import ufo_ext_slack.surface as slack
 import ufo_ext_web.surface as web_surface
 from cryptography.fernet import Fernet
@@ -57,7 +58,7 @@ from ufo.harness.sandbox.conversation import (
 )
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
-from ufo.host.ext.loader import turn_hooks, turn_tools
+from ufo.host.ext.loader import turn_hooks, turn_tools, turn_workspace_facts
 from ufo.host.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.access.credentials import (
     CredentialRequestState,
@@ -9083,6 +9084,42 @@ def test_the_manifest_arms_the_followers_from_the_turns_own_start() -> None:
         ("user_prompt_submit", slack.follow_turn),
         ("connection_recorded", settle_connect_button),
     ]
+
+
+async def test_the_prompt_states_the_slack_install_this_workspace_made(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The fact the connector listing has no row for, stated no earlier than it is true.
+    `slack_connect` binds a surface installation and writes no connector grant, so an agent reading
+    the listing alone answered that Slack was unconnected on the turn after the first run installed
+    it. The bound row is not the whole install: `slack_connect` binds it the moment the identity is
+    proven and still reports `pending`, and core's closer forbids offering a setup again — so the
+    line waits for what `slack_connect` waits for, a signature-verified request Slack made to this
+    deploy. Read here the way the turn reads it, through this manifest's own scoped context (the
+    surfaces that context declares are what let the read reach the installation at all), and
+    stamped the way a real install stamps it, by a signed event over the mounted surface. A
+    workspace with no install states nothing, which keeps the offer for the workspaces that still
+    need it."""
+    workspace_id, _member_id = await _seed()
+    store = await _store(workspace_id)
+
+    async def stated() -> tuple[str, ...]:
+        with ws(workspace_id):
+            return await turn_workspace_facts(
+                (slack_manifest(),), store, audience=conversation_audience(None)
+            )
+
+    uninstalled = await stated()
+    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, [])
+    pending = await stated()
+    event = _event_body(type="app_home_opened", user="U1", channel="D1")
+    async with client:
+        reached = await client.post(
+            EVENTS_PATH, content=event, headers=_sign(event, int(time.time()))
+        )
+    live = await stated()
+    assert reached.json() == {"ok": True, "ignored": True}
+    assert (uninstalled, pending, live) == ((), (), (manifest_module.SLACK_INSTALLED_LINE,))
 
 
 def test_the_cadence_resumes_at_the_next_mark_the_turn_has_not_reached() -> None:

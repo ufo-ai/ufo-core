@@ -48,12 +48,13 @@ from ufo_ext_slack.surface import (
     SlackIdentity,
     SlackIdentityError,
     SlackIdentityResolver,
+    mirror_url_verified,
     read_identity,
-    signing_secret_fingerprint,
     slack_authorize_url,
     slack_client_id,
     slack_installation_id,
     slack_oauth_redirect_uri,
+    verifying_fingerprint,
 )
 
 SLACK_SECRET_SLOTS = (SLACK_BOT_TOKEN_SLOT, SLACK_SIGNING_SECRET_SLOT)
@@ -268,8 +269,16 @@ async def _verified(ctx: ToolContext) -> bool:
     """Whether Slack has reached this deploy with the signing secret currently in force — the
     marker the slack surface writes on a signature-verified request, trusted only while its
     fingerprint matches the workspace's verifying secret (its own slot, else the deploy env), so a
-    rotation reads as pending again."""
+    rotation reads as pending again.
+
+    A proof read here re-stamps the scoped-store mirror the workspace fact reads. This is the only
+    reader that holds both, so it is where an install proved before that mirror existed — the
+    marker written by an earlier image, no `ext_store` row — stops reading live to this tool and
+    absent to the fact."""
     assert ctx.ext is not None
+    fingerprint = await verifying_fingerprint(ctx.ext.credentials)
+    if fingerprint is None:
+        return False
     key = URL_VERIFIED_BLOB_KEY
     if not await ctx.blob.exists(key):
         return False
@@ -277,13 +286,10 @@ async def _verified(ctx: ToolContext) -> bool:
         marker = json.loads(await ctx.blob.get(key))
     except (ValueError, json.JSONDecodeError):
         return False
-    try:
-        secret = await ctx.ext.credentials.get(SLACK_SIGNING_SECRET_SLOT)
-    except CredentialSlotUnset:
+    if not isinstance(marker, dict) or marker.get("fingerprint") != fingerprint:
         return False
-    return isinstance(marker, dict) and marker.get("fingerprint") == signing_secret_fingerprint(
-        secret
-    )
+    await mirror_url_verified(ctx.ext.workspace_id, fingerprint)
+    return True
 
 
 async def slack_manifest_handler(ctx: ToolContext, args: SlackManifestInput) -> ToolResult:

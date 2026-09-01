@@ -1,56 +1,72 @@
-name = "problem-report-triggers"
-base = "agent/diagnostic-problem-report"
-suites = ["problem_report"]
+name = "workspace-capability-facts"
+base = "HEAD"
+suites = ["github_connections", "surface_setup"]
 cases = [
-  "task-faults-on-every-run",
-  "restraint-the-agents-own-failed-step",
-  "restraint-a-capability-the-workspace-lacks",
+  "app-installed-asked-if-connected",
+  "git-works-operations-fail",
+  "neither-github-connection",
+  "slack-installed-status-question",
+  "slack-status-question",
 ]
-repeats = 3
+repeats = 5
 concurrency = 4
-max_stacks = 3
+max_stacks = 2
 budget_usd = 60.0
 est_usd_per_case = 0.50
 
 [template]
-database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5549/ufo" }
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
 blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
 connect = { public_base_url = "http://evals.invalid" }
-pack = { name = "assistant_eval" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
 research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
 
-# Spelling the retry exclusion out, over the `a fault no turn can repair` that carries it. The
-# sentence shipped for two ablations and held no restraint case better — 17/18 restraint samples
-# without it against 16/18 with — while making a refused token read as the provider's problem rather
-# than the faulting task's. It is out; this arm puts it back, so the next hand on that sentence is
-# measured on the two restraints it claims to guard plus the fault it must not suppress.
-
-[[arm]]
-name = "with-retry-bound"
-[[arm.replacements]]
-path = "extensions/debugger/ufo_ext_debugger/report.py"
-old = """
-    "member asks for a problem to be reported, whatever the problem is. Say what you attempted, "
-    "what happened, and what you expected, in your own words; never paste command output. An "
-"""
-new = """
-    "member asks for a problem to be reported, whatever the problem is. Not for a step you can "
-    "retry: one failed command, a path you named wrong, or a provider error that clears on the "
-    "next attempt is this turn's work. Say what you attempted, "
-    "what happened, and what you expected, in your own words; never paste command output. An "
-"""
-
-# The four examples of a fault, which are load-bearing: without them the faulting-task case reported
-# nothing at all on a connector-shaped log, and 1/3 on the task-shaped one that replaced it.
+# Each install writes its own leg and no connector grant, so the connector listing — the one
+# connection read the agent has — reports the provider unconnected and the answer offers the install
+# the workspace already made. Each capability states one line, and each arm silences one line's own
+# read rather than its wording, so the arm removes exactly what the extension contributes. The two
+# installed cases are what the lines claim to move; the two uninstalled ones are the control that
+# they change nothing where no install exists.
 
 [[arm]]
-name = "no-fault-examples"
+name = "no-slack-block"
 [[arm.replacements]]
-path = "extensions/debugger/ufo_ext_debugger/report.py"
+path = "extensions/slack/ufo_ext_slack/manifest.py"
 old = """
-    "no turn can repair — a connection that stopped authenticating, an empty credential slot, a "
-    "task that faults on every run, a sandbox or site that stopped answering — and whenever a "
+    if await ext.installations.installation(SURFACE_SLACK) is None:
+        return False
+    return await install_is_live(ext)
 """
 new = """
-    "no turn can repair — and whenever a "
+    return False and await install_is_live(ext)
+"""
+
+[[arm]]
+name = "no-github-block"
+[[arm.replacements]]
+path = "extensions/coding/ufo_ext_coding/connect.py"
+old = """
+    return await ext.credentials.stored(GIT_INSTALLATION_SLOT)
+"""
+new = """
+    return False and await ext.credentials.stored(GIT_INSTALLATION_SLOT)
+"""
+
+# The closer is one sentence and every arm above leaves it standing, so this arm empties it. Its two
+# sentences were ablated apart: neither carried the answer alone, an empty closer regressed, and the
+# connector caveat came out because it holds only where a capability shares a name with a broker
+# provider — which the next capability in this block will not.
+
+[[arm]]
+name = "no-closer"
+[[arm.replacements]]
+path = "core/src/ufo/runtime/prompts/render.py"
+old = """
+WORKSPACE_FACTS_CLOSER = "Already set up — do not offer again."
+"""
+new = """
+WORKSPACE_FACTS_CLOSER = ""
 """

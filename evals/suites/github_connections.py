@@ -1,4 +1,10 @@
-"""GitHub connection routing: PR work needs the App while API operations need Composio."""
+"""GitHub connection routing: PR work needs the App while API operations need Composio.
+
+A member who just installed the App and asks whether GitHub is connected is the third state,
+and the one the connector listing alone answers wrongly: it reports connector accounts, the
+install writes none, and the answer that follows offers the install the workspace already has.
+The `<workspace_capability>` block the coding extension states on every turn is what the case
+measures — the answer names the install, and no second install is offered."""
 
 from uuid import UUID, uuid4
 
@@ -9,7 +15,12 @@ from ufo_ext_coding.github_app import GIT_SLOT
 
 from evals.driver import EVAL_SURFACE
 from evals.harness.capability import CapabilityCase, CapabilitySeed
-from evals.harness.scorers import attempted_tools_scorer, combine, skill_scorer
+from evals.harness.scorers import (
+    attempted_tools_scorer,
+    combine,
+    restraint_scorer,
+    skill_scorer,
+)
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.access.credentials import (
@@ -178,15 +189,23 @@ CASES = (
         "git-works-operations-fail",
         "Private clone and push already work here, but the agent can't read or update our GitHub "
         "issues. Connect what's missing.",
-        combine(
-            skill_scorer("coding", "create-skill"),
-            attempted_tools_scorer(
-                (("connect_account", {"provider": "github"}),),
-                (CONNECT_GITHUB, "spawn"),
-                (("load_skill", "connect_account"),),
-            ),
+        attempted_tools_scorer(
+            (("connect_account", {"provider": "github"}),),
+            (CONNECT_GITHUB, "spawn"),
+            (("load_skill", "connect_account"),),
         ),
         digest_tag="github-connections:git-works-operations-fail:action",
+        seed=_github_state(connector=False, app=True),
+    ),
+    CapabilityCase(
+        "app-installed-asked-if-connected",
+        "Is GitHub connected for this workspace?",
+        restraint_scorer((CONNECT_GITHUB, "spawn")),
+        rubric=(
+            "The answer states that the ufo GitHub App is already installed for this workspace, "
+            "and that private clone and push work.",
+        ),
+        digest_tag="github-connections:app-installed-asked-if-connected:answer",
         seed=_github_state(connector=False, app=True),
     ),
 )

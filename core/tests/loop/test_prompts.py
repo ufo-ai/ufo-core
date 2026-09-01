@@ -14,10 +14,12 @@ from ufo.host.ext.loader import load_manifests
 from ufo.runtime.prompts.render import (
     COMPACTION_SYSTEM_PROMPT,
     SHELL,
+    WORKSPACE_FACTS_CLOSER,
     RenderedPrompt,
     render_skill_index,
     render_system_prompt,
     render_template,
+    render_workspace_facts,
     rendered_prompt,
 )
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, SkillCard, SkillRegistry
@@ -271,3 +273,16 @@ def test_compaction_prompt_is_structured_and_loaded() -> None:
     assert "SINGLE JSON object" in COMPACTION_SYSTEM_PROMPT
     assert "`intent`" in COMPACTION_SYSTEM_PROMPT
     assert "`next_step`" in COMPACTION_SYSTEM_PROMPT
+
+
+def test_the_capability_block_states_its_closer_once_for_every_line() -> None:
+    """The block is the whole point of the seam: an extension contributes one line of its own, and
+    the rule that reads them — already held, never a connector account — is stated once here rather
+    than repeated by each. A workspace holding nothing renders nothing, so the prompt of a fresh
+    workspace carries no empty tag."""
+    assert render_workspace_facts(()) == ""
+    block = render_workspace_facts(("Slack: installed.", "GitHub: installed."))
+    assert block.startswith("<workspace_capabilities>\n")
+    assert block.endswith(WORKSPACE_FACTS_CLOSER)
+    assert block.count(WORKSPACE_FACTS_CLOSER) == 1
+    assert "Slack: installed.\nGitHub: installed.\n</workspace_capabilities>" in block

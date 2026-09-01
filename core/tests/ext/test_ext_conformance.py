@@ -74,6 +74,7 @@ from ufo.host.ext.loader import (
     turn_subagent_grants,
     turn_subagents,
     turn_tools,
+    turn_workspace_facts,
 )
 from ufo.onboard.onboarding import run_onboarding_steps
 from ufo.runtime.access.connectors import UnknownBrokerTool
@@ -104,7 +105,7 @@ from ufo.runtime.sources.sync import CorePageFeed, SyncDriver
 from ufo.runtime.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.transcript import Transcript
-from ufo.runtime.turns.audience import audience_subjects, conversation_audience
+from ufo.runtime.turns.audience import SHARED_AUDIENCE, audience_subjects, conversation_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.turns.transcript import Conversation, transcript_key
 from ufo.runtime.workspace import ws
@@ -326,6 +327,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
         sample.CONNECTOR_EXECUTE_TOOL_NAME
     }
     assert {section.name for section in manifest.prompt_sections} == {sample.SECTION_NAME}
+    assert {fact.name for fact in manifest.workspace_facts} == {sample.WORKSPACE_FACT_NAME}
     assert {profile.name for profile in manifest.subagents} == {sample.SUBAGENT_NAME}
     assert {surface.name for surface in manifest.surfaces} == {
         sample.SURFACE_NAME,
@@ -2070,3 +2072,26 @@ async def test_sample_pack_onboarding_step_runs_through_its_scoped_context(db: N
     with ws(workspace_id):
         scoped = ScopedStore(extension=sample_pack.NAME)
         assert await scoped.get(sample_pack.ONBOARDING_KEY) == {"pack_onboarded": True}
+
+
+@pytest.mark.parametrize("held", [True, False])
+async def test_core_reads_each_declared_workspace_fact_through_its_own_context(
+    db: None, held: bool
+) -> None:
+    """The seam, proved through the sample rather than a fake: the sample's fact reads its own
+    scoped store, so a line in the answer is core having called that read with this extension's
+    context bound to this workspace. The state is written through the same public store an
+    extension writes, and read back through `turn_workspace_facts` — no mock call log.
+
+    The false arm is half the point: a workspace that holds nothing contributes no line, so a fresh
+    workspace's prompt carries no capability it does not have."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        if held:
+            await ScopedStore(extension=sample.NAME).put(sample.WORKSPACE_FACT_KEY, True)
+        lines = await turn_workspace_facts(
+            (_sample_manifest(),),
+            CredentialStore(fernet=Fernet(Fernet.generate_key())),
+            audience=SHARED_AUDIENCE,
+        )
+    assert lines == ((sample.WORKSPACE_FACT_LINE,) if held else ())

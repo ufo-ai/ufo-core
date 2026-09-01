@@ -93,6 +93,7 @@ from ufo.sdk.manifest import (
     SubagentToolGrant,
     TerminalTransportSpec,
     WorkspaceChanges,
+    WorkspaceFact,
 )
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import (
@@ -195,6 +196,9 @@ BROKER_BEARER_PREFIX = "sample-broker-token:"
 HUB_BACKEND = "sample_hub"
 TERMINAL_BACKEND = "sample_terminal"
 TOOL_KEY = "tool:echo"
+WORKSPACE_FACT_NAME = "sample_capability"
+WORKSPACE_FACT_KEY = "workspace_fact:held"
+WORKSPACE_FACT_LINE = "Sample: this workspace set up the sample extension's capability."
 JOB_KEY = "job:ran"
 TRAJECTORY_KEY = "job:trajectories"
 PROPOSAL_KEY = "job:proposal"
@@ -1446,6 +1450,13 @@ async def _conversation_slot_read(_ctx: ConversationSlotContext) -> WorkspaceCha
     return WorkspaceChanges(changes=(), truncated=False)
 
 
+async def _workspace_fact_held(ext: ExtensionContext) -> bool:
+    """The sample's own store answers, so a test proves core ran this read at turn assembly by
+    writing the key through the public store and finding the line in the assembled prompt. A
+    workspace that never wrote it states nothing, which is the other half of the point."""
+    return await ext.store.get(WORKSPACE_FACT_KEY) is True
+
+
 def manifest() -> Manifest:
     broker: ConnectorBroker = _SampleBroker()
     return Manifest(
@@ -1561,6 +1572,13 @@ def manifest() -> Manifest:
         ),
         onboarding_steps=(OnboardingStep(name=ONBOARDING_NAME, handler=_setup),),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
+        workspace_facts=(
+            WorkspaceFact(
+                name=WORKSPACE_FACT_NAME,
+                line=WORKSPACE_FACT_LINE,
+                holds=_workspace_fact_held,
+            ),
+        ),
         agents=(
             AgentProvision(
                 name=PROVISIONED_AGENT_NAME,

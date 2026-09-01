@@ -30,7 +30,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from ufo.blob import WorkspaceBlobStore
-from ufo.harness.o11y import log
+from ufo.harness.o11y import log, warn
 from ufo.host.ext.extension_kind import (
     EXTENSION_DESCRIPTION,
     EXTENSION_GUIDANCE,
@@ -896,6 +896,49 @@ def validate_ext_tools(
     return validated
 
 
+async def turn_workspace_facts(
+    manifests: tuple[Manifest, ...],
+    credential_store: CredentialStore | None,
+    *,
+    audience: Audience,
+) -> tuple[str, ...]:
+    """The lines every declared workspace fact says this workspace holds, in manifest order.
+
+    Each read runs with the declaring extension's own scoped context — the same handle its tools and
+    hooks receive, surfaces and credential slots included — so an extension answers for the leg its
+    own connect act writes and core names no provider. A read that raises drops its own line and
+    nothing else: the block decorates the prompt, and a database hiccup must not cost the member
+    their turn."""
+    lines: list[str] = []
+    for manifest in manifests:
+        if not manifest.workspace_facts:
+            continue
+        context = context_for(
+            manifest.name,
+            frozenset(slot.name for slot in manifest.credentials),
+            surfaces=frozenset(surface.name for surface in manifest.surfaces),
+            addressed_surfaces=frozenset(
+                surface.name for surface in manifest.surfaces if surface.addressed
+            ),
+            credential_store=credential_store,
+            audience=audience,
+        )
+        for fact in manifest.workspace_facts:
+            try:
+                held = await fact.holds(context)
+            except Exception as error:
+                warn(
+                    "workspace_fact.unread",
+                    extension=manifest.name,
+                    fact=fact.name,
+                    error_class=type(error).__name__,
+                )
+                continue
+            if held:
+                lines.append(fact.line)
+    return tuple(lines)
+
+
 def turn_hooks(
     manifests: tuple[Manifest, ...],
     credential_store: CredentialStore | None,
@@ -913,8 +956,9 @@ def turn_hooks(
     role with the model wired, never here. The `tailer` is the loop's own, so a hook watching the
     turn it fires under reads the frames that turn publishes, and `public_base_url` is the deploy's
     externally reachable base, which a hook rendering a link a member opens cannot reach any other
-    way. An extension that declares hooks without a credential key set fails loud, since its context
-    needs the credential store."""
+    way. Its surfaces are declared exactly as a tool's context declares them, so a hook reads the
+    installation its own surface bound. An extension that declares hooks without a credential key
+    set fails loud, since its context needs the credential store."""
     grouped: dict[HookEvent, list[BoundHook]] = {event: [] for event in TURN_HOOK_EVENTS}
     for manifest in manifests:
         if not manifest.hooks:
@@ -929,6 +973,10 @@ def turn_hooks(
             declared,
             index,
             embed,
+            surfaces=frozenset(surface.name for surface in manifest.surfaces),
+            addressed_surfaces=frozenset(
+                surface.name for surface in manifest.surfaces if surface.addressed
+            ),
             tailer=tailer,
             audience=audience,
             public_base_url=public_base_url,

@@ -12,10 +12,14 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import sqlalchemy as sa
 import ufo_ext_coding.connect as connect
 from cryptography.fernet import Fernet
 from starlette.datastructures import QueryParams
+from ufo_ext_coding.manifest import manifest as coding_manifest
 
+from ufo.db import workspace_tx
+from ufo.host.ext.loader import turn_workspace_facts
 from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CREDENTIAL_REQUEST_TTL_SECONDS,
@@ -23,11 +27,16 @@ from ufo.runtime.access.credentials import (
     CredentialRequestInvalid,
     CredentialRequests,
     CredentialRequestState,
+    CredentialStore,
     install_credential_requests,
     open_credential_request,
     open_installation,
     seal_credential_request,
 )
+from ufo.runtime.ext.context import CredentialAccess
+from ufo.runtime.workspace import init_workspace_credentials, ws
+from ufo.schema import tables
+from ufo.sdk.audience import SHARED_AUDIENCE
 from ufo.sdk.callback_page import CLOSE_THIS_PAGE, CONNECT_LOGO_PATH
 from ufo.sdk.http import Response
 
@@ -334,3 +343,34 @@ def test_the_exchange_sends_the_deploy_identity_and_the_returned_code() -> None:
     asyncio.run(_exchange(transport=httpx.MockTransport(handle)).reaches("the-code", OURS))
     assert seen == [{"client_id": "Iv1", "client_secret": "secret", "code": "the-code"}]
     assert json.dumps(seen)  # the recorded call is plain data, not a mock object
+
+
+@pytest.mark.parametrize("installed", [True, False])
+async def test_the_prompt_states_the_github_app_this_workspace_installed(
+    db: None, installed: bool
+) -> None:
+    """The fact the connector listing has no row for. Installing the App binds a credential seal and
+    writes no connector grant, so an agent reading the listing alone answered that GitHub was
+    unconnected on the turn after the first run installed it. The seal is written by the same
+    `bind_installation` the return leg calls, and the declared fact is read the way the turn reads
+    it. A workspace that bound no installation states nothing, which keeps the offer connect_github
+    is."""
+    fernet = Fernet(Fernet.generate_key())
+    store = CredentialStore(fernet=fernet)
+    slot = connect.GIT_INSTALLATION_SLOT
+    install_credential_requests(
+        CredentialRequests(fernet=fernet, declared=frozenset({slot}), fillable=frozenset({slot}))
+    )
+    init_workspace_credentials(store)
+    workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+    with ws(workspace_id):
+        if installed:
+            await CredentialAccess(declared=frozenset({slot})).bind_installation(slot, OURS)
+        lines = await turn_workspace_facts((coding_manifest(),), store, audience=SHARED_AUDIENCE)
+    assert lines == ((connect.GITHUB_APP_INSTALLED_LINE,) if installed else ())

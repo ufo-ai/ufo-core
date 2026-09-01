@@ -200,6 +200,24 @@ class PromptSection:
 
 
 @dataclass(frozen=True)
+class WorkspaceFact:
+    """One capability this workspace already holds, stated in the system prompt only where its own
+    read says so. A `PromptSection` is the same text for every workspace; this is the conditional
+    half — a fact rather than a rule, so it is one `line` of data and never a paragraph an extension
+    writes.
+
+    `holds` runs at turn assembly under the bound workspace, with the extension's own scoped
+    context, so an extension answers for the leg its own connect act writes and core names no
+    provider. Core renders every true line as one block and states once, for all of them, that the
+    workspace already holds them — which is what keeps a second capability from repeating a first
+    one's prose."""
+
+    name: str
+    line: str
+    holds: Callable[[ExtensionContext], Awaitable[bool]]
+
+
+@dataclass(frozen=True)
 class CarrierSpec:
     """One sandbox backend an extension registers: the `name` the `[sandbox] backend` config selects
     and the `factory` `serve` calls once to build the Carrier. Core ships `docker` and `e2b`; an
@@ -819,6 +837,7 @@ class Manifest:
     embeds: tuple[EmbedBackendSpec, ...] = ()
     hooks: tuple[HookSpec, ...] = ()
     prompt_sections: tuple[PromptSection, ...] = ()
+    workspace_facts: tuple[WorkspaceFact, ...] = ()
     agents: tuple[AgentProvision, ...] = ()
     subagents: tuple[SubagentProfile, ...] = ()
     member_skills: MemberSkillsSpec | None = None

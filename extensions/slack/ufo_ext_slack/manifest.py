@@ -14,6 +14,13 @@ The surface's thread followers are side-channel tasks in the process that runs t
 status follower and the progress reporter are armed on `user_prompt_submit` — the one event that
 fires once per execution of a turn, which is what puts them back on a run this fleet resumed.
 
+The install is declared as a workspace fact, not a prompt section: what a workspace holds is true
+or false per workspace, so core states the line only where Slack actually reaches this deploy. The
+installation row alone is not that state — both install paths bind it as soon as the identity is
+proven, while the member has still to complete the Events URL step, and a rotated signing secret
+returns a bound workspace to the same place. The line reads what `slack_connect` reports as
+`connected`, so a workspace mid-install keeps the offer that finishes it.
+
 The pack declares no prompt section. Prompt sections are workspace-global, not per-surface — the
 loop renders every active manifest's sections for every turn — so a rule that teaches the agent to
 write `@` plus a name also reaches a turn whose only output is a GitHub comment, where the handle
@@ -22,7 +29,14 @@ writes of its own accord and refuses everything else, so no prompt text is neede
 
 from pathlib import Path
 
-from ufo.sdk.manifest import CredentialSlot, HookSpec, Manifest, SkillSpec
+from ufo.sdk.context import ExtensionContext
+from ufo.sdk.manifest import (
+    CredentialSlot,
+    HookSpec,
+    Manifest,
+    SkillSpec,
+    WorkspaceFact,
+)
 from ufo.sdk.surfaces import SurfaceRoute, SurfaceSpec
 from ufo_ext_slack.hooks import (
     CONNECTOR_CALL_TOOL,
@@ -38,6 +52,7 @@ from ufo_ext_slack.surface import (
     attach,
     follow_turn,
     ingest,
+    install_is_live,
     interactive,
     oauth_callback,
     post,
@@ -50,6 +65,18 @@ from ufo_ext_slack.tools import TOOLS
 NAME = SLACK_EXTENSION
 VERSION = "0.1.0"
 SKILL_DIR = Path(__file__).parent / "skills" / "slack-app-setup"
+SLACK_INSTALLED_LINE = (
+    "Slack: ufo is installed and answers in this workspace's channels and direct messages."
+)
+
+
+async def _slack_answers(ext: ExtensionContext) -> bool:
+    """This workspace is bound to a Slack installation and Slack reaches this deploy through it. The
+    bound row on its own is the state `slack_connect` calls `pending`: it says an admin started the
+    install, never that a message sent to the bot arrives here."""
+    if await ext.installations.installation(SURFACE_SLACK) is None:
+        return False
+    return await install_is_live(ext)
 
 
 def manifest() -> Manifest:
@@ -94,4 +121,7 @@ def manifest() -> Manifest:
             HookSpec(event="connection_recorded", handler=settle_connect_button),
         ),
         skills=(SkillSpec(path=SKILL_DIR),),
+        workspace_facts=(
+            WorkspaceFact(name=SURFACE_SLACK, line=SLACK_INSTALLED_LINE, holds=_slack_answers),
+        ),
     )

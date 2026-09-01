@@ -103,6 +103,31 @@ def render_template(
     return rendered_prompt(BLANK_RUN_RE.sub("\n\n", filled).rstrip())
 
 
+WORKSPACE_FACTS_SECTION = "workspace_capabilities"
+WORKSPACE_FACTS_CLOSER = "Already set up — do not offer again."
+"""The one rule that holds for every line, whatever the capability is. A caveat about connector
+accounts lived here and came out: it only bites where a capability shares a name with a broker
+provider (slack, github do; imessage does not), and it is a universal claim that a connector-backed
+capability would falsify. The arms measured it as carrying nothing — and an empty closer regresses,
+so this sentence stays."""
+
+
+def render_workspace_facts(lines: Sequence[str]) -> str:
+    """The capabilities this workspace already holds, as one block. Each extension contributes one
+    line of its own; the closer is stated once here rather than by every extension, so a second
+    capability costs a line instead of a paragraph repeating the first one's rules."""
+    if not lines:
+        return ""
+    return "\n".join(
+        (
+            f"<{WORKSPACE_FACTS_SECTION}>",
+            *lines,
+            f"</{WORKSPACE_FACTS_SECTION}>",
+            WORKSPACE_FACTS_CLOSER,
+        )
+    )
+
+
 def render_skill_index(skills: Sequence[tuple[str, str]]) -> str:
     if not skills:
         return ""

@@ -438,6 +438,10 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["tool_activity"].simulator_model is None
     assert tasks["coding_profile"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["coding_profile"].simulator_model is None
+    assert tasks["github_connections"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["github_connections"].simulator_model is None
+    assert tasks["surface_setup"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["surface_setup"].simulator_model is None
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
@@ -469,6 +473,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "report_digest",
             "first_run",
             "tool_activity",
+            "github_connections",
+            "surface_setup",
         }
     )
 
@@ -822,6 +828,7 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "ufo-app-qa-replay",
         "member_add_notify",
         "rebuild_actions",
+        "surface_setup",
     }
 
 
@@ -1180,8 +1187,8 @@ async def test_github_connection_cases_seed_the_claimed_state(db: None) -> None:
         for _ in range(2):
             for case, connector, app in zip(
                 github_connections.CASES,
-                (False, True, False),
-                (False, False, True),
+                (False, True, False, False),
+                (False, False, True, True),
                 strict=True,
             ):
                 assert case.seed is not None
@@ -4264,6 +4271,28 @@ GITHUB_APP_CALL = {
 }
 
 
+GITHUB_ROUTING_CASE_NAMES = (
+    "neither-github-connection",
+    "operations-work-prs-fail",
+    "git-works-operations-fail",
+)
+
+
+def _github_routing_cases() -> tuple[CapabilityCase, ...]:
+    """The three cases that grade which connection a member's words route to. The fourth case grades
+    an answer rather than a route, so it holds none of the properties below."""
+    by_name = {case.name: case for case in github_connections.CASES}
+    return tuple(by_name[name] for name in GITHUB_ROUTING_CASE_NAMES)
+
+
+def _github_skill_gated_cases() -> tuple[CapabilityCase, ...]:
+    """The routing cases that still gate on the coding skill: the two whose workspace installed no
+    App. The App-installed case is stated the installation on every turn, so its answer no longer
+    needs the skill to find it, and a trajectory that skips the load still routes correctly."""
+    by_name = {case.name: case for case in github_connections.CASES}
+    return tuple(by_name[name] for name in GITHUB_ROUTING_CASE_NAMES[:2])
+
+
 async def test_github_connection_graders_accept_the_shipped_routes() -> None:
     coding = ToolInvocation("load_skill", {"name": "coding"}, "loaded", True)
     github_app = ToolInvocation("object_action", GITHUB_APP_CALL, "admin required", True, True)
@@ -4279,10 +4308,10 @@ async def test_github_connection_graders_accept_the_shipped_routes() -> None:
     reasons = (
         "loaded 'coding'; attempted action:credential:connect_github, connect_account",
         "loaded 'coding'; attempted action:credential:connect_github",
-        "loaded 'coding'; attempted connect_account",
+        "attempted connect_account",
     )
 
-    for case, output, reason in zip(github_connections.CASES, outputs, reasons, strict=True):
+    for case, output, reason in zip(_github_routing_cases(), outputs, reasons, strict=True):
         verdict = await case.grader(output)
         assert verdict.passed
         assert verdict.reason == reason
@@ -4308,11 +4337,11 @@ async def test_github_connection_graders_reject_the_wrong_routes() -> None:
         ),
         (
             CapabilityOutput("", (coding, wrong_connector)),
-            "loaded 'coding'; did not attempt: connect_account matching {'provider': 'github'}",
+            "did not attempt: connect_account matching {'provider': 'github'}",
         ),
     )
 
-    for case, (output, reason) in zip(github_connections.CASES, failures, strict=True):
+    for case, (output, reason) in zip(_github_routing_cases(), failures, strict=True):
         verdict = await case.grader(output)
         assert not verdict.passed
         assert verdict.reason == reason
@@ -4328,10 +4357,9 @@ async def test_github_connection_graders_require_the_parent_to_load_coding_first
     routed = (
         (github_app, github_connector),
         (github_app,),
-        (github_connector,),
     )
 
-    for case, calls in zip(github_connections.CASES, routed, strict=True):
+    for case, calls in zip(_github_skill_gated_cases(), routed, strict=True):
         assert not (await case.grader(CapabilityOutput("", (errored_coding, *calls)))).passed
         assert not (await case.grader(CapabilityOutput("", (*calls, coding)))).passed
         assert not (
@@ -4360,8 +4388,9 @@ def test_github_connection_grading_statements_pin_inputs_order_and_restraint() -
         "never attempts spawn",
         skill + f"attempts {connect} matching {{}}; load_skill before {connect}; "
         "never attempts connect_account, spawn",
-        skill + "attempts connect_account matching {'provider': 'github'}; "
+        "attempts connect_account matching {'provider': 'github'}; "
         f"load_skill before connect_account; never attempts {connect}, spawn",
+        f"answers without invoking {connect}, spawn",
     )
 
 

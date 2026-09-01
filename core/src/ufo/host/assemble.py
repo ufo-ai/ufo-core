@@ -37,6 +37,7 @@ from ufo.host.ext.loader import (
     turn_hooks,
     turn_member_skills,
     turn_tools,
+    turn_workspace_facts,
 )
 from ufo.host.spawn_catalog import spawn_catalog_skill
 from ufo.runtime.access.connectors import CliCredential
@@ -49,8 +50,10 @@ from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.agent_setup import setup_skill
 from ufo.runtime.objects import ObjectVerbs
 from ufo.runtime.prompts.render import (
+    WORKSPACE_FACTS_SECTION,
     RenderedPrompt,
     render_system_prompt,
+    render_workspace_facts,
     rendered_prompt,
 )
 from ufo.runtime.queue import (
@@ -138,6 +141,11 @@ class HostEnvironment:
             for manifest in self.manifests
             for section in manifest.prompt_sections
         )
+        held = render_workspace_facts(
+            await turn_workspace_facts(self.manifests, self.credentials, audience=request.audience)
+        )
+        if held:
+            sections = (*sections, (WORKSPACE_FACTS_SECTION, held))
         preload: tuple[LoadedSkill, ...] = ()
         view: MemberVisibility | None = None
         if profile is None:

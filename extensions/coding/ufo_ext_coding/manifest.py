@@ -39,14 +39,18 @@ from ufo.sdk.manifest import (
     SetupCredential,
     SkillSpec,
     SubagentProfile,
+    WorkspaceFact,
 )
 from ufo.sdk.objects import CREDENTIAL_KIND
 from ufo.sdk.tools import ActionPresentation, ObjectBinding, ToolDef
 from ufo_ext_coding.connect import (
     GIT_INSTALLATION_SLOT,
+    GITHUB_APP_INSTALLED_LINE,
+    GITHUB_PROVIDER,
     ROUTE_PATH,
     ConnectGitHubInput,
     connect_github,
+    github_app_installed,
     github_installed,
     install_workspace,
 )
@@ -234,6 +238,13 @@ def manifest() -> Manifest:
                 path=ROUTE_PATH,
                 handler=github_installed,
                 identify=install_workspace,
+            ),
+        ),
+        workspace_facts=(
+            WorkspaceFact(
+                name=GITHUB_PROVIDER,
+                line=GITHUB_APP_INSTALLED_LINE,
+                holds=github_app_installed,
             ),
         ),
     )

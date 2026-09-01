@@ -186,9 +186,9 @@ CLAIMS = (
         phrase="A new install, a manifest setup, or a signing-secret rotation can all land here",
         source=SLACK_TOOLS,
         pattern=(
-            r'marker\.get\("fingerprint"\) == signing_secret_fingerprint\(\n'
-            r"\s+secret\n"
-            r"\s+\)"
+            r"fingerprint = await verifying_fingerprint\(ctx\.ext\.credentials\)\n"
+            r"\s+if fingerprint is None:\n"
+            r"\s+return False"
         ),
     ),
     Claim(

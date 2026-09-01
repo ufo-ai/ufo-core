@@ -216,6 +216,9 @@ from ufo.runtime.ext.manifest import (
 from ufo.runtime.ext.manifest import (
     UserPromptSubmit as UserPromptSubmit,
 )
+from ufo.runtime.ext.manifest import (
+    WorkspaceFact as WorkspaceFact,
+)
 from ufo.runtime.kinds.agent_setup import (
     SCHEDULE_KIND as SCHEDULE_KIND,
 )

@@ -16,7 +16,11 @@ never opens when a token is minted against it.
 The return leg has no conversation behind it — the member left one to install an App on an
 organization — so the finished page carries them to the deploy's browser home rather than naming a
 thread it cannot know. A deploy with no browser surface has nowhere to send them, and the page says
-to close the tab instead."""
+to close the tab instead.
+
+A bound installation is stated to every turn as a workspace fact, because the bind writes a
+credential seal and no connector grant: an agent that reads the connector listing alone concludes
+GitHub is unconnected and offers the install this workspace already has."""
 
 import os
 from dataclasses import dataclass
@@ -42,6 +46,18 @@ ASK_UFO_AGAIN = "Ask ufo to connect GitHub again."
 RETURN_LABEL = "Return to ufo"
 HTTP_TIMEOUT_SECONDS = 10
 JSON_HEADERS = {"Accept": "application/json"}
+GITHUB_PROVIDER = "github"
+GITHUB_APP_INSTALLED_LINE = (
+    "GitHub: the ufo App is installed, so private clone, push, and pull requests already work "
+    "in the sandbox."
+)
+
+
+async def github_app_installed(ext: ExtensionContext) -> bool:
+    """The seal's presence is the read, never its value: a seal this deploy cannot open still
+    means an admin installed the App. A workspace holding only a member's own git token bound no
+    installation, so it states nothing and keeps the offer connect_github is."""
+    return await ext.credentials.stored(GIT_INSTALLATION_SLOT)
 
 
 class ConnectGitHubInput(BaseModel):

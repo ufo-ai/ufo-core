@@ -24,12 +24,27 @@ handler answers its own refusal or install state; an attempt is what the traject
 and whether the provider then answers is the extension's own integration proof.
 """
 
+from json import dumps
+from uuid import UUID
+
+import sqlalchemy as sa
 import yaml
 from ufo_ext_imessage.manifest import manifest as imessage_manifest
 from ufo_ext_imessage.surface import SURFACE_IMESSAGE
 from ufo_ext_imessage.tools import IMESSAGE_CONNECT_ACTION
 from ufo_ext_slack.manifest import NAME as SLACK_EXTENSION
-from ufo_ext_slack.surface import SURFACE_SLACK
+from ufo_ext_slack.surface import (
+    IDENTITY_BLOB_KEY,
+    SLACK_BOT_TOKEN_SLOT,
+    SLACK_SIGNING_SECRET_SLOT,
+    SURFACE_SLACK,
+    URL_VERIFIED_BLOB_KEY,
+    URL_VERIFIED_STORE_KEY,
+    SlackIdentity,
+    bot_token_fingerprint,
+    signing_secret_fingerprint,
+    slack_installation_id,
+)
 from ufo_ext_slack.tools import (
     SLACK_APP_MANIFEST_ACTION,
     SLACK_CHANNELS_ACTION,
@@ -49,7 +64,13 @@ from evals.harness.capability import (
     UndeliveredRound,
 )
 from evals.harness.scorers import attempted_tools_scorer, combine
+from ufo.blob import WorkspaceBlobStore
+from ufo.db import workspace_tx
 from ufo.host.kinds.surface_kind import SURFACE_KIND
+from ufo.runtime.ext.surface import SurfaceInstallationAccess
+from ufo.runtime.workspace import ws_current
+from ufo.schema import tables
+from ufo.sdk.context import ScopedStore
 from ufo.sdk.tools import ToolDef
 
 OBJECT_ACTION = "object_action"
@@ -205,6 +226,120 @@ def _known(surface: str, action: str) -> Grader:
 SLACK_OPENING = "What's our Slack situation with you right now?"
 IMESSAGE_OPENING = "Can I reach you over iMessage?"
 
+SLACK_EVAL_TEAM_ID = "T0EVALSLACK"
+SLACK_EVAL_BOT_USER_ID = "U0EVALSLACK"
+SLACK_EVAL_BOT_TOKEN = "xoxb-eval-surface-setup"
+SLACK_EVAL_SIGNING_SECRET = "eval-surface-setup-signing-secret"
+SLACK_EVAL_FINGERPRINT = signing_secret_fingerprint(SLACK_EVAL_SIGNING_SECRET)
+SLACK_EVAL_IDENTITY = SlackIdentity(
+    bot_token_fingerprint=bot_token_fingerprint(SLACK_EVAL_BOT_TOKEN),
+    team_id=SLACK_EVAL_TEAM_ID,
+    bot_user_id=SLACK_EVAL_BOT_USER_ID,
+)
+SLACK_INSTALLATION_ID = slack_installation_id(SLACK_EVAL_TEAM_ID)
+SLACK_EVAL_SLOTS = (SLACK_BOT_TOKEN_SLOT, SLACK_SIGNING_SECRET_SLOT)
+SLACK_EVAL_BLOB_KEYS = (IDENTITY_BLOB_KEY, URL_VERIFIED_BLOB_KEY)
+
+
+async def _refuse_a_slack_install_this_suite_did_not_make(blob: WorkspaceBlobStore) -> None:
+    """Refuse a workspace holding Slack state that is not this suite's own, before anything is
+    written or deleted.
+
+    The seed and its cleanup remove the installation row, the bot token and signing secret, the
+    identity and marker blobs, and the mirror. Against a workspace that really runs Slack that is an
+    OAuth-minted token and a member-supplied secret destroyed, and an install that has to be made
+    again. Every peer seed meeting this state refuses instead of writing through it, and this one
+    now does too: state that is exactly ours is a rerun and proceeds, anything else stops the run.
+    """
+    workspace = ws_current()
+    async with workspace_tx() as connection:
+        installations = frozenset(
+            (
+                await connection.execute(
+                    sa.select(tables.surface_installation.c.installation_id).where(
+                        tables.surface_installation.c.workspace_id == workspace.workspace_id,
+                        tables.surface_installation.c.surface == SURFACE_SLACK,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        slots = frozenset(
+            (
+                await connection.execute(
+                    sa.select(tables.credential.c.slot).where(
+                        tables.credential.c.workspace_id == workspace.workspace_id,
+                        tables.credential.c.slot.in_(SLACK_EVAL_SLOTS),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    held = [await blob.exists(key) for key in SLACK_EVAL_BLOB_KEYS]
+    if not (installations or slots or any(held)):
+        return
+    ours = installations in (frozenset(), frozenset((SLACK_INSTALLATION_ID,)))
+    for slot, value in (
+        (SLACK_BOT_TOKEN_SLOT, SLACK_EVAL_BOT_TOKEN),
+        (SLACK_SIGNING_SECRET_SLOT, SLACK_EVAL_SIGNING_SECRET),
+    ):
+        if slot in slots and await workspace.credential(slot) != value:
+            ours = False
+    if not ours:
+        raise RuntimeError("surface_setup requires a disposable workspace without Slack state")
+
+
+async def _bind_slack_install(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+    """The state a finished Slack install leaves: the surface installation, the credentials it runs
+    on, the identity those proved, and the marker a signature-verified request stamps. That marker
+    is what says Slack reaches this deploy — the row on its own is the `pending` install, which
+    states no capability and is not what this case asks about — and it is written to both places
+    the surface writes it, the blob `slack_connect` reads and the mirror the workspace fact reads.
+    The bind is the extension's own writer, so the row the case runs against is the row a real
+    install makes."""
+    await _refuse_a_slack_install_this_suite_did_not_make(blob)
+    await _drop_slack_install(workspace_id, agent_id, blob)
+    await SurfaceInstallationAccess(declared=frozenset({SURFACE_SLACK})).bind(
+        SURFACE_SLACK, SLACK_INSTALLATION_ID
+    )
+    workspace = ws_current()
+    await workspace.put_credential(SLACK_BOT_TOKEN_SLOT, SLACK_EVAL_BOT_TOKEN)
+    await workspace.put_credential(SLACK_SIGNING_SECRET_SLOT, SLACK_EVAL_SIGNING_SECRET)
+    await blob.put(IDENTITY_BLOB_KEY, SLACK_EVAL_IDENTITY.model_dump_json().encode())
+    await blob.put(
+        URL_VERIFIED_BLOB_KEY, dumps({"fingerprint": SLACK_EVAL_FINGERPRINT, "at": 1.0}).encode()
+    )
+    await ScopedStore(extension=SLACK_EXTENSION).put(URL_VERIFIED_STORE_KEY, SLACK_EVAL_FINGERPRINT)
+
+
+async def _drop_slack_install(
+    _workspace_id: UUID, _agent_id: UUID, blob: WorkspaceBlobStore
+) -> None:
+    """Every other case in this suite asks an uninstalled workspace, so everything the seed wrote
+    leaves with the case that made it — and only what it wrote: the same refusal guards the removal,
+    since a cleanup that fires after a refused seed must not delete the state it refused to
+    touch."""
+    await _refuse_a_slack_install_this_suite_did_not_make(blob)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.surface_installation).where(
+                tables.surface_installation.c.workspace_id == ws_current().workspace_id,
+                tables.surface_installation.c.surface == SURFACE_SLACK,
+            )
+        )
+        await connection.execute(
+            sa.delete(tables.credential).where(
+                tables.credential.c.workspace_id == ws_current().workspace_id,
+                tables.credential.c.slot.in_(SLACK_EVAL_SLOTS),
+            )
+        )
+    for key in SLACK_EVAL_BLOB_KEYS:
+        await blob.delete(key)
+    await ScopedStore(extension=SLACK_EXTENSION).delete(URL_VERIFIED_STORE_KEY)
+
+
 CASES = (
     CapabilityCase(
         "slack-workspace-install",
@@ -275,6 +410,24 @@ CASES = (
             attempted_tools_scorer(required=(), forbidden=NEIGHBORS, orderings=()),
         ),
         digest_tag="surface-setup:slack-status-question",
+    ),
+    CapabilityCase(
+        "slack-installed-status-question",
+        "Is Slack already connected for this workspace?",
+        combine(
+            no_surface_action_scorer(SURFACE_SLACK, (SLACK_APP_MANIFEST_ACTION,)),
+            attempted_tools_scorer(required=(), forbidden=NEIGHBORS, orderings=()),
+        ),
+        rubric=(
+            "The answer states that ufo is already installed in this workspace's Slack and "
+            "answers in its channels and direct messages.",
+            "The answer does not treat the Slack install as absent, unfinished, or as having "
+            "produced nothing, and does not offer to install Slack or to create a Slack app. "
+            "Naming a separate missing Slack account is not such a claim.",
+        ),
+        digest_tag="surface-setup:slack-installed-status-question",
+        seed=_bind_slack_install,
+        cleanup=_drop_slack_install,
     ),
     CapabilityCase(
         "slack-personal-account",

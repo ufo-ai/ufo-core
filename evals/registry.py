@@ -201,7 +201,12 @@ TASKS: tuple[EvalTask, ...] = (
     ),
     skill_authoring_task("skill_authoring", SKILL_AUTHORING_CASES),
     skill_authoring_task("skill_gtm", SKILL_GTM_CASES),
-    capability_task("github_connections", github_connections.CASES, serial=True),
+    capability_task(
+        "github_connections",
+        github_connections.CASES,
+        serial=True,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+    ),
     capability_task("billing_actions", billing_actions.CASES, packs=billing_actions.BILLING_PACKS),
     capability_task("rebuild_actions", rebuild_actions.CASES, serial=True),
     capability_task(
@@ -210,7 +215,13 @@ TASKS: tuple[EvalTask, ...] = (
         judge_model=SEMANTIC_JUDGE_MODEL,
         serial=True,
     ),
-    capability_task("surface_setup", surface_setup.CASES, packs=surface_setup.SURFACE_SETUP_PACKS),
+    capability_task(
+        "surface_setup",
+        surface_setup.CASES,
+        packs=surface_setup.SURFACE_SETUP_PACKS,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+        serial=True,
+    ),
     capability_task("monitor_arm", monitor_arm.CASES, packs=monitor_arm.MONITOR_PACKS),
     capability_task("app_builder", app_builder.CASES),
     capability_task(
