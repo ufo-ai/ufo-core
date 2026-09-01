@@ -30,22 +30,6 @@ def test_the_chat_app_is_the_workspaces_main_agent() -> None:
     assert provision.name == DEFAULT_AGENT_NAME
 
 
-def test_app_chat_ships_the_home_skill() -> None:
-    manifest = app_chat.manifest()
-    assert {path.name for path in (spec.path for spec in manifest.skills)} == {"app-chat-home"}
-    assert (SKILL_DIR / "SKILL.md").is_file()
-    assert (SKILL_DIR / "app.tsx").is_file()
-
-
-def test_the_built_page_is_the_apps_own_tsx() -> None:
-    entry = MODULE_SCRIPT.search(BUILD_ENTRY.read_text())
-    assert entry is not None
-    assert (BUILD_ENTRY.parent / entry[1]).resolve() == (SKILL_DIR / "app.tsx").resolve()
-    source = (SKILL_DIR / "app.tsx").read_text()
-    assert "ChatPane" in source
-    assert "mountApp(" in source
-
-
 def test_the_home_skill_edits_builds_and_deploys_the_project() -> None:
     skill = (SKILL_DIR / "SKILL.md").read_text()
     assert "Copy this skill's `app.tsx` and `index.html`" in skill

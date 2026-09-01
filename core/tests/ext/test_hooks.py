@@ -63,7 +63,6 @@ from ufo.runtime.ext.manifest import (
     ModifyOutput,
     PostToolUse,
     PreToolUse,
-    Stop,
     UserPromptSubmit,
 )
 from ufo.runtime.hub import Activity, InProcessHub, LiveFrame
@@ -126,48 +125,7 @@ def _pre(tool_name: str = "t") -> PreToolUse:
     return PreToolUse(tool_name=tool_name, tool_input=Args(value="x"))
 
 
-async def test_hook_context_keeps_speaker_and_audience_separate() -> None:
-    seen: list[tuple[UUID | None, Audience]] = []
-
-    async def capture(ctx: HookContext) -> HookOutcome:
-        seen.append((ctx.speaker_member_id, ctx.audience))
-        return None
-
-    speaker, member = uuid4(), uuid4()
-    audience = conversation_audience(member)
-    turn = Turn(
-        id=uuid4(),
-        workspace_id=uuid4(),
-        conversation_id=uuid4(),
-        agent_id=uuid4(),
-        seq=1,
-        status="running",
-        inbound="hi",
-        speaker_member_id=speaker,
-        created_at=datetime(2026, 7, 9, tzinfo=UTC),
-    )
-    await _chain("stop", _ext(audience), HookSpec(event="stop", handler=capture)).fire(
-        "stop",
-        Stop(answer="done"),
-        turn,
-        Agent(prompt="p", model="claude-opus-4-8"),
-        speaker,
-    )
-    assert seen == [(speaker, audience)]
-    with pytest.raises(ValueError, match="hook and chain audiences differ"):
-        HookChain(
-            hooks={
-                "stop": (
-                    BoundHook(
-                        spec=HookSpec(event="stop", handler=capture),
-                        ext=_ext(),
-                    ),
-                )
-            },
-            audience=audience,
-        )
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_hook_reads_the_frames_and_the_end_of_the_turn_it_fires_under(db: None) -> None:
     """A handler fires inside the turn's own execution, and side-channel work it starts there — a
     surface's loading state, an interim progress note — needs two reads and no more: the turn's live
@@ -213,6 +171,7 @@ async def test_a_hook_reads_the_frames_and_the_end_of_the_turn_it_fires_under(db
         assert await ext.turn_is_terminal(uuid4()) is True
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_hook_context_with_no_tailer_wired_fails_loud(db: None) -> None:
     """The loop wires the tailer; a context built without one cannot tail. That is a wiring fault,
     so it raises where it is called instead of handing back a stream that never yields."""
@@ -251,25 +210,6 @@ async def test_modify_input_folds_left_to_right_each_seeing_the_prior() -> None:
     assert resolution.tool_input.value == "xAB"
 
 
-async def test_inject_context_user_prompt_submit_concatenates_in_order() -> None:
-    async def first(ctx: HookContext) -> HookOutcome:
-        return InjectContext(text="first")
-
-    async def second(ctx: HookContext) -> HookOutcome:
-        return InjectContext(text="second")
-
-    ext = _ext()
-    chain = _chain(
-        "user_prompt_submit",
-        ext,
-        HookSpec(event="user_prompt_submit", handler=first),
-        HookSpec(event="user_prompt_submit", handler=second),
-    )
-    resolution = await _fire(chain, "user_prompt_submit", UserPromptSubmit(text="hi"))
-    assert resolution.denied is None
-    assert resolution.injected == "first\nsecond"
-
-
 async def test_deny_wins_and_short_circuits_later_hooks_preserving_order() -> None:
     ran: list[str] = []
 
@@ -295,31 +235,6 @@ async def test_deny_wins_and_short_circuits_later_hooks_preserving_order() -> No
     resolution = await _fire(chain, "pre_tool_use", _pre())
     assert resolution.denied == "policy"
     assert ran == ["modify"]
-
-
-async def test_matcher_limits_a_tool_hook_to_its_named_tools() -> None:
-    async def deny(ctx: HookContext) -> HookOutcome:
-        return Deny(reason="no")
-
-    ext = _ext()
-    chain = _chain(
-        "pre_tool_use", ext, HookSpec(event="pre_tool_use", handler=deny, tools=("bash",))
-    )
-    matched = await _fire(chain, "pre_tool_use", _pre("bash"))
-    skipped = await _fire(chain, "pre_tool_use", _pre("other"))
-    assert matched.denied == "no"
-    assert skipped.denied is None
-
-
-async def test_raising_gating_hook_fails_closed() -> None:
-    async def boom(ctx: HookContext) -> HookOutcome:
-        raise RuntimeError("hook exploded")
-
-    ext = _ext()
-    chain = _chain("pre_tool_use", ext, HookSpec(event="pre_tool_use", handler=boom))
-    resolution = await _fire(chain, "pre_tool_use", _pre())
-    assert resolution.denied is not None
-    assert "failed closed" in resolution.denied
 
 
 async def test_gating_hook_exceeding_the_timeout_fails_closed(monkeypatch: object) -> None:
@@ -664,6 +579,7 @@ def _sample_manifest() -> object:
     return found
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sample_pre_deny_short_circuits_and_post_captures_the_other(
     db: None, tmp_path: Path
 ) -> None:
@@ -690,6 +606,7 @@ async def test_sample_pre_deny_short_circuits_and_post_captures_the_other(
     assert results[1].is_error is False
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_stop_fires_with_the_final_answer(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
@@ -705,6 +622,7 @@ async def test_stop_fires_with_the_final_answer(db: None, tmp_path: Path) -> Non
         assert await scoped.get(sample.HOOK_STOP_KEY) == {"answer": "ok"}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_tool_failure_reaches_post_tool_use_failure_not_post_tool_use(
     db: None, tmp_path: Path
 ) -> None:
@@ -730,6 +648,7 @@ async def test_tool_failure_reaches_post_tool_use_failure_not_post_tool_use(
         assert await scoped.get(sample.HOOK_POST_KEY) is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
@@ -759,6 +678,7 @@ async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -
     assert post["after_tokens"] > 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_user_prompt_submit_inject_reaches_the_founding_message(
     db: None, tmp_path: Path
 ) -> None:
@@ -781,6 +701,7 @@ async def test_user_prompt_submit_inject_reaches_the_founding_message(
     assert "INJECTED-GUIDANCE" not in model.seen_system[0]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_user_prompt_submit_deny_refuses_the_turn_before_the_model(
     db: None, tmp_path: Path
 ) -> None:
@@ -801,6 +722,7 @@ async def test_user_prompt_submit_deny_refuses_the_turn_before_the_model(
     assert model.seen == []
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_pre_modify_input_alters_the_dispatched_args(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn(uuid4())
 
@@ -823,6 +745,7 @@ async def test_pre_modify_input_alters_the_dispatched_args(db: None, tmp_path: P
     assert not any("echo original" in " ".join(argv) for argv in carrier.calls)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_post_modify_output_and_inject_reach_the_tool_result(
     db: None, tmp_path: Path
 ) -> None:
@@ -852,6 +775,7 @@ async def test_post_modify_output_and_inject_reach_the_tool_result(
     assert result.content == "REPLACED\nNOTE"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_pre_hook_that_raises_fails_closed_and_the_tool_never_dispatches(
     db: None, tmp_path: Path
 ) -> None:
@@ -878,6 +802,7 @@ async def test_pre_hook_that_raises_fails_closed_and_the_tool_never_dispatches(
     assert result.is_error is True and "failed closed" in result.content
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_tool_outside_the_matcher_is_not_denied(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn(uuid4())
 

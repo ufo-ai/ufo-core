@@ -203,6 +203,7 @@ def test_digest_covers_a_tampered_non_entry_file_in_a_multi_file_package(
     assert before != after
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_installed_extension_fires_through_the_loader(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -289,6 +290,7 @@ def test_bundle_pins_the_wheel_instead_of_the_installed_tree(
     assert result.pins[0].digest != extension_digest(entry)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

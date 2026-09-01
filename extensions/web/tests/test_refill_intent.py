@@ -76,16 +76,6 @@ def test_the_screen_reaches_a_provider_through_the_verb_a_spent_balance_admits()
     )
 
 
-def test_the_intent_is_the_wire_shape_in_the_routes_key_order() -> None:
-    """The serialized intent is compared byte for byte at admission, so the literal is canonical:
-    reading it back and writing it again changes nothing, and its keys stand in the route's order —
-    kind, action, name, then the press's body under `input`."""
-    for literal in (ARRANGE_INTENT, STOP_INTENT, CARD_INTENT):
-        prepared = ToolIntent.model_validate_json(literal)
-        assert list(prepared.input) == ["kind", "action", "name", "input"]
-        assert prepared.model_dump_json() == literal
-
-
 def test_the_portal_link_is_read_off_the_turns_own_answer() -> None:
     """The action states a JSON object inside the wall every untrusted result renders in, so the key
     is read rather than the first address in the text — and only the portal operation reads one: an

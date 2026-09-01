@@ -147,6 +147,7 @@ def test_runtime_identity_requires_revision_and_image_together(
         serve._runtime_identity(_hosted_config(), CarrierSpec(name="local", factory=LocalCarrier))
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 def test_one_shot_closes_the_throwaway_loops_connections(database_url: str, tmp_path: Path) -> None:
     """The boot steps `run()` drives through `_one_shot` each get a throwaway `asyncio.run` loop,
     and the wrapper closes that loop's pooled connections before it closes — a socket abandoned to
@@ -182,6 +183,7 @@ def test_one_shot_closes_the_throwaway_loops_connections(database_url: str, tmp_
         asyncio.run(dispose_db())
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 def test_serve_verifies_the_owner_database_before_it_seats_the_instance(
     database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

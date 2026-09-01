@@ -173,6 +173,7 @@ async def _consume(hub: Hub, seed: Seed, turn_id: UUID) -> tuple[str, dict[str, 
     raise AssertionError("stream ended without a terminal frame")
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_live_anthropic_turn_streams_and_bills(
     live_runtime: tuple[Hub, FilesystemBlobStore],
 ) -> None:

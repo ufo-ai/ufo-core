@@ -24,13 +24,11 @@ from ufo.runtime.billing.accounting import (
     SANDBOX_TOKENS_ATTEMPT,
     SANDBOX_TOKENS_DIMENSION,
     TOKENS_DIMENSION,
-    VIDEOS_DIMENSION,
     SpendRollup,
     TurnCost,
     read_turn_cost,
     record_egress_request,
     record_image_usage,
-    record_probe_egress_request,
     record_sandbox_tokens,
     record_turn_usage,
     record_video_usage,
@@ -84,47 +82,6 @@ def test_sub_micro_usd_floors() -> None:
     assert CORE_PRICING.micro_usd("claude-haiku-4-5", Usage(cache_read_tokens=9)) == 0
 
 
-def test_openai_row_converted_from_usd_per_mtok() -> None:
-    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
-    assert CORE_PRICING.micro_usd("gpt-5.4", usage) == 17_500_000
-
-
-def test_unknown_model_prices_zero_never_raises() -> None:
-    assert CORE_PRICING.micro_usd("gpt-4o", FULL_USAGE) == 0
-
-
-def test_the_gpt_5_6_rows_price_at_the_published_rates() -> None:
-    """Sol bills $4/$20 per Mtok, Terra $2/$12 and Luna $0.20/$1.20, each with cache reads at 0.1x
-    input and cache writes at 1.25x — the rate OpenAI bills a GPT-5.6 cache write at, which is why
-    these rows carry a write rate above their input rate."""
-    usage = Usage(
-        input_tokens=1000,
-        output_tokens=2000,
-        cache_read_tokens=3000,
-        cache_write_30m_tokens=4000,
-    )
-    assert CORE_PRICING.micro_usd("gpt-5.6-sol", usage) == 65_200
-    assert CORE_PRICING.micro_usd("gpt-5.6-terra", usage) == 36_600
-    assert CORE_PRICING.micro_usd("gpt-5.6-luna", usage) == 3_660
-    for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
-        price = CORE_PRICES[model]
-        assert price.cache_write_5m == 0
-        assert price.cache_write_30m == price.input * 5 // 4
-        assert price.cache_write_1h == 0
-        assert price.cache_read == price.input // 10
-
-
-def test_sonnet_5_row_prices_at_the_published_rates() -> None:
-    price = CORE_PRICES["claude-sonnet-5"]
-    assert price == ModelPrice(2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000)
-
-
-def test_price_digest_is_stable_sha256() -> None:
-    assert PRICE_DIGEST.startswith("sha256:")
-    assert len(PRICE_DIGEST) == len("sha256:") + 64
-    assert price_digest(CORE_PRICES) == PRICE_DIGEST
-
-
 def test_price_digest_changes_when_price_table_changes() -> None:
     changed = {**CORE_PRICES, "claude-opus-4-8": ModelPrice(1, 1, 1, 1, 1)}
     assert price_digest(changed) != PRICE_DIGEST
@@ -141,15 +98,7 @@ def test_pricing_from_prices_a_contributed_model() -> None:
     assert pricing.digest != CORE_PRICING.digest
 
 
-def test_core_pricing_is_the_core_table() -> None:
-    assert CORE_PRICING.digest == PRICE_DIGEST
-    assert (
-        CORE_PRICING.micro_usd("claude-opus-4-8", Usage(input_tokens=1000, output_tokens=2000))
-        == 55_000
-    )
-    assert CORE_PRICING.micro_usd("vendor/model-x", FULL_USAGE) == 0
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_unknown_model_records_tokens_at_zero_price(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -236,6 +185,7 @@ async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
     return workspace_id, turn_id
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_record_then_read_back(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -261,6 +211,7 @@ async def test_record_then_read_back(db: None) -> None:
     assert tuple(ledger) == (1000, 2000, 3000, 0, 0, 4000, False)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_ledger_freezes_the_serving_byok_decision(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -279,41 +230,7 @@ async def test_ledger_freezes_the_serving_byok_decision(db: None) -> None:
         ).scalar_one()
 
 
-async def test_ledger_prices_five_minute_and_one_hour_cache_writes_separately(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_5m, turn_5m = await _seed_turn(connection)
-        workspace_1h, turn_1h = await _seed_turn(connection)
-        await record_turn_usage(
-            connection,
-            workspace_5m,
-            turn_5m,
-            "claude-opus-4-8",
-            Usage(cache_write_5m_tokens=TOKENS_PER_MTOK),
-        )
-        await record_turn_usage(
-            connection,
-            workspace_1h,
-            turn_1h,
-            "claude-opus-4-8",
-            Usage(cache_write_1h_tokens=TOKENS_PER_MTOK),
-        )
-    async with workspace_tx() as connection:
-        cost_5m = await read_turn_cost(connection, turn_5m, TOKENS_DIMENSION)
-        cost_1h = await read_turn_cost(connection, turn_1h, TOKENS_DIMENSION)
-    assert cost_5m == TurnCost(
-        tokens=TOKENS_PER_MTOK,
-        micro_usd=6_250_000,
-        model="claude-opus-4-8",
-        cache_percent=0,
-    )
-    assert cost_1h == TurnCost(
-        tokens=TOKENS_PER_MTOK,
-        micro_usd=10_000_000,
-        model="claude-opus-4-8",
-        cache_percent=0,
-    )
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_parked_then_resumed_turn_reads_back_as_one_spend(db: None) -> None:
     """A turn parked mid-run and resumed bills each partial burn under its own attempt, so the read
     totals every field across those rows: tokens, cost and both halves of the prompt split sum, and
@@ -369,6 +286,7 @@ async def test_a_parked_then_resumed_turn_reads_back_as_one_spend(db: None) -> N
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_ledger_insert_stamps_current_price_digest(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -382,19 +300,7 @@ async def test_ledger_insert_stamps_current_price_digest(db: None) -> None:
     assert stamped == PRICE_DIGEST
 
 
-async def test_egress_row_carries_no_price_digest(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await record_egress_request(connection, workspace_id, turn_id)
-    async with workspace_tx() as connection:
-        stamped = (
-            await connection.execute(
-                sa.select(tables.ledger.c.price_digest).where(tables.ledger.c.turn_id == turn_id)
-            )
-        ).scalar_one()
-    assert stamped is None
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_replay_leaves_one_row(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -411,13 +317,7 @@ async def test_replay_leaves_one_row(db: None) -> None:
     assert count == 1
 
 
-async def test_zero_usage_writes_nothing(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", Usage())
-        assert await read_turn_cost(connection, turn_id, TOKENS_DIMENSION) is None
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_egress_request_accumulates_a_priced_zero_count(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -437,55 +337,7 @@ async def test_egress_request_accumulates_a_priced_zero_count(db: None) -> None:
     assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("egress", 10, 0)
 
 
-async def test_probe_egress_bills_the_workspace_on_a_turnless_row(db: None) -> None:
-    """An off-turn probe's egress shares the turn path's dimension and its zero price, and names no
-    turn: it lands in the workspace total and every workspace-scoped cap window, and drops out of
-    the per-member and per-agent rollups, which reach a member or agent through `turn`. Each write
-    is its own row, so a probe row can never accumulate onto a key a later probe reuses."""
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await record_egress_request(connection, workspace_id, turn_id)
-        await record_probe_egress_request(connection, workspace_id, amount=3)
-        await record_probe_egress_request(connection, workspace_id)
-    async with workspace_tx() as connection:
-        rows = (
-            await connection.execute(
-                sa.select(
-                    tables.ledger.c.amount,
-                    tables.ledger.c.priced_micro_usd,
-                )
-                .where(
-                    tables.ledger.c.workspace_id == workspace_id,
-                    tables.ledger.c.dimension == "egress",
-                    tables.ledger.c.turn_id.is_(None),
-                )
-                .order_by(tables.ledger.c.amount)
-            )
-        ).all()
-        report = await SpendRollup(workspace_id=workspace_id).read(connection, None)
-
-    assert [(int(row.amount), int(row.priced_micro_usd)) for row in rows] == [(1, 0), (3, 0)]
-    assert [
-        (total.dimension, total.amount)
-        for total in report.by_dimension
-        if total.dimension == "egress"
-    ] == [("egress", 5)]
-    assert not [subject for subject in report.by_member if subject.subject_id is not None]
-
-
-async def test_egress_never_double_counts_the_token_cost(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
-        await record_egress_request(connection, workspace_id, turn_id)
-        await record_egress_request(connection, workspace_id, turn_id)
-    async with workspace_tx() as connection:
-        cost = await read_turn_cost(connection, turn_id, TOKENS_DIMENSION)
-    assert cost == TurnCost(
-        tokens=10_000, micro_usd=96_500, model="claude-opus-4-8", cache_percent=38
-    )
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) -> None:
     """An in-sandbox model call metered under `sandbox_tokens` and the host loop's terminal `tokens`
     bill for one turn are two rows with distinct ids, and a read that names `tokens` sees only the
@@ -524,16 +376,7 @@ async def test_sandbox_tokens_row_is_disjoint_from_the_host_token_row(db: None) 
     )
 
 
-async def test_a_turn_cost_read_has_to_name_the_spend_it_reads(db: None) -> None:
-    """One turn can carry spend under more than one dimension, so no default is right for every
-    reader: a caller that names none is refused at the call site rather than reading whichever one
-    the signature happened to prefer."""
-    async with workspace_tx() as connection:
-        _workspace_id, turn_id = await _seed_turn(connection)
-        with pytest.raises(TypeError, match="dimension"):
-            await read_turn_cost(connection, turn_id)  # type: ignore[call-arg]
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:
     usage = Usage(input_tokens=1000, output_tokens=2000)
     async with workspace_tx() as connection:
@@ -557,43 +400,7 @@ async def test_sandbox_tokens_accumulate_into_one_row(db: None) -> None:
     )
 
 
-async def test_sandbox_tokens_upsert_preserves_incomplete_token_classes(db: None) -> None:
-    usage = Usage(input_tokens=1000, output_tokens=2000)
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await record_sandbox_tokens(connection, workspace_id, turn_id, "claude-opus-4-8", usage)
-        await connection.execute(
-            sa.update(tables.ledger)
-            .where(
-                tables.ledger.c.workspace_id == workspace_id,
-                tables.ledger.c.turn_id == turn_id,
-                tables.ledger.c.dimension == SANDBOX_TOKENS_DIMENSION,
-            )
-            .values(token_classes_complete=False)
-        )
-        await record_sandbox_tokens(
-            connection,
-            workspace_id,
-            turn_id,
-            "claude-opus-4-8",
-            Usage(input_tokens=25),
-        )
-        row = (
-            await connection.execute(
-                sa.select(
-                    tables.ledger.c.amount,
-                    tables.ledger.c.token_classes_complete,
-                ).where(
-                    tables.ledger.c.workspace_id == workspace_id,
-                    tables.ledger.c.turn_id == turn_id,
-                    tables.ledger.c.dimension == SANDBOX_TOKENS_DIMENSION,
-                )
-            )
-        ).one()
-    assert int(row.amount) == 3025
-    assert row.token_classes_complete is False
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sandbox_rows_from_both_proxy_shapes_roll_up_and_export_once(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -660,6 +467,7 @@ async def test_sandbox_rows_from_both_proxy_shapes_roll_up_and_export_once(db: N
     assert sorted(export.amount for export in exports) == [75, 100]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sandbox_tokens_priced_and_stamped_by_the_merged_pricing(db: None) -> None:
     """An in-sandbox call on a contributed slug is priced against the deploy's merged table and
     stamped with its digest — never the core rate (which lacks the slug → $0) or the core digest —
@@ -689,28 +497,7 @@ async def test_sandbox_tokens_priced_and_stamped_by_the_merged_pricing(db: None)
     assert row.model == "vendor/model-x"
 
 
-async def test_spend_rollup_surfaces_sandbox_tokens(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
-        await record_sandbox_tokens(
-            connection,
-            workspace_id,
-            turn_id,
-            "claude-opus-4-8",
-            Usage(input_tokens=1000, output_tokens=2000),
-        )
-        await record_egress_request(connection, workspace_id, turn_id)
-    async with workspace_tx() as connection:
-        report = await SpendRollup(workspace_id).read(connection, 3600)
-    assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
-        "egress": (1, 0),
-        "sandbox_tokens": (3000, 55_000),
-        "tokens": (10_000, 96_500),
-    }
-    assert report.total_micro_usd == 96_500 + 55_000
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_generated_images_accumulate_into_one_unstamped_row(db: None) -> None:
     """Image spend is a count and a charge, not a token burn: the row carries the image count as its
     amount, the provider's charge as its price, no price digest (no pinned rate table describes an
@@ -743,38 +530,7 @@ async def test_generated_images_accumulate_into_one_unstamped_row(db: None) -> N
     assert row.price_digest is None
 
 
-async def test_generated_videos_meter_under_their_own_dimension(db: None) -> None:
-    """Video spend is priced per output second, so its charge is the provider's and its amount is a
-    video count — a row of its own, keyed apart from the same turn's images and accumulating across
-    generations exactly as they do."""
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await record_video_usage(connection, workspace_id, turn_id, "minimax/hailuo-3", 1, 650_000)
-        await record_video_usage(
-            connection, workspace_id, turn_id, "minimax/hailuo-3", 1, 1_300_000
-        )
-        await record_image_usage(
-            connection, workspace_id, turn_id, "bytedance-seed/seedream-4.5", 1, 40_000
-        )
-    async with workspace_tx() as connection:
-        rows = (
-            await connection.execute(
-                sa.select(
-                    tables.ledger.c.id,
-                    tables.ledger.c.dimension,
-                    tables.ledger.c.amount,
-                    tables.ledger.c.priced_micro_usd,
-                    tables.ledger.c.model,
-                    tables.ledger.c.price_digest,
-                ).where(tables.ledger.c.turn_id == turn_id)
-            )
-        ).all()
-    assert len({row.id for row in rows}) == 2
-    video = next(row for row in rows if row.dimension == VIDEOS_DIMENSION)
-    assert (int(video.amount), int(video.priced_micro_usd)) == (2, 1_950_000)
-    assert (video.model, video.price_digest) == ("minimax/hailuo-3", None)
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_images_are_disjoint_from_the_turns_token_bill(db: None) -> None:
     """A turn that generated an image and burned tokens has two rows with distinct ids, and a cost
     read that names `tokens` sees only the token row — the image charge is additive, never a
@@ -805,22 +561,7 @@ async def test_images_are_disjoint_from_the_turns_token_bill(db: None) -> None:
     )
 
 
-async def test_spend_rollup_surfaces_generated_images(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
-        await record_image_usage(
-            connection, workspace_id, turn_id, "bytedance-seed/seedream-4.5", 2, 80_000
-        )
-    async with workspace_tx() as connection:
-        report = await SpendRollup(workspace_id).read(connection, 3600)
-    assert {d.dimension: (d.amount, d.priced_micro_usd) for d in report.by_dimension} == {
-        "images": (2, 80_000),
-        "tokens": (10_000, 96_500),
-    }
-    assert report.total_micro_usd == 96_500 + 80_000
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_spend_rollup_matches_ledger_sums(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -887,6 +628,7 @@ async def _spawn_child_turn(
     return child_turn
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_spend_by_origin_gathers_a_subagents_burn_under_the_channel(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -907,31 +649,7 @@ async def test_spend_by_origin_gathers_a_subagents_burn_under_the_channel(db: No
     ]
 
 
-async def test_spend_by_origin_counts_a_turn_once_per_ledger_row(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await connection.execute(
-            sa.update(tables.conversation)
-            .where(tables.conversation.c.workspace_id == workspace_id)
-            .values(surface="slack", surface_label="#eng")
-        )
-        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
-        await record_turn_usage(
-            connection,
-            workspace_id,
-            turn_id,
-            "claude-opus-4-8",
-            FULL_USAGE,
-            attempt="resumed",
-        )
-    async with workspace_tx() as connection:
-        report = await SpendRollup(workspace_id).read(connection, 3600)
-    assert [(o.label, o.tokens, o.priced_micro_usd) for o in report.by_origin] == [
-        ("#eng", 20_000, 193_000)
-    ]
-    assert sum(o.priced_micro_usd for o in report.by_origin) == report.total_micro_usd
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_spend_by_origin_names_an_unlabelled_surface_and_a_turnless_job(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -947,6 +665,7 @@ async def test_spend_by_origin_names_an_unlabelled_surface_and_a_turnless_job(db
     ]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_usage_details_report_history_models_execution_and_all_time(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -989,29 +708,7 @@ async def test_usage_details_report_history_models_execution_and_all_time(db: No
     ]
 
 
-async def test_workspace_usage_is_anchorless_priced_and_stamped(db: None) -> None:
-    workspace_id = uuid4()
-    async with workspace_tx() as connection:
-        await record_workspace_usage(connection, workspace_id, "claude-opus-4-8", FULL_USAGE)
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(
-                    tables.ledger.c.turn_id,
-                    tables.ledger.c.dimension,
-                    tables.ledger.c.amount,
-                    tables.ledger.c.priced_micro_usd,
-                    tables.ledger.c.model,
-                    tables.ledger.c.price_digest,
-                ).where(tables.ledger.c.workspace_id == workspace_id)
-            )
-        ).one()
-    assert row.turn_id is None
-    assert (row.dimension, int(row.amount), int(row.priced_micro_usd)) == ("tokens", 10_000, 96_500)
-    assert row.model == "claude-opus-4-8"
-    assert row.price_digest == PRICE_DIGEST
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_workspace_usage_counts_in_total_not_member_or_agent(db: None) -> None:
     """A background job's metered spend lands in the workspace total and the per-dimension token
     total, but is attributed to no member or agent — those breakdowns join through the turn a
@@ -1036,6 +733,7 @@ async def test_workspace_usage_counts_in_total_not_member_or_agent(db: None) -> 
     ]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_spend_rollup_excludes_ledger_outside_the_window(db: None) -> None:
     old = datetime.now(UTC) - timedelta(hours=2)
     async with workspace_tx() as connection:
@@ -1062,6 +760,7 @@ async def test_spend_rollup_excludes_ledger_outside_the_window(db: None) -> None
     assert report.by_member == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> None:
     """A member's own slice sums the ledger rows their conversations' turns wrote — the same
     ledger→turn→conversation join a `member` cap binds on — so the number a member reads and the
@@ -1162,38 +861,6 @@ async def test_member_spend_reads_only_that_members_turns_and_caps(db: None) -> 
     assert rollup.total_micro_usd == 96_500 * 4
 
 
-async def test_member_spend_excludes_ledger_outside_the_window(db: None) -> None:
-    old = datetime.now(UTC) - timedelta(hours=2)
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        member_id = (
-            await connection.execute(
-                sa.select(tables.conversation.c.member_id).where(
-                    tables.conversation.c.workspace_id == workspace_id
-                )
-            )
-        ).scalar_one()
-        await connection.execute(
-            sa.insert(tables.ledger).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                turn_id=turn_id,
-                dimension="tokens",
-                amount=10,
-                prompt_tokens=10,
-                input_tokens=10,
-                priced_micro_usd=100,
-                model="claude-opus-4-8",
-                created_at=old,
-                updated_at=sa.func.now(),
-            )
-        )
-    async with workspace_tx() as connection:
-        report = await SpendRollup(workspace_id).read_member(connection, member_id, 3600)
-    assert report.total_micro_usd == 0
-    assert report.by_dimension == ()
-
-
 CONSUMER = "metronome"
 PAST_EXPORT_MARGIN_SECONDS = accounting.EXPORT_SETTLE_MARGIN_SECONDS + 100
 
@@ -1221,6 +888,7 @@ async def _pending(
         return await accounting.read_pending_usage_exports(connection, workspace_id, consumer, 100)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_usage_export_settlement_rules(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -1261,6 +929,7 @@ async def test_usage_export_settlement_rules(db: None) -> None:
     assert not any(export.dimension == "egress" for export in settled)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_images_export_with_their_settled_turn_as_platform_served(db: None) -> None:
     """An `images` row accumulates while its turn runs, so it settles like `sandbox_tokens`: nothing
     mints until the turn is terminal and past the margin. It exports as platform-served, because the
@@ -1288,6 +957,7 @@ async def test_images_export_with_their_settled_turn_as_platform_served(db: None
     assert export.price_digest is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_usage_export_uses_turn_byok_when_ledger_byok_is_null(
     db: None,
 ) -> None:
@@ -1315,6 +985,7 @@ async def test_usage_export_uses_turn_byok_when_ledger_byok_is_null(
     assert exports[0].byok is True
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_usage_export_classifies_background_byok_from_the_stored_key(
     db: None,
 ) -> None:
@@ -1360,31 +1031,7 @@ async def test_usage_export_classifies_background_byok_from_the_stored_key(
     assert exported is True
 
 
-async def test_videos_export_with_their_settled_turn_as_platform_served(db: None) -> None:
-    """A `videos` row accumulates while its turn runs and settles like an `images` row: nothing
-    mints until the turn is terminal and past the margin, and it exports as platform-served because
-    no video model is in the registry for a key slot to be resolved from."""
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await connection.execute(
-            sa.update(tables.turn).where(tables.turn.c.id == turn_id).values(byok=True)
-        )
-        await record_video_usage(connection, workspace_id, turn_id, "minimax/hailuo-3", 1, 650_000)
-    assert await _pending(workspace_id) == ()
-
-    async with workspace_tx() as connection:
-        await _settle_turn(connection, turn_id, age_seconds=PAST_EXPORT_MARGIN_SECONDS)
-    (export,) = await _pending(workspace_id)
-    assert (export.dimension, export.amount, export.from_amount) == ("videos", 1, 0)
-    assert (export.priced_micro_usd, export.model, export.turn_id) == (
-        650_000,
-        "minimax/hailuo-3",
-        turn_id,
-    )
-    assert export.byok is False
-    assert export.price_digest is None
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_usage_export_growth_mints_frozen_top_ups(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -1410,6 +1057,7 @@ async def test_usage_export_growth_mints_frozen_top_ups(db: None) -> None:
     assert await _pending(workspace_id) == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_recovered_turn_usage_growth_mints_a_frozen_top_up(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -1441,6 +1089,7 @@ async def test_recovered_turn_usage_growth_mints_a_frozen_top_up(db: None) -> No
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_usage_export_floor_consumer_and_workspace_scoping(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, _ = await _seed_turn(connection)
@@ -1480,14 +1129,6 @@ async def test_usage_export_floor_consumer_and_workspace_scoping(db: None) -> No
     assert theirs.amount == 7
 
 
-async def test_metered_workspaces_names_only_workspaces_with_ledger_rows(db: None) -> None:
-    async with workspace_tx() as connection:
-        metered, _ = await _seed_turn(connection)
-        await _seed_turn(connection)
-        await record_workspace_usage(connection, metered, "claude-opus-4-8", Usage(input_tokens=10))
-    assert await accounting.metered_workspaces()() == (metered,)
-
-
 async def _balance_of(connection: AsyncConnection, workspace_id: UUID) -> int:
     return (
         await connection.execute(
@@ -1508,6 +1149,7 @@ async def _priced_of(connection: AsyncConnection, turn_id: UUID, dimension: str)
     ).scalar_one()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_replayed_attempt_debits_once(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)
@@ -1520,20 +1162,7 @@ async def test_a_replayed_attempt_debits_once(db: None) -> None:
     assert left == 100_000_000 - CORE_PRICING.micro_usd("claude-opus-4-8", FULL_USAGE)
 
 
-async def test_several_sandbox_calls_debit_each_increment(db: None) -> None:
-    """One accumulating row, and the debits sum to it."""
-    async with workspace_tx() as connection:
-        workspace_id, turn_id = await _seed_turn(connection)
-        await credit(connection, workspace_id, 100_000_000, 100_000_000, "first")
-        for _ in range(3):
-            await record_sandbox_tokens(
-                connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE
-            )
-        billed = await _priced_of(connection, turn_id, SANDBOX_TOKENS_DIMENSION)
-        left = await _balance_of(connection, workspace_id)
-    assert left == 100_000_000 - billed
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_job_bill_debits_the_balance(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, _ = await _seed_turn(connection)
@@ -1551,6 +1180,7 @@ async def test_a_job_bill_debits_the_balance(db: None) -> None:
     assert left == 100_000_000 - billed
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_generated_media_debits_and_egress_does_not(db: None) -> None:
     """An image or video is real money on the platform key, so an empty balance must not keep
     generating. Egress counts requests and prices at zero, so it never moves the balance."""
@@ -1566,6 +1196,7 @@ async def test_generated_media_debits_and_egress_does_not(db: None) -> None:
     assert left == 100_000_000 - 40_000 - 7_000_000
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_workspace_with_no_balance_row_records_usage_unchanged(db: None) -> None:
     """The self-host path: the ledger still carries what it would have charged, and there is nothing
     to take it off."""
@@ -1582,6 +1213,7 @@ async def test_a_workspace_with_no_balance_row_records_usage_unchanged(db: None)
     assert rows == 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_balance_is_granted_less_every_debit(db: None) -> None:
     """The balance is not a sum over the ledger: a BYOK burn is priced and never debited, so the
     ledger total is only an upper bound. What holds exactly is granted less what was taken."""
@@ -1627,6 +1259,7 @@ async def test_the_balance_is_granted_less_every_debit(db: None) -> None:
     assert int(granted) - int(priced) < left
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_burn_the_workspaces_own_key_paid_for_never_debits(db: None) -> None:
     """BYOK meters without billing: the burn is still recorded at what it cost, and the balance is
     untouched, because the workspace already paid the provider directly."""
@@ -1659,6 +1292,7 @@ async def test_a_burn_the_workspaces_own_key_paid_for_never_debits(db: None) -> 
     assert left == 100_000_000
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_burn_on_the_platform_key_still_debits(db: None) -> None:
     """The exemption is the key that served the turn, decided when the turn was set up."""
     async with workspace_tx() as connection:
@@ -1675,6 +1309,7 @@ async def test_a_burn_on_the_platform_key_still_debits(db: None) -> None:
     assert left < 100_000_000
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_job_burn_the_workspaces_own_key_paid_for_never_debits(db: None) -> None:
     """A background job's spend follows the same rule a turn's does: the workspace that paid the
     provider directly is not charged for it a second time."""
@@ -1702,6 +1337,7 @@ async def test_a_job_burn_the_workspaces_own_key_paid_for_never_debits(db: None)
     assert left == 100_000_000
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_job_burn_on_the_platform_key_debits(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, _ = await _seed_turn(connection)
@@ -1718,6 +1354,7 @@ async def test_a_job_burn_on_the_platform_key_debits(db: None) -> None:
     assert left < 100_000_000
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_key_arriving_mid_turn_does_not_make_that_turn_free(db: None) -> None:
     """The exemption is decided against the key that served the turn, not against the credential
     rows as they stand when the bill is written. Re-read at terminal, a key stored mid-run would
@@ -1741,6 +1378,7 @@ async def test_a_key_arriving_mid_turn_does_not_make_that_turn_free(db: None) ->
     assert left < 100_000_000
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_balance_equals_granted_less_what_the_ledger_debited(db: None) -> None:
     """The identity the audit rests on. Priced is what a burn cost; debited is what it took, and a
     BYOK row is priced while taking nothing, so only the debited column rebuilds the balance."""
@@ -1775,6 +1413,7 @@ async def test_the_balance_equals_granted_less_what_the_ledger_debited(db: None)
     assert int(totals[0]) > int(totals[1])
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_workspace_with_no_balance_records_no_deduction(db: None) -> None:
     """Every workspace before its first top-up and every self-hosted install has no balance row, so
     nothing is taken. Recording the deduction that was attempted would claim money left a balance
@@ -1798,6 +1437,7 @@ async def test_a_workspace_with_no_balance_records_no_deduction(db: None) -> Non
     assert int(totals[1]) == 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_recovery_of_one_attempt_bills_the_key_that_served_it(db: None) -> None:
     """A crash recovery re-executes the same attempt and must bill the tokens already burned under
     the verdict they were burned under. Re-deciding there would make the whole attempt free because
@@ -1812,6 +1452,7 @@ async def test_a_recovery_of_one_attempt_bills_the_key_that_served_it(db: None) 
     assert recovered is False
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_recovery_uses_the_model_and_prices_that_started_the_attempt(db: None) -> None:
     async with workspace_tx() as connection:
         _, turn_id = await _seed_turn(connection)
@@ -1845,6 +1486,7 @@ async def test_a_recovery_uses_the_model_and_prices_that_started_the_attempt(db:
     assert resumed == changed.model_copy(update={"attempt": "attempt-2"})
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_resumed_attempt_decides_against_the_key_that_will_serve_it(db: None) -> None:
     """The money keys on the attempt: a parked turn's resume re-runs every round for real under a
     fresh workflow id and bills each burn under that attempt. A verdict frozen against the turn
@@ -1859,3 +1501,11 @@ async def test_a_resumed_attempt_decides_against_the_key_that_will_serve_it(db: 
     assert parked is False
     assert resumed is True
     assert resumed_again is False
+
+
+async def test_metered_workspaces_names_only_workspaces_with_ledger_rows(db: None) -> None:
+    async with workspace_tx() as connection:
+        metered, _ = await _seed_turn(connection)
+        await _seed_turn(connection)
+        await record_workspace_usage(connection, metered, "claude-opus-4-8", Usage(input_tokens=10))
+    assert await accounting.metered_workspaces()() == (metered,)

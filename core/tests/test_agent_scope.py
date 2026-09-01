@@ -6,18 +6,18 @@ from ufo.runtime.agent_scope import AgentUnbound, agent, agent_current
 from ufo.runtime.workspace import WorkspaceUnbound, ws
 
 
-def test_agent_requires_workspace() -> None:
+def _check_agent_requires_workspace() -> None:
     with pytest.raises(WorkspaceUnbound):
         with agent(uuid4()):
             pass
 
 
-def test_agent_current_requires_scope() -> None:
+def _check_agent_current_requires_scope() -> None:
     with pytest.raises(AgentUnbound):
         agent_current()
 
 
-def test_agent_binds_and_resets() -> None:
+def _check_agent_binds_and_resets() -> None:
     workspace_id = uuid4()
     agent_id = uuid4()
 
@@ -33,13 +33,13 @@ def test_agent_binds_and_resets() -> None:
         agent_current()
 
 
-def test_agent_refuses_switch_inside_scope() -> None:
+def _check_agent_refuses_switch_inside_scope() -> None:
     with ws(uuid4()), agent(uuid4()), pytest.raises(RuntimeError, match="cannot switch agent"):
         with agent(uuid4()):
             pass
 
 
-def test_agent_refuses_workspace_switch_inside_scope() -> None:
+def _check_agent_refuses_workspace_switch_inside_scope() -> None:
     with (
         ws(uuid4()),
         agent(uuid4()),
@@ -47,3 +47,10 @@ def test_agent_refuses_workspace_switch_inside_scope() -> None:
         pytest.raises(RuntimeError, match="workspace does not match"),
     ):
         agent_current()
+
+
+def test_agent_scope_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 5
+    for check in checks:
+        check()

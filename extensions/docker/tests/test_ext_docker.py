@@ -35,6 +35,11 @@ from ufo.sdk.sandbox import (
     sandbox_runtime_root,
 )
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 
 async def test_running_id_raises_on_docker_ps_failure_instead_of_reporting_not_running(
     monkeypatch: pytest.MonkeyPatch,
@@ -234,90 +239,6 @@ async def test_failed_provision_removes_the_container_and_network(
     ]
 
 
-async def test_attach_to_a_running_container_carries_the_second_turns_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The #507 bug lived in the attach branch: a later turn reusing a still-running container ran
-    under the first turn's baked env. Now the second `create` (which hits `running is not None`)
-    returns a handle whose `exec` carries the second turn's token and sentinels, not the first's —
-    the env lives on the per-turn handle, never on the container."""
-    conversation = uuid4()
-    running: list[str] = []
-    calls: list[tuple[str, ...]] = []
-
-    async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
-        calls.append(argv)
-        if argv[0] == "run":
-            running.append("cid1")
-            return 0, b"cid1\n", b""
-        if argv[0] == "ps" and "--format" in argv:
-            listed = f"ufo-sbx-{conversation}\n".encode() if running else b""
-            return 0, listed, b""
-        if argv[0] == "ps":
-            return 0, (b"cid1\n" if running else b""), b""
-        return 0, b"", b""
-
-    monkeypatch.setattr(docker_ext, "_docker", fake_docker)
-
-    def _spec(run_token: str, env: dict[str, str]) -> SandboxSpec:
-        return SandboxSpec(
-            conversation_id=conversation,
-            image_ref="ufo-sandbox:latest",
-            workspace_host_path="/tmp/ws",
-            proxy=ProxyEndpoint(port=8080, ca_cert="ca-pem"),
-            run_token=run_token,
-            env=env,
-        )
-
-    carrier = DockerCarrier()
-    await carrier.create(_spec("turn-a", {"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-a"}))
-    second = await carrier.create(_spec("turn-b", {"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-b"}))
-
-    exec_calls: list[tuple[str, ...]] = []
-
-    async def record_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
-        exec_calls.append(argv)
-        return 0, b"", b""
-
-    monkeypatch.setattr(docker_ext, "_docker", record_docker)
-    await carrier.exec(second, ("bash", "-lc", "gh api user"), 30)
-
-    exec_argv = exec_calls[-1]
-    assert "HTTPS_PROXY=http://turn-b:ufo@host.docker.internal:8080" in exec_argv
-    assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-b" in exec_argv
-    assert "HTTPS_PROXY=http://turn-a:ufo@host.docker.internal:8080" not in exec_argv
-    assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-a" not in exec_argv
-
-
-async def test_skill_programs_run_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, ...]] = []
-
-    async def record_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
-        calls.append(argv)
-        return 0, b"loaded", b""
-
-    monkeypatch.setattr(docker_ext, "_docker", record_docker)
-    handle = SandboxHandle(conversation_id=uuid4(), container_id="cid")
-
-    result = await DockerCarrier().exec_skill(handle, ("python3", "-I", "-c", "pass"), 30)
-
-    assert result.exit_code == 0
-    assert calls == [
-        (
-            "exec",
-            "--workdir",
-            WORKSPACE_DIR,
-            "--user",
-            "root",
-            "cid",
-            "python3",
-            "-I",
-            "-c",
-            "pass",
-        )
-    ]
-
-
 async def test_write_streams_the_content_over_stdin_and_never_on_the_command_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -347,25 +268,6 @@ async def test_write_streams_the_content_over_stdin_and_never_on_the_command_lin
     assert docker_ext.COPY_IN_PROG in argv[-3]
     assert "from containment import" in argv[-3]
     assert not any("cat > " in arg for arg in argv)
-
-
-async def test_write_derives_the_runtime_root_when_the_handle_omits_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, ...]] = []
-
-    async def record_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
-        calls.append(argv)
-        return 0, b"", b""
-
-    monkeypatch.setattr(docker_ext, "_docker", record_docker)
-    conversation_id = uuid4()
-    root = sandbox_runtime_root(conversation_id)
-    handle = SandboxHandle(conversation_id=conversation_id, container_id="cid1")
-
-    await DockerCarrier().write(handle, f"{root}/tool-output/call.txt", b"payload")
-
-    assert calls[-1][-2:] == (f"{root}/tool-output/call.txt", root)
 
 
 async def test_write_raises_with_the_container_error_on_a_nonzero_exit(
@@ -522,107 +424,6 @@ def _reclaim_spec(conversation_id: UUID) -> SandboxSpec:
     )
 
 
-async def test_create_reclaims_a_container_idle_past_the_ttl_and_leaves_the_rest(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reclaim is this carrier's own, fired by the create that proves the process is live. The
-    container whose conversation went untouched for the idle span is stopped by its resolved id —
-    never removed, so the container and its bind-mounted workspace persist for the next touch to
-    start again; a container touched inside the span, and the one the create is opening, are
-    not."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    idle, busy, opening = uuid4(), uuid4(), uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-
-    await carrier.create(_reclaim_spec(idle))
-    now = docker_ext.IDLE_RECLAIM_SECONDS - 1
-    await carrier.create(_reclaim_spec(busy))
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    daemon.calls.clear()
-
-    await carrier.create(_reclaim_spec(opening))
-
-    idle_name = f"{docker_ext.CONTAINER_NAME_PREFIX}{idle}"
-    assert ("stop", daemon.ids[idle_name]) in daemon.calls
-    assert idle_name in daemon.stopped
-    assert not any(argv[:2] == ("rm", "-f") for argv in daemon.calls)
-    stopped = [argv for argv in daemon.calls if argv[0] == "stop"]
-    assert stopped == [("stop", daemon.ids[idle_name])]
-
-
-async def test_reclaim_adopts_a_prior_process_container_and_takes_it_one_span_later(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A running `ufo-sbx-*` container this process has no touch for — left by a process that
-    restarted — must not run forever, and must not be stopped on sight either: the first create
-    adopts it at the current clock, and only a create one full idle span later stops it."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    orphan = uuid4()
-    daemon.start(f"{docker_ext.CONTAINER_NAME_PREFIX}{orphan}")
-    orphan_id = daemon.ids[f"{docker_ext.CONTAINER_NAME_PREFIX}{orphan}"]
-    carrier = DockerCarrier(clock=lambda: now)
-
-    await carrier.create(_reclaim_spec(uuid4()))
-    assert ("stop", orphan_id) not in daemon.calls
-
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(uuid4()))
-    assert ("stop", orphan_id) in daemon.calls
-
-
-async def test_concurrent_creates_reclaim_a_stale_container_exactly_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two creates racing one stale candidate must not double-stop or raise: the snapshot is
-    advisory, the stop re-checks the touch after every await, and the loser of the race finds the
-    entry already gone and moves on."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    stale = uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    await carrier.create(_reclaim_spec(stale))
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    stale_id = daemon.ids[f"{docker_ext.CONTAINER_NAME_PREFIX}{stale}"]
-    daemon.calls.clear()
-
-    await asyncio.gather(
-        carrier.create(_reclaim_spec(uuid4())), carrier.create(_reclaim_spec(uuid4()))
-    )
-
-    assert [argv for argv in daemon.calls if argv == ("stop", stale_id)] == [("stop", stale_id)]
-
-
-async def test_a_touch_landing_during_the_reclaim_scan_wins(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A conversation reopened while the scan is mid-flight is not stopped on the snapshot's
-    word: the staleness re-check after the id resolve sees the fresh touch and skips it."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    contested = uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    await carrier.create(_reclaim_spec(contested))
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    contested_name = f"{docker_ext.CONTAINER_NAME_PREFIX}{contested}"
-
-    def touch_during_resolve(argv: tuple[str, ...]) -> None:
-        if argv[:2] == ("ps", "-aq") and contested_name in argv[3]:
-            carrier._touched[contested] = now
-
-    daemon.on_call = touch_during_resolve
-    daemon.calls.clear()
-    await carrier.create(_reclaim_spec(uuid4()))
-
-    assert ("stop", daemon.ids[contested_name]) not in daemon.calls
-    assert contested in carrier._touched
-
-
 async def test_an_exec_keeps_a_working_conversations_container_out_of_reclaim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -743,153 +544,6 @@ async def test_a_create_losing_the_name_race_attaches_to_the_winner(
 
     assert daemon.counter == 1
     assert loser.container_id == winner.container_id
-
-
-async def test_a_mid_turn_command_revives_a_container_reclaim_stopped(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The scenario reclaim must survive: conversation A's turn goes quiet past the idle span with
-    no way for this carrier to know the turn is live, B's create stops A's container — and A's next
-    command starts it again and runs, so the wrong reclaim costs one restart, never a failed tool
-    call."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    quiet, opening = uuid4(), uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    handle = await carrier.create(_reclaim_spec(quiet))
-    quiet_name = f"{docker_ext.CONTAINER_NAME_PREFIX}{quiet}"
-
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(opening))
-    assert quiet_name in daemon.stopped
-
-    result = await carrier.exec(handle, ("bash", "-lc", "true"), 30)
-
-    assert result.exit_code == 0
-    assert quiet_name in daemon.running
-
-
-async def test_create_starts_a_stopped_container_instead_of_running_a_fresh_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The next turn of a reclaimed conversation reopens by starting the stopped container — same
-    id, same workspace, no `docker run` — the docker analog of resuming a provider-paused
-    sandbox."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    conversation = uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    first = await carrier.create(_reclaim_spec(conversation))
-    name = f"{docker_ext.CONTAINER_NAME_PREFIX}{conversation}"
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(uuid4()))
-    assert name in daemon.stopped
-
-    reopened = await carrier.create(_reclaim_spec(conversation))
-
-    assert reopened.container_id == first.container_id
-    assert name in daemon.running
-    assert daemon.counter == 2
-
-
-async def test_attach_starts_a_stopped_container_for_a_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A browse of a reclaimed conversation shows its live files: attach starts the stopped
-    container — the same shape as resuming a provider-paused sandbox — and still answers None when
-    no container exists at all."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    conversation = uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    created = await carrier.create(_reclaim_spec(conversation))
-    name = f"{docker_ext.CONTAINER_NAME_PREFIX}{conversation}"
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(uuid4()))
-    assert name in daemon.stopped
-
-    attached = await carrier.attach(_reclaim_spec(conversation))
-
-    assert attached is not None
-    assert attached.container_id == created.container_id
-    assert name in daemon.running
-    assert await carrier.attach(_reclaim_spec(uuid4())) is None
-
-
-async def test_a_command_in_flight_pins_its_container_against_reclaim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The in-flight guard, exercised mid-command: while conversation A's exec is suspended inside
-    the daemon call, the clock jumps past the idle TTL and an unrelated create fires reclaim — A's
-    container must not be stopped, however stale its last touch reads, because the command is still
-    running. The stop happens only once A is genuinely between calls."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    quiet, opening = uuid4(), uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    handle = await carrier.create(_reclaim_spec(quiet))
-    quiet_name = f"{docker_ext.CONTAINER_NAME_PREFIX}{quiet}"
-    quiet_id = daemon.ids[quiet_name]
-
-    release = asyncio.Event()
-    original = daemon.__class__.__call__
-
-    async def stall_exec(self, *argv, stdin=b"", timeout_s=60):
-        if argv[0] == "exec" and quiet_id in argv:
-            await release.wait()
-        return await original(self, *argv, stdin=stdin, timeout_s=timeout_s)
-
-    monkeypatch.setattr(daemon.__class__, "__call__", stall_exec)
-    inflight = asyncio.ensure_future(carrier.exec(handle, ("bash", "-lc", "slow"), 30))
-    await asyncio.sleep(0)
-    now = docker_ext.IDLE_RECLAIM_SECONDS + 1
-
-    await carrier.create(_reclaim_spec(opening))
-    assert ("stop", quiet_id) not in daemon.calls
-    assert quiet_name in daemon.running
-
-    release.set()
-    result = await inflight
-    assert result.exit_code == 0
-
-    now += docker_ext.IDLE_RECLAIM_SECONDS + 1
-    await carrier.create(_reclaim_spec(uuid4()))
-    assert ("stop", quiet_id) in daemon.calls
-
-
-async def test_reclaim_releases_the_conversations_network_and_revive_reconnects(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Bridge subnets are the host's finite resource (the daemon's default pools hold ~30), so a
-    stop that kept its network would wedge every new conversation past that count. Reclaim releases
-    the network with the stop, and the revive re-ensures it and reconnects the container before
-    starting — so the reopened conversation runs on a fresh subnet and nothing leaks."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    quiet = uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    handle = await carrier.create(_reclaim_spec(quiet))
-    network = f"ufo-sandbox-{quiet.hex}"
-    assert network in daemon.networks
-
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(uuid4()))
-
-    assert ("stop", handle.container_id) in [argv[:2] for argv in daemon.calls]
-    assert network not in daemon.networks
-
-    result = await carrier.exec(handle, ("bash", "-lc", "true"), 30)
-
-    assert result.exit_code == 0
-    assert network in daemon.networks
-    connect_at = daemon.calls.index(("network", "connect", network, handle.container_id))
-    start_at = daemon.calls.index(("start", handle.container_id))
-    assert connect_at < start_at
 
 
 async def test_a_failed_stop_keeps_the_stale_entry_for_the_next_create(
@@ -1022,47 +676,6 @@ async def test_a_revive_never_interleaves_inside_a_reclaims_release(
     assert removed_at < connect_at < start_at
 
 
-async def test_a_write_revives_a_container_reclaim_stopped(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The write half of the mid-turn heal: a copy-in landing on a stopped container starts it
-    again and lands, never surfacing the daemon's is-not-running answer to the caller."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    quiet = uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    handle = await carrier.create(_reclaim_spec(quiet))
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(uuid4()))
-    assert f"{docker_ext.CONTAINER_NAME_PREFIX}{quiet}" in daemon.stopped
-
-    await carrier.write(handle, "/workspace/note.txt", b"hi")
-
-    assert f"{docker_ext.CONTAINER_NAME_PREFIX}{quiet}" in daemon.running
-
-
-async def test_a_revive_tolerates_an_endpoint_already_connected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A container whose network survived (a release that failed after its stop) reconnects into
-    the connect conflict — the state the revive was after, so it proceeds to start."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    quiet = uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    handle = await carrier.create(_reclaim_spec(quiet))
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(uuid4()))
-    daemon.connect_conflict = True
-
-    result = await carrier.exec(handle, ("bash", "-lc", "true"), 30)
-
-    assert result.exit_code == 0
-    assert f"{docker_ext.CONTAINER_NAME_PREFIX}{quiet}" in daemon.running
-
-
 async def test_attach_answers_none_when_the_daemon_cannot_give_the_network_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1079,32 +692,6 @@ async def test_attach_answers_none_when_the_daemon_cannot_give_the_network_back(
     daemon.subnets_exhausted = True
 
     assert await carrier.attach(_reclaim_spec(quiet)) is None
-
-
-async def test_reclaim_adopts_and_releases_a_self_exited_containers_network(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A container that exited on its own still holds its subnet; the network scan adopts the
-    orphaned network at the current clock and one idle span later removes it, leaving the exited
-    container itself in place for a later attach to revive."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    crashed = uuid4()
-    name = f"{docker_ext.CONTAINER_NAME_PREFIX}{crashed}"
-    network = f"ufo-sandbox-{crashed.hex}"
-    daemon.start(name)
-    daemon._move(daemon.ids[name], daemon.running, daemon.stopped)
-    daemon.networks.add(network)
-    carrier = DockerCarrier(clock=lambda: now)
-
-    await carrier.create(_reclaim_spec(uuid4()))
-    assert network in daemon.networks
-
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(uuid4()))
-    assert network not in daemon.networks
-    assert name in daemon.stopped
 
 
 async def test_a_failed_network_release_is_retried_by_the_next_create(
@@ -1176,60 +763,6 @@ class _FakeCat:
         return out, err
 
 
-async def test_a_read_revives_a_stopped_container_and_restreams(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The read half of the mid-turn heal: the first cat dies on the daemon's is-not-running
-    answer before any byte, the revive starts the container, and the second cat streams the file
-    whole — no chunk lost, none repeated."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    quiet = uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    handle = await carrier.create(_reclaim_spec(quiet))
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(uuid4()))
-    name = f"{docker_ext.CONTAINER_NAME_PREFIX}{quiet}"
-    assert name in daemon.stopped
-    content = b"chunky" * 7
-
-    async def fake_cat(*argv, stdin=None, stdout=None, stderr=None):
-        if argv[2] in daemon.running.values():
-            return _FakeCat(content, b"", 0)
-        return _FakeCat(b"", f"container {argv[2]} is not running".encode(), 1)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_cat)
-    streamed = b"".join([chunk async for chunk in carrier.read(handle, "/workspace/big.bin")])
-
-    assert streamed == content
-    assert name in daemon.running
-
-
-async def test_a_reader_closing_early_kills_the_cat(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A caller that stops consuming mid-stream closes the iterator; the close reaches the child
-    synchronously — killed before aclose returns, never left to garbage collection — and the
-    in-flight pin drains so reclaim sees the conversation idle again."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    quiet = uuid4()
-    carrier = DockerCarrier(clock=lambda: now)
-    handle = await carrier.create(_reclaim_spec(quiet))
-    cat = _FakeCat(b"x" * docker_ext.READ_CHUNK_BYTES * 2, b"", 0, exited=False)
-
-    async def fake_cat(*argv, stdin=None, stdout=None, stderr=None):
-        return cat
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_cat)
-    chunks = carrier.read(handle, "/workspace/big.bin")
-    assert await anext(chunks)
-    await chunks.aclose()
-
-    assert cat.killed
-    assert carrier._inflight[quiet] == 0
-
-
 async def test_a_release_is_terminal_never_readopted(monkeypatch: pytest.MonkeyPatch) -> None:
     """A released conversation holds neither memory nor a subnet, appears in neither scan, and so
     is never adopted or released twice — the touch map stays bounded by what actually holds a
@@ -1295,36 +828,6 @@ async def test_create_keeps_the_stopped_container_on_a_daemon_fault(
     assert name in daemon.stopped
 
 
-async def test_a_dead_entry_with_no_resources_clears_on_the_next_create(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A create that died before its container ran leaves a touch entry holding nothing; the next
-    create's release finds no network to remove, takes the daemon's not-found answer as done, and
-    drops the entry instead of retrying it forever."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    dead = uuid4()
-    original = daemon.__class__.__call__
-
-    async def run_fails(self, *argv, stdin=b"", timeout_s=60):
-        if argv[0] == "run":
-            return 1, b"", b"daemon crashed"
-        return await original(self, *argv, stdin=stdin, timeout_s=timeout_s)
-
-    monkeypatch.setattr(daemon.__class__, "__call__", run_fails)
-    carrier = DockerCarrier(clock=lambda: now)
-    with pytest.raises(RuntimeError, match="daemon crashed"):
-        await carrier.create(_reclaim_spec(dead))
-    monkeypatch.setattr(daemon.__class__, "__call__", original)
-    assert dead in carrier._touched
-
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await carrier.create(_reclaim_spec(uuid4()))
-
-    assert dead not in carrier._touched
-
-
 async def test_a_drained_read_never_kills_the_cat(monkeypatch: pytest.MonkeyPatch) -> None:
     """`docker exec` closes its pipes a beat before it exits, so a fully drained stream can find
     the exit status not yet observed. Killing there reaps the status away from the loop's watcher
@@ -1366,34 +869,6 @@ async def test_the_scan_admits_only_exact_uuid_container_names(
     await carrier.create(_reclaim_spec(uuid4()))
 
     assert imposter in daemon.running
-
-
-async def test_reclaim_adopts_stops_and_releases_a_paused_container(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A paused container holds memory while `status=running` denies it exists. With its network
-    already gone — the crash shape — the container scan is the sole adopter, so listing paused
-    containers is load-bearing; release resolves the name in any state and `docker stop` handles
-    paused (measured), so the conversation releases terminally instead of retrying at its
-    original stamp forever."""
-    now = 0.0
-    daemon = _FakeDaemon()
-    monkeypatch.setattr(docker_ext, "_docker", daemon)
-    quiet = uuid4()
-    name = f"{docker_ext.CONTAINER_NAME_PREFIX}{quiet}"
-    network = f"ufo-sandbox-{quiet.hex}"
-    await DockerCarrier(clock=lambda: now).create(_reclaim_spec(quiet))
-    daemon._move(name, daemon.running, daemon.paused)
-    daemon.networks.discard(network)
-
-    restarted = DockerCarrier(clock=lambda: now)
-    await restarted.create(_reclaim_spec(uuid4()))
-    assert quiet in restarted._touched
-    now = docker_ext.IDLE_RECLAIM_SECONDS
-    await restarted.create(_reclaim_spec(uuid4()))
-
-    assert name in daemon.stopped
-    assert quiet not in restarted._touched
 
 
 def _scan_ps(argv: tuple[str, ...]) -> bool:

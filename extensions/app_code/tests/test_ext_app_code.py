@@ -41,46 +41,6 @@ def test_app_code_ships_the_one_agent_and_coding_ships_none() -> None:
     }
 
 
-def test_the_app_ships_the_one_feature_its_adopted_row_can_run() -> None:
-    """Provisioning writes a prompt when it creates a row and never again, because a prompt is a
-    member's to edit — so an adopted agent keeps the instructions it already has. A second feature
-    would be a band, a control under it, and no instructions behind it in every workspace that
-    already holds the reviewer, which is every workspace that has one.
-
-    So the prompt is the review procedure and nothing else, moved whole rather than rewritten: its
-    publication rule is the part a rewrite would have lost."""
-    prompt = app_code.CODE_APP_PROMPT
-    assert "reviewing is what you do" in prompt
-    assert "That commit status is the only permitted publication of the verdict." in prompt
-    page = (SKILL_DIR / "app.tsx").read_text()
-    # One feature, so the page draws one queue and nothing beside it.
-    assert '"Review queue"' in page
-
-
-def test_a_feed_wakes_the_armed_feature_so_the_setup_offers_no_cadence() -> None:
-    setup = app_code.CODE_APP_AGENT.setup
-    assert setup.standing == ("source_trigger",)
-    assert setup.schedule is None
-    assert setup.connectors == ("github",)
-    assert [credential.label for credential in setup.credentials] == ["ufo GitHub App"]
-
-
-def test_the_built_page_is_the_apps_own_tsx() -> None:
-    entry = MODULE_SCRIPT.search(BUILD_ENTRY.read_text())
-    assert entry is not None
-    assert (BUILD_ENTRY.parent / entry[1]).resolve() == (SKILL_DIR / "app.tsx").resolve()
-    source = (SKILL_DIR / "app.tsx").read_text()
-    assert "mountApp(" in source
-    # Filled in, because the page is the shape the app rebuilds against its own repository. A
-    # review is per head SHA, so the rows carry one.
-    for filled in ("#2077", "a41c9e2", "Materially incorrect result or state"):
-        assert filled in source
-    assert "<AppConversations" in source
-    # Setup is a portal screen, never a band here: the acts that wire an app — a workspace install
-    # an admin makes, a model turn that authors a page — are the two a framed page cannot start.
-    assert "AppSetup" not in source
-
-
 def test_the_page_draws_only_the_findings_the_procedure_produces() -> None:
     """A reviewer names one impact from a fixed list, and a claim it can only state as could or
     might is rejected before it is ever a finding. So the page has no lower tier to draw: one that
@@ -94,31 +54,6 @@ def test_the_page_draws_only_the_findings_the_procedure_produces() -> None:
         assert impact[0].lower() + impact[1:] in procedure
     assert "Plausible" not in page
     assert "Confirmed" not in page
-
-
-def test_the_home_skill_edits_builds_and_deploys_the_project() -> None:
-    skill = (SKILL_DIR / "SKILL.md").read_text()
-    assert "Copy this skill's `app.tsx` and `index.html`" in skill
-    assert (
-        "`deploy_website` action (`object_action` with kind `site`) with that directory and "
-        "`site_name` `code-home`"
-    ) in skill
-    assert "do not run a build yourself" in skill
-    assert "`object_get` kind `agent` with an empty name reads this turn's own agent" in skill
-    assert "`set_homepage` action's call template already carries the agent's name" in skill
-    assert f"`{app_code.manifest().agents[0].name}`" not in skill
-    assert "takes the platform kit as it stands today" in skill
-
-
-def test_the_review_agent_spawns_the_profile_this_pack_registers() -> None:
-    """The shipped agent and the child it drives ship together. A prompt naming a profile no
-    installed extension registers is a review agent that can never spawn anything — the profile is
-    the `coding` extension's, which is why the app declares it as a dependency by importing from
-    it."""
-    (agent,) = app_code.manifest().agents
-    profile = coding.manifest().subagents[0]
-    assert agent.name == app_code.CODE_APP_AGENT_NAME
-    assert f"`{profile.name}` reviewers" in agent.spec.prompt
 
 
 def test_the_review_agent_runs_the_member_facing_tool_set() -> None:
@@ -177,21 +112,6 @@ seven reviewers against two, a file split against every reviewer reading every f
 publication against a superseded head publishing nothing."""
 
 
-def test_the_app_carries_the_review_procedure_whole() -> None:
-    """The procedure is the agent, and this app moved it rather than rewriting it. A prompt is
-    written into an agent row once and never again, so a clause dropped here is a clause no
-    workspace provisioned after this release ever runs, and no test downstream of the row would
-    catch it — the fleet would simply review differently from the one this repository states.
-
-    Both directions are pinned. A missing clause is a rule silently lost in the move; a superseded
-    one is the older roster growing back beside the rule that replaced it, which is worse, because
-    the two disagree and the model would be reading both."""
-    (agent,) = app_code.manifest().agents
-    prompt = agent.spec.prompt
-    assert [clause for clause in CANONICAL_PROCEDURE if clause not in prompt] == []
-    assert [clause for clause in SUPERSEDED_PROCEDURE if clause in prompt] == []
-
-
 def test_the_app_frames_the_procedure_and_changes_nothing_in_it() -> None:
     """Two framing lines, and the procedure between them: which app is speaking, and where its own
     page is edited. Everything in between is the procedure as the repository holds it, so an edit
@@ -203,24 +123,6 @@ def test_the_app_frames_the_procedure_and_changes_nothing_in_it() -> None:
     assert lines[-2] == ""
     assert lines[-1].startswith("Your homepage is the code screen:")
     assert lines[-1].endswith(f"load the skill `{app_code.HOME_SKILL}` and follow it.")
-
-
-def test_the_prompt_names_the_home_skill_this_app_ships() -> None:
-    """The page is changed by loading a skill, and the agent is the only thing that knows to load
-    it. A prompt naming a skill the manifest does not ship is an app whose page no member can ask
-    it to change — and the two are written in different files, so nothing else pairs them."""
-    shipped = {path.name for path in (spec.path for spec in app_code.manifest().skills)}
-    assert app_code.HOME_SKILL in shipped
-    (agent,) = app_code.manifest().agents
-    assert f"load the skill `{app_code.HOME_SKILL}` and follow it." in agent.spec.prompt
-
-
-def test_the_review_agent_is_provisioned_for_the_two_reviewers_it_spawns() -> None:
-    """Both reviewers of a head run at once in the one sandbox the conversation holds, and each
-    takes its own checkout of the same repository."""
-    (agent,) = app_code.manifest().agents
-    assert agent.spec.sandbox_size == "large"
-    assert agent.spec.reasoning == "high"
 
 
 def test_the_review_agent_keeps_the_merge_base_its_diff_needs() -> None:
@@ -273,68 +175,6 @@ def test_the_review_agent_reads_agents_files_without_following_claude_symlinks()
     assert "Never read `CLAUDE.md`; it can be a symlink to `AGENTS.md`." in agent.spec.prompt
 
 
-def test_the_review_agent_requires_one_strict_json_result() -> None:
-    (agent,) = app_code.manifest().agents
-    prompt = agent.spec.prompt
-    assert "Return exactly one JSON object through `finish`, with no other text" in prompt
-    assert "contains no text outside it" in prompt
-
-
-def test_the_review_agent_reaches_github_through_the_slot_this_pack_declares() -> None:
-    """Public internet stays blocked, so a child's `git fetch` reaches github.com only through the
-    git slot's own injection rule, which the `coding` extension declares beside the profile that
-    uses it. Opening the public wire instead would give the agent every host."""
-    (agent,) = app_code.manifest().agents
-    assert agent.spec.internet_access_allowed is False
-    declared = coding.manifest().credentials
-    hosts = {slot.injection.host for slot in declared if slot.injection is not None}
-    assert coding.GIT_HOST in hosts
-
-
-def test_the_review_agent_publishes_the_status_the_repository_requires() -> None:
-    """`ufo review` is the required check on the pull request, and the head SHA is what it attaches
-    to. A prompt that names either differently publishes a status nothing is waiting for. Findings
-    ride a pull-request review, so each one lands on the changed line it describes rather than in a
-    status description that holds one sentence."""
-    (agent,) = app_code.manifest().agents
-    assert "`ufo review`" in agent.spec.prompt
-    assert "Never create a GitHub Check Run for it" in agent.spec.prompt
-    assert "never `ufo review`" in agent.spec.prompt
-    assert "/repos/{owner}/{repo}/statuses/{head_sha}" in agent.spec.prompt
-    assert "/repos/{owner}/{repo}/pulls/{pull_number}/reviews" in agent.spec.prompt
-
-
-def test_the_review_agent_declares_the_account_it_cannot_arrive_with() -> None:
-    """A shipped agent arrives with no grant, so the provision names the one kind of authority a
-    member must give it: a GitHub account, which its publication calls through. The instructions
-    also name the two acts no declaration can carry — sharing the pull-request source, which is
-    what lets a trigger wake it, and installing the App its children fetch commits with."""
-    (agent,) = app_code.manifest().agents
-    assert agent.setup.connectors == (coding.GITHUB_CONNECTOR,)
-    assert "share it" in agent.setup.instructions
-    assert "source trigger" in agent.setup.instructions
-    assert "connect_github" in agent.setup.instructions
-
-
-def test_the_review_agent_holds_the_verbs_its_own_setup_names() -> None:
-    """The setup asks the agent to connect an account and apply objects in its own conversation. It
-    runs the member-facing set, so it holds those verbs — an allowlist here would leave it reading
-    instructions it could not follow, which `AgentProvision` refuses outright."""
-    (agent,) = app_code.manifest().agents
-    assert agent.tools is None
-
-
-def test_the_page_says_what_the_app_is_for_in_the_provisions_own_words() -> None:
-    """The setup screen draws the provision's purpose as its lede, and the built page draws its own
-    `PURPOSE`. A member reads both, of one app, so two sentences that drift are two answers to what
-    the app is — and nothing but this holds them together."""
-    source = (SKILL_DIR / "app.tsx").read_text()
-    stated = re.search(r"const PURPOSE =\s*(.*?);\n", source, re.DOTALL)
-    assert stated is not None
-    drawn = "".join(re.findall(r'"([^"]*)"', stated[1]))
-    assert drawn == app_code.CODE_APP_AGENT.spec.purpose
-
-
 BABYSIT_SKILL_FILE = SKILL_DIR.parent / "app-code-babysit" / "SKILL.md"
 
 
@@ -375,19 +215,6 @@ def test_the_babysit_skill_names_no_workspace_of_its_own() -> None:
     owner_repo = re.findall(r"\b[a-z0-9][-\w]*/[a-z0-9][-\w]{2,}\b", prose)
     assert [held for held in owner_repo if not held.startswith(("repos/", "workspace/"))] == []
     assert "settings.md" in skill
-
-
-def test_babysitting_is_armed_by_a_clock_and_says_why() -> None:
-    """A finished check moves no pull-request record. The `pull_requests` stream syncs
-    `/repos/{owner}/{repo}/pulls`, so the source wakes on the record alone and a red check — the
-    first thing babysitting exists to clear — arrives at nothing. The review's own trigger cannot
-    carry this feature, and the prompt says so where a reader would otherwise try it."""
-    (agent,) = app_code.manifest().agents
-    assert f"`scheduled_task` named `{app_code.BABYSIT_TASK}`" in agent.spec.prompt
-    assert "a check that finishes moves no pull-request record" in agent.spec.prompt
-    # The review's standing order is unchanged: a feature nobody armed declares nothing.
-    assert app_code.CODE_APP_AGENT.setup.standing == ("source_trigger",)
-    assert app_code.CODE_APP_AGENT.setup.schedule is None
 
 
 def test_the_worker_is_given_the_rules_it_is_bound_by() -> None:

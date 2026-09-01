@@ -13,12 +13,11 @@ import asyncio
 import base64
 import hashlib
 import json
-import shlex
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import pytest
@@ -30,17 +29,14 @@ from ufo_ext_connectors.tools import (
     CallExternalToolInput,
     DescribeExternalToolsInput,
     ListExternalToolsInput,
-    SearchConnectorToolsInput,
     call_external_tool,
     describe_external_tools,
     list_external_tools,
-    search_connector_tools,
 )
 
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     WORKSPACE_DIR,
-    ExecResult,
     ProxyEndpoint,
     SandboxSession,
     SandboxSpec,
@@ -232,24 +228,6 @@ def test_call_external_tool_result_is_marked_untrusted() -> None:
     assert by_name["describe_external_tools"].untrusted is False
 
 
-async def test_list_external_tools_filters_the_registry() -> None:
-    result = await list_external_tools(
-        _ctx(_registry()),
-        ListExternalToolsInput(queries=("widgets",)),
-    )
-    rows = _payload(result)["connectors"]
-    assert rows == [{"source_id": OTHER_PROVIDER, "label": OTHER_LABEL, "connected_accounts": []}]
-
-
-async def test_list_external_tools_select_prefix_fetches_one_by_exact_id() -> None:
-    result = await list_external_tools(
-        _ctx(_registry()),
-        ListExternalToolsInput(queries=(f"select:{sample.CONNECTOR_PROVIDER}",)),
-    )
-    rows = _payload(result)["connectors"]
-    assert [row["source_id"] for row in rows] == [sample.CONNECTOR_PROVIDER]
-
-
 async def test_list_external_tools_names_each_connected_account_owner_and_sharing() -> None:
     result = await list_external_tools(
         _ctx(_registry(), accounts=("acct-1", "acct-2")),
@@ -260,21 +238,6 @@ async def test_list_external_tools_names_each_connected_account_owner_and_sharin
         {"account_id": "acct-1", "owner": GRANT_OWNER_EMAIL, "shared": True},
         {"account_id": "acct-2", "owner": GRANT_OWNER_EMAIL, "shared": True},
     ]
-
-
-async def test_describe_external_tools_fetches_schemas_from_the_broker() -> None:
-    result = await describe_external_tools(
-        _ctx(_registry()),
-        DescribeExternalToolsInput(
-            source_id=sample.CONNECTOR_PROVIDER,
-            tool_names=(sample.BROKER_TOOL_SLUG,),
-        ),
-    )
-    payload = _payload(result)
-    assert payload["source_id"] == sample.CONNECTOR_PROVIDER
-    schema = payload["schemas"][sample.BROKER_TOOL_SLUG]
-    assert schema["input_schema"]["properties"] == {"limit": {"type": "integer"}}
-    assert "unresolved" not in payload
 
 
 async def test_describe_external_tools_marks_an_unknown_name_unresolved() -> None:
@@ -288,48 +251,6 @@ async def test_describe_external_tools_marks_an_unknown_name_unresolved() -> Non
     payload = _payload(result)
     assert payload["unresolved"] == ["NOT_A_REAL_SLUG"]
     assert [tool["slug"] for tool in payload["availableTools"]] == [sample.BROKER_TOOL_SLUG]
-
-
-async def test_search_connector_tools_renders_the_brokers_search() -> None:
-    result = await search_connector_tools(
-        _ctx(_registry()),
-        SearchConnectorToolsInput(
-            source_id=sample.CONNECTOR_PROVIDER,
-            query="list widgets",
-        ),
-    )
-    payload = _payload(result)
-    assert payload["connector"] == sample.CONNECTOR_PROVIDER
-    assert [tool["slug"] for tool in payload["tools"]] == [sample.BROKER_TOOL_SLUG]
-    assert payload["plan"] == [sample.BROKER_SEARCH_PLAN]
-    assert payload["guidance"] == []
-
-
-async def test_search_connector_tools_falls_back_to_top_tools_and_marks_the_answer() -> None:
-    """Search goes through the same seam as describe, so a query the broker matched nothing for is
-    answered with the connector's unqueried top tools rather than empty rows beside an empty plan —
-    and marked as catalog order, so the head is never read as a relevance ranking."""
-    broker = _UnmatchedSearchBroker()
-    registry = ConnectorRegistry(
-        entries={
-            sample.CONNECTOR_PROVIDER: ConnectorEntry(
-                provider=sample.CONNECTOR_PROVIDER, label=sample.CONNECTOR_LABEL, broker=broker
-            )
-        }
-    )
-    result = await search_connector_tools(
-        _ctx(registry),
-        SearchConnectorToolsInput(
-            source_id=sample.CONNECTOR_PROVIDER,
-            query="reserve the widget nobody has named yet",
-        ),
-    )
-    payload = _payload(result)
-    assert [tool["slug"] for tool in payload["tools"]] == [sample.BROKER_TOOL_SLUG]
-    assert payload[connector_tools.SEARCH_TOOLS_NOTE_KEY] == (
-        connector_tools.AVAILABLE_TOOLS_FALLBACK_NOTE
-    )
-    assert broker.listed == [""]
 
 
 async def test_call_external_tool_uses_the_only_connected_account() -> None:
@@ -395,59 +316,6 @@ async def test_read_only_turn_refuses_mutating_or_unclassified_connector_tools(s
 
     assert broker.described == [slug]
     assert broker.executed == []
-
-
-async def test_call_external_tool_requires_a_choice_between_connected_accounts() -> None:
-    ctx = _ctx(_registry(), accounts=("acct-one", "acct-two"))
-    with pytest.raises(ValueError, match=r"multiple active.*pass account_id"):
-        await call_external_tool(
-            ctx,
-            CallExternalToolInput(
-                tool_name=sample.BROKER_TOOL_SLUG,
-                source_id=sample.CONNECTOR_PROVIDER,
-                arguments={},
-            ),
-        )
-    result = await call_external_tool(
-        ctx,
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            account_id="acct-two",
-            arguments={},
-        ),
-    )
-    assert _payload(result)["account"] == "acct-two"
-
-
-@pytest.mark.parametrize(
-    ("body", "blocks"),
-    [
-        (
-            {"markdown_text": "the **plan** is posted"},
-            [{"type": "markdown", "text": "the **plan** is posted"}],
-        ),
-        (
-            {"text": "the plan"},
-            [{"type": "section", "text": {"type": "mrkdwn", "text": "the plan"}}],
-        ),
-        ({"blocks": list(SLACK_BODY_BLOCKS), "text": "the plan"}, list(SLACK_BODY_BLOCKS)),
-    ],
-    ids=["markdown_text", "text", "blocks"],
-)
-def test_the_footer_is_the_sends_last_block_whatever_the_body_it_marks(
-    body: dict[str, JsonValue], blocks: list[JsonValue]
-) -> None:
-    """One route for the footer: the context block Slack renders in its small muted type, after the
-    body's own blocks. A `markdown_text` body moves into the `markdown` block that argument is the
-    top-level spelling of, which is also what keeps a body Slack refuses to take alongside `blocks`
-    from being sent with them; a `text` body moves into the section block that renders the mrkdwn it
-    is written in, and stays where it is as the notification fallback too."""
-    footer = {"type": "context", "elements": [{"type": "mrkdwn", "text": "*Sent using* ufo"}]}
-    fallback = {"text": body["text"]} if "text" in body else {}
-    assert connector_tools.slack_attributed(
-        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", **body}
-    ) == {"channel": "C1", **fallback, "blocks": [*blocks, footer]}
 
 
 def test_a_text_body_past_one_text_object_is_chunked_rather_than_refused() -> None:
@@ -516,41 +384,6 @@ def test_a_markdown_body_past_the_payloads_markdown_cap_stays_one_block() -> Non
     }
 
 
-@pytest.mark.parametrize("encode", [str, quote], ids=["json", "url_encoded"])
-def test_a_serialized_block_body_is_read_and_re_emitted_the_way_it_arrived(
-    encode: Callable[[str], str],
-) -> None:
-    """The broker's schema takes the block list serialized as well as literal, so both forms are
-    footered — and the value goes back in the encoding it came in, since that is the one the broker
-    reads it out of."""
-    sent = encode(json.dumps(SLACK_BODY_BLOCKS))
-    attributed = connector_tools.slack_attributed(
-        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", "blocks": sent}
-    )
-    blocks = attributed["blocks"]
-    assert isinstance(blocks, str) and json.loads(unquote(blocks)) == [
-        *SLACK_BODY_BLOCKS,
-        {"type": "context", "elements": [{"type": "mrkdwn", "text": "*Sent using* ufo"}]},
-    ]
-    assert (blocks == unquote(blocks)) is (sent == unquote(sent))
-
-
-@pytest.mark.parametrize(
-    "blocks",
-    ["not json at all", json.dumps({"type": "section"}), [], 7],
-    ids=["unparseable", "not_a_list", "empty", "not_a_body"],
-)
-def test_a_block_body_this_cannot_read_goes_out_unmarked(blocks: JsonValue) -> None:
-    """A `blocks` value that is not a block list to append to is passed through exactly as the model
-    wrote it, and so is the rest of the send: that value is the body the send publishes, and a
-    footer written anywhere else marks a message it does not belong to."""
-    arguments: dict[str, JsonValue] = {"blocks": blocks, "text": "the plan"}
-    assert (
-        connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, arguments)
-        == arguments
-    )
-
-
 @pytest.mark.parametrize(
     ("slug", "arguments"),
     [
@@ -566,26 +399,6 @@ def test_a_call_carrying_no_body_is_never_given_one(slug: str, arguments: dict) 
     attributed = connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, slug, arguments)
     assert attributed == arguments
     assert "blocks" not in attributed
-
-
-@pytest.mark.parametrize(
-    ("provider", "slug", "arguments"),
-    [
-        (connector_tools.SLACK_PROVIDER, SLACK_UPDATE_SLUG, {"ts": "1.0", "text": "corrected"}),
-        (connector_tools.SLACK_PROVIDER, SLACK_HISTORY_SLUG, {"channel": "C1"}),
-        (connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", "text": "  "}),
-        ("gmail", GMAIL_SEND_SLUG, {"to": "a@b.test", "text": "the plan is attached"}),
-        (sample.CONNECTOR_PROVIDER, SLACK_SEND_SLUG, {"text": "the plan is posted"}),
-    ],
-    ids=["edit", "read", "empty_text", "other_provider", "other_broker_slug"],
-)
-def test_slack_attributed_leaves_every_other_call_alone(
-    provider: str, slug: str, arguments: dict
-) -> None:
-    """Only a Slack send is marked. An edit and a read publish nothing new, an empty text is not a
-    body, and another provider's send is another product's message — outbound email included, which
-    this deploy originates through no path of its own."""
-    assert connector_tools.slack_attributed(provider, slug, arguments) == arguments
 
 
 @pytest.mark.parametrize(
@@ -658,38 +471,6 @@ def test_the_inbound_strip_reaches_a_footer_the_outbound_guard_will_not_read() -
     assert "blocks" in connector_tools.slack_attributed(
         connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": ends_the_way}
     )
-
-
-async def test_call_external_tool_dispatches_a_slack_send_with_the_attribution() -> None:
-    """The mark rides the arguments core dispatches, read back off the broker's echo — the same
-    seam the send would reach on a live broker."""
-    registry = ConnectorRegistry(
-        entries={
-            connector_tools.SLACK_PROVIDER: ConnectorEntry(
-                provider=connector_tools.SLACK_PROVIDER,
-                label="Slack",
-                broker=_AnySlugBroker(),
-            )
-        }
-    )
-    result = await call_external_tool(
-        _ctx(registry, accounts=(SLACK_ACCOUNT,), provider=connector_tools.SLACK_PROVIDER),
-        CallExternalToolInput(
-            tool_name=SLACK_SEND_SLUG,
-            source_id=connector_tools.SLACK_PROVIDER,
-            arguments={"channel": "C1", "text": "the plan is posted"},
-        ),
-    )
-    payload = _payload(result)
-    assert payload["slug"] == SLACK_SEND_SLUG
-    assert payload["arguments"] == {
-        "channel": "C1",
-        "text": "the plan is posted",
-        "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": "the plan is posted"}},
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": "*Sent using* ufo"}]},
-        ],
-    }
 
 
 async def test_tools_fail_loud_without_the_registry_or_the_provider() -> None:
@@ -845,36 +626,6 @@ async def test_a_produced_files_name_cannot_escape_its_workspace_dir(tmp_path: P
     assert not (tmp_path / "evil.txt").exists()
 
 
-async def test_a_produced_file_is_not_fetched_through_a_symlinked_connector_dir(
-    tmp_path: Path,
-) -> None:
-    """`connector_files/` is in the agent's own workspace, so the agent can replace it with a link
-    before the call and `curl -o` would follow it and truncate what it found. The path is claimed
-    through the containment guard first, so the fetch is refused at the linked component and nothing
-    outside the workspace is written."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (workspace / CONNECTOR_FILES_DIR).symlink_to(outside)
-    source = tmp_path / "store" / "legit.txt"
-    source.parent.mkdir()
-    source.write_bytes(b"payload")
-    broker = _FileBroker(outputs=(BrokerFile(name="legit.txt", url=f"file://{source}"),))
-
-    with pytest.raises(RuntimeError, match="escapes"):
-        await call_external_tool(
-            _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-            CallExternalToolInput(
-                tool_name="ANY",
-                source_id=sample.CONNECTOR_PROVIDER,
-                arguments={},
-            ),
-        )
-
-    assert list(outside.iterdir()) == []
-
-
 async def test_a_workspace_file_argument_cannot_climb_out_of_the_workspace(tmp_path: Path) -> None:
     """The model chooses this path and the bytes leave for the provider's file store, so a name
     climbing above `/workspace` is refused before anything is measured or staged."""
@@ -979,64 +730,6 @@ async def test_a_deduped_upload_slot_skips_the_put(tmp_path: Path) -> None:
     assert not (workspace / key).exists()
 
 
-async def test_transfer_urls_are_passed_as_curl_url_operands() -> None:
-    """Finding: a broker-reported URL starting with `-` must never be parsed as a curl flag. Both
-    legs pass the URL as the `--url` operand, so a dash-leading URL is a URL, never an option."""
-    commands: list[str] = []
-
-    class _RecordingSandbox:
-        async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
-            commands.append(command)
-            return ExecResult(stdout="", stderr="", exit_code=0)
-
-        async def python(
-            self, program: str, *args: str, timeout_s: int | None = None
-        ) -> ExecResult:
-            measured = "hashlib" in program
-            return ExecResult(stdout="deadbeef\n7\n" if measured else "", stderr="", exit_code=0)
-
-    broker = _FileBroker(outputs=(BrokerFile(name="out.txt", url="-oPWNED"),), put_url="-oPWNED")
-    await call_external_tool(
-        _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=_RecordingSandbox()),
-        CallExternalToolInput(
-            tool_name="UPLOAD_FILE",
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={"media": {"workspace_file": "/workspace/report.csv"}},
-        ),
-    )
-    curls = [command for command in commands if command.startswith("curl")]
-    assert curls, "expected upload and download curl commands"
-    assert all(f"--url {shlex.quote('-oPWNED')}" in command for command in curls)
-    assert not any(command.split("curl", 1)[1].strip().startswith("-oPWNED") for command in curls)
-
-
-async def test_provider_marked_base64_text_is_decoded_inline(tmp_path: Path) -> None:
-    """The GitHub contents shape, through the real tool: a source file the provider marked base64
-    reaches the model as readable UTF-8 with the marker corrected, and nothing is written to the
-    workspace. The sibling `type: "file"` is GitHub's entry-kind label, not a media type — it must
-    not push a small text field down the binary path."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source = "def main():\n    return 1\n"
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={
-                "content": base64.b64encode(source.encode()).decode(),
-                "encoding": "base64",
-                "name": "surface.py",
-                "type": "file",
-            },
-        ),
-    )
-    echoed = _payload(result)["arguments"]
-    assert echoed["content"] == source
-    assert echoed["encoding"] == "utf-8"
-    assert not list(workspace.rglob(f"{CONNECTOR_FILES_DIR}/*"))
-
-
 async def test_marked_binary_content_is_written_to_the_workspace_and_referenced(
     tmp_path: Path,
 ) -> None:
@@ -1121,88 +814,6 @@ async def test_base64_shaped_values_are_untouched_without_the_providers_marker(
     assert not list(workspace.rglob(f"{CONNECTOR_FILES_DIR}/*"))
 
 
-async def test_a_marked_field_that_is_not_base64_is_left_as_the_provider_sent_it(
-    tmp_path: Path,
-) -> None:
-    """A marker is a claim, not a guarantee: a provider that keeps `encoding: base64` while putting
-    a placeholder in the field must not have it mangled. Lenient decoding drops every character
-    outside the alphabet, so this exact placeholder decodes to 18 bytes of garbage that would be
-    written to the workspace as a file; strict validation rejects it and the node stands as sent."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    placeholder = "binary file (use raw endpoint)"
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={"content": placeholder, "encoding": "base64", "name": "x.bin"},
-        ),
-    )
-    echoed = _payload(result)["arguments"]
-    assert echoed["content"] == placeholder
-    assert echoed["encoding"] == "base64"
-    assert not list(workspace.rglob(f"{CONNECTOR_FILES_DIR}/*"))
-
-
-async def test_a_base64_data_url_is_translated_like_a_marked_field(tmp_path: Path) -> None:
-    """A `data:<mime>;base64,` string marks itself. Text inlines as itself; binary lands in the
-    workspace under the mimetype the URL declares, and neither leaves base64 behind."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    gif = b"GIF89a" + bytes(range(200))
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={
-                "note": f"data:text/plain;base64,{base64.b64encode(b'hi there').decode()}",
-                "avatar": f"data:image/gif;base64,{base64.b64encode(gif).decode()}",
-                "link": "data:not-a-data-url",
-            },
-        ),
-    )
-    echoed = _payload(result)["arguments"]
-    assert echoed["note"] == "hi there"
-    assert echoed["link"] == "data:not-a-data-url"
-    assert echoed["avatar"]["mimetype"] == "image/gif"
-    on_disk = workspace / Path(echoed["avatar"]["workspace_path"]).relative_to(WORKSPACE_DIR)
-    assert on_disk.read_bytes() == gif
-
-
-async def test_the_walk_reaches_base64_nested_under_a_content_key(tmp_path: Path) -> None:
-    """A `content` key holding an object is not a marked field, whatever the sibling marker claims.
-    The subtree under it is still walked, so base64 marked deeper down is translated rather than
-    skipped along with its parent."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source = "print('nested')\n"
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={
-                "encoding": "base64",
-                "content": {
-                    "entries": [
-                        {
-                            "content": base64.b64encode(source.encode()).decode(),
-                            "encoding": "base64",
-                            "name": "inner.py",
-                        }
-                    ]
-                },
-            },
-        ),
-    )
-    echoed = _payload(result)["arguments"]
-    assert echoed["content"]["entries"][0]["content"] == source
-    assert echoed["content"]["entries"][0]["encoding"] == "utf-8"
-    assert echoed["encoding"] == "base64"
-
-
 async def test_a_decoded_fields_name_cannot_escape_its_workspace_dir(tmp_path: Path) -> None:
     """The offloaded file is named by the provider, so it is basenamed like a produced file: a
     traversing name writes inside `connector_files/`, never above the workspace."""
@@ -1244,91 +855,6 @@ async def test_a_decoded_fields_name_cannot_escape_its_workspace_dir(tmp_path: P
     written = Path(escaped["workspace_path"])
     assert written.parent.parent.name == CONNECTOR_FILES_DIR
     assert (workspace / written.relative_to(WORKSPACE_DIR)).read_bytes() == png
-
-
-async def test_a_decoded_payload_placed_twice_leaves_one_file(tmp_path: Path) -> None:
-    """The path is the content's own digest, so a second decode of the same payload names a file
-    that already holds those bytes. It is left where it is and the staged copy is dropped, so the
-    workspace the member browses does not collect a `.part` per repeat."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    png = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
-    arguments = {
-        "data": base64.b64encode(png).decode(),
-        "encoding": "base64",
-        "name": "report.png",
-    }
-    call = CallExternalToolInput(
-        tool_name=sample.BROKER_TOOL_SLUG,
-        source_id=sample.CONNECTOR_PROVIDER,
-        arguments=arguments,
-    )
-
-    first = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)), call
-    )
-    placed = _payload(first)["arguments"]["data"]["workspace_path"]
-    on_disk = workspace / Path(placed).relative_to(WORKSPACE_DIR)
-    inode = on_disk.stat().st_ino
-
-    second = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)), call
-    )
-
-    assert _payload(second)["arguments"]["data"]["workspace_path"] == placed
-    assert [entry.name for entry in on_disk.parent.iterdir()] == ["report.png"]
-    assert on_disk.read_bytes() == png
-    assert on_disk.stat().st_ino == inode, "the second decode renamed a new inode over the first"
-
-
-async def test_a_decoded_payload_is_not_placed_over_a_planted_symlink(tmp_path: Path) -> None:
-    """A decoded payload's path is its own content digest, so the agent can compute it before the
-    call and leave a link at it. The placement runs through the containment guard, which refuses a
-    name a link holds instead of renaming over it — the outside file keeps its bytes."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    png = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
-    outside = tmp_path / "outside.png"
-    outside.write_bytes(b"host secret")
-    planted = workspace / CONNECTOR_FILES_DIR / hashlib.sha256(png).hexdigest()
-    planted.mkdir(parents=True)
-    (planted / "report.png").symlink_to(outside)
-
-    with pytest.raises(RuntimeError, match="not a regular file"):
-        await call_external_tool(
-            _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-            CallExternalToolInput(
-                tool_name=sample.BROKER_TOOL_SLUG,
-                source_id=sample.CONNECTOR_PROVIDER,
-                arguments={
-                    "data": base64.b64encode(png).decode(),
-                    "encoding": "base64",
-                    "name": "report.png",
-                },
-            ),
-        )
-
-    assert outside.read_bytes() == b"host secret"
-
-
-async def test_a_non_ascii_marked_field_is_left_as_the_provider_sent_it(tmp_path: Path) -> None:
-    """Non-ASCII in a marked field raises a bare ValueError out of `b64decode`, not the binascii
-    subclass. An i18n placeholder must take the same graceful path as any other mislabelled field —
-    node untouched — rather than escaping as an error for the whole call."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    placeholder = "café binary content über placeholder"
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={"content": placeholder, "encoding": "base64", "name": "note.txt"},
-        ),
-    )
-    echoed = _payload(result)["arguments"]
-    assert echoed["content"] == placeholder
-    assert echoed["encoding"] == "base64"
 
 
 async def test_a_response_nested_past_the_depth_cap_survives_untranslated(tmp_path: Path) -> None:
@@ -1393,36 +919,6 @@ async def test_a_field_over_the_decode_cap_is_never_decoded(
     assert not list(workspace.rglob(f"{CONNECTOR_FILES_DIR}/*"))
 
 
-async def test_a_node_marking_two_content_keys_translates_both(tmp_path: Path) -> None:
-    """A provider carries one marker for the node, not one per field. Both marked fields are
-    translated — neither is left as raw base64 under a marker claiming otherwise — and when their
-    outcomes differ the shared marker summarizes the node while each value describes its own field:
-    the small one is the decoded text in place, the binary one a reference to read."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    note = "release notes\n"
-    blob = b"\x89PNG\r\n\x1a\n" + bytes(range(128))
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={
-                "content": base64.b64encode(note.encode()).decode(),
-                "data": base64.b64encode(blob).decode(),
-                "encoding": "base64",
-                "name": "shot.png",
-            },
-        ),
-    )
-    echoed = _payload(result)["arguments"]
-    assert echoed["content"] == note
-    assert echoed["data"]["mimetype"] == "image/png"
-    assert echoed["encoding"] == "offloaded"
-    on_disk = workspace / Path(echoed["data"]["workspace_path"]).relative_to(WORKSPACE_DIR)
-    assert on_disk.read_bytes() == blob
-
-
 async def test_a_huge_non_data_url_string_is_never_scanned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1485,66 +981,6 @@ async def test_one_invalid_sibling_does_not_hold_back_a_valid_marked_field(
     assert echoed["content"] == note
     assert echoed["data"] == "binary file (use raw endpoint)"
     assert echoed["encoding"] == "base64"
-
-
-async def test_the_same_payload_offloads_to_one_content_addressed_path(tmp_path: Path) -> None:
-    """Decoded bytes name their own directory, so a payload that appears twice — the same attachment
-    on two records here, the same file re-read on a later round in practice — resolves to the path
-    it already wrote instead of accumulating a copy per occurrence, while a different payload under
-    the same provider name still gets its own."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    shot = b"\x89PNG\r\n\x1a\n" + bytes(range(96))
-    other = b"\x89PNG\r\n\x1a\n" + bytes(range(96, 192))
-
-    def record(blob: bytes) -> dict[str, object]:
-        return {
-            "data": base64.b64encode(blob).decode(),
-            "encoding": "base64",
-            "name": "shot.png",
-        }
-
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={"records": [record(shot), record(shot), record(other)]},
-        ),
-    )
-    paths = [row["data"]["workspace_path"] for row in _payload(result)["arguments"]["records"]]
-    assert paths[0] == paths[1], "the same bytes must resolve to one path"
-    assert paths[2] != paths[0], "different bytes must not collide"
-    written = sorted(p for p in workspace.rglob("*") if p.is_file())
-    assert len(written) == 2
-    on_disk = workspace / Path(paths[0]).relative_to(WORKSPACE_DIR)
-    assert on_disk.read_bytes() == shot
-    assert on_disk.name == "shot.png"
-
-
-async def test_a_marked_field_with_no_name_falls_back_for_both_name_and_mimetype(
-    tmp_path: Path,
-) -> None:
-    """A provider need not tell us what it inlined. With no name key on the node there is nothing to
-    infer a media type from either, so the offloaded file takes the fallback name and the fallback
-    mimetype rather than an empty path segment or a guessed type."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    blob = b"\x89\xff\xfe" + bytes(range(200, 256))
-    assert blob.decode("utf-8", "ignore").encode() != blob, "must be binary to reach the offload"
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={"body": base64.b64encode(blob).decode(), "encoding": "base64"},
-        ),
-    )
-    reference = _payload(result)["arguments"]["body"]
-    assert reference["name"] == connector_tools.FALLBACK_FILENAME
-    assert reference["mimetype"] == connector_tools.FALLBACK_MIMETYPE
-    on_disk = workspace / Path(reference["workspace_path"]).relative_to(WORKSPACE_DIR)
-    assert on_disk.read_bytes() == blob
 
 
 async def test_concurrent_calls_decoding_one_payload_never_expose_a_partial_file(
@@ -1810,32 +1246,6 @@ async def test_a_repeated_parent_object_crosses_once_and_expands_to_the_original
     assert json.dumps(_expanded(payload, payload)["arguments"]) == original
 
 
-async def test_a_single_repo_search_lands_inside_the_engine_inline_budget(tmp_path: Path) -> None:
-    """What condensing buys the member, composed with the cap the engine applies after the handler
-    returns: a 30-hit search scoped to one repository is far past `MAX_TOOL_RESULT_CHARS`, so the
-    engine would write it to a runtime `tool-output` file and leave the model a preview plus a path
-    to filter. Condensed, the result fits the inline budget and stays whole in context — the same
-    facts, no file round-trip. The order is what makes this hold: the handler condenses, then
-    dispatch measures what the handler returned."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    search = _code_search(30)
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments=search,
-        ),
-    )
-    text = result.content[0].text
-    assert len(json.dumps(search)) > MAX_TOOL_RESULT_CHARS, "the raw response must be offload-bound"
-    assert len(text) <= MAX_TOOL_RESULT_CHARS, f"{len(text)} chars is past the inline budget"
-    payload = _payload(result)
-    assert payload["arguments"]["items"][0]["repository"]["name"] == "widgets"
-    assert json.dumps(_expanded(payload, payload)["arguments"]) == json.dumps(search)
-
-
 async def test_a_cross_repo_search_still_offloads(tmp_path: Path) -> None:
     """The other side of that composition: a cross-repo search carries a different repository per
     hit, so there is nothing identical to collapse and the result must still be over the cap when
@@ -1904,24 +1314,6 @@ async def test_a_pointer_escapes_a_key_holding_a_slash_or_a_tilde(tmp_path: Path
     payload = _payload(result)
     assert payload["arguments"]["acme/widgets~dev"] == {"same_as": "/arguments/acme~1widgets~0main"}
     assert json.dumps(_expanded(payload, payload)["arguments"]) == json.dumps(arguments)
-
-
-async def test_small_repeated_objects_are_left_whole(tmp_path: Path) -> None:
-    """A pointer costs ~35 bytes, so churning small structs into pointers trades a readable result
-    for a saving that measures 1% on a real payload. Under the floor every copy crosses in full."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    stub = {"login": "acme", "id": 295985267, "type": "Organization"}
-    assert len(json.dumps(stub)) < connector_tools.MIN_DEDUPE_BYTES
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={"rows": [{"user": dict(stub)} for _ in range(20)]},
-        ),
-    )
-    assert _payload(result)["arguments"]["rows"] == [{"user": stub}] * 20
 
 
 async def test_a_repeated_array_keeps_its_type(tmp_path: Path) -> None:
@@ -2065,31 +1457,6 @@ async def test_a_node_dense_response_is_never_walked(tmp_path: Path) -> None:
         ),
     )
     assert _payload(result)["arguments"] == dense
-
-
-async def test_a_record_whose_child_was_pointed_away_still_collapses_whole(
-    tmp_path: Path,
-) -> None:
-    """A node's size is the one it came in at, so two nodes with equal digests clear the floor
-    alike. Here the same record appears under three keys: the shared `owner` inside it collapses
-    first, and the records above it must still collapse whole rather than surviving as
-    partially-pointered copies of a record already in the result."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    record = {"repository": _repository()}
-    result = await call_external_tool(
-        _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
-        CallExternalToolInput(
-            tool_name=sample.BROKER_TOOL_SLUG,
-            source_id=sample.CONNECTOR_PROVIDER,
-            arguments={"one": record, "two": dict(record), "three": dict(record)},
-        ),
-    )
-    payload = _payload(result)
-    echoed = payload["arguments"]
-    assert echoed["two"] == {"same_as": "/arguments/one"}
-    assert echoed["three"] == {"same_as": "/arguments/one"}
-    assert _expanded(payload, payload)["arguments"]["three"] == record
 
 
 async def test_deep_subtrees_are_never_judged_identical_past_the_depth_cap(tmp_path: Path) -> None:

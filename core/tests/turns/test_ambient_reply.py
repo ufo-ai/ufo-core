@@ -149,25 +149,21 @@ async def test_a_member_writing_the_fence_stays_inside_the_data() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("answer", "decision"),
-    [
+async def test_the_decision_is_the_last_decision_word_the_model_answered() -> None:
+    """One word is what the prompt asks for, and a model that reasons out loud on the way there is
+    read by its conclusion — the last word, not the first, so a rule named on the way to the
+    opposite answer does not become the answer."""
+    cases = (
         ("REPLY", "REPLY"),
         ("NO_REPLY", "NO_REPLY"),
         ("no_reply", "NO_REPLY"),
         ("  REPLY\n", "REPLY"),
         ("Rule 2 fits, so NO_REPLY.", "NO_REPLY"),
-    ],
-)
-async def test_the_decision_is_the_last_decision_word_the_model_answered(
-    answer: str, decision: str
-) -> None:
-    """One word is what the prompt asks for, and a model that reasons out loud on the way there is
-    read by its conclusion — the last word, not the first, so a rule named on the way to the
-    opposite answer does not become the answer."""
-    classifier, _ = _classifier(answer)
+    )
 
-    assert await classifier.decide(AmbientMessage(speaker=OTHER, text="hm"), ()) == decision
+    for answer, decision in cases:
+        classifier, _ = _classifier(answer)
+        assert await classifier.decide(AmbientMessage(speaker=OTHER, text="hm"), ()) == decision
 
 
 async def test_an_unreadable_answer_raises_rather_than_guessing() -> None:

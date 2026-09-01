@@ -3,7 +3,7 @@ import pytest
 from ufo.harness.tools import dispatch_segments
 
 
-def test_segments_safe_runs_around_ordered_barriers() -> None:
+def test_segments_bound_safe_runs_by_barriers_and_parallel_limit() -> None:
     items = ("safe:1", "safe:2", "barrier:1", "safe:3", "barrier:2")
 
     segments = tuple(
@@ -12,8 +12,6 @@ def test_segments_safe_runs_around_ordered_barriers() -> None:
 
     assert segments == (("safe:1", "safe:2"), ("barrier:1",), ("safe:3",), ("barrier:2",))
 
-
-def test_segments_split_a_safe_run_at_the_parallel_limit() -> None:
     segments = tuple(dispatch_segments(tuple(range(7)), parallel_safe=lambda _item: True, limit=3))
 
     assert segments == ((0, 1, 2), (3, 4, 5), (6,))

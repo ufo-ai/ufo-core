@@ -80,6 +80,7 @@ async def _row_live(instance_id: UUID) -> bool:
     return row is not None
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_a_transient_error_does_not_kill_the_heartbeat_loop(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -112,6 +113,7 @@ async def test_a_transient_error_does_not_kill_the_heartbeat_loop(
     assert await _row_live(instance_id)
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_heartbeat_refreshes_a_stale_row_and_retire_removes_it(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -136,6 +138,7 @@ async def test_heartbeat_refreshes_a_stale_row_and_retire_removes_it(
     assert not await _row_present(instance_id)
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_fleet_seat_has_no_workspace_and_counts_as_a_live_executor(db: None) -> None:
     """The shared fleet's seat: recorded with no workspace (it serves them all), refreshed by the
     same heartbeat, and read as live by the executor-recovery sweep — so a booting fleet process is
@@ -260,6 +263,7 @@ async def _turn_status(turn_id: UUID) -> str:
         ).scalar_one()
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_cancel_reconciler_cancels_turns_left_live_under_a_cancelled_parent(db: None) -> None:
     """The backstop: a turn left live under a cancelled parent — a fault mid-cancel, or an orphan
     DBOS recovery re-dispatched — is cancelled, along with its own descendants; a turn under a
@@ -282,6 +286,7 @@ async def test_cancel_reconciler_cancels_turns_left_live_under_a_cancelled_paren
     assert idle.cancelled == []
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_cancel_reconciler_reaches_a_live_turn_under_a_done_intermediate(db: None) -> None:
     """The deep-orphan case: a cancelled root R has a child C that finished `done` on its own while
     a grandchild G it spawned is still running. G's immediate parent is `done`, not cancelled, but G
@@ -301,6 +306,7 @@ async def test_cancel_reconciler_reaches_a_live_turn_under_a_done_intermediate(d
     assert set(client.cancelled) == {str(grandchild), str(great_grandchild)}
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_cancel_never_crosses_an_agent_child_boundary(db: None) -> None:
     """A spawned agent is an independent peer: cancelling its spawner leaves it and its own
     subtree running, while cancelling the agent child itself still reaps what it spawned."""
@@ -325,6 +331,7 @@ async def test_cancel_never_crosses_an_agent_child_boundary(db: None) -> None:
     assert set(client.cancelled) == {str(tied)}
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_cancel_reconciler_cancels_an_intent_child_of_a_plain_agent_turn(db: None) -> None:
     workspace_id = await _workspace()
     agent_id = await _agent(workspace_id)
@@ -346,6 +353,7 @@ async def test_cancel_reconciler_cancels_an_intent_child_of_a_plain_agent_turn(d
 _AGED = STRANDED_TURN_GRACE_SECONDS + 60
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_stranded_reconciler_cancels_a_turn_whose_workflow_cannot_reach_it(db: None) -> None:
     """The strand: a claimed turn whose attempt DBOS has ended or lost. Both shapes seen in the
     wild — a workflow cancelled under it, and a workflow absent from the store — leave a row no
@@ -365,6 +373,7 @@ async def test_stranded_reconciler_cancels_a_turn_whose_workflow_cannot_reach_it
     assert set(client.cancelled) == {"wf-ended", "wf-absent"}
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_stranded_reconciler_spares_a_live_turn_under_a_terminal_parent(db: None) -> None:
     """A spawned agent outlives its spawner, so a live child under a `done` parent is ordinary
     work. Only the attempt's DBOS status decides: the child here is PENDING and survives a sweep
@@ -385,6 +394,7 @@ async def test_stranded_reconciler_spares_a_live_turn_under_a_terminal_parent(db
     assert client.cancelled == ["wf-dead"]
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_stranded_reconciler_spares_a_turn_that_is_merely_idle(db: None) -> None:
     """Row freshness is not liveness: a turn stepping normally goes minutes between writes. An
     ENQUEUED or DELAYED attempt still carries its turn, however long the row has sat."""
@@ -403,6 +413,7 @@ async def test_stranded_reconciler_spares_a_turn_that_is_merely_idle(db: None) -
     assert client.cancelled == []
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_stranded_reconciler_holds_off_inside_the_grace_window(db: None) -> None:
     """A claim landing beside the sweep's own reads is not a strand. The row is left for a later
     tick, and once the window passes the same row is taken."""
@@ -417,6 +428,7 @@ async def test_stranded_reconciler_holds_off_inside_the_grace_window(db: None) -
     assert await _turn_status(fresh) == "cancelled"
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_stranded_reconciler_leaves_undispatched_turns_to_the_dispatch_sweep(
     db: None,
 ) -> None:

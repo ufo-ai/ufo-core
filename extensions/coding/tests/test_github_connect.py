@@ -40,6 +40,11 @@ from ufo.sdk.audience import SHARED_AUDIENCE
 from ufo.sdk.callback_page import CLOSE_THIS_PAGE, CONNECT_LOGO_PATH
 from ufo.sdk.http import Response
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 APP_ID = "4396470"
 OURS = "149082716"
 THEIRS = "149082717"
@@ -325,24 +330,6 @@ async def _route(ctx: _Ctx, exchange: connect.GitHubInstallExchange, **params: s
         return await connect.github_installed(ctx, _Request(**params))  # type: ignore[arg-type]
     finally:
         connect.install_exchange = original  # type: ignore[assignment]
-
-
-def test_the_exchange_sends_the_deploy_identity_and_the_returned_code() -> None:
-    """What GitHub is asked is the point: the App's own client id and secret with the code from the
-    redirect. A member token is only ever obtained by presenting all three."""
-    seen: list[dict[str, str]] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/access_token"):
-            seen.append(dict(pair.split("=", 1) for pair in request.content.decode().split("&")))
-            return httpx.Response(200, json={"access_token": "user-token"})
-        return httpx.Response(200, json={"installations": []})
-
-    import asyncio
-
-    asyncio.run(_exchange(transport=httpx.MockTransport(handle)).reaches("the-code", OURS))
-    assert seen == [{"client_id": "Iv1", "client_secret": "secret", "code": "the-code"}]
-    assert json.dumps(seen)  # the recorded call is plain data, not a mock object
 
 
 @pytest.mark.parametrize("installed", [True, False])

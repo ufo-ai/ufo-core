@@ -589,6 +589,7 @@ async def test_edit_non_unique_without_replace_all_raises(
         await _run("edit", ctx, file_path="dup.py", edits=[{"old_string": "x", "new_string": "y"}])
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
     file_ctx: tuple[ToolContext, Path],
     db: None,
@@ -608,6 +609,7 @@ async def test_share_file_streams_a_file_over_the_read_cap_byte_exact(
         assert await ctx.blob.get(claims.blob_key) == payload
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_text_preflight_and_download_url(
     file_ctx: tuple[ToolContext, Path],
     db: None,
@@ -626,6 +628,7 @@ async def test_share_file_text_preflight_and_download_url(
         assert await ctx.blob.get(claims.blob_key) == body
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_packs_a_directory_into_a_tarball(
     file_ctx: tuple[ToolContext, Path],
     db: None,
@@ -666,6 +669,7 @@ async def test_share_file_packs_a_directory_into_a_tarball(
         assert not any("tool-output" in name for name in names)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_packs_a_workspace_a_carrier_serves_under_another_name(
     file_ctx: tuple[ToolContext, Path],
     tmp_path: Path,
@@ -705,6 +709,7 @@ async def test_share_file_packs_a_workspace_a_carrier_serves_under_another_name(
         assert not any("tool-output" in name for name in names)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_delivers_a_list_in_share_order(
     file_ctx: tuple[ToolContext, Path],
     db: None,
@@ -774,6 +779,7 @@ async def _shared_row(blob_key: str) -> sa.Row:
         ).one()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_records_no_preview_without_an_s3_store(
     file_ctx: tuple[ToolContext, Path],
     db: None,
@@ -791,6 +797,7 @@ async def test_share_file_records_no_preview_without_an_s3_store(
     assert row.preview_size_bytes is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_leaves_a_plain_file_without_a_rendered_page(
     file_ctx: tuple[ToolContext, Path],
     db: None,
@@ -807,6 +814,7 @@ async def test_share_file_leaves_a_plain_file_without_a_rendered_page(
     assert row.preview_size_bytes is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_uploads_from_inside_the_sandbox_on_the_s3_backend(
     file_ctx: tuple[ToolContext, Path],
     s3_store: S3BlobStore,
@@ -838,6 +846,7 @@ async def test_share_file_uploads_from_inside_the_sandbox_on_the_s3_backend(
         assert await WorkspaceBlobStore(backend=s3_store).get(claims.blob_key) == payload
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_refuses_a_file_over_the_artifact_cap(
     file_ctx: tuple[ToolContext, Path],
     s3_store: S3BlobStore,
@@ -868,6 +877,7 @@ async def test_share_file_refuses_a_file_over_the_artifact_cap(
     assert rows == []
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_confines_a_traversal_name(
     file_ctx: tuple[ToolContext, Path],
     db: None,
@@ -882,6 +892,7 @@ async def test_share_file_confines_a_traversal_name(
     assert claims.filename == "x.txt"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_file_appends_the_source_extension_to_a_display_name(
     file_ctx: tuple[ToolContext, Path],
     db: None,

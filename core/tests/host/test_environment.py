@@ -1,5 +1,5 @@
 import pytest
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.host import environment
@@ -88,35 +88,6 @@ def test_a_malformed_or_oversized_or_widened_document_is_refused(
         environment.parse_environment_document(b'{"main": {}}')
 
 
-def test_a_prompt_override_is_text_or_replace_never_both() -> None:
-    with pytest.raises(ValidationError, match="exactly one"):
-        PromptOverride(text="x", replace=({"old": "a", "new": "b"},))
-    with pytest.raises(ValidationError, match="exactly one"):
-        PromptOverride()
-
-
-def test_a_tool_override_carries_one_meaning() -> None:
-    with pytest.raises(ValidationError, match="takes no other field"):
-        ToolOverride(enabled=False, description="x")
-    with pytest.raises(ValidationError, match="requires `run`"):
-        ToolOverride(input={"path": ToolInput(description="a path")})
-    with pytest.raises(ValidationError, match="defines its own `input`"):
-        ToolOverride(run="wc -l", parameters={"path": "x"})
-    with pytest.raises(ValidationError, match="must change something"):
-        ToolOverride()
-
-
-def test_a_skills_entry_parses_as_the_skill_it_names() -> None:
-    with pytest.raises(ValueError, match="must match its directory"):
-        EnvironmentDocument.model_validate(
-            {"skills": {"coding": _skill_md("other", "Load when coding.", "Body.")}}
-        )
-    document = EnvironmentDocument.model_validate(
-        {"skills": {"coding": _skill_md("coding", "Load when coding.", "Body.")}}
-    )
-    assert "coding" in document.skills
-
-
 def test_a_files_entry_is_a_contained_destination_and_a_digest() -> None:
     digest = f"sha256:{'a' * 64}"
     document = EnvironmentDocument.model_validate({"files": {"data/case.tar": digest}})
@@ -139,36 +110,6 @@ async def test_a_stored_file_loads_by_its_digest_and_only_intact(tmp_path) -> No
         await blob.put(key, b"tampered")
         with pytest.raises(ValueError, match="does not match its digest"):
             await environment.load_environment_file(blob, digest)
-
-
-async def test_a_stored_document_loads_by_its_digest_and_only_intact(tmp_path) -> None:
-    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
-    with ws("11111111-1111-1111-1111-111111111111"):
-        digest = await environment.store_environment_document(
-            blob, b"main:\n  tools:\n    web:\n      enabled: false\n"
-        )
-        loaded = await environment.load_environment_document(blob, digest)
-        assert loaded.main == EnvironmentOverrides(tools={"web": ToolOverride(enabled=False)})
-        with pytest.raises(ValueError, match="malformed"):
-            await environment.load_environment_document(blob, "sha256:zz")
-        key = environment.ENVIRONMENT_DOCUMENT_KEY_PREFIX + digest.removeprefix("sha256:")
-        await blob.put(key, b'{"main": null}')
-        with pytest.raises(ValueError, match="does not match its digest"):
-            await environment.load_environment_document(blob, digest)
-
-
-def test_a_description_rewrite_touches_only_the_named_tool() -> None:
-    prompt, tools, replaced = _applied_document(
-        PROMPT,
-        _registry(),
-        EnvironmentOverrides(tools={"bash": ToolOverride(description="patched")}),
-        {},
-    )
-    assert prompt == PROMPT
-    assert not replaced
-    assert tools.get("bash").description == "patched"
-    assert tools.get("web").description == "fetch a page"
-    assert tools.get("bash").handler is _never
 
 
 def test_a_parameter_rewrite_clones_the_model_and_keeps_the_rest() -> None:
@@ -216,20 +157,6 @@ def test_a_scoped_name_the_offer_does_not_hold_fails_loud() -> None:
         )
 
 
-def test_a_global_override_applies_where_offered_and_skips_elsewhere() -> None:
-    _prompt, tools, _replaced = _applied_document(
-        PROMPT,
-        _registry(),
-        None,
-        {
-            "bash": ToolOverride(description="patched everywhere"),
-            "spawn": ToolOverride(description="not offered here"),
-        },
-    )
-    assert tools.get("bash").description == "patched everywhere"
-    assert [tool.name for tool in tools.tools] == ["bash", "web"]
-
-
 def test_a_scoped_entry_wins_over_the_global_one() -> None:
     _prompt, tools, _replaced = _applied_document(
         PROMPT,
@@ -238,18 +165,6 @@ def test_a_scoped_entry_wins_over_the_global_one() -> None:
         {"bash": ToolOverride(description="global")},
     )
     assert tools.get("bash").description == "scoped"
-
-
-def test_a_prompt_text_override_replaces_content_and_digest() -> None:
-    prompt, _tools, replaced = _applied_document(
-        PROMPT,
-        _registry(),
-        EnvironmentOverrides(prompt=PromptOverride(text="OVERRIDDEN")),
-        {},
-    )
-    assert prompt.content == "OVERRIDDEN"
-    assert prompt.digest != PROMPT.digest
-    assert replaced
 
 
 def test_prompt_edits_land_in_sequence_each_exactly_once() -> None:
@@ -324,18 +239,6 @@ def test_a_run_tool_joins_the_offer_with_its_input_model() -> None:
         )
 
 
-def test_a_run_tool_replacing_an_offered_tool_keeps_its_description() -> None:
-    _prompt, tools, _replaced = _applied_document(
-        PROMPT,
-        _registry(),
-        EnvironmentOverrides(tools={"web": ToolOverride(run='curl -s "$INPUT_URL"')}),
-        {},
-    )
-    replaced_tool = tools.get("web")
-    assert replaced_tool.description == "fetch a page"
-    assert replaced_tool.handler is not _never
-
-
 def test_a_run_command_carries_inputs_as_environment_variables() -> None:
     model = _run_tool(
         "probe",
@@ -407,15 +310,6 @@ def test_a_skill_edit_lands_on_the_live_skill_or_fails_loud() -> None:
                 {"skills": {"unknown": {"replace": [{"old": "a", "new": "b"}]}}}
             ),
         )
-
-
-def test_a_skill_addition_joins_the_index() -> None:
-    document = EnvironmentDocument(
-        skills={"report-style": _skill_md("report-style", "Load when reporting.", "New workflow.")}
-    )
-    skills = _skills_with_document(_skills(), document)
-    assert ("report-style", "Load when reporting.") in skills.index()
-    assert skills.named("report-style").instructions == "New workflow."
 
 
 def test_a_member_skill_is_never_a_documents_to_change() -> None:

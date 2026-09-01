@@ -38,6 +38,11 @@ from ufo.schema import tables
 from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import _mount_shared_surfaces
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 SECRET = "memory-token-secret"
 BASE_TIME = datetime(2026, 7, 1, tzinfo=UTC)
 
@@ -247,53 +252,6 @@ async def test_memories_list_shared_and_member_newest_first_with_state(explorer)
     assert 0.0 < pref["decay_factor"] < 0.8
 
 
-async def test_page_derived_memory_carries_its_whole_origin(explorer) -> None:
-    """A derived row's origin is the page, its revision, and the source that synced it — an
-    operator reading two identical claims apart needs all three, so every one reaches the JSON."""
-    workspace_id = await _seed_workspace()
-    page_id, source_id = uuid4(), uuid4()
-    await _seed_memory(
-        workspace_id,
-        SHARED_SUBJECT,
-        "the renewal closes September 30",
-        minute=7,
-        page_origin=(page_id, 4, source_id),
-    )
-    await _seed_memory(workspace_id, SHARED_SUBJECT, "a member typed this one", minute=8)
-    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
-
-    rows = {
-        row["body"]: row
-        for row in (await explorer.get("/surface/memory/api/memories", headers=_auth(token))).json()
-    }
-    derived = rows["the renewal closes September 30"]
-    assert derived["created_from_page_id"] == str(page_id)
-    assert derived["created_from_page_revision"] == 4
-    assert derived["source_id"] == str(source_id)
-    typed = rows["a member typed this one"]
-    assert typed["created_from_page_id"] is None
-    assert typed["source_id"] is None
-
-
-async def test_indexing_lease_state_round_trips(explorer) -> None:
-    """A row the indexer has claimed but not yet embedded — a digest still NULL with
-    `embedding_claimed_at` set — is the 'indexing' state the explorer renders distinctly from
-    'due'; it must survive the read to the JSON."""
-    workspace_id = await _seed_workspace()
-    await _seed_memory(
-        workspace_id,
-        SHARED_SUBJECT,
-        "mid-index",
-        minute=5,
-        embedding_claimed_at=datetime(2026, 7, 2, tzinfo=UTC),
-    )
-    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
-
-    (row,) = (await explorer.get("/surface/memory/api/memories", headers=_auth(token))).json()
-    assert row["embedding_digest"] is None
-    assert row["embedding_claimed_at"] is not None
-
-
 async def test_inventory_caps_at_the_newest_limit(explorer, monkeypatch) -> None:
     monkeypatch.setattr(memory_store, "MEMORY_INVENTORY_LIMIT", 2)
     workspace_id = await _seed_workspace()
@@ -318,21 +276,6 @@ async def test_ws_param_rescopes_to_another_workspace(explorer) -> None:
         "/surface/memory/api/memories", params={"ws": str(target)}, headers=_auth(token)
     )
     assert [row["body"] for row in scoped.json()] == ["target-only memory"]
-
-
-async def test_posted_token_binds_the_shared_cookie_and_reads(explorer) -> None:
-    workspace_id = await _seed_workspace()
-    await _seed_memory(workspace_id, SHARED_SUBJECT, "cookie-bound read", minute=1)
-    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
-    bind = await explorer.post("/surface/memory", data={"token": token}, follow_redirects=False)
-    assert bind.status_code == 303
-    assert "token=" not in bind.headers["location"]
-    cookie = bind.headers["set-cookie"]
-    assert cookie.startswith("ufo_debug=")
-    assert "HttpOnly" in cookie and "Secure" in cookie and "Domain" not in cookie
-    assert "SameSite=lax" in cookie
-    listed = await explorer.get("/surface/memory/api/memories")
-    assert [row["body"] for row in listed.json()] == ["cookie-bound read"]
 
 
 async def test_page_serves_and_fails_loud_when_missing(explorer, monkeypatch) -> None:

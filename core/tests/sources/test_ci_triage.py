@@ -40,7 +40,7 @@ def _filters() -> dict[str, list[str]]:
     return loaded
 
 
-def test_triage_runs_on_pull_requests_only_and_forces_every_lane_on_push() -> None:
+def _check_triage_runs_on_pull_requests_only_and_forces_every_lane_on_push() -> None:
     triage = _jobs()["triage"]
     for expression in triage["outputs"].values():
         assert NON_PR_FORCES_TRUE in expression
@@ -48,11 +48,11 @@ def test_triage_runs_on_pull_requests_only_and_forces_every_lane_on_push() -> No
     assert filter_step["if"] == "github.event_name == 'pull_request'"
 
 
-def test_docs_exemption_is_exactly_docs_markdown() -> None:
+def _check_docs_exemption_is_exactly_docs_markdown() -> None:
     assert _filters()["not_docs_md"] == ["!docs/**/*.md"]
 
 
-def test_cross_cutting_inputs_light_every_lane() -> None:
+def _check_cross_cutting_inputs_light_every_lane() -> None:
     filters = _filters()
     for name, patterns in filters.items():
         if name == "not_docs_md":
@@ -61,7 +61,7 @@ def test_cross_cutting_inputs_light_every_lane() -> None:
             assert pattern in patterns, f"{name} misses {pattern}"
 
 
-def test_every_tracked_top_level_path_is_classified() -> None:
+def _check_every_tracked_top_level_path_is_classified() -> None:
     tracked = subprocess.run(
         ["git", "-C", str(ROOT), "ls-files"],
         check=True,
@@ -79,7 +79,7 @@ def test_every_tracked_top_level_path_is_classified() -> None:
     assert not unclassified, f"classify {sorted(unclassified)} in the triage filters"
 
 
-def test_every_lane_decision_is_consumed_and_every_consumer_names_a_lane() -> None:
+def _check_every_lane_decision_is_consumed_and_every_consumer_names_a_lane() -> None:
     jobs = _jobs()
     declared = set(jobs["triage"]["outputs"])
     consumed = {
@@ -94,7 +94,7 @@ def test_every_lane_decision_is_consumed_and_every_consumer_names_a_lane() -> No
         assert job["if"] == f"needs.triage.outputs.{lane} == 'true'", job_id
 
 
-def test_required_contexts_come_from_an_unfiltered_pull_request_trigger() -> None:
+def _check_required_contexts_come_from_an_unfiltered_pull_request_trigger() -> None:
     loaded = yaml.load(CI.read_text(), Loader=yaml.BaseLoader)
     assert loaded["on"]["pull_request"] == ""
     jobs = _jobs()
@@ -102,7 +102,7 @@ def test_required_contexts_come_from_an_unfiltered_pull_request_trigger() -> Non
         assert "name" not in jobs[context], context
 
 
-def test_gate_rejects_current_head_cancellation_and_asserts_every_need() -> None:
+def _check_gate_rejects_current_head_cancellation_and_asserts_every_need() -> None:
     gate = _jobs()["test"]
     assert gate["if"] == "always()"
     assert gate["permissions"] == {"contents": "read", "pull-requests": "read"}
@@ -119,7 +119,7 @@ def test_gate_rejects_current_head_cancellation_and_asserts_every_need() -> None
     assert 'test "${{ needs.triage.result }}" = success' in script
 
 
-def test_paths_filter_action_is_pinned_to_a_commit() -> None:
+def _check_paths_filter_action_is_pinned_to_a_commit() -> None:
     (filter_step,) = [s for s in _jobs()["triage"]["steps"] if s.get("id") == "filter"]
     assert re.fullmatch(
         r"dorny/paths-filter@[0-9a-f]{40}",
@@ -127,7 +127,7 @@ def test_paths_filter_action_is_pinned_to_a_commit() -> None:
     )
 
 
-def test_test_shards_run_the_one_client_ci_built() -> None:
+def _check_test_shards_run_the_one_client_ci_built() -> None:
     jobs = _jobs()
     producer = jobs["sandbox-client"]
     uploaded = [
@@ -165,12 +165,12 @@ def test_test_shards_run_the_one_client_ci_built() -> None:
     )
 
 
-def test_python_suite_runs_in_ten_shards() -> None:
+def _check_python_suite_runs_in_ten_shards() -> None:
     shards = _jobs()["test-shard"]["strategy"]["matrix"]["shard"]
     assert shards == [f"{index}/10" for index in range(1, 11)]
 
 
-def test_test_shards_do_not_build_the_workflow_linter() -> None:
+def _check_test_shards_do_not_build_the_workflow_linter() -> None:
     steps = _jobs()["test-shard"]["steps"]
     assert any(step.get("run") == "uv sync --no-install-package actionlint-py" for step in steps)
     assert any(
@@ -178,7 +178,7 @@ def test_test_shards_do_not_build_the_workflow_linter() -> None:
     )
 
 
-def test_the_portal_suite_stays_off_the_shard_critical_path() -> None:
+def _check_the_portal_suite_stays_off_the_shard_critical_path() -> None:
     """The shards wait on the portal's build, never on its suite. `web-build` publishes the three
     trees and stops; `web-test` reads those same bytes back and runs vitest beside the shards, so a
     suite that grows never delays them, and the gate names it because nothing else consumes it."""
@@ -198,7 +198,7 @@ def test_the_portal_suite_stays_off_the_shard_critical_path() -> None:
     assert "web-test" in jobs["test"]["needs"]
 
 
-def test_integration_shards_start_on_the_lane_decision_alone() -> None:
+def _check_integration_shards_start_on_the_lane_decision_alone() -> None:
     jobs = _jobs()
     assert jobs["integration"]["needs"] == "triage"
     assert jobs["integration"]["uses"] == "./.github/workflows/integration.yaml"
@@ -207,3 +207,10 @@ def test_integration_shards_start_on_the_lane_decision_alone() -> None:
         'test "${{ needs.integration.result }}" = '
         "\"${{ needs.triage.outputs.checks == 'true' && 'success' || 'skipped' }}\""
     ) in gate
+
+
+def test_ci_triage_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 13
+    for check in checks:
+        check()

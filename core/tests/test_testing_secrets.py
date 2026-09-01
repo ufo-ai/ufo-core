@@ -36,7 +36,7 @@ def _document(**overrides: str) -> bytes:
     return json.dumps(_SEEDED | overrides).encode()
 
 
-def test_testing_secret_write_preserves_the_live_document() -> None:
+def _check_testing_secret_write_preserves_the_live_document() -> None:
     raw = _document(**{"existing-api-key": "existing-value"})
     write = testing_secrets.testing_secret_write(_environment(), raw)
     assert json.loads(write.payload) == _SEEDED | _FILLED | {
@@ -54,40 +54,31 @@ def test_testing_secret_write_preserves_the_live_document() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("environment", "raw", "error"),
-    (
+def _check_testing_secret_write_rejects_invalid_input() -> None:
+    for environment, raw, error in (
         (_environment() | {DEPLOYMENT_ID_ENV: ""}, _document(), DEPLOYMENT_ID_ENV),
         (_environment() | {"ANTHROPIC_API_KEY": ""}, _document(), "ANTHROPIC_API_KEY"),
         (_environment() | {"PERPLEXITY_API_KEY": ""}, _document(), "PERPLEXITY_API_KEY"),
         (_environment() | {"SPECTRUM_PROJECT_ID": ""}, _document(), "SPECTRUM_PROJECT_ID"),
-        (
-            _environment() | {"SPECTRUM_PROJECT_SECRET": ""},
-            _document(),
-            "SPECTRUM_PROJECT_SECRET",
-        ),
+        (_environment() | {"SPECTRUM_PROJECT_SECRET": ""}, _document(), "SPECTRUM_PROJECT_SECRET"),
         (_environment() | {SECRET_ID_ENV: ""}, _document(), SECRET_ID_ENV),
         (_environment(), b"not-json", "must contain valid JSON"),
         (_environment(), b"[]", "must contain string properties"),
         (_environment(), b'{"value":null}', "must contain string properties"),
-    ),
-)
-def test_testing_secret_write_rejects_invalid_input(
-    environment: dict[str, str], raw: bytes, error: str
-) -> None:
-    with pytest.raises(RuntimeError, match=error):
-        testing_secrets.testing_secret_write(environment, raw)
+    ):
+        with pytest.raises(RuntimeError, match=error):
+            testing_secrets.testing_secret_write(environment, raw)
 
 
-@pytest.mark.parametrize("property_name", sorted(REQUIRED_PROPERTIES - set(SECRET_INPUTS)))
-def test_testing_secret_write_refuses_an_empty_required_property(property_name: str) -> None:
+def _check_testing_secret_write_refuses_an_empty_required_property() -> None:
     """The deploy stops at this step instead of projecting an empty credential into the cluster and
     rolling pods that crash-loop until the apply's rollout wait expires."""
-    with pytest.raises(RuntimeError, match=f"holds no value for {property_name}"):
-        testing_secrets.testing_secret_write(_environment(), _document(**{property_name: ""}))
+    for property_name in sorted(REQUIRED_PROPERTIES - set(SECRET_INPUTS)):
+        with pytest.raises(RuntimeError, match=f"holds no value for {property_name}"):
+            testing_secrets.testing_secret_write(_environment(), _document(**{property_name: ""}))
 
 
-def test_testing_secret_write_names_every_empty_required_property() -> None:
+def _check_testing_secret_write_names_every_empty_required_property() -> None:
     blanked = json.dumps(dict.fromkeys(sorted(REQUIRED_PROPERTIES), "")).encode()
     with pytest.raises(RuntimeError) as error:
         testing_secrets.testing_secret_write(_environment(), blanked)
@@ -98,7 +89,9 @@ def test_testing_secret_write_names_every_empty_required_property() -> None:
     )
 
 
-def test_testing_secret_write_fills_an_unseeded_flag_key_rather_than_stopping_the_deploy() -> None:
+def _check_testing_secret_write_fills_an_unseeded_flag_key_rather_than_stopping_the_deploy() -> (
+    None
+):
     """The cluster projects each flag key by name, so a property Secrets Manager does not hold
     leaves the ExternalSecret unready and times out the forced re-sync before the apply. An empty
     value costs testing nothing: serve builds no flag provider without all three, so every flag
@@ -109,7 +102,7 @@ def test_testing_secret_write_fills_an_unseeded_flag_key_rather_than_stopping_th
     assert not FAIL_CLOSED_PROPERTIES & REQUIRED_PROPERTIES
 
 
-def test_testing_secret_write_preserves_a_seeded_flag_key() -> None:
+def _check_testing_secret_write_preserves_a_seeded_flag_key() -> None:
     raw = _document(**{"cloudflare-flagship-token": "cf-flagship-token"})
     written = json.loads(testing_secrets.testing_secret_write(_environment(), raw).payload)
     assert written["cloudflare-flagship-token"] == "cf-flagship-token"
@@ -162,6 +155,13 @@ def test_main_reads_and_writes_through_stdin(
     assert all(call["keys"] == [] for call in calls)
 
 
-def test_main_rejects_arguments() -> None:
+def _check_main_rejects_arguments() -> None:
     with pytest.raises(RuntimeError, match=r"usage: testing_secrets\.py"):
         main(("unknown",))
+
+
+def test_testing_secrets_sync_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 7
+    for check in checks:
+        check()

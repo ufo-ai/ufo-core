@@ -90,7 +90,7 @@ def _per_workspace(on_for: str) -> InMemoryProvider:
     )
 
 
-async def test_a_deploy_with_no_backend_reads_every_flag_as_its_call_site_default() -> None:
+async def _check_a_deploy_with_no_backend_reads_every_flag_as_its_call_site_default() -> None:
     """`init_flags(None)` leaves the SDK's no-op provider in place, so a deploy carrying no flag
     service runs on exactly what each call site passes — closed where the caller defaults closed."""
     init_flags(None)
@@ -99,7 +99,7 @@ async def test_a_deploy_with_no_backend_reads_every_flag_as_its_call_site_defaul
         assert await flag_enabled(FLAG, default=True) is True
 
 
-async def test_a_backend_holding_no_such_flag_reads_as_the_call_site_default() -> None:
+async def _check_a_backend_holding_no_such_flag_reads_as_the_call_site_default() -> None:
     """The state a deploy is in before an operator creates a flag, and the one a deleted flag leaves
     behind. A caller withholding a shipped screen passes True here, so the screen stands until the
     service answers false — the direction that cannot take a working portal away."""
@@ -109,7 +109,7 @@ async def test_a_backend_holding_no_such_flag_reads_as_the_call_site_default() -
         assert await flag_enabled("no-such-flag", default=False) is False
 
 
-async def test_the_selected_backend_answers_on_and_off() -> None:
+async def _check_the_selected_backend_answers_on_and_off() -> None:
     """The sample extension's registered backend, bound through the same `init_flags` boot path
     `serve` runs, decides the read rather than the default."""
     init_flags(sample.build_flag_provider(0.0))
@@ -118,7 +118,7 @@ async def test_the_selected_backend_answers_on_and_off() -> None:
         assert await flag_enabled(sample.FLAG_OFF, default=True) is False
 
 
-async def test_the_read_targets_the_bound_workspace() -> None:
+async def _check_the_read_targets_the_bound_workspace() -> None:
     """The evaluation carries the ambient workspace as its targeting key, which is what lets a
     backend turn a feature on for one workspace while the next one still reads it off."""
     on_workspace = uuid4()
@@ -130,7 +130,7 @@ async def test_the_read_targets_the_bound_workspace() -> None:
         assert await flag_enabled(FLAG, default=False) is False
 
 
-async def test_a_backend_that_raises_reads_as_the_default() -> None:
+async def _check_a_backend_that_raises_reads_as_the_default() -> None:
     """A live backend that fails mid-evaluation withholds the feature rather than failing the turn
     that read the flag."""
     init_flags(_failing_provider())
@@ -187,3 +187,10 @@ async def test_a_variation_spelled_some_other_way_reads_as_the_default(
     assert record.message == "flags.unreadable"
     assert record.ufo["flag"] == FLAG
     assert record.ufo["served"] == "yes"
+
+
+async def test_flag_in_memory_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 5
+    for check in checks:
+        await check()

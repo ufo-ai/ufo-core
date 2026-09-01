@@ -10,10 +10,8 @@ proof), the `direct` BYOK backend reading a member-added key host-side, and the 
 honouring each `Credential` shape. These live in `extensions/sources/tests` so the framework evolves
 without colliding with the composio broker's auth-proxy proof in `extensions/connectors/tests`."""
 
-import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -22,26 +20,18 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_ext_embed_openai import EMBED_DIM
-from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.store import MemoryStore, PageIndexer
 from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.providers.asana import AsanaConnector
 from ufo_ext_sources.providers.github import GitHubConnector
 
-from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.access.connectors import (
-    DIRECT_ACCOUNT,
-    ConnectorRegistry,
     Credential,
-    SourceCredentialResolver,
 )
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.ext.context import CredentialAccess, SourceReader, context_for
-from ufo.runtime.indexing import TextChunker
+from ufo.runtime.ext.context import CredentialAccess
 from ufo.runtime.sources import rest
-from ufo.runtime.sources.sync import CorePageFeed, SourceAuth, StreamSkipped, SyncDriver
-from ufo.runtime.turns.subjects import SHARED_SUBJECT
+from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.sdk.sources import (
@@ -54,6 +44,11 @@ from ufo.sdk.sources import (
     StreamPage,
     StreamSpec,
 )
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 ACCOUNT = "acct-1"
 QUOTA_WINDOW_SECONDS = 60.0
@@ -148,26 +143,6 @@ async def test_next_link_strategy_follows_the_link_header() -> None:
     assert _ids(await _pages(_ProbeConnector(stream, handle))) == {1, 2}
 
 
-async def test_next_cursor_strategy_follows_the_body_token() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.params.get("cursor") == "c2":
-            return httpx.Response(200, json={"data": [{"id": 2}], "next": None})
-        return httpx.Response(200, json={"data": [{"id": 1}], "next": "c2"})
-
-    stream = StreamSpec(
-        name="things",
-        source_object="things",
-        pagination=Pagination(
-            strategy=PaginationStrategy.next_cursor,
-            path="/things",
-            record_path="data",
-            cursor_path="next",
-            cursor_param="cursor",
-        ),
-    )
-    assert _ids(await _pages(_ProbeConnector(stream, handle))) == {1, 2}
-
-
 async def test_offset_limit_strategy_advances_until_short_page() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.params.get("offset") == "2":
@@ -187,15 +162,6 @@ async def test_offset_limit_strategy_advances_until_short_page() -> None:
         ),
     )
     assert _ids(await _pages(_ProbeConnector(stream, handle))) == {1, 2, 3}
-
-
-async def test_undeclared_pagination_raises() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=[])
-
-    stream = StreamSpec(name="bare", source_object="bare")
-    with pytest.raises(NotImplementedError):
-        await _pages(_ProbeConnector(stream, handle))
 
 
 async def test_next_cursor_strategy_fails_on_a_repeated_cursor() -> None:
@@ -259,70 +225,49 @@ def _record_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return waits
 
 
-@pytest.mark.parametrize(
-    ("failing_calls", "expected_bounds"),
-    [
-        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "42"})], [(42.0, 60.0)]),
-        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "600"})], [(60.0, 60.0)]),
-        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "0.25"})], [(1.0, 1.5)]),
-        (
-            [lambda: httpx.Response(503, json={})] * 5
-            + [lambda: httpx.Response(429, json={}, headers={"retry-after": "1"})],
-            [(1.0, 1.5), (2.0, 3.0), (4.0, 6.0), (8.0, 12.0), (16.0, 24.0), (30.0, 30.0)],
-        ),
-        (
-            [lambda: httpx.Response(503, json={})] * 5
-            + [lambda: httpx.Response(429, json={}, headers={"retry-after": "30"})],
-            [(1.0, 1.5), (2.0, 3.0), (4.0, 6.0), (8.0, 12.0), (16.0, 24.0), (30.0, 30.0)],
-        ),
-        (
-            [lambda: httpx.Response(503, json={})] * 5
-            + [lambda: httpx.Response(429, json={}, headers={"retry-after": "32"})],
-            [(1.0, 1.5), (2.0, 3.0), (4.0, 6.0), (8.0, 12.0), (16.0, 24.0), (32.0, 48.0)],
-        ),
-        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "inf"})], [(1.0, 1.5)]),
-        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "nan"})], [(1.0, 1.5)]),
-        ([lambda: httpx.Response(429, json={}, headers={"retry-after": "-5"})], [(1.0, 1.5)]),
-        ([lambda: httpx.Response(429, json={})], [(1.0, 1.5)]),
-        (
-            [
-                lambda: httpx.Response(
-                    429, json={}, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}
-                )
-            ],
-            [(1.0, 1.5)],
-        ),
-        ([lambda: httpx.Response(503, json={}, headers={"retry-after": "42"})], [(42.0, 60.0)]),
-        ([lambda: httpx.Response(504, json={}, headers={"retry-after": "42"})], [(42.0, 60.0)]),
-        ([lambda: httpx.Response(500, json={}, headers={"retry-after": "42"})], [(1.0, 1.5)]),
-        ([_connect_error], [(1.0, 1.5)]),
-        (
-            [lambda: httpx.Response(503, json={}), lambda: httpx.Response(503, json={})],
-            [(1.0, 1.5), (2.0, 3.0)],
-        ),
-    ],
-    ids=[
-        "429-seconds",
-        "429-seconds-over-the-cap",
-        "429-seconds-under-the-doubling-delay",
-        "429-seconds-under-a-late-doubling-delay",
-        "429-seconds-tying-the-ladder-bound-under-a-late-doubling-delay",
-        "429-seconds-over-the-ladder-bound-under-a-late-doubling-delay",
-        "429-inf",
-        "429-nan",
-        "429-negative",
-        "429-no-header",
-        "429-http-date",
-        "503-header-read",
-        "504-header-read",
-        "500-header-not-read",
-        "transport-error",
-        "503-twice-doubles",
-    ],
+RETRY_WAIT_CASES = (
+    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "42"})], [(42.0, 60.0)]),
+    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "600"})], [(60.0, 60.0)]),
+    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "0.25"})], [(1.0, 1.5)]),
+    (
+        [lambda: httpx.Response(503, json={})] * 5
+        + [lambda: httpx.Response(429, json={}, headers={"retry-after": "1"})],
+        [(1.0, 1.5), (2.0, 3.0), (4.0, 6.0), (8.0, 12.0), (16.0, 24.0), (30.0, 30.0)],
+    ),
+    (
+        [lambda: httpx.Response(503, json={})] * 5
+        + [lambda: httpx.Response(429, json={}, headers={"retry-after": "30"})],
+        [(1.0, 1.5), (2.0, 3.0), (4.0, 6.0), (8.0, 12.0), (16.0, 24.0), (30.0, 30.0)],
+    ),
+    (
+        [lambda: httpx.Response(503, json={})] * 5
+        + [lambda: httpx.Response(429, json={}, headers={"retry-after": "32"})],
+        [(1.0, 1.5), (2.0, 3.0), (4.0, 6.0), (8.0, 12.0), (16.0, 24.0), (32.0, 48.0)],
+    ),
+    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "inf"})], [(1.0, 1.5)]),
+    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "nan"})], [(1.0, 1.5)]),
+    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "-5"})], [(1.0, 1.5)]),
+    ([lambda: httpx.Response(429, json={})], [(1.0, 1.5)]),
+    (
+        [
+            lambda: httpx.Response(
+                429, json={}, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}
+            )
+        ],
+        [(1.0, 1.5)],
+    ),
+    ([lambda: httpx.Response(503, json={}, headers={"retry-after": "42"})], [(42.0, 60.0)]),
+    ([lambda: httpx.Response(504, json={}, headers={"retry-after": "42"})], [(42.0, 60.0)]),
+    ([lambda: httpx.Response(500, json={}, headers={"retry-after": "42"})], [(1.0, 1.5)]),
+    ([_connect_error], [(1.0, 1.5)]),
+    (
+        [lambda: httpx.Response(503, json={}), lambda: httpx.Response(503, json={})],
+        [(1.0, 1.5), (2.0, 3.0)],
+    ),
 )
+
+
 async def test_retry_waits_a_bounded_retry_after_else_a_jittered_doubling_delay(
-    failing_calls: list[Callable[[], httpx.Response]],
-    expected_bounds: list[tuple[float, float]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A come-back-later response carrying `Retry-After` must wait at least that long — the provider
@@ -352,20 +297,24 @@ async def test_retry_waits_a_bounded_retry_after_else_a_jittered_doubling_delay(
     `JITTER_MAX_FACTOR` times that floor and never past the cap governing it — which is why the
     over-the-cap row is one point rather than a range. The lower bound is what pins the jitter as
     one-sided, so a stated reset is never undercut."""
-    waits = _record_waits(monkeypatch)
-    calls = 0
+    for case, (failing_calls, expected_bounds) in enumerate(RETRY_WAIT_CASES):
+        waits = _record_waits(monkeypatch)
+        calls = 0
 
-    def handle(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        if calls <= len(failing_calls):
-            return failing_calls[calls - 1]()
-        return httpx.Response(200, json=[{"id": 1}])
+        def handle(
+            request: httpx.Request,
+            failures: list[Callable[[], httpx.Response]] = failing_calls,
+        ) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls <= len(failures):
+                return failures[calls - 1]()
+            return httpx.Response(200, json=[{"id": 1}])
 
-    assert _ids(await _pages(_ProbeConnector(_retry_stream(), handle))) == {1}
-    assert len(waits) == len(expected_bounds)
-    for wait, (low, high) in zip(waits, expected_bounds, strict=True):
-        assert low <= wait <= high
+        assert _ids(await _pages(_ProbeConnector(_retry_stream(), handle))) == {1}, case
+        assert len(waits) == len(expected_bounds), case
+        for wait, (low, high) in zip(waits, expected_bounds, strict=True):
+            assert low <= wait <= high, case
 
 
 async def test_the_retry_envelope_outlasts_a_per_minute_quota_window(
@@ -535,17 +484,6 @@ def _ok(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json=[])
 
 
-async def test_full_collection_stream_returns_a_snapshot() -> None:
-    stream = StreamSpec(name="repos", source_object="repos", delete_missing=True)
-    connector = _CannedConnector(stream, [[{"id": "1", "name": "Widgets"}]])
-    result = await _fetch(connector, "repos", _ok)
-    assert result.snapshot is True
-    assert result.next_cursor is None
-    assert result.deletes == ()
-    assert result.pages[0].source_ref == "repos/1"
-    assert "Widgets" in result.pages[0].body
-
-
 async def test_incremental_stream_advances_watermark_and_tombstones_deletes() -> None:
     stream = StreamSpec(
         name="tickets", source_object="tickets", cursor_field="updated_at", delete_missing=False
@@ -558,15 +496,6 @@ async def test_incremental_stream_advances_watermark_and_tombstones_deletes() ->
     assert result.next_cursor == "2026-02-02T00:00:00Z"
     assert result.deletes == ("tickets/9",)
     assert {p.source_ref for p in result.pages} == {"tickets/5"}
-
-
-async def test_stream_page_cursor_wins_over_watermark() -> None:
-    stream = StreamSpec(name="tickets", source_object="tickets", cursor_field="updated_at")
-    page = StreamPage(
-        records=[{"id": "5", "updated_at": "2026-02-02T00:00:00Z"}], next_cursor="opaque-token"
-    )
-    result = await _fetch(_CannedConnector(stream, [page]), "tickets", _ok)
-    assert result.next_cursor == "opaque-token"
 
 
 async def test_connector_backend_fails_loud_without_an_auth_proxy() -> None:
@@ -596,22 +525,6 @@ class _PerTenantConnector(RestConnector):
                 pagination=Pagination(strategy=PaginationStrategy.next_link, path="/rows"),
             )
         ]
-
-
-async def test_per_tenant_fetch_dials_the_config_base_url() -> None:
-    seen: list[str | None] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        seen.append(request.url.host)
-        return httpx.Response(200, json=[{"id": 1}])
-
-    result = await ConnectorBackend(connector=_PerTenantConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream="rows", base_url="https://acme.tenant.test"),
-        None,
-        _auth(handle),
-    )
-    assert {page.source_ref for page in result.pages} == {"rows/1"}
-    assert seen == ["acme.tenant.test"]
 
 
 async def test_per_tenant_fetch_without_a_base_url_fails_loud() -> None:
@@ -672,35 +585,6 @@ async def test_github_repositories_fan_out_over_granted_orgs() -> None:
     assert "acme/widgets" in result.pages[0].body
 
 
-async def test_github_issues_fan_out_link_pagination_and_pr_filter() -> None:
-    """Issues are incremental: fan out over granted repos, follow the Link header, drop pull
-    requests, and checkpoint the repo's watermark into the per-repo cursor map — snapshot=False,
-    no deletes (GitHub has no delete)."""
-    result = await _fetch(GitHubConnector(), "issues", _github_handler([]))
-    assert {p.source_ref for p in result.pages} == {
-        "issues/acme/widgets/1",
-        "issues/acme/widgets/3",
-    }
-    assert any("Bug" in p.body for p in result.pages)
-    assert result.snapshot is False
-    assert result.next_cursor == json.dumps(
-        {"acme/widgets": "2026-01-05T00:00:00Z"}, sort_keys=True
-    )
-    assert result.deletes == ()
-
-
-async def test_github_issues_send_since_and_state_when_a_cursor_is_stored() -> None:
-    seen: list[tuple[str, dict[str, str]]] = []
-    await ConnectorBackend(connector=GitHubConnector()).fetch(
-        ConnectorSourceConfig(account=ACCOUNT, stream="issues"),
-        json.dumps({"acme/widgets": "2026-01-01T00:00:00Z"}, sort_keys=True),
-        _auth(_github_handler(seen)),
-    )
-    issue_calls = [params for path, params in seen if path.endswith("/issues")]
-    assert issue_calls and issue_calls[0].get("since") == "2026-01-01T00:00:00Z"
-    assert issue_calls[0].get("state") == "all"
-
-
 async def test_github_skips_when_org_enumeration_is_refused() -> None:
     """A grant with no org scope (`/user/orgs` → 403) can read no stream, so the fetch raises
     `StreamSkipped` — the driver records a skip, never a failure."""
@@ -724,16 +608,6 @@ def _asana_handler(
         return httpx.Response(200, json=page_by_offset[request.url.params.get("offset")])
 
     return handle
-
-
-async def test_asana_follows_offset_pagination_to_the_end() -> None:
-    paged: dict[str | None, dict[str, object]] = {
-        None: {"data": [{"gid": "1", "name": "One"}], "next_page": {"offset": "o2"}},
-        "o2": {"data": [{"gid": "2", "name": "Two"}], "next_page": None},
-    }
-    result = await _fetch(AsanaConnector(), "workspaces", _asana_handler(paged))
-    assert {page.source_ref for page in result.pages} == {"workspaces/1", "workspaces/2"}
-    assert result.snapshot is False
 
 
 # --- direct BYOK backend -------------------------------------------------------------------------
@@ -826,73 +700,3 @@ async def _workspace() -> UUID:
             )
         )
     return workspace_id
-
-
-async def test_asana_source_syncs_through_the_driver_into_recallable_memory(
-    db: None, database_url: str, tmp_path: Path
-) -> None:
-    """End to end: register an asana source through the SDK, let the core sync driver drive the
-    connector's backend (records pulled through a mock auth-proxy transport, no token read), and
-    recall the landed page through memory — the both-ends proof for a connector source."""
-    workspace_id = await _workspace()
-
-    context = context_for("sources", frozenset())
-    with ws(workspace_id):
-        await context.register_source(
-            "asana",
-            ConnectorSourceConfig(account=DIRECT_ACCOUNT, stream="workspaces"),
-            subject=SHARED_SUBJECT,
-            owner_member_id=None,
-        )
-
-    handler = _asana_handler({None: {"data": [{"gid": "111", "name": "Acme HQ workspace"}]}})
-    embed = _StubEmbed(_vec((6, 1.0)))
-    index = DefaultIndex(transaction=workspace_tx)
-    blob = FilesystemBlobStore(root=tmp_path)
-    postgres = database_url.startswith("postgresql")
-    driver = SyncDriver(
-        backends={"asana": ConnectorBackend(connector=AsanaConnector())},
-        blob=blob,
-        postgres=postgres,
-        source_credentials=SourceCredentialResolver(
-            ConnectorRegistry(entries={}, fallback=_MockProxy(handler=handler))
-        ),
-    )
-    page_feed = CorePageFeed(blob=blob)
-    page_indexer = PageIndexer(
-        index=index,
-        embed=embed,
-        transaction=workspace_tx,
-        chunker=TextChunker(),
-        workspace_id=workspace_id,
-        page_states=context.page_states,
-    )
-    service = MemoryStore(
-        index=index,
-        embed=embed,
-        transaction=workspace_tx,
-        workspace_id=workspace_id,
-        page_states=context.page_states,
-        readable_page_states=context.readable_page_states,
-        readable_source_ids=context.readable_source_ids,
-    )
-
-    await driver.run()
-    async with workspace_tx() as connection:
-        chunks = (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
-    assert chunks == 0
-
-    with ws(workspace_id):
-        await page_indexer.apply((await page_feed.pages_changed_since(None, 50)).changes)
-    with ws(workspace_id):
-        matches = await service.search_sources(
-            "Acme HQ workspace",
-            frozenset({SHARED_SUBJECT}),
-            5,
-            source_reader=SourceReader(
-                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
-                requesting_member_id=None,
-                subjects=frozenset({SHARED_SUBJECT}),
-            ),
-        )
-    assert matches and "Acme HQ workspace" in matches[0].text

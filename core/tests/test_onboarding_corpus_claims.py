@@ -719,7 +719,7 @@ def _flowed(text: str) -> str:
     return " ".join(text.split())
 
 
-def test_every_claim_holds_at_both_ends() -> None:
+def _check_every_claim_holds_at_both_ends() -> None:
     for claim in CLAIMS:
         corpus = _flowed((CORPUS / claim.corpus).read_text())
         assert _flowed(claim.phrase) in corpus, (
@@ -733,7 +733,7 @@ def test_every_claim_holds_at_both_ends() -> None:
         )
 
 
-def test_the_corpus_names_exactly_the_install_states_slack_reports() -> None:
+def _check_the_corpus_names_exactly_the_install_states_slack_reports() -> None:
     """The install-state table is translated for customers state by state, so a fifth state leaves a
     customer with no row and a renamed one leaves a row that can never appear. Both sides are
     discovered, never filtered against a list this file keeps: the reported set is every state
@@ -752,7 +752,7 @@ def test_the_corpus_names_exactly_the_install_states_slack_reports() -> None:
     )
 
 
-def test_no_agent_tool_cancels_a_turn() -> None:
+def _check_no_agent_tool_cancels_a_turn() -> None:
     """The corpus tells a customer a running turn is stopped through the surface — a button, an Esc
     key — never by asking the agent to do it. The only cancel a turn can reach through a tool is a
     parent cancelling its own subagent; a member-facing one would make that a lie."""
@@ -773,7 +773,7 @@ BANNED_COPY = (
 )
 
 
-def test_the_corpus_carries_none_of_the_banned_copy() -> None:
+def _check_the_corpus_carries_none_of_the_banned_copy() -> None:
     """AGENTS.md's user-facing copy rule bans the UFO metaphors from every word a member reads, and
     this corpus is the vocabulary the agent answers a customer in. Pinned because the words were
     removed by hand: `identification` and `identified` were throughout it until they were caught in
@@ -788,7 +788,7 @@ def test_the_corpus_carries_none_of_the_banned_copy() -> None:
     assert not found, f"banned copy in the corpus: {', '.join(sorted(found))}"
 
 
-def test_the_drift_sweep_points_at_the_corpus_and_this_gate() -> None:
+def _check_the_drift_sweep_points_at_the_corpus_and_this_gate() -> None:
     """The sweep is the half of the coverage a pattern cannot hold, so it must read the corpus this
     gate pins and be able to extend it: a prompt that named neither would sweep nothing."""
     workflow = yaml.load(
@@ -805,3 +805,10 @@ def test_the_drift_sweep_points_at_the_corpus_and_this_gate() -> None:
     assert workflow["on"]["schedule"]
     assert CORPUS.relative_to(REPO_ROOT).as_posix() in prompt
     assert Path(__file__).name in prompt
+
+
+def test_onboarding_corpus_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 5
+    for check in checks:
+        check()

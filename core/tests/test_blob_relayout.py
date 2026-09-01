@@ -13,6 +13,7 @@ from ufo.schema import tables
 
 ROOT = Path(__file__).parents[2]
 SCRIPT = ROOT / "infra" / "blob_relayout.py"
+pytestmark = pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 
 
 def _relayout_module():
@@ -123,8 +124,6 @@ async def test_relayout_copies_verifies_and_deletes_the_old_layout(
     every row-mapped object under its workspace and leaves orphans in place, a rerun copies
     nothing, `verify` proves the row-referenced keys, and `delete` clears the old prefixes —
     orphans included — leaving only the workspace layout."""
-    if database_url.startswith("sqlite"):
-        pytest.skip("the relayout runs against deployed Postgres")
     module = _relayout_module()
     artifact_key = f"artifacts/{uuid4()}/report.txt"
     body_ref = f"sources/{uuid4()}/{uuid4()}/seed"
@@ -180,8 +179,6 @@ async def test_relayout_refuses_a_database_with_no_rows(
     """An empty mapping is the signature of the wrong DSN (an RLS-scoped role reads zero rows), and
     a copy that maps nothing would let a later delete treat the whole bucket as orphans — so the
     tool refuses to run against a database that names no owners."""
-    if database_url.startswith("sqlite"):
-        pytest.skip("the relayout runs against deployed Postgres")
     module = _relayout_module()
     relayout = module.Relayout(
         client=await s3_store._client(), bucket=s3_store.bucket, database_url=database_url

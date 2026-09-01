@@ -59,7 +59,7 @@ async def test_command_protocol_builds_supervised_and_isolated_argv() -> None:
 
 
 @pytest.mark.asyncio
-async def test_file_protocol_uses_document_timeout_and_parses_result() -> None:
+async def test_file_protocol_uses_document_timeout_and_separates_failures() -> None:
     execute = Executor(results=[Result(stdout='{"content":"page"}')])
     files = SandboxFileOperations(
         execute=execute,
@@ -77,9 +77,6 @@ async def test_file_protocol_uses_document_timeout_and_parses_result() -> None:
     assert argv[-2:] == ("read", '{"path":"/workspace/report.pdf","offset":0}')
     assert timeout_s == 120
 
-
-@pytest.mark.asyncio
-async def test_file_protocol_separates_handled_and_wire_failures() -> None:
     handled = Executor(results=[Result(stdout='{"error":"path denied"}')])
     broken = Executor(results=[Result(stdout="not json", stderr="decoder failed")])
     values = {

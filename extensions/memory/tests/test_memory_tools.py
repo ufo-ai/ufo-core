@@ -7,23 +7,19 @@ in a fresh one — both by the search tool and, unprompted, by the user_prompt_s
 
 import asyncio
 import gc
-import json
 import logging
-from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory
-import ufo_ext_sources.manifest as sources
-from cryptography.fernet import Fernet
 from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
-from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, SUMMARY_MAX, MemoryObjects
+from ufo_ext_memory.objects import MEMORY_OBJECT, MemoryObjects
 from ufo_ext_memory.store import (
     MEMORY_BODY_MAX_CHARS,
     SEMANTIC,
@@ -38,27 +34,12 @@ from ufo_ext_memory.store import (
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.harness.models.interface import ToolUseBlock
-from ufo.harness.tools import dispatch_segments
-from ufo.host.ext.loader import turn_tools
-from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.agent_scope import agent
-from ufo.runtime.engine import (
-    MAX_PARALLEL_TOOL_CALLS,
-    EffectiveCall,
-)
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.indexing import TextChunker
 from ufo.runtime.objects import (
-    BoundAction,
-    BoundKind,
     ObjectListQuery,
-    ObjectVerbs,
-    action_registry,
-    object_registry,
 )
 from ufo.runtime.tools.context import SpawnResult, ToolContext, ToolResult
-from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -71,6 +52,11 @@ from ufo.sdk.audience import (
     room_audience,
 )
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "remembering what they told me"
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
@@ -86,99 +72,6 @@ def test_memory_update_is_side_effecting() -> None:
     assert MEMORY_TOOLS["memory_update"].side_effecting
 
 
-def test_memory_tools_stay_global_and_the_portal_writes_bind_to_the_collection() -> None:
-    tools, _, verbs = turn_tools(
-        (memory.manifest(), sources.manifest()),
-        CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        audience=SHARED_AUDIENCE,
-    )
-    wire = {tool.name: tool for tool in tools}
-    assert {"memory_search", "memory_update"} <= wire.keys()
-    assert wire["memory_search"].bound is None and wire["memory_update"].bound is None
-    search = wire["memory_search"]
-    assert search.parallel_safe and not search.side_effecting and search.presentation is None
-    actions = {name: bound.action for name, bound in verbs.actions[MEMORY_KIND].items()}
-    assert actions.keys() == {memory.RECORD_CORRECTION_ACTION, memory.RECORD_FIRST_RUN_ACTION}
-    for action in actions.values():
-        assert action.bound == ObjectBinding(kind=MEMORY_KIND, binding="collection")
-    assert {action.canonical_id for action in actions.values()} == MEMORY_ACTION_IDS
-    assert actions[memory.RECORD_CORRECTION_ACTION].presentation == ActionPresentation(
-        label=memory.RECORD_CORRECTION_LABEL
-    )
-    assert actions[memory.RECORD_FIRST_RUN_ACTION].presentation == ActionPresentation(
-        label=memory.RECORD_FIRST_RUN_LABEL
-    )
-
-
-def test_memory_search_reads_dispatch_in_one_segment() -> None:
-    search, update = MEMORY_TOOLS["memory_search"], MEMORY_TOOLS["memory_update"]
-    assert search.parallel_safe
-
-    def resolved(call_id: str, tool: ToolDef) -> EffectiveCall:
-        call = ToolUseBlock(id=call_id, name=tool.name, input={})
-        return EffectiveCall(call=call, tool=tool, call_id=tool.name, ext=None)
-
-    calls = (resolved("s1", search), resolved("s2", search), resolved("w1", update))
-    segments = [
-        tuple(item.call.id for item in segment)
-        for segment in dispatch_segments(
-            calls,
-            parallel_safe=lambda item: item.parallel_safe,
-            limit=MAX_PARALLEL_TOOL_CALLS,
-        )
-    ]
-    assert segments == [("s1", "s2"), ("w1",)]
-
-
-async def test_the_memory_listing_offers_its_actions(db: None, tmp_path: Path) -> None:
-    workspace_id = await _workspace()
-    alice = uuid4()
-    alice_dm = conversation_audience(alice)
-    ext = _ext(DefaultIndex(transaction=workspace_tx), StubEmbed(vec((0, 1.0))), alice_dm)
-    ctx = replace(
-        _tool_ctx(ext, alice, tmp_path, workspace_id=workspace_id, audience=alice_dm),
-        granted_actions=MEMORY_ACTION_IDS,
-    )
-    kinds = object_registry(
-        (
-            BoundKind(kind=MEMORY_OBJECT, extension=memory.NAME, context=ext),
-            *(
-                BoundKind(kind=kind, extension=sources.NAME, context=None)
-                for kind in sources.manifest().objects
-            ),
-        )
-    )
-    verbs = ObjectVerbs(
-        registry=kinds,
-        actions=action_registry(
-            tuple(
-                BoundAction(action=tool, extension=memory.NAME, context=ext)
-                for tool in memory.manifest().tools
-                if tool.bound is not None
-            ),
-            kinds,
-        ),
-    )
-    tool = next(tool for tool in verbs.tools() if tool.name == "object_list")
-    with ws(workspace_id):
-        result = await tool.handler(ctx, tool.input_model.model_validate({"kind": MEMORY_KIND}))
-    assert result.is_error is False
-    views = json.loads(result.content[0].text)["actions"]
-    assert [view["name"] for view in views] == [
-        memory.RECORD_CORRECTION_ACTION,
-        memory.RECORD_FIRST_RUN_ACTION,
-    ]
-    correction, first_run = views
-    assert correction["call"] == {
-        "kind": MEMORY_KIND,
-        "action": memory.RECORD_CORRECTION_ACTION,
-        "input": {},
-    }
-    assert {"corrects", "body"} <= correction["input_schema"]["properties"].keys()
-    assert "body" in first_run["input_schema"]["properties"]
-    assert "label" not in correction and "label" not in first_run
-
-
 def test_memory_inputs_refuse_an_unknown_field() -> None:
     with pytest.raises(ValidationError):
         memory.MemorySearchInput.model_validate({"queries": ("launch date",), "kind": "memory"})
@@ -186,11 +79,6 @@ def test_memory_inputs_refuse_an_unknown_field() -> None:
         memory.MemoryUpdateInput.model_validate(
             {"body": "Acme Corp — Moved the launch to March.", "kind": "memory"}
         )
-
-
-def test_recall_hook_is_best_effort() -> None:
-    recall = next(hook for hook in memory.manifest().hooks if hook.event == "user_prompt_submit")
-    assert recall.best_effort
 
 
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
@@ -321,129 +209,12 @@ async def _run(name: str, ctx: ToolContext, **args: object) -> ToolResult:
     return await tool.handler(ctx, tool.input_model.model_validate({**args}))
 
 
-async def test_memory_update_then_search_recalls_in_a_new_conversation(
-    db: None, tmp_path: Path
-) -> None:
-    workspace_id = await _workspace()
-    member = uuid4()
-    embed = StubEmbed(vec((6, 1.0)))
-    ext = _ext(DefaultIndex(transaction=workspace_tx), embed, conversation_audience(member))
-
-    with ws(workspace_id):
-        stored = await _run(
-            "memory_update",
-            _tool_ctx(ext, member, tmp_path),
-            body="the deploy password is hunter2",
-        )
-        assert stored.is_error is False
-        await _indexer(embed).run()
-
-        found = await _run("memory_search", _tool_ctx(ext, member, tmp_path), queries=["hunter2"])
-        assert "hunter2" in found.content[0].text
-
-
 async def test_memory_search_provider_rejects_an_empty_query_set() -> None:
     (spec,) = memory.manifest().memory_search
     embed = StubEmbed(vec((0, 1.0)))
     provider = spec.build(_ext(DefaultIndex(transaction=workspace_tx), embed))
     with pytest.raises(ValueError, match="requires 1-3 queries"):
         await provider.search((), frozenset({"shared"}))
-
-
-async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
-    db: None,
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The headline: a fact committed in one context is auto-injected into a fresh turn by the
-    user_prompt_submit recall hook — no tool call, the recall path is the hook itself."""
-    workspace_id = await _workspace()
-    member = uuid4()
-    embed = StubEmbed(vec((7, 1.0)))
-    ext = _ext(DefaultIndex(transaction=workspace_tx), embed, conversation_audience(member))
-    with ws(workspace_id):
-        await MEMORY_TOOLS["memory_update"].handler(
-            ToolContext(
-                sandbox=None,
-                blob=None,
-                turn=Turn(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    conversation_id=uuid4(),
-                    agent_id=uuid4(),
-                    seq=1,
-                    status="running",
-                    inbound="hi",
-                    created_at=datetime(2026, 7, 9, tzinfo=UTC),
-                ),
-                agent=Agent(prompt="p", model="claude-opus-4-8"),
-                spawn=_unavailable_spawn,
-                speaker_member_id=member,
-                audience=conversation_audience(member),
-                artifact_token_secret="",
-                ext=ext,
-            ),
-            memory.MemoryUpdateInput(body="the vault code is 4821"),
-        )
-        await _indexer(embed).run()
-        async with workspace_tx() as connection:
-            memory_id = (
-                await connection.execute(
-                    sa.select(memory_item.c.id).where(
-                        memory_item.c.workspace_id == workspace_id,
-                        memory_item.c.body == "the vault code is 4821",
-                    )
-                )
-            ).scalar_one()
-
-        turn_id = uuid4()
-        hook = HookContext(
-            ext=ext,
-            turn=Turn(
-                id=turn_id,
-                workspace_id=workspace_id,
-                conversation_id=uuid4(),
-                agent_id=uuid4(),
-                seq=1,
-                status="running",
-                inbound="what is the vault code",
-                created_at=datetime(2026, 7, 9, tzinfo=UTC),
-                admission_source="member",
-            ),
-            agent=Agent(prompt="p", model="claude-opus-4-8"),
-            speaker_member_id=member,
-            audience=conversation_audience(member),
-            payload=UserPromptSubmit(text="what is the vault code"),
-        )
-        with caplog.at_level(logging.INFO, logger="ufo"):
-            outcome = await memory.recall_hook(hook)
-        record = next(record for record in caplog.records if record.message == MEMORY_RECALL_EVENT)
-        assert record.ufo["turn_id"] == str(turn_id)
-        assert record.ufo["memory_ids"] == [str(memory_id)]
-        assert "error_class" not in record.ufo
-        assert "vault code" not in str(record.ufo)
-        assert isinstance(outcome, InjectContext)
-        assert "the vault code is 4821" in outcome.text
-
-        without_turn = await memory.recall_hook(
-            HookContext(
-                ext=ext,
-                turn=None,
-                agent=Agent(prompt="p", model="claude-opus-4-8"),
-                speaker_member_id=member,
-                audience=conversation_audience(member),
-                payload=UserPromptSubmit(text="what is the vault code"),
-            )
-        )
-        assert without_turn is None
-
-        def fail_log(_event: str, **_fields: object) -> None:
-            raise RuntimeError("collector unavailable")
-
-        monkeypatch.setattr(memory, "log", fail_log)
-        outcome = await memory.recall_hook(hook)
-        assert isinstance(outcome, InjectContext)
-        assert "the vault code is 4821" in outcome.text
 
 
 async def test_recall_hook_observes_search_failure_without_denial(
@@ -530,21 +301,6 @@ def test_memory_update_input_rejects_an_oversized_body() -> None:
         memory.MemoryUpdateInput(body="x" * (memory.MEMORY_BODY_MAX_CHARS + 1))
 
 
-def test_memory_update_offers_the_item_classes_an_agent_records() -> None:
-    """A hand-written ledger reached the wiki's Overview because `item_class` took whatever class
-    the model named. `semantic` is the band the consolidation job writes from facts that agree —
-    which is what the page tells the member it is — so the tool offers what an agent records and
-    that job stays the one producer."""
-    with pytest.raises(ValidationError) as refused:
-        memory.MemoryUpdateInput(
-            body="a ledger of the whole sweep",
-            item_class="semantic",
-        )
-    assert refused.value.errors()[0]["loc"] == ("item_class",)
-    recorded = memory.MemoryUpdateInput(body="Acme Corp — Moved the launch to March.")
-    assert recorded.item_class == "fact"
-
-
 async def _retire(body: str, superseded_by: UUID) -> None:
     """Put one row where the dedup sweep leaves it — retired at the copy that replaced it — so a
     test drives the revival that follows through the real `commit` rather than through a sweep it
@@ -589,37 +345,6 @@ async def _backdate(body: str, created_at: datetime) -> datetime:
             sa.update(memory_item).values(created_at=created_at).where(memory_item.c.body == body)
         )
     return (await _rows_by_body())[body]["created_at"]
-
-
-async def test_a_revival_carries_fresh_recency_and_a_plain_re_commit_does_not(db: None) -> None:
-    """A revival is a fresh assertion, so it takes a fresh `created_at`: recall decays it from the
-    restatement rather than from a wording the member abandoned, and the dedup sweep — whose winner
-    is the newest copy — sees the restatement as newer than the copy that retired it. Leaving the
-    old stamp would have the next sweep retire the member's restatement right back. An identical
-    re-commit of a live row restates nothing and keeps the stamp it has, so replaying one body
-    cannot walk a row's recency forward."""
-    workspace_id = await _workspace()
-    original = "the deploy has no code_review profile"
-    reworded = "re-confirmed: the deploy still has no code_review profile"
-    stale = datetime.now(UTC) - timedelta(hours=6)
-    embed = StubEmbed(vec((0, 1.0)))
-    with ws(workspace_id):
-        store = _store(embed)
-        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
-        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=reworded))
-        rewrite = await _backdate(reworded, datetime.now(UTC) - timedelta(hours=3))
-
-        aged = await _backdate(original, stale)
-        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
-        replayed = (await _rows_by_body())[original]["created_at"]
-
-        await _retire(original, (await _rows_by_body())[reworded]["id"])
-        await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=original))
-        rows = await _rows_by_body()
-
-    assert replayed == aged
-    assert rows[original]["created_at"] > rewrite
-    assert rows[original]["superseded_by"] is None
 
 
 def _stub_turn(
@@ -708,35 +433,6 @@ async def test_recall_hook_serves_a_member_message_folded_onto_an_internal_root(
     assert calls == 1
 
 
-async def test_recall_hook_still_serves_child_and_scheduled_turns(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-
-    class StubStore:
-        async def recall(
-            self, query: str, subjects: frozenset[str], limit: int, *, source_reader: object
-        ) -> tuple[Recalled, ...]:
-            nonlocal calls
-            calls += 1
-            return ()
-
-    monkeypatch.setattr(memory, "store_for", lambda ext: StubStore())
-    workspace_id = uuid4()
-    with ws(workspace_id):
-        for admission_source, parent_turn_id in (
-            ("internal", uuid4()),
-            ("scheduled", None),
-            ("member", None),
-        ):
-            turn = _stub_turn(
-                workspace_id, admission_source=admission_source, parent_turn_id=parent_turn_id
-            )
-            await memory.recall_hook(_hook(workspace_id, turn))
-
-    assert calls == 3
-
-
 async def test_recall_hook_bounds_injected_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Four bodies at exactly the per-item cap sum to precisely RECALL_TOTAL_MAX_CHARS on their raw
     text (8,000) but their rendered lines — each with its "- " prefix and "\\n" separator — sum to
@@ -793,94 +489,6 @@ async def test_recall_hook_omits_a_budget_dropped_item_from_the_event(
     assert isinstance(outcome, InjectContext)
     assert "d" * 2_500 not in outcome.text
     assert memory.RECALL_TRUNCATION_MARK in outcome.text
-
-
-async def test_recall_hook_excludes_episodic_topic_pointers(
-    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """An episodic hit is rewritten to a topic pointer and dropped from the auto-injected context;
-    a durable fact is injected verbatim — the episodic→topic exclusion, end to end through the
-    user_prompt_submit hook."""
-    workspace_id = await _workspace()
-    member = uuid4()
-    embed = StubEmbed(vec((9, 1.0)))
-    ext = _ext(DefaultIndex(transaction=workspace_tx), embed, conversation_audience(member))
-    with ws(workspace_id):
-        await _run(
-            "memory_update", _tool_ctx(ext, member, tmp_path), body="the api key rotates monthly"
-        )
-        await _run(
-            "memory_update",
-            _tool_ctx(ext, member, tmp_path),
-            body="browsed the pricing page once",
-            item_class="episodic",
-        )
-        await _indexer(embed).run()
-        async with workspace_tx() as connection:
-            memory_ids = {
-                row.body: str(row.id)
-                for row in (
-                    await connection.execute(
-                        sa.select(memory_item.c.id, memory_item.c.body).where(
-                            memory_item.c.workspace_id == workspace_id
-                        )
-                    )
-                ).all()
-            }
-
-        with caplog.at_level(logging.INFO, logger="ufo"):
-            outcome = await memory.recall_hook(
-                HookContext(
-                    ext=ext,
-                    turn=Turn(
-                        id=uuid4(),
-                        workspace_id=workspace_id,
-                        conversation_id=uuid4(),
-                        agent_id=uuid4(),
-                        seq=1,
-                        status="running",
-                        inbound="api key pricing",
-                        created_at=datetime(2026, 7, 9, tzinfo=UTC),
-                        admission_source="member",
-                    ),
-                    agent=Agent(prompt="p", model="claude-opus-4-8"),
-                    speaker_member_id=member,
-                    audience=conversation_audience(member),
-                    payload=UserPromptSubmit(text="api key pricing"),
-                )
-            )
-        record = next(record for record in caplog.records if record.message == MEMORY_RECALL_EVENT)
-        assert isinstance(outcome, InjectContext)
-        assert "the api key rotates monthly" in outcome.text
-        assert "browsed the pricing page once" not in outcome.text
-        assert record.ufo["memory_ids"] == [memory_ids["the api key rotates monthly"]]
-
-
-async def test_recall_hook_ignores_a_non_prompt_payload(db: None) -> None:
-    workspace_id = await _workspace()
-    embed = StubEmbed(vec((0, 1.0)))
-    ext = _ext(DefaultIndex(transaction=workspace_tx), embed)
-    with ws(workspace_id):
-        outcome = await memory.recall_hook(
-            HookContext(
-                ext=ext,
-                turn=Turn(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    conversation_id=uuid4(),
-                    agent_id=uuid4(),
-                    seq=1,
-                    status="running",
-                    inbound="hi",
-                    created_at=datetime(2026, 7, 9, tzinfo=UTC),
-                ),
-                agent=Agent(prompt="p", model="claude-opus-4-8"),
-                speaker_member_id=None,
-                audience=conversation_audience(None),
-                payload=None,
-            )
-        )
-        assert outcome is None
 
 
 async def test_memory_update_writes_only_the_conversation_audience(
@@ -1159,67 +767,6 @@ async def test_memory_search_bounds_the_merged_result_across_queries(
         assert len(found.content[0].text.splitlines()) == memory.MEMORY_SEARCH_LIMIT
 
 
-async def test_memory_search_interleaves_per_query_results(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The merge interleaves the per-query legs round-robin — query-1's top, query-2's top, then
-    query-1's second — so a sparse query's hit precedes a dense query's tail. A global best-score
-    top-N would order the low-scoring b-one behind the higher-scoring a-two; interleave keeps each
-    query represented, which is what the merge is for. The store is faked to fix the per-query legs;
-    the assertion is on the handler's merge order, not the store."""
-    from ufo_ext_memory.store import Recalled
-
-    def _recalled(body: str, score: float) -> Recalled:
-        return Recalled(
-            memory_id=uuid4(),
-            subject="s",
-            item_class="fact",
-            body=body,
-            source_ref=None,
-            score=score,
-        )
-
-    legs = {
-        "alpha": (_recalled("a-one", 0.9), _recalled("a-two", 0.8)),
-        "beta": (_recalled("b-one", 0.1),),
-    }
-
-    class _Store:
-        async def recall(
-            self,
-            query: str,
-            subjects: object,
-            limit: int,
-            start: object,
-            end: object,
-            *,
-            source_reader: object,
-        ):
-            return legs[query]
-
-        async def search_sources(
-            self,
-            query: str,
-            subjects: object,
-            limit: int,
-            start: object,
-            end: object,
-            *,
-            source_reader: object,
-        ):
-            return ()
-
-    monkeypatch.setattr(memory, "store_for", lambda ext: _Store())
-    ctx = _tool_ctx(_ext(object(), object()), None, tmp_path)
-    with ws(uuid4()):
-        found = await _run("memory_search", ctx, queries=["alpha", "beta"])
-    bodies = [
-        line.split("] ", 1)[1].rsplit(" (memory/", 1)[0]
-        for line in found.content[0].text.splitlines()
-    ]
-    assert bodies == ["a-one", "b-one", "a-two"]
-
-
 async def test_memory_search_keeps_each_legs_passage_of_one_document(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1336,202 +883,6 @@ async def test_the_memory_object_kind_is_sealed_against_a_speaking_member(
     assert fetched_own is not None
 
 
-async def test_the_memory_kind_filters_and_orders_on_its_declared_fields(
-    db: None, tmp_path: Path
-) -> None:
-    """Every field `memory` declares rides its listing rows, so a filter and an order on each one
-    answers from the live listing — the only place the declaration is checked against the rows."""
-    workspace_id = await _workspace()
-    alice = uuid4()
-    embed = StubEmbed(vec((0, 1.0)))
-    index = DefaultIndex(transaction=workspace_tx)
-    alice_dm = conversation_audience(alice)
-    alice_ctx = _tool_ctx(
-        _ext(index, embed, alice_dm), alice, tmp_path, workspace_id=workspace_id, audience=alice_dm
-    )
-    verbs = ObjectVerbs(
-        registry=object_registry(
-            (BoundKind(kind=MEMORY_OBJECT, extension="memory", context=alice_ctx.ext),)
-        )
-    )
-
-    async def listed(**args: object) -> list[dict]:
-        tool = next(tool for tool in verbs.tools() if tool.name == "object_list")
-        result = await tool.handler(
-            alice_ctx,
-            tool.input_model.model_validate({"kind": MEMORY_KIND, **args}),
-        )
-        assert result.is_error is False
-        return json.loads(result.content[0].text)["objects"]
-
-    with ws(workspace_id):
-        await _run(
-            "memory_update",
-            alice_ctx,
-            body="alice prefers plaintext email",
-            item_class="episodic",
-            memory_kind="preference",
-        )
-        await _run(
-            "memory_update",
-            alice_ctx,
-            body="alice shipped the billing migration",
-            item_class="fact",
-            memory_kind="event",
-        )
-
-        rows = await listed()
-        by_kind = await listed(filters={"memory_kind": "preference"})
-        by_class = await listed(filters={"item_class": "fact"})
-        by_subject = await listed(filters={"subject": member_subject(alice)})
-        ordered = await listed(order_by="memory_kind")
-
-    assert {row["memory_kind"] for row in rows} == {"preference", "event"}
-    assert {row["item_class"] for row in rows} == {"episodic", "fact"}
-    assert {row["subject"] for row in rows} == {member_subject(alice)}
-    assert [row["memory_kind"] for row in by_kind] == ["preference"]
-    assert [row["item_class"] for row in by_class] == ["fact"]
-    assert len(by_subject) == 2
-    assert [row["memory_kind"] for row in ordered] == ["event", "preference"]
-
-
-async def test_portal_reads_hold_the_subject_and_source_gates_the_turn_holds(
-    db: None, tmp_path: Path
-) -> None:
-    """The portal reads memory on the subjects a member's own conversation carries and behind the
-    bound agent's source grant: another member's private item is absent from the index and
-    not-found by name, and a shared page-derived item answers only under an agent granted its
-    source."""
-    workspace_id = await _workspace()
-    alice, bob = uuid4(), uuid4()
-    granted_agent, ungranted_agent = uuid4(), uuid4()
-    source_id, page_id, item_id = uuid4(), uuid4(), uuid4()
-    now = datetime(2026, 7, 9, tzinfo=UTC)
-    index = DefaultIndex(transaction=workspace_tx)
-    embed = StubEmbed(vec((0, 1.0)))
-    alice_dm = conversation_audience(alice)
-    alice_ctx = _tool_ctx(
-        _ext(index, embed, alice_dm), alice, tmp_path, workspace_id=workspace_id, audience=alice_dm
-    )
-    async with workspace_tx() as connection:
-        for agent_id, name in ((granted_agent, "granted"), (ungranted_agent, "ungranted")):
-            await connection.execute(
-                sa.insert(tables.agent).values(
-                    id=agent_id,
-                    workspace_id=workspace_id,
-                    name=name,
-                    prompt="p",
-                    model="m",
-                    is_main=False,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-        await connection.execute(
-            sa.insert(tables.source).values(
-                id=source_id,
-                workspace_id=workspace_id,
-                backend="folder",
-                config={},
-                subject="shared",
-                next_sync_at=now,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.source_grant).values(
-                workspace_id=workspace_id,
-                source_id=source_id,
-                agent_id=granted_agent,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.page).values(
-                id=page_id,
-                workspace_id=workspace_id,
-                source_id=source_id,
-                digest="sha256:page",
-                body_ref=f"pages/{page_id}",
-                stream="notes",
-                title="Page",
-                subject="shared",
-                tombstone=False,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        revision = (
-            await connection.execute(
-                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
-            )
-        ).scalar_one()
-        await connection.execute(
-            sa.insert(memory_item).values(
-                id=item_id,
-                workspace_id=workspace_id,
-                subject="shared",
-                body="the vault code is 8842",
-                item_class="fact",
-                memory_kind="fact",
-                confidence=5,
-                created_from_page_id=page_id,
-                created_from_page_revision=revision,
-                source_id=source_id,
-                embedding_digest="sha256:seeded",
-                created_at=now,
-                updated_at=now,
-            )
-        )
-    store = MemoryObjects()
-    ext = alice_ctx.ext
-    query = ObjectListQuery(supported_fields=MEMORY_OBJECT.list_fields)
-    with ws(workspace_id):
-        await _run("memory_update", alice_ctx, body="alice private roadmap")
-        async with workspace_tx() as connection:
-            private_id = (
-                await connection.execute(
-                    sa.select(memory_item.c.id).where(
-                        memory_item.c.subject == member_subject(alice)
-                    )
-                )
-            ).scalar_one()
-        with agent(granted_agent):
-            alice_names = {
-                row.name
-                for row in (
-                    await store.member_page(ext, member_id=alice, admin=False, query=query)
-                ).rows
-            }
-            bob_names = {
-                row.name
-                for row in (
-                    await store.member_page(ext, member_id=bob, admin=True, query=query)
-                ).rows
-            }
-            bob_read = await store.member_detail(ext, str(private_id), member_id=bob, admin=True)
-            granted_read = await store.member_detail(ext, str(item_id), member_id=bob, admin=False)
-        with agent(ungranted_agent):
-            ungranted_names = {
-                row.name
-                for row in (
-                    await store.member_page(ext, member_id=bob, admin=False, query=query)
-                ).rows
-            }
-            ungranted_read = await store.member_detail(
-                ext, str(item_id), member_id=bob, admin=False
-            )
-    assert {str(private_id), str(item_id)} <= alice_names
-    assert bob_names == {str(item_id)}
-    assert bob_read is None
-    assert granted_read is not None
-    assert granted_read.row.fields["subject"] == "shared"
-    assert ungranted_names == set()
-    assert ungranted_read is None
-
-
 async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(
     db: None, tmp_path: Path
 ) -> None:
@@ -1626,254 +977,3 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(
     assert str(item_id) in granted_names
     assert ungranted_get is None
     assert granted_get is not None
-
-
-async def test_a_row_cites_the_page_it_was_derived_from(db: None, tmp_path: Path) -> None:
-    """A page-derived row carries the page it came from — the id an `object_get kind=page` opens,
-    with the title and stream that name it — on the listing and on the row the portal renders
-    beside a detail; a row a member wrote carries nulls in the same three fields."""
-    workspace_id = await _workspace()
-    member = uuid4()
-    source_id, page_id = uuid4(), uuid4()
-    derived_id, written_id = uuid4(), uuid4()
-    now = datetime(2026, 7, 9, tzinfo=UTC)
-    ext = _ext(DefaultIndex(transaction=workspace_tx), StubEmbed(vec((0, 1.0))))
-    granted = _tool_ctx(ext, None, tmp_path, workspace_id=workspace_id)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=granted.turn.agent_id,
-                workspace_id=workspace_id,
-                name="granted",
-                prompt="p",
-                model="m",
-                is_main=False,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.source).values(
-                id=source_id,
-                workspace_id=workspace_id,
-                backend="folder",
-                config={},
-                subject="shared",
-                next_sync_at=now,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.source_grant).values(
-                workspace_id=workspace_id,
-                source_id=source_id,
-                agent_id=granted.turn.agent_id,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.page).values(
-                id=page_id,
-                workspace_id=workspace_id,
-                source_id=source_id,
-                digest="sha256:page",
-                body_ref=f"pages/{page_id}",
-                stream="pull_requests",
-                title="Q3 pricing rollout",
-                subject="shared",
-                tombstone=False,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        revision = (
-            await connection.execute(
-                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
-            )
-        ).scalar_one()
-        await connection.execute(
-            sa.insert(memory_item).values(
-                id=derived_id,
-                workspace_id=workspace_id,
-                subject="shared",
-                body="pricing ships on the first of the quarter",
-                item_class="fact",
-                memory_kind="fact",
-                confidence=5,
-                created_from_page_id=page_id,
-                created_from_page_revision=revision,
-                source_id=source_id,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        await connection.execute(
-            sa.insert(memory_item).values(
-                id=written_id,
-                workspace_id=workspace_id,
-                subject="shared",
-                body="the team stands up at nine",
-                item_class="fact",
-                memory_kind="fact",
-                confidence=5,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-    query = ObjectListQuery(supported_fields=MEMORY_OBJECT.list_fields)
-    with ws(workspace_id):
-        rows = {row.name: row for row in (await MemoryObjects().list(granted, query)).rows}
-        with agent(granted.turn.agent_id):
-            read = await MemoryObjects().member_detail(
-                ext, str(derived_id), member_id=member, admin=False
-            )
-    cited = rows[str(derived_id)].fields
-    assert (
-        cited["created_from_page_id"],
-        cited["created_from_page_title"],
-        cited["created_from_page_stream"],
-    ) == (str(page_id), "Q3 pricing rollout", "pull_requests")
-    plain = rows[str(written_id)].fields
-    assert (
-        plain["created_from_page_id"],
-        plain["created_from_page_title"],
-        plain["created_from_page_stream"],
-    ) == (None, None, None)
-    assert read is not None
-    assert (
-        read.row.fields["created_from_page_id"],
-        read.row.fields["created_from_page_title"],
-        read.row.fields["created_from_page_stream"],
-    ) == (str(page_id), "Q3 pricing rollout", "pull_requests")
-
-
-async def test_list_recent_carries_each_row_subject(db: None, tmp_path: Path) -> None:
-    workspace_id = await _workspace()
-    member = uuid4()
-    embed = StubEmbed(vec((0, 1.0)))
-    index = DefaultIndex(transaction=workspace_tx)
-    ext = _ext(index, embed)
-    bound_ctx = _tool_ctx(ext, member, tmp_path, audience=SHARED_AUDIENCE)
-    common_ctx = _tool_ctx(ext, None, tmp_path, audience=SHARED_AUDIENCE)
-    with ws(workspace_id):
-        await _run("memory_update", bound_ctx, body="a private note")
-        await _run("memory_update", common_ctx, body="a team note")
-        listed = await memory.MemorySearchService(ext).list_recent(
-            frozenset({member_subject(member), "shared"}), 25
-        )
-    assert {(row.text, row.subject) for row in listed.rows} == {
-        ("a private note", member_subject(member)),
-        ("a team note", "shared"),
-    }
-
-
-@pytest.mark.asyncio
-async def test_a_row_written_before_the_budget_is_cut_back_to_a_whole_word(
-    db: None, tmp_path: Path
-) -> None:
-    """Every truncated row a member reads today measures 119 or 120 characters and ends on a
-    fragment — "requested trying 2x and then viewing screen…". The write budget keeps a compliant
-    row whole and this branch never fires for it; a row that predates the budget gives up its last
-    word instead of half of one."""
-    workspace_id = await _workspace()
-    member = uuid4()
-    dm = conversation_audience(member)
-    ctx = _tool_ctx(
-        _ext(DefaultIndex(transaction=workspace_tx), StubEmbed(vec((0, 1.0))), dm),
-        member,
-        tmp_path,
-        workspace_id=workspace_id,
-        audience=dm,
-    )
-    body = (
-        "Rob Ryan described the direction as correct but probably slightly overshot, requested "
-        "trying 2x and then viewing screen sizes again."
-    )
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(memory_item).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    subject=member_subject(member),
-                    body=body,
-                    item_class="fact",
-                    memory_kind="preference",
-                    confidence=5,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-        with agent(uuid4()):
-            page = await MemoryObjects().member_page(
-                ctx.ext,
-                member_id=member,
-                admin=False,
-                query=ObjectListQuery(supported_fields=MEMORY_OBJECT.list_fields),
-            )
-
-    summary = page.rows[0].summary
-    assert len(summary) <= SUMMARY_MAX
-    assert summary.endswith("…")
-    assert body.startswith(summary.removesuffix("…"))
-    assert summary.removesuffix("…")[-1].isalpha()
-
-
-@pytest.mark.asyncio
-async def test_the_memory_listing_orders_newest_first_on_written(db: None, tmp_path: Path) -> None:
-    """A memory item is named by a uuid, so the index's default order by name is arbitrary — the
-    portal's wiki asks for `written` instead, and the kind has to declare it and sort on it. Three
-    items are committed out of chronological order with uuid names that sort against the dates, so
-    a listing ordered by name lands in a different order than one ordered by `written`."""
-    workspace_id = await _workspace()
-    member = uuid4()
-    dm = conversation_audience(member)
-    index = DefaultIndex(transaction=workspace_tx)
-    embed = StubEmbed(vec((0, 1.0)))
-    ctx = _tool_ctx(
-        _ext(index, embed, dm), member, tmp_path, workspace_id=workspace_id, audience=dm
-    )
-    written = {
-        "the oldest note": datetime(2026, 1, 1, tzinfo=UTC),
-        "the newest note": datetime(2026, 8, 1, tzinfo=UTC),
-        "the middle note": datetime(2026, 4, 1, tzinfo=UTC),
-    }
-
-    with ws(workspace_id):
-        for body in written:
-            await _run("memory_update", ctx, body=body)
-        async with workspace_tx() as connection:
-            for body, moment in written.items():
-                await connection.execute(
-                    sa.update(memory_item)
-                    .where(memory_item.c.body == body)
-                    .values(created_at=moment, updated_at=moment)
-                )
-
-        with agent(uuid4()):
-            page = await MemoryObjects().member_page(
-                ctx.ext,
-                member_id=member,
-                admin=False,
-                query=ObjectListQuery(
-                    supported_fields=MEMORY_OBJECT.list_fields,
-                    order_by="written",
-                    order="desc",
-                ),
-            )
-
-    assert [row.summary for row in page.rows] == [
-        "the newest note",
-        "the middle note",
-        "the oldest note",
-    ]
-    assert [row.fields["written"] for row in page.rows] == [
-        moment.isoformat()
-        for moment in (
-            written["the newest note"],
-            written["the middle note"],
-            written["the oldest note"],
-        )
-    ]

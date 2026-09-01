@@ -43,7 +43,7 @@ def _copied_roots() -> set[str]:
     return copied
 
 
-def test_the_image_carries_every_target_the_manifest_declares() -> None:
+def _check_the_image_carries_every_target_the_manifest_declares() -> None:
     """Cargo validates every declared target's path when it loads the manifest, before it selects
     one to build. A declared target whose directory the image lacks refuses the whole manifest, so
     the stage fails on a crate it could otherwise build."""
@@ -61,7 +61,7 @@ def test_the_image_carries_every_target_the_manifest_declares() -> None:
     assert "licenses" in copied
 
 
-def test_every_release_job_builds_the_gh_payload_first() -> None:
+def _check_every_release_job_builds_the_gh_payload_first() -> None:
     for filename, jobs in RELEASE_JOBS.items():
         workflow = yaml.safe_load((ROOT / ".github" / "workflows" / filename).read_text())
         for name in jobs:
@@ -79,7 +79,7 @@ def test_every_release_job_builds_the_gh_payload_first() -> None:
                 )
 
 
-def test_gh_payload_is_pinned_to_the_runtime_that_reads_the_bundle() -> None:
+def _check_gh_payload_is_pinned_to_the_runtime_that_reads_the_bundle() -> None:
     steps = yaml.safe_load(ACTION.read_text())["runs"]["steps"]
     (setup,) = [step for step in steps if step.get("uses") == "actions/setup-go@v6"]
     assert setup["with"]["go-version"] == "1.27.0"
@@ -92,7 +92,7 @@ def test_gh_payload_is_pinned_to_the_runtime_that_reads_the_bundle() -> None:
     assert "cygpath -w" in build["run"]
 
 
-def test_gh_payload_is_cached_on_the_pins_that_determine_it() -> None:
+def _check_gh_payload_is_cached_on_the_pins_that_determine_it() -> None:
     """Every pin the payload has — the toolchain, the cli release, the target — is spelled in
     build-gh.sh, so its hash is the key: bumping one moves the key, and a hit skips the toolchain
     install with the cross-compile. A restored archive answers to the same `gzip -t` a built one
@@ -112,7 +112,7 @@ def test_gh_payload_is_cached_on_the_pins_that_determine_it() -> None:
     assert steps.index(cache) < steps.index(setup) < steps.index(build)
 
 
-def test_integration_puts_the_client_it_builds_on_path() -> None:
+def _check_integration_puts_the_client_it_builds_on_path() -> None:
     workflow = yaml.safe_load(INTEGRATION.read_text())
     steps = workflow["jobs"]["integration"]["steps"]
     build = next(
@@ -129,7 +129,7 @@ def test_integration_puts_the_client_it_builds_on_path() -> None:
     assert build < path < test
 
 
-def test_integration_builds_the_sites_kit_its_tests_read() -> None:
+def _check_integration_builds_the_sites_kit_its_tests_read() -> None:
     workflow = yaml.safe_load(INTEGRATION.read_text())
     steps = workflow["jobs"]["integration"]["steps"]
     pnpm = next(step for step in steps if step.get("uses") == "pnpm/action-setup@v4")
@@ -149,3 +149,10 @@ def test_integration_builds_the_sites_kit_its_tests_read() -> None:
         "cache-dependency-path": "extensions/web/frontend/pnpm-lock.yaml",
     }
     assert install < build < test
+
+
+def test_client_image_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 6
+    for check in checks:
+        check()

@@ -7,6 +7,7 @@ the fixture parametrizes."""
 
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from ufo_ext_sites.main_homepage import (
     RELEASED_KEY,
@@ -21,6 +22,11 @@ from ufo.db import workspace_tx
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 CHAT_EXTENSION = "app_chat"
 CHAT_DECLARED = "chat"

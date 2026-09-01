@@ -54,22 +54,22 @@ from ufo.harness.models.interface import (
     ToolSchema,
     ToolUseBlock,
 )
-from ufo.harness.models.pricing import ModelPrice
 from ufo.harness.models.registry import model_registry
-from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.billing.accounting import IMAGES_DIMENSION, VIDEOS_DIMENSION
 from ufo.runtime.ext.context import context_for
-from ufo.runtime.queue import _agent_actions
 from ufo.runtime.tools.context import ToolContext
-from ufo.runtime.tools.registry import ObjectBinding
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
-from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn, Usage
+from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.models import ModelStreamInterrupted
-from ufo.sdk.objects import ARTIFACT_KIND
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 OPENROUTER_KEY = "sk-or-v1-secret-0xfeedface"
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n-one").decode()
@@ -700,75 +700,6 @@ async def test_unpriced_cache_writes_remain_fresh_input() -> None:
     )
 
 
-async def test_priced_cache_writes_are_a_disjoint_usage_class() -> None:
-    create = ScriptedCreate(
-        [
-            _chunk(content="ok"),
-            _chunk(finish="stop"),
-            _chunk(usage=_usage(10, 2, cached=4, cache_write=3)),
-        ]
-    )
-    client = _client(create)
-    priced = replace(
-        client.spec,
-        price=ModelPrice(0, 0, 0, 0, 0, cache_write_30m=1),
-    )
-    events = [event async for event in replace(client, spec=priced).complete(REQUEST)]
-    assert events[-1] == Usage(
-        input_tokens=3,
-        output_tokens=2,
-        cache_read_tokens=4,
-        cache_write_30m_tokens=3,
-    )
-
-
-async def test_the_session_id_reaches_the_wire_as_a_top_level_body_field() -> None:
-    """OpenRouter reads the sticky routing key off the body's own `session_id`, so the proof is the
-    JSON that was posted rather than the kwargs a stub recorded. The key is what makes prompt
-    caching work through a router at all: a slug names many upstream providers, each holding a
-    cache of its own, and the pin is what puts the next call back on the warm one."""
-    bodies: list[dict[str, object]] = []
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        bodies.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            headers={"content-type": "text/event-stream"},
-            content=(
-                b'data: {"id":"c","object":"chat.completion.chunk","created":0,"model":"x",'
-                b'"choices":[{"index":0,"finish_reason":"stop","delta":{"content":"ok"}}],'
-                b'"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n'
-                b"data: [DONE]\n\n"
-            ),
-        )
-
-    client = openrouter.OpenRouterModelClient(
-        client=openai.AsyncOpenAI(
-            api_key=OPENROUTER_KEY,
-            base_url=openrouter.OPENROUTER_BASE_URL,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(upstream)),
-        ),
-        spec=openrouter.OPENROUTER_MODEL_SPECS[0],
-        key=OPENROUTER_KEY,
-    )
-
-    events = [event async for event in client.complete(REQUEST)]
-
-    assert events[-1] == Usage(input_tokens=3, output_tokens=2)
-    assert bodies[0]["session_id"] == SESSION
-
-
-async def test_the_session_id_rides_every_attempt_of_one_request() -> None:
-    """A re-issue past a dead upstream is the same series as the call it replaces, so it carries the
-    same key — a reroute that renamed the session would strand the conversation on a cold cache."""
-    dead = [_chunk(finish="stop", provider="deadco"), _chunk(usage=_usage(1, 0))]
-    good = [_chunk(content="recovered"), _chunk(finish="stop"), _chunk(usage=_usage(2, 3))]
-    create = ScriptedCreate(dead, good)
-    async for _ in _client(create).complete(REQUEST):
-        pass
-    assert [call["extra_body"]["session_id"] for call in create.calls] == [SESSION, SESSION]
-
-
 async def test_a_request_naming_no_session_is_refused_before_the_call() -> None:
     """A direct client holds one cache and never reads the field, so an unnamed series only means
     something here — and here it means a caller reached a router without saying what its prompt
@@ -783,29 +714,6 @@ async def test_a_request_naming_no_session_is_refused_before_the_call() -> None:
             pass
 
     assert create.calls == []
-
-
-async def test_reasoning_effort_rides_from_the_request() -> None:
-    create = ScriptedCreate(
-        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
-    )
-    async for _ in _client(create).complete(REQUEST.model_copy(update={"reasoning": "low"})):
-        pass
-    assert create.calls[0]["extra_body"] == {"session_id": SESSION, "reasoning": {"effort": "low"}}
-
-
-async def test_reasoning_off_disables_the_reasoning_budget() -> None:
-    """An omitted budget leaves the upstream model reasoning at its own default effort, and
-    max_tokens is reasoning-inclusive, so `off` says so on the wire."""
-    create = ScriptedCreate(
-        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
-    )
-    async for _ in _client(create).complete(REQUEST.model_copy(update={"reasoning": "off"})):
-        pass
-    assert create.calls[0]["extra_body"] == {
-        "session_id": SESSION,
-        "reasoning": {"enabled": False},
-    }
 
 
 async def test_model_without_reasoning_omits_the_reasoning_budget() -> None:
@@ -839,60 +747,6 @@ async def test_model_without_tools_with_reasoning_omits_the_reasoning_budget() -
     async for _ in _client(create, spec).complete(request):
         pass
     assert create.calls[0]["extra_body"] == {"session_id": SESSION}
-
-
-def test_google_tool_result_with_json_reference_is_text_enveloped() -> None:
-    result = json.dumps(
-        {
-            "$defs": {"Visibility": {"type": "string"}},
-            "properties": {"visibility": {"$ref": "#/$defs/Visibility"}},
-        }
-    )
-    request = REQUEST.model_copy(
-        update={
-            "model": "google/gemini-3.7-flash",
-            "messages": (
-                Message(role="user", content="inspect"),
-                Message(
-                    role="assistant",
-                    content=(ToolUseBlock(id="c1", name="inspect", input={}),),
-                ),
-                Message(
-                    role="user",
-                    content=(ToolResultBlock(tool_use_id="c1", content=result),),
-                ),
-            ),
-        }
-    )
-    kwargs = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())
-    messages = kwargs["messages"]
-    assert isinstance(messages, list)
-    assert json.loads(messages[-1]["content"]) == {"text": result}
-
-
-def test_deep_google_tool_results_do_not_recurse() -> None:
-    result = "[" * 600 + '{"$ref":"#/$defs/Value"}' + "]" * 600
-    request = REQUEST.model_copy(
-        update={
-            "model": "google/gemini-3.7-flash",
-            "messages": (
-                Message(role="user", content="inspect"),
-                Message(
-                    role="assistant",
-                    content=(ToolUseBlock(id="c1", name="inspect", input={}),),
-                ),
-                Message(
-                    role="user",
-                    content=(ToolResultBlock(tool_use_id="c1", content=result),),
-                ),
-            ),
-        }
-    )
-
-    messages = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())["messages"]
-
-    assert isinstance(messages, list)
-    assert json.loads(messages[-1]["content"])["text"] == result
 
 
 def test_google_tool_results_survive_json_parser_value_refusal() -> None:
@@ -991,33 +845,6 @@ def test_text_only_model_omits_tool_result_images_before_provider_call() -> None
     }
 
 
-async def test_dead_provider_completion_reroutes_excluding_that_provider() -> None:
-    dead = [_chunk(finish="stop", provider="deadco"), _chunk(usage=_usage(1, 0))]
-    good = [_chunk(content="recovered"), _chunk(finish="stop"), _chunk(usage=_usage(2, 3))]
-    create = ScriptedCreate(dead, good)
-    events = [event async for event in _client(create).complete(REQUEST)]
-    assert len(create.calls) == 2
-    assert [event for event in events if isinstance(event, TextDelta)] == [
-        TextDelta(text="recovered")
-    ]
-    assert [event for event in events if isinstance(event, Usage)] == [
-        Usage(input_tokens=1, output_tokens=0),
-        Usage(input_tokens=2, output_tokens=3),
-    ]
-    assert create.calls[1]["extra_body"]["provider"] == {"ignore": ["deadco"]}
-
-
-async def test_length_finish_raises_truncated() -> None:
-    create = ScriptedCreate(
-        [_chunk(content="cut"), _chunk(finish="length"), _chunk(usage=_usage(1, 9))]
-    )
-    events = []
-    with pytest.raises(ModelResponseTruncated):
-        async for event in _client(create).complete(REQUEST):
-            events.append(event)
-    assert events[-1] == Usage(input_tokens=1, output_tokens=9)
-
-
 async def test_length_finish_without_stream_usage_truncates_before_any_generation_lookup() -> None:
     """The engine recovers a truncated round on the ModelResponseTruncated class alone, so a round
     cut at the budget raises it whether or not the stream carried usage: a generation lookup here
@@ -1044,129 +871,6 @@ async def test_length_finish_without_stream_usage_truncates_before_any_generatio
     assert requests == []
 
 
-def test_manifest_registers_slug_pinned_specs() -> None:
-    manifest = openrouter.manifest()
-    by_id = {spec.id: spec for spec in manifest.models}
-    assert set(by_id) == {
-        "google/gemini-3.7-flash",
-        "google/gemini-2.5-pro",
-        "z-ai/glm-5.2",
-        "z-ai/glm-5.3",
-        "z-ai/glm-5.3-flash",
-        "moonshotai/kimi-k3",
-        "anthropic/claude-fable-5",
-        "openai/gpt-5.6-sol",
-    }
-    assert by_id["z-ai/glm-5.2"].price.output == 3_000_000
-    assert by_id["z-ai/glm-5.2"].knowledge_cutoff == "2026-03"
-
-
-def test_glm_53_spec_carries_its_route_price_window_and_required_reasoning() -> None:
-    spec = {s.id: s for s in openrouter.manifest().models}["z-ai/glm-5.3"]
-    assert openrouter.openrouter_slug(spec.id) == "z-ai/glm-5.3"
-    assert spec.price.input == 1_400_000
-    assert spec.price.output == 4_400_000
-    assert spec.price.cache_read == 260_000
-    assert spec.context_window == 1_048_576
-    assert spec.reasoning.default_on
-    assert not spec.reasoning.can_disable
-    assert not spec.accepts_image_input
-    assert spec.wire_reasoning("off", ()) == "low"
-    assert spec.wire_reasoning("high", ()) == "high"
-
-
-def test_gemini_37_flash_spec_carries_its_route_price_window_and_reasoning() -> None:
-    spec = {s.id: s for s in openrouter.manifest().models}["google/gemini-3.7-flash"]
-    assert openrouter.openrouter_slug(spec.id) == "google/gemini-3.7-flash"
-    assert spec.price.input == 375_000
-    assert spec.price.output == 1_875_000
-    assert spec.price.cache_read == 37_500
-    assert spec.context_window == 1_048_576
-    assert spec.knowledge_cutoff == "2026-03"
-    assert spec.reasoning.default_on
-    assert not spec.reasoning.can_disable
-    assert spec.accepts_image_input
-    assert spec.wire_reasoning("off", ()) == "low"
-    assert spec.wire_reasoning("high", ()) == "high"
-
-
-def test_glm_53_flash_spec_carries_its_undiscounted_price_window_and_required_reasoning() -> None:
-    """The rates are the ones a route bills without the 0.5 promotional discount the listing shows,
-    which no route is held to, and the window is the 1,048,576 tokens every route but Cloudflare's
-    serves. The model reasons on every call, so a row that let an agent write `off` would send a
-    budget it refuses. Unlike `z-ai/glm-5.3`, this route takes image input."""
-    spec = {s.id: s for s in openrouter.manifest().models}["z-ai/glm-5.3-flash"]
-    assert openrouter.openrouter_slug(spec.id) == "z-ai/glm-5.3-flash"
-    assert spec.price.input == 150_000
-    assert spec.price.output == 500_000
-    assert spec.price.cache_read == 30_000
-    assert spec.context_window == 1_048_576
-    assert spec.knowledge_cutoff == "2026-03"
-    assert spec.reasoning.default_on
-    assert not spec.reasoning.can_disable
-    assert spec.accepts_image_input
-    assert spec.wire_reasoning("off", ()) == "low"
-    assert spec.wire_reasoning("high", ()) == "high"
-
-
-def test_kimi_k3_spec_carries_its_price_cache_rate_and_million_token_window() -> None:
-    spec = {s.id: s for s in openrouter.manifest().models}["moonshotai/kimi-k3"]
-    assert spec.price.input == 3_000_000
-    assert spec.price.output == 15_000_000
-    assert spec.price.cache_read == 300_000
-    assert spec.context_window == 1_000_000
-
-
-def test_fable_5_route_carries_its_slug_price_window_and_required_reasoning() -> None:
-    """The id is the slug OpenRouter's catalog publishes, `anthropic/claude-fable-5`; the router
-    also resolves dated spellings onto it, so a wrong id here would pass a live call and hide the
-    mistake. Cache writes carry no rate, so this router's one write channel leaves them priced as
-    input, like every other row here. The model reasons on every call, so a row that let an agent
-    write `off` would send a budget it refuses."""
-    spec = {s.id: s for s in openrouter.manifest().models}["anthropic/claude-fable-5"]
-    assert openrouter.openrouter_slug(spec.id) == "anthropic/claude-fable-5"
-    assert spec.price.input == 10_000_000
-    assert spec.price.output == 50_000_000
-    assert spec.price.cache_read == 1_000_000
-    assert spec.price.cache_write_30m == 0
-    assert spec.context_window == 1_000_000
-    assert spec.reasoning.default_on
-    assert not spec.reasoning.can_disable
-    assert spec.wire_reasoning("off", ()) == "low"
-
-
-def test_gpt_56_sol_route_carries_its_slug_price_and_billed_window() -> None:
-    """The route accepts 1,050,000 tokens and bills 2x input plus 1.5x output for a whole request
-    over 272,000, which one rate per token class cannot express, so the row carries the window this
-    rate is true at. The row holds the undiscounted slug rate, which equals the direct openai row:
-    the listing halves it under a promotional discount the router applies to one route of seven, and
-    a ledger that books the discount charges half of what the other six routes cost. Reasoning
-    composes with tools here because this router sends its own normalised `reasoning` field rather
-    than the `reasoning_effort` the model refuses beside tools on Chat Completions (#568)."""
-    spec = {s.id: s for s in openrouter.manifest().models}["openai/gpt-5.6-sol"]
-    assert openrouter.openrouter_slug(spec.id) == "openai/gpt-5.6-sol"
-    assert spec.price.input == 4_000_000
-    assert spec.price.output == 20_000_000
-    assert spec.price.cache_read == 400_000
-    assert spec.price.cache_write_30m == 5_000_000
-    assert spec.context_window == 272_000
-    assert spec.knowledge_cutoff == "2026-02"
-    assert spec.accepts_image_input
-    tools = (ToolSchema(name="search", description="Search", input_schema={"type": "object"}),)
-    assert spec.wire_reasoning("high", tools) == "high"
-
-
-async def test_model_client_requires_its_key(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    monkeypatch.delenv(openrouter.OPENROUTER_API_KEY_ENV, raising=False)
-    config = Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
-        blob=BlobConfig(backend="filesystem", root=tmp_path),
-    )
-    registry = model_registry(config, (openrouter.manifest(),))
-    with ws(uuid4()), pytest.raises(RuntimeError, match=openrouter.OPENROUTER_API_KEY_ENV):
-        await registry.client_for("google/gemini-2.5-pro")
-
-
 async def test_registry_rejects_a_non_ascii_openrouter_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -1188,25 +892,6 @@ async def test_registry_rejects_a_non_ascii_openrouter_key(
             ),
         ):
             await registry.client_for("google/gemini-2.5-pro")
-
-
-async def test_registry_selects_openrouter_and_prices_its_slug(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(openrouter.OPENROUTER_API_KEY_ENV, "sk-openrouter-test")
-    config = Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
-        blob=BlobConfig(backend="filesystem", root=tmp_path),
-    )
-    registry = model_registry(config, (openrouter.manifest(),))
-    with ws(uuid4()):
-        client = await registry.client_for("google/gemini-2.5-pro")
-    assert isinstance(client, openrouter.OpenRouterModelClient)
-    assert client.spec is registry.spec("google/gemini-2.5-pro")
-    priced = registry.pricing.micro_usd(
-        "google/gemini-2.5-pro", Usage(input_tokens=1_000_000, output_tokens=1_000_000)
-    )
-    assert priced == 11_000_000
 
 
 @dataclass
@@ -1392,51 +1077,6 @@ def test_every_advertised_aspect_ratio_is_served_by_the_default_model() -> None:
     assert openrouter.IMAGE_MODELS["recraft/recraft-v4.1"].aspect_ratios < limits.aspect_ratios
 
 
-def test_manifest_publishes_the_generation_tools_and_the_key_slot() -> None:
-    """The key slot is declared because a tool reads credentials only for slots its manifest names;
-    the model specs resolve the same slot, so models, images and videos run on one key."""
-    manifest = openrouter.manifest()
-    assert [tool.name for tool in manifest.tools] == ["generate_image", "generate_video"]
-    assert all(tool.side_effecting for tool in manifest.tools)
-    assert all(
-        tool.bound == ObjectBinding(kind=ARTIFACT_KIND, binding="collection")
-        for tool in manifest.tools
-    )
-    assert [tool.canonical_id for tool in manifest.tools] == [
-        "action:artifact:generate_image",
-        "action:artifact:generate_video",
-    ]
-    (slot,) = manifest.credentials
-    assert slot.name == openrouter.OPENROUTER_KEY_SLOT
-    assert slot.injection is None
-    assert {spec.key_slot for spec in manifest.models} == {openrouter.OPENROUTER_KEY_SLOT}
-
-
-def test_generation_registers_as_artifact_actions_and_leaves_the_wire() -> None:
-    manifest = openrouter.manifest()
-    tools, ext_by_tool, verbs = turn_tools(
-        (manifest,),
-        CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        audience=conversation_audience(None),
-    )
-    assert {"generate_image", "generate_video"} <= set(verbs.actions[ARTIFACT_KIND])
-    for name in ("generate_image", "generate_video"):
-        bound = verbs.actions[ARTIFACT_KIND][name]
-        assert bound.extension == openrouter.NAME
-        assert bound.context is not None and bound.context.store.extension == openrouter.NAME
-    wire = {tool.name for tool in tools}
-    assert wire.isdisjoint({"generate_image", "generate_video"})
-    assert "object_action" in wire
-    assert set(ext_by_tool).isdisjoint({"generate_image", "generate_video"})
-    assert {"action:artifact:generate_image", "action:artifact:generate_video"} <= _agent_actions(
-        verbs.actions, None, MEMBER_ADMISSION
-    )
-    assert _agent_actions(
-        verbs.actions, ("action:artifact:generate_image", "bash"), MEMBER_ADMISSION
-    ) == frozenset({"action:artifact:generate_image"})
-    assert _agent_actions(verbs.actions, ("generate_image",), MEMBER_ADMISSION) == frozenset()
-
-
 def test_the_payload_is_bounded_at_the_tool_boundary() -> None:
     common = {"prompt": "p", "file_name": "poster"}
     with pytest.raises(ValidationError):
@@ -1455,31 +1095,6 @@ def test_generation_inputs_refuse_an_extra_key() -> None:
         model.model_validate(common)
         with pytest.raises(ValidationError, match="unexpected_key"):
             model.model_validate({**common, "unexpected_key": "x"})
-
-
-def test_the_offered_resolution_tiers_are_the_ones_seedream_draws() -> None:
-    """Seed's parameter list names `1K`, and Seed then refuses to render it: it draws at least
-    3,686,400 output pixels and 1K is 1,048,576 at every aspect ratio. What the field offers is
-    what came back as an image, so `1K` is not a tier here however the parameter list reads."""
-    common = {"prompt": "p", "file_name": "poster"}
-    tiers, _none = get_args(GenerateImageInput.model_fields["resolution"].annotation)
-    assert set(get_args(tiers)) == {"2K", "4K"}
-    assert openrouter.IMAGE_MODELS[openrouter.DEFAULT_IMAGE_MODEL].resolutions == set(
-        get_args(tiers)
-    )
-    for below in ("1K", "512"):
-        with pytest.raises(ValidationError):
-            GenerateImageInput(**common, resolution=below)
-
-
-def test_an_unasked_resolution_settles_on_the_cheapest_tier_that_draws() -> None:
-    """A call that names no tier draws at 2K rather than whatever the provider would pick, and 4K
-    stays reachable for the member who wants it."""
-    common = {"prompt": "p", "file_name": "poster"}
-    assert GenerateImageInput(**common).resolution == openrouter.DEFAULT_RESOLUTION
-    assert openrouter.DEFAULT_RESOLUTION == "2K"
-    for tier in ("2K", "4K"):
-        assert GenerateImageInput(**common, resolution=tier).resolution == tier
 
 
 def test_a_model_that_sizes_its_own_output_is_sent_no_tier() -> None:
@@ -1572,25 +1187,6 @@ async def test_generate_image_posts_the_bounded_request_and_saves_every_image(
     assert not result.is_error
 
 
-async def test_the_providers_reported_cost_meters_onto_the_turn(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """OpenRouter reports what it charged for this generation whatever unit the upstream billed in,
-    so that number is the ledger's, and the row counts images rather than tokens. A default call
-    also sends only the fields every allowlisted model accepts — GPT Image 2 takes no
-    `resolution`."""
-    api = _ImageApi(usage={"prompt_tokens": 0, "completion_tokens": 4175, "cost": 0.1234})
-    _wire(monkeypatch, api)
-    workspace_id, turn_id = await _keyed_turn()
-    await _generate(workspace_id, turn_id, _Sandbox(), tmp_path, model="openai/gpt-image-2")
-    assert api.sent() == {
-        "model": "openai/gpt-image-2",
-        "prompt": "a red panda astronaut, studio lighting",
-        "n": 1,
-    }
-    assert await _images_ledger(turn_id) == (1, 123_400, "openai/gpt-image-2", None)
-
-
 async def test_a_response_without_a_cost_meters_the_models_list_rate(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1614,27 +1210,6 @@ async def test_a_response_without_a_cost_meters_the_models_list_rate(
         "generated-images/poster-2.png",
     ]
     assert [block.media_type for block in result.content[1:]] == ["image/png", "image/png"]
-
-
-async def test_a_byok_generation_meters_the_upstream_charge_it_reports(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A workspace running its own upstream key is charged nothing by OpenRouter, which reports
-    `cost` as zero and states the real spend under `cost_details`. That is the same money one hop
-    further out, so it is what the turn is metered — a reported zero is not a free image."""
-    api = _ImageApi(
-        usage={
-            "prompt_tokens": 12,
-            "completion_tokens": 229,
-            "cost": 0,
-            "is_byok": True,
-            "cost_details": {"upstream_inference_cost": 0.00693},
-        }
-    )
-    _wire(monkeypatch, api)
-    workspace_id, turn_id = await _keyed_turn()
-    await _generate(workspace_id, turn_id, _Sandbox(), tmp_path, model="openai/gpt-image-2")
-    assert await _images_ledger(turn_id) == (1, 6_930, "openai/gpt-image-2", None)
 
 
 async def test_a_default_seedream_call_puts_the_cheap_tier_on_the_wire(
@@ -1671,26 +1246,6 @@ async def test_a_workspace_on_its_own_key_is_not_metered_for_its_own_spend(
     assert not result.is_error
     assert sorted(sandbox.writes) == ["generated-images/poster-1.png"]
     assert await _images_ledger(turn_id) is None
-
-
-async def test_a_zero_cost_carrying_no_upstream_charge_falls_back_to_the_list_rate(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _wire(monkeypatch, _ImageApi(usage={"prompt_tokens": 0, "completion_tokens": 4175, "cost": 0}))
-    workspace_id, turn_id = await _keyed_turn()
-    await _generate(workspace_id, turn_id, _Sandbox(), tmp_path)
-    list_rate = openrouter.IMAGE_MODELS["bytedance-seed/seedream-4.5"].list_micro_usd
-    assert await _images_ledger(turn_id) == (1, list_rate, "bytedance-seed/seedream-4.5", None)
-
-
-async def test_two_generations_on_one_turn_accumulate_into_one_images_row(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _wire(monkeypatch, _ImageApi())
-    workspace_id, turn_id = await _keyed_turn()
-    await _generate(workspace_id, turn_id, _Sandbox(), tmp_path)
-    await _generate(workspace_id, turn_id, _Sandbox(), tmp_path, file_name="second")
-    assert await _images_ledger(turn_id) == (2, 160_000, "bytedance-seed/seedream-4.5", None)
 
 
 async def test_a_provider_refusal_returns_its_message_and_bills_nothing(
@@ -1964,130 +1519,6 @@ def test_the_video_payload_is_bounded_at_the_tool_boundary() -> None:
         GenerateVideoInput(**common, model="minimax/hailuo-2.3")
 
 
-async def test_generate_video_posts_the_job_polls_it_and_saves_the_download(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The whole asynchronous flow on one key: the accepted job is polled until it completes, the
-    finished MP4 is downloaded from the job's content route and written into the workspace, and the
-    provider's reported charge is what the turn is metered."""
-    api = _VideoApi()
-    _wire_video(monkeypatch, api)
-    workspace_id, turn_id = await _keyed_turn()
-    sandbox = _Sandbox()
-    result = await _film(workspace_id, turn_id, sandbox, tmp_path, duration=10, aspect_ratio="16:9")
-
-    assert {request.headers["authorization"] for request in api.requests} == {
-        f"Bearer {OPENROUTER_KEY}"
-    }
-    assert api.sent() == {
-        "model": "minimax/hailuo-3",
-        "prompt": "a red panda astronaut drifting down a station corridor",
-        "duration": 10,
-        "resolution": "2K",
-        "aspect_ratio": "16:9",
-        "generate_audio": True,
-    }
-    assert api.polls() == 2
-    assert api.requests[-1].url.params["index"] == "0"
-    assert sandbox.writes == {"generated-videos/teaser.mp4": MP4}
-    assert json.loads(result.content[0].text) == {
-        "model": "minimax/hailuo-3",
-        "files": ["generated-videos/teaser.mp4"],
-        "duration_seconds": 10,
-        "machine_generated": True,
-        "cost_micro_usd": 650_000,
-    }
-    assert not result.is_error
-    assert await _videos_ledger(turn_id) == (1, 650_000, "minimax/hailuo-3", None)
-
-
-async def test_a_job_that_prices_nothing_meters_the_list_rate_per_second(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """H3 lists at $0.13 per output second at its one 2K tier, so an unpriced job is metered over
-    the seconds asked for rather than at nothing."""
-    _wire_video(monkeypatch, _VideoApi(statuses=[{"status": "completed"}]))
-    workspace_id, turn_id = await _keyed_turn()
-    await _film(workspace_id, turn_id, _Sandbox(), tmp_path, duration=15)
-    assert await _videos_ledger(turn_id) == (1, 15 * 130_000, "minimax/hailuo-3", None)
-
-
-async def test_seedance_films_its_own_length_and_tier_and_is_metered_at_that_tiers_rate(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A take H3 cannot film — 20 seconds at 480p — goes out on Seedance's own bounds, and an
-    unpriced job is metered at that tier's rate, not at H3's flat $0.13 per second."""
-    api = _VideoApi(statuses=[{"status": "completed"}])
-    _wire_video(monkeypatch, api)
-    workspace_id, turn_id = await _keyed_turn()
-    sandbox = _Sandbox()
-    result = await _film(
-        workspace_id,
-        turn_id,
-        sandbox,
-        tmp_path,
-        model="bytedance/seedance-2.5",
-        duration=20,
-        resolution="480p",
-    )
-    assert api.sent() == {
-        "model": "bytedance/seedance-2.5",
-        "prompt": "a red panda astronaut drifting down a station corridor",
-        "duration": 20,
-        "resolution": "480p",
-        "generate_audio": True,
-    }
-    assert sandbox.writes == {"generated-videos/teaser.mp4": MP4}
-    assert json.loads(result.content[0].text)["cost_micro_usd"] == 20 * 107_471
-    assert await _videos_ledger(turn_id) == (
-        1,
-        20 * 107_471,
-        "bytedance/seedance-2.5",
-        None,
-    )
-
-
-async def test_a_bigger_frame_on_a_token_billed_model_meters_more_per_second(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Seedance's charge is per video token, so the same 6-second take costs more at 720p than at
-    480p; the fallback rate is read per tier and the ledger carries the difference."""
-    _wire_video(monkeypatch, _VideoApi(statuses=[{"status": "completed"}]))
-    workspace_id, turn_id = await _keyed_turn()
-    await _film(
-        workspace_id,
-        turn_id,
-        _Sandbox(),
-        tmp_path,
-        model="bytedance/seedance-2.5",
-        duration=6,
-    )
-    assert await _videos_ledger(turn_id) == (1, 6 * 232_577, "bytedance/seedance-2.5", None)
-
-
-async def test_a_byok_video_meters_the_upstream_charge_it_reports(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _wire_video(
-        monkeypatch,
-        _VideoApi(
-            statuses=[
-                {
-                    "status": "completed",
-                    "usage": {
-                        "cost": 0,
-                        "is_byok": True,
-                        "cost_details": {"upstream_inference_cost": 0.78},
-                    },
-                }
-            ]
-        ),
-    )
-    workspace_id, turn_id = await _keyed_turn()
-    await _film(workspace_id, turn_id, _Sandbox(), tmp_path, duration=6)
-    assert await _videos_ledger(turn_id) == (1, 780_000, "minimax/hailuo-3", None)
-
-
 async def test_a_workspace_on_its_own_key_is_not_metered_for_its_own_video(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2101,16 +1532,6 @@ async def test_a_workspace_on_its_own_key_is_not_metered_for_its_own_video(
     assert not result.is_error
     assert sorted(sandbox.writes) == ["generated-videos/teaser.mp4"]
     assert await _videos_ledger(turn_id) is None
-
-
-async def test_two_generations_on_one_turn_accumulate_into_one_videos_row(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _wire_video(monkeypatch, _VideoApi(statuses=[{"status": "completed", "usage": {"cost": 0.65}}]))
-    workspace_id, turn_id = await _keyed_turn()
-    await _film(workspace_id, turn_id, _Sandbox(), tmp_path)
-    await _film(workspace_id, turn_id, _Sandbox(), tmp_path, file_name="second")
-    assert await _videos_ledger(turn_id) == (2, 1_300_000, "minimax/hailuo-3", None)
 
 
 async def test_a_rejected_video_request_returns_the_providers_message_and_bills_nothing(

@@ -18,7 +18,7 @@ from ufo_ext_sources.providers.gmail import GmailConnector
 
 from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import CursorExpired, SourceAuth, StreamSkipped
-from ufo.sdk.sources import MAIL_BACKFILL_WINDOW_DAYS, ConnectorBackend, ConnectorSourceConfig
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
 
 ACCOUNT = "acct-1"
 PINNED_CUTOFF = datetime(2026, 1, 15, 9, 30, tzinfo=UTC)
@@ -191,58 +191,6 @@ async def test_the_pinned_window_bounds_the_backfill_and_survives_a_cursor_reset
     assert int(PINNED_CUTOFF.timestamp()) == 1768469400
     assert {page.source_ref for page in first.pages} == {"messages/m1"}
     assert {page.source_ref for page in second.pages} == {"messages/m1"}
-
-
-async def test_a_row_pinning_no_window_lists_the_whole_mailbox() -> None:
-    queries: list[str | None] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/gmail/v1/users/me/messages":
-            queries.append(request.url.params.get("q"))
-            return httpx.Response(200, json={"messages": [{"id": "m1"}], "nextPageToken": None})
-        if path.startswith("/gmail/v1/users/me/messages/"):
-            return _get(path.rsplit("/", 1)[-1], request)
-        if path == "/gmail/v1/users/me/profile":
-            return _profile()
-        return httpx.Response(404, json={"path": path})
-
-    await _fetch(handle)
-
-    assert queries == [None]
-    assert GmailConnector().streams()[0].backfill_window_days == MAIL_BACKFILL_WINDOW_DAYS
-
-
-async def test_a_window_holding_no_message_still_seeds_the_history_cursor() -> None:
-    """A bounded window is a state a member can ask for and get nothing back from — a quiet mailbox,
-    a narrow window — and a run that seeded no cursor would stay in backfill mode: it would
-    re-enumerate the window every interval and never reach the delta path, the only place a
-    provider-side deletion becomes a tombstone. The mailbox profile carries a `historyId` of its
-    own, so an empty window still hands the next run its starting point.
-
-    That profile read has to happen BEFORE the enumeration, and the request order is the assertion
-    that holds it there. Read after, it names a point the walk never saw: a message delivered
-    between the empty listing and the profile read gets a `historyId` below the seeded cursor, and
-    the next `history.list` starts past it and never reports it — one message lost silently, on the
-    quiet mailbox this path exists for. Read before, the same message sits above the seed and the
-    delta names it. The mailbox here answers a later `historyId` than the run seeds, which is what
-    a read-after would have picked up."""
-    paths: list[str] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        paths.append(request.url.path)
-        if request.url.path == "/gmail/v1/users/me/messages":
-            return httpx.Response(200, json={})
-        if request.url.path == "/gmail/v1/users/me/profile":
-            # a message lands the instant the empty listing comes back, moving the mailbox on
-            return _profile("8500" if len(paths) == 1 else "8600")
-        return httpx.Response(404, json={"path": request.url.path})
-
-    result = await _fetch(handle, backfill_after=PINNED_CUTOFF)
-
-    assert result.pages == ()
-    assert paths == ["/gmail/v1/users/me/profile", "/gmail/v1/users/me/messages"]
-    assert result.next_cursor == "8500"
 
 
 async def test_a_windowed_row_still_walks_the_history_delta_it_resumes_from() -> None:

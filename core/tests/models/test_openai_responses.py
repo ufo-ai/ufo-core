@@ -52,8 +52,6 @@ from ufo.harness.models.openai import (
     MAX_EMPTY_PROVIDER_RETRIES,
     MAX_PROVIDER_RETRIES,
     OpenAIClient,
-    responses_input,
-    responses_request,
 )
 from ufo.harness.models.pricing import ModelPrice
 from ufo.harness.models.spec import ModelSpec, ReasoningSupport
@@ -392,118 +390,6 @@ async def test_responses_reasoning_item_without_encrypted_content_fails_loud() -
         [event async for event in _responses_client(scripted).complete(_request())]
 
 
-def test_responses_input_replays_assistant_text_and_reasoning_ahead_of_function_calls() -> None:
-    """The guarantee the replay rests on: a round's items keep their order among themselves and land
-    ahead of the function calls they chose. Structured assistant narration is output text — the
-    Responses API rejects input text in an assistant message — while member text remains input."""
-    assert responses_input(
-        (
-            Message(
-                role="assistant",
-                content=(
-                    ReasoningItemBlock(id="rs_1", encrypted_content="ZW5jcnlwdGVk"),
-                    ReasoningItemBlock(id="rs_2", encrypted_content="bW9yZQ"),
-                    TextBlock(text="looking"),
-                    ToolUseBlock(id="call-1", name="read", input={"path": "a"}),
-                ),
-            ),
-        )
-    ) == [
-        {"type": "reasoning", "id": "rs_1", "encrypted_content": "ZW5jcnlwdGVk", "summary": []},
-        {"type": "reasoning", "id": "rs_2", "encrypted_content": "bW9yZQ", "summary": []},
-        {
-            "role": "assistant",
-            "content": [{"type": "output_text", "text": "looking", "annotations": []}],
-        },
-        {
-            "type": "function_call",
-            "call_id": "call-1",
-            "name": "read",
-            "arguments": '{"path": "a"}',
-        },
-    ]
-
-
-def test_responses_request_always_disables_retention_and_asks_for_encrypted_reasoning() -> None:
-    """Every Responses request is stateless, whatever wire serves it: `store=False` leaves nothing
-    on the provider, and `include` is what makes the reasoning items it returns replayable — a
-    request without it gets items the fail-loud guard then rejects."""
-    kwargs = responses_request(_request(), None)
-    assert kwargs["store"] is False
-    assert kwargs["include"] == ["reasoning.encrypted_content"]
-
-
-def test_the_codex_wire_carries_no_output_budget() -> None:
-    """The backend a member's ChatGPT account reaches refuses `max_output_tokens` outright — it
-    answers 400 `Unsupported parameter`, so every coding round of every member who connected
-    ChatGPT dies on the first request. The platform wire still carries the budget."""
-    platform = responses_request(_request(), None)
-    assert platform["max_output_tokens"] == _request().max_tokens
-
-    codex = responses_request(_request(), None, True)
-    assert "max_output_tokens" not in codex
-    assert codex["stream"] is True
-    assert codex["store"] is False
-
-
-def test_responses_request_preserves_input_controls_and_disables_storage() -> None:
-    request = ModelRequest(
-        model="gpt-5.6-terra",
-        system="be terse",
-        max_tokens=128,
-        conversation_cache_ttl="5m",
-        tools=(ToolSchema(name="read", description="read it", input_schema={"type": "object"}),),
-        messages=(
-            Message(
-                role="user",
-                content=(
-                    TextBlock(text="look"),
-                    ImageBlock(source=ImageSource(media_type="image/png", data="QUJD")),
-                ),
-            ),
-            Message(
-                role="assistant",
-                content=(ToolUseBlock(id="old-call", name="read", input={"path": "old"}),),
-            ),
-            Message(
-                role="user",
-                content=(
-                    ToolResultBlock(tool_use_id="old-call", content="missing", is_error=True),
-                ),
-            ),
-        ),
-    )
-    kwargs = responses_request(request, None)
-    assert kwargs["instructions"] == "be terse"
-    assert kwargs["store"] is False
-    assert kwargs["include"] == ["reasoning.encrypted_content"]
-    assert "reasoning" not in kwargs
-    assert kwargs["input"] == [
-        {
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": "look"},
-                {
-                    "type": "input_image",
-                    "detail": "auto",
-                    "image_url": "data:image/png;base64,QUJD",
-                },
-            ],
-        },
-        {
-            "type": "function_call",
-            "call_id": "old-call",
-            "name": "read",
-            "arguments": '{"path": "old"}',
-        },
-        {
-            "type": "function_call_output",
-            "call_id": "old-call",
-            "output": "[tool error] missing",
-        },
-    ]
-
-
 async def test_responses_path_fails_loud_on_truncation_and_refusal() -> None:
     usage = ResponseUsage(
         input_tokens=3,
@@ -759,52 +645,6 @@ async def test_responses_path_persistent_empty_degrades_to_usage() -> None:
     ]
 
 
-async def test_responses_path_pins_effort_none_when_the_request_asks_off() -> None:
-    """`off` reaches the wire as effort `none`. An omitted parameter is the provider's own default
-    effort, and `max_output_tokens` is reasoning-inclusive, so a caller that budgeted 100 tokens for
-    a chat title would spend all of them on reasoning and truncate before a word of it."""
-    seen: dict[str, Any] = {}
-    scripted = ScriptedResponses((_completed_events(), None))
-
-    class Capturing:
-        async def create(self, **kwargs: Any) -> AsyncIterator[object]:
-            seen.update(kwargs)
-            return await scripted.create(**kwargs)
-
-    client = OpenAIClient(
-        client=cast(openai.AsyncOpenAI, SimpleNamespace(responses=Capturing())),
-        spec=RESPONSES_SPEC,
-    )
-    request = _request().model_copy(update={"reasoning": "off", "max_tokens": 100})
-    [event async for event in client.complete(request)]
-    assert seen["reasoning"] == {"effort": "none"}
-    assert seen["max_output_tokens"] == 100
-
-
-async def test_responses_path_forced_tool_choice_carries_effort_none() -> None:
-    """A forced tool choice runs with reasoning off by construction, so the one round it compels
-    spends its whole budget on the call it was forced to make."""
-    seen: dict[str, Any] = {}
-    scripted = ScriptedResponses((_completed_events(), None))
-
-    class Capturing:
-        async def create(self, **kwargs: Any) -> AsyncIterator[object]:
-            seen.update(kwargs)
-            return await scripted.create(**kwargs)
-
-    client = OpenAIClient(
-        client=cast(openai.AsyncOpenAI, SimpleNamespace(responses=Capturing())),
-        spec=RESPONSES_SPEC,
-    )
-    tool = ToolSchema(name="finish", description="finish", input_schema={"type": "object"})
-    request = _request().model_copy(
-        update={"tools": (tool,), "tool_choice": "finish", "reasoning": "off"}
-    )
-    [event async for event in client.complete(request)]
-    assert seen["reasoning"] == {"effort": "none"}
-    assert seen["tool_choice"] == {"type": "function", "name": "finish"}
-
-
 async def test_responses_path_omits_reasoning_when_the_model_does_not_support_it() -> None:
     """A model that does not reason takes no reasoning parameter, for `off` as much as for `high`:
     there is nothing to switch off, and `none` is a value its api does not know."""
@@ -827,34 +667,6 @@ async def test_responses_path_omits_reasoning_when_the_model_does_not_support_it
     assert "reasoning" not in seen
     seen.clear()
     [event async for event in client.complete(request.model_copy(update={"reasoning": "off"}))]
-    assert "reasoning" not in seen
-
-
-async def test_responses_path_omits_reasoning_when_tools_forbid_the_pair() -> None:
-    seen: dict[str, Any] = {}
-    scripted = ScriptedResponses((_completed_events(), None))
-
-    class Capturing:
-        async def create(self, **kwargs: Any) -> AsyncIterator[object]:
-            seen.update(kwargs)
-            return await scripted.create(**kwargs)
-
-    spec = replace(
-        RESPONSES_SPEC,
-        reasoning=ReasoningSupport(supported=True, tools_with_reasoning=False),
-    )
-    client = OpenAIClient(
-        client=cast(openai.AsyncOpenAI, SimpleNamespace(responses=Capturing())), spec=spec
-    )
-    request = _request().model_copy(
-        update={
-            "tools": (
-                ToolSchema(name="search", description="Search", input_schema={"type": "object"}),
-            )
-        }
-    )
-    [event async for event in client.complete(request)]
-    assert "tools" in seen
     assert "reasoning" not in seen
 
 

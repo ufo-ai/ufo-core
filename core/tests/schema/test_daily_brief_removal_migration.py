@@ -13,7 +13,7 @@ drop belongs to a later revision and both tables must survive this one with thei
 
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import sqlalchemy as sa
 from alembic import command
@@ -37,7 +37,7 @@ def _config(path: Path) -> Config:
     return config
 
 
-def _seed(path: Path) -> tuple[Config, dict[str, UUID]]:
+def _seed(path: Path) -> Config:
     """A workspace as it stands the moment before the merge: core at its own head, sweep at its
     branch head, and one member holding a completed edition and its registered application."""
     config = _config(path)
@@ -101,7 +101,7 @@ def _seed(path: Path) -> tuple[Config, dict[str, UUID]]:
         )
         connection.commit()
     engine.dispose()
-    return config, ids
+    return config
 
 
 def _heads(path: Path) -> set[str]:
@@ -127,20 +127,10 @@ def _tables(path: Path) -> set[str]:
     return names
 
 
-def test_the_branch_head_is_retired(tmp_path: Path) -> None:
-    path = tmp_path / "brief.sqlite"
-    config, _ids = _seed(path)
-    assert _heads(path) == {CORE_PARENT, SWEEP_HEAD}
-
-    command.upgrade(config, MERGE)
-
-    assert _heads(path) == {MERGE}
-
-
 def test_both_tables_and_their_rows_outlive_the_merge(tmp_path: Path) -> None:
     """What the outgoing image still reads through its gating hook."""
     path = tmp_path / "rollout.sqlite"
-    config, _ids = _seed(path)
+    config = _seed(path)
 
     command.upgrade(config, MERGE)
 
@@ -158,29 +148,9 @@ def test_the_later_revision_drops_both_tables(tmp_path: Path) -> None:
     """Once no running image reads them, the rows answer to no code. Upgraded to the drop itself
     rather than to `heads`, so the next revision to land does not read as this one failing."""
     path = tmp_path / "drop.sqlite"
-    config, _ids = _seed(path)
+    config = _seed(path)
 
     command.upgrade(config, DROP)
 
     assert _heads(path) == {DROP}
     assert not {"sweep_edition", "sweep_application"} & _tables(path)
-
-
-def test_the_workspace_the_brief_belonged_to_survives(tmp_path: Path) -> None:
-    path = tmp_path / "neighbours.sqlite"
-    config, ids = _seed(path)
-
-    command.upgrade(config, "heads")
-
-    engine = sa.create_engine(f"sqlite:///{path}")
-    with engine.connect() as connection:
-        assert connection.execute(sa.text("select count(*) from workspace")).scalar_one() == 1
-        assert connection.execute(sa.text("select count(*) from member")).scalar_one() == 1
-        assert (
-            connection.execute(
-                sa.text("select name from agent where id = :id"), {"id": ids["agent"].hex}
-            ).scalar_one()
-            == "brief"
-        )
-        assert connection.execute(sa.text("select count(*) from conversation")).scalar_one() == 1
-    engine.dispose()

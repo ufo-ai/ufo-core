@@ -78,6 +78,11 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Turn, mid_turn_reply_id_for
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 ANSWERED = UUID("a532d68a-6724-5bd3-b34f-3ec90a57db80")
 SPAN_TEXT = "Filed the launch issue as metalcraftai/ufo#1801."
 CLOSING_TEXT = "Both are done."

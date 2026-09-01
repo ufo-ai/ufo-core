@@ -70,13 +70,13 @@ def _document(documents: list[dict[str, object]], kind: str, name: str) -> dict[
     )
 
 
-def test_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
+def _check_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
     assert 'assume_role_condition_test = "StringLike"' in APP_S3_MODULE
     assert 'namespace_service_accounts = ["ufo-*:ufo-serve"]' in APP_S3_MODULE
     assert "ufo-ingress" not in APP_S3_MODULE
 
 
-def test_app_s3_role_name_is_plan_known_and_shared() -> None:
+def _check_app_s3_role_name_is_plan_known_and_shared() -> None:
     platform = Path(__file__).resolve().parents[2] / "infra/modules/platform"
     assert re.search(
         r'app_s3_role_name\s+= "\$\{local\.name\}-app-s3"', (platform / "main.tf").read_text()
@@ -90,7 +90,7 @@ def test_app_s3_role_name_is_plan_known_and_shared() -> None:
     )
 
 
-def test_ingress_reads_the_blob_bucket_under_a_read_only_role() -> None:
+def _check_ingress_reads_the_blob_bucket_under_a_read_only_role() -> None:
     """The ingress streams a stored site's bytes out of the blob store, so it needs a credential for
     that bucket — and it is the internet-facing reverse proxy, so it gets the narrowest one that
     serves a byte: GetObject plus the bucket-level reads, never PutObject or DeleteObject. Sharing
@@ -130,7 +130,7 @@ def test_ingress_reads_the_blob_bucket_under_a_read_only_role() -> None:
     assert "ufo-serve" not in INGRESS_DEPLOYMENT.split("containers:", maxsplit=1)[0]
 
 
-def test_cache_outputs_are_plan_known() -> None:
+def _check_cache_outputs_are_plan_known() -> None:
     """The cache bucket name and role ARN render into the hosted manifest, whose keys feed a
     for_each that must be known at plan time. So the outputs are built from plan-known inputs, never
     from an apply-time attribute like `aws_s3_bucket.cache.id` that would break the plan on a fresh
@@ -149,7 +149,7 @@ def test_cache_outputs_are_plan_known() -> None:
     assert "role/${local.cache_s3_role_name}" in value_line("cache_s3_role_arn")
 
 
-def test_platform_grants_the_proxy_only_cache_scoped_s3() -> None:
+def _check_platform_grants_the_proxy_only_cache_scoped_s3() -> None:
     """The sandbox itself reaches nothing under a cloud role — its workspace lives on the carrier's
     filesystem and artifact PUTs are presigned serve-side, so there is no sandbox-fs role and no
     hand-rolled AssumeRole policy. The proxy pod's one cloud grant is the cache sidecar's durable
@@ -167,11 +167,11 @@ def test_platform_grants_the_proxy_only_cache_scoped_s3() -> None:
     assert "aws_s3_bucket.blob" not in cache_policy
 
 
-def test_hosted_serve_receives_the_bedrock_region() -> None:
+def _check_hosted_serve_receives_the_bedrock_region() -> None:
     assert '- {name: AWS_REGION, value: "${region}"}' in HOSTED_TEMPLATE.read_text()
 
 
-def test_production_ingress_survives_a_node_or_zone_loss() -> None:
+def _check_production_ingress_survives_a_node_or_zone_loss() -> None:
     _, start, remainder = PROD_CONFIG.read_text().partition(
         'resource "helm_release" "ingress_nginx" {'
     )
@@ -199,7 +199,7 @@ def test_production_ingress_survives_a_node_or_zone_loss() -> None:
     )
 
 
-def test_production_workloads_survive_a_node_or_zone_loss() -> None:
+def _check_production_workloads_survive_a_node_or_zone_loss() -> None:
     assert re.search(r"^\s+workload_ha\s+= true$", PROD_CONFIG.read_text(), re.MULTILINE)
     documents = _documents(True)
     for name in PRODUCTION_WORKLOADS:
@@ -234,7 +234,7 @@ def test_production_workloads_survive_a_node_or_zone_loss() -> None:
         }
 
 
-def test_testing_workloads_keep_the_current_placement() -> None:
+def _check_testing_workloads_keep_the_current_placement() -> None:
     assert re.search(r"^\s+workload_ha\s+= false$", TESTING_CONFIG.read_text(), re.MULTILINE)
     documents = _documents(False)
     assert not [document for document in documents if document["kind"] == "PodDisruptionBudget"]
@@ -245,14 +245,14 @@ def test_testing_workloads_keep_the_current_placement() -> None:
         assert "topologySpreadConstraints" not in pod
 
 
-def test_hosted_serve_rolls_all_replacements_before_draining() -> None:
+def _check_hosted_serve_rolls_all_replacements_before_draining() -> None:
     assert "maxSurge: 100%" in SERVE_DEPLOYMENT
     assert "maxUnavailable: 0" in SERVE_DEPLOYMENT
     assert "terminationGracePeriodSeconds: ${termination_grace_period_seconds}" in SERVE_DEPLOYMENT
     assert 'command: [sleep, "${prestop_seconds}"]' in SERVE_DEPLOYMENT
 
 
-def test_hosted_serve_reserves_capacity() -> None:
+def _check_hosted_serve_reserves_capacity() -> None:
     deployment = _document(_documents(False), "Deployment", "ufo-serve")
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"] == {
@@ -260,14 +260,14 @@ def test_hosted_serve_reserves_capacity() -> None:
     }
 
 
-def test_hosted_proxy_rolls_all_replacements_and_drains_connections() -> None:
+def _check_hosted_proxy_rolls_all_replacements_and_drains_connections() -> None:
     assert "maxSurge: 100%" in PROXY_DEPLOYMENT
     assert "maxUnavailable: 0" in PROXY_DEPLOYMENT
     assert "terminationGracePeriodSeconds: ${termination_grace_period_seconds}" in PROXY_DEPLOYMENT
     assert 'command: [sleep, "${prestop_seconds}"]' in PROXY_DEPLOYMENT
 
 
-def test_hosted_shutdown_grace_matches_across_environments() -> None:
+def _check_hosted_shutdown_grace_matches_across_environments() -> None:
     """The env local is the single source for each drain window: the rendered `[serve]` config
     interpolates the local (never a second literal), and the pod's termination grace is computed
     from both sequential shutdown phases — so no value can drift from its enforcement. Both envs
@@ -287,7 +287,7 @@ def test_hosted_shutdown_grace_matches_across_environments() -> None:
         ) in config
 
 
-def test_hosted_serve_receives_the_bedrock_mantle_api_key() -> None:
+def _check_hosted_serve_receives_the_bedrock_mantle_api_key() -> None:
     assert "bedrock-api-key" in API_KEYS_PROPERTIES
     assert (
         "{secretKey: AWS_BEARER_TOKEN_BEDROCK, "
@@ -296,7 +296,7 @@ def test_hosted_serve_receives_the_bedrock_mantle_api_key() -> None:
     )
 
 
-def test_hosted_serve_receives_the_perplexity_api_key() -> None:
+def _check_hosted_serve_receives_the_perplexity_api_key() -> None:
     assert (
         "{secretKey: PERPLEXITY_API_KEY, "
         "remoteRef: {key: ${secret_api_keys}, property: perplexity-api-key}}"
@@ -304,7 +304,7 @@ def test_hosted_serve_receives_the_perplexity_api_key() -> None:
     )
 
 
-def test_hosted_serve_receives_the_spectrum_project_credentials() -> None:
+def _check_hosted_serve_receives_the_spectrum_project_credentials() -> None:
     projections = CLUSTER_SERVICES_TEMPLATE.read_text()
     for name, property_name in (
         ("SPECTRUM_PROJECT_ID", "spectrum-project-id"),
@@ -317,7 +317,7 @@ def test_hosted_serve_receives_the_spectrum_project_credentials() -> None:
         )
 
 
-def test_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> None:
+def _check_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> None:
     """The shared app host fronts both the onboarding gateway and the serve fleet behind one
     ingress, so the sign-in flow is same-origin with the product it deposits members into. The
     browser sign-in endpoints (`/login`, the `/v1/onboard` wire, the `/ufo` install script) route
@@ -335,7 +335,7 @@ def test_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> None
     assert routing == expected
 
 
-def test_app_host_ingress_outlives_the_terminal_surface_hold() -> None:
+def _check_app_host_ingress_outlives_the_terminal_surface_hold() -> None:
     blocks = HOSTED_TEMPLATE.read_text().split("kind: Ingress")
     serve_ingress = next(b for b in blocks if "name: ufo-serve" in b.split("---", 1)[0])
     configured = re.search(
@@ -350,7 +350,7 @@ def test_app_host_ingress_outlives_the_terminal_surface_hold() -> None:
     assert int(configured.group(1)) > float(held.group(1))
 
 
-def test_hosted_proxy_runs_the_ufo_egress_data_plane() -> None:
+def _check_hosted_proxy_runs_the_ufo_egress_data_plane() -> None:
     """The proxy pod runs the standalone ufo-egress image as its entrypoint (no `args`), binds 8888,
     and reaches serve's egress-control RPC: the control URL on serve's internal port, the bearer and
     the run-token secret from ufo-platform-secrets, and the signing CA (cert + key) from
@@ -372,7 +372,7 @@ def test_hosted_proxy_runs_the_ufo_egress_data_plane() -> None:
     assert '- {name: UFO_EGRESS_CACHE_DAEMON, value: "127.0.0.1:9110"}' in PROXY_DEPLOYMENT
 
 
-def test_hosted_proxy_is_a_keyless_data_plane() -> None:
+def _check_hosted_proxy_is_a_keyless_data_plane() -> None:
     """The ufo-egress data plane holds no provider, broker, or credential keys and no database — it
     verifies the run token locally and calls serve's egress-control RPC for every decision. So every
     secret the deleted Python proxy carried (the model/provider keys, the Composio broker key, the
@@ -392,7 +392,7 @@ def test_hosted_proxy_is_a_keyless_data_plane() -> None:
         assert absent not in PROXY_DEPLOYMENT
 
 
-def test_egress_control_token_is_minted_and_projected() -> None:
+def _check_egress_control_token_is_minted_and_projected() -> None:
     """The bearer the ufo-egress data plane presents to serve's egress-control RPC is minted in
     terraform, written into the platform secret, and projected into ufo-platform-secrets — so serve
     (which reads that secret whole via envFrom) and the proxy (an explicit secretKeyRef) resolve one
@@ -408,7 +408,7 @@ def test_egress_control_token_is_minted_and_projected() -> None:
     )
 
 
-def test_hosted_github_app_registration_is_projected_for_serve() -> None:
+def _check_hosted_github_app_registration_is_projected_for_serve() -> None:
     """serve loads the coding manifest and mints GitHub installation tokens in-process, so the
     all-or-none App registration is projected into ufo-platform-secrets, which serve reads whole via
     envFrom. The keyless ufo-egress data plane never receives it."""
@@ -425,24 +425,24 @@ def test_hosted_github_app_registration_is_projected_for_serve() -> None:
         )
 
 
-def test_hosted_serve_holds_the_fleet_credential_key() -> None:
+def _check_hosted_serve_holds_the_fleet_credential_key() -> None:
     """A keyed provider's secret is decrypted serve-side now — the egress data plane holds no keys —
     so serve, not the proxy, opens the fleet Fernet."""
     assert "name: UFO_CREDENTIAL_KEY" in SERVE_DEPLOYMENT
     assert "secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}" in SERVE_DEPLOYMENT
 
 
-def test_hosted_proxy_receives_the_run_token_signing_secret() -> None:
+def _check_hosted_proxy_receives_the_run_token_signing_secret() -> None:
     assert "name: UFO_TOKEN_SECRET" in PROXY_DEPLOYMENT
     assert "secretKeyRef: {name: ufo-platform-secrets, key: UFO_TOKEN_SECRET}" in PROXY_DEPLOYMENT
 
 
-def test_hosted_proxy_has_resource_bounds() -> None:
+def _check_hosted_proxy_has_resource_bounds() -> None:
     assert "requests: {cpu: 250m, memory: 384Mi}" in PROXY_DEPLOYMENT
     assert 'limits: {cpu: "2", memory: 768Mi}' in PROXY_DEPLOYMENT
 
 
-def test_hosted_cache_reserves_node_storage() -> None:
+def _check_hosted_cache_reserves_node_storage() -> None:
     disk_size = re.search(r"node_disk_size\s+=\s+(\d+)", TESTING_MAIN.read_text())
     cache_size = re.search(r"emptyDir: \{sizeLimit: (\d+)Gi\}", PROXY_DEPLOYMENT)
 
@@ -454,7 +454,7 @@ def test_hosted_cache_reserves_node_storage() -> None:
     assert 'limits: {cpu: "2", memory: 3Gi, ephemeral-storage: 32Gi}' in PROXY_DEPLOYMENT
 
 
-def test_hosted_proxy_carries_only_the_cache_scoped_identity() -> None:
+def _check_hosted_proxy_carries_only_the_cache_scoped_identity() -> None:
     """The proxy pod holds no broad cloud role: artifact PUTs are presigned serve-side, so it needs
     no blob access and there is no `proxy_role_arn` input. Its one cloud grant is the cache
     sidecar's — the cache-bucket-scoped IRSA role, annotated on the SA only when the cache is
@@ -470,7 +470,7 @@ def test_hosted_proxy_carries_only_the_cache_scoped_identity() -> None:
     assert "eks.amazonaws.com/role-arn: ${cache_s3_role_arn}" in proxy_account
 
 
-def test_sites_answer_one_label_under_the_apex_behind_the_proxy() -> None:
+def _check_sites_answer_one_label_under_the_apex_behind_the_proxy() -> None:
     """Three deploy facts decide a site's address, and all are unforgiving.
 
     The NLB admits only `cloudflare_ipv4_ranges`, so a site address that resolves straight to it is
@@ -498,7 +498,7 @@ def test_sites_answer_one_label_under_the_apex_behind_the_proxy() -> None:
         assert f'  shared_host         = "app.${{{apex}}}"' in config
 
 
-def test_the_blob_bucket_admits_a_presigned_put_from_the_portal_and_nothing_else() -> None:
+def _check_the_blob_bucket_admits_a_presigned_put_from_the_portal_and_nothing_else() -> None:
     """A web attachment travels as one presigned PUT the member's browser sends straight to the
     bucket, from the portal page and carrying the checksum header the mint signed — a header no
     browser sends without asking S3 first. A bucket with no CORS rule refuses that ask, and every
@@ -518,7 +518,7 @@ def test_the_blob_bucket_admits_a_presigned_put_from_the_portal_and_nothing_else
         assert 'blob_origins         = ["https://${local.shared_host}"]' in main.read_text()
 
 
-def test_serve_mounts_the_rendered_config_and_the_proxy_reads_env() -> None:
+def _check_serve_mounts_the_rendered_config_and_the_proxy_reads_env() -> None:
     """serve mounts the rendered shared-fleet ufo.toml; the ufo-egress data plane reads its whole
     configuration from env and mounts no config, so only serve carries the config volume."""
     config_mount = "{name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}"
@@ -536,7 +536,7 @@ def _rendered_cluster_services() -> list[dict[str, object]]:
     return [document for document in yaml.safe_load_all(rendered) if document]
 
 
-def test_every_secret_key_a_workload_reads_is_one_an_external_secret_supplies() -> None:
+def _check_every_secret_key_a_workload_reads_is_one_an_external_secret_supplies() -> None:
     """A `secretKeyRef` naming a key no ExternalSecret syncs is not a plan error, a terraform error,
     or a test failure — the pod stops at `CreateContainerConfigError` and the rollout times out. The
     `data` lists are enumerated key by key, so writing a value into the AWS secret is only half of
@@ -583,3 +583,10 @@ def test_every_secret_key_a_workload_reads_is_one_an_external_secret_supplies() 
         f"secretKeyRef names keys no ExternalSecret syncs: {missing}. "
         f"Add each to the matching `data` list in {CLUSTER_SERVICES_TEMPLATE.name}."
     )
+
+
+def test_hosted_irsa_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 31
+    for check in checks:
+        check()

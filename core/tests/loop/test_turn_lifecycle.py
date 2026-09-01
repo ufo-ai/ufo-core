@@ -101,6 +101,11 @@ from ufo.schema.records import (
     Usage,
 )
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 STREAM_TIMEOUT_SECONDS = 30
 HOLD_RELEASE = threading.Event()
 HOLD_TWO_STARTED = threading.Event()

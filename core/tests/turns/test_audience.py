@@ -28,13 +28,12 @@ def test_audience_atoms_round_trip() -> None:
     assert audience_member(room_audience("slack", "C123")) is None
 
 
-@pytest.mark.parametrize(
-    "value",
-    ("", "member", "member:nope", "room:slack", "room::C1", "foreign:slack:", "other:x:y"),
-)
-def test_invalid_audience_atoms_fail_loud(value: str) -> None:
-    with pytest.raises(ValueError, match="audience"):
-        parse_audience(value)
+def test_invalid_audience_atoms_fail_loud() -> None:
+    invalid = ("", "member", "member:nope", "room:slack", "room::C1", "foreign:slack:", "other:x:y")
+
+    for value in invalid:
+        with pytest.raises(ValueError, match="audience"):
+            parse_audience(value)
 
 
 def test_foreign_audience_is_sealed_from_shared_subjects() -> None:

@@ -1,5 +1,3 @@
-import pytest
-
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.harness.coding import PinnedRepositoryRoute
 
@@ -31,9 +29,8 @@ async def test_pinned_repository_route_requires_the_coding_lane_and_exact_fetch(
     assert "no call fetches" in (await gate(output(commands=("git status",)))).reason
 
 
-@pytest.mark.parametrize(
-    "command",
-    (
+async def test_a_fetch_naming_only_the_pin_passes() -> None:
+    commands = (
         f"git fetch --depth 1 origin {PIN} && git checkout FETCH_HEAD",
         f"git -C /workspace/sympy fetch origin {PIN}",
         f"git fetch origin +{PIN}:refs/heads/pinned",
@@ -42,27 +39,15 @@ async def test_pinned_repository_route_requires_the_coding_lane_and_exact_fetch(
         f"git fetch origin --depth 1 {PIN} 2>&1",
         f"GIT_TERMINAL_PROMPT=0 git fetch origin {PIN}",
         f"sh -c 'git fetch --depth 1 origin {PIN}'",
-    ),
-    ids=(
-        "checkout-chain",
-        "chdir-option",
-        "explicit-refspec",
-        "deepen-the-pin",
-        "timeout-wrapper",
-        "trailing-option-and-redirect",
-        "env-assignment",
-        "nested-shell",
-    ),
-)
-async def test_a_fetch_naming_only_the_pin_passes(command: str) -> None:
+    )
     gate = PinnedRepositoryRoute("sympy/sympy", PIN)
-    verdict = await gate(output(commands=(command,)))
-    assert verdict.passed, verdict.reason
+    for command in commands:
+        verdict = await gate(output(commands=(command,)))
+        assert verdict.passed, f"{command}: {verdict.reason}"
 
 
-@pytest.mark.parametrize(
-    "command",
-    (
+async def test_a_fetch_past_the_pin_is_refused() -> None:
+    commands = (
         "git fetch origin master",
         "git fetch origin",
         "git fetch",
@@ -85,42 +70,16 @@ async def test_a_fetch_naming_only_the_pin_passes(command: str) -> None:
         "git fetch origin master 2>&1 | tail -5",
         "GIT_TERMINAL_PROMPT=0 git fetch origin master",
         "bash -c 'cd /workspace/sympy && git fetch origin master'",
-    ),
-    ids=(
-        "branch",
-        "default-refspec",
-        "bare",
-        "all-remotes",
-        "unshallow-default",
-        "tag-sweep",
-        "pin-plus-branch",
-        "other-commit",
-        "pull-request-head",
-        "depth-one-pr-head",
-        "pr-merge-ref",
-        "depth-one-other-commit",
-        "shell-variable",
-        "fork-with-pin-in-prose",
-        "pull-bare",
-        "pull-branch",
-        "remote-update",
-        "after-cd",
-        "wrapped-in-timeout",
-        "piped",
-        "env-prefixed",
-        "nested-shell",
-    ),
-)
-async def test_a_fetch_past_the_pin_is_refused(command: str) -> None:
+    )
     gate = PinnedRepositoryRoute("sympy/sympy", PIN)
-    verdict = await gate(output(commands=(f"git fetch --depth 1 origin {PIN}", command)))
-    assert not verdict.passed
-    assert "past the pinned commit" in verdict.reason
+    for command in commands:
+        verdict = await gate(output(commands=(f"git fetch --depth 1 origin {PIN}", command)))
+        assert not verdict.passed, command
+        assert "past the pinned commit" in verdict.reason, command
 
 
-@pytest.mark.parametrize(
-    "command",
-    (
+async def test_pinned_repository_route_rejects_history_leaks() -> None:
+    commands = (
         "git clone https://github.com/sympy/sympy.git",
         "curl https://github.com/sympy/sympy/archive/main.tar.gz",
         "gh api repos/sympy/sympy/contents/sympy/core.py",
@@ -134,12 +93,11 @@ async def test_a_fetch_past_the_pin_is_refused(command: str) -> None:
         "curl https://patch-diff.githubusercontent.com/raw/sympy/sympy/123.diff",
         'curl -sSL "https://api.github.com/repos/sympy/sympy/pulls/25560" '
         '-H "Accept: application/vnd.github.v3.diff" -o pr25560.diff',
-    ),
-)
-async def test_pinned_repository_route_rejects_history_leaks(command: str) -> None:
+    )
     gate = PinnedRepositoryRoute("sympy/sympy", PIN)
-    verdict = await gate(output(commands=(command,)))
-    assert not verdict.passed
+    for command in commands:
+        verdict = await gate(output(commands=(command,)))
+        assert not verdict.passed, command
 
 
 async def test_a_spawnless_run_still_reports_its_fence_breaches() -> None:

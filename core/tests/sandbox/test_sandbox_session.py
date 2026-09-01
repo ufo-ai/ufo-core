@@ -71,14 +71,14 @@ LARGE_SKILL_BYTES = 1_000_000
 LINUX_MAX_ARG_STRLEN = 131_072
 
 
-def test_shell_path_expands_only_the_runtime_home_prefix() -> None:
+def _check_shell_path_expands_only_the_runtime_home_prefix() -> None:
     assert shell_path("$UFO_HOME/runs/abc/repl/run file.mjs") == (
         "\"$UFO_HOME\"/'runs/abc/repl/run file.mjs'"
     )
     assert shell_path("/workspace/run file.mjs") == "'/workspace/run file.mjs'"
 
 
-def test_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
+def _check_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
     proxy = ProxyEndpoint(port=9, ca_cert="PEM", public_url="https://proxy.example.com")
     env = egress_proxy_env(proxy, "tok-123")
     assert env["HTTPS_PROXY"] == "https://tok-123:ufo@proxy.example.com"
@@ -89,7 +89,7 @@ def test_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
     assert env["NODE_EXTRA_CA_CERTS"] == CA_SANDBOX_PATH
 
 
-def test_egress_proxy_env_refuses_missing_or_http_url() -> None:
+def _check_egress_proxy_env_refuses_missing_or_http_url() -> None:
     with pytest.raises(RuntimeError, match="proxy_public_url"):
         egress_proxy_env(ProxyEndpoint(port=9, ca_cert="PEM"), "tok")
     with pytest.raises(RuntimeError, match="HTTPS"):
@@ -102,36 +102,36 @@ def _basic(username: str) -> str:
     return "Basic " + base64.b64encode(f"{username}:{PROXY_PASSWORD}".encode()).decode()
 
 
-def test_run_token_round_trips_encode_then_proxy_auth() -> None:
+def _check_run_token_round_trips_encode_then_proxy_auth() -> None:
     token = RunToken(workspace_id=uuid4(), turn_id=uuid4(), authority=MemberAuthority(uuid4()))
     assert RUN_TOKENS.from_proxy_auth(_basic(RUN_TOKENS.encode(token))) == token
 
 
-def test_encoded_token_is_url_safe_userinfo() -> None:
+def _check_encoded_token_is_url_safe_userinfo() -> None:
     encoded = RUN_TOKENS.encode(
         RunToken(workspace_id=uuid4(), turn_id=uuid4(), authority=WORKSPACE_AUTHORITY)
     )
     assert all(char.isalnum() or char in "-_." for char in encoded)
 
 
-def test_from_proxy_auth_rejects_non_basic_scheme() -> None:
+def _check_from_proxy_auth_rejects_non_basic_scheme() -> None:
     with pytest.raises(ValueError, match="basic"):
         RUN_TOKENS.from_proxy_auth(
             "Bearer " + RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), WORKSPACE_AUTHORITY))
         )
 
 
-def test_from_proxy_auth_rejects_missing_header() -> None:
+def _check_from_proxy_auth_rejects_missing_header() -> None:
     with pytest.raises(ValueError, match="basic"):
         RUN_TOKENS.from_proxy_auth("")
 
 
-def test_from_proxy_auth_rejects_a_malformed_run_token() -> None:
+def _check_from_proxy_auth_rejects_a_malformed_run_token() -> None:
     with pytest.raises(ValueError):
         RUN_TOKENS.from_proxy_auth(_basic("not-a-run-token"))
 
 
-def test_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
+def _check_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
     run = RunToken(uuid4(), uuid4(), WORKSPACE_AUTHORITY)
     forged = RunTokenCodec(b"other-deployment").encode(run)
     with pytest.raises(ValueError, match="signed"):
@@ -148,12 +148,12 @@ def _probe(expires_at: int = 1_800_000_000, member: UUID | None = None) -> Probe
     )
 
 
-def test_probe_token_round_trips_encode_then_proxy_auth() -> None:
+def _check_probe_token_round_trips_encode_then_proxy_auth() -> None:
     probe = _probe()
     assert PROBE_TOKENS.from_proxy_auth(_basic(PROBE_TOKENS.encode(probe))) == probe
 
 
-def test_probe_token_round_trips_its_member_authority() -> None:
+def _check_probe_token_round_trips_its_member_authority() -> None:
     """The member a probe acts as is signed with it, so the proxy reads an authority this deployment
     granted rather than one the sandbox could name for itself. Absent is a distinct value, not a
     zero: it means nobody, and the wire keeps the two apart."""
@@ -165,28 +165,28 @@ def test_probe_token_round_trips_its_member_authority() -> None:
     )
 
 
-def test_encoded_probe_token_is_url_safe_userinfo() -> None:
+def _check_encoded_probe_token_is_url_safe_userinfo() -> None:
     encoded = PROBE_TOKENS.encode(_probe())
     assert all(char.isalnum() or char in "-_." for char in encoded)
 
 
-def test_probe_from_proxy_auth_rejects_non_basic_scheme() -> None:
+def _check_probe_from_proxy_auth_rejects_non_basic_scheme() -> None:
     with pytest.raises(ValueError, match="basic"):
         PROBE_TOKENS.from_proxy_auth("Bearer " + PROBE_TOKENS.encode(_probe()))
 
 
-def test_probe_from_proxy_auth_rejects_a_malformed_probe_token() -> None:
+def _check_probe_from_proxy_auth_rejects_a_malformed_probe_token() -> None:
     with pytest.raises(ValueError):
         PROBE_TOKENS.from_proxy_auth(_basic("not-a-probe-token"))
 
 
-def test_probe_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
+def _check_probe_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
     forged = ProbeTokenCodec(b"other-deployment").encode(_probe())
     with pytest.raises(ValueError, match="signed"):
         PROBE_TOKENS.from_proxy_auth(_basic(forged))
 
 
-def test_neither_codec_reads_the_other_domain_under_one_secret() -> None:
+def _check_neither_codec_reads_the_other_domain_under_one_secret() -> None:
     """Both classes are signed with the one deploy secret, so only the domain inside the payload
     keeps them apart: a run token presented where a probe token is expected must be refused as
     firmly as a forgery, else a turn's token would authorize egress with no turn read behind it."""
@@ -198,7 +198,7 @@ def test_neither_codec_reads_the_other_domain_under_one_secret() -> None:
         RUN_TOKENS.from_proxy_auth(_basic(probe))
 
 
-def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> None:
+def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> None:
     conversation_id = uuid4()
     common = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), WORKSPACE_AUTHORITY))
     member = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), MemberAuthority(uuid4())))
@@ -240,7 +240,7 @@ def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_ba
     assert base.handle.egress_env["HTTP_PROXY"] == proxy
 
 
-def test_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
+def _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
     """A tool runs its commands through a session re-authorized for the acting member, while the
     cancel path stops through the turn's own base session. Both name the same turn, so the stop
     reaches exactly the groups the turn's commands left running — in a container its sibling turns
@@ -265,7 +265,7 @@ def test_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
     assert authorized.handle.turn_id == turn_id
 
 
-def test_host_argv_names_a_logical_path_under_the_host_root() -> None:
+def _check_host_argv_names_a_logical_path_under_the_host_root() -> None:
     root = "/Users/member/proj"
 
     assert host_argv(("cat", f"{WORKSPACE_DIR}/hello/index.html"), root) == (
@@ -280,7 +280,7 @@ def test_host_argv_names_a_logical_path_under_the_host_root() -> None:
     ) == ("PYTHONPATH=/lib:/Users/member/proj/pkg", "file:///Users/member/proj/staged")
 
 
-def test_host_argv_leaves_the_substring_that_is_not_this_workspace() -> None:
+def _check_host_argv_leaves_the_substring_that_is_not_this_workspace() -> None:
     """Every blob key begins `workspaces/`, so a presigned URL carries the substring inside text a
     signature covers: naming that under the host root PUTs a key nothing signed and the store
     answers 403. A path of the member's own that merely reads like the name is theirs too."""
@@ -413,7 +413,7 @@ def _tool_ctx(
     )
 
 
-async def test_a_carrier_that_declares_no_stop_is_never_asked_for_one() -> None:
+async def _check_a_carrier_that_declares_no_stop_is_never_asked_for_one() -> None:
     """The stop is a capability, not a contract every carrier owes: a carrier whose command dies
     with the call it was made in has nothing left for a cancel to reach, so the session asks it
     nothing rather than requiring it to answer with a no-op."""
@@ -427,7 +427,7 @@ async def test_a_carrier_that_declares_no_stop_is_never_asked_for_one() -> None:
     assert not hasattr(session.carrier, "stop_commands")
 
 
-async def test_skills_load_from_one_staged_container_payload() -> None:
+async def _check_skills_load_from_one_staged_container_payload() -> None:
     carrier = _RecordingCarrier(
         result=ExecResult(
             stdout='{"roots":{"sandbox":"/home/user/.ufo/skills/sandbox"}}',
@@ -470,7 +470,7 @@ async def test_skills_load_from_one_staged_container_payload() -> None:
     ]
 
 
-async def test_large_skill_payload_never_enters_a_container_command_argument() -> None:
+async def _check_large_skill_payload_never_enters_a_container_command_argument() -> None:
     carrier = _RecordingCarrier(
         result=ExecResult(
             stdout='{"roots":{"large":"/home/user/.ufo/skills/large"}}',
@@ -501,7 +501,7 @@ async def test_large_skill_payload_never_enters_a_container_command_argument() -
     assert max(len(arg) for arg in carrier.argvs[0]) < LINUX_MAX_ARG_STRLEN
 
 
-async def test_skill_load_fails_when_the_container_loader_fails() -> None:
+async def _check_skill_load_fails_when_the_container_loader_fails() -> None:
     carrier = _RecordingCarrier(result=ExecResult(stdout="", stderr="missing", exit_code=2))
     session = SandboxSession(
         carrier=carrier,
@@ -512,7 +512,7 @@ async def test_skill_load_fails_when_the_container_loader_fails() -> None:
         await session.load_skills({"system": {"sandbox": "sha256:aaa"}, "user": {}})
 
 
-async def test_a_stale_sandbox_refreshes_before_loading_the_requested_system_skill() -> None:
+async def _check_a_stale_sandbox_refreshes_before_loading_the_requested_system_skill() -> None:
     class _PrivilegedCarrier(_RecordingCarrier):
         async def exec_skill(
             self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
@@ -774,7 +774,7 @@ def test_privileged_loader_refuses_a_nested_skill_name_through_a_symlink(
     assert manifest.read_text() == '{"skills":{}}'
 
 
-async def test_read_glob_and_grep_accept_skill_paths_outside_the_workspace() -> None:
+async def _check_read_glob_and_grep_accept_skill_paths_outside_the_workspace() -> None:
     class _FileCarrier(_RecordingCarrier):
         def __init__(self) -> None:
             super().__init__()
@@ -825,7 +825,7 @@ async def test_read_glob_and_grep_accept_skill_paths_outside_the_workspace() -> 
     ]
 
 
-async def test_file_reads_accept_only_the_current_runtime_namespace() -> None:
+async def _check_file_reads_accept_only_the_current_runtime_namespace() -> None:
     class _FileCarrier(_RecordingCarrier):
         def __init__(self) -> None:
             super().__init__()
@@ -864,35 +864,30 @@ async def test_file_reads_accept_only_the_current_runtime_namespace() -> None:
         await session.run_ufo_fs("write", {"path": "$UFO_HOME/runs/current/tool-output/call.txt"})
 
 
-@pytest.mark.parametrize("path", ("", "../escape", "tasks/../escape", "/absolute"))
-def test_runtime_relative_refuses_an_escape(path: str) -> None:
-    with pytest.raises(ValueError, match="invalid runtime path"):
-        runtime_relative(path)
+def _check_runtime_relative_refuses_an_escape() -> None:
+    for path in ("", "../escape", "tasks/../escape", "/absolute"):
+        with pytest.raises(ValueError, match="invalid runtime path"):
+            runtime_relative(path)
 
 
-@pytest.mark.parametrize(
-    ("op", "path"),
-    (
+async def _check_file_reads_outside_the_workspace_and_skill_tree_are_refused() -> None:
+    for op, path in (
         ("read", "/etc/passwd"),
         ("glob", "/opt/reference"),
         ("grep", "$UFO_HOME/config.toml"),
         ("read", "$UFO_HOME/skills/../credentials"),
         ("glob", "/home/user/.ufo/skills/../../config.toml"),
-    ),
-)
-async def test_file_reads_outside_the_workspace_and_skill_tree_are_refused(
-    op: str, path: str
-) -> None:
-    session = SandboxSession(
-        carrier=_RecordingCarrier(),
-        handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
-    )
+    ):
+        session = SandboxSession(
+            carrier=_RecordingCarrier(),
+            handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
+        )
 
-    with pytest.raises(ValueError, match="escapes"):
-        await session.run_ufo_fs(op, {"path": path, "pattern": "probe"})
+        with pytest.raises(ValueError, match="escapes"):
+            await session.run_ufo_fs(op, {"path": path, "pattern": "probe"})
 
 
-async def test_write_and_edit_remain_workspace_confined() -> None:
+async def _check_write_and_edit_remain_workspace_confined() -> None:
     session = SandboxSession(
         carrier=_RecordingCarrier(),
         handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
@@ -908,7 +903,7 @@ async def test_write_and_edit_remain_workspace_confined() -> None:
         await session.run_ufo_fs("edit", {"path": "$UFO_HOME/skills/probe/SKILL.md"})
 
 
-async def test_document_file_ops_outlive_the_preview_request() -> None:
+async def _check_document_file_ops_outlive_the_preview_request() -> None:
     carrier = _RecordingCarrier(result=ExecResult(stdout='{"type":"text"}', stderr="", exit_code=0))
     handle = SandboxHandle(conversation_id=uuid4(), container_id="c")
 
@@ -1382,3 +1377,46 @@ async def test_a_command_that_failed_on_its_own_records_no_timeout(
 
     assert not [r for r in caplog.records if r.message == "sandbox.exec_timeout"]
     assert EXEC_TIMEOUT_VITALS_CMD not in carrier.commands
+
+
+def test_sandbox_session_sync_contract() -> None:
+    for check in (
+        _check_shell_path_expands_only_the_runtime_home_prefix,
+        _check_egress_proxy_env_embeds_run_token_and_sentinels,
+        _check_egress_proxy_env_refuses_missing_or_http_url,
+        _check_run_token_round_trips_encode_then_proxy_auth,
+        _check_encoded_token_is_url_safe_userinfo,
+        _check_from_proxy_auth_rejects_non_basic_scheme,
+        _check_from_proxy_auth_rejects_missing_header,
+        _check_from_proxy_auth_rejects_a_malformed_run_token,
+        _check_run_token_rejects_a_valid_shape_signed_by_another_deployment,
+        _check_probe_token_round_trips_encode_then_proxy_auth,
+        _check_probe_token_round_trips_its_member_authority,
+        _check_encoded_probe_token_is_url_safe_userinfo,
+        _check_probe_from_proxy_auth_rejects_non_basic_scheme,
+        _check_probe_from_proxy_auth_rejects_a_malformed_probe_token,
+        _check_probe_token_rejects_a_valid_shape_signed_by_another_deployment,
+        _check_neither_codec_reads_the_other_domain_under_one_secret,
+        _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base,
+        _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to,
+        _check_host_argv_names_a_logical_path_under_the_host_root,
+        _check_host_argv_leaves_the_substring_that_is_not_this_workspace,
+        _check_runtime_relative_refuses_an_escape,
+    ):
+        check()
+
+
+async def test_sandbox_session_async_contract() -> None:
+    for check in (
+        _check_a_carrier_that_declares_no_stop_is_never_asked_for_one,
+        _check_skills_load_from_one_staged_container_payload,
+        _check_large_skill_payload_never_enters_a_container_command_argument,
+        _check_skill_load_fails_when_the_container_loader_fails,
+        _check_a_stale_sandbox_refreshes_before_loading_the_requested_system_skill,
+        _check_read_glob_and_grep_accept_skill_paths_outside_the_workspace,
+        _check_file_reads_accept_only_the_current_runtime_namespace,
+        _check_file_reads_outside_the_workspace_and_skill_tree_are_refused,
+        _check_write_and_edit_remain_workspace_confined,
+        _check_document_file_ops_outlive_the_preview_request,
+    ):
+        await check()

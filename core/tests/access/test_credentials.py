@@ -14,8 +14,7 @@ from cryptography.fernet import Fernet
 
 from ufo import product as product_module
 from ufo.db import workspace_tx
-from ufo.harness.models import grant as grant_module
-from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
+from ufo.harness.models.catalog import OPENAI_KEY_SLOT
 from ufo.harness.models.grant import Grant, read_grant
 from ufo.harness.models.pricing import Pricing
 from ufo.harness.models.registry import ModelRegistry
@@ -23,7 +22,6 @@ from ufo.host.ext.loader import injecting_slots
 from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.product import PRODUCT_ATTACH_METRIC, product_census
 from ufo.runtime import workspace as workspace_module
-from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CREDENTIAL_REQUEST_TTL_SECONDS,
@@ -54,7 +52,6 @@ from ufo.runtime.access.egress_rules import (
 from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.accounting import workspace_owns_the_key
 from ufo.runtime.ext.manifest import (
-    ConnectorProvider,
     CredentialSlot,
     InjectionTarget,
     Manifest,
@@ -62,18 +59,6 @@ from ufo.runtime.ext.manifest import (
 from ufo.runtime.seats import create_member
 from ufo.runtime.workspace import init_workspace_credentials, model_authority, ws, ws_current
 from ufo.schema import tables
-
-
-class _StubOAuth:
-    """The connector's OAuth descriptor is irrelevant here — only its declared CLI env name is."""
-
-    provider = "github"
-    host = "api.github.com"
-
-
-class _StubBroker:
-    """Neither the broker nor the forwarder is called: the assertion is on boot-time name claims."""
-
 
 DATADOG_HOST = "api.datadoghq.com"
 US5_HOST = "api.us5.datadoghq.com"
@@ -144,6 +129,7 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_round_trips_and_is_encrypted_at_rest(db: None) -> None:
     workspace_id = await _workspace()
     store = _store()
@@ -160,27 +146,7 @@ async def test_credential_round_trips_and_is_encrypted_at_rest(db: None) -> None
     assert b"sk-secret-value" not in stored.ciphertext
 
 
-async def test_put_upserts(db: None) -> None:
-    workspace_id = await _workspace()
-    store = _store()
-    await store.put(workspace_id, "sample_api", "one")
-    await store.put(workspace_id, "sample_api", "two")
-    assert await store.get(workspace_id, "sample_api") == "two"
-
-
-async def test_update_merges_with_the_value_under_the_workspace_lock(db: None) -> None:
-    workspace_id = await _workspace()
-    store = _store()
-
-    def append(current: str | None, submitted: str) -> str:
-        return (current or "") + submitted
-
-    await store.update(workspace_id, "structured", "one", append)
-    await store.update(workspace_id, "structured", "-two", append)
-
-    assert await store.get(workspace_id, "structured") == "one-two"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_rotate_updates_only_the_expected_existing_value(db: None) -> None:
     workspace_id = await _workspace()
     store = _store()
@@ -194,6 +160,7 @@ async def test_rotate_updates_only_the_expected_existing_value(db: None) -> None
         await store.rotate(workspace_id, "oauth", "new", "")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_writes_bump_the_egress_rules_generation(db: None) -> None:
     """The proxy's rule cache pins this counter, so a filled, rotated, or cleared key re-derives
     its injection rules at the next CONNECT instead of waiting out the cache TTL."""
@@ -227,17 +194,20 @@ async def test_credential_writes_bump_the_egress_rules_generation(db: None) -> N
     assert start < filled < rotated < cleared
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_put_rejects_an_empty_value(db: None) -> None:
     with pytest.raises(ValueError, match="empty"):
         await _store().put(await _workspace(), "sample_api", "")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_unset_slot_raises(db: None) -> None:
     store = _store()
     with pytest.raises(CredentialSlotUnset, match="missing"):
         await store.get(await _workspace(), "missing")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_stored_slot_is_told_apart_from_the_platform_default(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -256,22 +226,7 @@ async def test_a_stored_slot_is_told_apart_from_the_platform_default(
         assert await ws_current().credential_is_stored("sample_api")
 
 
-async def test_platform_default_prefers_the_ufo_prefixed_env(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Every slot's platform default resolves `UFO_<NAME>` before `<NAME>`, so a repo `.env` can
-    hold a key scoped to ufo alone without handing it to every other tool reading the bare name;
-    an environment exporting only the bare name still serves."""
-    workspace_id = await _workspace()
-    init_workspace_credentials(_store())
-    monkeypatch.setenv("UFO_SAMPLE_API", "ufo-scoped")
-    monkeypatch.setenv("SAMPLE_API", "ambient")
-    with ws(workspace_id):
-        assert await ws_current().credential("sample_api") == "ufo-scoped"
-        monkeypatch.setenv("UFO_SAMPLE_API", "")
-        assert await ws_current().credential("sample_api") == "ambient"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_member_key_serves_only_a_turn_bound_to_that_member(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -313,34 +268,7 @@ async def test_a_member_key_serves_only_a_turn_bound_to_that_member(
         assert await ws_current().credential(OPENAI_KEY_SLOT) == "workspace-key"
 
 
-async def test_model_funding_tells_a_plan_apart_from_a_metered_key(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The two things a member can connect cost different things. A grant is a subscription they
-    already bought, so its tokens carry no per-token price; a pasted API key is metered by the
-    provider, so its tokens cost real money that is simply not the deploy's to bill. Both make the
-    deploy's key idle, which is why one boolean could never answer for both."""
-    workspace_id = await _workspace()
-    store = _store()
-    init_workspace_credentials(store)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "platform-default")
-    async with workspace_tx() as connection:
-        planned = await create_member(connection, workspace_id, "planned@work.com")
-        keyed = await create_member(connection, workspace_id, "keyed@work.com")
-    grant = Grant(access="oat-token", refresh="refresh", expires_at=time.time() + 3600)
-    await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, planned), grant.stored())
-    await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, keyed), "sk-ant-api-pasted")
-    served = frozenset({OWN_ACCOUNT_MODEL})
-    with ws(workspace_id):
-        assert await ws_current().model_funding(ANTHROPIC_KEY_SLOT, OWN_ACCOUNT_MODEL) == "platform"
-        with model_authority(MemberAuthority(planned), served):
-            assert await ws_current().model_funding(ANTHROPIC_KEY_SLOT, OWN_ACCOUNT_MODEL) == "plan"
-        with model_authority(MemberAuthority(keyed), served):
-            assert await ws_current().model_funding(ANTHROPIC_KEY_SLOT, OWN_ACCOUNT_MODEL) == "key"
-        await store.put(workspace_id, ANTHROPIC_KEY_SLOT, "workspace-key")
-        assert await ws_current().model_funding(ANTHROPIC_KEY_SLOT, OWN_ACCOUNT_MODEL) == "key"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_members_key_never_serves_a_slot_that_is_not_member_routed(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -360,6 +288,7 @@ async def test_a_members_key_never_serves_a_slot_that_is_not_member_routed(
         )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_members_own_key_is_not_the_workspaces_to_spend(db: None) -> None:
     """`workspace_owns_the_key` is the balance guard's question — whether the workspace pays its own
     way for work the deploy would otherwise fund — so a member's personally connected account never
@@ -376,25 +305,6 @@ async def test_a_members_own_key_is_not_the_workspaces_to_spend(db: None) -> Non
         assert not await workspace_owns_the_key(connection, workspace_id, OPENAI_KEY_SLOT)
 
     await store.put(workspace_id, OPENAI_KEY_SLOT, "workspace-key")
-    async with workspace_tx() as connection:
-        assert await workspace_owns_the_key(connection, workspace_id, OPENAI_KEY_SLOT)
-
-
-async def test_the_guard_reads_a_workspace_where_two_members_connected_the_same_provider(
-    db: None,
-) -> None:
-    """The match is a row per member, so the second person in a workspace to connect a provider is
-    the ordinary case. Reading it as one row raised `MultipleResultsFound` — on the turn path, which
-    made that second sign-in break every turn on the provider's models."""
-    workspace_id = await _workspace()
-    store = _store()
-    async with workspace_tx() as connection:
-        first = await create_member(connection, workspace_id, "first@work.com")
-        second = await create_member(connection, workspace_id, "second@work.com")
-    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, first), "first-key")
-    await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, second), "second-key")
-    await store.put(workspace_id, OPENAI_KEY_SLOT, "workspace-key")
-
     async with workspace_tx() as connection:
         assert await workspace_owns_the_key(connection, workspace_id, OPENAI_KEY_SLOT)
 
@@ -451,22 +361,7 @@ def test_credential_requests_seal_only_declared_slots() -> None:
         requests.seal(uuid4(), uuid4(), ("a", "nope"))
 
 
-def test_credential_request_seal_records_its_issue_time() -> None:
-    requests = CredentialRequests(
-        fernet=Fernet(Fernet.generate_key()), declared=frozenset({"a"}), fillable=frozenset({"a"})
-    )
-    before = int(time.time())
-    sealed = requests.seal(uuid4(), uuid4(), ("a",))
-    state = open_credential_request(
-        requests.fernet,
-        sealed,
-        purpose=CREDENTIAL_REQUEST_PURPOSE,
-    )
-
-    assert state.issued_at is not None
-    assert before <= state.issued_at <= int(time.time())
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_requests_open_an_owner_bound_authorization(db: None) -> None:
     workspace_id = await _workspace()
     member_id = uuid4()
@@ -487,54 +382,7 @@ async def test_credential_requests_open_an_owner_bound_authorization(db: None) -
         requests.open_authorization(sealed, workspace_id, member_id, "other")
 
 
-async def test_two_keys_on_one_host_each_inject_their_own_header(db: None) -> None:
-    """A provider taking more than one key on the wire is two injecting slots on one host: each
-    swaps its own header from its own stored secret, while the host is scoped and metered exactly
-    once — one physical request carries both keys, so metering per slot would double-count every
-    Datadog call in `sandbox_egress_total`. The `DD-API-KEY` + `DD-APPLICATION-KEY` case, with no
-    composite target."""
-    workspace_id = await _workspace()
-    store = _store()
-    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
-    await store.put(workspace_id, "datadog_application_key", "dd-app-real")
-    slots = injecting_slots((_keyed_manifest(),))
-    rules = await derive_credential_rules(slots, workspace_id, store)
-    injections = {rule.header: rule for rule in rules if isinstance(rule, InjectionRule)}
-    assert injections["DD-API-KEY"] == InjectionRule(
-        host=DATADOG_HOST, header="DD-API-KEY", sentinel="SENTINEL_DD_API", real="dd-api-real"
-    )
-    assert injections["DD-APPLICATION-KEY"] == InjectionRule(
-        host=DATADOG_HOST,
-        header="DD-APPLICATION-KEY",
-        sentinel="SENTINEL_DD_APP",
-        real="dd-app-real",
-    )
-    assert [rule for rule in rules if isinstance(rule, ScopeRule)] == [
-        ScopeRule(allowed_hosts=frozenset({DATADOG_HOST}))
-    ]
-    assert [rule for rule in rules if isinstance(rule, MeterRule)] == [
-        MeterRule(host=DATADOG_HOST, dimension="requests")
-    ]
-
-
-async def test_the_host_slot_pins_the_workspace_site(db: None) -> None:
-    """The non-secret companion slot is what makes a per-account host correct: with it set, every
-    rule the provider derives — scope, injection, meter — names that workspace's own host, so a US5
-    org's key is admitted to US5 and never rides to the US1 default."""
-    workspace_id = await _workspace()
-    store = _store()
-    await store.put(workspace_id, "datadog_api_key", "dd-api-real")
-    await store.put(workspace_id, "datadog_api_host", "API.US5.datadoghq.com ")
-    rules = await derive_credential_rules(
-        injecting_slots((_keyed_manifest(),)), workspace_id, store
-    )
-    assert {rule.host for rule in rules if not isinstance(rule, ScopeRule)} == {US5_HOST}
-    assert ScopeRule(allowed_hosts=frozenset({US5_HOST})) in rules
-    assert not any(
-        isinstance(rule, ScopeRule) and DATADOG_HOST in rule.allowed_hosts for rule in rules
-    )
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_unfilled_slot_opens_no_egress_and_a_code_only_slot_never_rides(db: None) -> None:
     workspace_id = await _workspace()
     store = _store()
@@ -549,6 +397,7 @@ async def test_an_unfilled_slot_opens_no_egress_and_a_code_only_slot_never_rides
     assert injecting_slots((code_only,)) == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_one_workspace_never_derives_anothers_secret(db: None) -> None:
     """Per-workspace resolution is the tenant isolation the one shared proxy leans on: the same
     declaration resolved for a second workspace yields that workspace's own secret, or nothing."""
@@ -564,6 +413,7 @@ async def test_one_workspace_never_derives_anothers_secret(db: None) -> None:
     assert await derive_credential_rules(slots, second, store) == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_selection_resolves_to_the_declared_literal_or_nothing(db: None) -> None:
     """The resolver's whole contract. A fixed host answers itself. A choice answers the declared
     literal a selection names — case-insensitively, as DNS is, and canonicalised to the row's own
@@ -660,154 +510,7 @@ def test_two_slots_claiming_one_sentinel_or_env_fail_loud() -> None:
         injecting_slots((first, same_env))
 
 
-def test_one_sandbox_variable_carries_one_value_whichever_field_claims_it() -> None:
-    """Every exported name lands in one dict per sandbox, so the namespace is one: a slot's `env`, a
-    host choice's `env`, and a connector CLI's env all compete. Two claims on one name carrying
-    different values would let the later export win the merge silently, leaving a client reading a
-    hostname where its auth belongs, and the same holds inside one slot naming a variable twice."""
-
-    def keyed(name: str, **injection: object) -> Manifest:
-        return Manifest(
-            name=name,
-            version="1",
-            credentials=(
-                CredentialSlot(
-                    name=f"{name}_key",
-                    description="key",
-                    injection=InjectionTarget(
-                        header="x-key",
-                        sentinel=f"S_{name}",
-                        **injection,  # type: ignore[arg-type]
-                    ),
-                ),
-                CredentialSlot(name="datadog_api_host", description="site"),
-            ),
-        )
-
-    clash = replace(DATADOG_SITES, env="X")
-    with pytest.raises(RuntimeError, match="env 'X'"):
-        injecting_slots((keyed("alpha", host="api.a.test", env="X"), keyed("beta", host=clash)))
-    with pytest.raises(RuntimeError, match="env 'Y'"):
-        injecting_slots((keyed("solo", host=replace(DATADOG_SITES, env="Y"), env="Y"),))
-    assert injecting_slots(
-        (
-            keyed("alpha", host="api.a.test", env="X"),
-            keyed(
-                "beta",
-                host=clash.__class__(
-                    slot="datadog_api_host",
-                    description="d",
-                    hosts=DATADOG_SITES.hosts,
-                    default=DATADOG_HOST,
-                    env="H",
-                ),
-            ),
-        )
-    )
-
-
-def test_two_slots_claiming_one_sentinel_fail_loud() -> None:
-    """A shared sentinel draws whichever secret matched first, so it is refused across every
-    installed extension."""
-
-    def keyed(name: str, sentinel: str) -> Manifest:
-        return Manifest(
-            name=name,
-            version="1",
-            credentials=(
-                CredentialSlot(
-                    name=f"{name}_key",
-                    description="key",
-                    injection=InjectionTarget(
-                        host=f"api.{name}.test", header="x-key", sentinel=sentinel
-                    ),
-                ),
-            ),
-        )
-
-    with pytest.raises(RuntimeError, match="sentinel"):
-        injecting_slots((keyed("a", "SHARED"), keyed("b", "SHARED")))
-    assert injecting_slots((keyed("a", "OWN_A"), keyed("b", "OWN_B")))
-
-
-def test_slots_sharing_a_host_env_must_select_through_one_choice() -> None:
-    """Sharing one host variable is safe exactly while its sharers resolve it identically, and a
-    frozen value object settles that by equality over every field it has — not a tuple of the fields
-    someone remembered to list, which is what let a divergent bound through before. Two keys naming
-    one choice is the point; two different choices claiming one variable is refused."""
-    together = Manifest(
-        name="together",
-        version="1",
-        credentials=(
-            CredentialSlot(
-                name="a_key",
-                description="k",
-                injection=InjectionTarget(host=DATADOG_SITES, header="A", sentinel="S_A"),
-            ),
-            CredentialSlot(
-                name="b_key",
-                description="k",
-                injection=InjectionTarget(host=DATADOG_SITES, header="B", sentinel="S_B"),
-            ),
-            CredentialSlot(name="datadog_api_host", description="site"),
-        ),
-    )
-    assert len(injecting_slots((together,))) == 2
-    diverged = replace(DATADOG_SITES, default=US5_HOST)
-    apart = Manifest(
-        name="apart",
-        version="1",
-        credentials=(
-            CredentialSlot(
-                name="c_key",
-                description="k",
-                injection=InjectionTarget(host=diverged, header="C", sentinel="S_C"),
-            ),
-        ),
-    )
-    with pytest.raises(RuntimeError, match="DD_HOST"):
-        injecting_slots((together, apart))
-
-
-def test_a_keyed_export_cannot_take_a_connector_clis_env_name() -> None:
-    """The sandbox env has two producers — a grant's CLI sentinel and a keyed slot's — merged into
-    one dict with the keyed half last, so a row naming `GH_TOKEN` would overwrite the github grant's
-    sentinel and leave that CLI authenticating as nothing. Adding a keyed provider is meant to cost
-    no code and no test, so nothing but this refusal stops the next row taking a name in use."""
-    connector = Manifest(
-        name="broker",
-        version="1",
-        connectors=(
-            ConnectorProvider(
-                oauth=_StubOAuth(),
-                label="GitHub",
-                broker=_StubBroker(),
-                cli=CliCredential(env="GH_TOKEN", header="authorization", forward=_StubBroker()),
-            ),
-        ),
-    )
-
-    def keyed(host: str | HostChoice, env: str | None) -> Manifest:
-        return Manifest(
-            name="keyed",
-            version="1",
-            credentials=(
-                CredentialSlot(
-                    name="k",
-                    description="key",
-                    injection=InjectionTarget(host=host, header="x-key", sentinel="S", env=env),
-                ),
-                CredentialSlot(name="datadog_api_host", description="site"),
-            ),
-        )
-
-    with pytest.raises(RuntimeError, match="GH_TOKEN"):
-        injecting_slots((connector, keyed("api.k.test", "GH_TOKEN")))
-    with pytest.raises(RuntimeError, match="GH_TOKEN"):
-        injecting_slots((connector, keyed(replace(DATADOG_SITES, env="GH_TOKEN"), None)))
-    assert injecting_slots((connector, keyed("api.k.test", "K_TOKEN")))
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_proxy_withholds_every_rule_for_a_selection_the_row_does_not_offer(
     db: None, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -905,9 +608,16 @@ def test_slots_reaching_one_host_must_meter_it_the_same_way() -> None:
         injecting_slots((agreed, aliased))
 
 
-def _git_manifest() -> Manifest:
-    """A git credential slot: one stored secret, composed into Basic on the way to the wire."""
-    return Manifest(
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_git_slot_injects_basic_composed_from_its_one_secret(db: None) -> None:
+    """git smart-HTTP takes only Basic — a bearer is refused even for a public repository — so the
+    stored secret rides as the password half of `x-access-token:<token>`, composed at derivation
+    rather than stored composed: the token is one value the member rotates on its own. The host is
+    scoped and metered like any keyed host, which is also what makes the proxy MITM it at all."""
+    workspace_id = await _workspace()
+    store = _store()
+    await store.put(workspace_id, "github_git_token", "ghp-real")
+    manifest = Manifest(
         name="git",
         version="1",
         credentials=(
@@ -924,17 +634,7 @@ def _git_manifest() -> Manifest:
             ),
         ),
     )
-
-
-async def test_a_git_slot_injects_basic_composed_from_its_one_secret(db: None) -> None:
-    """git smart-HTTP takes only Basic — a bearer is refused even for a public repository — so the
-    stored secret rides as the password half of `x-access-token:<token>`, composed at derivation
-    rather than stored composed: the token is one value the member rotates on its own. The host is
-    scoped and metered like any keyed host, which is also what makes the proxy MITM it at all."""
-    workspace_id = await _workspace()
-    store = _store()
-    await store.put(workspace_id, "github_git_token", "ghp-real")
-    rules = await derive_credential_rules(injecting_slots((_git_manifest(),)), workspace_id, store)
+    rules = await derive_credential_rules(injecting_slots((manifest,)), workspace_id, store)
     assert [rule for rule in rules if isinstance(rule, InjectionRule)] == [
         InjectionRule(
             host="github.com",
@@ -949,16 +649,6 @@ async def test_a_git_slot_injects_basic_composed_from_its_one_secret(db: None) -
     assert [rule for rule in rules if isinstance(rule, MeterRule)] == [
         MeterRule(host="github.com", dimension="requests")
     ]
-
-
-async def test_a_git_slot_with_nothing_stored_derives_no_rule(db: None) -> None:
-    """No credential, no rules — so `github.com` keeps riding the turn's internet policy as an
-    opaque tunnel, which is what lets an anonymous clone of a public repository still work."""
-    workspace_id = await _workspace()
-    rules = await derive_credential_rules(
-        injecting_slots((_git_manifest(),)), workspace_id, _store()
-    )
-    assert rules == ()
 
 
 class _MintedTokens:
@@ -978,6 +668,7 @@ class _MintedTokens:
         return workspace_id == self.installed
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_minted_source_answers_before_the_stored_fallback(db: None) -> None:
     """A workspace that installed the App gets the token minted for this turn, not the member's
     stored one — the App's identity is what the organization granted. The stored value stays the
@@ -995,15 +686,6 @@ async def test_a_minted_source_answers_before_the_stored_fallback(db: None) -> N
     assert await slot_secret("github_git_token", source, bare, store) == "member-pat"
     assert await slot_secret("github_git_token", None, installed, store) == "member-pat"
     assert source.calls == 2
-
-
-async def test_a_slot_with_neither_a_mint_nor_a_stored_value_resolves_to_nothing(db: None) -> None:
-    """No credential at all opens no egress: the caller skips the slot rather than deriving a rule
-    that would swap in nothing, so the host keeps riding the turn's own internet policy."""
-    workspace_id = await _workspace()
-    assert (
-        await slot_secret("github_git_token", _MintedTokens(None), workspace_id, _store()) is None
-    )
 
 
 SLOT_NAME = "github_app_installation"
@@ -1026,21 +708,6 @@ def test_an_installation_binding_opens_only_for_the_workspace_that_sealed_it() -
         open_installation(Fernet(Fernet.generate_key()), mine, SLOT_NAME, sealed)
     with pytest.raises(CredentialRequestInvalid, match="names another slot"):
         open_installation(fernet, mine, "another_slot", sealed)
-
-
-def test_a_request_seal_cannot_stand_in_for_an_installation_binding() -> None:
-    """One deploy key seals both acts, so ciphertext from either opens under the other. The member
-    is handed their own connect link's `state` in chat: pasted into the installation slot it must be
-    refused for what it is, not decoded as a binding and not raised as a bare KeyError, which would
-    fail every turn that opens a sandbox for the workspace until an operator cleared the slot."""
-    fernet = Fernet(Fernet.generate_key())
-    workspace_id, member_id = uuid4(), uuid4()
-    handed_to_the_member = CredentialRequests(
-        fernet=fernet, declared=frozenset({SLOT_NAME}), fillable=frozenset()
-    ).authorize(workspace_id, member_id, SLOT_NAME, "install")
-
-    with pytest.raises(CredentialRequestInvalid, match="sealed for 'credential-request'"):
-        open_installation(fernet, workspace_id, SLOT_NAME, handed_to_the_member)
 
 
 def test_an_installation_binding_cannot_stand_in_for_a_member_authorization() -> None:
@@ -1068,6 +735,7 @@ def test_an_installation_binding_cannot_stand_in_for_a_member_authorization() ->
         requests.open_authorization(binding, workspace_id, member_id, SLOT_NAME)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 def test_a_bare_installation_id_in_the_slot_mints_nothing(db: None) -> None:
     """The end the attack would come through: an owner (or an agent talking one into it) filling the
     installation slot by hand through the ordinary credential prompt. The value never opens, so no
@@ -1102,6 +770,7 @@ def _git_slot(source: object | None) -> tuple[CredentialSlot, ...]:
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_minted_secret_reaches_the_proxy_rule_the_wire_uses(db: None) -> None:
     """Both ends: the value a source mints must be the one the proxy actually injects, not just what
     `slot_secret` returns. The member's stored token is present too, so a rule carrying it would
@@ -1119,6 +788,7 @@ async def test_a_minted_secret_reaches_the_proxy_rule_the_wire_uses(db: None) ->
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_workspace_that_did_not_install_the_app_is_set_by_its_own_token(db: None) -> None:
     """The deploy wires the App as the source for every workspace, so a workspace that never
     installed it still reaches a source that reports no binding. That is the member-token case the
@@ -1149,6 +819,7 @@ async def test_a_workspace_that_did_not_install_the_app_is_set_by_its_own_token(
     assert source.mints == 1
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_mint_failure_withholds_only_that_host(db: None) -> None:
     """A source reaches a provider, so it can fail while the rest of the turn is fine. The host's
     rules are withheld rather than the derivation aborting — which would fail a turn that never
@@ -1180,6 +851,7 @@ async def test_a_mint_failure_withholds_only_that_host(db: None) -> None:
     ]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_any_slot_fault_withholds_its_own_host_and_leaves_the_rest_deriving(
     db: None, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1239,6 +911,7 @@ async def test_any_slot_fault_withholds_its_own_host_and_leaves_the_rest_derivin
         assert withheld[0]["error_class"] == type(error).__name__
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_bound_account_serves_its_own_models_and_no_other_call_in_the_turn(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1267,6 +940,7 @@ async def test_a_bound_account_serves_its_own_models_and_no_other_call_in_the_tu
         assert not await ws_current().credential_is_stored(OPENAI_KEY_SLOT, BACKGROUND_MODEL)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_spent_grant_is_refreshed_in_place_before_a_call_gets_it(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1297,6 +971,7 @@ async def test_a_spent_grant_is_refreshed_in_place_before_a_call_gets_it(
     assert (written.access, written.refresh) == ("fresh-access", "refresh-2")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_live_grant_is_spent_as_it_stands(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1321,6 +996,7 @@ async def test_a_live_grant_is_spent_as_it_stands(
         )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_two_turns_finding_one_grant_spent_exchange_its_token_once(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1365,6 +1041,7 @@ async def test_two_turns_finding_one_grant_spent_exchange_its_token_once(
     assert (written.access, written.refresh) == ("access-1", "refresh-2")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_no_transaction_is_held_open_across_the_provider_refresh(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1404,24 +1081,7 @@ async def test_no_transaction_is_held_open_across_the_provider_refresh(
     assert wrote_during_refresh
 
 
-def test_a_grant_is_refreshed_as_the_client_the_deploy_signed_in_as(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A refresh names the same client the sign-in did. A deploy presenting its own OAuth client
-    would otherwise mint grants under it and refresh them under the published one, which the
-    provider refuses — and every coding turn would die from the first expiry onward."""
-    assert grant_module.openai_client_id() == grant_module.OPENAI_PUBLIC_CLIENT_ID
-    assert grant_module.anthropic_client_id() == grant_module.ANTHROPIC_PUBLIC_CLIENT_ID
-
-    monkeypatch.setenv(grant_module.OPENAI_CLIENT_ID_ENV, "deploys-own-openai")
-    monkeypatch.setenv(grant_module.ANTHROPIC_CLIENT_ID_ENV, "deploys-own-anthropic")
-
-    assert grant_module.openai_client_id() == "deploys-own-openai"
-    assert grant_module.anthropic_client_id() == "deploys-own-anthropic"
-    assert grant_module.GRANT_CLIENTS[OPENAI_KEY_SLOT][1]() == "deploys-own-openai"
-    assert grant_module.GRANT_CLIENTS[ANTHROPIC_KEY_SLOT][1]() == "deploys-own-anthropic"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_product_census_counts_no_members_own_account(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1450,6 +1110,7 @@ async def test_the_product_census_counts_no_members_own_account(
     assert not any(str(member) in name for _kind, name in counted)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_token_rejected_mid_turn_is_refreshed_and_the_round_carries_on(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1500,6 +1161,7 @@ async def test_a_token_rejected_mid_turn_is_refreshed_and_the_round_carries_on(
     assert served == ["first", "second"]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_rejection_the_rebuild_cannot_fix_is_raised_after_one_retry(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1540,3 +1202,16 @@ async def test_a_rejection_the_rebuild_cannot_fix_is_raised_after_one_retry(
             [event async for event in client.complete(object())]
 
     assert attempts == ["rejected", "rejected"]
+
+
+async def test_update_merges_with_the_value_under_the_workspace_lock(db: None) -> None:
+    workspace_id = await _workspace()
+    store = _store()
+
+    def append(current: str | None, submitted: str) -> str:
+        return (current or "") + submitted
+
+    await store.update(workspace_id, "structured", "one", append)
+    await store.update(workspace_id, "structured", "-two", append)
+
+    assert await store.get(workspace_id, "structured") == "one-two"

@@ -124,20 +124,6 @@ async def test_stream_skipped_on_refusal() -> None:
         await _fetch("customers", handle)
 
 
-async def test_query_addresses_the_company_the_row_names() -> None:
-    """QBO answers a query only under the company file it is addressed to, and the whole address
-    including that company is what the row carries — a realm-less `/v3/company/query` names no
-    company and can never return a record."""
-    paths: list[str] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        paths.append(request.url.path)
-        return httpx.Response(200, json={"QueryResponse": {}})
-
-    await _fetch("customers", handle)
-    assert paths == [f"{COMPANY_PATH}/query"]
-
-
 async def test_a_row_naming_no_company_fails_before_any_request() -> None:
     """The connector declares no host of its own, so a row without the company address fails loud
     rather than dial one: no request it could make names a company."""

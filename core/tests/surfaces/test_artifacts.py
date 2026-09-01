@@ -34,6 +34,11 @@ from ufo.runtime.surfaces.artifacts import router as artifacts_router
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 SECRET = "artifact-signing-secret"
 BEARER_SECRET = "bearer-signing-secret"
 MEMBER_EMAIL = "member@example.com"

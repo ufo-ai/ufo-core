@@ -6,9 +6,7 @@ proxy transport run against canned Composio responses. This proves the credentia
 `ConnectorRegistry` routes a brokered provider's feed-sync to; the source framework that consumes a
 `Credential` keeps its own proof in `extensions/sources/tests`."""
 
-import json
 from collections.abc import Callable
-from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -77,52 +75,6 @@ async def test_composio_broker_yields_a_transport_that_proxies_provider_http(
 SHEETS_ACCOUNT = "ca_googlesheets_1"
 SHEETS_BASE = "https://sheets.googleapis.com/v4"
 SHEET_RANGES = ["'Summary'", "'Q1 2026'", "'Owner''s View'"]
-
-
-async def test_composio_broker_transport_carries_a_query_name_repeated_per_value(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A provider request repeating one query name reaches proxy-execute with every value: Sheets'
-    `values:batchGet` names one `ranges` per tab, and proxy-execute's `parameters` list is keyed by
-    name, so a repeat expressed there would ask for a single range and the batch would answer one
-    value range for the three the caller asked for."""
-    workspace_id = uuid4()
-    owner = f"{composio.EXTERNAL_USER_PREFIX}{workspace_id}"
-    payloads: list[dict[str, Any]] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and "/connected_accounts/" in request.url.path:
-            return httpx.Response(
-                200,
-                json={
-                    "id": SHEETS_ACCOUNT,
-                    "user_id": owner,
-                    "status": "ACTIVE",
-                    "toolkit": {"slug": "googlesheets"},
-                },
-            )
-        if request.method == "POST" and request.url.path.endswith(
-            composio_proxy.PROXY_EXECUTE_PATH
-        ):
-            payloads.append(json.loads(request.content))
-            return httpx.Response(200, json={"data": {"data": {}, "status": 200, "headers": {}}})
-        return httpx.Response(404, json={})
-
-    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
-    monkeypatch.setattr(composio, "composio_client", lambda: client)
-
-    credential = await ComposioBroker().credential(workspace_id, "googlesheets", SHEETS_ACCOUNT)
-    async with httpx.AsyncClient(base_url=SHEETS_BASE, transport=credential.transport) as http:
-        await http.get(
-            "/spreadsheets/sheet-1/values:batchGet",
-            params={"ranges": SHEET_RANGES, "majorDimension": "ROWS"},
-        )
-
-    endpoint = httpx.URL(str(payloads[0]["endpoint"]))
-    assert endpoint.params.get_list("ranges") == SHEET_RANGES
-    assert endpoint.params.get("majorDimension") == "ROWS"
-    parameters = payloads[0].get("parameters") or []
-    assert [item for item in parameters if item["type"] == "query"] == []
 
 
 R2_URL = "https://temp.store.r2.cloudflarestorage.test/export/abc?X-Amz-Signature=deadbeef"

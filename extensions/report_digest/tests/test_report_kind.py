@@ -19,6 +19,11 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.audience import SHARED_AUDIENCE
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 PORTAL = "https://portal.test"
 SECRET = "0123456789abcdef0123456789abcdef"
 

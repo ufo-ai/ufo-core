@@ -23,6 +23,11 @@ from ufo.runtime.turns.workspace_changes import (
 )
 from ufo.schema import tables
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 RECORDER_READ_TIMEOUT_SECONDS = 1.0
 
 

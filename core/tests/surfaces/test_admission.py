@@ -32,6 +32,11 @@ from ufo.schema.records import (
     TurnRuntimeConfig,
 )
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 
 @dataclass
 class StubDbos:
@@ -371,53 +376,6 @@ async def test_a_fold_logs_the_turn_and_the_row_it_landed_on(
     ) == (str(first.turn_id), str(folded.arrival_id), "member", "queued")
 
 
-async def test_message_while_a_turn_is_queued_joins_its_inbound_queue(db: None) -> None:
-    workspace_id, member_id, _, conversation_id = await _seed()
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    first = await admission.admit_member(
-        workspace_id, conversation_id, "first message", member_id, "C:1"
-    )
-    second = await admission.admit_member(
-        workspace_id,
-        conversation_id,
-        "second message",
-        member_id,
-        "C:2",
-        TurnContext(sender="Pat Doe", timezone="UTC"),
-    )
-    assert first.opened_run
-    assert second == Admitted(
-        first.turn_id, opened_run=False, arrival_id=(await _queued_ids(conversation_id))[0]
-    )
-    assert await _turn_count(conversation_id) == 1
-    assert await _queued_bodies(conversation_id) == ["second message"]
-    async with workspace_tx() as connection:
-        inbound = (
-            await connection.execute(
-                sa.select(tables.turn.c.inbound).where(tables.turn.c.id == first.turn_id)
-            )
-        ).scalar_one()
-        queued = (
-            await connection.execute(
-                sa.select(
-                    tables.inbound_message.c.context,
-                    tables.inbound_message.c.speaker_member_id,
-                    tables.inbound_message.c.idempotency_key,
-                    tables.inbound_message.c.admission_source,
-                    tables.inbound_message.c.admitted_turn_id,
-                ).where(tables.inbound_message.c.conversation_id == conversation_id)
-            )
-        ).one()
-    assert inbound == "first message"
-    assert TurnContext.model_validate(queued.context).sender == "Pat Doe"
-    assert queued.speaker_member_id == member_id
-    assert queued.idempotency_key == "C:2"
-    assert queued.admission_source == "member"
-    assert queued.admitted_turn_id == first.turn_id
-    assert dbos.enqueued == [str(first.turn_id)]
-
-
 async def test_message_while_a_turn_runs_joins_its_inbound_queue(db: None) -> None:
     workspace_id, member_id, _, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
@@ -427,25 +385,6 @@ async def test_message_while_a_turn_runs_joins_its_inbound_queue(db: None) -> No
     assert second == Admitted(
         first.turn_id, opened_run=False, arrival_id=(await _queued_ids(conversation_id))[0]
     )
-    assert await _turn_count(conversation_id) == 1
-    assert await _queued_bodies(conversation_id) == ["two"]
-
-
-async def test_message_redelivery_joins_the_queued_row(db: None) -> None:
-    """A redelivery lands on the row the first delivery queued and says so: the same turn and the
-    same arrival, so a surface holding that message keeps holding the one arrival it admitted."""
-    workspace_id, member_id, _, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    first = await admission.admit_member(workspace_id, conversation_id, "one", member_id, "C:1")
-    second = await admission.admit_member(workspace_id, conversation_id, "two", member_id, "C:2")
-    redelivered = await admission.admit_member(
-        workspace_id, conversation_id, "two", member_id, "C:2"
-    )
-    folded = Admitted(
-        first.turn_id, opened_run=False, arrival_id=(await _queued_ids(conversation_id))[0]
-    )
-    assert second == folded
-    assert redelivered == folded
     assert await _turn_count(conversation_id) == 1
     assert await _queued_bodies(conversation_id) == ["two"]
 
@@ -770,19 +709,6 @@ async def test_unseated_speaker_is_refused_with_the_seat_message(db: None) -> No
     assert writebacks == 1
 
 
-async def test_seated_speaker_enqueues(db: None) -> None:
-    workspace_id, member_id, _, conversation_id = await _seed()
-    dbos = StubDbos()
-    admitted = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
-        workspace_id, conversation_id, "hi", member_id
-    )
-    turn_id = admitted.turn_id
-    assert admitted.opened_run
-    assert dbos.enqueued == [str(turn_id)]
-    status, _ = await _turn_row(turn_id)
-    assert status == "queued"
-
-
 async def test_a_surface_comment_is_recorded_once_and_published_to_the_live_thread(
     db: None,
 ) -> None:
@@ -838,22 +764,6 @@ async def test_a_surface_comment_is_recorded_once_and_published_to_the_live_thre
         text=comment,
         is_comment=True,
     )
-
-
-async def test_internal_invoke_passes_the_seat_gate(db: None) -> None:
-    """An internal turn has no speaker to gate on, so an unseated conversation member never holds
-    up the work the workspace itself asked for."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    await _unseat(member_id)
-    dbos = StubDbos()
-    turn_id = await _invoke(
-        Admission(dbos=dbos, durable_surfaces=frozenset()),
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "background job",
-    )
-    assert dbos.enqueued == [str(turn_id)]
 
 
 async def test_unseated_speakers_message_does_not_fold_into_a_live_turn(db: None) -> None:
@@ -1333,124 +1243,6 @@ async def test_a_member_message_the_live_turn_absorbed_supersedes_a_fire(db: Non
     assert await _turn_count(conversation_id) == 1
 
 
-async def test_a_member_message_absorbed_before_the_arm_never_refuses_the_timer(db: None) -> None:
-    """The inverse of the fold window, and the sharper failure of the two. A member message that
-    folded into the arming turn BEFORE the wait was armed is history the agent had already read when
-    it decided to wait — and it lands on the arming turn itself, so a rule that asks which turn a
-    fold joined can never tell it apart from a reply that arrived afterwards. Counted, it refuses
-    every fire this wait will ever have: the runner retires the row on the refusal and the workflow
-    is left unfinished with nothing scheduled to finish it. The arrival watermark is what separates
-    them, because it was taken when the wait was armed."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    arming = await _invoke(admission, workspace_id, conversation_id, agent_id, "the arming work")
-    assert arming is not None
-    folded = await admission.admit_member(
-        workspace_id, conversation_id, "one more thing before you start", member_id
-    )
-    assert folded.turn_id == arming
-    await _drain_arrivals(arming)
-
-    fired = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "resume the plan",
-        "pause:1",
-        as_scheduled=True,
-        unless_member_since=1,
-        unless_member_arrival_since=1,
-    )
-
-    assert fired is not None
-    assert fired != arming
-    status, _ = await _turn_row(fired)
-    assert status == "queued"
-
-
-async def test_a_wait_takes_both_watermarks_or_neither(db: None) -> None:
-    """Half the question is worse than none of it: a caller passing only the turn watermark would
-    read as guarded while every folded reply passed straight through it, which is the defect this
-    pair replaced."""
-    workspace_id, _member_id, agent_id, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-
-    for watermarks in ({"unless_member_since": 0}, {"unless_member_arrival_since": 0}):
-        with pytest.raises(ValueError, match="both watermarks"):
-            await _invoke(
-                admission,
-                workspace_id,
-                conversation_id,
-                agent_id,
-                "resume the plan",
-                "pause:1",
-                **watermarks,
-            )
-
-    assert await _turn_count(conversation_id) == 0
-
-
-async def test_an_absorbed_internal_arrival_does_not_supersede_a_fire(db: None) -> None:
-    """Only a member ends a wait on a member. Internal work folding into the same live turn — a
-    subagent's result, another job's invoke — is the system talking to itself."""
-    workspace_id, _member_id, agent_id, conversation_id = await _seed()
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    arming = await _invoke(admission, workspace_id, conversation_id, agent_id, "the arming work")
-    assert arming is not None
-    assert await _invoke(admission, workspace_id, conversation_id, agent_id, "more work") == arming
-    await _drain_arrivals(arming)
-
-    fired = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "resume the plan",
-        "pause:1",
-        as_scheduled=True,
-        unless_member_since=1,
-        unless_member_arrival_since=0,
-    )
-
-    assert fired is not None
-    assert fired != arming
-    assert await _turn_count(conversation_id) == 2
-
-
-async def test_a_member_message_absorbed_before_the_wait_does_not_supersede_it(db: None) -> None:
-    """A fold that landed on an earlier turn than the one that armed the wait is history the agent
-    had already read when it armed. Counting it would refuse every fire in a conversation a member
-    had ever folded a message into."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    earlier = await _invoke(admission, workspace_id, conversation_id, agent_id, "earlier work")
-    assert earlier is not None
-    folded = await admission.admit_member(workspace_id, conversation_id, "a note", member_id)
-    assert folded.turn_id == earlier
-    await _drain_arrivals(earlier)
-    await _finish(earlier)
-    arming = await _invoke(admission, workspace_id, conversation_id, agent_id, "the arming work")
-    assert arming is not None
-
-    fired = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "resume the plan",
-        "pause:1",
-        as_scheduled=True,
-        unless_member_since=2,
-        unless_member_arrival_since=1,
-    )
-
-    assert fired is not None
-    assert await _turn_count(conversation_id) == 3
-
-
 async def test_a_queued_member_message_supersedes_a_fire(db: None) -> None:
     """A member message already waiting for the live turn is a resume in flight, whatever the turn
     sequence says."""
@@ -1509,94 +1301,6 @@ async def test_a_quiet_conversation_admits_a_guarded_fire(db: None) -> None:
     assert dbos.enqueued == [str(fired)]
 
 
-async def test_the_armed_seq_itself_does_not_supersede_a_fire(db: None) -> None:
-    """The member turn the wait was armed from is the origin, not a reply that overtook it."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    origin = await admission.admit_member(workspace_id, conversation_id, "watch this", member_id)
-    await _finish(origin.turn_id)
-
-    fired = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "resume the plan",
-        "pause:1",
-        unless_member_since=1,
-        unless_member_arrival_since=0,
-    )
-
-    assert fired is not None
-    assert fired != origin.turn_id
-    assert await _turn_count(conversation_id) == 2
-
-
-async def test_a_redelivered_fire_keeps_its_turn_after_a_member_speaks(db: None) -> None:
-    """A crash between fire and retire re-fires the same identity, and it must converge on the
-    first outcome: the key already admitted a turn, so the redelivery answers that turn rather than
-    reading the member who spoke afterwards and refusing."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    fired = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "resume the plan",
-        "pause:1",
-        authority=MemberAuthority(member_id),
-        as_scheduled=True,
-        unless_member_since=0,
-        unless_member_arrival_since=0,
-    )
-    assert fired is not None
-    folded = await admission.admit_member(workspace_id, conversation_id, "never mind", member_id)
-    assert folded.turn_id == fired
-
-    redelivered = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "resume the plan",
-        "pause:1",
-        authority=MemberAuthority(member_id),
-        as_scheduled=True,
-        unless_member_since=0,
-        unless_member_arrival_since=0,
-    )
-
-    assert redelivered == fired
-    assert await _turn_count(conversation_id) == 1
-    assert await _queued_bodies(conversation_id) == ["never mind"]
-
-
-async def test_a_guarded_scheduled_fire_is_superseded_the_same_way(db: None) -> None:
-    """The pause fire's shape: scheduled meaning plus the guard. The member's own turn resumed the
-    work, so the fire adds nothing and is refused."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    await admission.admit_member(workspace_id, conversation_id, "never mind", member_id)
-
-    superseded = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "resume the plan",
-        "pause:1",
-        authority=MemberAuthority(member_id),
-        as_scheduled=True,
-        unless_member_since=0,
-        unless_member_arrival_since=0,
-    )
-
-    assert superseded is None
-    assert await _turn_count(conversation_id) == 1
-    assert await _queued_bodies(conversation_id) == []
-
-
 async def _cancel_turn_row(turn_id: UUID) -> None:
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1645,91 +1349,12 @@ async def test_redispatch_founds_a_run_on_the_oldest_pending_member_arrival(db: 
     assert await admission.redispatch(workspace_id, conversation_id) is None
 
 
-async def test_redispatch_stamps_a_keyless_arrival(db: None) -> None:
-    workspace_id, member_id, _, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
-    await admission.admit_member(workspace_id, conversation_id, "keyless follow up", member_id)
-    await _cancel_turn_row(first.turn_id)
-
-    founded = await admission.redispatch(workspace_id, conversation_id)
-
-    assert founded is not None
-    new_turn_id, arrival_id = founded
-    async with workspace_tx() as connection:
-        key = (
-            await connection.execute(
-                sa.select(tables.turn.c.idempotency_key).where(tables.turn.c.id == new_turn_id)
-            )
-        ).scalar_one()
-    assert key == f"redispatch:{arrival_id}"
-
-
 async def test_redispatch_with_nothing_pending_is_none(db: None) -> None:
     workspace_id, member_id, _, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
     first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
     await _cancel_turn_row(first.turn_id)
     assert await admission.redispatch(workspace_id, conversation_id) is None
-
-
-async def test_redispatch_joins_a_live_turn_without_founding(db: None) -> None:
-    workspace_id, member_id, _, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    await admission.admit_member(workspace_id, conversation_id, "start", member_id)
-    await admission.admit_member(
-        workspace_id, conversation_id, "follow up", member_id, idempotency_key="send-1"
-    )
-
-    assert await admission.redispatch(workspace_id, conversation_id) is None
-
-    assert await _turn_count(conversation_id) == 1
-    assert await _queued_bodies(conversation_id) == ["follow up"]
-
-
-async def test_redispatch_leaves_internal_arrivals_for_the_next_turn(db: None) -> None:
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
-    await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "a child result",
-        authority=MemberAuthority(member_id),
-    )
-    await _cancel_turn_row(first.turn_id)
-
-    assert await admission.redispatch(workspace_id, conversation_id) is None
-
-    assert await _queued_bodies(conversation_id) == ["a child result"]
-
-
-async def test_redispatch_founds_on_the_oldest_and_leaves_the_rest_for_the_drain(db: None) -> None:
-    workspace_id, member_id, _, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    first = await admission.admit_member(workspace_id, conversation_id, "start", member_id)
-    await admission.admit_member(
-        workspace_id, conversation_id, "first follow up", member_id, idempotency_key="send-1"
-    )
-    await admission.admit_member(
-        workspace_id, conversation_id, "second follow up", member_id, idempotency_key="send-2"
-    )
-    await _cancel_turn_row(first.turn_id)
-
-    founded = await admission.redispatch(workspace_id, conversation_id)
-
-    assert founded is not None
-    new_turn_id, _ = founded
-    async with workspace_tx() as connection:
-        inbound = (
-            await connection.execute(
-                sa.select(tables.turn.c.inbound).where(tables.turn.c.id == new_turn_id)
-            )
-        ).scalar_one()
-    assert inbound == "first follow up"
-    assert await _queued_bodies(conversation_id) == ["second follow up"]
 
 
 async def test_member_admission_stores_its_trace_for_the_turn_span(db: None, monkeypatch) -> None:

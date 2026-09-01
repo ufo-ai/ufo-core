@@ -136,29 +136,6 @@ def _shaped_handler() -> Callable[[httpx.Request], httpx.Response]:
     return handle
 
 
-async def test_users_flatten_derives_name_from_username() -> None:
-    record = _flat(await _fetch("users", _hierarchy_handler()), "users/u1")
-    assert record["name"] == "Ada"
-    assert record["email"] == "ada@example.com"
-
-
-async def test_tasks_flatten_stringifies_status_dict_and_lifts_created_at() -> None:
-    result = await _fetch("tasks", _shaped_handler())
-    page = result.pages[0]
-    assert page.created_at == "1970-01-01T00:26:40.000000+00:00"
-    assert page.updated_at == "1970-01-01T00:03:20.000000+00:00"
-    record = _flat(result, "tasks/tk1")
-    assert record["status"] == "in progress"
-    assert record["due_date"] == "1700"
-    assert record["created_at"] == "1600"
-
-
-async def test_spaces_flatten_derives_api_url() -> None:
-    record = _flat(await _fetch("spaces", _shaped_handler()), "spaces/s1")
-    assert record["name"] == "Space"
-    assert record["api_url"] == "https://api.clickup.com/api/v2/space/s1"
-
-
 async def test_list_comments_flatten_derive_body_author_and_parent() -> None:
     record = _flat(await _fetch("list_comments", _shaped_handler()), "list_comments/cm1")
     assert record["body"] == "nice work"

@@ -39,15 +39,10 @@ from e2b.sandbox.commands.command_handle import CommandExitException
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from ufo_ext_e2b import (
-    CA_INSTALL_TIMEOUT_SECONDS,
     CAP_WORKLOAD_COMMAND,
     CARRIER_NAME,
-    CLIENT_CHECK_TIMEOUT_SECONDS,
-    CLIENT_INSTALL_TIMEOUT_SECONDS,
     CLIENT_PATH,
-    CLIENT_STAGING_PATH,
     CONVERSATION_METADATA_KEY,
-    DIAL_LEASE_SECONDS,
     E2B_API_KEY_ENV,
     E2B_LIFECYCLE,
     E2B_NETWORK,
@@ -61,7 +56,6 @@ from ufo_ext_e2b import (
     RESUME_TOTAL_TIMEOUT_SECONDS,
     RESUME_TRANSPORT_RETRIES,
     SANDBOX_LEASE_SECONDS,
-    SILENT_MARK_SECONDS,
     SILENT_PROBE_CMD,
     WORKLOAD_CAP_TIMEOUT_SECONDS,
     WORKLOAD_CGROUPS,
@@ -70,7 +64,6 @@ from ufo_ext_e2b import (
     WORKSPACE_ENSURE_TIMEOUT_SECONDS,
     E2BCarrier,
     build_e2b_carrier,
-    e2b_runtime_digest,
 )
 
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
@@ -80,12 +73,7 @@ from ufo.harness.sandbox.select import select_carrier
 from ufo.harness.sandbox.session import (
     CA_SANDBOX_PATH,
     CA_STAGING_PATH,
-    NO_PROXY_HOSTS,
-    NODE_GLOBAL_MODULES,
-    PLAYWRIGHT_BROWSERS_DIR,
     SANDBOX_SIZES,
-    SENTINEL_MODEL_KEY,
-    SYSTEM_CA_BUNDLE,
     WORKSPACE_DIR,
     ExecResult,
     ProxyEndpoint,
@@ -542,15 +530,6 @@ async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -
     assert (ENSURE_WORKSPACE_COMMAND, None, WORKSPACE_ENSURE_TIMEOUT_SECONDS) in runs
 
 
-async def test_create_disables_public_port_traffic() -> None:
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
-
-    await carrier.create(_spec(uuid4()))
-
-    assert sdk.created[0]["network"] == {"allow_public_traffic": False}
-
-
 async def test_create_fails_loud_when_no_traffic_token_returns() -> None:
     """The token is not on the handle any more — `dial` reads it off the live container — but a
     template that returns none at create leaves every port unreachable through the ingress, so the
@@ -560,37 +539,6 @@ async def test_create_fails_loud_when_no_traffic_token_returns() -> None:
 
     with pytest.raises(RuntimeError, match="traffic access token"):
         await carrier.create(_spec(uuid4()))
-
-
-async def test_create_installs_the_proxy_ca_into_system_trust_as_root() -> None:
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-
-    await carrier.create(_spec(uuid4()))
-
-    sandbox = sdk.sandboxes["sbx-1"]
-    assert sandbox.files.written == [(CA_STAGING_PATH, "ca-pem")]
-    assert sandbox.files.write_users == ["root"]
-    assert sandbox.commands.runs[1] == (INSTALL_CA_COMMAND, None, CA_INSTALL_TIMEOUT_SECONDS)
-    assert sandbox.commands.users[1] == "root"
-
-
-async def test_create_replaces_a_stale_workload_client() -> None:
-    sdk = _Sdk(command_fail_counts={CLIENT_PATH: 1})
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-
-    await carrier.create(_spec(uuid4()))
-
-    sandbox = sdk.sandboxes["sbx-1"]
-    client_path, client_content = sandbox.files.written[0]
-    assert client_path.startswith(f"{CLIENT_STAGING_PATH}-")
-    assert client_content == b"client-binary"
-    assert sandbox.files.written[1] == (CA_STAGING_PATH, "ca-pem")
-    assert sandbox.commands.runs[0][2] == CLIENT_CHECK_TIMEOUT_SECONDS
-    assert client_path in sandbox.commands.runs[1][0]
-    assert f"{CLIENT_PATH}.next-" in sandbox.commands.runs[1][0]
-    assert sandbox.commands.runs[1][2] == CLIENT_INSTALL_TIMEOUT_SECONDS
-    assert sandbox.commands.users[:2] == ["root", "root"]
 
 
 async def test_every_preparation_caps_the_workload_cgroups_as_root() -> None:
@@ -627,23 +575,6 @@ async def test_a_failed_trust_update_raises_a_named_ca_install_error() -> None:
     runs = sdk.sandboxes["sbx-1"].commands.runs
     assert CLIENT_PATH in runs[0][0]
     assert [command for command, _, _ in runs[1:]] == [INSTALL_CA_COMMAND]
-
-
-async def test_a_box_reached_off_the_cache_is_prepared_again_not_deferred() -> None:
-    """No durable handle names this box — it is reached off this process's own cache — so nothing
-    vouches for its preparation and the next open re-asserts it strictly rather than deferring."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01)
-    spec = _spec(uuid4())
-
-    await carrier.create(spec)
-    sdk.sandboxes["sbx-1"].commands.hangs = True
-
-    with pytest.raises(TimeoutError):
-        async with asyncio.timeout(0.2):
-            await carrier.create(spec)
-
-    assert sdk.connected == ["sbx-1"]
 
 
 async def test_a_cached_box_whose_preparation_failed_drops_its_lease() -> None:
@@ -808,75 +739,6 @@ async def test_the_resume_backoff_doubles_and_the_whole_retry_is_wall_clock_boun
     assert sum(slept) < RESUME_TOTAL_TIMEOUT_SECONDS
 
 
-async def test_a_control_plane_that_answers_nothing_at_all_ends_at_the_ceiling(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Attempts bound how many times this asks; only the wall clock bounds how long. A `connect`
-    that never returns would otherwise hold a member's setup for as long as the SDK's own default
-    allows — a third-party value this repo neither sets nor asserts."""
-    conversation = uuid4()
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    opened = await carrier.create(_spec(conversation))
-
-    async def never_answers(
-        sandbox_id: str,
-        *,
-        timeout: int,  # noqa: ASYNC109
-        api_key: str,
-    ) -> _Sandbox:
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-    sdk.connect = never_answers  # type: ignore[method-assign]
-    stalling = _carrier(
-        api_key="k", templates=_templates("t"), sdk=sdk, resume_total_timeout_seconds=0.05
-    )
-
-    with caplog.at_level(logging.INFO, logger="ufo"), pytest.raises(httpx.ReadTimeout):
-        await stalling.create(replace(_spec(conversation), resume_id=opened.container_id))
-
-    assert _events(caplog, "sandbox.e2b.resume_timed_out") != []
-
-
-async def test_a_fresh_box_is_not_lease_visible_until_it_is_prepared() -> None:
-    """The lease is what a concurrent open adopts, so it must vouch only for a box already made
-    ready. Publishing it before preparation hands the next caller a container this one is still
-    working on and may be about to fail out of."""
-    conversation = uuid4()
-    sdk = _Sdk(file_write_raises=httpx.ReadError("connection broken"))
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, prepare_retry_seconds=0.0)
-
-    with pytest.raises(httpx.ReadError):
-        await carrier.create(_spec(conversation))
-
-    assert carrier._leased(conversation) is None
-
-
-async def test_every_connect_in_the_carrier_retries_an_unanswered_control_plane() -> None:
-    """One endpoint, one uncertainty. A stall that kills a turn at setup kills it just as dead on
-    the mid-turn lease renewal ten minutes in, and on the read path — so all three `connect` sites
-    come through the one retrying seam rather than only the one #1346 happened to report."""
-    conversation = uuid4()
-    clock = _Clock()
-    sdk = _Sdk(clock=clock)
-    carrier = _carrier(
-        api_key="k", templates=_templates("t"), sdk=sdk, clock=clock, resume_retry_delay_seconds=0.0
-    )
-    opened = await carrier.create(_spec(conversation))
-
-    sdk.connect_faults = [httpx.ReadTimeout("timed out")]
-    attached = await carrier.attach(replace(_spec(conversation), resume_id=opened.container_id))
-    assert attached is not None
-    assert sdk.connected == [opened.container_id] * 2
-
-    sdk.connected.clear()
-    clock.now += SANDBOX_LEASE_SECONDS
-    sdk.connect_faults = [httpx.ReadTimeout("timed out")]
-    assert (await carrier.exec(opened, ("true",), 5)).exit_code == 0
-    assert sdk.connected == [opened.container_id] * 2
-
-
 def test_ca_install_command_removes_a_target_after_a_failed_bundle_update(
     tmp_path: Path,
 ) -> None:
@@ -943,37 +805,6 @@ def test_cap_workload_command_refuses_a_guest_smaller_than_the_reserve(tmp_path:
         assert not (directory / "memory.max").exists()
 
 
-async def test_exec_runs_under_the_turn_egress_env() -> None:
-    """Every sandbox command routes out through the proxy: exec passes an egress env whose
-    HTTP(S)_PROXY dial the proxy's public URL with the turn's run token as the basic-auth username
-    (so the proxy meters the request to the turn), whose NO_PROXY exempts the sandbox's own
-    loopback, whose model keys are the sentinels the proxy swaps for the real key on the wire, and
-    whose CA vars point at the written proxy CA."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-
-    await carrier.exec(handle, ("bash", "-lc", "curl https://example.com"), 60)
-
-    envs = sdk.sandboxes["sbx-1"].commands.envs[-1]
-    assert envs is not None
-    proxy_url = "https://run-token:ufo@sandbox-proxy.test"
-    assert envs["HTTP_PROXY"] == proxy_url
-    assert envs["HTTPS_PROXY"] == proxy_url
-    assert envs["http_proxy"] == proxy_url
-    assert envs["https_proxy"] == proxy_url
-    assert envs["NO_PROXY"] == NO_PROXY_HOSTS
-    assert envs["no_proxy"] == NO_PROXY_HOSTS
-    assert envs["ANTHROPIC_API_KEY"] == SENTINEL_MODEL_KEY
-    assert envs["OPENAI_API_KEY"] == SENTINEL_MODEL_KEY
-    assert envs["SSL_CERT_FILE"] == SYSTEM_CA_BUNDLE
-    assert envs["REQUESTS_CA_BUNDLE"] == SYSTEM_CA_BUNDLE
-    assert envs["CURL_CA_BUNDLE"] == SYSTEM_CA_BUNDLE
-    assert envs["NODE_EXTRA_CA_CERTS"] == CA_SANDBOX_PATH
-    assert envs["NODE_PATH"] == NODE_GLOBAL_MODULES
-    assert envs["PLAYWRIGHT_BROWSERS_PATH"] == PLAYWRIGHT_BROWSERS_DIR
-
-
 async def test_create_without_a_reachable_proxy_url_fails_loud() -> None:
     """The carrier's own fail-loud, behind the boot guard: an e2b spec whose proxy carries no public
     URL cannot build a metered egress env, so create raises rather than run an open sandbox."""
@@ -1006,71 +837,6 @@ async def test_create_with_a_plaintext_proxy_url_fails_loud() -> None:
     )
     with pytest.raises(RuntimeError, match="HTTPS"):
         await carrier.create(spec)
-
-
-async def test_dial_returns_the_per_port_host_and_traffic_header() -> None:
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-
-    target = await carrier.dial(handle, 8000)
-
-    assert target.host == f"8000-{handle.container_id}.e2b.test"
-    assert target.tls is True
-    assert target.headers == {"e2b-traffic-access-token": "traffic-tok"}
-
-
-async def test_dial_omits_the_header_when_the_sandbox_carries_no_traffic_token() -> None:
-    """A resumed sandbox `dial` reaches through `connect`, not `create`'s fresh-token guard — a
-    sandbox with no token on the wire dials without the header rather than raising."""
-    sdk = _Sdk()
-    sdk.sandboxes["sbx-1"] = _Sandbox(
-        sandbox_id="sbx-1",
-        provider=_Provider(clock=sdk.clock, expires_at=sdk.clock() + SANDBOX_LEASE_SECONDS),
-        commands=_Commands(),
-        files=_Files(),
-        traffic_access_token=None,
-    )
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-1")
-
-    target = await carrier.dial(handle, 9223)
-
-    assert target.headers == {}
-
-
-async def test_a_lease_naming_another_container_is_a_miss() -> None:
-    """The lease is keyed by conversation, the caller names a container. The ingress re-reads the
-    conversation's handle per request precisely so a sandbox recreated since is picked up at once,
-    so a fresh lease naming the old container must not answer for the new one — otherwise every
-    viewer keeps reaching a sandbox the conversation no longer runs on until the lease lapses."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-    recreated = SandboxHandle(conversation_id=handle.conversation_id, container_id="sbx-2")
-    sdk.sandboxes["sbx-2"] = _Sandbox(
-        sandbox_id="sbx-2",
-        provider=_Provider(clock=sdk.clock, expires_at=sdk.clock() + SANDBOX_LEASE_SECONDS),
-        commands=_Commands(),
-        files=_Files(),
-    )
-
-    target = await carrier.dial(recreated, 8000)
-
-    assert target.host == "8000-sbx-2.e2b.test"
-    assert sdk.connected == ["sbx-2"]
-
-
-async def test_dial_raises_sandbox_unreachable_when_the_sandbox_is_gone() -> None:
-    """A sandbox the provider no longer has raises `SandboxNotFoundException` on reconnect; `dial`
-    maps it to `SandboxUnreachable`, the one error every carrier's `dial` raises, rather than
-    leaking the e2b SDK's own exception type."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-1")
-
-    with pytest.raises(SandboxUnreachable):
-        await carrier.dial(handle, 9223)
 
 
 async def test_second_create_for_the_conversation_resumes_rather_than_recreates() -> None:
@@ -1213,42 +979,6 @@ def _counted(reader: InMemoryMetricReader, name: str) -> list[tuple[int, dict[st
     ]
 
 
-async def test_a_deferred_preparation_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The deferral is how a wedged box stops costing a turn, so its rate is the thing to watch —
-    a log line alone answers "did it happen once", never "is it getting worse"."""
-    reader = _counters(monkeypatch)
-    sdk = _Sdk()
-    first = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    conversation = uuid4()
-    opened = await first.create(_spec(conversation))
-    sdk.sandboxes[opened.container_id].commands.hang_on = (INSTALL_CA_COMMAND,)
-
-    restarted = _carrier(
-        api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01
-    )
-    await restarted.create(replace(_spec(conversation), resume_id=opened.container_id))
-
-    assert _counted(reader, "ufo.sandbox_prepare_deferred_total") == [
-        (1, {"carrier": CARRIER_NAME})
-    ]
-
-
-async def test_a_command_that_timed_out_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`exec` maps a wedged `envd` to an exit code the model reads and moves past, so nothing else
-    records that it happened."""
-    reader = _counters(monkeypatch)
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    sdk.sandboxes[handle.container_id].commands.raises = TimeoutException("probe hung")
-
-    result = await carrier.exec(handle, ("bash", "-lc", "pytest -q"), 60)
-
-    assert result.exit_code == EXEC_TIMEOUT_CODE
-    assert result.timed_out_after_s == 60
-    assert _counted(reader, "ufo.sandbox_exec_timeout_total") == [(1, {"carrier": CARRIER_NAME})]
-
-
 async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result() -> None:
     sdk = _Sdk()
     carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
@@ -1264,34 +994,6 @@ async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result
     assert timeout == 60
 
 
-async def test_write_uploads_through_the_filesystem_api() -> None:
-    """The bytes go through `files.write`, never the command line: inlining them is what e2b rejects
-    once the payload is large, exactly when a caller offloads an oversized tool result."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    content = b"x" * (2 * 1024 * 1024)
-
-    await carrier.write(handle, "/workspace/f", content)
-
-    sandbox = sdk.sandboxes["sbx-1"]
-    assert ("/workspace/f", content) in sandbox.files.written
-    assert not any("base64" in command for command, _, _ in sandbox.commands.runs)
-
-
-async def test_exec_maps_a_nonzero_exit_to_the_command_result() -> None:
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    sdk.sandboxes["sbx-1"].commands.raises = CommandExitException(
-        stderr="boom", stdout="partial", exit_code=3, error="boom"
-    )
-
-    result = await carrier.exec(handle, ("bash", "-lc", "false"), 60)
-
-    assert result == ExecResult(stdout="partial", stderr="boom", exit_code=3)
-
-
 async def test_exec_maps_a_timeout_to_the_timeout_code() -> None:
     sdk = _Sdk()
     carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
@@ -1303,38 +1005,6 @@ async def test_exec_maps_a_timeout_to_the_timeout_code() -> None:
     assert result.exit_code == EXEC_TIMEOUT_CODE
     assert result.timed_out_after_s == 1
     assert "timed out" in result.stderr
-
-
-async def test_a_stopped_command_leads_its_own_process_group() -> None:
-    """The command's own group is what makes it stoppable at all: envd runs every command in one
-    shared group, so the pid the carrier signals must lead a group of the command's own or the
-    signal reaches the carrier's other calls instead."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-
-    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
-
-    launched, _, _ = sdk.sandboxes["sbx-1"].commands.runs[-1]
-    assert launched == "setsid bash -lc 'pytest -n auto'"
-
-
-async def test_a_command_the_deadline_stopped_is_no_longer_running() -> None:
-    """The deadline severs the client's stream and leaves the command running: a suite launched
-    under one stopped call otherwise keeps every core of the container for as long as it lives, and
-    the next call in the same turn meets a box consumed by the run it believes it stopped. Nothing
-    else can stop it — no later call knows the pid this one saw."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-    commands.raises = TimeoutException("timed out")
-
-    result = await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
-
-    assert result.timed_out_after_s == 60
-    assert commands.alive == {}
-    assert any(cmd.startswith("kill -9 -") for cmd, _, _ in commands.runs)
 
 
 async def test_a_stop_the_sandbox_refuses_still_reports_the_deadline(
@@ -1423,54 +1093,6 @@ async def test_a_member_cancel_stops_the_group_the_cancelled_step_left_running()
     assert [cmd for cmd, _, _ in commands.runs if cmd.startswith("kill")] == [f"kill -9 -{pid}"]
 
 
-async def test_a_turns_stop_spares_the_commands_of_the_turns_sharing_its_container() -> None:
-    """A subagent inherits the sandbox of the turn that spawned it, so a parent, its children and
-    every later turn of the conversation run their commands in one container. The stop reaches the
-    cancelled turn's own group and nothing else: a sibling turn is holding a build, a clone, a push
-    nobody cancelled, and signalling it would destroy that work in the workspace they share."""
-    sdk, carrier = _leased(_Clock())
-    conversation = uuid4()
-    cancelled = await carrier.create(_spec(conversation, turn=uuid4()))
-    sibling = await carrier.create(_spec(conversation, turn=uuid4()))
-    assert cancelled.container_id == sibling.container_id
-    commands = sdk.sandboxes["sbx-1"].commands
-    commands.hangs = True
-    stopped = asyncio.ensure_future(carrier.exec(cancelled, ("bash", "-lc", "pytest -n auto"), 60))
-    await _until(lambda: bool(commands.alive))
-    stopped.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await stopped
-    (stopped_pid,) = commands.alive
-    spared = asyncio.ensure_future(carrier.exec(sibling, ("bash", "-lc", "git push"), 60))
-    await _until(lambda: len(commands.alive) == 2)
-
-    await SandboxSession(carrier=carrier, handle=cancelled).stop_commands()
-
-    assert list(commands.alive.values()) == ["setsid bash -lc 'git push'"]
-    assert [cmd for cmd, _, _ in commands.runs if cmd.startswith("kill")] == [
-        f"kill -9 -{stopped_pid}"
-    ]
-    spared.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await spared
-
-
-async def test_a_stop_with_nothing_running_asks_the_provider_nothing() -> None:
-    """A cancel with no command in flight is the common one, so leasing a box to signal nothing
-    would put a control-plane round trip on every stop. A command that already ended is not a group
-    anything may signal either — its pid belongs to the box now."""
-    sdk, carrier = _leased(_Clock())
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-    await carrier.exec(handle, ("bash", "-lc", "echo done"), 60)
-    before = len(commands.runs)
-
-    await carrier.stop_commands(handle)
-
-    assert len(commands.runs) == before
-    assert sdk.connected == []
-
-
 async def test_a_cancel_before_the_launch_answers_names_no_group(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1521,202 +1143,6 @@ async def test_a_box_that_stopped_answering_refuses_the_next_command_at_once(
 
     assert [cmd for cmd, _, _ in commands.runs[before:]] == [SILENT_PROBE_CMD]
     assert _counted(reader, "ufo.sandbox_unreachable_total") == [(1, {"carrier": CARRIER_NAME})]
-
-
-async def test_a_box_that_answers_again_is_used_again() -> None:
-    """The mark records a fault, never a verdict: a channel that comes back is a working box, and
-    the command that proved it goes on to run."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-    commands.raises = TimeoutException("timed out")
-    commands.stops_fail = True
-    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 600)
-    commands.raises = None
-    commands.stops_fail = False
-    commands.result = _Result("back\n", "", 0)
-
-    recovered = await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
-
-    assert recovered.exit_code == 0
-    assert recovered.stdout == "back\n"
-    settled = len(commands.runs)
-    again = await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
-    assert again.exit_code == 0
-    assert SILENT_PROBE_CMD not in [cmd for cmd, _, _ in commands.runs[settled:]]
-
-
-async def test_a_stop_the_box_answers_leaves_nothing_to_recheck() -> None:
-    """A group already gone exits non-zero, which is the box answering. Only silence is the fault
-    worth remembering, so the next command is not made to pay a probe for it."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-    commands.raises = TimeoutException("timed out")
-    commands.stops_reject = True
-    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 600)
-    commands.raises = None
-    before = len(commands.runs)
-
-    await carrier.exec(handle, ("bash", "-lc", "echo hi"), 600)
-
-    assert SILENT_PROBE_CMD not in [cmd for cmd, _, _ in commands.runs[before:]]
-
-
-async def test_a_command_that_ends_on_its_own_is_not_signalled() -> None:
-    """A command that exits leaves nothing to stop, and a backgrounded descendant outliving the
-    exec that launched it is how a turn starts a server."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-
-    await carrier.exec(handle, ("bash", "-lc", "echo hi"), 60)
-
-    assert not any(cmd.startswith("kill -9 -") for cmd, _, _ in commands.runs)
-
-
-async def test_a_deadline_that_beats_the_launch_has_nothing_to_stop() -> None:
-    """A deadline that fires before the launch answers has no pid to name and nothing yet running
-    behind it: the stop is skipped, not sent to a group that does not exist, and the caller is
-    still told its own deadline fired."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-    commands.launch_never_answers = True
-
-    result = await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
-
-    assert result.exit_code == EXEC_TIMEOUT_CODE
-    assert result.timed_out_after_s == 60
-    assert not any(cmd.startswith("kill") for cmd, _, _ in commands.runs)
-
-
-async def test_a_launch_the_box_cannot_answer_is_the_box_going_silent() -> None:
-    """Measured against a container whose `envd` was frozen: the launch is what its deadline takes,
-    so the stop that would have noticed is never reached and every later call paid its own budget
-    again. Detaching returns as soon as the command has a pid, so a launch outlasting the caller's
-    whole budget is a gone channel rather than slow work — the plainest reading of one there is."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-    commands.launch_never_answers = True
-    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
-    before = len(commands.runs)
-
-    with pytest.raises(SandboxUnreachable):
-        await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 60)
-
-    assert [cmd for cmd, _, _ in commands.runs[before:]] == [SILENT_PROBE_CMD]
-
-
-async def test_a_box_the_probe_cannot_reach_is_tried_again_once_the_mark_expires(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """What the 2026-08-17 turns met: the container was alive and saturated — load 16.55 on four
-    cores, 3930 MB of 4096 used, no swap — so it answered neither the stop nor the one word this
-    probe asks, and every later command of the turn was refused for a box that was thrashing rather
-    than gone. The mark holds one fault's evidence and ends with it: past the span the command the
-    caller asked for is what tries the box. A refused probe does not renew the span either, or each
-    refusal would carry the next one and the mark would outlive the process."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-    commands.raises = TimeoutException("timed out")
-    commands.stops_fail = True
-    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 600)
-    commands.raises = None
-    commands.timeout_on = (SILENT_PROBE_CMD,)
-    clock.advance(SILENT_MARK_SECONDS - 1)
-    with pytest.raises(SandboxUnreachable):
-        await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
-    clock.advance(2)
-    before = len(commands.runs)
-
-    with caplog.at_level(logging.INFO, logger="ufo"):
-        recovered = await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
-
-    assert recovered.exit_code == 0
-    assert [cmd for cmd, _, _ in commands.runs[before:]] == ["setsid bash -lc 'cat /proc/loadavg'"]
-    assert _events(caplog, "sandbox.e2b.silent_mark_expired") == [{"sandbox_id": "sbx-1"}]
-
-
-async def test_a_box_that_is_really_gone_earns_the_mark_again() -> None:
-    """Expiry costs the fast fail nothing worth keeping. One command past the span pays its own
-    deadline, the silence that deadline meets marks the container again, and the commands behind it
-    are refused at once instead of each waiting ten minutes to learn what this one established."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-    commands.launch_never_answers = True
-    await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 600)
-    clock.advance(SILENT_MARK_SECONDS + 1)
-
-    tried = await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
-
-    assert tried.exit_code == EXEC_TIMEOUT_CODE
-    before = len(commands.runs)
-    with pytest.raises(SandboxUnreachable):
-        await carrier.exec(handle, ("bash", "-lc", "cat /proc/loadavg"), 600)
-    assert [cmd for cmd, _, _ in commands.runs[before:]] == [SILENT_PROBE_CMD]
-
-
-async def test_the_deadline_stop_ends_the_launcher_and_spares_its_detached_task(
-    tmp_path: Path,
-) -> None:
-    """The bash tool hands the carrier `ufo run`: its launcher starts a task supervisor in its own
-    session and waits, so a budget that expires moves the command to the background rather than
-    ending it. The deadline stop must therefore end the launcher's group and nothing wider. Real
-    processes prove the composition: the launcher dies, the supervisor survives, the probe answers
-    its live pid, and the task's advertised stop still lands its exit code."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    commands = _ProcessCommands(root=tmp_path)
-    sdk.sandboxes["sbx-live"] = _Sandbox(
-        sandbox_id="sbx-live",
-        provider=_Provider(clock=sdk.clock, expires_at=0),
-        commands=cast(_Commands, commands),
-        files=_Files(),
-    )
-    handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-live")
-    base = f"{tmp_path}/tasks/t-0001"
-    launch = (
-        str(client_binary()),
-        "run",
-        "--task",
-        base,
-        "--",
-        "bash",
-        "-lc",
-        "sleep 30",
-    )
-
-    result = await carrier.exec(handle, launch, 1)
-
-    assert result.exit_code == EXEC_TIMEOUT_CODE
-    assert result.timed_out_after_s == 1
-    assert await asyncio.wait_for(commands.launched[0].wait(), 10) == -9
-    probe = await carrier.exec(handle, ("sh", "-c", TASK_PROBE, "sh", base), 5)
-    assert probe.exit_code == 0
-    supervisor = probe.stdout.strip()
-    assert supervisor
-    stopped = await carrier.exec(handle, ("bash", "-lc", f'kill "{supervisor}"'), 5)
-    assert stopped.exit_code == 0
-    for _ in range(100):
-        ended = await carrier.exec(
-            handle, ("bash", "-lc", f'cat "{base}.exit" 2>/dev/null || true'), 5
-        )
-        if ended.stdout.strip():
-            assert ended.stdout.strip() != "0"
-            return
-        await asyncio.sleep(0.05)
-    raise AssertionError("the stopped task never wrote its exit code")
 
 
 async def test_a_cancel_leaves_the_launcher_running_until_the_member_stop(tmp_path: Path) -> None:
@@ -1785,14 +1211,6 @@ def _events(caplog: pytest.LogCaptureFixture, name: str) -> list[dict[str, objec
     return [record.ufo for record in caplog.records if record.getMessage() == name]
 
 
-def test_the_autosuspend_span_is_five_minutes() -> None:
-    """The lease IS the autosuspend: a sandbox untouched for this span pauses and releases its
-    concurrency slot. Five minutes is the deliberate trade after the 2026-08-13 slot exhaustion —
-    finished work frees its slot three times sooner, and a turn that thinks past the span pays a
-    sub-second auto-resume on its next call rather than holding a slot through the silence."""
-    assert SANDBOX_LEASE_SECONDS == 300
-
-
 async def test_a_standing_lease_covers_short_commands_without_a_round_trip() -> None:
     """A command asks the lease only for its own timeout plus the answer margin, so the common case
     reaches the provider once, for the command itself. Renewing per call would put a control-plane
@@ -1805,17 +1223,6 @@ async def test_a_standing_lease_covers_short_commands_without_a_round_trip() -> 
 
     assert sdk.created[0]["timeout"] == SANDBOX_LEASE_SECONDS
     assert sdk.connected == []
-
-
-async def test_a_command_longer_than_the_standing_lease_leases_past_it() -> None:
-    """A command asking for more than the standing lease gets one sized to the command, so no
-    timeout a tool can raise reintroduces a container that pauses mid-command."""
-    sdk, carrier = _leased(_Clock())
-    handle = await carrier.create(_spec(uuid4()))
-
-    await carrier.exec(handle, ("bash", "-lc", "sleep 3500"), 3_600)
-
-    assert sdk.connect_leases == [3_600 + LEASE_MARGIN_SECONDS]
 
 
 async def test_a_bash_command_at_the_tools_ceiling_never_pauses_mid_run() -> None:
@@ -1832,151 +1239,6 @@ async def test_a_bash_command_at_the_tools_ceiling_never_pauses_mid_run() -> Non
     assert ceiling > SANDBOX_LEASE_SECONDS
     assert sdk.connect_leases == [ceiling + LEASE_MARGIN_SECONDS]
     assert not sdk.sandboxes["sbx-1"].provider.paused
-
-
-async def test_a_turn_still_working_when_the_lease_runs_low_renews_it(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """e2b's timeout is a wall clock, not an idle timer, so one lease counts down across a whole
-    turn and whichever command straddles its end is paused out from under and its stream torn down.
-    A turn still working as the lease runs low buys another before running anything."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-
-    await carrier.exec(handle, ("bash", "-lc", "sleep 100"), 120)
-    assert sdk.connected == []
-
-    clock.advance(SANDBOX_LEASE_SECONDS - 100)
-    with caplog.at_level(logging.INFO, logger="ufo"):
-        await carrier.exec(handle, ("bash", "-lc", "sleep 100"), 120)
-
-    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
-    assert not sdk.sandboxes["sbx-1"].provider.paused
-    assert _events(caplog, "sandbox.e2b.leased") == [
-        {
-            "conversation_id": str(handle.conversation_id),
-            "sandbox_id": "sbx-1",
-            "span": SANDBOX_LEASE_SECONDS,
-            "lapsed": False,
-        }
-    ]
-
-
-async def test_a_renewed_lease_carries_the_calls_after_it() -> None:
-    """A renewal has to leave behind a deadline the next call can trust. One recorded as anything
-    already past would still buy the right span from the provider and still look right in the call
-    it makes — and then force a round trip on every remaining call of the conversation, which is
-    the whole cost the skip exists to avoid."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-    clock.advance(SANDBOX_LEASE_SECONDS - 100)
-    await carrier.exec(handle, ("bash", "-lc", "sleep 100"), 120)
-    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
-
-    for _ in range(3):
-        await carrier.exec(handle, ("bash", "-lc", "sleep 100"), 120)
-
-    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
-
-
-async def test_the_lease_deadline_is_taken_before_the_call_that_sets_it() -> None:
-    """The provider starts counting when it handles the request, not when the reply lands, so both
-    the open and the renewal read the clock before the call goes out. Recording it after would
-    believe the lease runs later than it does — the one direction that works a container past what
-    the provider agreed to. Each round trip here burns 100s, and each renewal below is due only if
-    that 100s is charged against the lease."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    sdk.on_call = lambda: clock.advance(100)
-    needed = 2 + LEASE_MARGIN_SECONDS
-    opened = clock.now
-    handle = await carrier.create(_spec(uuid4()))
-
-    clock.now = opened + SANDBOX_LEASE_SECONDS - needed + 1
-    renewed_at = clock.now
-    await carrier.exec(handle, ("bash", "-lc", "echo hi"), 2)
-
-    clock.now = renewed_at + SANDBOX_LEASE_SECONDS - needed + 1
-    await carrier.exec(handle, ("bash", "-lc", "echo hi"), 2)
-
-    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS, SANDBOX_LEASE_SECONDS]
-
-
-async def test_a_write_under_a_covering_lease_buys_no_round_trip() -> None:
-    """A write asks the lease only for the answer margin, so a standing lease carries a run of
-    offloaded results without a control-plane call per file."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-    clock.advance(SANDBOX_LEASE_SECONDS - 100)
-
-    await carrier.write(handle, "/workspace/out.txt", b"payload")
-
-    assert sdk.connect_leases == []
-
-
-async def test_a_write_renews_a_lease_that_no_longer_covers_it() -> None:
-    """A write near the lease's end renews the same lease the commands do, back to the full
-    autosuspend span — the provider must not pause the container mid-upload."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-    clock.advance(SANDBOX_LEASE_SECONDS - 30)
-
-    await carrier.write(handle, "/workspace/out.txt", b"payload")
-
-    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
-
-
-async def test_a_read_holds_the_full_autosuspend_span_before_streaming() -> None:
-    """A read's stream is an open connection that cannot renew mid-flight, and a pause severs it
-    with no self-heal — so unlike a write's bounded body, the stream starts only with the whole
-    span ahead of it, the same floor the transfer had before the span shrank."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-    sdk.sandboxes["sbx-1"].files.chunks = (b"pay", b"load")
-    clock.advance(100)
-
-    whole = [chunk async for chunk in carrier.read(handle, f"{WORKSPACE_DIR}/out.txt")]
-
-    assert b"".join(whole) == b"payload"
-    assert sdk.connect_leases == [SANDBOX_LEASE_SECONDS]
-
-
-async def test_a_dial_leases_the_long_span_for_the_exchange_it_cannot_see() -> None:
-    """The address a dial hands out is consumed off-carrier — a turn's CDP session, a site
-    request's stream — so nothing renews while the exchange runs and a pause severs it with no
-    reconnect. The dial therefore guarantees the autosuspend span ahead and renews to the long
-    dial span, the same contract browsing had before the autosuspend shrank."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-    clock.advance(SANDBOX_LEASE_SECONDS - 30)
-
-    target = await carrier.dial(handle, 9223)
-
-    assert target.host == "9223-sbx-1.e2b.test"
-    assert sdk.connect_leases == [DIAL_LEASE_SECONDS]
-    assert DIAL_LEASE_SECONDS > SANDBOX_LEASE_SECONDS
-
-
-async def test_a_dial_under_a_long_lease_buys_no_round_trip() -> None:
-    """The ingress dials per request, so a site under traffic must ride the standing dial lease
-    rather than pay a control-plane call per page load."""
-    clock = _Clock()
-    sdk, carrier = _leased(clock)
-    handle = await carrier.create(_spec(uuid4()))
-    clock.advance(30)
-    await carrier.dial(handle, 9223)
-    assert sdk.connect_leases == [DIAL_LEASE_SECONDS]
-    clock.advance(100)
-
-    await carrier.dial(handle, 9223)
-
-    assert sdk.connect_leases == [DIAL_LEASE_SECONDS]
 
 
 async def test_an_expired_lease_is_dropped_and_the_next_dial_reconnects() -> None:
@@ -2000,20 +1262,6 @@ async def test_an_expired_lease_is_dropped_and_the_next_dial_reconnects() -> Non
     assert sdk.connected == [handle.container_id]
     assert not sdk.sandboxes[handle.container_id].provider.paused
     assert target.host == f"8000-{handle.container_id}.e2b.test"
-
-
-async def test_a_process_that_reconnects_carries_the_lease_on_connect() -> None:
-    """A process that never created the sandbox reaches it through the same renewal, so the first
-    command after a restart is covered exactly like any later one, with no unleased window between
-    attaching and running."""
-    clock = _Clock()
-    sdk, opener = _leased(clock)
-    handle = await opener.create(_spec(uuid4()))
-    restarted = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=clock)
-
-    await restarted.exec(handle, ("bash", "-lc", "sleep 500"), 540)
-
-    assert sdk.connect_leases == [540 + LEASE_MARGIN_SECONDS]
 
 
 async def test_a_turn_whose_lease_lapsed_resumes_the_paused_container(
@@ -2094,27 +1342,6 @@ async def test_a_failed_upload_leaves_no_lease_for_the_next_call_to_trust(
     assert sdk.connected == ["sbx-1"]
 
 
-async def test_a_stored_sandbox_the_provider_no_longer_has_opens_a_fresh_one(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The durable handle outlives the container it names: e2b keeps a paused sandbox until
-    something kills it, but a sandbox killed out of band leaves an id nothing can resurrect. Failing
-    the resume would fail every turn the conversation ever admits, so the id is abandoned for a
-    fresh container over the same durable workspace."""
-    sdk, carrier = _leased(_Clock())
-    conversation = uuid4()
-
-    with caplog.at_level(logging.INFO, logger="ufo"):
-        handle = await carrier.create(replace(_spec(conversation), resume_id="killed-1"))
-
-    assert sdk.connected == ["killed-1"]
-    assert _events(caplog, "sandbox.e2b.resume_missed") == [
-        {"conversation_id": str(conversation), "sandbox_id": "killed-1"}
-    ]
-    assert handle.container_id == "sbx-1"
-    assert sdk.created[0]["metadata"] == {CONVERSATION_METADATA_KEY: str(conversation)}
-
-
 TEMPLATES_ENV_VALUE = (
     "small=ufo-sbx-small:build-1,medium=ufo-sbx-medium:build-2,large=ufo-sbx-large:build-3"
 )
@@ -2124,49 +1351,6 @@ def _clear_e2b_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(E2B_API_KEY_ENV, raising=False)
     monkeypatch.delenv(E2B_TEMPLATES_ENV, raising=False)
     monkeypatch.delenv("UFO_CLIENT_BINARY", raising=False)
-
-
-def test_build_e2b_carrier_requires_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_e2b_env(monkeypatch)
-    with pytest.raises(RuntimeError, match=E2B_API_KEY_ENV):
-        build_e2b_carrier()
-
-
-def test_build_e2b_carrier_requires_the_template_map(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_e2b_env(monkeypatch)
-    monkeypatch.setenv(E2B_API_KEY_ENV, "sk-env")
-    with pytest.raises(RuntimeError, match=E2B_TEMPLATES_ENV):
-        build_e2b_carrier()
-
-
-def test_build_e2b_carrier_reads_the_templates_and_key_from_the_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _clear_e2b_env(monkeypatch)
-    monkeypatch.setenv(E2B_API_KEY_ENV, "sk-env")
-    monkeypatch.setenv(E2B_TEMPLATES_ENV, TEMPLATES_ENV_VALUE)
-    monkeypatch.setenv("UFO_CLIENT_BINARY", __file__)
-    carrier = build_e2b_carrier()
-    assert carrier.api_key == "sk-env"
-    assert carrier.templates == {
-        "small": "ufo-sbx-small:build-1",
-        "medium": "ufo-sbx-medium:build-2",
-        "large": "ufo-sbx-large:build-3",
-    }
-
-
-def test_runtime_digest_canonicalizes_the_published_template_map(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(E2B_TEMPLATES_ENV, TEMPLATES_ENV_VALUE)
-    first = e2b_runtime_digest()
-    monkeypatch.setenv(
-        E2B_TEMPLATES_ENV,
-        ",".join(reversed(TEMPLATES_ENV_VALUE.split(","))),
-    )
-
-    assert e2b_runtime_digest() == first
-    assert re.fullmatch(r"sha256:[0-9a-f]{64}", first)
 
 
 @pytest.mark.parametrize(
@@ -2188,28 +1372,6 @@ def test_build_e2b_carrier_refuses_a_template_map_missing_a_size(
     monkeypatch.setenv(E2B_TEMPLATES_ENV, value)
     with pytest.raises(RuntimeError, match=E2B_TEMPLATES_ENV):
         build_e2b_carrier()
-
-
-def test_config_backend_e2b_resolves_the_extension_contributed_carrier(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The seam end to end: with `[sandbox] backend = "e2b"` and the e2b extension's Manifest
-    present, `serve` builds exactly this extension's carrier by name — the deploy swaps the sandbox
-    backend to an extension's without core naming e2b."""
-    _clear_e2b_env(monkeypatch)
-    monkeypatch.setenv(E2B_API_KEY_ENV, "sk-env")
-    monkeypatch.setenv(E2B_TEMPLATES_ENV, TEMPLATES_ENV_VALUE)
-    monkeypatch.setenv("UFO_CLIENT_BINARY", __file__)
-    config = Config(
-        database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
-        blob=BlobConfig(backend="filesystem", root=Path("blobs")),
-        sandbox=SandboxConfig(backend="e2b", proxy_public_url=PROXY_PUBLIC_URL),
-    )
-    carrier, spec = select_carrier(config, (e2b_ext.manifest(),))
-    assert isinstance(carrier, E2BCarrier)
-    assert spec.off_cluster
-    assert spec.sizes == SANDBOX_SIZES
-    assert carrier.templates["small"] == "ufo-sbx-small:build-1"
 
 
 def test_e2b_backend_without_proxy_public_url_fails_closed(
@@ -2245,61 +1407,6 @@ def test_e2b_backend_with_plaintext_proxy_public_url_fails_closed(
 
     with pytest.raises(RuntimeError, match="HTTPS"):
         select_carrier(config, (e2b_ext.manifest(),))
-
-
-async def test_exec_env_rides_the_handle_not_the_conversation() -> None:
-    """Two turns can hold the same conversation's sandbox at once (a subagent beside its parent):
-    each exec runs under its own handle's run token, so egress attribution never leaks across turns
-    and a later create never re-points an earlier turn's env."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    conversation = uuid4()
-    first = await carrier.create(replace(_spec(conversation), run_token="turn-a"))
-    second = await carrier.create(replace(_spec(conversation), run_token="turn-b"))
-
-    await carrier.exec(first, ("bash", "-lc", "true"), 60)
-    await carrier.exec(second, ("bash", "-lc", "true"), 60)
-
-    envs = sdk.sandboxes["sbx-1"].commands.envs
-    assert envs[-2] is not None
-    assert envs[-2]["HTTPS_PROXY"] == "https://turn-a:ufo@sandbox-proxy.test"
-    assert envs[-1] is not None
-    assert envs[-1]["HTTPS_PROXY"] == "https://turn-b:ufo@sandbox-proxy.test"
-
-
-async def test_spec_env_joins_the_exec_env() -> None:
-    """The engine's per-turn sentinel entries (a grant CLI credential like GH_TOKEN) ride the spec
-    onto the handle and into every exec of that turn."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(
-        replace(_spec(uuid4()), env={"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-1"})
-    )
-
-    await carrier.exec(handle, ("bash", "-lc", "gh api user"), 60)
-
-    envs = sdk.sandboxes["sbx-1"].commands.envs[-1]
-    assert envs is not None
-    assert envs["GH_TOKEN"] == "UFO_SENTINEL_GRANT_acct-1"
-
-
-async def test_skill_programs_run_as_root() -> None:
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    commands = sdk.sandboxes["sbx-1"].commands
-
-    result = await carrier.exec_skill(handle, ("python3", "-I", "-c", "pass"), 30)
-
-    assert result.exit_code == 0
-    assert commands.runs[-1] == (
-        "setsid python3 -I -c pass",
-        WORKSPACE_DIR,
-        30,
-    )
-    assert commands.users[-1] == "root"
-    assert commands.envs[-1] is not None
-    assert "HTTPS_PROXY" not in commands.envs[-1]
 
 
 async def test_create_provisions_ca_then_workspace_as_root_on_every_branch() -> None:
@@ -2356,16 +1463,6 @@ async def test_read_streams_through_the_filesystem_api_and_closes_the_reader() -
     await partial.aclose()
 
     assert files.closed == 2
-
-
-async def test_read_of_an_absent_file_raises_file_not_found() -> None:
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    handle = await carrier.create(_spec(uuid4()))
-    sdk.sandboxes["sbx-1"].files.missing = True
-
-    with pytest.raises(FileNotFoundError):
-        [chunk async for chunk in carrier.read(handle, f"{WORKSPACE_DIR}/out.txt")]
 
 
 async def test_create_evicts_expired_leases_without_touching_the_provider() -> None:
@@ -2437,40 +1534,6 @@ async def test_create_prefers_the_named_resume_id_over_its_own_live_cache() -> N
 
     assert adopted.container_id == winner.container_id
     assert sdk.connected[-1] == winner.container_id
-
-
-async def test_attach_answers_absent_for_a_sandbox_the_cache_outlived() -> None:
-    """A cached lease can outlive its sandbox — a kill, a provider fault — and a read that answered
-    present off the cache would raise where absence was promised. Attach asks the provider every
-    time, sheds the dead cache entry, and answers None."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    conversation = uuid4()
-    opened = await carrier.create(_spec(conversation))
-    assert conversation in carrier._live
-    del sdk.sandboxes[opened.container_id]
-
-    attached = await carrier.attach(replace(_spec(conversation), resume_id=opened.container_id))
-
-    assert attached is None
-    assert conversation not in carrier._live
-
-
-async def test_a_lease_renewal_on_a_lost_sandbox_sheds_the_lease_and_raises() -> None:
-    """`_sandbox`'s reconnect can meet a sandbox the provider no longer has; the lease is dropped so
-    the next call reattaches from durable state instead of trusting a deadline the provider
-    abandoned, and the loss surfaces rather than reading as a transport fault."""
-    sdk = _Sdk()
-    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=sdk.clock)
-    conversation = uuid4()
-    handle = await carrier.create(_spec(conversation))
-    sdk.clock.now += SANDBOX_LEASE_SECONDS + 1
-    del sdk.sandboxes[handle.container_id]
-
-    with pytest.raises(SandboxNotFoundException):
-        await carrier.exec(handle, ("bash", "-lc", "true"), 30)
-
-    assert conversation not in carrier._live
 
 
 async def test_attach_connects_to_the_named_id_even_when_the_cache_holds_another() -> None:

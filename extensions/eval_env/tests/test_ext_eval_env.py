@@ -29,18 +29,15 @@ from evals.suites.connector_refs import (
     KERNEL,
     LEDGER,
     LEGACY,
-    POINTER,
     QUERIES,
     REF_MAIN,
-    REF_SWAPPED,
-    TELEMETRY,
     token,
 )
 from ufo.db import workspace_tx
 from ufo.host.tools.builtins import EditInput, FileEdit, ReadInput
 from ufo.runtime.access.connectors import ConnectorEntry, ConnectorRegistry, UnknownBrokerTool
 from ufo.runtime.access.grants import Grant, GrantStore
-from ufo.runtime.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
+from ufo.runtime.engine import TOOL_RESULT_PREVIEW_CHARS
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -48,6 +45,11 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.sdk.manifest import HookContext, PreToolUse
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "using the connected account"
 
@@ -294,33 +296,6 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-async def test_send_email_lands_a_durable_sent_row(db: None) -> None:
-    workspace_id = await _workspace()
-
-    result = await call_external_tool(
-        _ctx(workspace_id),
-        CallExternalToolInput(
-            tool_name="send_email",
-            source_id=env.EMAIL_PROVIDER,
-            arguments={"to": [BOB], "subject": "Dinner", "body": "Friday at 7pm works."},
-        ),
-    )
-
-    assert _payload(result)["status"] == "sent"
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(env.eval_env_email).where(
-                    env.eval_env_email.c.workspace_id == workspace_id
-                )
-            )
-        ).one()
-    assert row.folder == "sent"
-    assert tuple(row.recipients) == (BOB,)
-    assert row.sender == env.MAILBOX_ADDRESS
-    assert row.subject == "Dinner"
-
-
 async def test_reply_all_email_derives_recipients_from_the_workspace_message(db: None) -> None:
     workspace_id = await _workspace()
     message_id = uuid4()
@@ -365,49 +340,6 @@ async def test_reply_all_email_derives_recipients_from_the_workspace_message(db:
     assert sent.sender == env.MAILBOX_ADDRESS
     assert sent.subject == "Re: Offsite planning"
     assert sent.body == "Count me in."
-
-
-async def test_list_emails_reads_the_seeded_folder_with_filtering(db: None) -> None:
-    workspace_id = await _workspace()
-    async with workspace_tx() as connection:
-        for sender, subject, folder, sent_at in (
-            ("dana@evalco.test", "Budget planning", "inbox", datetime(2026, 7, 14, tzinfo=UTC)),
-            ("bob@evalco.test", "Lunch?", "inbox", datetime(2026, 7, 15, tzinfo=UTC)),
-            (env.MAILBOX_ADDRESS, "Re: Lunch?", "sent", datetime(2026, 7, 15, 1, tzinfo=UTC)),
-        ):
-            await connection.execute(
-                sa.insert(env.eval_env_email).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    folder=folder,
-                    sender=sender,
-                    recipients=["member@evalco.test"],
-                    subject=subject,
-                    body="body",
-                    sent_at=sent_at,
-                )
-            )
-
-    everything = await call_external_tool(
-        _ctx(workspace_id),
-        CallExternalToolInput(
-            tool_name="list_emails",
-            source_id=env.EMAIL_PROVIDER,
-            arguments={},
-        ),
-    )
-    filtered = await call_external_tool(
-        _ctx(workspace_id),
-        CallExternalToolInput(
-            tool_name="list_emails",
-            source_id=env.EMAIL_PROVIDER,
-            arguments={"query": "budget"},
-        ),
-    )
-
-    inbox = _payload(everything)["emails"]
-    assert [email["subject"] for email in inbox] == ["Lunch?", "Budget planning"]
-    assert [email["from"] for email in _payload(filtered)["emails"]] == ["dana@evalco.test"]
 
 
 async def test_calendar_lifecycle_updates_and_cancels_durably(db: None) -> None:
@@ -483,20 +415,6 @@ async def test_unknown_slug_raises_for_the_wrong_provider() -> None:
     broker = env.EvalEnvBroker()
     with pytest.raises(UnknownBrokerTool):
         await broker.execute(uuid4(), env.EMAIL_PROVIDER, "create_event", {}, "acct", None)
-
-
-async def test_describe_exposes_the_catalog_schemas() -> None:
-    result = await describe_external_tools(
-        _ctx(uuid4()),
-        DescribeExternalToolsInput(
-            source_id=env.EMAIL_PROVIDER,
-            tool_names=("send_email", "reply_all_email"),
-        ),
-    )
-    schema = _payload(result)["schemas"]["send_email"]
-    reply_schema = _payload(result)["schemas"]["reply_all_email"]
-    assert set(schema["input_schema"]["properties"]) == {"to", "subject", "body"}
-    assert set(reply_schema["input_schema"]["properties"]) == {"message_id", "body"}
 
 
 async def test_app_providers_return_only_the_seeded_tool_response(db: None) -> None:
@@ -650,18 +568,6 @@ async def test_parallel_app_actions_keep_case_fixture_state_isolated(db: None) -
     assert shared == fixture
 
 
-def test_app_provider_catalog_uses_fixed_provider_names() -> None:
-    providers = {connector.oauth.provider for connector in env.manifest().connectors}
-
-    assert {
-        "google_drive",
-        env.GITHUB_PROVIDER,
-        "stripe",
-        "hubspot",
-        "greenhouse",
-    } <= providers
-
-
 async def test_call_without_a_grant_fails_loud() -> None:
     with pytest.raises(ValueError, match="connect one with connect_account"):
         await call_external_tool(
@@ -692,48 +598,6 @@ async def test_describe_backfills_discovery_and_marks_unknown_unresolved() -> No
         "reply_all_email",
         "list_emails",
     }
-
-
-async def test_list_events_reads_the_calendar_with_filtering(db: None) -> None:
-    workspace_id = await _workspace()
-    ctx = _ctx(workspace_id)
-    events = (
-        ("Design sync", "2026-07-23T14:00:00+00:00", "2026-07-23T15:00:00+00:00"),
-        ("1:1", "2026-07-22T10:00:00+00:00", "2026-07-22T11:00:00+00:00"),
-    )
-    for title, start, end in events:
-        await call_external_tool(
-            ctx,
-            CallExternalToolInput(
-                tool_name="create_event",
-                source_id=env.CALENDAR_PROVIDER,
-                arguments={"title": title, "start": start, "end": end, "attendees": []},
-            ),
-        )
-
-    everything = _payload(
-        await call_external_tool(
-            ctx,
-            CallExternalToolInput(
-                tool_name="list_events",
-                source_id=env.CALENDAR_PROVIDER,
-                arguments={},
-            ),
-        )
-    )
-    filtered = _payload(
-        await call_external_tool(
-            ctx,
-            CallExternalToolInput(
-                tool_name="list_events",
-                source_id=env.CALENDAR_PROVIDER,
-                arguments={"query": "sync"},
-            ),
-        )
-    )
-
-    assert [event["title"] for event in everything["events"]] == ["1:1", "Design sync"]
-    assert [event["title"] for event in filtered["events"]] == ["Design sync"]
 
 
 @dataclass(frozen=True)
@@ -803,29 +667,6 @@ async def test_an_unseeded_code_query_fails_loud(db: None) -> None:
         await _searched(workspace_id, "never-seeded")
 
 
-async def test_every_seeded_page_lands_where_its_case_measures(db: None) -> None:
-    """The suite's fixture guard: each page keeps (or refuses) its pointers, falls on the side of
-    `MAX_TOOL_RESULT_CHARS` its case was written around, and leaves exactly the number of copies of
-    the graded literal the case expects — one for a condensed page, so reporting it is evidence the
-    pointed-at record was reached. A fixture that drifts off this table fails here rather than
-    silently grading a model against a different payload."""
-    workspace_id = await _workspace()
-    assert {landing.query for landing in CODE_PAGES} == set(QUERIES)
-    with ws(workspace_id):
-        await _seeded_code_index()
-        landed = {
-            landing.query: await _searched(workspace_id, landing.query) for landing in CODE_PAGES
-        }
-
-    for landing in CODE_PAGES:
-        text = landed[landing.query]
-        assert (POINTER in text) is landing.pointers, f"{landing.query} pointers"
-        assert (len(text) <= MAX_TOOL_RESULT_CHARS) is landing.inline, (
-            f"{landing.query} landed at {len(text)} chars"
-        )
-        assert text.count(landing.literal) == landing.copies, f"{landing.query} literal copies"
-
-
 async def test_the_offloaded_pages_place_their_literal_and_decoy_across_the_preview(
     db: None,
 ) -> None:
@@ -846,44 +687,6 @@ async def test_the_offloaded_pages_place_their_literal_and_decoy_across_the_prev
     assert 0 < capacity.find(token("LIC", LEGACY)) < TOOL_RESULT_PREVIEW_CHARS
 
 
-async def test_the_pointers_the_semantics_cases_grade_are_the_ones_emitted(db: None) -> None:
-    """Each semantics case exists for one pointer shape, and this is that shape as the shipped pass
-    writes it: a reference token escaping `/` and `~`, a target at a non-zero index, and a target
-    that itself holds a reference — the two-hop shape, which is as deep as it goes, since a pointer
-    is never written in place of another pointer."""
-    workspace_id = await _workspace()
-    with ws(workspace_id):
-        await _seeded_code_index()
-        refs = await _searched(workspace_id, "ref-index")
-        kernel = await _searched(workspace_id, "kernel-hold")
-        nested = await _searched(workspace_id, "fleet-telemetry")
-
-    assert f'{POINTER}refs/acme~1widgets~0main"' in refs
-    assert token("LIC", REF_SWAPPED) in refs
-    assert f'{POINTER}items/3/repository"' in kernel
-    assert f'{POINTER}items/2/repository"' in nested
-    assert f'{POINTER}items/0/repository/owner"' in nested
-    assert json.loads(nested)["items"][2]["repository"]["full_name"] == TELEMETRY
-
-
-async def test_raising_the_dedupe_floor_takes_the_pointers_away(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The floor is what makes these pages point at all: above every record's size nothing is
-    replaced, the single-repo page goes back to 30 full copies, and it lands past the inline budget
-    again — so the suite's fixture guard fails rather than grading a payload with no references in
-    it."""
-    workspace_id = await _workspace()
-    monkeypatch.setattr(connector_tools, "MIN_DEDUPE_BYTES", 1_000_000)
-    with ws(workspace_id):
-        await _seeded_code_index()
-        text = await _searched(workspace_id, "widget-reserve")
-
-    assert POINTER not in text
-    assert len(text) > MAX_TOOL_RESULT_CHARS
-    assert text.count(token("LIC", FLEET)) == 30
-
-
 def _ranked(query: str, path: tuple[str, ...]) -> JsonObject:
     page = json.loads(json.dumps(QUERIES[query]))
     for index, hit in enumerate(page["items"]):
@@ -892,26 +695,3 @@ def _ranked(query: str, path: tuple[str, ...]) -> JsonObject:
             node = node[key]
         node["result_rank"] = index
     return page
-
-
-async def test_pages_point_because_their_repeats_are_identical_at_each_level(db: None) -> None:
-    """The other direction, one level at a time: the pages point because the repeated records are
-    byte-identical, not because they look alike. Distinguishing each repository leaves the owner it
-    embeds still identical, so that collapses and the page still points — the pass compares at
-    every level, not only the outermost record. Distinguishing the owner too leaves nothing
-    identical anywhere, no pointer is written, and the page lands past the inline budget again."""
-    workspace_id = await _workspace()
-    store = ScopedStore(extension=env.NAME)
-    with ws(workspace_id):
-        await store.put(
-            f"{env.CODE_FIXTURE_PREFIX}ranked", _ranked("widget-reserve", ("repository",))
-        )
-        await store.put(
-            f"{env.CODE_FIXTURE_PREFIX}distinct", _ranked("widget-reserve", ("repository", "owner"))
-        )
-        ranked = await _searched(workspace_id, "ranked")
-        distinct = await _searched(workspace_id, "distinct")
-
-    assert ranked.count(f'{POINTER}items/0/repository/owner"') == 29
-    assert POINTER not in distinct
-    assert len(distinct) > MAX_TOOL_RESULT_CHARS

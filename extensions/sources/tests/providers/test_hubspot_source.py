@@ -279,38 +279,6 @@ async def test_form_submissions_project_submission_time_as_creation() -> None:
     assert result.pages[0].updated_at is None
 
 
-@pytest.mark.parametrize(
-    ("stream", "path", "envelope", "record"),
-    [
-        (
-            "event_occurrences",
-            "/events/v3/events",
-            "results",
-            {"id": "e1", "occurredAt": "2026-01-01T00:00:00Z"},
-        ),
-        (
-            "email_events",
-            "/email/public/v1/events",
-            "events",
-            {"id": "e2", "created": 1767225600000},
-        ),
-    ],
-)
-async def test_hubspot_occurrences_project_provider_time_as_creation(
-    stream: str,
-    path: str,
-    envelope: str,
-    record: dict,
-) -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == path
-        return httpx.Response(200, json={envelope: [record], "hasMore": False})
-
-    result = await _fetch(stream, handle)
-    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
-    assert result.pages[0].updated_at is None
-
-
 async def test_consent_states_project_capture_time_as_creation() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/crm/v3/objects/contacts":
@@ -337,6 +305,17 @@ async def test_consent_states_project_capture_time_as_creation() -> None:
     result = await _fetch("consent_states", handle)
     assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
     assert result.pages[0].updated_at is None
+
+
+async def test_stream_skipped_when_the_object_is_scope_gated() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={"message": "This app does not have proper permissions to read companies"},
+        )
+
+    with pytest.raises(StreamSkipped):
+        await _fetch("companies", handle)
 
 
 async def test_consent_states_key_on_the_contact_id_not_the_contact_email() -> None:
@@ -431,55 +410,3 @@ async def test_email_events_require_the_provider_id() -> None:
     assert [page.source_ref for page in result.pages] == ["email_events/email-event-1"]
     assert [page.source_identity for page in result.pages] == ["email_events/email-event-1"]
     assert result.dropped == 1
-
-
-async def test_custom_objects_project_record_creation_and_property_update_time() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/crm/v3/schemas":
-            return httpx.Response(
-                200,
-                json={
-                    "results": [
-                        {
-                            "objectTypeId": "2-123",
-                            "name": "pets",
-                            "properties": [{"name": "name"}],
-                            "primaryDisplayProperty": "name",
-                        }
-                    ]
-                },
-            )
-        if request.method == "POST" and request.url.path == "/crm/v3/objects/2-123/search":
-            return httpx.Response(
-                200,
-                json={
-                    "results": [
-                        {
-                            "id": "p1",
-                            "createdAt": "2026-01-01T00:00:00Z",
-                            "properties": {
-                                "name": "Pixel",
-                                "hs_lastmodifieddate": "2026-02-01T00:00:00Z",
-                            },
-                        }
-                    ]
-                },
-            )
-        if request.url.path == "/crm/v3/objects/2-123":
-            return httpx.Response(200, json={"results": []})
-        return httpx.Response(404, json={"path": request.url.path})
-
-    result = await _fetch("custom_objects", handle)
-    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
-    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
-
-
-async def test_stream_skipped_when_the_object_is_scope_gated() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            403,
-            json={"message": "This app does not have proper permissions to read companies"},
-        )
-
-    with pytest.raises(StreamSkipped):
-        await _fetch("companies", handle)

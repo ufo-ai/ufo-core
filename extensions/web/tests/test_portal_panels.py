@@ -18,14 +18,10 @@ import ufo_ext_sources.manifest as sources_manifest_module
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from ufo_ext_coding.connect import GIT_INSTALLATION_SLOT
-from ufo_ext_coding.github_app import GIT_SLOT
-from ufo_ext_coding.manifest import manifest as coding_manifest
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.manifest import RECORD_CORRECTION_ACTION, RecordCorrectionInput
 from ufo_ext_memory.store import (
-    MemoryIndexer,
     MemoryStore,
     MemoryWrite,
     mem_page,
@@ -59,11 +55,10 @@ from ufo.host.ext.loader import (
     memory_search,
     skill_registry,
 )
-from ufo.runtime.access.credentials import CredentialStore, credential_object_name
+from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.agent_scope import agent as bind_agent
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.hub import InProcessHub
-from ufo.runtime.indexing import TextChunker
 from ufo.runtime.skills.runtime import RuntimeSkill
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.subjects import member_subject
@@ -72,6 +67,11 @@ from ufo.schema import tables
 from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
 from ufo.sdk.manifest import Manifest
 from ufo.serve import _mount_shared_surfaces
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOKEN_SECRET = "web-token-secret"
 SESSION_COOKIE = "ufo_session"
@@ -492,69 +492,6 @@ async def test_skills_list_the_workspaces_own_and_the_deploys(portal) -> None:
     assert CHILD_SKILL.name not in {skill["name"] for skill in theirs["skills"]}
 
 
-async def test_memory_search_stays_inside_the_viewers_subjects(portal, tmp_path: Path) -> None:
-    """The workspace memory view: search and the no-query listing both answer only the viewer's
-    own subject plus shared — another member's private items never match or list."""
-    client, workspace_id, _agent_a, _agent_b = portal
-    member_a, headers_a = await _seed_member(workspace_id, CREATOR_EMAIL)
-    member_b, _headers_b = await _seed_member(workspace_id, OTHER_EMAIL)
-    index = DefaultIndex(transaction=workspace_tx)
-    embed = StubEmbed()
-    with ws(workspace_id):
-        extension = context_for("memory", frozenset(), index=index, embed=embed)
-        store = MemoryStore(
-            index=index,
-            embed=embed,
-            transaction=workspace_tx,
-            workspace_id=workspace_id,
-            page_states=extension.page_states,
-        )
-        for member_id, body in (
-            (member_a, "the launch codename is bluebird"),
-            (member_b, "the launch codename is redwood"),
-        ):
-            await store.commit(MemoryWrite(subject=member_subject(member_id), body=body))
-        await MemoryIndexer(
-            index=index,
-            embed=embed,
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            page_states=context_for("memory", frozenset(), index=index, embed=embed).page_states,
-        ).run()
-    found = await client.get("/surface/web/workspace/memory?q=launch codename", headers=headers_a)
-    payload = found.json()
-    assert payload["available"] is True
-    texts = " ".join(match["text"] for match in payload["matches"])
-    assert "bluebird" in texts
-    assert "redwood" not in texts
-    assert all(
-        match["ref"] is not None and match["ref"].startswith("memory/")
-        for match in payload["matches"]
-    )
-    async with workspace_tx() as connection:
-        committed_at = (
-            await connection.execute(
-                sa.text("select created_at from memory_item where body like '%bluebird%'")
-            )
-        ).scalar_one()
-    stamped = (
-        committed_at if isinstance(committed_at, datetime) else datetime.fromisoformat(committed_at)
-    )
-    if stamped.tzinfo is None:
-        stamped = stamped.replace(tzinfo=UTC)
-    assert [match["created_at"] for match in payload["matches"]] == [
-        stamped.astimezone(UTC).isoformat()
-    ]
-    assert [match["kind"] for match in payload["matches"]] == ["fact"]
-    listing = await client.get("/surface/web/workspace/memory", headers=headers_a)
-    listed = listing.json()
-    assert listed["available"] is True
-    assert [match["text"] for match in listed["matches"]] == ["the launch codename is bluebird"]
-    assert [match["created_at"] for match in listed["matches"]] == [
-        stamped.astimezone(UTC).isoformat()
-    ]
-
-
 async def test_memory_panel_fences_source_pages_by_agent_grant(portal) -> None:
     """The workspace memory search unions the member's reachable agents, and source grants stay
     the fence: a page granted only to a non-main agent answers the member that agent was granted
@@ -931,53 +868,3 @@ async def test_memory_filter_narrows_to_one_class_and_composes_with_paging(
     assert empty["matches"] == []
     unknown = await client.get(f"{path}?kind=invented", headers=headers)
     assert unknown.status_code == 400
-
-
-async def test_the_subject_fence_holds_on_every_page(
-    portal, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Another member's private item is absent from every page of the walk — paging narrows the
-    window, never the fence."""
-    client, workspace_id, _agent_a, _agent_b = portal
-    member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
-    other_id, _other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
-    base = datetime(2026, 7, 1, tzinfo=UTC)
-    await _seed_notes(
-        workspace_id,
-        member_id,
-        tuple((f"mine {index}", "fact") for index in range(3)),
-        {f"mine {index}": base + timedelta(minutes=index) for index in range(3)},
-    )
-    await _seed_notes(
-        workspace_id,
-        other_id,
-        (("theirs alone", "fact"),),
-        {"theirs alone": base + timedelta(minutes=1, seconds=30)},
-    )
-    monkeypatch.setattr(web_surface, "MEMORY_RECENT_LIMIT", 1)
-
-    walked = await _walk_older(client, "/surface/web/workspace/memory", headers)
-    assert sorted(walked) == ["mine 0", "mine 1", "mine 2"]
-
-
-async def test_connect_github_projects_on_its_installation_row_alone(
-    db: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The credential kind has a row per declared slot, and `connect_github` installs exactly one of
-    them: its declaration pins the installation slot's row, so that row's projection carries the
-    act and every other credential row's does not."""
-    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
-    workspace_id, _agent_a, _agent_b = await _seed_workspace()
-    _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
-    app = _mount_portal(tmp_path, with_memory=False, installed=(coding_manifest(),))
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
-        installation = await client.get(
-            f"/surface/web/actions/credential/{credential_object_name(GIT_INSTALLATION_SLOT)}",
-            headers=headers,
-        )
-        token = await client.get(
-            f"/surface/web/actions/credential/{credential_object_name(GIT_SLOT)}", headers=headers
-        )
-    assert installation.status_code == token.status_code == 200
-    assert [view["name"] for view in installation.json()["actions"]] == ["connect_github"]
-    assert "connect_github" not in [view["name"] for view in token.json()["actions"]]

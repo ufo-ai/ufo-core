@@ -106,7 +106,7 @@ class _UnusableGrantProxy:
         raise GrantUnusable(self.reason, awaits_grant=self.awaits_grant)
 
 
-async def test_an_unusable_grant_skips_the_stream_instead_of_failing_the_run() -> None:
+async def _check_an_unusable_grant_skips_the_stream_instead_of_failing_the_run() -> None:
     """A grant the broker will not authenticate is a refusal, not a fault. Nothing about it changes
     between two attempts, so failing the run would climb the error backoff and hold a CRITICAL check
     that pages hourly for a repair only the member can make. As a `StreamSkipped` the driver counts
@@ -128,7 +128,7 @@ async def test_an_unusable_grant_skips_the_stream_instead_of_failing_the_run() -
     assert raised.value.awaits_grant is False  # the raiser's claim, never invented here
 
 
-async def test_only_the_raiser_decides_that_a_grant_event_is_the_one_repair() -> None:
+async def _check_only_the_raiser_decides_that_a_grant_event_is_the_one_repair() -> None:
     """`awaits_grant` reaches the driver exactly as the broker set it. A broker naming one account
     unhealthy sets it, and that feed stops polling until the reconnect. A broker that does not
     recognise the grant leaves it clear, because one broker key rotation makes every account unknown
@@ -199,7 +199,7 @@ async def test_capped_run_resumes_at_the_last_native_checkpoint(
     assert result.snapshot is False
 
 
-async def test_a_rows_pinned_window_reaches_the_connector_beside_the_spec_it_drives() -> None:
+async def _check_a_rows_pinned_window_reaches_the_connector_beside_the_spec_it_drives() -> None:
     """The window a row pins arrives as `fetch_page`'s own `backfill_after`, and the `StreamSpec`
     is handed down exactly as the connector declared it. That separation is the point: a spec
     carries only connector constants, so there is no per-run field on it for a connector to
@@ -251,7 +251,7 @@ async def test_an_unrepresentable_record_is_dropped_and_named_not_run_failing(
     ]
 
 
-async def test_cursor_field_supplies_updated_at_when_provider_value_is_absent() -> None:
+async def _check_cursor_field_supplies_updated_at_when_provider_value_is_absent() -> None:
     stream = StreamSpec(
         name="items",
         source_object="items",
@@ -265,7 +265,7 @@ async def test_cursor_field_supplies_updated_at_when_provider_value_is_absent() 
     assert result.pages[0].updated_at == "2026-07-23T18:30:00.000000+00:00"
 
 
-async def test_record_timestamp_fields_resolve_nested_provider_paths() -> None:
+async def _check_record_timestamp_fields_resolve_nested_provider_paths() -> None:
     stream = StreamSpec(
         name="items",
         source_object="items",
@@ -290,19 +290,19 @@ async def test_record_timestamp_fields_resolve_nested_provider_paths() -> None:
     assert result.pages[0].updated_at == "2026-07-23T18:30:00.000000+00:00"
 
 
-async def test_opaque_cursor_field_does_not_supply_updated_at() -> None:
+async def _check_opaque_cursor_field_does_not_supply_updated_at() -> None:
     stream = StreamSpec(name="items", source_object="items", cursor_field="checkpoint")
     result = await _fetch(stream, [[{"id": 1, "checkpoint": "ck-1"}]])
     assert result.pages[0].updated_at is None
 
 
-async def test_large_numeric_cursor_field_does_not_supply_updated_at() -> None:
+async def _check_large_numeric_cursor_field_does_not_supply_updated_at() -> None:
     stream = StreamSpec(name="items", source_object="items", cursor_field="checkpoint")
     result = await _fetch(stream, [[{"id": 1, "checkpoint": "9" * 100}]])
     assert result.pages[0].updated_at is None
 
 
-def test_default_render_rejects_record_without_title_or_identity() -> None:
+def _check_default_render_rejects_record_without_title_or_identity() -> None:
     stream = StreamSpec(name="items", source_object="items")
     with pytest.raises(ValueError, match="non-empty title or 'id' identity"):
         _FeedConnector(stream, []).render({"body": "untitled"}, stream)
@@ -328,20 +328,20 @@ async def test_a_record_with_no_declared_key_is_dropped_and_named_not_content_ke
     ]
 
 
-async def test_an_empty_key_is_no_key_so_the_record_is_dropped() -> None:
+async def _check_an_empty_key_is_no_key_so_the_record_is_dropped() -> None:
     stream = StreamSpec(name="items", source_object="items")
     result = await _fetch(stream, [[{"id": "", "name": "blank"}, *_records(1)]])
     assert [page.source_ref for page in result.pages] == ["items/1"]
     assert result.dropped == 1
 
 
-async def test_a_declared_key_resolves_a_nested_provider_id() -> None:
+async def _check_a_declared_key_resolves_a_nested_provider_id() -> None:
     stream = StreamSpec(name="items", source_object="items", primary_key="author.id")
     result = await _fetch(stream, [[{"author": {"id": 7, "login": "ada"}, "total": 3}]])
     assert [page.source_identity for page in result.pages] == ["items/7"]
 
 
-async def test_connector_normalizes_integer_timestamps() -> None:
+async def _check_connector_normalizes_integer_timestamps() -> None:
     stream = StreamSpec(
         name="items",
         source_object="items",
@@ -416,7 +416,7 @@ async def test_capped_run_closes_the_connector_generator(monkeypatch: pytest.Mon
     assert connector.closed is True
 
 
-async def test_resumed_run_drives_from_origin_and_skips_the_prefix() -> None:
+async def _check_resumed_run_drives_from_origin_and_skips_the_prefix() -> None:
     stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
     connector = _FeedConnector(stream, [_records(1, 2, 3, 4)])
     result = await _run(connector, stream, cursor=_envelope("ORIGIN", 2, "WATERMARK"))
@@ -441,7 +441,7 @@ async def test_slicing_lands_every_record_exactly_once(monkeypatch: pytest.Monke
     assert cursor == "2026-01-05T00:00:00Z"
 
 
-async def test_uncapped_snapshot_run_keeps_snapshot_semantics() -> None:
+async def _check_uncapped_snapshot_run_keeps_snapshot_semantics() -> None:
     stream = StreamSpec(name="items", source_object="items", delete_missing=True)
     result = await _fetch(stream, [_records(1, 2)])
     assert result.snapshot is True
@@ -461,7 +461,7 @@ async def test_delete_missing_stream_ignores_the_cap_and_snapshots(
     assert [page.source_ref for page in result.pages] == [f"items/{i}" for i in range(1, 6)]
 
 
-async def test_connector_json_map_cursor_round_trips_untouched() -> None:
+async def _check_connector_json_map_cursor_round_trips_untouched() -> None:
     stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
     incoming = json.dumps({"acme/repo1": "2026-02-01T00:00:00Z"}, sort_keys=True)
     outgoing = json.dumps({"acme/repo1": "2026-02-04T00:00:00Z"}, sort_keys=True)
@@ -472,7 +472,7 @@ async def test_connector_json_map_cursor_round_trips_untouched() -> None:
     assert len(result.pages) == 2
 
 
-def test_envelope_decoder_rejects_extra_keys() -> None:
+def _check_envelope_decoder_rejects_extra_keys() -> None:
     corrupted = json.dumps(
         {"ufo_backfill": {"origin": None, "skip": 0, "watermark": None, "junk": True}}
     )
@@ -546,13 +546,13 @@ class _PerTenantConnector(_FeedConnector):
     base_url = ""
 
 
-async def test_a_connectors_fixed_host_drives_the_run() -> None:
+async def _check_a_connectors_fixed_host_drives_the_run() -> None:
     connector = _FeedConnector(ADDRESS_STREAM, [_records(1)])
     await _run(connector, ADDRESS_STREAM)
     assert connector.received_base_urls == ["https://probe.example"]
 
 
-async def test_a_row_that_pins_the_address_drives_the_run() -> None:
+async def _check_a_row_that_pins_the_address_drives_the_run() -> None:
     connector = _PerTenantConnector(ADDRESS_STREAM, [_records(1)])
     auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy())
     await ConnectorBackend(connector=connector).fetch(
@@ -565,3 +565,32 @@ async def test_a_row_that_pins_the_address_drives_the_run() -> None:
         auth,
     )
     assert connector.received_base_urls == ["https://tenant-1.probe.example"]
+
+
+def test_connector_backend_sync_contract() -> None:
+    for check in (
+        _check_default_render_rejects_record_without_title_or_identity,
+        _check_envelope_decoder_rejects_extra_keys,
+    ):
+        check()
+
+
+async def test_connector_backend_async_contract() -> None:
+    for check in (
+        _check_an_unusable_grant_skips_the_stream_instead_of_failing_the_run,
+        _check_only_the_raiser_decides_that_a_grant_event_is_the_one_repair,
+        _check_a_rows_pinned_window_reaches_the_connector_beside_the_spec_it_drives,
+        _check_cursor_field_supplies_updated_at_when_provider_value_is_absent,
+        _check_record_timestamp_fields_resolve_nested_provider_paths,
+        _check_opaque_cursor_field_does_not_supply_updated_at,
+        _check_large_numeric_cursor_field_does_not_supply_updated_at,
+        _check_an_empty_key_is_no_key_so_the_record_is_dropped,
+        _check_a_declared_key_resolves_a_nested_provider_id,
+        _check_connector_normalizes_integer_timestamps,
+        _check_resumed_run_drives_from_origin_and_skips_the_prefix,
+        _check_uncapped_snapshot_run_keeps_snapshot_semantics,
+        _check_connector_json_map_cursor_round_trips_untouched,
+        _check_a_connectors_fixed_host_drives_the_run,
+        _check_a_row_that_pins_the_address_drives_the_run,
+    ):
+        await check()

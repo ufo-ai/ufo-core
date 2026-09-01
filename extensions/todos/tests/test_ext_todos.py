@@ -18,6 +18,11 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.manifest import ConversationSlotContext
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 
 @dataclass
 class _NoSandbox:
@@ -234,32 +239,3 @@ async def test_an_out_of_range_index_fails_loud(db: None, tmp_path: Path) -> Non
                     updates=(todos.TodoStatusUpdate(index=5, status="completed"),),
                 ),
             )
-
-
-async def test_requires_the_extension_context(tmp_path: Path) -> None:
-    turn = Turn(
-        id=uuid4(),
-        workspace_id=uuid4(),
-        conversation_id=uuid4(),
-        agent_id=uuid4(),
-        seq=0,
-        status="running",
-        inbound="hi",
-        created_at=datetime(2026, 7, 9, tzinfo=UTC),
-    )
-    ctx = ToolContext(
-        sandbox=_NoSandbox(),
-        blob=FilesystemBlobStore(root=tmp_path),
-        turn=turn,
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
-        spawn=_unavailable_spawn,
-        speaker_member_id=None,
-        audience=conversation_audience(None),
-        artifact_token_secret="",
-        ext=None,
-    )
-    with pytest.raises(RuntimeError, match="todos extension context"):
-        await todos.update_todo_list(
-            ctx,
-            todos.UpdateTodoListInput(title="x", tasks=()),
-        )

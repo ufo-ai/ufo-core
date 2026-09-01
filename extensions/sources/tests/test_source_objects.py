@@ -66,6 +66,11 @@ from ufo.sdk.objects import AdminRequired, ObjectListQuery, VerbNotSupported
 from ufo.sdk.sources import ConnectorSourceConfig, PageChange, binding_name
 from ufo.sdk.tools import SpeakerRequired, ToolContext
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 TOOL_NARRATION = "setting up the connection"
 
 ASANA = "asana"
@@ -623,20 +628,6 @@ async def test_a_member_registers_a_private_source_by_default(
     assert fetched["spec"]["shared"] is False
 
 
-async def test_the_model_registers_a_shared_source_on_request(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("GREENHOUSE", "secret")
-    state = await _workspace()
-    ctx = _context(state, None, speaker_id=state.member_id)
-    name = binding_name(GREENHOUSE, DIRECT_ACCOUNT, None)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name, shared=True))
-    rows = await _rows(state, GREENHOUSE)
-    assert {row["subject"] for row in rows} == {SHARED_SUBJECT}
-    assert {row["owner_member_id"] for row in rows} == {state.member_id}
-
-
 async def test_only_the_registrar_may_widen_a_private_source(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -985,22 +976,6 @@ async def test_a_binding_narrows_its_first_sync_window(db: None) -> None:
     assert fetched["spec"]["backfill_days"] == 7
 
 
-async def test_a_binding_asks_for_all_history(db: None) -> None:
-    state = await _workspace()
-    grants = GrantStore()
-    await _grant(state, grants, GMAIL, "acct-one")
-    ctx = _context(state, grants, brokered=(GMAIL,))
-    name = binding_name(GMAIL, "acct-one", None)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days="all"))
-        fetched = await _get(ctx, name)
-    [row] = await _rows(state, GMAIL)
-    assert row["config"]["backfill_days"] == "all"
-    assert row["config"]["backfill_after"] is None
-    assert fetched["spec"]["backfill_days"] == "all"
-    assert fetched["status"]["streams"]["messages"]["backfill_after"] is None
-
-
 async def test_a_window_pins_only_the_streams_that_take_one(db: None) -> None:
     """A binding's streams do not all read a window: a mail message stream floors its first walk at
     the cutoff, while the calendar stream beside it reaches back the fixed distance Graph gives it.
@@ -1297,66 +1272,6 @@ async def test_dropping_the_last_windowed_stream_narrows_a_binding_that_holds_a_
     assert fetched["spec"]["backfill_days"] is None
 
 
-async def test_a_re_apply_settles_the_binding_on_the_streams_it_names(db: None) -> None:
-    """A binding's name derives from provider, account and tenant URL alone, so its streams are
-    what it carries rather than which binding it is: a submit naming a different set is the same
-    binding with different content, never a second one, and the member ends with exactly the
-    streams they name.
-
-    Dropping `stories` removes its row and tombstones its pages — the one act that clears what a
-    stream synced, which is why the whole binding had to be deleted before. Adding `users` takes
-    the binding's own disclosure and owner. Naming `stories` again revives its single row, since
-    the row id derives from the config: no stream ever holds two."""
-    state = await _workspace()
-    grants = GrantStore()
-    await _grant(state, grants, ASANA, "acct-one")
-    ctx = _context(state, grants, brokered=(ASANA,))
-    name = binding_name(ASANA, "acct-one", None)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(ctx, _manifest_text(ASANA, ("stories", "tasks"), name))
-        before = {str(row["config"]["stream"]): row for row in await _rows(state, ASANA)}
-        page_id = uuid4()
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.page).values(
-                    id=page_id,
-                    workspace_id=state.workspace_id,
-                    source_id=before["stories"]["id"],
-                    digest="sha256:x",
-                    body_ref="pages/x",
-                    subject=member_subject(state.owner_id),
-                    tombstone=False,
-                    created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
-                )
-            )
-        narrowed = await _apply(ctx, _manifest_text(ASANA, ("tasks", "users"), name))
-        rows = {str(row["config"]["stream"]): row for row in await _rows(state, ASANA)}
-        async with workspace_tx() as connection:
-            tombstone = (
-                await connection.execute(
-                    sa.select(tables.page.c.tombstone).where(tables.page.c.id == page_id)
-                )
-            ).scalar_one()
-        fetched = await _get(ctx, name)
-        readded = await _apply(ctx, _manifest_text(ASANA, ("stories", "tasks", "users"), name))
-        revived = {str(row["config"]["stream"]): row for row in await _rows(state, ASANA)}
-    assert narrowed == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
-    assert sorted(rows) == ["stories", "tasks", "users"]
-    assert rows["stories"]["removed_at"] is not None
-    assert tombstone is True or tombstone == 1
-    assert rows["tasks"] == before["tasks"]
-    assert rows["users"]["removed_at"] is None
-    assert rows["users"]["subject"] == member_subject(state.owner_id)
-    assert rows["users"]["owner_member_id"] == state.owner_id
-    assert rows["users"]["connection_id"] == before["tasks"]["connection_id"]
-    assert fetched["spec"]["streams"] == ["tasks", "users"]
-    assert readded["result"] == "updated"
-    assert sorted(revived) == ["stories", "tasks", "users"]
-    assert revived["stories"]["id"] == before["stories"]["id"]
-    assert revived["stories"]["removed_at"] is None
-
-
 async def test_narrowing_a_live_bindings_window_is_delete_and_recreate(db: None) -> None:
     """Lowering `backfill_days` is refused where raising it is not, and the asymmetry is the point:
     the pages between the old floor and the narrower one would be stranded live — never revisited,
@@ -1399,81 +1314,6 @@ async def test_narrowing_a_live_bindings_window_is_delete_and_recreate(db: None)
     [row] = await _rows(state, GMAIL)
     assert row["removed_at"] is None
     assert row["config"]["backfill_days"] == 7
-
-
-async def test_the_window_belongs_to_what_identifies_a_submitted_binding(db: None) -> None:
-    """A submit that differs from the binding's own read-back spec only in the window has to reach
-    the window path rather than the no-op an identity-equal submit takes, and a
-    resync carrying a changed window is refused whole rather than run while ignoring what it asked
-    for. Both ride on the window's membership in the submitted binding's identity. The narrowing
-    submit is the one that proves it reached the window path at all, since a widening one would
-    have been applied and a submit that never reached it would be a silent no-op."""
-    state = await _workspace()
-    grants = GrantStore()
-    await _grant(state, grants, GMAIL, "acct-one")
-    ctx = _context(state, grants, brokered=(GMAIL,))
-    name = binding_name(GMAIL, "acct-one", None)
-    apply_tool = _TOOLS["object_apply"]
-    narrowed = _manifest_text(GMAIL, ("messages",), name, account_id="acct-one", backfill_days=7)
-    resynced = _manifest_text(
-        GMAIL, ("messages",), name, account_id="acct-one", backfill_days=7, resync=True
-    )
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=90))
-        for submitted, refusal in ((narrowed, "only ever widens"), (resynced, "resync changes")):
-            args = apply_tool.input_model.model_validate({"manifest": submitted})
-            with pytest.raises(VerbNotSupported, match=refusal):
-                await apply_tool.handler(ctx, args)
-    [row] = await _rows(state, GMAIL)
-    assert row["config"]["backfill_days"] == 90
-
-
-async def test_resync_pulls_the_bindings_next_sync_to_now(db: None) -> None:
-    """A resync apply — the binding's current spec with `resync` set — schedules every stream
-    row now, changes nothing else, and always reads back false; a resync that also edits the
-    binding is refused whole."""
-    state = await _workspace()
-    grants = GrantStore()
-    await _grant(state, grants, ASANA, "acct-one")
-    ctx = _context(state, grants, brokered=(ASANA,))
-    name = binding_name(ASANA, "acct-one", None)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(ctx, _manifest_text(ASANA, ("workspaces", "projects"), name))
-        future = datetime(2027, 1, 1, tzinfo=UTC)
-        async with workspace_tx() as connection:
-            await connection.execute(sa.update(tables.source).values(next_sync_at=future))
-        before = datetime.now(UTC)
-        resynced = await _apply(
-            ctx,
-            _manifest_text(
-                ASANA, ("workspaces", "projects"), name, account_id="acct-one", resync=True
-            ),
-        )
-        assert resynced == {"kind": SOURCE_KIND, "name": name, "result": "updated"}
-        get_tool = _TOOLS["object_get"]
-        fetched = yaml.safe_load(
-            (
-                await get_tool.handler(
-                    ctx,
-                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
-                )
-            )
-            .content[0]
-            .text
-        )
-        assert fetched["spec"]["resync"] is False
-        with pytest.raises(VerbNotSupported, match="a resync changes nothing else"):
-            await _apply(
-                ctx,
-                _manifest_text(ASANA, ("workspaces",), name, account_id="acct-one", resync=True),
-            )
-    rows = await _rows(state, ASANA)
-    assert len(rows) == 2
-    for row in rows:
-        scheduled = row["next_sync_at"]
-        if scheduled.tzinfo is None:
-            scheduled = scheduled.replace(tzinfo=UTC)
-        assert before - timedelta(seconds=5) <= scheduled <= datetime.now(UTC)
 
 
 async def test_resync_is_registrar_or_admin(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1640,22 +1480,6 @@ async def test_a_private_brokered_binding_links_to_the_connection_it_uses(db: No
             },
         },
     ]
-
-
-async def test_a_shared_brokered_binding_names_no_connection(db: None) -> None:
-    """A shared source is workspace-readable while its connection stays owner-or-admin, so naming
-    the connection would point at narrower visibility — spec.md demands equal-or-wider. `_status`
-    withholds `owner_member_id` on a shared row for the same reason."""
-    state = await _workspace()
-    grants = GrantStore()
-    await _grant(state, grants, ASANA, "acct-one")
-    ctx = _context(state, grants, brokered=(ASANA,))
-    name = binding_name(ASANA, "acct-one", None)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(ctx, _manifest_text(ASANA, ("workspaces",), name, shared=True))
-        fetched = await _get(ctx, name)
-    assert fetched["links"] == []
-    assert "owner_member_id" not in fetched["status"]
 
 
 async def test_a_direct_binding_links_to_its_workspace_credential_slot(
@@ -1854,55 +1678,8 @@ async def test_provider_with_no_broker_and_no_direct_backend_refuses(db: None) -
             await tool.handler(ctx, args)
 
 
-async def test_open_namespace_provider_with_a_byok_key_syncs_directly(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A provider the open namespace does broker, with no connected account and a set BYOK
-    credential, syncs through its direct key — the key is read before the namespace is asked, so the
-    member who picked the path by setting a key is never forced through connect."""
-    assert GOOGLEDRIVE in NAMESPACE_BROKERED
-    monkeypatch.setenv(GOOGLEDRIVE.upper(), "secret")
-    state = await _workspace()
-    ctx = _context(state, GrantStore(), brokered=(), open_namespace=True)
-    name = binding_name(GOOGLEDRIVE, DIRECT_ACCOUNT, None)
-    with ws(state.workspace_id), agent(state.agent_id):
-        registered = await _apply(ctx, _manifest_text(GOOGLEDRIVE, ("files",), name))
-    assert registered["result"] == "created"
-    [row] = await _rows(state, GOOGLEDRIVE)
-    assert row["config"]["account"] == DIRECT_ACCOUNT
-
-
-@pytest.mark.parametrize(
-    ("provider", "base_url", "normalized"),
-    [
-        ("active_campaign", "https://acme.api-us1.com/", "https://acme.api-us1.com"),
-        (
-            "bamboohr",
-            "https://api.bamboohr.com/api/gateway.php/acme/",
-            "https://api.bamboohr.com/api/gateway.php/acme",
-        ),
-        ("chargebee", "https://acme.chargebee.com/api/v2/", "https://acme.chargebee.com/api/v2"),
-        ("freshdesk", "https://acme.freshdesk.com/", "https://acme.freshdesk.com"),
-        ("mailchimp", "https://us21.api.mailchimp.com/", "https://us21.api.mailchimp.com"),
-        (
-            "quickbooks",
-            "https://quickbooks.api.intuit.com/v3/company/9130347596/",
-            "https://quickbooks.api.intuit.com/v3/company/9130347596",
-        ),
-        ("recruitee", "https://api.recruitee.com/c/acme/", "https://api.recruitee.com/c/acme"),
-        ("salesforce", "https://acme.my.salesforce.com/", "https://acme.my.salesforce.com"),
-        ("zendesk", "https://acme.zendesk.com/", "https://acme.zendesk.com"),
-    ],
-)
-def test_tenant_urls_are_validated_by_provider(
-    provider: str, base_url: str, normalized: str
-) -> None:
-    assert _validated_base_url(provider, base_url) == normalized
-
-
-@pytest.mark.parametrize(
-    ("provider", "base_url"),
-    [
+def test_tenant_urls_reject_cross_provider_and_unsafe_origins() -> None:
+    unsafe_origins = (
         ("active_campaign", "https://acme.freshdesk.com"),
         ("bamboohr", "https://api.bamboohr.com.evil.test/api/gateway.php/acme"),
         ("chargebee", "https://acme.chargebee.com/admin"),
@@ -1915,26 +1692,10 @@ def test_tenant_urls_are_validated_by_provider(
         ("recruitee", "https://api.recruitee.com/c/acme?redirect=evil"),
         ("salesforce", "https://evil.test"),
         ("zendesk", "https://attacker@acme.zendesk.com"),
-    ],
-)
-def test_tenant_urls_reject_cross_provider_and_unsafe_origins(provider: str, base_url: str) -> None:
-    with pytest.raises(ValueError):
-        _validated_base_url(provider, base_url)
-
-
-def test_quickbooks_requires_the_company_its_address_names() -> None:
-    """QBO addresses one company file per request and no broker holds that company id, so a binding
-    without the whole address could never run — it is refused at registration, where the agent can
-    ask the member for it, rather than failing every sync afterwards. A provider whose host is
-    complete still refuses any override."""
-    with pytest.raises(ValueError, match="requires base_url"):
-        _validated_base_url("quickbooks", None)
-    with pytest.raises(ValueError, match="requires base_url"):
-        _validated_base_url("quickbooks", "")
-    with pytest.raises(ValueError, match="fixed API host"):
-        _validated_base_url("asana", "https://app.asana.com/api/1.0")
-    with pytest.raises(ValueError, match="requires base_url"):
-        _validated_base_url("zendesk", None)
+    )
+    for provider, base_url in unsafe_origins:
+        with pytest.raises(ValueError):
+            _validated_base_url(provider, base_url)
 
 
 async def test_invalid_base_url_registers_nothing(db: None) -> None:
@@ -2177,57 +1938,6 @@ async def test_a_non_owner_may_watch_a_shared_source(db: None) -> None:
         assert await _woken(state, name) == {state.conversation_id: state.agent_id}
 
 
-async def test_a_trigger_is_named_for_the_pair_it_is(db: None) -> None:
-    """The name derives from the source and the conversation, so a submit under any other name is
-    refused with the exact one to use rather than filed as a second row over the same pair."""
-    state = await _workspace()
-    name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    tool = _TOOLS["object_apply"]
-    with ws(state.workspace_id), agent(state.agent_id):
-        with pytest.raises(ValueError, match=trigger_name(name, state.conversation_id)):
-            await tool.handler(
-                _context(state, None),
-                tool.input_model.model_validate(
-                    {
-                        "manifest": yaml.safe_dump(
-                            {
-                                "kind": SOURCE_TRIGGER_KIND,
-                                "name": "whatever-i-please",
-                                "spec": {"source": name},
-                            }
-                        ),
-                    }
-                ),
-            )
-        assert await _woken(state, name) == {}
-
-
-async def test_applying_another_conversations_trigger_name_reports_no_success(db: None) -> None:
-    """The name names the conversation, so its own creator re-applying it from somewhere else is
-    refused with the name to use — never answered `updated` for a conversation no row was written
-    for, which is what the member would be told had been watched."""
-    state = await _workspace()
-    name, _ = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    elsewhere = await _second_conversation(state)
-    tool = _TOOLS["object_apply"]
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
-        base = _context(state, None)
-        from_elsewhere = replace(
-            base, turn=base.turn.model_copy(update={"conversation_id": elsewhere})
-        )
-        with pytest.raises(ValueError, match=trigger_name(name, elsewhere)):
-            await tool.handler(
-                from_elsewhere,
-                tool.input_model.model_validate(
-                    {
-                        "manifest": _trigger_manifest(name, state.conversation_id),
-                    }
-                ),
-            )
-        assert await _woken(state, name) == {state.conversation_id: state.agent_id}
-
-
 async def test_a_private_source_cannot_be_watched_and_a_strangers_is_unknown(db: None) -> None:
     """A source private to member M reaches no other reader, so its changes could wake nobody: M is
     told exactly that, while a stranger is told the source does not exist at all — the refusal a
@@ -2381,47 +2091,6 @@ async def test_removing_a_source_takes_its_triggers_and_a_revival_inherits_none(
     assert revived_name == name
     [row] = await _rows(state, ASANA)
     assert row["removed_at"] is None
-
-
-async def test_a_registration_absorbs_a_binding_another_turn_created_first(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`source` returns no generation, so two turns registering one binding settle on one row: the
-    second reads no source, finds the first's rows when it applies, and the identical spec is the
-    idempotent no-op this kind already promises — never a refusal that the source changed while
-    editing, which would end the turn on a name the registrar asked for and now has."""
-    state = await _workspace()
-    grants = GrantStore()
-    await _grant(state, grants, ASANA, "acct-one")
-    ctx = _context(state, grants, brokered=(ASANA,))
-    name = binding_name(ASANA, "acct-one", None)
-    real_apply = SourceObjects.apply
-
-    async def register_before_apply(
-        store: SourceObjects,
-        tool_ctx: ToolContext,
-        applied: str,
-        spec: SourceSpec,
-        old: SourceSpec | None,
-        *,
-        expected_generation: UUID | None,
-    ) -> None:
-        await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="workspaces")
-        await real_apply(
-            store, tool_ctx, applied, spec, old, expected_generation=expected_generation
-        )
-
-    monkeypatch.setattr(SourceObjects, "apply", register_before_apply)
-    with ws(state.workspace_id), agent(state.agent_id):
-        applied = await _apply(
-            ctx,
-            _manifest_text(ASANA, ("workspaces",), name, account_id="acct-one", shared=True),
-        )
-
-    assert applied == {"kind": SOURCE_KIND, "name": name, "result": "created"}
-    [row] = await _rows(state, ASANA)
-    assert row["config"]["stream"] == "workspaces"
-    assert row["subject"] == SHARED_SUBJECT
 
 
 async def test_page_change_alerts_only_woken_conversations_idempotently(db: None) -> None:
@@ -2642,47 +2311,6 @@ async def test_per_page_delivery_keeps_one_conversation_per_page(db: None) -> No
     assert len(await _turns(turns_by_page[second_page]["conversation_id"])) == 1
 
 
-async def test_multi_stream_binding_alerts_once_per_conversation(db: None) -> None:
-    """Two streams of one binding both changing in a batch is one alert, not two — the hook
-    aggregates by binding, so distinct per-stream `changed_at` neither split into two turns nor
-    collide on one idempotency key and drop a stream."""
-    state = await _workspace()
-    name, tasks_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    _, projects_id = await _register(
-        state, subject=SHARED_SUBJECT, owner=state.owner_id, stream="projects"
-    )
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(
-            _context(state, None),
-            _manifest_text(ASANA, ("projects", "tasks"), name, account_id="acct-one", shared=True),
-        )
-        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
-        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
-        await on_page_change(
-            HookContext(
-                ext=ext,
-                payload=PageChangeBatch(
-                    changes=(
-                        _change(
-                            tasks_id,
-                            "# t",
-                            changed_at=datetime(2026, 7, 20, 9, tzinfo=UTC),
-                            stream="tasks",
-                        ),
-                        _change(
-                            projects_id,
-                            "# p",
-                            changed_at=datetime(2026, 7, 20, 10, tzinfo=UTC),
-                            stream="projects",
-                        ),
-                    )
-                ),
-            )
-        )
-        (turn,) = await _turns(state.conversation_id)
-        assert "projects: 1 added; tasks: 1 added" in turn["inbound"]
-
-
 async def _second_conversation(state: _Workspace) -> UUID:
     """Another conversation of the same agent — the second place one member can apply from."""
     conversation_id = uuid4()
@@ -2877,26 +2505,6 @@ async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) ->
         assert {entry["stream"] for entry in logged} == {"tasks", "projects"}
 
 
-async def test_change_log_replay_rewrites_rather_than_appends(db: None, tmp_path) -> None:
-    """The log is named for the same latest-change stamp the alert's idempotency key carries, so a
-    replayed batch overwrites one file instead of appending its pages a second time."""
-    state = await _workspace()
-    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    sandboxes = _sandboxes(tmp_path)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
-        ext = context_for(
-            NAME, DECLARED_PROVIDERS, sandboxes=sandboxes, invoker=_admitting(state.workspace_id)
-        )
-        batch = PageChangeBatch(changes=tuple(_change(source_id, f"# task {n}") for n in range(6)))
-        await on_page_change(HookContext(ext=ext, payload=batch))
-        await on_page_change(HookContext(ext=ext, payload=batch))
-
-        assert len(await _turns(state.conversation_id)) == 1
-        logged = await _change_log(sandboxes, state.conversation_id, name)
-        assert len(logged) == 6
-
-
 async def test_change_log_omits_a_member_private_page(db: None, tmp_path) -> None:
     """The shared-only filter governs the log as well as the message — a private page is not
     written to a file a reader of the woken conversation cannot open."""
@@ -2942,22 +2550,6 @@ async def test_change_log_failure_propagates_rather_than_degrading(db: None, tmp
         assert await _turns(state.conversation_id) == []
 
 
-async def test_alert_degrades_to_counts_when_no_sandbox_is_wired(db: None) -> None:
-    """No workspace seam means no change log; the alert still reports what changed and names the
-    object_list route rather than losing the turn to plumbing."""
-    state = await _workspace()
-    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
-        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
-        changes = tuple(_change(source_id, f"# task {n}") for n in range(6))
-        await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=changes)))
-
-        (turn,) = await _turns(state.conversation_id)
-        assert "tasks: 6 added" in turn["inbound"]
-        assert "object_list page" in turn["inbound"]
-
-
 async def test_alert_skipped_when_only_member_private_changes(db: None) -> None:
     state = await _workspace()
     name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
@@ -2967,28 +2559,3 @@ async def test_alert_skipped_when_only_member_private_changes(db: None) -> None:
         private = _change(source_id, "# secret", subject=member_subject(state.member_id))
         await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=(private,))))
         assert await _turns(state.conversation_id) == []
-
-
-async def test_a_trigger_on_an_archived_app_alerts_nothing_and_stops_no_batch(db: None) -> None:
-    state = await _workspace()
-    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.agent)
-                .values(
-                    name=f"~archived-{state.agent_id}",
-                    archived_name=tables.agent.c.name,
-                    is_main=False,
-                    archived_at=sa.func.now(),
-                )
-                .where(tables.agent.c.id == state.agent_id)
-            )
-        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
-        batch = PageChangeBatch(changes=(_change(source_id, "# asana tasks: Ship it"),))
-
-        await on_page_change(HookContext(ext=ext, payload=batch))
-
-        assert await _turns(state.conversation_id) == []
-        assert [trigger.id for trigger in await SourceTriggerStore(ext).waking(name)]

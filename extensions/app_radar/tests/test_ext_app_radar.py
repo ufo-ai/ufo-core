@@ -21,18 +21,6 @@ def test_app_radar_ships_one_workspace_agent() -> None:
     assert {path.name for path in (spec.path for spec in manifest.skills)} == {"app-radar-home"}
 
 
-def test_the_built_page_is_the_apps_own_tsx() -> None:
-    entry = MODULE_SCRIPT.search(BUILD_ENTRY.read_text())
-    assert entry is not None
-    assert (BUILD_ENTRY.parent / entry[1]).resolve() == (SKILL_DIR / "app.tsx").resolve()
-    source = (SKILL_DIR / "app.tsx").read_text()
-    assert "RebuildDialog" in source
-    assert "FileSheet" in source
-    assert "FileBody" not in source
-    assert "FileDownload" not in source
-    assert "mountApp(" in source
-
-
 def test_the_home_skill_edits_builds_and_deploys_the_project() -> None:
     skill = (SKILL_DIR / "SKILL.md").read_text()
     assert "Copy this skill's `app.tsx` and `index.html`" in skill

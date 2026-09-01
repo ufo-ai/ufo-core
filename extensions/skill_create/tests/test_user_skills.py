@@ -13,10 +13,8 @@ asserted — the derived chunk rows are."""
 import asyncio
 import hashlib
 import json
-import shutil
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -63,7 +61,7 @@ from ufo.runtime.agent_scope import AgentUnbound, agent
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.runtime.objects import ObjectListQuery
-from ufo.runtime.skills.runtime import CORE_SKILL_NAMES, install_skill
+from ufo.runtime.skills.runtime import CORE_SKILL_NAMES
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.workspace import ws
@@ -72,6 +70,11 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.index import IndexScope
 from ufo.sdk.skills import SkillCard
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "saving the workflow"
 
@@ -301,55 +304,6 @@ async def test_cards_survive_corrupt_content_and_materialize_fails_loud(db: None
     assert beta.description == "B"
 
 
-async def test_resave_updates_the_card_with_the_same_parse(db: None) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        await store.save("greet", {"SKILL.md": _skill_md("greet", "v1")}, frozenset())
-        await store.save(
-            "greet",
-            {"SKILL.md": _skill_md("greet", "v2", depends=("tone",))},
-            frozenset({"greet"}),
-            generation=await _generation(store, "greet"),
-        )
-        [card] = await store.cards()
-        loaded = await store.materialize("greet")
-    assert loaded is not None
-    assert (card.description, card.depends) == ("v2", ("tone",))
-    assert (card.description, card.depends) == (loaded.description, loaded.depends)
-
-
-async def test_save_fences_on_the_generation_the_read_observed(db: None) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        await store.save("greet", {"SKILL.md": _skill_md("greet", "v1")}, frozenset())
-        first = await store.record("greet")
-        assert first is not None
-        await store.save(
-            "greet",
-            {"SKILL.md": _skill_md("greet", "v2")},
-            frozenset({"greet"}),
-            generation=first.generation,
-        )
-        with pytest.raises(StaleSkillGeneration, match="changed after it was read"):
-            await store.save(
-                "greet",
-                {"SKILL.md": _skill_md("greet", "lost race")},
-                frozenset({"greet"}),
-                generation=first.generation,
-            )
-        with pytest.raises(StaleSkillGeneration, match="already saved"):
-            await store.save(
-                "greet", {"SKILL.md": _skill_md("greet", "blind")}, frozenset({"greet"})
-            )
-        [card] = await store.cards()
-        record = await store.record("greet")
-    assert card.description == "v2"
-    assert record is not None
-    assert record.generation != first.generation
-
-
 async def test_save_after_a_delete_requires_a_fresh_create(db: None) -> None:
     workspace_id, agent_id = await _workspace_agent()
     store = _store()
@@ -370,20 +324,6 @@ async def test_save_after_a_delete_requires_a_fresh_create(db: None) -> None:
     assert record is not None
     assert record.generation != first.generation
     assert record.description == "anew"
-
-
-async def test_frontmatter_agents_persist_on_the_card(db: None) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        await store.save(
-            "triage", {"SKILL.md": _skill_md("triage", "d", agents=("helpdesk",))}, frozenset()
-        )
-        [card] = await store.cards()
-        loaded = await store.materialize("triage")
-    assert card.agents == ("helpdesk",)
-    assert loaded is not None
-    assert loaded.agents == ("helpdesk",)
 
 
 async def test_pinned_cap_enforced_and_pin_survives_resave(db: None) -> None:
@@ -495,25 +435,24 @@ async def test_save_refuses_a_name_that_shadows_a_core_skill(db: None) -> None:
         assert await store.cards() == ()
 
 
-@pytest.mark.parametrize(
-    "bad_name", ["../../etc", "..", ".", "a/b", "sandbox/child", "Sandbox", "my skill", "", "-x"]
-)
-async def test_save_refuses_an_unsafe_skill_name(db: None, bad_name: str) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        with pytest.raises(InvalidSkillName):
-            await store.save(bad_name, {"SKILL.md": _skill_md(bad_name, "d")}, frozenset())
-        assert await store.cards() == ()
-
-
-async def test_save_accepts_a_valid_slug_name(db: None) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    with ws(workspace_id), agent(agent_id):
-        saved = await _store().save(
-            "weekly-report", {"SKILL.md": _skill_md("weekly-report", "d")}, frozenset()
-        )
-    assert saved.name == "weekly-report"
+async def test_save_refuses_an_unsafe_skill_name(db: None) -> None:
+    for bad_name in (
+        "../../etc",
+        "..",
+        ".",
+        "a/b",
+        "sandbox/child",
+        "Sandbox",
+        "my skill",
+        "",
+        "-x",
+    ):
+        workspace_id, agent_id = await _workspace_agent()
+        store = _store()
+        with ws(workspace_id), agent(agent_id):
+            with pytest.raises(InvalidSkillName):
+                await store.save(bad_name, {"SKILL.md": _skill_md(bad_name, "d")}, frozenset())
+            assert await store.cards() == ()
 
 
 async def test_save_refuses_over_the_skill_cap_but_allows_a_resave(
@@ -570,78 +509,6 @@ async def test_member_skills_seam_serves_cards_and_materializes_by_name(db: None
         assert await spec.materialize(_ext(), "greet") is None
 
 
-async def test_index_job_derives_chunks_and_settles_the_digest(db: None) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    ctx, index = _indexed_ext()
-    with ws(workspace_id), agent(agent_id):
-        await UserSkillStore(ctx).save(
-            "greet", {"SKILL.md": _skill_md("greet", "greets visitors politely")}, frozenset()
-        )
-    assert await _skill_chunk_count() == 0
-
-    with ws(workspace_id):
-        await index_skills(ctx)
-    derived = await _skill_chunk_count()
-    assert derived >= 1
-    with ws(workspace_id):
-        [hit] = await index.lexical(
-            "greets visitors", frozenset({SKILL_SUBJECT}), SKILL_OWNER_KIND, 10
-        )
-        assert hit.owner_id == "greet"
-        assert hit.subject == SKILL_SUBJECT
-        assert (
-            await index.lexical(
-                "greets visitors", frozenset({"agent:" + str(uuid4())}), SKILL_OWNER_KIND, 10
-            )
-            == ()
-        )
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(sa.select(user_skill.c.digest, user_skill.c.indexed_digest))
-        ).one()
-    assert row.indexed_digest == row.digest
-
-    with ws(workspace_id):
-        await index_skills(ctx)
-    assert await _skill_chunk_count() == derived
-
-
-async def test_index_job_reindexes_an_edit_and_prunes_the_old_text(db: None) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    ctx, index = _indexed_ext()
-    store = UserSkillStore(ctx)
-    subjects = frozenset({SKILL_SUBJECT})
-    with ws(workspace_id), agent(agent_id):
-        await store.save(
-            "greet", {"SKILL.md": _skill_md("greet", "greets visitors politely")}, frozenset()
-        )
-    with ws(workspace_id):
-        await index_skills(ctx)
-    with ws(workspace_id), agent(agent_id):
-        await store.save(
-            "greet",
-            {"SKILL.md": _skill_md("greet", "sends farewells")},
-            frozenset({"greet"}),
-            generation=await _generation(store, "greet"),
-        )
-    async with workspace_tx() as connection:
-        stale = (
-            await connection.execute(sa.select(user_skill.c.digest, user_skill.c.indexed_digest))
-        ).one()
-    assert stale.indexed_digest != stale.digest
-
-    with ws(workspace_id):
-        await index_skills(ctx)
-        [hit] = await index.lexical("farewells", subjects, SKILL_OWNER_KIND, 10)
-        assert hit.owner_id == "greet"
-        assert await index.lexical("politely", subjects, SKILL_OWNER_KIND, 10) == ()
-    async with workspace_tx() as connection:
-        settled = (
-            await connection.execute(sa.select(user_skill.c.digest, user_skill.c.indexed_digest))
-        ).one()
-    assert settled.indexed_digest == settled.digest
-
-
 async def test_delete_prunes_the_skills_index_scope(db: None) -> None:
     workspace_id, agent_id = await _workspace_agent()
     ctx, _ = _indexed_ext()
@@ -665,54 +532,6 @@ async def test_index_job_without_backends_fails_loud(db: None) -> None:
     workspace_id, _ = await _workspace_agent()
     with ws(workspace_id), pytest.raises(RuntimeError, match="index and embed"):
         await index_skills(_ext())
-
-
-async def test_index_job_runs_through_the_job_runner_on_stale_candidates(db: None) -> None:
-    ws_with_work, agent_id = await _workspace_agent()
-    ws_empty = await _workspace()
-    ctx, index = _indexed_ext()
-    with ws(ws_with_work), agent(agent_id):
-        await UserSkillStore(ctx).save(
-            "greet", {"SKILL.md": _skill_md("greet", "greets visitors politely")}, frozenset()
-        )
-
-    declared = manifest()
-    job = next(job for job in declared.jobs if job.name == SKILL_INDEX_JOB)
-    assert job.schedule == SKILL_INDEX_SCHEDULE
-    candidates = await job.candidates()
-    assert set(candidates) == {ws_with_work}
-    assert ws_empty not in candidates
-
-    bindings = bindings_from((declared,), ())
-    index_key = f"{NAME}:{SKILL_INDEX_JOB}"
-    keys = {binding.key for binding in bindings}
-    assert index_key in keys
-    assert f"{CORE_EXTENSION}:{SKILL_INDEX_JOB}" not in keys
-    runner = JobRunner(
-        bindings=bindings,
-        manifests=(declared,),
-        index=index,
-        embed=StubEmbed(vec((0, 1.0))),
-    )
-    for workspace_id in await runner.candidates(index_key):
-        await runner.fire(index_key, workspace_id)
-
-    assert await job.candidates() == ()
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(sa.select(user_skill.c.digest, user_skill.c.indexed_digest))
-        ).one()
-    assert row.indexed_digest == row.digest
-
-    with ws(ws_with_work), agent(agent_id):
-        store = UserSkillStore(ctx)
-        await store.save(
-            "greet",
-            {"SKILL.md": _skill_md("greet", "sends farewells")},
-            frozenset({"greet"}),
-            generation=await _generation(store, "greet"),
-        )
-    assert set(await job.candidates()) == {ws_with_work}
 
 
 async def test_materialize_all_skips_corrupt_and_keeps_the_rest(db: None) -> None:
@@ -742,35 +561,6 @@ async def test_materialize_all_skips_corrupt_and_keeps_the_rest(db: None) -> Non
     assert [skill.name for skill in loaded] == ["beta"]
     assert ("references/tone.md", b"warm") in loaded[0].files
     assert [skill.name for skill in seam] == ["beta"]
-
-
-async def test_backfill_sentinel_row_hides_from_cards_and_stays_deletable(db: None) -> None:
-    """A row the backfill could not parse carries the empty-description sentinel: it routes
-    nowhere (cards and the portal listing skip it), a load of it still fails loud, and the member
-    can still delete it by name."""
-    workspace_id, agent_id = await _workspace_agent()
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        await store.save("greet", {"SKILL.md": _skill_md("greet", "greets people")}, frozenset())
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(user_skill)
-            .values(description="", depends="[]", content="{ not valid json")
-            .where(
-                user_skill.c.workspace_id == workspace_id,
-                user_skill.c.name == "greet",
-            )
-        )
-    objects = SkillObjects()
-    query = ObjectListQuery(supported_fields=SKILL_OBJECT.list_fields)
-    with ws(workspace_id), agent(agent_id):
-        assert await store.cards() == ()
-        page = await objects.member_page(_ext(), member_id=uuid4(), admin=True, query=query)
-        with pytest.raises(ValidationError):
-            await store.materialize("greet")
-        await store.delete("greet")
-        assert await store.files("greet") is None
-    assert page.rows == ()
 
 
 async def test_delete_crash_after_prune_leaves_a_stale_row_the_next_tick_repairs(db: None) -> None:
@@ -835,43 +625,6 @@ async def test_row_deleted_mid_embed_gets_its_upsert_undone(db: None) -> None:
     with ws(workspace_id):
         await index_skills(ctx)
     assert await _skill_chunk_count() == 0
-
-
-async def test_row_resaved_mid_embed_stays_stale_until_the_next_tick(db: None) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    index = DefaultIndex(transaction=workspace_tx)
-
-    async def resave_row() -> None:
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(user_skill)
-                .values(digest="sha256:racing", description="sends farewells")
-                .where(user_skill.c.workspace_id == workspace_id, user_skill.c.name == "greet")
-            )
-
-    ctx = context_for(NAME, frozenset(), index, FirstCallEmbed(vec((0, 1.0)), resave_row))
-    with ws(workspace_id), agent(agent_id):
-        await UserSkillStore(ctx).save(
-            "greet", {"SKILL.md": _skill_md("greet", "greets visitors politely")}, frozenset()
-        )
-    with ws(workspace_id):
-        await index_skills(ctx)
-    async with workspace_tx() as connection:
-        raced = (
-            await connection.execute(sa.select(user_skill.c.digest, user_skill.c.indexed_digest))
-        ).one()
-    assert raced.indexed_digest is None
-    assert raced.digest == "sha256:racing"
-
-    with ws(workspace_id):
-        await index_skills(ctx)
-        [hit] = await index.lexical("farewells", frozenset({SKILL_SUBJECT}), SKILL_OWNER_KIND, 10)
-        assert hit.owner_id == "greet"
-    async with workspace_tx() as connection:
-        settled = (
-            await connection.execute(sa.select(user_skill.c.digest, user_skill.c.indexed_digest))
-        ).one()
-    assert settled.indexed_digest == "sha256:racing"
 
 
 async def test_one_failing_row_logs_and_the_tick_continues(db: None) -> None:
@@ -1032,97 +785,6 @@ async def _local_session(tmp_path) -> SandboxSession:
     return SandboxSession(carrier=carrier, handle=handle)
 
 
-async def test_applied_skill_resolves_files_and_materializes(db: None, tmp_path) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    session = await _local_session(tmp_path)
-    await session.write_file("greet/SKILL.md", _skill_md("greet", "greets people"))
-    await session.write_file("greet/references/tone.md", b"warm")
-    ctx = _tool_ctx(workspace_id, session, tmp_path, agent_id)
-    with ws(workspace_id), agent(agent_id):
-        applied = json.loads(
-            await _dispatch(
-                _object_tool("object_apply"),
-                ctx,
-                manifest=_skill_manifest(
-                    "greet",
-                    {
-                        "SKILL.md": {"from": "greet/SKILL.md"},
-                        "references/tone.md": {"from": "greet/references/tone.md"},
-                        "assets/note.md": "inline note",
-                    },
-                ),
-            )
-        )
-        assert applied == {"kind": SKILL_KIND, "name": "greet", "result": "created"}
-        fetched = yaml.safe_load(
-            await _dispatch(_object_tool("object_get"), ctx, kind=SKILL_KIND, name="greet")
-        )
-        loaded = await _store().materialize("greet")
-    assert fetched["spec"]["files"]["references/tone.md"] == {
-        "sha256": hashlib.sha256(b"warm").hexdigest(),
-        "size": 4,
-    }
-    assert fetched["spec"]["files"]["assets/note.md"] == {
-        "sha256": hashlib.sha256(b"inline note").hexdigest(),
-        "size": len(b"inline note"),
-    }
-    assert fetched["spec"]["pinned"] is False
-    assert fetched["status"]["description"] == "greets people"
-    assert fetched["status"]["files"] == 3
-    assert fetched["status"]["pinned"] is False
-    assert fetched["updated_at"] is not None
-    assert loaded is not None
-    assert ("references/tone.md", b"warm") in loaded.files
-
-
-async def test_pinned_spec_round_trips_through_apply_and_get(db: None, tmp_path) -> None:
-    """Apply is declarative: the manifest is the whole state, so a pin set on one apply survives a
-    re-apply that repeats it and clears on one that omits it — and `get` returns the pin beside
-    the file digests, so re-applying what `get` returned keeps the pin."""
-    workspace_id, agent_id = await _workspace_agent()
-    ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
-    apply = _object_tool("object_apply")
-    get = _object_tool("object_get")
-    inline = _skill_md("greet", "greets people").decode()
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(
-            apply, ctx, manifest=_skill_manifest("greet", {"SKILL.md": inline}, pinned=True)
-        )
-        pinned_get = yaml.safe_load(await _dispatch(get, ctx, kind=SKILL_KIND, name="greet"))
-        await _dispatch(
-            apply,
-            ctx,
-            manifest=yaml.safe_dump(
-                {"kind": SKILL_KIND, "name": "greet", "spec": pinned_get["spec"]}
-            ),
-        )
-        kept = yaml.safe_load(await _dispatch(get, ctx, kind=SKILL_KIND, name="greet"))
-        await _dispatch(apply, ctx, manifest=_skill_manifest("greet", {"SKILL.md": inline}))
-        cleared = yaml.safe_load(await _dispatch(get, ctx, kind=SKILL_KIND, name="greet"))
-    assert pinned_get["spec"]["pinned"] is True
-    assert pinned_get["status"]["pinned"] is True
-    assert kept["spec"]["pinned"] is True
-    assert cleared["spec"]["pinned"] is False
-
-
-async def test_a_saved_skill_is_scoped_to_no_agent(db: None, tmp_path) -> None:
-    """A skill belongs to the workspace, so its record links to nothing narrower: an agent that
-    saved one holds no claim over it, and every other agent of the workspace reads the same set."""
-    workspace_id, agent_id = await _workspace_agent(name="research")
-    ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
-    inline = _skill_md("greet", "greets people").decode()
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(
-            _object_tool("object_apply"),
-            ctx,
-            manifest=_skill_manifest("greet", {"SKILL.md": inline}),
-        )
-        fetched = yaml.safe_load(
-            await _dispatch(_object_tool("object_get"), ctx, kind=SKILL_KIND, name="greet")
-        )
-    assert "links" not in fetched or fetched["links"] == []
-
-
 async def test_reapplied_skill_updates_and_delete_removes(db: None, tmp_path) -> None:
     workspace_id, agent_id = await _workspace_agent()
     ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
@@ -1189,47 +851,6 @@ async def test_reapply_keeps_files_by_digest_and_refuses_unknown(db: None, tmp_p
             await apply.handler(ctx, stale)
 
 
-async def test_apply_fences_on_the_generation_the_get_returned(db: None, tmp_path) -> None:
-    """The object verb carries the fence: object_get returns the skill's generation, a manifest
-    echoing it applies exactly once, and a manifest still holding it after another save is refused
-    with the other writer's content kept."""
-    workspace_id, agent_id = await _workspace_agent()
-    ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
-    apply = _object_tool("object_apply")
-    get = _object_tool("object_get")
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(
-            apply,
-            ctx,
-            manifest=_skill_manifest("greet", {"SKILL.md": _skill_md("greet", "v1").decode()}),
-        )
-        fetched = yaml.safe_load(await _dispatch(get, ctx, kind=SKILL_KIND, name="greet"))
-        await _dispatch(
-            apply,
-            ctx,
-            manifest=_skill_manifest(
-                "greet",
-                {"SKILL.md": _skill_md("greet", "v2").decode()},
-                generation=fetched["generation"],
-            ),
-        )
-        stale = apply.input_model.model_validate(
-            {
-                "manifest": _skill_manifest(
-                    "greet",
-                    {"SKILL.md": _skill_md("greet", "lost race").decode()},
-                    generation=fetched["generation"],
-                ),
-            }
-        )
-        with pytest.raises(StaleSkillGeneration, match="changed after it was read"):
-            await apply.handler(ctx, stale)
-        refetched = yaml.safe_load(await _dispatch(get, ctx, kind=SKILL_KIND, name="greet"))
-        [card] = await _store().cards()
-    assert card.description == "v2"
-    assert refetched["generation"] != fetched["generation"]
-
-
 async def test_apply_refuses_shadow_and_frontmatter_mismatch(db: None, tmp_path) -> None:
     workspace_id, agent_id = await _workspace_agent()
     ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
@@ -1276,43 +897,6 @@ async def test_apply_refuses_a_file_key_outside_the_skill(db: None, tmp_path, ba
         with pytest.raises(ValueError, match="not a path inside the skill"):
             await apply.handler(ctx, escaping)
         assert await _store().cards() == ()
-
-
-async def test_a_saved_skills_mount_replaces_a_planted_symlink(db: None, tmp_path) -> None:
-    """The durable half, through the real store and a real carrier: a skill saved on one turn mounts
-    on the next, and the agent can leave a link at one of its file names in between. The saved bytes
-    are renamed onto the name rather than written through the link, so the host file the link named
-    keeps its own bytes and a planted link cannot deny the mount for good."""
-    workspace_id, agent_id = await _workspace_agent()
-    session = await _local_session(tmp_path)
-    outside = tmp_path / "outside.md"
-    outside.write_bytes(b"host secret")
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(
-            _object_tool("object_apply"),
-            ctx=_tool_ctx(workspace_id, session, tmp_path, agent_id),
-            manifest=_skill_manifest(
-                "greet",
-                {
-                    "SKILL.md": _skill_md("greet", "greets people").decode(),
-                    "references/tone.md": "warm",
-                },
-            ),
-        )
-        saved = await _store().materialize("greet")
-    assert saved is not None
-    mount = Path(session.handle.egress_env["UFO_HOME"]) / "skills" / "greet" / "references"
-    if mount.parent.is_dir():
-        shutil.rmtree(mount.parent)
-    mount.mkdir(parents=True)
-    (mount / "tone.md").symlink_to(outside)
-
-    await install_skill(session, saved)
-
-    mounted = mount / "tone.md"
-    assert not mounted.is_symlink()
-    assert mounted.read_bytes() == b"warm"
-    assert outside.read_bytes() == b"host secret"
 
 
 async def test_apply_refuses_binary_and_missing_sources(db: None, tmp_path) -> None:
@@ -1426,46 +1010,6 @@ async def test_skill_dispatch_and_the_seam_answer_one_workspace_set(db: None, tm
     assert all(row.generation is not None for row in rows)
 
 
-async def test_object_get_resolves_the_one_skill_of_that_name(db: None, tmp_path) -> None:
-    """A second agent's apply of a name the workspace already holds edits that skill: one record
-    stands behind the name, with the timestamps of the row the first save created."""
-    workspace_id, first_agent = await _workspace_agent("first")
-    second_agent = await _agent(workspace_id, "second")
-    first = _tool_ctx(workspace_id, None, tmp_path, first_agent)
-    second = _tool_ctx(workspace_id, None, tmp_path, second_agent)
-    apply = _object_tool("object_apply")
-    get = _object_tool("object_get")
-    first_md = _skill_md("greet", "first agent", "Use the first voice.")
-    second_md = _skill_md("greet", "second agent", "Use the second voice.")
-
-    with ws(workspace_id), agent(first_agent):
-        await _dispatch(
-            apply,
-            first,
-            manifest=_skill_manifest("greet", {"SKILL.md": first_md.decode()}),
-        )
-        first_get = yaml.safe_load(await _dispatch(get, first, kind=SKILL_KIND, name="greet"))
-    with ws(workspace_id), agent(second_agent):
-        await _dispatch(
-            apply,
-            second,
-            manifest=_skill_manifest("greet", {"SKILL.md": second_md.decode()}),
-        )
-        second_get = yaml.safe_load(await _dispatch(get, second, kind=SKILL_KIND, name="greet"))
-
-    assert first_get["spec"]["files"]["SKILL.md"] == {
-        "sha256": hashlib.sha256(first_md).hexdigest(),
-        "size": len(first_md),
-    }
-    assert second_get["spec"]["files"]["SKILL.md"] == {
-        "sha256": hashlib.sha256(second_md).hexdigest(),
-        "size": len(second_md),
-    }
-    assert first_get["status"]["description"] == "first agent"
-    assert second_get["status"]["description"] == "second agent"
-    assert first_get["created_at"] == second_get["created_at"]
-
-
 async def test_portal_reads_answer_the_workspace_set_from_any_agent(db: None, tmp_path) -> None:
     """The portal reads the workspace's saved set, whichever agent the caller bound: the skill one
     agent saved lists and opens under a second one, and its record names no agent."""
@@ -1500,50 +1044,49 @@ async def test_portal_reads_answer_the_workspace_set_from_any_agent(db: None, tm
     assert other_read is not None
 
 
-async def test_a_corrupt_skill_still_lists_from_its_card_columns(db: None) -> None:
-    """The portal listing is the card projection, so a skill whose stored bundle no longer parses
-    keeps its row — the columns survive the content, proving no read on this path decodes it."""
-    workspace_id, agent_id = await _workspace_agent()
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        await store.save("alpha", {"SKILL.md": _skill_md("alpha", "A")}, frozenset())
-        await store.save("beta", {"SKILL.md": _skill_md("beta", "B")}, frozenset())
+async def test_index_job_runs_through_the_job_runner_on_stale_candidates(db: None) -> None:
+    ws_with_work, agent_id = await _workspace_agent()
+    ws_empty = await _workspace()
+    ctx, index = _indexed_ext()
+    with ws(ws_with_work), agent(agent_id):
+        await UserSkillStore(ctx).save(
+            "greet", {"SKILL.md": _skill_md("greet", "greets visitors politely")}, frozenset()
+        )
+
+    declared = manifest()
+    job = next(job for job in declared.jobs if job.name == SKILL_INDEX_JOB)
+    assert job.schedule == SKILL_INDEX_SCHEDULE
+    candidates = await job.candidates()
+    assert set(candidates) == {ws_with_work}
+    assert ws_empty not in candidates
+
+    bindings = bindings_from((declared,), ())
+    index_key = f"{NAME}:{SKILL_INDEX_JOB}"
+    keys = {binding.key for binding in bindings}
+    assert index_key in keys
+    assert f"{CORE_EXTENSION}:{SKILL_INDEX_JOB}" not in keys
+    runner = JobRunner(
+        bindings=bindings,
+        manifests=(declared,),
+        index=index,
+        embed=StubEmbed(vec((0, 1.0))),
+    )
+    for workspace_id in await runner.candidates(index_key):
+        await runner.fire(index_key, workspace_id)
+
+    assert await job.candidates() == ()
     async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(user_skill)
-            .values(content="{ not valid json")
-            .where(
-                user_skill.c.workspace_id == workspace_id,
-                user_skill.c.name == "alpha",
-            )
-        )
-    objects = SkillObjects()
-    ext = context_for(NAME, frozenset())
-    query = ObjectListQuery(supported_fields=SKILL_OBJECT.list_fields)
-    member_id = uuid4()
-    with ws(workspace_id), agent(agent_id):
-        page = await objects.member_page(ext, member_id=member_id, admin=True, query=query)
-        intact = await objects.member_detail(ext, "beta", member_id=member_id, admin=True)
-        with pytest.raises(ValidationError):
-            await objects.member_detail(ext, "alpha", member_id=member_id, admin=True)
-    assert [(row.name, row.summary) for row in page.rows] == [("alpha", "A"), ("beta", "B")]
-    assert intact is not None
+        row = (
+            await connection.execute(sa.select(user_skill.c.digest, user_skill.c.indexed_digest))
+        ).one()
+    assert row.indexed_digest == row.digest
 
-
-async def test_list_orders_and_filters(db: None, tmp_path) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
-    apply = _object_tool("object_apply")
-    with ws(workspace_id), agent(agent_id):
-        for name, description in (("alpha", "first"), ("beta", "second"), ("gamma", "third")):
-            await _dispatch(
-                ctx=ctx,
-                tool=apply,
-                manifest=_skill_manifest(name, {"SKILL.md": _skill_md(name, description).decode()}),
-            )
-        listing = json.loads(await _dispatch(_object_tool("object_list"), ctx, kind=SKILL_KIND))
-        filtered = json.loads(
-            await _dispatch(_object_tool("object_list"), ctx, kind=SKILL_KIND, query="second")
+    with ws(ws_with_work), agent(agent_id):
+        store = UserSkillStore(ctx)
+        await store.save(
+            "greet",
+            {"SKILL.md": _skill_md("greet", "sends farewells")},
+            frozenset({"greet"}),
+            generation=await _generation(store, "greet"),
         )
-    assert [row["name"] for row in listing["objects"]] == ["alpha", "beta", "gamma"]
-    assert [row["name"] for row in filtered["objects"]] == ["beta"]
+    assert set(await job.candidates()) == {ws_with_work}

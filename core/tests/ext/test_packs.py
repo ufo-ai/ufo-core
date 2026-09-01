@@ -232,24 +232,18 @@ def test_the_hosted_onboarding_corpus_ships_its_reference_files() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("name", "extensions"),
-    (
+def test_dsqa_eval_packs_enforce_the_capability_tiers() -> None:
+    for name, extensions in (
         (dsqa_eval.CORE_NAME, dsqa_eval.CORE_EXTENSIONS),
         (dsqa_eval.SEARCH_NAME, dsqa_eval.SEARCH_EXTENSIONS),
         (dsqa_eval.BROWSER_NAME, dsqa_eval.BROWSER_EXTENSIONS),
-    ),
-)
-def test_dsqa_eval_packs_enforce_the_capability_tiers(
-    name: str, extensions: tuple[str, ...]
-) -> None:
-    assert discovered_packs()[name].extensions == extensions
-    assert [manifest.name for manifest in load_manifests(name)] == [*extensions, name]
+    ):
+        assert discovered_packs()[name].extensions == extensions
+        assert [manifest.name for manifest in load_manifests(name)] == [*extensions, name]
 
 
-@pytest.mark.parametrize(
-    ("name", "extensions"),
-    (
+def test_gdpval_treatment_packs_are_discovered() -> None:
+    for name, extensions in (
         (gdpval.CORE_NAME, gdpval.BASE_EXTENSIONS),
         (gdpval.DOCUMENTS_NAME, (*gdpval.BASE_EXTENSIONS, *gdpval.DOCUMENT_EXTENSIONS)),
         (gdpval.RESEARCH_NAME, (*gdpval.BASE_EXTENSIONS, *gdpval.RESEARCH_EXTENSIONS)),
@@ -257,11 +251,9 @@ def test_dsqa_eval_packs_enforce_the_capability_tiers(
             gdpval.FULL_NAME,
             (*gdpval.BASE_EXTENSIONS, *gdpval.DOCUMENT_EXTENSIONS, *gdpval.RESEARCH_EXTENSIONS),
         ),
-    ),
-)
-def test_gdpval_treatment_pack_is_discovered(name: str, extensions: tuple[str, ...]) -> None:
-    assert discovered_packs()[name].extensions == extensions
-    assert [manifest.name for manifest in load_manifests(name)] == [*extensions, name]
+    ):
+        assert discovered_packs()[name].extensions == extensions
+        assert [manifest.name for manifest in load_manifests(name)] == [*extensions, name]
 
 
 def test_no_pack_selected_leaves_the_unnarrowed_extension_set() -> None:

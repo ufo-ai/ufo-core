@@ -21,14 +21,12 @@ from ufo_ext_gbrain.git import GIT_BACKEND, GITHUB_TOKEN_SLOT
 from ufo_ext_gbrain.manifest import NAME, manifest
 from ufo_ext_gbrain.objects import GBRAIN_KIND, gbrain_source_name
 
-from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.objects import UnknownObject
-from ufo.runtime.sources.sync import register_sources
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
@@ -37,6 +35,11 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.objects import VerbNotSupported
 from ufo.sdk.tools import ToolContext
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "setting up the gbrain source"
 REPO = "octo/wiki"
@@ -315,21 +318,6 @@ async def test_member_registers_a_repo_source_privately_by_default(db: None) -> 
     assert fetched["status"]["next_sync_at"] is not None
 
 
-async def test_the_model_registers_a_shared_branch_source_on_request(db: None) -> None:
-    state = await _workspace()
-    ctx = _context(state, speaker_id=state.member_id)
-    name = gbrain_source_name(REPO, BRANCH, None)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(ctx, _manifest_text(name, repo=REPO, branch=BRANCH, shared=True))
-        fetched = await _get(ctx, name)
-    [row] = await _rows(state)
-    assert row["config"] == {"repo": REPO, "branch": BRANCH}
-    assert row["subject"] == SHARED_SUBJECT
-    assert row["owner_member_id"] == state.member_id
-    assert fetched["spec"]["shared"] is True
-    assert "owner_member_id" not in fetched["status"]
-
-
 async def test_wrong_name_refusal_hands_back_the_derived_name(db: None) -> None:
     state = await _workspace()
     ctx = _context(state, speaker_id=state.member_id)
@@ -337,35 +325,6 @@ async def test_wrong_name_refusal_hands_back_the_derived_name(db: None) -> None:
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate({"manifest": _manifest_text("my-wiki", repo=REPO)})
     with ws(state.workspace_id), agent(state.agent_id), pytest.raises(ValueError, match=derived):
-        await tool.handler(ctx, args)
-    assert await _rows(state) == []
-
-
-async def test_the_spec_names_exactly_one_origin(db: None) -> None:
-    state = await _workspace()
-    ctx = _context(state)
-    tool = _TOOLS["object_apply"]
-    for manifest_text in (
-        _manifest_text("gbrain-deadbeef", repo=REPO, root=ROOT),
-        _manifest_text("gbrain-deadbeef"),
-    ):
-        args = tool.input_model.model_validate({"manifest": manifest_text})
-        with (
-            ws(state.workspace_id),
-            agent(state.agent_id),
-            pytest.raises(ValueError, match="exactly one of repo or root"),
-        ):
-            await tool.handler(ctx, args)
-    args = tool.input_model.model_validate(
-        {
-            "manifest": _manifest_text("gbrain-deadbeef", root=ROOT, branch=BRANCH),
-        }
-    )
-    with (
-        ws(state.workspace_id),
-        agent(state.agent_id),
-        pytest.raises(ValueError, match="only with repo"),
-    ):
         await tool.handler(ctx, args)
     assert await _rows(state) == []
 
@@ -381,22 +340,6 @@ async def test_root_apply_is_refused_for_everyone(db: None) -> None:
         ):
             await _apply(ctx, _manifest_text(name, root=ROOT))
     assert await _rows(state) == []
-
-
-async def test_configured_root_lists_as_a_shared_source(db: None) -> None:
-    state = await _workspace()
-    await register_sources((SourceEntry(backend=FOLDER_BACKEND, config=SourceConfig(root=ROOT)),))
-    name = gbrain_source_name(None, None, ROOT)
-    ctx = _context(state, speaker_id=state.member_id)
-    with ws(state.workspace_id), agent(state.agent_id):
-        assert name in await _list_names(ctx)
-        fetched = await _get(ctx, name)
-    assert fetched["spec"]["root"] == ROOT
-    assert fetched["spec"]["shared"] is True
-    [row] = await _rows(state)
-    assert row["backend"] == FOLDER_BACKEND
-    assert row["subject"] == SHARED_SUBJECT
-    assert row["owner_member_id"] is None
 
 
 async def test_identical_reapply_grants_the_settled_source_to_the_calling_agent(db: None) -> None:

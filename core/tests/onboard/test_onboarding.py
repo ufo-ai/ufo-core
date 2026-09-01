@@ -59,6 +59,7 @@ def _onboarding(
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_onboarding_creates_the_initial_admin_and_main_agent(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -87,6 +88,7 @@ async def test_onboarding_creates_the_initial_admin_and_main_agent(
     assert agent.icon == MAIN_AGENT_ICON
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_re_running_against_an_initialized_workspace_fails_loud(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -102,6 +104,7 @@ async def test_re_running_against_an_initialized_workspace_fails_loud(
     assert members == 1
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_onboarding_accepts_the_ufo_prefixed_model_key(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -111,6 +114,7 @@ async def test_onboarding_accepts_the_ufo_prefixed_model_key(
     assert onboarded.member_id is not None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_onboarding_requires_the_chosen_models_key_before_touching_the_db(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -125,6 +129,7 @@ async def test_onboarding_requires_the_chosen_models_key_before_touching_the_db(
     assert workspaces == 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_default_agent_defers_its_model_to_the_deploy_knob(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -150,6 +155,7 @@ async def test_default_agent_defers_its_model_to_the_deploy_knob(
     assert onboarding.config.models.auto_model != AUTO_MODEL
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_onboarding_runs_each_installed_extensions_steps(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -176,6 +182,7 @@ def test_third_party_extension_cannot_declare_privileged_capabilities(
         loader.discovered()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_platform_credential_is_read_live_not_seeded(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,6 +223,7 @@ async def test_platform_credential_is_read_live_not_seeded(
             await access.get("unseeded_api_key")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_onboarding_steps_without_a_credential_key_fail_before_the_db(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -232,6 +240,7 @@ async def test_onboarding_steps_without_a_credential_key_fail_before_the_db(
     assert workspaces == 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_failing_onboarding_step_is_isolated_from_its_siblings(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -313,6 +322,7 @@ def test_cold_start_mints_the_credential_key_for_onboarding(
         assert second.exit_code != 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_self_host_init_creates_no_balance(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

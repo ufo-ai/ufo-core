@@ -74,6 +74,7 @@ from ufo.schema.records import Turn
 PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")
 RUN_TOKENS = RunTokenCodec(b"sandbox-handle-test-secret")
 GIT_PROXY_AUTH_ENV = _git_config_env(GIT_PROXY_AUTH_CONFIG)
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
 
 def _derived_env(spec: SandboxSpec) -> Mapping[str, str]:

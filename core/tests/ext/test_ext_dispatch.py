@@ -278,6 +278,7 @@ def _engine(
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_extension_tool_runs_in_turn_with_its_scoped_context(
     db: None, tmp_path: Path
 ) -> None:
@@ -297,6 +298,7 @@ async def test_extension_tool_runs_in_turn_with_its_scoped_context(
         assert await scoped.get("note") == {"text": "from the turn"}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_builtin_shaped_tool_dispatches_with_ext_none(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn()
     engine = _engine(
@@ -319,6 +321,7 @@ async def test_builtin_shaped_tool_dispatches_with_ext_none(db: None, tmp_path: 
     assert tool_use[0].name == "report_ext"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_side_effecting_tool_receives_the_stable_idempotency_key(
     db: None, tmp_path: Path
 ) -> None:
@@ -335,6 +338,7 @@ async def test_side_effecting_tool_receives_the_stable_idempotency_key(
     assert tool_result[0].content == f"key={turn.id}/idem_write/c1"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_read_tool_receives_no_idempotency_key(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn()
     engine = _engine(

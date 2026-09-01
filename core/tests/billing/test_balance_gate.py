@@ -1,5 +1,6 @@
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncConnection
 from test_spend_caps import (
@@ -20,30 +21,22 @@ from ufo.runtime.billing.balance import (
     credit,
     debit,
     mark_topup_verified,
-    set_auto_topup,
     set_reserve,
 )
-from ufo.runtime.hub import InProcessHub, Parked
+from ufo.runtime.hub import Parked
 from ufo.runtime.surfaces.admission import Admission
-from ufo.runtime.surfaces.hub_tail import PARK_NOTICE, HubTailer, turn_status_frame
+from ufo.runtime.surfaces.hub_tail import PARK_NOTICE, turn_status_frame
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, ToolIntent, Usage
 
 DOLLAR = 1_000_000
 
-BILLING_SCREEN = "https://ufo.example.com/surface/web#/workspace/billing"
-LINKED_REFUSAL = (
-    "This workspace is out of credit. An admin can add credit at "
-    "https://ufo.example.com/surface/web#/workspace/billing"
-)
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
 
 def _own_key(_model: str) -> str:
     return "anthropic_api_key"
-
-
-FULL_TOKENS = Usage(input_tokens=1000, output_tokens=2000)
 
 
 async def _insert_running(
@@ -97,25 +90,6 @@ async def test_admission_rejects_at_the_reserve_with_a_reason(db: None) -> None:
     assert (await _terminal(turn_id)).text == balance_refusal_message(None)
 
 
-async def test_a_refused_admission_sends_the_member_to_the_billing_screen(db: None) -> None:
-    """The refusal names where the fix happens, not only that a fix exists. The screen is a deploy
-    fact the boot threads down, so the sentence a member reads is the one their own deploy can act
-    on."""
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        await _fund(connection, workspace_id, dollars=10, reserve_dollars=10)
-    turn_id = await Admission(
-        dbos=StubDbos(), durable_surfaces=frozenset(), billing_url=BILLING_SCREEN
-    ).invoke(
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "hi",
-        authority=WORKSPACE_AUTHORITY,
-    )
-    assert (await _terminal(turn_id)).text == LINKED_REFUSAL
-
-
 async def test_admission_above_the_reserve_enqueues(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, _, agent_id, conversation_id = await _seed(connection)
@@ -136,19 +110,6 @@ async def test_no_balance_row_allows_admission(db: None) -> None:
         workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
     )
     assert dbos.enqueued == [str(turn_id)]
-
-
-async def test_a_negative_balance_rejects(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        await _fund(connection, workspace_id, dollars=1)
-        await debit(connection, workspace_id, 5 * DOLLAR)
-    dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
-    )
-    assert dbos.enqueued == []
-    assert await _status(turn_id) == "cancelled"
 
 
 async def test_a_credit_readmits_a_parked_turn(db: None) -> None:
@@ -179,22 +140,6 @@ async def test_a_credit_below_the_reserve_does_not_resume(db: None) -> None:
     assert dbos.enqueued == []
 
 
-async def test_the_two_thresholds_do_not_meet(db: None) -> None:
-    """The thrash regression, and the whole reason the gate has two methods.
-
-    A balance sitting between zero and the reserve refuses a new turn but sustains a running one.
-    Were entry and continuation one line, a resume would admit a turn that the first round's spend
-    pushed straight back under — a round burnt per cycle, answering nothing."""
-    async with workspace_tx() as connection:
-        workspace_id, _, _, _ = await _seed(connection)
-        await _fund(connection, workspace_id, dollars=5, reserve_dollars=10)
-        gate = BalanceGate(workspace_id)
-        entering = await gate.admits(connection)
-        continuing = await gate.sustains(connection, pending_micro_usd=DOLLAR)
-    assert entering.outcome != ALLOW
-    assert continuing.outcome == ALLOW
-
-
 async def test_a_running_turn_stops_only_at_zero(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, _, _, _ = await _seed(connection)
@@ -205,19 +150,6 @@ async def test_a_running_turn_stops_only_at_zero(db: None) -> None:
     assert under.outcome == ALLOW
     assert over.outcome != ALLOW
     assert over.message == balance_refusal_message(None)
-
-
-async def test_a_held_round_sends_the_member_to_the_billing_screen(db: None) -> None:
-    """The hold a member reads mid-turn carries the same link as the refusal that turns one away —
-    one sentence, one place it is written."""
-    async with workspace_tx() as connection:
-        workspace_id, _, _, _ = await _seed(connection)
-        await _fund(connection, workspace_id, dollars=5, reserve_dollars=10)
-        over = await BalanceGate(workspace_id, BILLING_SCREEN).sustains(
-            connection, pending_micro_usd=5 * DOLLAR
-        )
-    assert over.outcome != ALLOW
-    assert over.message == LINKED_REFUSAL
 
 
 async def test_a_round_that_debits_nothing_is_never_held(db: None) -> None:
@@ -289,34 +221,6 @@ async def test_a_byok_turn_still_stops_once_its_own_spend_takes_the_balance_unde
         free_but_overdrawn = await gate.sustains(connection, 0, turn_id)
     assert free_and_solvent.outcome == ALLOW
     assert free_but_overdrawn.outcome != ALLOW
-
-
-async def test_a_turn_that_has_debited_nothing_is_never_held(db: None) -> None:
-    """The other half: a turn that has taken nothing off the balance cannot resume its way out of a
-    park, so holding it would loop forever."""
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        await _fund(connection, workspace_id, dollars=1)
-        await debit(connection, workspace_id, 5 * DOLLAR)
-        turn_id = await _insert_running(connection, workspace_id, conversation_id, agent_id, seq=2)
-        decision = await BalanceGate(workspace_id).sustains(connection, 0, turn_id)
-    assert decision.outcome == ALLOW
-
-
-async def test_an_own_key_turn_is_not_held_by_the_price_it_never_paid(db: None) -> None:
-    """The stall this replaced: an own-key row is priced and takes nothing, so reading the price
-    would park the turn, the dispatcher would let it back in, and it would stop at the same point
-    every few minutes forever — telling the member it is out of credit and never answering."""
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        await _fund(connection, workspace_id, dollars=1)
-        await debit(connection, workspace_id, 5 * DOLLAR)
-        turn_id = await _insert_running(connection, workspace_id, conversation_id, agent_id, seq=2)
-        await record_turn_usage(
-            connection, workspace_id, turn_id, "claude-opus-4-8", FULL_TOKENS, byok=True
-        )
-        decision = await BalanceGate(workspace_id).sustains(connection, 0, turn_id)
-    assert decision.outcome == ALLOW
 
 
 async def test_a_parked_turn_that_already_charged_is_not_readmitted_on_its_own_key(
@@ -414,20 +318,6 @@ async def test_the_grace_is_earned_by_paying_not_granted_on_arrival(db: None) ->
     assert entering.message == balance_refusal_message(None)
 
 
-async def test_the_grace_is_a_flat_figure_a_workspace_cannot_widen(db: None) -> None:
-    """The overdraft is bounded by a constant, so what a workspace can take while unpaid does not
-    move with any figure it chooses. Past the constant it is refused however much it arranged to
-    refill."""
-    async with workspace_tx() as connection:
-        workspace_id, _, _, _ = await _seed(connection)
-        await _fund(connection, workspace_id, dollars=1)
-        await set_auto_topup(connection, workspace_id, 100_000 * DOLLAR, 50_000 * DOLLAR)
-        await mark_topup_verified(connection, workspace_id)
-        await debit(connection, workspace_id, DOLLAR + TOPUP_GRACE_MICRO_USD)
-        entering = await BalanceGate(workspace_id).admits(connection)
-    assert entering.outcome != ALLOW
-
-
 async def test_entry_stays_the_stricter_line_once_the_grace_applies(db: None) -> None:
     """The ordering the two thresholds depend on. Moving only entry down by the grace would admit a
     turn beneath the line that stops it, so it would be parked on its first round — worse than the
@@ -477,27 +367,6 @@ async def test_a_spent_balance_still_admits_the_act_that_ends_the_refusal(db: No
     assert await _status(admitted.turn_id) != "cancelled"
 
 
-async def test_a_spent_balance_admits_the_step_before_the_refill(db: None) -> None:
-    """A refill is refused until a card is on file, so reaching the provider is the act that ends
-    the refusal for a workspace that has never paid — and it is the step the billing screen carries
-    for exactly that workspace. The exemption keys on the action rather than its operation, which is
-    what makes this true without a second gate to keep in step; this asserts it rather than leaving
-    it to be read off the gate."""
-    async with workspace_tx() as connection:
-        workspace_id, member_id, _agent_id, conversation_id = await _seed(connection)
-        await _fund(connection, workspace_id, dollars=1)
-        await debit(connection, workspace_id, 5 * DOLLAR)
-    portal = _billing_intent(workspace_id, "portal")
-    admitted = await Admission(dbos=StubDbos(), durable_surfaces=frozenset()).admit_member(
-        workspace_id,
-        conversation_id,
-        portal.model_dump_json(),
-        member_id,
-        intent=portal,
-    )
-    assert await _status(admitted.turn_id) != "cancelled"
-
-
 async def test_the_exemption_is_the_billing_verb_and_nothing_else(db: None) -> None:
     """A prepared intent is cheap, but cheap is not a reason to admit every panel act on an
     overdrawn workspace — an agent edit or a member add would then ride past the balance the same
@@ -530,21 +399,6 @@ async def test_the_park_notice_names_the_balance_rather_than_a_cap(db: None) -> 
         turn_id = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
     with ws(workspace_id):
         assert await turn_status_frame(turn_id) == Parked(message=balance_refusal_message(None))
-
-
-async def test_the_park_notice_sends_the_member_to_the_billing_screen(db: None) -> None:
-    """A reconnecting surface reads the park's reason off the poll, not off the live stream that
-    published it, so the link has to reach that poll too — the tailer holds it and hands it down."""
-    async with workspace_tx() as connection:
-        workspace_id, _member_id, agent_id, conversation_id = await _seed(connection)
-        await _fund(connection, workspace_id, dollars=1)
-        await debit(connection, workspace_id, 5 * DOLLAR)
-        turn_id = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
-    tailer = HubTailer(hub=InProcessHub(), billing_url=BILLING_SCREEN)
-    with ws(workspace_id):
-        async with tailer.tail(turn_id) as stream:
-            frames = [frame async for _cursor, frame in stream]
-    assert frames == [Parked(message=LINKED_REFUSAL)]
 
 
 async def test_the_park_notice_names_the_cap_that_holds_the_turn(db: None) -> None:

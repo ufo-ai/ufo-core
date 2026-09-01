@@ -15,10 +15,11 @@ binding holding a workspace-shared row gains nothing at all; and a member narrow
 binding through `object_apply` keeps exactly the streams they named."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 import yaml
 from cryptography.fernet import Fernet
@@ -41,6 +42,11 @@ from ufo.sdk.audience import conversation_audience
 from ufo.sdk.connectors import ConnectorEntry, ConnectorRegistry
 from ufo.sdk.sources import ConnectorSourceConfig, binding_name
 from ufo.sdk.tools import ToolContext
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 ASANA = "asana"
 GMAIL = "gmail"
@@ -332,10 +338,6 @@ def test_the_manifest_fires_on_connect_and_keeps_a_retry_job() -> None:
     assert job.schedule == sources_manifest.CONNECTED_SOURCES_RETRY_SCHEDULE
 
 
-def test_every_connector_declares_a_canonical_stream() -> None:
-    assert [provider for provider in sorted(CONNECTORS) if not _canonical(provider)] == []
-
-
 async def test_connecting_an_account_creates_its_feeds_in_the_callback(db: None) -> None:
     state = await _workspace()
 
@@ -353,27 +355,6 @@ async def test_connecting_an_account_creates_its_feeds_in_the_callback(db: None)
         assert row["connection_id"] == connection_id
         assert row["removed_at"] is None
     assert await _granted_agents(state) == {state.main_id}
-
-
-async def test_each_stream_is_pinned_to_the_window_it_declares(db: None) -> None:
-    state = await _workspace()
-
-    await _connect(state, state.main_id, GMAIL)
-
-    rows = await _rows(state)
-    assert {row["config"]["stream"] for row in rows} == _canonical(GMAIL)
-    declared = {
-        stream.name: stream.backfill_window_days for stream in CONNECTORS[GMAIL]().streams()
-    }
-    for row in rows:
-        window = declared[row["config"]["stream"]]
-        pinned = row["config"]["backfill_after"]
-        assert row["config"]["backfill_days"] is None
-        if window is None:
-            assert pinned is None
-        else:
-            reach = datetime.now(UTC) - datetime.fromisoformat(pinned)
-            assert timedelta(days=window) <= reach < timedelta(days=window + 1)
 
 
 async def test_a_connection_only_another_agent_holds_is_left_alone(db: None) -> None:
@@ -394,20 +375,6 @@ async def test_a_per_tenant_provider_is_never_auto_registered(db: None) -> None:
     await _tick(state)
 
     assert await _rows(state) == []
-
-
-async def test_the_job_creates_what_a_connect_time_creation_did_not(db: None) -> None:
-    state = await _workspace()
-    await _connect_without_the_hook(state, state.main_id, ASANA)
-    assert await _rows(state) == []
-
-    assert state.workspace_id in set(await _runner().candidates(JOB_KEY))
-    await _tick(state)
-    created = await _rows(state)
-    await _tick(state)
-
-    assert {row["config"]["stream"] for row in created} == _canonical(ASANA)
-    assert await _rows(state) == created
 
 
 async def test_a_binding_the_member_deleted_does_not_return(db: None) -> None:

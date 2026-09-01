@@ -64,7 +64,7 @@ def _op_params(op: TerminalOp) -> dict:
     return json.loads(op.params)
 
 
-async def test_send_answers_with_the_resolved_reply() -> None:
+async def _check_send_answers_with_the_resolved_reply() -> None:
     terminals = Terminals()
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/Users/member/proj", uuid4())
@@ -88,7 +88,7 @@ async def test_send_without_a_connected_terminal_raises(
         await Terminals().send(uuid4(), "exec", 1)
 
 
-async def test_send_waits_out_the_gap_between_held_streams() -> None:
+async def _check_send_waits_out_the_gap_between_held_streams() -> None:
     """A turn's op landing while the client is between polls is the normal case: the send waits for
     the reconnect instead of failing a turn whose member is right here."""
     terminals = Terminals()
@@ -101,7 +101,7 @@ async def test_send_waits_out_the_gap_between_held_streams() -> None:
     assert await sending == b"{}"
 
 
-async def test_a_second_sender_serializes_behind_the_first() -> None:
+async def _check_a_second_sender_serializes_behind_the_first() -> None:
     """A terminal runs one op at a time — a background subagent's op, or an off-turn attachment
     write, queues behind the in-flight op and runs when it frees, rather than failing."""
     terminals = Terminals()
@@ -135,7 +135,7 @@ async def test_timeout_raises_gone_and_clears_the_op(monkeypatch: pytest.MonkeyP
     assert not terminals.resolve(conversation_id, "0" * 32, b"{}")
 
 
-async def test_a_stale_reply_is_dropped_without_disturbing_the_waiter() -> None:
+async def _check_a_stale_reply_is_dropped_without_disturbing_the_waiter() -> None:
     terminals = Terminals()
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/p", None)
@@ -147,7 +147,7 @@ async def test_a_stale_reply_is_dropped_without_disturbing_the_waiter() -> None:
     assert await sending == b"right"
 
 
-async def test_the_slot_survives_a_reconnect_mid_op() -> None:
+async def _check_the_slot_survives_a_reconnect_mid_op() -> None:
     terminals = Terminals()
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/p", None)
@@ -160,7 +160,7 @@ async def test_the_slot_survives_a_reconnect_mid_op() -> None:
     assert await sending == b"{}"
 
 
-async def test_staged_bytes_serve_only_the_op_that_carries_them() -> None:
+async def _check_staged_bytes_serve_only_the_op_that_carries_them() -> None:
     terminals = Terminals()
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/p", None)
@@ -176,7 +176,7 @@ async def test_staged_bytes_serve_only_the_op_that_carries_them() -> None:
     assert await terminals.staged(conversation_id, op.op_id) is None
 
 
-async def test_the_member_gate_rejects_a_stranger_and_admits_the_binding_member() -> None:
+async def _check_the_member_gate_rejects_a_stranger_and_admits_the_binding_member() -> None:
     """The in-process transport, reached through the `TerminalTransport` Protocol: an op's staged
     bytes and its reply answer only the member the binding named, and `None` leaves the gate open
     for the direct-drive path."""
@@ -197,7 +197,7 @@ async def test_the_member_gate_rejects_a_stranger_and_admits_the_binding_member(
     assert await sending == b"{}"
 
 
-async def test_the_last_disconnect_removes_an_idle_slot() -> None:
+async def _check_the_last_disconnect_removes_an_idle_slot() -> None:
     terminals = Terminals()
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/p", None)
@@ -208,7 +208,7 @@ async def test_the_last_disconnect_removes_an_idle_slot() -> None:
     assert terminals.workspace(conversation_id) is None
 
 
-async def test_an_idle_reconnect_from_elsewhere_rebinds_the_slot() -> None:
+async def _check_an_idle_reconnect_from_elsewhere_rebinds_the_slot() -> None:
     terminals = Terminals()
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/first", None)
@@ -234,7 +234,7 @@ async def test_create_refuses_without_a_binding_and_names_a_mismatch(
     assert "/Users/member/elsewhere" in str(refusal.value)
 
 
-async def test_create_binds_the_directory_and_the_metered_proxy() -> None:
+async def _check_create_binds_the_directory_and_the_metered_proxy() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -249,7 +249,7 @@ async def test_create_binds_the_directory_and_the_metered_proxy() -> None:
     assert handle.egress_env["UFO_CONVERSATION_ID"] == str(conversation_id)
 
 
-async def test_create_without_a_public_proxy_fails_closed_on_loopback() -> None:
+async def _check_create_without_a_public_proxy_fails_closed_on_loopback() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -284,7 +284,7 @@ def _rendered_document(kind: str, page: int, text: str) -> bytes:
     return target.getvalue()
 
 
-async def test_a_document_read_relays_bounded_bytes_to_preview() -> None:
+async def _check_a_document_read_relays_bounded_bytes_to_preview() -> None:
     rendered = _rendered_document("xlsx", 2, "sheet page two")
 
     async def preview(_request: httpx.Request) -> httpx.Response:
@@ -319,7 +319,7 @@ async def test_a_document_read_relays_bounded_bytes_to_preview() -> None:
     assert result["pages_returned"] == 1
 
 
-async def test_a_skill_document_read_keeps_ufo_home_as_its_containment_root() -> None:
+async def _check_a_skill_document_read_keeps_ufo_home_as_its_containment_root() -> None:
     async def preview(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -362,7 +362,7 @@ async def test_a_skill_document_read_keeps_ufo_home_as_its_containment_root() ->
     assert result["type"] == "pdf"
 
 
-async def test_attach_answers_only_the_bound_directory() -> None:
+async def _check_attach_answers_only_the_bound_directory() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -385,7 +385,7 @@ def _resuming(spec: SandboxSpec, resume_id: str) -> SandboxSpec:
     )
 
 
-async def test_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply() -> None:
+async def _check_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -405,7 +405,7 @@ async def test_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply(
     assert result.exit_code == 0 and result.stdout == "out\n"
 
 
-async def test_skills_use_the_running_clients_native_operation() -> None:
+async def _check_skills_use_the_running_clients_native_operation() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -427,7 +427,7 @@ async def test_skills_use_the_running_clients_native_operation() -> None:
     assert await running == {"sandbox": "/Users/member/.ufo/skills/sandbox"}
 
 
-async def test_exec_keeps_a_presigned_url_whole_beside_the_path_it_uploads() -> None:
+async def _check_exec_keeps_a_presigned_url_whole_beside_the_path_it_uploads() -> None:
     """A member's machine is where the upload leg of hosted publishing runs: `curl -T` over a
     workspace path and a presigned URL, each its own argv element. Every blob key begins
     `workspaces/`, so the logical root's name rides inside a URL a signature covers — the path is
@@ -463,7 +463,7 @@ async def test_exec_keeps_a_presigned_url_whole_beside_the_path_it_uploads() -> 
     ]
 
 
-async def test_exec_decodes_a_base64_reply() -> None:
+async def _check_exec_decodes_a_base64_reply() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -483,7 +483,7 @@ async def test_exec_decodes_a_base64_reply() -> None:
     assert result.exit_code == 3 and result.stdout == "out\n" and result.stderr == "err\n"
 
 
-async def test_exec_reports_the_clients_expired_deadline_as_a_timeout() -> None:
+async def _check_exec_reports_the_clients_expired_deadline_as_a_timeout() -> None:
     """The seconds the op allowed are what the `bash` tool needs to hand back the handles of a
     command still running on the member's machine; without them a timed-out call reports a bare
     exit code and the model never learns the work continues."""
@@ -509,7 +509,7 @@ async def test_exec_reports_the_clients_expired_deadline_as_a_timeout() -> None:
     assert result.stdout == "partial\n"
 
 
-async def test_exec_reports_a_command_the_member_killed_as_its_own_exit() -> None:
+async def _check_exec_reports_a_command_the_member_killed_as_its_own_exit() -> None:
     """A group signal the client did not send answers the same code, so only the reply's own field
     says whose deadline ended the command — and a client the deploy has not yet updated sends none.
     """
@@ -532,7 +532,7 @@ async def test_exec_reports_a_command_the_member_killed_as_its_own_exit() -> Non
         assert result.exit_code == 137
 
 
-async def test_exec_refuses_a_malformed_base64_reply() -> None:
+async def _check_exec_refuses_a_malformed_base64_reply() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -546,7 +546,7 @@ async def test_exec_refuses_a_malformed_base64_reply() -> None:
         await running
 
 
-async def test_exec_refuses_a_reply_missing_its_streams() -> None:
+async def _check_exec_refuses_a_reply_missing_its_streams() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -560,7 +560,7 @@ async def test_exec_refuses_a_reply_missing_its_streams() -> None:
         await running
 
 
-async def test_write_stages_the_bytes_and_maps_a_refusal() -> None:
+async def _check_write_stages_the_bytes_and_maps_a_refusal() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -581,7 +581,7 @@ async def test_write_stages_the_bytes_and_maps_a_refusal() -> None:
         await failing
 
 
-async def test_a_workspace_named_subdirectory_maps_under_the_root_once() -> None:
+async def _check_a_workspace_named_subdirectory_maps_under_the_root_once() -> None:
     """A member's own subdirectory named `workspace` yields the logical path
     `/workspace/workspace/notes.md`; the carrier must strip the one leading `/workspace` and land it
     under the root once, never rewrite every occurrence into a bogus nested tree."""
@@ -598,7 +598,7 @@ async def test_a_workspace_named_subdirectory_maps_under_the_root_once() -> None
     await writing
 
 
-async def test_read_streams_the_reply_and_maps_a_missing_file() -> None:
+async def _check_read_streams_the_reply_and_maps_a_missing_file() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -624,7 +624,7 @@ async def test_read_streams_the_reply_and_maps_a_missing_file() -> None:
         await missing
 
 
-async def test_file_op_names_its_program_and_maps_the_handled_error() -> None:
+async def _check_file_op_names_its_program_and_maps_the_handled_error() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -663,7 +663,7 @@ async def test_file_op_names_its_program_and_maps_the_handled_error() -> None:
         await refused
 
 
-async def test_a_walk_enumerates_a_bound_directory_that_contains_workspace() -> None:
+async def _check_a_walk_enumerates_a_bound_directory_that_contains_workspace() -> None:
     """A member launched from a directory whose path contains `/workspace` (`~/workspace/api`) must
     still walk: the enumeration's already-concrete root must not go through the `/workspace`→root
     rewrite a second time, which would mangle it into a path `find` cannot reach."""
@@ -849,7 +849,7 @@ def test_a_target_outside_any_checkout_enumerates_nothing(tmp_path: Path) -> Non
     assert enum == b""
 
 
-async def test_changes_without_targets_sends_no_op() -> None:
+async def _check_changes_without_targets_sends_no_op() -> None:
     """The empty scan is answered by the carrier itself: nothing travels, so a turn that wrote
     nothing costs the member's machine nothing."""
     terminals = Terminals()
@@ -867,7 +867,7 @@ async def test_changes_without_targets_sends_no_op() -> None:
         await carrier.file_op(handle, "changes", {"workspace": WORKSPACE_DIR})
 
 
-async def test_changes_targets_ride_the_enumeration_argv() -> None:
+async def _check_changes_targets_ride_the_enumeration_argv() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -890,7 +890,7 @@ async def test_changes_targets_ride_the_enumeration_argv() -> None:
     assert await running == {"changes": [], "truncated": False}
 
 
-async def test_dial_is_unreachable() -> None:
+async def _check_dial_is_unreachable() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
@@ -926,3 +926,10 @@ def test_a_sender_on_another_loop_is_woken_from_this_one() -> None:
     asyncio.run(answer())
     thread.join(timeout=10)
     assert not thread.is_alive() and outcome == [b"cross-loop"]
+
+
+async def test_terminal_in_memory_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 30
+    for check in checks:
+        await check()

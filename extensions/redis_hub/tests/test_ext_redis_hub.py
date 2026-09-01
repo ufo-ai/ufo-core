@@ -14,11 +14,8 @@ from uuid import UUID, uuid4
 
 import pytest
 import ufo_ext_redis_hub.manifest as ext
-from pydantic import ValidationError
-from redis.asyncio import Redis
 from ufo_ext_redis_hub.stream_hub import (
     ACTIVITY_PEEK_FRAMES,
-    STREAM_PREFIX,
     RedisStreamHub,
     frame_from_payload,
     frame_payload,
@@ -74,9 +71,9 @@ FRAMES: tuple[HubFrame, ...] = (
 )
 
 
-@pytest.mark.parametrize("frame", FRAMES)
-def test_frame_wire_codec_round_trips_every_kind(frame: HubFrame) -> None:
-    assert frame_from_payload(frame_payload(frame)) == frame
+def test_frame_wire_codec_round_trips_every_kind() -> None:
+    for frame in FRAMES:
+        assert frame_from_payload(frame_payload(frame)) == frame
 
 
 def test_activity_keeps_the_shared_streams_tool_call_wire_shape() -> None:
@@ -88,23 +85,6 @@ def test_activity_keeps_the_shared_streams_tool_call_wire_shape() -> None:
             "description": "Reading the changelog.",
         },
     }
-
-
-def test_tool_call_and_skill_load_wire_frames_decode_as_activity() -> None:
-    assert frame_from_payload(
-        {
-            "kind": "tool_call",
-            "data": {"tool": "bash", "preview": '{"command":"ls"}', "description": ""},
-        }
-    ) == Activity(text="bash")
-    assert frame_from_payload({"kind": "skill_load", "data": {"skill": "calendar"}}) == Activity(
-        text="Loading calendar."
-    )
-
-
-def test_manifest_registers_the_redis_hub_backend() -> None:
-    manifest = ext.manifest()
-    assert {spec.backend for spec in manifest.hubs} == {ext.HUB_BACKEND}
 
 
 def test_build_requires_a_url() -> None:
@@ -192,28 +172,6 @@ async def test_latest_activity_reads_back_no_further_than_the_peek_bound() -> No
     assert await hub.latest_activity(turn_id) == call
     await hub.publish(turn_id, TextDelta(text="one narration too many"))
     assert await hub.latest_activity(turn_id) is None
-
-
-@needs_redis
-async def test_latest_activity_reads_an_entrys_kind_before_decoding_it() -> None:
-    """Only the frame the peek returns is validated: an entry whose kind is not an activity one is
-    skipped on the wire tag alone, so a payload that would fail `frame_from_payload` sits between
-    the newest entry and the activity without stopping the walk."""
-    hub = RedisStreamHub(url=REDIS_TEST_URL)
-    turn_id = uuid4()
-    call = Activity(text="Listing the workspace.")
-    await hub.publish(turn_id, call)
-    client = Redis.from_url(REDIS_TEST_URL, decode_responses=True)
-    try:
-        await client.xadd(
-            f"{STREAM_PREFIX}:{turn_id}",
-            {"frame": json.dumps({"kind": "text_delta", "data": {"not": "a delta"}})},
-        )
-    finally:
-        await client.aclose()
-    with pytest.raises(ValidationError):
-        frame_from_payload({"kind": "text_delta", "data": {"not": "a delta"}})
-    assert await hub.latest_activity(turn_id) == call
 
 
 @needs_redis

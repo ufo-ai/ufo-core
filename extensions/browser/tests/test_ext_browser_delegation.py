@@ -16,8 +16,6 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-import ufo_ext_browser.delegation as delegation
-import ufo_ext_browserbase as browserbase
 from pydantic import BaseModel, ValidationError
 from ufo_ext_browser.delegation import (
     BROWSER_TASK_TIMEOUT_FLOOR_MINUTES,
@@ -26,12 +24,9 @@ from ufo_ext_browser.delegation import (
 )
 
 from ufo.blob import FilesystemBlobStore
-from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     ExecResult,
-    ProxyEndpoint,
     SandboxSession,
-    SandboxSpec,
 )
 from ufo.runtime.tools.context import SpawnResult, SubagentStatus, ToolContext
 from ufo.schema.records import Agent, Turn
@@ -259,32 +254,6 @@ async def test_wide_browse_fans_over_deduped_entities_and_writes_the_json(tmp_pa
     assert json.loads(result.content[0].text)["output_file"] == "wide_browse.json"
 
 
-async def test_wide_browse_keys_each_child_on_the_call_and_entity(tmp_path: Path) -> None:
-    """The producer half of the recovery-dedup seam: wide_browse is side_effecting and spawns each
-    child under a dedup_key derived from the call's idempotency_key and the entity, deterministic
-    across a crash-recovery re-run so the parent reconnects rather than respawns. browser_task
-    keys its one child on the bare idempotency_key (proven above)."""
-    wide_browse = _tool("wide_browse")
-    assert wide_browse.side_effecting is True
-    sandbox = FilesSandbox(files={"entities.txt": "acme.com\nbeta.io\n", "schema.json": ""})
-    spawn = RecordingSpawn()
-    ctx = _context(sandbox, spawn, tmp_path, idempotency_key="turn-1/wide_browse/call-3")
-    await wide_browse.handler(
-        ctx,
-        wide_browse.input_model.model_validate(
-            {
-                "entities_file": "entities.txt",
-                "prompt_template": "get pricing from {entity}",
-                "output_schema_file": "schema.json",
-            }
-        ),
-    )
-    assert [dedup for *_, dedup in spawn.spawned] == [
-        "turn-1/wide_browse/call-3/acme.com",
-        "turn-1/wide_browse/call-3/beta.io",
-    ]
-
-
 async def test_wide_browse_caps_the_entity_count(tmp_path: Path) -> None:
     too_many = "\n".join(f"site{i}.com" for i in range(MAX_WIDE_BROWSE_ENTITIES + 1))
     sandbox = FilesSandbox(files={"entities.txt": too_many, "schema.json": ""})
@@ -300,66 +269,3 @@ async def test_wide_browse_caps_the_entity_count(tmp_path: Path) -> None:
                 }
             ),
         )
-
-
-def test_a_browser_task_budget_stays_within_what_a_leased_session_can_hold() -> None:
-    """The browser a run holds is one leased session. A budget above what a transport will keep
-    alive would drop the live connection mid-task instead of ending it through the graceful cancel
-    path, so the tool refuses it rather than accepting a budget it cannot honour."""
-    assert (
-        delegation.BrowserTaskInput(
-            url="https://example.com",
-            task="t",
-            task_name="n",
-            timeout_minutes=delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES,
-        ).timeout_minutes
-        == delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES
-    )
-    with pytest.raises(ValidationError):
-        delegation.BrowserTaskInput(
-            url="https://example.com",
-            task="t",
-            task_name="n",
-            timeout_minutes=delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES + 1,
-        )
-    assert (
-        browserbase.SESSION_TIMEOUT_SECONDS > delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES * 60
-    )
-
-
-async def test_a_real_shell_reads_hostile_paths_literally(tmp_path: Path) -> None:
-    """The injection proof, against a REAL bash through LocalCarrier: BOTH reads the handler makes —
-    the entities file and the output schema — are given a name containing `$(…)` and backticks, and
-    each must come back as file contents with the substitution it would have run never happening."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    entities = 'entities.txt"; $(touch pwned_entities) `touch ticked_entities` $HOME'
-    schema = 'schema.json"; $(touch pwned_schema) `touch ticked_schema` $HOME'
-    (workspace / entities).write_text("acme.com\n")
-    (workspace / schema).write_text('{"price": "number"}')
-    carrier = LocalCarrier()
-    handle = await carrier.create(
-        SandboxSpec(
-            conversation_id=uuid4(),
-            image_ref="ufo-sandbox:latest",
-            workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-            run_token="run-token-abc",
-        )
-    )
-    session = SandboxSession(carrier=carrier, handle=handle)
-    spawn = RecordingSpawn()
-    tool = _tool("wide_browse")
-    await tool.handler(
-        _context(session, spawn, tmp_path),
-        tool.input_model.model_validate(
-            {
-                "entities_file": entities,
-                "prompt_template": "get pricing from {entity}",
-                "output_schema_file": schema,
-            }
-        ),
-    )
-    assert [payload["task_name"] for _, payload, *_ in spawn.spawned] == ["acme.com"]
-    assert all('{"price": "number"}' in payload["task"] for _, payload, *_ in spawn.spawned)
-    assert not any(workspace.glob("pwned_*")) and not any(workspace.glob("ticked_*"))

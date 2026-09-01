@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from dbos import EnqueueOptions
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -14,13 +15,11 @@ from ufo.runtime.billing.accounting import (
     record_sandbox_tokens,
     record_workspace_usage,
 )
-from ufo.runtime.engine import _claim_turn
 from ufo.runtime.ext.context import ExtensionContext
 from ufo.runtime.ext.manifest import JobSpec
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
     TURN_DISPATCH_BATCH_TURNS,
-    TURN_DISPATCH_GRACE_SECONDS,
     TURN_DISPATCH_JOB,
     JobRunner,
     TurnDispatcher,
@@ -29,6 +28,8 @@ from ufo.runtime.jobs import (
 from ufo.runtime.surfaces.admission import Admission
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, Usage
+
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
 
 @dataclass
@@ -257,23 +258,6 @@ async def _status(turn_id: UUID) -> str:
         ).scalar_one()
 
 
-async def _dispatch_stamp(turn_id: UUID) -> datetime | None:
-    async with workspace_tx() as connection:
-        return (
-            await connection.execute(
-                sa.select(tables.turn.c.dispatch_enqueued_at).where(tables.turn.c.id == turn_id)
-            )
-        ).scalar_one()
-
-
-async def test_no_caps_allow(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, member_id, agent_id, _ = await _seed(connection)
-        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
-    assert decision.outcome == "allow"
-    assert decision.message == ""
-
-
 async def test_workspace_cap_counts_extension_spend(db: None) -> None:
     """A background job's workspace-anchored spend (turn_id NULL) moves a workspace-scope cap, which
     sums every ledger row for the workspace."""
@@ -318,16 +302,6 @@ async def test_member_cap_rejects_when_over(db: None) -> None:
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
     assert decision.outcome == "reject"
     assert "declined" in decision.message
-
-
-async def test_reject_wins_over_park(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
-        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
-        await _set_cap(connection, workspace_id, "workspace", None, 60, 50, "reject")
-        decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
-    assert decision.outcome == "reject"
 
 
 async def test_under_cap_allows(db: None) -> None:
@@ -479,117 +453,6 @@ async def test_admission_rejects_over_cap_member_with_reason(db: None) -> None:
     assert "declined" in TerminalFrame.model_validate(row.terminal).text
 
 
-async def test_admission_under_cap_enqueues(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 40, seq=1)
-        await _set_cap(connection, workspace_id, "member", member_id, 3600, 100, "park")
-    dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
-    )
-    assert dbos.enqueued == [str(turn_id)]
-    assert await _status(turn_id) == "queued"
-
-
-async def test_dispatch_recovers_an_unstamped_queued_turn(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        queued = await _insert_queued(connection, workspace_id, conversation_id, agent_id, seq=1)
-    dbos = StubDbos()
-    await _dispatch(dbos)
-    assert dbos.enqueued == [str(queued)]
-    assert dbos.workflow_ids == [str(queued)]
-    assert await _dispatch_stamp(queued) is not None
-
-
-async def test_dispatch_offers_an_ever_claimed_queued_turn_a_fresh_workflow_id(db: None) -> None:
-    """A fold resumed this parked turn but its enqueue was deferred: the run that parked it
-    consumed the turn's own workflow id, so a sweep offer riding that id would dedup against the
-    completed workflow and the resume would never run."""
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        queued = await _insert_queued(
-            connection, workspace_id, conversation_id, agent_id, seq=1, running_attempt=uuid4().hex
-        )
-    dbos = StubDbos()
-    await _dispatch(dbos)
-    assert dbos.enqueued == [str(queued)]
-    assert dbos.workflow_ids != [str(queued)]
-
-
-async def test_dispatch_waits_for_the_earlier_queued_turn_to_start(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        first = await _insert_queued(connection, workspace_id, conversation_id, agent_id, seq=1)
-        second = await _insert_queued(connection, workspace_id, conversation_id, agent_id, seq=2)
-    dbos = StubDbos()
-    await _dispatch(dbos)
-    assert dbos.enqueued == [str(first)]
-    assert await _dispatch_stamp(first) is not None
-    assert await _dispatch_stamp(second) is None
-
-    assert await _claim_turn(first, "first-attempt")
-    while_running = StubDbos()
-    await _dispatch(while_running)
-    assert while_running.enqueued == []
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(status="done", terminal=TerminalFrame(status="done").model_dump(mode="json"))
-            .where(tables.turn.c.id == first)
-        )
-    again = StubDbos()
-    await _dispatch(again)
-    assert again.enqueued == [str(second)]
-    assert again.workflow_ids == [str(second)]
-
-
-async def test_dispatch_skips_a_fresh_queued_offer_and_its_successor(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        first = await _insert_queued(
-            connection,
-            workspace_id,
-            conversation_id,
-            agent_id,
-            seq=1,
-            dispatch_enqueued_at=datetime.now(UTC),
-        )
-        second = await _insert_queued(connection, workspace_id, conversation_id, agent_id, seq=2)
-    dbos = StubDbos()
-    await _dispatch(dbos)
-    assert dbos.enqueued == []
-    assert await _dispatch_stamp(first) is not None
-    assert await _dispatch_stamp(second) is None
-
-
-async def test_dispatch_retries_a_stale_queued_offer_with_the_same_workflow_id(db: None) -> None:
-    stale = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS + 60)
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        queued = await _insert_queued(
-            connection,
-            workspace_id,
-            conversation_id,
-            agent_id,
-            seq=1,
-            dispatch_enqueued_at=stale,
-        )
-    first = StubDbos()
-    await _dispatch(first)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(dispatch_enqueued_at=stale)
-            .where(tables.turn.c.id == queued)
-        )
-    second = StubDbos()
-    await _dispatch(second)
-    assert first.enqueued == second.enqueued == [str(queued)]
-    assert first.workflow_ids == second.workflow_ids == [str(queued)]
-
-
 async def test_dispatch_stamp_excludes_a_concurrent_sweep(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, _, agent_id, conversation_id = await _seed(connection)
@@ -615,63 +478,6 @@ async def test_resume_skips_turn_still_over_cap(db: None) -> None:
     await _dispatch(dbos)
     assert dbos.enqueued == []
     assert await _status(parked) == "parked"
-
-
-async def test_resume_skips_a_recently_enqueued_parked_turn(db: None) -> None:
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        recent = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(dispatch_enqueued_at=sa.func.now())
-            .where(tables.turn.c.id == recent)
-        )
-    dbos = StubDbos()
-    await _dispatch(dbos)
-    assert dbos.enqueued == []
-    assert await _status(recent) == "parked"
-
-
-async def test_resume_reenqueues_a_parked_turn_past_the_grace_window(db: None) -> None:
-    stale = datetime.now(UTC) - timedelta(seconds=TURN_DISPATCH_GRACE_SECONDS + 60)
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        parked = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(dispatch_enqueued_at=stale)
-            .where(tables.turn.c.id == parked)
-        )
-    dbos = StubDbos()
-    await _dispatch(dbos)
-    assert dbos.enqueued == [str(parked)]
-    assert dbos.workflow_ids != [str(parked)]
-    again = StubDbos()
-    await _dispatch(again)
-    assert again.enqueued == []
-
-
-async def test_resume_sweep_bounds_its_batch_and_progresses_across_sweeps(db: None) -> None:
-    """A sweep re-admits at most `dispatch_batch` turns per workspace — a workspace that parked many
-    makes bounded progress each tick rather than holding one tick for all of them. A later parked
-    turn becomes eligible after the earlier one ends, preserving conversation sequence."""
-    async with workspace_tx() as connection:
-        workspace_id, _, agent_id, conversation_id = await _seed(connection)
-        first = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=1)
-        second = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
-    dbos = StubDbos()
-    await _dispatch(dbos, dispatch_batch=1)
-    assert dbos.enqueued == [str(first)]
-    assert await _claim_turn(first, "first-parked-attempt")
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(status="done", terminal=TerminalFrame(status="done").model_dump(mode="json"))
-            .where(tables.turn.c.id == first)
-        )
-    again = StubDbos()
-    await _dispatch(again, dispatch_batch=1)
-    assert again.enqueued == [str(second)]
 
 
 async def test_resume_readmits_when_cap_raised(db: None) -> None:

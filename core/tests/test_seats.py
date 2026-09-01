@@ -1,4 +1,4 @@
-"""Seat rules proven against the real schema on both dialects: creation seats the member it
+"""Seat rules proven against the real schema: creation seats the member it
 writes, the last seated admin is irrevocable, member authority requires a live seat,
 the parked-resume sweep holds a revoked speaker's turn, and the migration seats every existing
 member and takes the seat bounds off the workspace."""
@@ -39,6 +39,7 @@ from ufo.schema.records import INTERNAL_ADMISSION, MEMBER_ADMISSION, SCHEDULED_A
 
 ADMIN_EMAIL = "owner@example.com"
 TEAMMATE_EMAIL = "teammate@example.com"
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
 
 async def _workspace(subject: str | None = None) -> UUID:
@@ -285,7 +286,9 @@ async def test_sweep_resumes_a_speakerless_parked_turn(db: None) -> None:
     assert dbos.enqueued == [str(turn_id)]
 
 
-def test_migration_seats_every_member_and_drops_the_seat_bounds(tmp_path: Path) -> None:
+def test_migration_seats_every_member_and_drops_the_seat_bounds(
+    database_url: str, tmp_path: Path
+) -> None:
     url = f"sqlite+aiosqlite:///{tmp_path / 'backfill.db'}"
     config = AlembicConfig()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))

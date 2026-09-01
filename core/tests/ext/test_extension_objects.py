@@ -108,6 +108,7 @@ async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
     return result.content[0].text
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_active_extension_lists_and_reads_everything_it_declares(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample()
@@ -175,6 +176,7 @@ async def test_an_active_extension_lists_and_reads_everything_it_declares(db: No
         }
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_extension_kind_filters_and_orders_on_its_declared_fields(db: None) -> None:
     """`version`, `tool_count`, and `credential_slot_count` ride the listing rows, so an admin sees
     which version is running and which extensions carry keys without opening each one."""
@@ -221,6 +223,7 @@ async def test_the_extension_kind_filters_and_orders_on_its_declared_fields(db: 
         assert [row["name"] for row in ordered["objects"]] == ["probe-keyed", "probe-bare"]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_status_carries_what_the_manifest_asks_of_the_deploy(db: None) -> None:
     """Status is the declaration's other side, so it reads off the manifest rather than off the
     defaults every manifest shares."""
@@ -249,6 +252,7 @@ async def test_status_carries_what_the_manifest_asks_of_the_deploy(db: None) -> 
     assert unasked["status"] == {"sandbox_internet": False, "requires": []}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_absent_extension_name_is_no_object_at_all(db: None) -> None:
     workspace_id = await _workspace()
     manifest = Manifest(name="probe_only", version="1.0.0")
@@ -262,6 +266,7 @@ async def test_an_absent_extension_name_is_no_object_at_all(db: None) -> None:
         assert await store.status(ctx, "probe-absent", expected_generation=None) is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_installing_or_removing_an_extension_is_refused_as_a_deploy_act(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample()

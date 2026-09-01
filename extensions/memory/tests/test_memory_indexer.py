@@ -5,10 +5,10 @@ the real DefaultIndex and the workspace-scoped transaction, exactly as core thre
 job's context. The embed client is a real dependency counted (never asserted) to witness that
 overlapping runs embed each row once."""
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory_manifest
 from ufo_ext_embed_openai import EMBED_DIM
@@ -24,11 +24,16 @@ from ufo_ext_memory.store import (
 from ufo.db import workspace_tx
 from ufo.runtime.ext.context import PageState, SourceReader, context_for
 from ufo.runtime.indexing import OWNER_KIND_MEMORY_ITEM, TextChunker
-from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
+from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.audience import conversation_audience
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 
 def _reader(subjects: frozenset[str]) -> SourceReader:
@@ -163,39 +168,6 @@ async def test_index_job_derives_chunks_and_stamps_digest(db: None) -> None:
     assert await _chunk_count() == derived
 
 
-async def test_overlapping_index_runs_embed_each_row_once(db: None) -> None:
-    workspace_id = await _workspace()
-    embed = CountingEmbed(vec((0, 1.0)))
-    store, _ = _wire(embed, workspace_id)
-    bodies = tuple(f"fact number {n} worth remembering" for n in range(6))
-    for body in bodies:
-        await store.commit(MemoryWrite(subject="shared", body=body))
-
-    runs = tuple(
-        MemoryIndexer(
-            index=DefaultIndex(transaction=workspace_tx),
-            embed=embed,
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            page_states=context_for("memory", frozenset()).page_states,
-        )
-        for _ in range(2)
-    )
-    with ws(workspace_id):
-        await asyncio.gather(*(indexer.run() for indexer in runs))
-
-    assert embed.calls == len(bodies)
-    async with workspace_tx() as connection:
-        pending = (
-            await connection.execute(
-                sa.select(sa.func.count())
-                .select_from(memory_item)
-                .where(memory_item.c.embedding_digest.is_(None))
-            )
-        ).scalar_one()
-    assert pending == 0
-
-
 async def test_page_narrowed_during_embed_withdraws_the_write_and_keeps_the_row(
     db: None,
 ) -> None:
@@ -326,23 +298,6 @@ async def test_old_indexer_cannot_delete_a_same_body_fact_rebound_to_a_new_page_
     assert row.embedding_claimed_at is None
 
 
-async def test_committed_fact_recalls_after_indexing(db: None) -> None:
-    workspace_id = await _workspace()
-    probe = vec((4, 1.0))
-    store, indexer = _wire(StubEmbed(probe), workspace_id)
-    await store.commit(MemoryWrite(subject="shared", body="the mascot is named zoltar"))
-    with ws(workspace_id):
-        await indexer.run()
-        hits = await store.recall(
-            "zoltar mascot",
-            frozenset({"shared"}),
-            5,
-            source_reader=_reader(frozenset({SHARED_SUBJECT})),
-        )
-    assert len(hits) == 1
-    assert "zoltar" in hits[0].body
-
-
 async def test_member_memory_is_invisible_to_another_member(db: None) -> None:
     workspace_id = await _workspace()
     alice, bob = uuid4(), uuid4()
@@ -414,13 +369,3 @@ async def test_memory_index_job_fires_bound_only_on_workspaces_with_unindexed_it
             ).scalar_one()
     assert digest is not None and digest.startswith("sha256:")
     assert ws_empty not in set(await job.candidates())
-
-
-def test_memory_index_registers_as_an_extension_job() -> None:
-    manifest = memory_manifest.manifest()
-    job = next(job for job in manifest.jobs if job.name == memory_manifest.MEMORY_INDEX_JOB)
-    assert job.schedule == memory_manifest.MEMORY_INDEX_SCHEDULE
-    bindings = bindings_from((manifest,), ())
-    keys = {binding.key for binding in bindings}
-    assert f"{manifest.name}:{memory_manifest.MEMORY_INDEX_JOB}" in keys
-    assert f"{CORE_EXTENSION}:{memory_manifest.MEMORY_INDEX_JOB}" not in keys

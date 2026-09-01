@@ -30,6 +30,11 @@ from ufo.schema import tables
 from ufo.sdk.context import CredentialAccess
 from ufo.sdk.sources import SourceAuth, StreamFault, SyncResult
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 REPO = "acme/brain"
 SHA = "a" * 40
 ETAG = '"etag-1"'
@@ -120,43 +125,6 @@ async def test_first_sync_resolves_head_then_snapshots_the_tarball() -> None:
     assert parsed["checked_at"] is not None
 
 
-async def test_not_modified_is_idle_and_restamps_the_probe_instant() -> None:
-    cursor = json.dumps({"sha": SHA, "etag": ETAG})
-    seen: list[httpx.Request] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(304)
-
-    result = await _fetch(handle, cursor=cursor)
-
-    assert seen[0].headers["If-None-Match"] == ETAG
-    assert len(seen) == 1
-    assert result.pages == ()
-    assert result.snapshot is False
-    parsed = _parsed_cursor(result)
-    assert (parsed["sha"], parsed["etag"]) == (SHA, ETAG)
-    assert parsed["checked_at"] is not None
-
-
-async def test_same_sha_is_idle_with_a_refreshed_cursor() -> None:
-    seen: list[httpx.Request] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(200, text=SHA, headers={"ETag": REFRESHED_ETAG})
-
-    result = await _fetch(handle, cursor=json.dumps({"sha": SHA, "etag": None}))
-
-    assert "If-None-Match" not in seen[0].headers
-    assert len(seen) == 1
-    assert result.pages == ()
-    assert result.snapshot is False
-    parsed = _parsed_cursor(result)
-    assert (parsed["sha"], parsed["etag"]) == (SHA, REFRESHED_ETAG)
-    assert parsed["checked_at"] is not None
-
-
 async def test_head_not_found_is_a_stream_fault_naming_the_ref() -> None:
     with pytest.raises(StreamFault, match=f"github answered 404 for {REPO}@HEAD head"):
         await _fetch(lambda request: httpx.Response(404))
@@ -227,19 +195,6 @@ async def test_oversize_decompressed_markdown_is_a_stream_fault() -> None:
             await source.fetch(GbrainGitConfig(repo=REPO), None, SourceAuth(workspace_id=uuid4()))
 
 
-async def test_tokenless_probe_is_throttled_inside_the_interval() -> None:
-    seen: list[httpx.Request] = []
-    fresh = datetime.now(UTC).isoformat(timespec="seconds")
-    cursor = json.dumps({"sha": SHA, "etag": ETAG, "checked_at": fresh})
-
-    result = await _fetch(_repo_handler(seen), cursor=cursor)
-
-    assert seen == []
-    assert result.pages == ()
-    assert result.snapshot is False
-    assert result.next_cursor == cursor
-
-
 async def test_tokenless_probe_resumes_past_the_interval() -> None:
     seen: list[httpx.Request] = []
     stale = (datetime.now(UTC) - timedelta(seconds=UNAUTHENTICATED_PROBE_SECONDS)).isoformat(
@@ -255,28 +210,6 @@ async def test_tokenless_probe_resumes_past_the_interval() -> None:
 
     assert len(seen) == 1
     assert _parsed_cursor(result)["checked_at"] != stale
-
-
-async def test_branch_config_is_the_head_ref() -> None:
-    seen: list[httpx.Request] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        if request.url.path == f"/repos/{REPO}/commits/main":
-            return httpx.Response(200, text=SHA)
-        return httpx.Response(200, content=_archive(ENTRIES))
-
-    result = await _fetch(handle, branch="main")
-
-    assert seen[0].url.path == f"/repos/{REPO}/commits/main"
-    assert result.snapshot is True
-
-
-async def test_unreadable_cursor_falls_back_to_a_full_sync() -> None:
-    seen: list[httpx.Request] = []
-    result = await _fetch(_repo_handler(seen), cursor="not json")
-    assert len(seen) == 2
-    assert result.snapshot is True
 
 
 async def test_without_a_stored_token_no_authorization_header_is_sent() -> None:

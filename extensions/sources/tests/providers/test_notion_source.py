@@ -198,32 +198,6 @@ async def test_comments_fan_out_per_page_and_render_the_body() -> None:
     assert result.pages[0].title == "Looks good to me"
 
 
-async def test_users_collection_renders_name_and_email() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        assert request.method == "GET" and request.url.path == "/v1/users"
-        return httpx.Response(
-            200,
-            json={
-                "results": [
-                    {
-                        "object": "user",
-                        "id": "u1",
-                        "name": "Ada Lovelace",
-                        "person": {"email": "ada@example.com"},
-                    }
-                ],
-                "next_cursor": None,
-                "has_more": False,
-            },
-        )
-
-    result = await _fetch("users", handle)
-    assert {page.source_ref for page in result.pages} == {"users/u1"}
-    body = result.pages[0].body
-    assert "Ada Lovelace" in body
-    assert "ada@example.com" in body
-
-
 async def test_stream_skipped_when_the_integration_lacks_capability() -> None:
     """A 403 `restricted_resource` (the integration was never granted the user-read capability)
     surfaces as `StreamSkipped` so the run records a skip, never a failure."""

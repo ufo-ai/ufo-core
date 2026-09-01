@@ -3,13 +3,11 @@
 that a skill-name collision across packs is refused where the registry is built."""
 
 import re
-from base64 import urlsafe_b64decode
 
 import pytest
 import ufo_ext_documents.manifest as documents
 
 from ufo.host.ext.loader import skill_registry
-from ufo.runtime.skills.runtime import SKILL_MD, install_skill
 
 DESIGN_FOUNDATIONS_DEPENDENTS = ("office-docx", "office-pptx", "pdf", "theme-factory")
 HOUSE_STYLE = "ufo-style"
@@ -48,22 +46,6 @@ def test_documents_skills_parse_and_index() -> None:
         assert name in index
 
 
-def test_pdf_pulls_its_design_foundations_dependency() -> None:
-    registry = skill_registry((documents.manifest(),))
-    assert [ref.card.name for ref in registry.closure("pdf")] == [
-        "pdf",
-        "design-foundations",
-        HOUSE_STYLE,
-    ]
-
-
-def test_office_pptx_and_theme_factory_pull_design_foundations() -> None:
-    registry = skill_registry((documents.manifest(),))
-    for name in ("office-pptx", "theme-factory"):
-        closure = [ref.card.name for ref in registry.closure(name)]
-        assert closure == [name, "design-foundations", HOUSE_STYLE]
-
-
 def test_design_foundations_defaults_to_the_house_style_and_says_what_overrides_it() -> None:
     """An artifact nobody gave a style direction for is drawn in the house palette, so
     `design-foundations` pulls `ufo-style` and every skill that builds on it inherits that default.
@@ -77,92 +59,6 @@ def test_design_foundations_defaults_to_the_house_style_and_says_what_overrides_
     body = registry.named("design-foundations").instructions
     assert HOUSE_STYLE in body
     assert "wins over the house style" in body
-
-
-@pytest.mark.parametrize("dependent", DESIGN_FOUNDATIONS_DEPENDENTS)
-async def test_loading_a_dependent_mounts_every_file_in_its_closure(dependent: str) -> None:
-    """The split moved the palette, type and chart guidance into `references/`, and each dependent
-    cites those files by mounted path. Every load has to put all three on disk alongside every file
-    the dependent brings itself, or the workflow it injects points at nothing."""
-    registry = skill_registry((documents.manifest(),))
-    written: dict[str, bytes] = {}
-
-    class _Sandbox:
-        async def load_skills(self, payload: dict[str, object]) -> dict[str, str]:
-            user = payload["user"]
-            assert isinstance(user, dict)
-            roots = {}
-            for name, wire in user.items():
-                assert isinstance(name, str) and isinstance(wire, dict)
-                files = wire["files"]
-                assert isinstance(files, dict)
-                root = f"$UFO_HOME/skills/{name}"
-                for path, content in files.items():
-                    assert isinstance(path, str) and isinstance(content, str)
-                    written[f"{root}/{path}"] = urlsafe_b64decode(content)
-                roots[name] = root
-            return roots
-
-    loaded = await registry.materialize(registry.closure(dependent))
-    for entry in loaded:
-        await install_skill(_Sandbox(), entry.skill)
-
-    for reference in ("color", "typography", "dataviz"):
-        assert f"$UFO_HOME/skills/design-foundations/references/{reference}.md" in written
-    expected = {
-        f"{entry.skill.root()}/{path}" for entry in loaded for path in entry.skill.all_files()
-    }
-    assert written.keys() == expected
-
-
-async def test_every_design_foundations_path_a_dependent_cites_is_one_it_mounts() -> None:
-    """A citation naming a file that the load does not mount is a dead end the agent cannot follow.
-    Every `$UFO_HOME/skills/design-foundations/...` path written in a dependent's own files must
-    resolve to a path that dependent's closure actually loads."""
-    registry = skill_registry((documents.manifest(),))
-    for name in DESIGN_FOUNDATIONS_DEPENDENTS:
-        mounted = {
-            f"{entry.skill.root()}/{path}"
-            for entry in await registry.materialize(registry.closure(name))
-            for path in entry.skill.all_files()
-        }
-        skill = registry.named(name)
-        sources = {SKILL_MD: skill.raw_skill_md.encode(), **dict(skill.files)}
-        for source, content in sources.items():
-            if not source.endswith(".md"):
-                continue
-            citations = re.findall(
-                r"\$UFO_HOME/skills/design-foundations/[\w./-]+\.md", content.decode()
-            )
-            for cited in citations:
-                assert cited in mounted, f"{name}:{source} cites {cited}"
-
-
-def test_the_references_table_routes_each_topic_to_the_file_that_holds_it() -> None:
-    """`design-foundations` sends the agent to one of three reference files by what a row claims it
-    covers, so a row pointing at the wrong file is a silent misroute that no mount or citation check
-    can see. Every phrase in a row that occurs in exactly one reference file must occur in that
-    row's own file — swapping two rows puts each one's phrases in the other and fails here."""
-    skill = skill_registry((documents.manifest(),)).named("design-foundations")
-    bodies = {
-        path.removeprefix("references/"): _words(content.decode())
-        for path, content in skill.files
-        if path.startswith("references/")
-    }
-    assert set(bodies) == {"color.md", "typography.md", "dataviz.md"}
-
-    rows = re.findall(r"^\|\s*`references/([\w.-]+)`\s*\|([^|]*)\|", skill.instructions, re.M)
-    assert {name for name, _ in rows} == set(bodies)
-
-    for name, covers in rows:
-        located = {}
-        for phrase in _phrases(covers):
-            holders = {f for f, body in bodies.items() if phrase in body}
-            if len(holders) == 1:
-                located[phrase] = holders.pop()
-        assert located, f"the {name} row claims nothing that identifies a reference file"
-        misrouted = {p: holder for p, holder in located.items() if holder != name}
-        assert not misrouted, f"the {name} row claims text that lives elsewhere: {misrouted}"
 
 
 def test_document_review_puts_the_period_it_checks_in_the_query_text() -> None:

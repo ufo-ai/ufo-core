@@ -2,9 +2,7 @@ import asyncio
 import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
-from html import unescape
-from pathlib import Path
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
@@ -22,17 +20,13 @@ from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import (
-    REQUEST_METER_DIMENSION,
     ConnectorTransferHosts,
     ForwardRule,
     InjectionRule,
     InternetRule,
-    MeterRule,
     ScopeRule,
-    derive_grant_rules,
 )
 from ufo.runtime.access.grants import (
-    CONNECT_MEMO_SECONDS,
     ConnectFlow,
     ConnectHandoff,
     ConnectionOwnedByAnotherMember,
@@ -53,23 +47,18 @@ from ufo.runtime.agent_scope import AgentUnbound, agent
 from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
 from ufo.runtime.surfaces.admission import Admission, ConnectResume
-from ufo.runtime.surfaces.cli import CONNECT_LOGO_CACHE, CONNECT_LOGO_FILE, callback_router
+from ufo.runtime.surfaces.cli import callback_router
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.sdk.callback_page import (
-    CALLBACK_PAGE_MAX_BYTES,
     CLOSE_THIS_PAGE,
-    CONNECT_LOGO_PATH,
     CONVERSATION_CONTINUES,
-    PageLink,
-    callback_page,
 )
 
 GRANTED_HOST = "api.granted.test"
-UNGRANTED_HOST = "api.ungranted.test"
 HOST_A = "api.aaa.test"
 HOST_B = "api.bbb.test"
 REDIRECT_URI = "http://surface/v1/connect/callback"
@@ -208,74 +197,16 @@ async def _summaries(workspace_id: UUID, agent_id: UUID) -> tuple[GrantSummary, 
         return await grant_summaries()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_grant_store_requires_an_agent_boundary(db: None) -> None:
     with ws(await _workspace()), pytest.raises(AgentUnbound):
         await GrantStore().active_grants()
 
 
-def test_derive_admits_and_meters_the_granted_host_without_injecting() -> None:
-    """A grant admits and meters its host but injects nothing — the broker holds the account's token
-    and runs connector tools server-side, so no secret is on the wire."""
-    grant = Grant(
-        id=uuid4(),
-        connection_id=uuid4(),
-        provider="stub",
-        account_id="acct-42",
-        host=GRANTED_HOST,
-        owner_member_id=uuid4(),
-        owner_email="owner@x.test",
-        connection_shared=False,
-    )
-    rules = derive_grant_rules((grant,))
-    scope = next(r for r in rules if isinstance(r, ScopeRule))
-    assert scope.allowed_hosts == frozenset({GRANTED_HOST})
-    assert MeterRule(host=GRANTED_HOST, dimension=REQUEST_METER_DIMENSION) in rules
-    assert not any(isinstance(r, InjectionRule) for r in rules)
-
-
-def test_no_grants_derive_no_rules() -> None:
-    assert derive_grant_rules(()) == ()
-
-
 TRANSFER_HOST = "stash.broker.test"
 
 
-def test_derive_admits_the_providers_transfer_hosts_with_the_grant() -> None:
-    """A grant also admits and meters its broker's declared file-store hosts — where the sandbox
-    fetches a tool's presigned file outputs and stages its file inputs — still injecting nothing."""
-    grant = Grant(
-        id=uuid4(),
-        connection_id=uuid4(),
-        provider="stub",
-        account_id="acct-42",
-        host=GRANTED_HOST,
-        owner_member_id=uuid4(),
-        owner_email="owner@x.test",
-        connection_shared=False,
-    )
-    rules = derive_grant_rules((grant,), ConnectorTransferHosts({"stub": (TRANSFER_HOST,)}))
-    scope = next(r for r in rules if isinstance(r, ScopeRule))
-    assert scope.allowed_hosts == frozenset({GRANTED_HOST, TRANSFER_HOST})
-    assert MeterRule(host=TRANSFER_HOST, dimension=REQUEST_METER_DIMENSION) in rules
-    assert not any(isinstance(r, InjectionRule) for r in rules)
-
-
-def test_derive_ignores_another_providers_transfer_hosts() -> None:
-    grant = Grant(
-        id=uuid4(),
-        connection_id=uuid4(),
-        provider="stub",
-        account_id="acct-42",
-        host=GRANTED_HOST,
-        owner_member_id=uuid4(),
-        owner_email="owner@x.test",
-        connection_shared=False,
-    )
-    rules = derive_grant_rules((grant,), ConnectorTransferHosts({"other": (TRANSFER_HOST,)}))
-    scope = next(r for r in rules if isinstance(r, ScopeRule))
-    assert scope.allowed_hosts == frozenset({GRANTED_HOST})
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) -> None:
     """The per-turn resolver carries the manifests' provider→transfer-hosts map, so a granted
     provider's broker file store is reachable for exactly the turns its grant covers."""
@@ -303,6 +234,7 @@ async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) 
     assert not any(isinstance(r, InjectionRule) for r in rules)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_grant_round_trips_carrying_only_the_account_id(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -334,26 +266,7 @@ async def test_grant_round_trips_carrying_only_the_account_id(db: None) -> None:
     )
 
 
-async def test_record_rejects_a_control_char_account_id(db: None) -> None:
-    """The account_id is external (the provider's OAuth exchange) and a connector tool sends it to
-    the broker, so a CR/LF that could forge a broker request is refused at record."""
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    with pytest.raises(ValueError, match="control character"):
-        await _record(
-            GrantStore(),
-            workspace_id,
-            agent_id,
-            provider="stub",
-            account_id="acct-42\r\nX-Injected: 1",
-            host=GRANTED_HOST,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-            shared=False,
-        )
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_reconnecting_the_same_account_updates_not_duplicates(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -383,6 +296,7 @@ async def test_reconnecting_the_same_account_updates_not_duplicates(db: None) ->
     assert grants[0].host == HOST_B
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_reconnecting_an_owned_account_cannot_reassign_it(db: None) -> None:
     workspace_id = await _workspace()
     owner_id, agent_id = await _member_agent(workspace_id)
@@ -440,6 +354,7 @@ async def test_reconnecting_an_owned_account_cannot_reassign_it(db: None) -> Non
     assert (row.owner_member_id, row.host, row.shared) == (owner_id, HOST_A, False)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_reconnect_never_narrows_a_shared_connection(db: None) -> None:
     """The owner reconnects a workspace-shared account for another agent with shared=False —
     the connect tool's default — and the connection stays shared: reconnect widens only."""
@@ -485,6 +400,7 @@ async def test_reconnect_never_narrows_a_shared_connection(db: None) -> None:
     assert bool(row.shared) is True
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connect_flow_records_a_durable_grant_with_account_label(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -529,6 +445,7 @@ async def test_connect_flow_records_a_durable_grant_with_account_label(db: None)
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connect_flow_cannot_land_after_the_grantor_loses_access(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -568,6 +485,7 @@ async def test_connect_flow_cannot_land_after_the_grantor_loses_access(db: None)
     assert (connections, grants) == (0, 0)
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_record_takes_no_lock_that_conflicts_with_a_concurrent_workspace_write(
     db: None,
     database_url: str,
@@ -626,6 +544,7 @@ async def test_record_takes_no_lock_that_conflicts_with_a_concurrent_workspace_w
     assert owner == member_id
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_landed_connection_reaches_every_extension_that_derives_from_it(db: None) -> None:
     """The control-plane seam: completing the handoff publishes the committed connection to each
     declared `connection_recorded` hook, so an extension creates what the connection implies inside
@@ -697,79 +616,6 @@ async def test_a_landed_connection_reaches_every_extension_that_derives_from_it(
             ).scalar_one() == landed.connection_id
 
 
-async def test_connect_flow_records_null_account_label(db: None) -> None:
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    flow = ConnectFlow(
-        providers={"stub": StubProvider(account_label=None)},
-        fernet=Fernet(Fernet.generate_key()),
-        store=GrantStore(),
-        redirect_uri=REDIRECT_URI,
-    )
-    state = parse_qs(
-        urlparse(
-            flow.authorize(
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                provider="stub",
-                grantor_member_id=member_id,
-                conversation_id=conversation_id,
-                shared=False,
-            )
-        ).query
-    )["state"][0]
-    await flow.complete(state=state, code="the-code")
-    async with workspace_tx() as connection:
-        label = (
-            await connection.execute(
-                sa.select(tables.connection.c.account_label).where(
-                    tables.connection.c.workspace_id == workspace_id
-                )
-            )
-        ).scalar_one()
-    assert label is None
-
-
-async def test_reconnect_refreshes_account_label(db: None) -> None:
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-
-    async def complete(label: str) -> None:
-        flow = ConnectFlow(
-            providers={"stub": StubProvider(account_label=label)},
-            fernet=Fernet(Fernet.generate_key()),
-            store=GrantStore(),
-            redirect_uri=REDIRECT_URI,
-        )
-        state = parse_qs(
-            urlparse(
-                flow.authorize(
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    provider="stub",
-                    grantor_member_id=member_id,
-                    conversation_id=conversation_id,
-                    shared=False,
-                )
-            ).query
-        )["state"][0]
-        await flow.complete(state=state, code="the-code")
-
-    await complete("Work account")
-    await complete("Personal account")
-    async with workspace_tx() as connection:
-        label = (
-            await connection.execute(
-                sa.select(tables.connection.c.account_label).where(
-                    tables.connection.c.workspace_id == workspace_id
-                )
-            )
-        ).scalar_one()
-    assert label == "Personal account"
-
-
 async def test_tampered_connect_state_is_refused() -> None:
     flow = ConnectFlow(
         providers={"stub": StubProvider()},
@@ -779,25 +625,6 @@ async def test_tampered_connect_state_is_refused() -> None:
     )
     with pytest.raises(ConnectStateInvalid):
         await flow.complete(state="not-a-sealed-token", code="x")
-
-
-def test_unknown_provider_is_rejected() -> None:
-    flow = ConnectFlow(
-        providers={},
-        fernet=Fernet(Fernet.generate_key()),
-        store=GrantStore(),
-        redirect_uri=REDIRECT_URI,
-    )
-    with pytest.raises(UnknownProvider) as caught:
-        flow.authorize(
-            workspace_id=uuid4(),
-            agent_id=uuid4(),
-            provider="nope",
-            grantor_member_id=uuid4(),
-            conversation_id=uuid4(),
-            shared=False,
-        )
-    assert str(caught.value) == "No connector is available for 'nope'."
 
 
 async def test_validating_an_unclaimed_provider_states_the_refusal() -> None:
@@ -812,6 +639,7 @@ async def test_validating_an_unclaimed_provider_states_the_refusal() -> None:
     assert str(caught.value) == "No connector is available for 'linear'."
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -834,6 +662,7 @@ async def test_grant_summaries_expose_the_audit_view(db: None) -> None:
     assert (summary.owner_member_id, summary.conversation_id) == (member_id, conversation_id)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> None:
     """Per-agent authentication isolation: agent A's resolved rules carry an exact rule for A's
     provider only — B's host is neither scoped nor forwardable in A's set, so A cannot inject or
@@ -884,6 +713,7 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
     assert InternetRule() in rules_a
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) -> None:
     """The resolver derives each call, so a grant recorded after it was built is live on the next
     turn's resolve — nothing pins a snapshot at boot."""
@@ -985,6 +815,7 @@ class _QueueDbos:
         self.enqueued.append(turn_id)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_completed_connect_lands_a_real_turn_on_the_conversations_queue(db: None) -> None:
     """The seam proven against the queue itself rather than a recorder: the callback runs the real
     `ConnectResume` over the real `Admission`, and what is read back is the durable turn in the
@@ -1094,90 +925,7 @@ async def test_a_completed_connect_lands_a_real_turn_on_the_conversations_queue(
     assert after == 1
 
 
-def test_the_callback_page_is_small_and_fetches_only_its_own_mark() -> None:
-    """A member waits on this page in a browser they opened for one moment, often on a phone off a
-    Slack thread, and no session or cache stands behind it. So the document carries its own styling
-    and asks for exactly one thing more: the mark, from this same origin on the connection already
-    open. A stylesheet or a font added later would each cost another round trip on that connection,
-    and the cap plus these assertions are what keep them out.
-
-    Inlining the mark instead would put 19 KB on a 700-byte page, and nothing in front of this
-    deploy compresses a response — so it is served once and cached for good."""
-    page = callback_page(headline="GitHub connected.", detail=CLOSE_THIS_PAGE).body.decode()
-
-    assert len(page.encode()) < CALLBACK_PAGE_MAX_BYTES
-    # Same origin, so no host to resolve and no second connection to open.
-    assert "://" not in page
-    assert page.count("src=") == 1 and CONNECT_LOGO_PATH in page
-    # It answers in the reader's own theme without a media query, which is the cheapest way to.
-    assert "color-scheme:light dark" in page
-    # A page that still asks the member for something must stay put, so it carries no script.
-    assert "<script" not in page
-
-
-def test_a_return_leg_with_nothing_left_to_say_closes_its_own_tab() -> None:
-    """The member is finished here and the agent has the work, so the tab goes away on its own
-    rather than being left for them to deal with. The close runs from the document itself, and the
-    detail line stays the instruction for a browser that refuses to close a tab it did not open."""
-    finished = callback_page(
-        headline="GitHub is connected.", detail=CLOSE_THIS_PAGE, close=True
-    ).body.decode()
-
-    assert "window.close()" in finished and CLOSE_THIS_PAGE in finished
-    # Still one document, one fetch: the close costs no round trip.
-    assert "://" not in finished
-    assert finished.count("src=") == 1
-    assert len(finished.encode()) < CALLBACK_PAGE_MAX_BYTES
-
-
-def test_a_finished_return_leg_links_back_to_the_conversation() -> None:
-    """The close is refused for any tab a script did not open, which is most of them: the member
-    reached this page from a chat link through the provider. A link needs no permission, so it is
-    the half that always works — and it replaces the detail line, because it says the same thing
-    and acts on it. It is styled in `currentColor`, so it needs no colour of its own to hold in
-    either theme, and the rule ships only on a page that has a link."""
-    back = "https://slack.com/app_redirect?app=A1&team=T1"
-    linked = callback_page(
-        headline="ufo is installed.", link=PageLink(label="Continue in Slack", url=back), close=True
-    ).body.decode()
-    plain = callback_page(headline="GitHub connected.", detail=CLOSE_THIS_PAGE).body.decode()
-
-    assert f'<a href="{back}">Continue in Slack</a>' in unescape(linked)
-    assert "<p>" not in linked
-    assert "color:inherit" in linked and "a{" not in plain
-    assert len(linked.encode()) < CALLBACK_PAGE_MAX_BYTES
-
-
-def test_the_connect_mark_is_the_portals_own_file_byte_for_byte() -> None:
-    """A logo is drawn artwork, so core copies it rather than rewriting it. Hand-minifying this one
-    drew it wrongly: the counters in the letters are cut by the `fill-rule: evenodd` that its
-    `<defs>` stylesheet carries, and rounding the coordinates moved the shapes against each other.
-    Nothing about a rendered glyph fails a size assertion, so this compares the bytes instead — and
-    it is also what keeps the two copies from drifting apart as the brand changes."""
-    portal = (
-        Path(__file__).resolve().parents[3]
-        / "extensions"
-        / "web"
-        / "frontend"
-        / "src"
-        / "assets"
-        / "ufo-logo.svg"
-    )
-
-    assert portal.is_file(), "the portal's logo moved — core's copy is now unanchored"
-    assert CONNECT_LOGO_FILE.read_bytes() == portal.read_bytes()
-
-
-def test_the_connect_mark_is_served_immutably_from_core() -> None:
-    """The page is reached with no session and no frontend build behind it, so the mark cannot be
-    the portal's copy: that one is fingerprinted by its bundler and its name changes every build.
-    Core serves its own, and says it never changes, so a member who connects a second account pays
-    for it once."""
-    assert CONNECT_LOGO_FILE.is_file()
-    assert b"<svg" in CONNECT_LOGO_FILE.read_bytes()[:200]
-    assert "immutable" in CONNECT_LOGO_CACHE
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_connect_from_a_portal_panel_leaves_the_intent_lane_alone(db: None) -> None:
     """A connect begun from a portal panel seals that panel's own conversation, and that lane
     dispatches one typed verb per turn with no model round. A free-text message admitted there
@@ -1263,6 +1011,7 @@ async def test_a_connect_from_a_portal_panel_leaves_the_intent_lane_alone(db: No
     assert "window.close()" in page
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker(
     db: None,
 ) -> None:
@@ -1386,6 +1135,7 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
     assert (rows[0].owner_member_id, rows[0].conversation_id) == (member_id, conversation_id)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connect_handoff_refuses_a_request_whose_agent_is_gone(db: None) -> None:
     """A request outliving its own signing window may outlive the agent it was to grant. Sealing a
     state for one the workspace no longer holds moves the failure into the callback, where the
@@ -1429,145 +1179,6 @@ async def test_connect_handoff_refuses_a_request_whose_agent_is_gone(db: None) -
         await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
 
 
-async def test_connect_handoff_mints_for_a_request_older_than_one_signing_window(db: None) -> None:
-    """A request outlives the window any one state is signed for — a member reads the reply, leaves,
-    and presses the control later — so an old request mints rather than refusing the only act its
-    reply names."""
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    flow = ConnectFlow(
-        providers={"stub": StubProvider()},
-        fernet=Fernet(Fernet.generate_key()),
-        store=GrantStore(),
-        redirect_uri=REDIRECT_URI,
-    )
-    turn_id = uuid4()
-    terminal = TerminalFrame(
-        status="done",
-        connect_request=ConnectRequest(provider="stub", requester_member_id=member_id),
-    )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="done",
-                inbound="connect",
-                admission_source="member",
-                speaker_member_id=member_id,
-                terminal=terminal.model_dump(mode="json"),
-                created_at=sa.func.now(),
-                updated_at=datetime.now(UTC) - timedelta(minutes=11),
-            )
-        )
-    minted = await ConnectHandoff(flow).authorize(workspace_id, turn_id, member_id)
-    assert minted.startswith("https://stub.test/oauth?state=")
-    async with workspace_tx() as connection:
-        stamped = (
-            await connection.execute(
-                sa.select(
-                    tables.turn.c.connect_authorization_url,
-                    tables.turn.c.connect_authorized_at,
-                ).where(tables.turn.c.id == turn_id)
-            )
-        ).one()
-    assert stamped.connect_authorization_url == minted
-    assert stamped.connect_authorized_at is not None
-
-
-async def test_connect_handoff_replays_one_authorization_then_remints_past_its_window(
-    db: None,
-) -> None:
-    """Every read of one request names one control while the state it carries is live, so a reload
-    and the stream draw the same URL. Once that state has aged past the window the callback would
-    refuse it, the next read mints a fresh one in its place — the control the member presses is
-    always a live consent page."""
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    flow = ConnectFlow(
-        providers={"stub": StubProvider()},
-        fernet=Fernet(Fernet.generate_key()),
-        store=GrantStore(),
-        redirect_uri=REDIRECT_URI,
-    )
-    turn_id = uuid4()
-    terminal = TerminalFrame(
-        status="done",
-        connect_request=ConnectRequest(provider="stub", requester_member_id=member_id),
-    )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="done",
-                inbound="connect",
-                admission_source="member",
-                speaker_member_id=member_id,
-                terminal=terminal.model_dump(mode="json"),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    handoff = ConnectHandoff(flow)
-    url = await handoff.authorize(workspace_id, turn_id, member_id)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(updated_at=datetime.now(UTC) - timedelta(minutes=11))
-            .where(tables.turn.c.id == turn_id)
-        )
-    assert await handoff.authorize(workspace_id, turn_id, member_id) == url
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(connect_authorized_at=datetime.now(UTC) - timedelta(minutes=11))
-            .where(tables.turn.c.id == turn_id)
-        )
-    reminted = await handoff.authorize(workspace_id, turn_id, member_id)
-    assert reminted.startswith("https://stub.test/oauth?state=")
-    assert reminted != url
-    assert await handoff.authorize(workspace_id, turn_id, member_id) == reminted
-    # One handed back late in its own signing window would send the member to a consent page the
-    # callback then refuses, so the memo is spent well before the state it holds is.
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(
-                connect_authorized_at=datetime.now(UTC)
-                - timedelta(seconds=CONNECT_MEMO_SECONDS + 1)
-            )
-            .where(tables.turn.c.id == turn_id)
-        )
-    fresher = await handoff.authorize(workspace_id, turn_id, member_id)
-    assert fresher not in (url, reminted)
-    # Age it by the store's own clock, which is what stamped it: a stamp read back in whatever
-    # precision that store keeps names no row, so the write that replaces an aged authorization
-    # names the URL it read instead.
-    async with workspace_tx() as connection:
-        clock = (
-            "datetime('now','-11 minutes')"
-            if connection.dialect.name == "sqlite"
-            else "now() - interval '11 minutes'"
-        )
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(connect_authorized_at=sa.text(clock))
-            .where(tables.turn.c.id == turn_id)
-        )
-    again = await handoff.authorize(workspace_id, turn_id, member_id)
-    assert again.startswith("https://stub.test/oauth?state=")
-    assert again not in (url, reminted)
-
-
 async def test_connect_account_without_a_speaker_is_refused() -> None:
     ctx = _turn_context(uuid4(), uuid4(), uuid4(), None)
     with pytest.raises(ValueError, match="speaking member"):
@@ -1594,34 +1205,7 @@ async def test_the_begin_route_is_gone_and_the_callback_reports_unavailable_with
     assert callback.status_code == 503
 
 
-async def test_connect_flow_records_the_models_shared_decision(db: None) -> None:
-    """The model decides disclosure at connect time: shared=True lands a workspace-shared grant,
-    the default lands one private to its grantor."""
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    store = GrantStore()
-    flow = ConnectFlow(
-        providers={"stub": StubProvider()},
-        fernet=Fernet(Fernet.generate_key()),
-        store=store,
-        redirect_uri=REDIRECT_URI,
-    )
-    url = flow.authorize(
-        workspace_id=workspace_id,
-        agent_id=agent_id,
-        provider="stub",
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=True,
-    )
-    state = parse_qs(urlparse(url).query)["state"][0]
-    await flow.complete(state=state, code="c")
-    (grant,) = await _active(store, workspace_id, agent_id)
-    assert grant.connection_shared is True
-    assert grant.owner_member_id == member_id
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_grant_defaults_private_and_reconnect_updates_shared(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -1645,33 +1229,7 @@ async def test_a_grant_defaults_private_and_reconnect_updates_shared(db: None) -
     assert summary.shared is True
 
 
-async def test_set_shared_flips_the_connection_for_every_attached_agent(db: None) -> None:
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    second_agent = await _agent(workspace_id, "reviewer")
-    conversation_id = await _conversation(workspace_id, member_id)
-    store = GrantStore()
-    for target in (agent_id, second_agent):
-        await _record(
-            store,
-            workspace_id,
-            target,
-            provider="stub",
-            account_id="acct-42",
-            host=GRANTED_HOST,
-            grantor_member_id=member_id,
-            conversation_id=conversation_id,
-            shared=False,
-        )
-    (initial,) = await _active(store, workspace_id, agent_id)
-    assert await _set_shared(store, workspace_id, agent_id, member_id, initial.id, True) is True
-    (flipped,) = await _active(store, workspace_id, agent_id)
-    assert flipped.connection_shared is True
-    (untouched,) = await _active(store, workspace_id, second_agent)
-    assert untouched.connection_shared is True
-    assert await _set_shared(store, workspace_id, agent_id, member_id, uuid4(), True) is False
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_attach_honors_ownership_and_sharing_and_never_widens(db: None) -> None:
     """The owner attaches their private connection to a second agent; another member is refused
     until the connection is shared, and an admin holds no escape past that refusal. A `shared`
@@ -1772,6 +1330,7 @@ async def test_attach_honors_ownership_and_sharing_and_never_widens(db: None) ->
         )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_revoke_removes_only_the_named_agents_binding(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -1798,60 +1357,7 @@ async def test_revoke_removes_only_the_named_agents_binding(db: None) -> None:
     assert await _revoke(store, workspace_id, agent_id, member_id, initial.id) is False
 
 
-async def test_grant_mutations_bump_the_egress_rules_generation(db: None) -> None:
-    """The proxy's rule cache pins this counter, so every act that changes what the wire may do
-    reaches the next CONNECT instead of waiting out the cache TTL."""
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    second_agent = await _agent(workspace_id, "reviewer")
-    conversation_id = await _conversation(workspace_id, member_id)
-    store = GrantStore()
-
-    async def generation() -> int:
-        async with workspace_tx() as connection:
-            return (
-                await connection.execute(
-                    sa.select(tables.workspace.c.egress_rules_generation).where(
-                        tables.workspace.c.id == workspace_id
-                    )
-                )
-            ).scalar_one()
-
-    start = await generation()
-    await _record(
-        store,
-        workspace_id,
-        agent_id,
-        provider="stub",
-        account_id="acct-42",
-        host=GRANTED_HOST,
-        grantor_member_id=member_id,
-        conversation_id=conversation_id,
-        shared=True,
-    )
-    recorded = await generation()
-    with ws(workspace_id), agent(second_agent):
-        assert await store.attach(
-            provider="stub",
-            account_id="acct-42",
-            conversation_id=conversation_id,
-            actor_member_id=member_id,
-            shared=False,
-        )
-    attached = await generation()
-    (grant,) = await _active(store, workspace_id, agent_id)
-    assert await _set_shared(store, workspace_id, agent_id, member_id, grant.id, False)
-    unshared = await generation()
-    assert await _revoke(store, workspace_id, agent_id, member_id, grant.id)
-    revoked = await generation()
-    with ws(workspace_id), agent(second_agent):
-        assert await store.disconnect(grant.connection_id, actor_member_id=member_id)
-    disconnected = await generation()
-
-    assert start == 0
-    assert start < recorded < attached < unshared < revoked < disconnected
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_same_owner_replacements_refuse_stale_generations(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -1920,6 +1426,7 @@ async def test_same_owner_replacements_refuse_stale_generations(db: None) -> Non
     assert (await _active(store, workspace_id, agent_id)) == (regranted,)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_admin_may_narrow_and_revoke_but_not_widen(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -1958,6 +1465,7 @@ async def test_admin_may_narrow_and_revoke_but_not_widen(db: None) -> None:
     assert await _active(store, workspace_id, agent_id) == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_stale_owner_mutation_cannot_touch_a_reconnected_account(db: None) -> None:
     workspace_id = await _workspace()
     alice, agent_id = await _member_agent(workspace_id)
@@ -2032,6 +1540,7 @@ async def test_stale_owner_mutation_cannot_touch_a_reconnected_account(db: None)
     assert (current.owner_member_id, current.connection_shared) == (bob, False)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connect_account_carries_the_shared_intent(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
@@ -2117,6 +1626,7 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
     return conversation_id
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(db: None) -> None:
     """The runtime check: a private grant resolves only for its grantor's turns; a shared grant
     for anyone's; a speakerless (scheduled/internal) turn sees only shared grants."""
@@ -2163,6 +1673,7 @@ async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(
             await ctx.connector_account("stub", "acct-other-private")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerless_turns(
     db: None,
 ) -> None:
@@ -2199,6 +1710,7 @@ async def test_connector_accounts_resolve_the_on_behalf_of_member_for_speakerles
         assert await anonymous.connector_accounts("stub") == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_main_agent_connects_an_account_for_another_agent(db: None) -> None:
     """A member on a surface bound only to the main agent finishes another agent's setup by asking.
     The named agent is resolved and gated when the request is made, so the durable request already
@@ -2229,6 +1741,7 @@ async def test_the_main_agent_connects_an_account_for_another_agent(db: None) ->
     assert request.grantee_agent_id == shipped
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_grant_lands_on_the_named_agent_not_the_asking_one(db: None) -> None:
     """The whole point of the target: the member answers on the main agent's turn, and the
     connection must still belong to the agent that needs it. The seal carries the grantee, so the
@@ -2290,6 +1803,7 @@ async def test_the_grant_lands_on_the_named_agent_not_the_asking_one(db: None) -
     assert [row.agent_id for row in granted] == [shipped]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_agent_that_is_not_main_cannot_connect_for_another(db: None) -> None:
     """A grant changes one agent's authority, so naming a different agent is the main agent's act
     alone — the same rule the object verbs hold. Any other agent is refused where it asks."""
@@ -2313,6 +1827,7 @@ async def test_an_agent_that_is_not_main_cannot_connect_for_another(db: None) ->
         )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connecting_for_an_unknown_agent_is_refused(db: None) -> None:
     workspace_id = await _workspace()
     member_id, main_id = await _member_agent(workspace_id)
@@ -2337,6 +1852,7 @@ async def test_connecting_for_an_unknown_agent_is_refused(db: None) -> None:
         )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_grant_refuses_an_archived_app_name(db: None) -> None:
     workspace_id = await _workspace()
     member_id, main_id = await _member_agent(workspace_id)

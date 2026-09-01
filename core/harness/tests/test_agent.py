@@ -138,9 +138,10 @@ def output_contract(blocked: Callable[[], bool] = lambda: False) -> StructuredOu
 
 
 @pytest.mark.asyncio
-async def test_engine_runs_a_tool_and_returns_the_model_answer() -> None:
+async def test_engine_preserves_the_tool_exchange_and_ordered_content() -> None:
     call = ToolCall("one", "echo", {"value": "hello"})
-    model = ScriptedModel([round_("", call), round_("hello")])
+    reasoning = Reasoning("thinking", {"type": "thinking", "thinking": "x"})
+    model = ScriptedModel([ModelRound((), "working", (call,), (reasoning,)), round_("done")])
     tools = Tools()
     conversation = Conversation()
 
@@ -150,10 +151,10 @@ async def test_engine_runs_a_tool_and_returns_the_model_answer() -> None:
 
     exchange = (
         Message("user", "say hello"),
-        Message("assistant", (call,)),
+        Message("assistant", (reasoning, Text("working"), call)),
         Message("user", (ToolResult("one", "hello"),)),
     )
-    assert result == Finished(exchange, "hello")
+    assert result == Finished(exchange, "done")
     assert tools.calls == [call]
     assert conversation.exchanges == [exchange]
     assert model.requests[0].system_prompt == "You are concise."
@@ -161,21 +162,7 @@ async def test_engine_runs_a_tool_and_returns_the_model_answer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_engine_preserves_reasoning_text_calls_and_results_in_order() -> None:
-    call = ToolCall("one", "echo", {"value": "hello"})
-    reasoning = Reasoning("thinking", {"type": "thinking", "thinking": "x"})
-    model = ScriptedModel([ModelRound((), "working", (call,), (reasoning,)), round_("done")])
-
-    result = await AgentEngine(definition(), model, Tools()).run(())
-
-    assert result.messages == (
-        Message("assistant", (reasoning, Text("working"), call)),
-        Message("user", (ToolResult("one", "hello"),)),
-    )
-
-
-@pytest.mark.asyncio
-async def test_empty_round_is_nudged_once() -> None:
+async def test_empty_round_is_nudged_once_then_fails_if_repeated() -> None:
     model = ScriptedModel([round_(), round_("answer")])
 
     result = await AgentEngine(definition(), model, Tools()).run(())
@@ -183,17 +170,12 @@ async def test_empty_round_is_nudged_once() -> None:
     assert result.messages == (Message("user", definition().empty_response_feedback),)
     assert result.answer == "answer"
 
-
-@pytest.mark.asyncio
-async def test_two_empty_rounds_fail() -> None:
-    model = ScriptedModel([round_(), round_()])
-
     with pytest.raises(RuntimeError, match="model returned an empty response twice"):
-        await AgentEngine(definition(), model, Tools()).run(())
+        await AgentEngine(definition(), ScriptedModel([round_(), round_()]), Tools()).run(())
 
 
 @pytest.mark.asyncio
-async def test_round_budget_runs_one_toolless_final_round() -> None:
+async def test_round_budget_exhausts_after_a_tool_or_recoverable_error() -> None:
     call = ToolCall("one", "echo", {"value": "one"})
     model = ScriptedModel([round_("", call), round_("forced")])
     events = Events()
@@ -216,12 +198,9 @@ async def test_round_budget_runs_one_toolless_final_round() -> None:
     assert model.requests[-1].tools == ()
     assert events.exhausted_count == 1
 
+    recovered = ScriptedModel([RecoverableModelError("recovered"), round_("forced")])
 
-@pytest.mark.asyncio
-async def test_recoverable_model_error_consumes_the_same_round_budget() -> None:
-    model = ScriptedModel([RecoverableModelError("recovered"), round_("forced")])
-
-    result = await AgentEngine(definition(max_rounds=1), model, Tools()).run(())
+    result = await AgentEngine(definition(max_rounds=1), recovered, Tools()).run(())
 
     assert result == Finished(
         (Message("user", "recovered"), Message("user", "finish without tools")),
@@ -231,7 +210,7 @@ async def test_recoverable_model_error_consumes_the_same_round_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_lone_finish_call_returns_the_structured_result() -> None:
+async def test_structured_finish_accepts_valid_and_returns_invalid_feedback() -> None:
     call = ToolCall("done", "finish", {"result": "result"})
     model = ScriptedModel([round_("", call)])
 
@@ -239,9 +218,6 @@ async def test_a_lone_finish_call_returns_the_structured_result() -> None:
 
     assert result == Finished((), "result", structured=True)
 
-
-@pytest.mark.asyncio
-async def test_invalid_finish_is_tool_feedback_the_next_round_can_correct() -> None:
     bad = ToolCall("bad", "finish", {})
     good = ToolCall("good", "finish", {"result": "result"})
     model = ScriptedModel([round_("", bad), round_("", good)])
@@ -287,7 +263,7 @@ async def test_arrival_interrupts_the_tool_boundary_before_the_next_round() -> N
 
 
 @pytest.mark.asyncio
-async def test_parallel_safe_calls_run_concurrently_and_keep_model_order() -> None:
+async def test_tool_segments_run_concurrently_and_follow_the_resolved_boundary() -> None:
     first = ToolCall("one", "echo", {"value": "one"})
     second = ToolCall("two", "echo", {"value": "two"})
     both_started = asyncio.Event()
@@ -316,11 +292,6 @@ async def test_parallel_safe_calls_run_concurrently_and_keep_model_order() -> No
         "user", (ToolResult("one", "one"), ToolResult("two", "two"))
     )
 
-
-@pytest.mark.asyncio
-async def test_segments_follow_the_boundarys_flag_for_the_call_it_resolves() -> None:
-    """One offered definition can dispatch calls whose declarations differ, so the boundary answers
-    per call: two calls it calls safe share a segment, and the one it refuses is a barrier."""
     safe_one = ToolCall("one", "dispatch", {"value": "one", "safe": True})
     safe_two = ToolCall("two", "dispatch", {"value": "two", "safe": True})
     barrier = ToolCall("three", "dispatch", {"value": "three", "safe": False})
@@ -349,7 +320,7 @@ async def test_segments_follow_the_boundarys_flag_for_the_call_it_resolves() -> 
     )
 
 
-def test_agent_definition_rejects_invalid_execution_limits() -> None:
+def test_definitions_reject_invalid_values() -> None:
     with pytest.raises(ValueError, match="max_rounds must be positive"):
         definition(max_rounds=0)
     with pytest.raises(ValueError, match="max_parallel_calls must be positive"):
@@ -359,15 +330,12 @@ def test_agent_definition_rejects_invalid_execution_limits() -> None:
             max_parallel_calls=0,
             force_final_prompt="finish",
         )
-
-
-def test_tool_definition_rejects_an_empty_name() -> None:
     with pytest.raises(ValueError, match="tool name is empty"):
         ToolDefinition(" ", "Empty.", {})
 
 
 @pytest.mark.asyncio
-async def test_engine_rejects_duplicate_tool_names() -> None:
+async def test_engine_rejects_ambiguous_tool_names() -> None:
     tools = Tools(
         definitions_=(
             ToolDefinition("echo", "First.", {}),
@@ -378,9 +346,6 @@ async def test_engine_rejects_duplicate_tool_names() -> None:
     with pytest.raises(ValueError, match="duplicate tools: echo"):
         await AgentEngine(definition(), ScriptedModel([]), tools).run(())
 
-
-@pytest.mark.asyncio
-async def test_structured_finish_tool_cannot_shadow_an_agent_tool() -> None:
     finish = output_contract().finish_tool
     tools = Tools(definitions_=(finish,))
 

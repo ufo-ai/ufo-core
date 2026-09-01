@@ -86,15 +86,15 @@ def test_load_dotenv_fails_loud_on_a_quote_that_never_closes(
         _load_dotenv()
 
 
-@pytest.mark.parametrize("address", ["jane doe", "root", "a@b@example.com", "trailing@"])
-def test_init_refuses_an_owner_address_that_is_not_one_local_at_domain(address: str) -> None:
+def test_init_refuses_an_owner_address_that_is_not_one_local_at_domain() -> None:
     """`--email` is the one unvalidated way an address reached a member row: the owner row is
     seated, admin, and undeletable, so a typo would leave a workspace whose own domain matches no
     teammate. The option answers the same shape rule the write enforces, and says so in one line
     instead of raising out of the workspace insert."""
-    result = CliRunner().invoke(init, ["--email", address])
-    assert result.exit_code == 2
-    assert f"{address!r} is not one local@domain address." in result.output
+    for address in ["jane doe", "root", "a@b@example.com", "trailing@"]:
+        result = CliRunner().invoke(init, ["--email", address])
+        assert result.exit_code == 2
+        assert f"{address!r} is not one local@domain address." in result.output
 
 
 def test_new_migration_stamps_the_id_and_chains_onto_core_head(
@@ -142,12 +142,12 @@ def test_head_file_names_the_graphs_core_head() -> None:
     )
 
 
-@pytest.mark.parametrize("slug", ["Ledger Split", "ledger-split", "0114_ledger"])
-def test_new_migration_refuses_a_slug_that_is_not_snake_case(slug: str) -> None:
+def test_new_migration_refuses_a_slug_that_is_not_snake_case() -> None:
     """The slug becomes a module name the tests import by filename."""
-    result = CliRunner().invoke(new_migration, [slug])
-    assert result.exit_code == 2
-    assert f"{slug!r} is not a snake_case name." in result.output
+    for slug in ["Ledger Split", "ledger-split", "0114_ledger"]:
+        result = CliRunner().invoke(new_migration, [slug])
+        assert result.exit_code == 2
+        assert f"{slug!r} is not a snake_case name." in result.output
 
 
 def _handoff_page(fetch: Callable[[str], None], monkeypatch: pytest.MonkeyPatch) -> str:

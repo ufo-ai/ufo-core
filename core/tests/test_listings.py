@@ -39,7 +39,7 @@ def _page(rows: list[Row], cursor: ListingCursor | None, limit: int):
     )
 
 
-def test_a_cursor_round_trips_through_its_token() -> None:
+def _check_a_cursor_round_trips_through_its_token() -> None:
     for cursor in (
         ListingCursor(created_at=STAMP, item_id=ITEM),
         ListingCursor(created_at=STAMP, item_id=ITEM, newer=True),
@@ -47,9 +47,9 @@ def test_a_cursor_round_trips_through_its_token() -> None:
         assert ListingCursor.decode(cursor.encode()) == cursor
 
 
-@pytest.mark.parametrize(
-    "token",
-    [
+def _check_a_token_naming_no_position_is_refused() -> None:
+    """Fail loud: a surface answers its client's error rather than serving some other page."""
+    for token in [
         "",
         "garbage",
         f"sideways|{STAMP.isoformat()}|{ITEM}",
@@ -57,15 +57,12 @@ def test_a_cursor_round_trips_through_its_token() -> None:
         f"older|{STAMP.isoformat()}|not-a-uuid",
         f"older|{STAMP.isoformat()}",
         f"{STAMP.isoformat()}|{ITEM}",
-    ],
-)
-def test_a_token_naming_no_position_is_refused(token: str) -> None:
-    """Fail loud: a surface answers its client's error rather than serving some other page."""
-    with pytest.raises(MalformedCursor):
-        ListingCursor.decode(token)
+    ]:
+        with pytest.raises(MalformedCursor):
+            ListingCursor.decode(token)
 
 
-def test_the_first_page_offers_only_older() -> None:
+def _check_the_first_page_offers_only_older() -> None:
     page = _page(_rows(4), None, 3)
     assert page.rows == ("row 0", "row 1", "row 2")
     assert page.newer is None
@@ -74,7 +71,7 @@ def test_the_first_page_offers_only_older() -> None:
     )
 
 
-def test_a_full_last_page_offers_no_older() -> None:
+def _check_a_full_last_page_offers_no_older() -> None:
     """The row past the limit is the only thing that distinguishes these — without it a listing
     whose last page is exactly full offers an Older control onto nothing."""
     exact = _page(_rows(3), None, 3)
@@ -82,14 +79,14 @@ def test_a_full_last_page_offers_no_older() -> None:
     assert exact.older is None
 
 
-def test_a_page_reached_by_a_cursor_offers_the_way_back() -> None:
+def _check_a_page_reached_by_a_cursor_offers_the_way_back() -> None:
     walked = ListingCursor(created_at=STAMP, item_id=ITEM, newer=False)
     page = _page(_rows(2), walked, 3)
     assert page.older is None
     assert page.newer == ListingCursor(created_at=STAMP, item_id="0", newer=True)
 
 
-def test_walking_newer_reverses_the_page_back_into_recency_order() -> None:
+def _check_walking_newer_reverses_the_page_back_into_recency_order() -> None:
     """`page_query` inverts its ordering to walk toward newer rows, so the rows arrive
     oldest-first and the page hands them back newest-first — the order every listing renders."""
     ascending = list(reversed(_rows(3)))
@@ -100,8 +97,15 @@ def test_walking_newer_reverses_the_page_back_into_recency_order() -> None:
     )
 
 
-def test_an_empty_page_offers_no_control_at_all() -> None:
+def _check_an_empty_page_offers_no_control_at_all() -> None:
     page = _page([], ListingCursor(created_at=STAMP, item_id=ITEM), 3)
     assert page.rows == ()
     assert page.older is None
     assert page.newer is None
+
+
+def test_listings_sync_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 7
+    for check in checks:
+        check()

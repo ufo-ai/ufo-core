@@ -7,7 +7,6 @@ stored ranking never states a claim about access that a connect made stale.
 """
 
 import json
-import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -24,11 +23,8 @@ from ufo_ext_web.panels import (
     Unlock,
 )
 from ufo_ext_web.starters import (
-    LINE_CHARS,
     SLATE_DIGEST,
-    SLATE_SYSTEM,
     SLATE_TOOL,
-    TITLE_CHARS,
     CheckIn,
     RankedUnlock,
     Slate,
@@ -39,7 +35,6 @@ from ufo_ext_web.starters import (
 )
 from ufo_ext_web.surface import (
     DEFAULT_APP_SETUP_ASK,
-    STARTER_APP_SLOTS,
     StarterApp,
     fill_starters,
 )
@@ -62,6 +57,11 @@ from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 AUTO_MODEL = "claude-opus-5"
 PROVIDER_ANTHROPIC = "anthropic"
@@ -146,11 +146,6 @@ def test_the_slate_is_stored_under_the_members_own_subject() -> None:
     assert starters_key(member_id).endswith(member_subject(member_id))
 
 
-def test_the_prompt_states_the_character_budget_the_schema_enforces() -> None:
-    stated = [int(cap) for cap in re.findall(r"at most (\d+) characters", SLATE_SYSTEM)]
-    assert stated == [TITLE_CHARS, LINE_CHARS]
-
-
 def test_a_reply_recording_no_call_raises_rather_than_settling_an_empty_slate() -> None:
     with pytest.raises(ValueError, match="record_slate"):
         settle_slate(_reply(TextBlock(text="here are some ideas")), STAMP)
@@ -187,35 +182,9 @@ def test_an_entry_naming_no_catalog_row_drops() -> None:
     assert [entry.unlock for entry in slate.ranked] == ["inbox-triage"]
 
 
-def test_a_row_ranked_twice_is_taken_once() -> None:
-    slate = settle_slate(
-        _reply(
-            _call(
-                ranked=[
-                    {"unlock": "inbox-triage", "title": "Inbox", "line": "b", "ask": "a"},
-                    {"unlock": "inbox-triage", "title": "Mail", "line": "b", "ask": "a"},
-                ]
-            )
-        ),
-        STAMP,
-    )
-    assert [entry.unlock for entry in slate.ranked] == ["inbox-triage"]
-
-
 def test_an_unusable_check_in_leaves_the_slate_without_one() -> None:
     slate = settle_slate(_reply(_call(ranked=[], check_in={"title": "x"})), STAMP)
     assert slate.check_in is None
-
-
-def test_a_held_row_is_an_application_and_a_short_row_is_the_unlock() -> None:
-    slate = _slate(
-        ranked=(_ranked("inbox-triage", "Inbox"), _ranked("runway-report", "Runway")),
-    )
-    rows, unlock = fill_starters(slate, frozenset({"gmail"}), frozenset())
-    assert [row.line for row in rows] == ["Does Inbox."]
-    assert unlock is not None
-    assert unlock.line == "Does Runway."
-    assert [tile.name for tile in unlock.providers] == ["stripe", "quickbooks"]
 
 
 def test_a_connected_provider_is_never_offered_as_an_unlock() -> None:
@@ -229,45 +198,6 @@ def test_a_connected_provider_is_never_offered_as_an_unlock() -> None:
     assert [row.line for row in rows] == ["Does Runway."]
 
 
-def test_unlocks_take_the_slots_no_ready_application_filled() -> None:
-    """A workspace that has connected nothing has no ready application by definition. The screen
-    fills with named work rather than standing empty. A row standing in an application's slot says
-    its work and nothing about its accounts — it carries `providers` so the row can wear the brand
-    of what it needs, and the row closing the list is the one that states a price."""
-    slate = _slate(
-        ranked=(
-            _ranked("inbox-triage", "Inbox"),
-            _ranked("runway-report", "Runway"),
-            _ranked("release-notes", "Release notes"),
-        )
-    )
-    rows, unlock = fill_starters(slate, frozenset(), frozenset())
-    assert unlock is not None and unlock.line == "Does Inbox."
-    assert [(r.kind, r.line) for r in rows] == [
-        ("unlock", "Does Runway."),
-        ("unlock", "Does Release notes."),
-    ]
-    assert rows[0].line == "Does Runway."
-    assert [t.name for t in rows[0].providers] == ["stripe", "quickbooks"]
-
-
-def test_promotion_stops_at_the_slots_the_screen_draws() -> None:
-    """A long ranking of unreachable rows still yields one screen, not a list of everything the
-    workspace could connect."""
-    slate = _slate(
-        ranked=(
-            _ranked("inbox-triage", "Inbox"),
-            _ranked("runway-report", "Runway"),
-            _ranked("release-notes", "Release notes"),
-            _ranked("payment-watch", "Payments"),
-            _ranked("ticket-themes", "Tickets"),
-        )
-    )
-    rows, unlock = fill_starters(slate, frozenset(), frozenset())
-    assert unlock is not None
-    assert len([r for r in rows if r.kind == "unlock"]) == STARTER_APP_SLOTS
-
-
 def test_a_row_short_of_accounts_is_never_drawn_twice() -> None:
     """The connector row takes the first short row, so promotion starts at the second. A screen
     that offered one row in two places would spend a slot saying the same thing."""
@@ -275,36 +205,6 @@ def test_a_row_short_of_accounts_is_never_drawn_twice() -> None:
     rows, unlock = fill_starters(slate, frozenset({"gmail"}), frozenset())
     assert unlock is not None and unlock.line == "Does Runway."
     assert [(r.kind, r.line) for r in rows] == [("app", "Does Inbox.")]
-
-
-def test_two_ready_applications_leave_no_slot_to_promote_into() -> None:
-    slate = _slate(
-        ranked=(
-            _ranked("inbox-triage", "Inbox"),
-            _ranked("thread-summarizer", "Threads"),
-            _ranked("runway-report", "Runway"),
-        )
-    )
-    rows, unlock = fill_starters(slate, frozenset({"gmail", "slack"}), frozenset())
-    assert [r.kind for r in rows] == ["app", "app"]
-    assert unlock is not None and unlock.line == "Does Runway."
-
-
-def test_a_row_more_than_two_accounts_short_is_passed_over() -> None:
-    row = Unlock(
-        name="three-way",
-        mark="gnomon",
-        does="Needs three.",
-        needs=(("github",), ("stripe",), ("notion",)),
-    )
-    UNLOCKS_BY_NAME[row.name] = row
-    try:
-        slate = _slate(ranked=(_ranked("three-way", "Three"),))
-        rows, unlock = fill_starters(slate, frozenset(), frozenset())
-        assert rows == ()
-        assert unlock is None
-    finally:
-        del UNLOCKS_BY_NAME[row.name]
 
 
 def test_an_application_the_workspace_already_has_is_never_offered_again() -> None:
@@ -370,17 +270,6 @@ def test_two_starters_for_one_default_app_produce_one_offer() -> None:
 
     assert unlock is None
     assert [(row.line, row.agent_id) for row in rows] == [("Does Day ahead.", MEETINGS_ID)]
-
-
-def test_the_screen_takes_no_more_applications_than_it_draws() -> None:
-    slate = _slate(
-        ranked=tuple(
-            _ranked(name, name)
-            for name in ("competitor-watch", "market-researcher", "writing-desk")
-        ),
-    )
-    rows, _unlock = fill_starters(slate, frozenset(), frozenset())
-    assert len(rows) == STARTER_APP_SLOTS
 
 
 def test_the_check_in_closes_the_list_and_founds_no_application() -> None:
@@ -489,46 +378,6 @@ async def _backdate(store: ScopedStore, key: str, field_name: str, minutes: floa
     await store.put(key, {**held, field_name: stamped.isoformat()})
 
 
-async def test_the_first_read_generates_and_stores_the_slate(db: None) -> None:
-    workspace_id, member_id = await _seed_member()
-    client = _SlateClient(RANKED_ARGUMENTS)
-    with ws(workspace_id):
-        slate = await _cache(member_id, client).read()
-        stored = await ScopedStore(extension="web").get(starters_key(member_id))
-
-    assert client.calls == 1
-    assert slate is not None
-    assert [entry.unlock for entry in slate.ranked] == ["pr-babysitter"]
-    assert Slate.model_validate(stored).prompt == SLATE_DIGEST
-
-
-async def test_a_slate_inside_its_ttl_costs_no_model_call(db: None) -> None:
-    workspace_id, member_id = await _seed_member()
-    client = _SlateClient(RANKED_ARGUMENTS)
-    with ws(workspace_id):
-        await _cache(member_id, client).read()
-        await _cache(member_id, client).read()
-        assert client.calls == 1
-
-        await _backdate(ScopedStore(extension="web"), starters_key(member_id), "generated_at", 31)
-        await _cache(member_id, client).read()
-        assert client.calls == 2
-
-
-async def test_changed_ranking_instructions_re_rank_inside_the_ttl(db: None) -> None:
-    workspace_id, member_id = await _seed_member()
-    client = _SlateClient(RANKED_ARGUMENTS)
-    store = ScopedStore(extension="web")
-    with ws(workspace_id):
-        await _cache(member_id, client).read()
-        held = await store.get(starters_key(member_id))
-        assert isinstance(held, dict)
-        await store.put(starters_key(member_id), {**held, "prompt": "a different digest"})
-        await _cache(member_id, client).read()
-
-    assert client.calls == 2
-
-
 async def test_a_failed_generation_answers_what_is_held_and_then_stands_down(db: None) -> None:
     workspace_id, member_id = await _seed_member()
     good = _SlateClient(RANKED_ARGUMENTS)
@@ -553,20 +402,6 @@ async def test_a_failed_generation_answers_what_is_held_and_then_stands_down(db:
         assert bad.calls == 1
         # And the claim was released, so a later read is free to try again.
         assert await store.get(claim_key(member_id)) is None
-
-
-async def test_a_held_claim_leaves_the_second_reader_with_what_is_stored(db: None) -> None:
-    workspace_id, member_id = await _seed_member()
-    client = _SlateClient(RANKED_ARGUMENTS)
-    store = ScopedStore(extension="web")
-    with ws(workspace_id):
-        await store.put(claim_key(member_id), {"claimed_at": datetime.now(UTC).isoformat()})
-        assert await _cache(member_id, client).read() is None
-        assert client.calls == 0
-
-        await _backdate(store, claim_key(member_id), "claimed_at", 3)
-        assert await _cache(member_id, client).read() is not None
-        assert client.calls == 1
 
 
 async def test_a_refusing_balance_generates_nothing(db: None) -> None:

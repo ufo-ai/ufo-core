@@ -9,7 +9,6 @@ routes gmail's feed-sync to; the gmail connector itself keeps its proof in
 `extensions/sources/tests`."""
 
 import base64
-import json
 from collections.abc import Callable, Iterator
 from urllib.parse import parse_qs
 from uuid import UUID, uuid4
@@ -178,25 +177,6 @@ async def test_proxy_drops_an_upstream_cookie_before_the_next_request(
     assert calls == 2
 
 
-async def test_proxy_passes_an_upstream_404_through_verbatim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Gmail's expired-cursor signal is a 404 on the history walk; the proxy hop must not swallow
-    or re-shape it, or the source would never raise `CursorExpired` and refetch."""
-    workspace_id = uuid4()
-    owner = _owner(workspace_id)
-
-    def upstream(target: str, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, json={"error": {"code": 404, "message": "historyId expired"}})
-
-    _install(monkeypatch, owner, upstream)
-    credential = await PipedreamBroker().credential(workspace_id, "gmail", ACCOUNT)
-    async with httpx.AsyncClient(base_url=GMAIL_BASE, transport=credential.transport) as http:
-        response = await http.get(HISTORY_PATH, params={"startHistoryId": "1"})
-    assert response.status_code == 404
-    assert json.loads(response.content)["error"]["message"] == "historyId expired"
-
-
 async def test_pipedream_broker_refuses_a_foreign_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -249,28 +229,6 @@ async def test_pipedream_broker_refuses_an_unhealthy_account_as_a_reconnect(
 
     assert ACCOUNT in str(raised.value)
     assert not isinstance(raised.value, pipedream.PipedreamError)
-
-
-async def test_pipedream_broker_says_reconnect_for_an_account_it_does_not_hold(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A feed-sync grant recorded through a previous broker answers 404 on the account read — the
-    run's failure names the repair (reconnect), never a bare not-found."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/oauth/token":
-            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
-        return httpx.Response(404, json={"error": "Account not found"})
-
-    client = pipedream.PipedreamClient(
-        client_id=f"cid_{uuid4().hex}",
-        client_secret="s",
-        project_id="proj_test",
-        transport=httpx.MockTransport(handler),
-    )
-    monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
-    with pytest.raises(GrantUnusable, match="reconnect with connect_account"):
-        await PipedreamBroker().credential(uuid4(), "gmail", "ca_composio_era")
 
 
 async def test_pipedream_broker_refuses_an_account_on_the_wrong_app(

@@ -675,6 +675,7 @@ async def test_sample_search_provider_answers_a_query_and_fetches() -> None:
     assert page.text == sample.SAMPLE_FETCH_TEXT
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sample_memory_search_provider_receives_the_exact_subjects(db: None) -> None:
     workspace_id = await _workspace()
     member_id = uuid4()
@@ -924,6 +925,7 @@ def test_sample_subagent_profile_flows_through_the_loader_into_the_registry() ->
     assert subagent_system_prompt(profile).endswith(FINISH_CONTRACT)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_subagent_tool_grant_and_default_widen_a_child_beyond_its_named_tools(
     db: None,
 ) -> None:
@@ -976,6 +978,7 @@ async def test_sample_model_provider_is_selected_priced_and_streams(tmp_path: Pa
     assert priced == 6_000_000
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
@@ -1059,6 +1062,7 @@ async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_pa
     ]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connector_execute_tool_resolves_the_bound_account_without_the_sandbox(
     db: None, tmp_path: Path
 ) -> None:
@@ -1120,6 +1124,7 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
         }
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_undeclared_credential_slot_is_refused(db: None) -> None:
     manifest = _sample_manifest()
     declared = frozenset(slot.name for slot in manifest.credentials)
@@ -1129,6 +1134,7 @@ async def test_undeclared_credential_slot_is_refused(db: None) -> None:
         await context.credentials.get(sample.UNDECLARED_SLOT)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_only_an_off_turn_role_carries_the_probe_seam(db: None, tmp_path: Path) -> None:
     """A job's context carries the off-turn exec. A tool's and a turn hook's do not: those run
     inside a turn that already holds its sandbox, and a probe there would open a second,
@@ -1154,6 +1160,7 @@ async def test_only_an_off_turn_role_carries_the_probe_seam(db: None, tmp_path: 
         assert context.probes is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_context_confines_the_credential_handle(db: None) -> None:
     """The credential handle a context carries exposes only its gated methods: no raw
     CredentialStore field to read an undeclared slot. The same confinement holds whether the context
@@ -1190,6 +1197,7 @@ def test_a_route_without_a_credential_key_fails_loud() -> None:
         _mount_ext_routes(FastAPI(), (manifest,), None, None, None, None)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_job_fires_through_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     await _seed_note(workspace_id)
@@ -1202,6 +1210,7 @@ async def test_job_fires_through_its_scoped_context(db: None) -> None:
         assert await scoped.get(sample.JOB_KEY) == {"ran": True}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_onboarding_step_runs_through_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()
@@ -1211,6 +1220,7 @@ async def test_onboarding_step_runs_through_its_scoped_context(db: None) -> None
         assert await scoped.get(sample.ONBOARDING_KEY) == {"onboarded": True}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_route_reaches_its_scoped_context(db: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     workspace_id = await _workspace()
@@ -1238,6 +1248,7 @@ async def test_route_reaches_its_scoped_context(db: None, monkeypatch: pytest.Mo
         assert await scoped.get(sample.ROUTE_KEY) == {"body": "ping", "home_url": None}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_route_is_handed_the_deploy_base_and_the_browser_home(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1288,6 +1299,7 @@ def test_a_tool_is_handed_the_deploy_base_and_the_browser_home() -> None:
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> None:
     first = await _workspace()
     await _seed_note(first)
@@ -1388,6 +1400,7 @@ async def _sole_conversation() -> UUID:
         return (await connection.execute(sa.select(tables.conversation.c.id))).scalar_one()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_job_reads_trajectories_and_opens_a_governed_proposal(
     db: None, tmp_path: Path
 ) -> None:
@@ -1446,6 +1459,7 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
     assert prompt == SEED_PROMPT
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_job_context_confines_blob_to_a_workspace_scoped_trajectory_read(
     db: None, tmp_path: Path
 ) -> None:
@@ -1476,6 +1490,7 @@ async def test_job_context_confines_blob_to_a_workspace_scoped_trajectory_read(
     assert trajectories[0].agent_id == first_agent
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_corpus_reads_only_the_most_recent_conversations(
     db: None, tmp_path: Path
 ) -> None:
@@ -1497,6 +1512,7 @@ async def test_the_corpus_reads_only_the_most_recent_conversations(
     assert [trajectory.agent_id for trajectory in trajectories] == [recent_agent]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_corpus_reads_the_conversations_a_handler_names_whatever_the_bound(
     db: None, tmp_path: Path
 ) -> None:
@@ -1526,6 +1542,7 @@ async def test_the_corpus_reads_the_conversations_a_handler_names_whatever_the_b
         assert await corpus.conversations((elsewhere,)) == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_corrupt_transcript_is_skipped_not_aborting_the_corpus(
     db: None, tmp_path: Path
 ) -> None:
@@ -1593,6 +1610,7 @@ class _NamedModel:
         raise AssertionError("this probe calls no model")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_surface_route_is_handed_the_model_the_deploy_wired(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1650,6 +1668,7 @@ async def test_a_surface_route_is_handed_the_model_the_deploy_wired(
     assert unwired.json() == {"model": None}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sample_surface_admits_links_streams_and_delivers(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1770,6 +1789,7 @@ async def test_sample_surface_admits_links_streams_and_delivers(
     assert round_tripped == b"shared-bytes"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sample_surface_live_admit_tails_and_stays_off_writeback(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2006,6 +2026,7 @@ async def test_core_selects_a_manifest_index_backend_by_name(db: None, database_
         index_backend((manifest,), sample.INDEX_BACKEND, None)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_core_selects_a_manifest_embed_backend_by_name(db: None, database_url: str) -> None:
     """The `embeds` seam end to end through the probe: with `memory.embed_backend` naming the
     sample's backend, core builds the manifest-contributed EmbedClient and it is driven through the
@@ -2063,6 +2084,7 @@ def test_sample_pack_skill_reaches_the_skill_registry() -> None:
     assert sample_pack.SKILL_NAME in dict(registry.index())
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sample_pack_onboarding_step_runs_through_its_scoped_context(db: None) -> None:
     """The pack-level `onboarding` contribution end to end: activating the pack fires its
     onboarding step with a context scoped to the pack's name, which records through its scoped store
@@ -2075,6 +2097,7 @@ async def test_sample_pack_onboarding_step_runs_through_its_scoped_context(db: N
 
 
 @pytest.mark.parametrize("held", [True, False])
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_core_reads_each_declared_workspace_fact_through_its_own_context(
     db: None, held: bool
 ) -> None:

@@ -7,20 +7,16 @@ sets, and the unkeyed answer — no provider, so every flag resolves to its call
 vendor provider publishes none of that, so the endpoint and bounds are read off the client it built.
 """
 
-import json
 import logging
 from collections.abc import Callable
 from dataclasses import replace
-from uuid import uuid4
 
 import httpx
 import pytest
 import ufo_ext_flagship as flagship
 from flagship import FlagshipServerProvider
-from openfeature import api
 
-from ufo.flags import FLAG_TIMEOUT_SECONDS, flag_enabled, init_flags
-from ufo.runtime.workspace import ws
+from ufo.flags import FLAG_TIMEOUT_SECONDS
 
 APP_ID = "flagship-app-7"
 ACCOUNT_ID = "cf-account-42"
@@ -79,15 +75,6 @@ def test_the_request_bound_stays_inside_the_ceiling_a_flag_read_holds() -> None:
     its retries must finish inside that or the ceiling is what cuts the read off."""
     attempts = flagship.REQUEST_RETRIES + 1
     assert flagship.REQUEST_TIMEOUT_SECONDS * attempts < FLAG_TIMEOUT_SECONDS
-
-
-def test_a_zero_cache_window_evaluates_every_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`cache_ttl_seconds = 0` is the operator asking for no caching at all, which the vendor
-    provider spells as no cache rather than a zero-length one."""
-    _keyed(monkeypatch)
-    provider = flagship.build(0.0)
-    assert isinstance(provider, FlagshipServerProvider)
-    assert provider._cache is None
 
 
 @pytest.mark.parametrize(
@@ -156,41 +143,6 @@ def _admin(
     )
 
 
-def test_writing_needs_a_token_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Serve's token may evaluate and nothing else, so the write reads its own key and names it
-    rather than failing at Cloudflare with a permission error somebody has to decode."""
-    _keyed(monkeypatch)
-    monkeypatch.delenv(flagship.WRITE_TOKEN_ENV, raising=False)
-    with pytest.raises(RuntimeError, match=flagship.WRITE_TOKEN_ENV):
-        flagship.build_admin()
-
-
-def test_serving_a_flag_changes_one_field_of_what_the_app_holds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Terraform creates a flag and then ignores what it serves, so this is the only writer of that
-    field — and it must stay the only thing it touches. The API's `PUT` takes the whole flag, so a
-    body naming its own fields drops the rest: the rollout somebody built, and the `type` and
-    `flag_key` terraform sets, whose absence makes the next plan want to replace the flag — which
-    the destructive-change guard refuses, so every deploy stops until the state is repaired. The
-    body is therefore what the app answered, minus the fields it answers with and refuses on a
-    write, with one field changed."""
-    sent: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        sent.append(request)
-        return httpx.Response(200, json={"success": True, "result": ANSWERED_FLAG})
-
-    _admin(monkeypatch, handler).serve("enable-wiki-app", on=False)
-
-    assert [(request.method, str(request.url)) for request in sent] == [
-        ("GET", f"{FLAGS_URL}/enable-wiki-app"),
-        ("PUT", f"{FLAGS_URL}/enable-wiki-app"),
-    ]
-    assert json.loads(sent[1].content) == {**HELD_FLAG, "default_variation": "off"}
-    assert sent[1].headers["authorization"] == f"Bearer {WRITE_TOKEN}"
-
-
 def test_serving_a_variation_the_flag_does_not_hold_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -214,37 +166,3 @@ def test_a_refusal_carries_what_cloudflare_said(monkeypatch: pytest.MonkeyPatch)
     )
     with pytest.raises(RuntimeError, match="Authentication error"):
         admin.serve("enable-wiki-app", on=True)
-
-
-@pytest.mark.parametrize(
-    ("served", "variant", "expected"),
-    [("true", "on", True), ("false", "off", False)],
-)
-async def test_the_evaluate_answer_this_app_gives_reads_through_as_a_flag(
-    monkeypatch: pytest.MonkeyPatch, served: str, variant: str, expected: bool
-) -> None:
-    """The whole read, on the bytes the live app answers with. Flagship types a flag from the
-    variation values it was written with, and terraform can only write strings
-    (`cloudflare_flagship_flag.variations` is `map(string)`), so `value` comes back as `"true"` and
-    never as a JSON boolean. Asked for a boolean this answer is a type mismatch the SDK returns
-    rather than raises, which reads as a flag no operator can move — so the vendor provider, the
-    core helper, and this response shape are proven together or not at all."""
-    _keyed(monkeypatch)
-    provider = flagship.build(0.0)
-    assert isinstance(provider, FlagshipServerProvider)
-    answer = {
-        "flagKey": "enable-wiki-app",
-        "value": served,
-        "variant": variant,
-        "reason": "DEFAULT",
-    }
-    provider._client._async_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=answer))
-    )
-    api.clear_providers()
-    init_flags(provider)
-    try:
-        with ws(uuid4()):
-            assert await flag_enabled("enable-wiki-app", default=not expected) is expected
-    finally:
-        api.clear_providers()

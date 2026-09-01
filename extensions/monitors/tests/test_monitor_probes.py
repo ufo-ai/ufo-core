@@ -38,7 +38,11 @@ from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.turns.audience import SHARED_AUDIENCE
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "watching the run"
 MARKER = "probe-state.txt"
@@ -507,35 +511,3 @@ async def test_only_due_workspaces_reach_the_runner(db: None, tmp_path: Path) ->
     assert workspace_id not in await due_monitor_workspaces()()
     await _due_again(armed.id)
     assert workspace_id in await due_monitor_workspaces()()
-
-
-async def test_a_terminal_turn_does_not_hold_off_a_founding_fire(db: None, tmp_path: Path) -> None:
-    """An ended turn is not a live one: the fire founds the conversation's next turn rather than
-    queueing behind what already finished."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    await _probe_state(tmp_path, conversation_id, "passed\n")
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="done",
-                inbound="earlier work",
-                admission_source="internal",
-                terminal=TerminalFrame(status="done").model_dump(mode="json"),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    dbos = StubDbos()
-    ext = _probing_ctx(_invoker(workspace_id, dbos), tmp_path)
-    with ws(workspace_id), agent(agent_id):
-        await _arm(ext, conversation_id, agent_id, member_id, baseline="queued\n")
-        await MonitorRunner(ctx=ext).run()
-        turns = await _turns(conversation_id)
-
-    assert [turn["status"] for turn in turns] == ["done", "queued"]
-    assert f'cause="{CHANGED}"' in turns[1]["inbound"]

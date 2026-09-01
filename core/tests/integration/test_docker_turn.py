@@ -169,6 +169,7 @@ async def _seed_turn(conversation_id: UUID) -> Turn:
     )
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_turn_execs_bash_in_a_live_container(
     db: None, live_container: SandboxHandle, tmp_path: Path
 ) -> None:

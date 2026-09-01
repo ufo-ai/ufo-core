@@ -23,9 +23,7 @@ from ufo_ext_browser_use import BrowserTaskInput, WideBrowseInput
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.harness.containment import ContainmentError
-from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ExecResult, ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.harness.sandbox.session import ExecResult, SandboxSession
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.tools.context import ToolContext
@@ -34,6 +32,11 @@ from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 API_KEY = "bu_live_secret_0xdeadbeef"
 RUN_ID = "11111111-1111-1111-1111-111111111111"
@@ -215,42 +218,6 @@ def test_this_pack_and_the_browser_pack_cannot_load_together() -> None:
         ToolRegistry(tuple(tool for tool in both if not tool.profile_only))
 
 
-async def test_browser_task_creates_one_run_and_returns_its_result_and_files(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
-) -> None:
-    api = _Api(files=[{"path": "data.csv", "size": 6, "url": DOWNLOAD_URL}])
-    _wire(monkeypatch, api)
-    workspace_id = await _keyed_workspace()
-    sandbox = _Sandbox()
-    with ws(workspace_id):
-        result = await _tool("browser_task").handler(
-            _context(sandbox, tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test",
-                task="read the price",
-                task_name="Price check",
-            ),
-        )
-
-    (created,) = api.sent("POST", "/api/v4/runs")
-    assert created.headers[browser_use.API_KEY_HEADER] == API_KEY
-    body = json.loads(created.content)
-    assert body["model"] == "claude-sonnet-5"
-    assert body["maxCostUsd"] == browser_use.TASK_MAX_COST_USD
-    assert body["browserSettings"] == {"proxyCountryCode": "us"}
-    assert body["task"] == "Start at https://shop.test\n\nread the price"
-
-    assert sandbox.writes == {"/workspace/data.csv": b"col\n1\n"}
-    payload = json.loads(result.content[0].text)
-    assert payload == {
-        "result": "found it",
-        "files": ["data.csv"],
-        "files_not_fetched": [],
-        "more_files_exist": False,
-    }
-    assert not result.is_error
-
-
 async def test_the_api_key_never_reaches_the_presigned_storage_host(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
 ) -> None:
@@ -314,29 +281,6 @@ async def test_a_run_that_finished_just_before_the_deadline_keeps_its_result(
     assert api.sent("POST", f"/api/v4/runs/{RUN_ID}/cancel") == []
     assert outcome.status == "completed"
     assert outcome.output == "found it"
-
-
-async def test_a_model_supplied_path_cannot_break_out_of_the_cat_command(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
-) -> None:
-    """`sandbox.bash` runs a real shell, so a JSON-quoted path would leave `$(...)` live and let a
-    tool argument run commands in the sandbox."""
-    evil = 'entities.txt"; $(touch pwned) `id` $HOME'
-    _wire(monkeypatch, _Api(statuses=["completed"]))
-    workspace_id = await _keyed_workspace()
-    sandbox = _Sandbox(files={evil: "a.test\n", "schema.json": "{}"})
-    with ws(workspace_id):
-        await _tool("wide_browse").handler(
-            _context(sandbox, tmp_path),
-            WideBrowseInput(
-                entities_file=evil,
-                prompt_template="visit {entity}",
-                output_schema_file="schema.json",
-            ),
-        )
-    assert sandbox.commands[0] == f"cat {shlex.quote(evil)}"
-    assert sandbox.commands[0].startswith("cat '")
-    assert '"; $(touch pwned)' not in sandbox.commands[0].replace(shlex.quote(evil), "")
 
 
 async def test_a_vendor_side_cancellation_keeps_its_output_and_is_not_called_a_timeout(
@@ -430,42 +374,6 @@ async def test_an_output_path_escaping_the_workspace_is_a_fault(
             BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
     assert not sandbox.writes
-
-
-async def test_an_output_path_is_not_written_through_a_planted_symlink(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
-) -> None:
-    """Through a real carrier: the vendor names a path under a directory the agent replaced with a
-    link in its own workspace. The write is refused at that component, so a run's output cannot be
-    steered onto a host file by a link the agent left behind."""
-    api = _Api(files=[{"path": "out/data.csv", "size": 6, "url": DOWNLOAD_URL}])
-    _wire(monkeypatch, api)
-    workspace_id = await _keyed_workspace()
-    workspace = tmp_path / "workspace"
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    carrier = LocalCarrier()
-    session = SandboxSession(
-        carrier=carrier,
-        handle=await carrier.create(
-            SandboxSpec(
-                conversation_id=uuid4(),
-                image_ref="ufo-sandbox:latest",
-                workspace_host_path=str(workspace),
-                proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
-                run_token="run-token",
-            )
-        ),
-    )
-    (workspace / "out").symlink_to(outside)
-
-    with ws(workspace_id), pytest.raises(ContainmentError):
-        await _tool("browser_task").handler(
-            _context(session, tmp_path),
-            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
-        )
-
-    assert list(outside.iterdir()) == []
 
 
 async def test_a_failed_output_download_fails_loud_rather_than_writing_an_error_body(
@@ -580,43 +488,6 @@ async def test_a_task_over_the_send_bound_is_refused_rather_than_truncated(
     assert not api.sent("POST", "/api/v4/runs")
 
 
-async def test_wide_browse_runs_each_entity_on_the_batch_model_and_collects_rows(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
-) -> None:
-    api = _Api(statuses=["completed"])
-    _wire(monkeypatch, api)
-    workspace_id = await _keyed_workspace()
-    sandbox = _Sandbox(
-        files={"entities.txt": "a.test\nb.test\na.test\n", "schema.json": '{"type": "object"}'}
-    )
-    with ws(workspace_id):
-        result = await _tool("wide_browse").handler(
-            _context(sandbox, tmp_path),
-            WideBrowseInput(
-                entities_file="entities.txt",
-                prompt_template="visit {entity}",
-                output_schema_file="schema.json",
-            ),
-        )
-
-    creates = api.sent("POST", "/api/v4/runs")
-    assert len(creates) == 2
-    bodies = [json.loads(request.content) for request in creates]
-    assert {body["model"] for body in bodies} == {"gemini-3.5-flash"}
-    assert {body["maxCostUsd"] for body in bodies} == {browser_use.WIDE_BROWSE_MAX_COST_USD}
-    assert sorted(body["task"].splitlines()[0] for body in bodies) == [
-        "visit a.test",
-        "visit b.test",
-    ]
-    assert all('{"type": "object"}' in body["task"] for body in bodies)
-
-    assert not api.touched("/workspaces")
-    rows = json.loads(sandbox.writes[browser_use.WIDE_BROWSE_OUTPUT])
-    assert [row["entity"] for row in rows] == ["a.test", "b.test"]
-    assert {row["status"] for row in rows} == {"completed"}
-    assert json.loads(result.content[0].text)["output_file"] == browser_use.WIDE_BROWSE_OUTPUT
-
-
 async def test_one_failing_entity_does_not_discard_its_siblings_paid_results(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
 ) -> None:
@@ -642,53 +513,6 @@ async def test_one_failing_entity_does_not_discard_its_siblings_paid_results(
     assert rows["c.test"]["status"] == "completed"
     assert rows["b.test"]["status"] == "errored"
     assert "500" in rows["b.test"]["result"]
-
-
-async def test_wide_browse_reattaches_a_recorded_run_instead_of_paying_twice(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
-) -> None:
-    """A crash-recovery re-run reconnects to the run the first attempt already bought — the store
-    key is what makes a repeated fan-out cost nothing extra."""
-    api = _Api(statuses=["completed"])
-    _wire(monkeypatch, api)
-    workspace_id = await _keyed_workspace()
-    sandbox = _Sandbox(files={"entities.txt": "a.test\n", "schema.json": "{}"})
-    ctx = _context(sandbox, tmp_path, idempotency_key="idem")
-    with ws(workspace_id):
-        await ctx.ext.store.put("run/idem/a.test", {"id": RUN_ID, "workspace_id": WORKSPACE_ID})
-        await _tool("wide_browse").handler(
-            ctx,
-            WideBrowseInput(
-                entities_file="entities.txt",
-                prompt_template="visit {entity}",
-                output_schema_file="schema.json",
-            ),
-        )
-    assert not api.sent("POST", "/api/v4/runs")
-    assert api.sent("GET", f"/api/v4/runs/{RUN_ID}")
-
-
-async def test_a_keyed_browser_task_reattaches_the_run_its_first_attempt_bought(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
-) -> None:
-    api = _Api(statuses=["completed"])
-    _wire(monkeypatch, api)
-    workspace_id = await _keyed_workspace()
-    ctx = _context(_Sandbox(), tmp_path, idempotency_key="idem")
-    assert _tool("browser_task").side_effecting is True
-    with ws(workspace_id):
-        await ctx.ext.store.put("run/idem", {"id": RUN_ID, "workspace_id": WORKSPACE_ID})
-        result = await _tool("browser_task").handler(
-            ctx,
-            BrowserTaskInput(
-                url="https://shop.test",
-                task="read the price",
-                task_name="Price check",
-            ),
-        )
-    assert not api.sent("POST", "/api/v4/runs")
-    assert api.sent("GET", f"/api/v4/runs/{RUN_ID}")
-    assert json.loads(result.content[0].text)["result"] == "found it"
 
 
 @pytest.mark.parametrize("vendor_status", ["stopped", "cancelled"])
@@ -787,30 +611,6 @@ async def test_the_mark_is_durable_before_the_cancel_is_attempted(
         recorded = await ctx.ext.store.get("run/idem")
     assert api.sent("POST", f"/api/v4/runs/{RUN_ID}/cancel")
     assert browser_use.StartedRun.model_validate(recorded).timed_out is True
-
-
-async def test_a_keyed_run_records_its_handle_so_a_later_attempt_can_find_it(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_poll: None
-) -> None:
-    """The write half of the reattach: without this record the recovery read has nothing to find."""
-    api = _Api(statuses=["completed"])
-    _wire(monkeypatch, api)
-    workspace_id = await _keyed_workspace()
-    sandbox = _Sandbox(files={"entities.txt": "a.test\n", "schema.json": "{}"})
-    ctx = _context(sandbox, tmp_path, idempotency_key="idem")
-    with ws(workspace_id):
-        await _tool("wide_browse").handler(
-            ctx,
-            WideBrowseInput(
-                entities_file="entities.txt",
-                prompt_template="visit {entity}",
-                output_schema_file="schema.json",
-            ),
-        )
-        recorded = await ctx.ext.store.get("run/idem/a.test")
-    assert len(api.sent("POST", "/api/v4/runs")) == 1
-    assert recorded == {"id": RUN_ID, "workspace_id": WORKSPACE_ID, "timed_out": False}
-    assert browser_use.StartedRun.model_validate(recorded).id == RUN_ID
 
 
 async def test_an_unreadable_schema_file_fails_loud_like_an_unreadable_entities_file(

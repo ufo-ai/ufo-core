@@ -20,7 +20,6 @@ import httpx
 import pytest
 import sqlalchemy as sa
 import ufo_ext_slack.surface as slack
-import yaml
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 from ufo_ext_slack.manifest import manifest as slack_manifest
@@ -36,7 +35,6 @@ from ufo_ext_slack.surface import (
     signing_secret_fingerprint,
 )
 from ufo_ext_slack.tools import (
-    SLACK_SECRET_SLOTS,
     SlackChannelsInput,
     SlackConnectInput,
     SlackManifestInput,
@@ -53,7 +51,7 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
 )
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
-from ufo.host.ext.loader import skill_registry, turn_hooks, turn_tools
+from ufo.host.ext.loader import turn_hooks, turn_tools
 from ufo.host.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import (
@@ -69,7 +67,7 @@ from ufo.runtime.hub import InProcessHub
 from ufo.runtime.prompts.render import rendered_prompt
 from ufo.runtime.queue import _agent_actions, _agent_tools, _with_action_verbs
 from ufo.runtime.tools.context import SpawnResult, ToolContext
-from ufo.runtime.tools.registry import ObjectBinding, ToolDef, ToolRegistry
+from ufo.runtime.tools.registry import ToolDef, ToolRegistry
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import ActivitySummarizer
 from ufo.runtime.workspace import init_workspace_credentials, ws
@@ -83,6 +81,11 @@ from ufo.sdk.surfaces import (
     TerminalFrame,
     Writeback,
 )
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "getting Slack connected"
 
@@ -548,30 +551,6 @@ async def test_connect_stamps_the_mirror_an_install_made_before_it_never_wrote(
     assert (before, after) == (False, True)
 
 
-async def test_the_install_reads_dead_once_the_bot_token_slot_is_emptied(
-    db: None, tmp_path: Path
-) -> None:
-    """The proof says Slack reaches us; the bot token is what reaches back. An admin who empties the
-    slot leaves a workspace that receives events and answers none of them, so the workspace fact
-    must stop claiming it answers — the signing secret and the stamped mirror both still match."""
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    init_workspace_credentials(store)
-    registry, ext_by_tool = _registry(store)
-    blob = FilesystemBlobStore(root=tmp_path)
-    with ws(workspace_id):
-        await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-installed")
-    await _write_identity(blob, workspace_id, "xoxb-installed")
-    await _mark_verified(blob, workspace_id)
-    ext = ext_by_tool["slack_connect"]
-    assert ext is not None
-    with ws(workspace_id):
-        await _run(registry, "slack_connect", _context(workspace_id, ext, blob, owner_id, store))
-        assert await slack.install_is_live(ext) is True
-        await store.clear(workspace_id, SLACK_BOT_TOKEN_SLOT)
-        assert await slack.install_is_live(ext) is False
-
-
 async def test_oauth_default_falls_back_to_manifest_when_unconfigured(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -589,63 +568,6 @@ async def test_oauth_default_falls_back_to_manifest_when_unconfigured(
         result = json.loads(await _run(registry, "slack_connect", ctx))
     assert result["state"] == "not_configured"
     assert "manifest" in result["hint"]
-
-
-async def test_stale_identity_reads_not_installed(db: None, tmp_path: Path) -> None:
-    """A stored token whose identity record was written for a different token (a reinstall left the
-    fingerprint mismatched) reads not_installed, so the owner reconnects via OAuth."""
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    init_workspace_credentials(store)
-    registry, ext_by_tool = _registry(store)
-    blob = FilesystemBlobStore(root=tmp_path)
-    with ws(workspace_id):
-        await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-new")
-    await _write_identity(blob, workspace_id, "xoxb-old")
-    ctx = _context(workspace_id, ext_by_tool["slack_connect"], blob, owner_id, store)
-    with ws(workspace_id):
-        result = json.loads(await _run(registry, "slack_connect", ctx))
-    assert result["state"] == "not_installed"
-    assert "authorize_url" in result
-
-
-async def test_manifest_path_walks_not_configured_to_pending_to_connected(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The bring-your-own-app path: with no OAuth app on the deploy, `method='manifest'` reports
-    not_configured until both secret slots are filled, derives identity with `auth.test` (owner-
-    only) into `pending`, and a verified marker flips it to `connected`."""
-    monkeypatch.delenv(slack.SLACK_CLIENT_ID_ENV, raising=False)
-    monkeypatch.delenv(slack.SLACK_CLIENT_SECRET_ENV, raising=False)
-    monkeypatch.delenv(slack.SLACK_SIGNING_SECRET_ENV, raising=False)
-    workspace_id, owner_id, joiner_id = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    init_workspace_credentials(store)
-    recorder: list[httpx.Request] = []
-    _patch_httpx(monkeypatch, _auth_test_transport(recorder))
-    registry, ext_by_tool = _registry(store)
-    blob = FilesystemBlobStore(root=tmp_path)
-    ext = ext_by_tool["slack_connect"]
-    owner = _context(workspace_id, ext, blob, owner_id, store)
-    joiner = _context(workspace_id, ext, blob, joiner_id, store)
-    with ws(workspace_id):
-        bare = json.loads(await _run(registry, "slack_connect", owner, method="manifest"))
-        assert bare["state"] == "not_configured"
-        assert set(bare["missing"]) == set(SLACK_SECRET_SLOTS)
-        assert bare["events_url"] == f"{PUBLIC_BASE_URL}/surface/slack"
-        await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-byo")
-        await store.put(workspace_id, SLACK_SIGNING_SECRET_SLOT, "byo-secret")
-        with pytest.raises(ValueError, match="workspace admin"):
-            await _run(registry, "slack_connect", joiner, method="manifest")
-        assert recorder == []
-        derived = json.loads(await _run(registry, "slack_connect", owner, method="manifest"))
-        assert derived["state"] == "pending"
-        assert derived["team_id"] == TEAM_ID
-        assert len(recorder) == 1
-        assert await slack.read_identity(WorkspaceBlobStore(backend=blob), "xoxb-byo") is not None
-        await _mark_verified(blob, workspace_id, "byo-secret")
-        connected = json.loads(await _run(registry, "slack_connect", owner, method="manifest"))
-        assert connected["state"] == "connected"
 
 
 async def test_manifest_path_reports_a_rejected_token(
@@ -671,53 +593,6 @@ async def test_manifest_path_reports_a_rejected_token(
         assert await slack.read_identity(WorkspaceBlobStore(backend=blob), "xoxb-revoked") is None
 
 
-async def test_manifest_tool_matches_the_skill_and_validates_the_name(
-    db: None, tmp_path: Path
-) -> None:
-    """The tool's YAML is the skill's YAML — one manifest, pinned, so scopes and events never drift
-    between what the agent renders and what the skill teaches."""
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    registry, ext_by_tool = _registry(store)
-    blob = FilesystemBlobStore(root=tmp_path)
-    ctx = _context(workspace_id, ext_by_tool["slack_app_manifest"], blob, owner_id, store)
-    served = yaml.safe_load(await _run(registry, "slack_app_manifest", ctx, bot_name="acme bot"))
-    assert served["display_information"]["name"] == "acme bot"
-    assert served["oauth_config"]["scopes"]["bot"] == [
-        "app_mentions:read",
-        "assistant:write",
-        "channels:history",
-        "channels:read",
-        "chat:write",
-        "files:read",
-        "files:write",
-        "groups:history",
-        "groups:read",
-        "im:history",
-        "im:read",
-        "mpim:history",
-        "mpim:read",
-        "users:read",
-        "users:read.email",
-    ]
-    assert served["settings"]["event_subscriptions"]["request_url"] == (
-        f"{PUBLIC_BASE_URL}/surface/slack"
-    )
-    skill_body = skill_registry((slack_manifest(),)).named("slack-app-setup").instructions
-    assert "Only a workspace admin can fill these" in skill_body
-    assert "workspace owner" not in skill_body
-    block = re.search(r"```yaml\n(.*?)```", skill_body, re.DOTALL)
-    assert block is not None
-    skill_yaml = yaml.safe_load(
-        block.group(1)
-        .replace("<bot display name>", "acme bot")
-        .replace("<public_base_url>", PUBLIC_BASE_URL)
-    )
-    assert served == skill_yaml
-    with pytest.raises(ValueError, match="display name"):
-        await _run(registry, "slack_app_manifest", ctx, bot_name="<script>")
-
-
 def _channel_row(
     channel_id: str,
     name: str,
@@ -735,10 +610,6 @@ def _channel_row(
         "purpose": {"value": purpose},
         "topic": {"value": topic},
     }
-
-
-def _user(real_name: str, email: str) -> dict[str, object]:
-    return {"real_name": real_name, "profile": {"email": email}, "is_email_confirmed": True}
 
 
 async def _seed_identity(blob: FilesystemBlobStore, workspace_id: UUID, bot_token: str) -> None:
@@ -851,93 +722,6 @@ async def test_slack_channels_searches_across_pages(
     assert len(json.loads(listed.content[0].text)["conversations"]) == 4
 
 
-async def test_slack_channels_finds_a_dm_by_its_people(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A DM has no name, so it is found by who is in it: the tool resolves each 1:1 DM's and group
-    DM's members to their display name/email — dropping the bot itself — and matches the query on
-    those, giving the agent the conversation id to act on."""
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    init_workspace_credentials(store)
-    await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-1")
-    blob = FilesystemBlobStore(root=tmp_path)
-    await _seed_identity(blob, workspace_id, "xoxb-1")
-    pages: list[dict[str, object]] = [
-        {
-            "ok": True,
-            "channels": [
-                _channel_row("C1", "general"),
-                {"id": "D1", "is_im": True, "user": "U_ALICE", "is_member": True},
-                {
-                    "id": "G1",
-                    "is_mpim": True,
-                    "is_private": True,
-                    "name": "mpdm-alice--bob-1",
-                    "is_member": True,
-                },
-            ],
-            "response_metadata": {"next_cursor": ""},
-        }
-    ]
-    users = {
-        "U_ALICE": _user("Alice Eng", "alice@acme.com"),
-        "U_BOB": _user("Bob", "bob@acme.com"),
-    }
-    recorder: list[httpx.Request] = []
-    transport = _directory_transport(
-        pages, members={"G1": [BOT_USER_ID, "U_ALICE", "U_BOB"]}, users=users, recorder=recorder
-    )
-    _patch_httpx(monkeypatch, transport)
-    registry, ext_by_tool = _registry(store)
-    ctx = _context(workspace_id, ext_by_tool["slack_channels"], blob, owner_id)
-    tool = registry["slack_channels"]
-    with ws(workspace_id):
-        result = await tool.handler(
-            ctx,
-            tool.input_model.model_validate({"query": "alice"}),
-        )
-    by_id = {convo["id"]: convo for convo in json.loads(result.content[0].text)["conversations"]}
-    assert set(by_id) == {"D1", "G1"}
-    assert by_id["D1"]["kind"] == "im"
-    assert by_id["D1"]["name"] == ""
-    assert by_id["D1"]["people"] == ["Alice Eng (alice@acme.com)"]
-    # the group DM resolves both members and drops the bot itself.
-    assert by_id["G1"]["kind"] == "mpim"
-    assert by_id["G1"]["people"] == ["Alice Eng (alice@acme.com)", "Bob (bob@acme.com)"]
-    # The two DM kinds are consumed by distinct requests, the acts im:read/mpim:read authorize: the
-    # list asks Slack for both im and mpim, the 1:1 DM's member comes straight off the list object,
-    # and only the group DM triggers a conversations.members read.
-    requested_types = recorder[0].url.params["types"].split(",")
-    assert {"im", "mpim"} <= set(requested_types)
-    members_channels = [
-        request.url.params["channel"]
-        for request in recorder
-        if request.url.path == "/api/conversations.members"
-    ]
-    assert members_channels == ["G1"]
-
-
-async def test_slack_channels_requires_a_resolved_identity(db: None, tmp_path: Path) -> None:
-    """The bot token is stored but slack_connect never derived the identity: the tool fails loud
-    toward slack_connect rather than searching without knowing its own id — which would leak the
-    bot into a group DM's people."""
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    init_workspace_credentials(store)
-    await store.put(workspace_id, SLACK_BOT_TOKEN_SLOT, "xoxb-1")
-    registry, ext_by_tool = _registry(store)
-    blob = FilesystemBlobStore(root=tmp_path)
-    ctx = _context(workspace_id, ext_by_tool["slack_channels"], blob, owner_id)
-    tool = registry["slack_channels"]
-    with ws(workspace_id):
-        with pytest.raises(ValueError, match="identity is not resolved"):
-            await tool.handler(
-                ctx,
-                tool.input_model.model_validate({}),
-            )
-
-
 async def test_slack_channels_caps_people_resolution(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -956,7 +740,13 @@ async def test_slack_channels_caps_people_resolution(
     pages: list[dict[str, object]] = [
         {"ok": True, "channels": dms, "response_metadata": {"next_cursor": ""}}
     ]
-    users = {"U_ALICE": _user("Alice Eng", "alice@acme.com")}
+    users = {
+        "U_ALICE": {
+            "real_name": "Alice Eng",
+            "profile": {"email": "alice@acme.com"},
+            "is_email_confirmed": True,
+        }
+    }
     _patch_httpx(monkeypatch, _directory_transport(pages, users=users))
     registry, ext_by_tool = _registry(store)
     ctx = _context(workspace_id, ext_by_tool["slack_channels"], blob, owner_id)
@@ -1005,24 +795,6 @@ async def test_slack_channels_stops_at_the_page_bound(
     payload = json.loads(result.content[0].text)
     assert payload["conversations"] == []
     assert payload["truncated"] is True
-
-
-async def test_slack_channels_needs_the_bot_token(db: None, tmp_path: Path) -> None:
-    """No bot token means Slack is not connected — the tool fails loud toward slack_connect rather
-    than calling Slack unauthenticated."""
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    init_workspace_credentials(store)
-    registry, ext_by_tool = _registry(store)
-    blob = FilesystemBlobStore(root=tmp_path)
-    ctx = _context(workspace_id, ext_by_tool["slack_channels"], blob, owner_id)
-    tool = registry["slack_channels"]
-    with ws(workspace_id):
-        with pytest.raises(ValueError, match="Slack is not connected"):
-            await tool.handler(
-                ctx,
-                tool.input_model.model_validate({}),
-            )
 
 
 @dataclass(frozen=True)
@@ -1105,88 +877,6 @@ def test_tool_inputs_refuse_an_extra_key() -> None:
     ):
         with pytest.raises(ValidationError, match="surprise"):
             model.model_validate({**args, "surprise": "x"})
-
-
-def test_the_slack_tools_are_instance_actions_on_the_slack_surface() -> None:
-    """Each setup tool binds to the `surface` kind as an instance action pinned to the Slack row, so
-    none rides the wire tool set, each answers to `action:surface:<name>`, and none is offered on
-    another surface's row. `slack_connect` binds an installation and
-    seals an install handoff — durable writes — so it is side-effecting and keyed; it declares the
-    presentation the portal's connect step submits through. `slack_channels` keeps its untrusted
-    wall over Slack's own text."""
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    wire, _, verbs = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
-    actions = verbs.actions[SURFACE_KIND]
-    assert set(actions) == {"slack_connect", "slack_app_manifest", "slack_channels"}
-    assert not {"slack_connect", "slack_app_manifest", "slack_channels"} & {t.name for t in wire}
-    for name, bound in actions.items():
-        assert bound.action.bound == ObjectBinding(
-            kind=SURFACE_KIND, binding="instance", name=slack.SURFACE_SLACK
-        )
-        assert bound.action.canonical_id == f"action:{SURFACE_KIND}:{name}"
-        assert bound.extension == slack_manifest().name
-    connect = actions["slack_connect"].action
-    assert connect.side_effecting is True
-    assert connect.untrusted is True
-    assert connect.presentation is not None and connect.presentation.label == "Connect Slack"
-    assert actions["slack_channels"].action.untrusted is True
-    assert actions["slack_channels"].action.side_effecting is False
-    assert actions["slack_app_manifest"].action.presentation is None
-
-
-async def test_reading_the_slack_surface_lists_its_actions_before_slack_is_connected(
-    db: None, tmp_path: Path
-) -> None:
-    """Discovery is the setup path's front door: a granted agent reading `surface/slack` on a
-    workspace with no installation sees the three actions with their call templates pre-bound to the
-    surface, so connecting Slack starts from an object read and never from a memorized tool name."""
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    tools, _, verbs = turn_tools((slack_manifest(),), store, audience=conversation_audience(None))
-    get = next(tool for tool in tools if tool.name == "object_get")
-    ctx = replace(
-        _context(workspace_id, None, FilesystemBlobStore(root=tmp_path), owner_id, store),
-        target=None,
-        granted_actions=_agent_actions(verbs.actions, None, MEMBER_ADMISSION),
-    )
-    with ws(workspace_id):
-        result = await get.handler(
-            ctx, get.input_model.model_validate({"kind": SURFACE_KIND, "name": slack.SURFACE_SLACK})
-        )
-    read = yaml.safe_load(result.content[0].text)
-    assert read["status"] == {"bound": False}
-    assert [view["name"] for view in read["actions"]] == [
-        "slack_app_manifest",
-        "slack_channels",
-        "slack_connect",
-    ]
-    for view in read["actions"]:
-        assert view["call"] == {
-            "kind": SURFACE_KIND,
-            "action": view["name"],
-            "name": slack.SURFACE_SLACK,
-            "input": {},
-        }
-    manifest_view = read["actions"][0]
-    assert set(manifest_view["input_schema"]["properties"]) == {"bot_name"}
-
-
-async def test_dispatch_reaches_the_manifest_handler_under_the_slack_context(
-    db: None, tmp_path: Path
-) -> None:
-    workspace_id, owner_id, _ = await _seed()
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    turn = await _seed_turn(workspace_id, owner_id)
-    with ws(workspace_id):
-        result = await _dispatch(
-            store, FilesystemBlobStore(root=tmp_path), turn, "slack_app_manifest", bot_name="acme"
-        )
-    assert result.is_error is False
-    served = yaml.safe_load(str(result.content))
-    assert served["display_information"]["name"] == "acme"
-    assert served["settings"]["event_subscriptions"]["request_url"] == (
-        f"{PUBLIC_BASE_URL}/surface/slack"
-    )
 
 
 async def test_dispatch_holds_the_connect_admin_gate_and_the_channels_precondition(

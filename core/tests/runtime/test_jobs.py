@@ -128,6 +128,7 @@ async def _await_marker(scoped: ScopedStore) -> object:
             await asyncio.sleep(0.2)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_fire_binds_each_candidate_workspace_and_never_runs_unbound(db: None) -> None:
     """The invariant: `fire` opens `with ws(id)` for each workspace the candidate names and runs the
     handler scoped to it — never once unbound. Two workspaces exist but the selector names only
@@ -150,6 +151,7 @@ async def test_fire_binds_each_candidate_workspace_and_never_runs_unbound(db: No
     assert observed == [ws_a]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_fire_with_empty_candidates_never_invokes_the_handler(db: None) -> None:
     """A selector that names no workspace fires the handler zero times — there is no unbound
     fallthrough, so a job with nothing to do runs no handler at all."""
@@ -170,6 +172,7 @@ async def test_fire_with_empty_candidates_never_invokes_the_handler(db: None) ->
     assert calls == 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_fire_logs_the_exact_failed_job_and_reraises(
     db: None, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -199,6 +202,7 @@ async def test_fire_logs_the_exact_failed_job_and_reraises(
     assert "sqlstate" not in record.ufo
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_fire_names_the_statement_the_database_refused(
     db: None, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -230,6 +234,7 @@ async def test_fire_names_the_statement_the_database_refused(
     assert "_refused" in record.ufo["stack"]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_job_runs_its_own_model_calls_on_the_background_jobs_model(db: None) -> None:
     """A job's `ctx.model` is the deploy registry with its default replaced by the background-jobs
     model, so the one-shot a handler runs — fact extraction, consolidation, a chat title — calls and
@@ -260,6 +265,7 @@ async def test_a_job_runs_its_own_model_calls_on_the_background_jobs_model(db: N
     assert registry.auto_model == "claude-opus-5"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_job_model_call_meters_its_tokens_and_latency_under_the_key_that_fired(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -317,6 +323,7 @@ async def test_a_job_model_call_meters_its_tokens_and_latency_under_the_key_that
     ] == [(key, BACKGROUND_PROFILE, BACKGROUND_MODEL)]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_job_that_needs_the_deploy_model_keeps_it(db: None) -> None:
     """One call site does not fit the cheap model: a self-improvement replay re-sends a whole
     archived transcript, compacted against the deploy default's context window and bounded by
@@ -349,6 +356,7 @@ async def test_a_job_that_needs_the_deploy_model_keeps_it(db: None) -> None:
     assert seen == ["claude-opus-5"]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_recurring_core_job_registers_at_boot_and_fires(
     db: None, dbos_launched: object
 ) -> None:
@@ -370,6 +378,7 @@ async def test_recurring_core_job_registers_at_boot_and_fires(
         jobs_module._firing = None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_tick_skips_a_key_this_process_registers_no_job_for(
     db: None, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -393,6 +402,7 @@ async def test_tick_skips_a_key_this_process_registers_no_job_for(
     assert record.ufo == {"key": vanished}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: object) -> None:
     workspace_id = await _workspace()
     spec = JobSpec(name="boot", schedule=None, handler=_write_marker, candidates=_every_workspace())
@@ -407,6 +417,7 @@ async def test_one_shot_core_job_fires_once_at_boot(db: None, dbos_launched: obj
 
 
 @pytest.mark.serial
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_job_recovery_replays_a_completed_handler_step_without_running_it_again(
     db: None,
     dbos_launched: object,
@@ -496,6 +507,7 @@ def _skips(caplog: pytest.LogCaptureFixture, event: str, **fields: str) -> list[
     ]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_tick_skips_while_predecessor_runs_and_resumes_after_terminal(
     db: None, dbos_launched: object, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -525,6 +537,7 @@ async def test_tick_skips_while_predecessor_runs_and_resumes_after_terminal(
         jobs_module._firing = None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_one_shot_twin_boots_start_one_run(
     db: None, dbos_launched: object, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -548,6 +561,7 @@ async def test_one_shot_twin_boots_start_one_run(
         jobs_module._firing = None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_slow_workspace_does_not_starve_its_neighbors(
     db: None, dbos_launched: object
 ) -> None:
@@ -795,6 +809,7 @@ def _census_reader(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
     return reader
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_census_reports_every_stage_and_counts_only_the_stages_reached(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -828,6 +843,7 @@ async def test_the_census_reports_every_stage_and_counts_only_the_stages_reached
     assert f"ufo.{PRODUCT_ATTACH_METRIC}" not in points
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_census_counts_every_stage_a_finished_workspace_reached(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -860,6 +876,7 @@ async def test_the_census_counts_every_stage_a_finished_workspace_reached(
     assert all(point.value == 1 for point in points[f"ufo.{PRODUCT_STAGE_METRIC}"])
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_census_counts_the_app_stage_off_an_app_the_workspace_made_itself(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -891,6 +908,7 @@ async def test_the_census_counts_the_app_stage_off_an_app_the_workspace_made_its
     assert "app" in built_stages
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_census_ages_a_workspace_out_of_the_active_window_it_left(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -912,6 +930,7 @@ async def test_the_census_ages_a_workspace_out_of_the_active_window_it_left(
     assert stages["active_1d"] == 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_census_names_what_is_attached_without_holding_its_name(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -940,6 +959,7 @@ async def test_the_census_names_what_is_attached_without_holding_its_name(
     }
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_census_counts_a_proved_address_apart_from_its_installation(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -970,6 +990,7 @@ async def test_the_census_counts_a_proved_address_apart_from_its_installation(
     assert reachable_kinds == {SURFACE_KIND, ADDRESS_KIND}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_census_sees_only_the_workspace_it_is_bound_to(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

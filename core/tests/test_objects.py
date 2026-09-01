@@ -132,6 +132,7 @@ SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sand
 OBJECT_NARRATION = "checking the workspace records"
 ADMIN_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 JOINER_CREATED_AT = datetime(2026, 7, 2, tzinfo=UTC)
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
 
 class _UntouchedCarrier:
@@ -534,7 +535,7 @@ async def test_list_pages_with_cursor_and_query(db: None) -> None:
         assert by_field["objects"][0]["size"] == 1
 
 
-def test_object_page_cursor_survives_a_removed_boundary_row() -> None:
+def _check_object_page_cursor_survives_a_removed_boundary_row() -> None:
     rows = tuple(
         ObjectRow(name=f"w-{index:03d}", summary="", fields={"size": index % 3})
         for index in range(OBJECT_LIST_PAGE + 5)
@@ -557,7 +558,7 @@ def test_object_page_cursor_survives_a_removed_boundary_row() -> None:
     assert [row.name for row in second.rows] == [row.name for row in ordered[OBJECT_LIST_PAGE:]]
 
 
-def test_object_page_rejects_a_cursor_from_another_name_order() -> None:
+def _check_object_page_rejects_a_cursor_from_another_name_order() -> None:
     rows = tuple(
         ObjectRow(name=f"w-{index:03d}", summary="") for index in range(OBJECT_LIST_PAGE + 5)
     )
@@ -567,13 +568,13 @@ def test_object_page_rejects_a_cursor_from_another_name_order() -> None:
         object_page(rows, ObjectListQuery(order="desc", cursor=first.next_cursor))
 
 
-def test_object_page_rejects_a_malformed_cursor() -> None:
+def _check_object_page_rejects_a_malformed_cursor() -> None:
     rows = (ObjectRow(name="widget", summary=""),)
     with pytest.raises(ValueError, match="invalid object list cursor"):
         object_page(rows, ObjectListQuery(cursor="not-hex"))
 
 
-def test_object_page_rejects_a_cursor_with_an_invalid_sort_rank() -> None:
+def _check_object_page_rejects_a_cursor_with_an_invalid_sort_rank() -> None:
     rows = (ObjectRow(name="widget", summary=""),)
     cursor = (
         json.dumps(
@@ -593,7 +594,7 @@ def test_object_page_rejects_a_cursor_with_an_invalid_sort_rank() -> None:
     assert "cursor value does not match its sort rank" in str(caught.value.__cause__)
 
 
-def test_object_page_rejects_a_cursor_with_an_unknown_field() -> None:
+def _check_object_page_rejects_a_cursor_with_an_unknown_field() -> None:
     rows = (ObjectRow(name="widget", summary=""),)
     cursor = (
         json.dumps(
@@ -614,19 +615,19 @@ def test_object_page_rejects_a_cursor_with_an_unknown_field() -> None:
     assert "Extra inputs are not permitted" in str(caught.value.__cause__)
 
 
-def test_object_page_rejects_reserved_row_fields() -> None:
+def _check_object_page_rejects_reserved_row_fields() -> None:
     rows = (ObjectRow(name="widget", summary="", fields={"name": "shadow"}),)
     with pytest.raises(ValueError, match="collide with reserved fields"):
         object_page(rows, ObjectListQuery())
 
 
-def test_object_page_rejects_undeclared_row_fields() -> None:
+def _check_object_page_rejects_undeclared_row_fields() -> None:
     rows = (ObjectRow(name="widget", summary="", fields={"color": "teal"}),)
     with pytest.raises(ValueError, match="rows carry undeclared fields"):
         object_page(rows, ObjectListQuery())
 
 
-def test_object_page_search_skips_link_fields() -> None:
+def _check_object_page_search_skips_link_fields() -> None:
     """A signed link carries its expiry and signature, so a numeric search would match every row
     that mints one — search reads text fields, never `url` or `*_url`."""
     fields = frozenset({"subject", "url", "preview_url"})
@@ -651,7 +652,7 @@ def test_object_page_search_skips_link_fields() -> None:
     assert [row.name for row in by_name.rows] == ["report-q3"]
 
 
-def test_member_owned_kinds_gate_through_the_shared_base() -> None:
+def _check_member_owned_kinds_gate_through_the_shared_base() -> None:
     """A member-owned kind cannot hand-roll its own visibility/ownership gate — it subclasses the
     core base that owns it. The connector and source kinds are the reference members; a future
     member-owned kind that reimplements the gate instead of subclassing fails here."""
@@ -662,7 +663,7 @@ def test_member_owned_kinds_gate_through_the_shared_base() -> None:
     assert isinstance(SCHEDULED_TASK_OBJECT.store, MemberOwnedObjects)
 
 
-def test_the_portals_member_reads_are_an_opt_in_a_kind_declares_by_type() -> None:
+def _check_the_portals_member_reads_are_an_opt_in_a_kind_declares_by_type() -> None:
     """The portal's two projections are implemented, not declared: a kind answering a signed-in
     member outside a turn is `MemberReadable`, one answering a whole page is `MemberListable`, and
     a kind absent from a projection is refused by name by the portal's routes instead of raising
@@ -685,7 +686,7 @@ def test_the_portals_member_reads_are_an_opt_in_a_kind_declares_by_type() -> Non
     assert not isinstance(PAGE_OBJECT.store, MemberListable)
 
 
-def test_boot_fails_on_a_colliding_kind() -> None:
+def _check_boot_fails_on_a_colliding_kind() -> None:
     widget = ObjectKind(
         name=sample.WIDGET_KIND,
         description="d",
@@ -718,7 +719,7 @@ def test_boot_fails_on_a_colliding_kind() -> None:
         )
 
 
-def test_boot_fails_on_an_unknown_agent_target_verb() -> None:
+def _check_boot_fails_on_an_unknown_agent_target_verb() -> None:
     kind = ObjectKind(
         name="widget",
         description="d",
@@ -886,7 +887,7 @@ class _SecretSpec(BaseModel):
     inner: _SealedInner | None = None
 
 
-def test_boot_fails_on_a_gate_violating_kind() -> None:
+def _check_boot_fails_on_a_gate_violating_kind() -> None:
     def kind_of(spec_model: type[BaseModel], list_fields: frozenset[str] = frozenset()) -> Manifest:
         return Manifest(
             name="probe",
@@ -912,7 +913,7 @@ def test_boot_fails_on_a_gate_violating_kind() -> None:
     validate_ext_tools((kind_of(sample.WidgetSpec, frozenset({"weight"})),), None)
 
 
-def test_a_declared_field_no_row_produces_reads_as_null() -> None:
+def _check_a_declared_field_no_row_produces_reads_as_null() -> None:
     """`list_fields` is the kind's own vocabulary, so a field its rows never carry is admitted at
     boot and reads null in a listing — filterable and orderable, matching nothing."""
     rows = (ObjectRow(name="widget", summary="teal widget"),)
@@ -1793,7 +1794,7 @@ async def _narrow_conversation(conversation_id: UUID, member_id: UUID) -> None:
         )
 
 
-def test_artifact_object_names_prefix_the_conversation_and_slug_the_filename() -> None:
+def _check_artifact_object_names_prefix_the_conversation_and_slug_the_filename() -> None:
     conv_a, conv_b = uuid4(), uuid4()
     names = artifact_object_names(
         [(conv_a, "Q3 Report(final).PDF"), (conv_a, ".env"), (conv_a, "¡!")]
@@ -3609,7 +3610,7 @@ class _AdminOnlyStore(MemberOwnedObjects[_BootSpec, ObjectOwner]):
         raise AssertionError("gate must refuse before _delete_owned")
 
 
-async def test_shared_admin_only_row_refuses_a_speakerless_turn() -> None:
+async def _check_shared_admin_only_row_refuses_a_speakerless_turn() -> None:
     """A shared admin-only row (owner member_id None, shared) is visible to everyone but mutable
     only by a workspace admin. A speakerless turn has acting member None, which must never
     collide with the None owner into 'owned' — the gate refuses both its mutation and its
@@ -3622,7 +3623,7 @@ async def test_shared_admin_only_row_refuses_a_speakerless_turn() -> None:
         await store.apply(ctx, "boot", _BootSpec(), None, expected_generation=None)
 
 
-async def test_an_ungenerated_kind_reads_a_vanished_row_as_absent_not_a_lost_race() -> None:
+async def _check_an_ungenerated_kind_reads_a_vanished_row_as_absent_not_a_lost_race() -> None:
     """A kind whose store returns no generation is unfenced: the expectation an active verb carries
     is empty, so a row absent by the time the gate looks reads as absent — an empty status and a
     not-found delete — never as a replacement the verb lost a race to."""
@@ -4512,3 +4513,33 @@ async def test_an_archived_app_is_gettable_by_its_durable_name(db: None) -> None
         with pytest.raises(VerbNotSupported) as refusal:
             await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name=durable)
         assert str(refusal.value) == AGENT_ALREADY_ARCHIVED
+
+
+def test_object_pure_contract(database_url: str) -> None:
+    for check in (
+        _check_object_page_cursor_survives_a_removed_boundary_row,
+        _check_object_page_rejects_a_cursor_from_another_name_order,
+        _check_object_page_rejects_a_malformed_cursor,
+        _check_object_page_rejects_a_cursor_with_an_invalid_sort_rank,
+        _check_object_page_rejects_a_cursor_with_an_unknown_field,
+        _check_object_page_rejects_reserved_row_fields,
+        _check_object_page_rejects_undeclared_row_fields,
+        _check_object_page_search_skips_link_fields,
+        _check_member_owned_kinds_gate_through_the_shared_base,
+        _check_the_portals_member_reads_are_an_opt_in_a_kind_declares_by_type,
+        _check_boot_fails_on_a_colliding_kind,
+        _check_boot_fails_on_an_unknown_agent_target_verb,
+        _check_boot_fails_on_a_gate_violating_kind,
+        _check_a_declared_field_no_row_produces_reads_as_null,
+        _check_artifact_object_names_prefix_the_conversation_and_slug_the_filename,
+    ):
+        check()
+
+
+@pytest.mark.asyncio
+async def test_object_async_pure_contract(database_url: str) -> None:
+    for check in (
+        _check_shared_admin_only_row_refuses_a_speakerless_turn,
+        _check_an_ungenerated_kind_reads_a_vanished_row_as_absent_not_a_lost_race,
+    ):
+        await check()

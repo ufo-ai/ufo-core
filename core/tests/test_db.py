@@ -2288,16 +2288,13 @@ def test_the_dial_is_bounded_and_the_pool_is_named() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
+def test_every_backend_bounds_the_wait_for_a_pooled_connection() -> None:
+    for url in [
         "postgresql+asyncpg://ufo:ufo@localhost/ufo",
         "postgresql+psycopg://ufo:ufo@localhost/ufo",
         "sqlite+aiosqlite:///ufo.db",
-    ],
-)
-def test_every_backend_bounds_the_wait_for_a_pooled_connection(url: str) -> None:
-    assert ufo.db._pool_kwargs(url, ufo.db._APP)["pool_timeout"] == ufo.db.POOL_TIMEOUT_SECONDS
+    ]:
+        assert ufo.db._pool_kwargs(url, ufo.db._APP)["pool_timeout"] == ufo.db.POOL_TIMEOUT_SECONDS
 
 
 async def test_every_driver_a_composition_root_opens_can_actually_connect(

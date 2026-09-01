@@ -404,7 +404,7 @@ def _facets(reported: dict[str, object]) -> set[str]:
     return named | {"host"} if reported.get("host_name") else named
 
 
-def test_platform_addons_wait_for_the_load_balancer_webhook() -> None:
+def _check_platform_addons_wait_for_the_load_balancer_webhook() -> None:
     source = _code((ROOT / "infra" / "modules" / "platform" / "addons.tf").read_text())
     controller = _terraform_block(source, "resource", "aws_load_balancer_controller")
     assert "wait             = true" in controller
@@ -416,22 +416,22 @@ def test_platform_addons_wait_for_the_load_balancer_webhook() -> None:
     assert "atomic" not in external_dns
 
 
-def test_webhook_addons_install_atomically() -> None:
+def _check_webhook_addons_install_atomically() -> None:
     source = _code((ROOT / "infra" / "modules" / "platform" / "addons.tf").read_text())
     for name in ("aws_load_balancer_controller", "cert_manager", "external_secrets"):
         addon = _terraform_block(source, "resource", name)
         assert "atomic           = true" in addon
 
 
-@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
-def test_database_storage_monitor_tracks_allocation(environment: str) -> None:
-    assert _monitor_attribute("db_storage_low", "query", environment) == STORAGE_QUERY
-    assert _monitor_attribute("db_storage_low", "critical", environment) == "0.05"
-    assert _monitor_attribute("db_storage_low", "warning", environment) == "0.08"
-    assert _monitor_attribute("db_storage_low", "evaluation_delay", environment) == "900"
+def _check_database_storage_monitor_tracks_allocation() -> None:
+    for environment in DEPLOY_ENVIRONMENTS:
+        assert _monitor_attribute("db_storage_low", "query", environment) == STORAGE_QUERY
+        assert _monitor_attribute("db_storage_low", "critical", environment) == "0.05"
+        assert _monitor_attribute("db_storage_low", "warning", environment) == "0.08"
+        assert _monitor_attribute("db_storage_low", "evaluation_delay", environment) == "900"
 
 
-def test_every_main_push_triggers_deployment() -> None:
+def _check_every_main_push_triggers_deployment() -> None:
     workflow = _workflow(WORKFLOWS / "deploy.yml")
     triggers = workflow["on"]
     assert isinstance(triggers, dict)
@@ -462,7 +462,7 @@ def test_every_main_push_triggers_deployment() -> None:
     assert rollout["concurrency"]["cancel-in-progress"] == "false"
 
 
-def test_every_pull_request_has_one_deployment_gate() -> None:
+def _check_every_pull_request_has_one_deployment_gate() -> None:
     workflow = _workflow(WORKFLOWS / "deploy.yml")
     triggers = workflow["on"]
     assert isinstance(triggers, dict)
@@ -588,7 +588,7 @@ def test_manual_production_target_must_have_a_successful_testing_run(tmp_path: P
     assert "status=" not in query
 
 
-def test_pull_request_plans_active_deployment_inputs() -> None:
+def _check_pull_request_plans_active_deployment_inputs() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
     changes = jobs["changes"]
@@ -621,7 +621,7 @@ def test_pull_request_plans_active_deployment_inputs() -> None:
     assert "exit 0" not in script
 
 
-def test_testing_deploy_writes_provider_credentials_before_apply() -> None:
+def _check_testing_deploy_writes_provider_credentials_before_apply() -> None:
     workflow = _workflow(WORKFLOWS / "deploy.yml")
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
@@ -748,7 +748,7 @@ _EXPANSION_BLOCK_GROUP_AUTH_DIFF = (
 )
 
 
-def test_authorization_expansions_co_deploy_but_contractions_split() -> None:
+def _check_authorization_expansions_co_deploy_but_contractions_split() -> None:
     gate = _deploy_change_gate()
     # Authorization alone, or a runtime change alone, is always fine.
     gate.validate_deploy_change(("infra/modules/platform/iam.tf",), _ADDITIVE_AUTH_DIFF)
@@ -1018,7 +1018,7 @@ def test_deploy_change_gate_entrypoint_exits_nonzero_on_the_boundary(tmp_path: P
     assert allowed.stderr == ""
 
 
-def test_plans_run_only_for_selected_deployment_inputs() -> None:
+def _check_plans_run_only_for_selected_deployment_inputs() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
     client = jobs["client"]
@@ -1530,15 +1530,15 @@ def test_edge_deploys_are_isolated(
     assert failed.returncode != 0
 
 
-@pytest.mark.parametrize("name", ["testing_portal", "prod_portal"])
-def test_flag_resources_keep_their_refresh_address(name: str) -> None:
-    source = _code((ROOT / "infra" / "envs" / "edge" / "flags.tf").read_text())
-    resource = _terraform_block(source, "resource", name)
-    assert re.search(r"^\s*key\s*=\s*each\.key$", resource, re.MULTILINE)
-    assert re.search(r"^\s*flag_key\s*=\s*each\.key$", resource, re.MULTILINE)
+def _check_flag_resources_keep_their_refresh_address() -> None:
+    for name in ["testing_portal", "prod_portal"]:
+        source = _code((ROOT / "infra" / "envs" / "edge" / "flags.tf").read_text())
+        resource = _terraform_block(source, "resource", name)
+        assert re.search(r"^\s*key\s*=\s*each\.key$", resource, re.MULTILINE)
+        assert re.search(r"^\s*flag_key\s*=\s*each\.key$", resource, re.MULTILINE)
 
 
-def test_production_edge_preserves_the_promoted_workspace() -> None:
+def _check_production_edge_preserves_the_promoted_workspace() -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
     deploy = jobs["deploy"]
@@ -1580,7 +1580,7 @@ def test_production_edge_preserves_the_promoted_workspace() -> None:
     )
 
 
-def test_production_shared_edge_uses_current_main() -> None:
+def _check_production_shared_edge_uses_current_main() -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
     deploy = jobs["deploy"]
@@ -1621,9 +1621,8 @@ def test_production_shared_edge_uses_current_main() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("workflow", "job_name", "group"),
-    [
+def _check_edge_writers_share_deploy_concurrency() -> None:
+    for workflow, job_name, group in [
         (
             "deploy.yml",
             "edge",
@@ -1631,15 +1630,13 @@ def test_production_shared_edge_uses_current_main() -> None:
             "format('deploy-edge-pr-{0}', github.event.pull_request.number) || 'deploy-edge' }}",
         ),
         ("deploy-production.yml", "deploy", "deploy-edge"),
-    ],
-)
-def test_edge_writers_share_deploy_concurrency(workflow: str, job_name: str, group: str) -> None:
-    job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
-    assert isinstance(job, dict)
-    assert job["concurrency"] == {"group": group, "cancel-in-progress": "false"}
+    ]:
+        job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
+        assert isinstance(job, dict)
+        assert job["concurrency"] == {"group": group, "cancel-in-progress": "false"}
 
 
-def test_pull_requests_guard_the_production_edge_plan() -> None:
+def _check_pull_requests_guard_the_production_edge_plan() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
     edge = jobs["edge"]
@@ -1680,7 +1677,7 @@ def test_pull_requests_guard_the_production_edge_plan() -> None:
     )
 
 
-def test_pull_requests_plan_production_foundation_without_applying() -> None:
+def _check_pull_requests_plan_production_foundation_without_applying() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
     rollout = jobs["rollout"]
@@ -1810,9 +1807,8 @@ def test_production_prerequisites_fail_before_terraform(
         assert "contains(ResourceARN, `:loadbalancer/net/`)" in invoked
 
 
-@pytest.mark.parametrize(
-    "failed_command",
-    [
+def test_production_prerequisite_queries_fail_loud(tmp_path: Path) -> None:
+    failed_commands = (
         "ec2 describe-vpcs",
         "ec2 describe-addresses",
         "eks list-clusters",
@@ -1823,18 +1819,19 @@ def test_production_prerequisites_fail_before_terraform(
         "elbv2 describe-load-balancers",
         "resourcegroupstaggingapi get-resources",
         "ec2 describe-availability-zones",
-    ],
-)
-def test_production_prerequisite_queries_fail_loud(tmp_path: Path, failed_command: str) -> None:
-    instances_used = (
-        '[["m6i.large", null]]' if failed_command == "ec2 describe-instance-types" else "[]"
     )
-    run, _ = _run_production_prerequisites(
-        tmp_path,
-        failed_command=failed_command,
-        instances_used=instances_used,
-    )
-    assert run.returncode == 42
+    for index, failed_command in enumerate(failed_commands):
+        case_path = tmp_path / str(index)
+        case_path.mkdir()
+        instances_used = (
+            '[["m6i.large", null]]' if failed_command == "ec2 describe-instance-types" else "[]"
+        )
+        run, _ = _run_production_prerequisites(
+            case_path,
+            failed_command=failed_command,
+            instances_used=instances_used,
+        )
+        assert run.returncode == 42, failed_command
 
 
 @pytest.mark.parametrize(
@@ -1876,7 +1873,7 @@ def test_production_vcpu_quota_uses_standard_on_demand_instance_defaults(
     assert 'select(test("^(?:[acdhmrtz][0-9]|i(?:[0-9]|m[0-9]|s[0-9]))"))' in script
 
 
-def test_production_vcpu_reservation_matches_the_node_group() -> None:
+def _check_production_vcpu_reservation_matches_the_node_group() -> None:
     production = (ROOT / "infra" / "envs" / "prod" / "main.tf").read_text()
     eks = (ROOT / "infra" / "modules" / "platform" / "eks.tf").read_text()
     instance_types = re.search(
@@ -1899,7 +1896,7 @@ def test_production_vcpu_reservation_matches_the_node_group() -> None:
     assert int(reservation.group(1)) == nodes * M6I_LARGE_DEFAULT_VCPUS
 
 
-def test_production_nlb_reservation_matches_the_services() -> None:
+def _check_production_nlb_reservation_matches_the_services() -> None:
     production = (ROOT / "infra" / "envs" / "prod" / "ufo.tf").read_text()
     load_balancers = production.count(
         '"service.beta.kubernetes.io/aws-load-balancer-nlb-target-type"'
@@ -2026,7 +2023,7 @@ def test_production_prerequisites_reserve_only_missing_capacity(tmp_path: Path) 
     ]
 
 
-def test_hosted_runtime_receives_the_selected_sandbox_template() -> None:
+def _check_hosted_runtime_receives_the_selected_sandbox_template() -> None:
     template = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
     documents = template.split("\n---\n")
     for name in ("ufo-ingress", "ufo-serve"):
@@ -2045,7 +2042,7 @@ def test_hosted_runtime_receives_the_selected_sandbox_template() -> None:
         assert 'condition     = var.e2b_templates != ""' in variables
 
 
-def test_hosted_serve_attests_the_deployed_bundle() -> None:
+def _check_hosted_serve_attests_the_deployed_bundle() -> None:
     template = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
     deployment = next(
         document
@@ -2057,9 +2054,8 @@ def test_hosted_serve_attests_the_deployed_bundle() -> None:
     assert '- {name: UFO_RUNTIME_IMAGE, value: "${bundle_image}"}' in deployment
 
 
-@pytest.mark.parametrize(
-    ("workflow", "job_name", "plan_name", "step_name", "working_directory"),
-    [
+def _check_saved_plans_reject_destructive_changes() -> None:
+    for workflow, job_name, plan_name, step_name, working_directory in [
         ("deploy.yml", "rollout", "testing", "Terraform plan", "${{ env.TF_DIR }}"),
         ("deploy.yml", "edge", "edge", "Terraform plan", "infra/envs/edge"),
         (
@@ -2083,62 +2079,47 @@ def test_hosted_serve_attests_the_deployed_bundle() -> None:
             "Terraform plan",
             "infra/production-access",
         ),
-        (
-            "deploy-production.yml",
-            "deploy",
-            "production",
-            "Terraform plan",
-            "${{ env.TF_DIR }}",
-        ),
-    ],
-)
-def test_saved_plans_reject_destructive_changes(
-    workflow: str,
-    job_name: str,
-    plan_name: str,
-    step_name: str,
-    working_directory: str,
-) -> None:
-    jobs = _workflow(WORKFLOWS / workflow)["jobs"]
-    assert isinstance(jobs, dict)
-    job = jobs[job_name]
-    assert isinstance(job, dict)
-    steps = job["steps"]
-    assert isinstance(steps, list)
-    setup = next(step for step in steps if step.get("uses") == "hashicorp/setup-terraform@v3")
-    assert setup["with"]["terraform_wrapper"] == "false"
-    plan = _step(job_name, step_name, workflow)
-    guard = _step(job_name, "Reject destructive changes", workflow)
-    plan_path = f"$RUNNER_TEMP/{plan_name}.tfplan"
-    assert f'-out="{plan_path}"' in plan["run"]
-    assert plan["working-directory"] == working_directory
-    assert guard["working-directory"] == working_directory
-    assert guard.get("if") is None
-    assert guard["run"] == (
-        f'terraform show -json "{plan_path}" | '
-        'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
-    )
-    assert steps.index(plan) < steps.index(guard)
+        ("deploy-production.yml", "deploy", "production", "Terraform plan", "${{ env.TF_DIR }}"),
+    ]:
+        jobs = _workflow(WORKFLOWS / workflow)["jobs"]
+        assert isinstance(jobs, dict)
+        job = jobs[job_name]
+        assert isinstance(job, dict)
+        steps = job["steps"]
+        assert isinstance(steps, list)
+        setup = next(step for step in steps if step.get("uses") == "hashicorp/setup-terraform@v3")
+        assert setup["with"]["terraform_wrapper"] == "false"
+        plan = _step(job_name, step_name, workflow)
+        guard = _step(job_name, "Reject destructive changes", workflow)
+        plan_path = f"$RUNNER_TEMP/{plan_name}.tfplan"
+        assert f'-out="{plan_path}"' in plan["run"]
+        assert plan["working-directory"] == working_directory
+        assert guard["working-directory"] == working_directory
+        assert guard.get("if") is None
+        assert guard["run"] == (
+            f'terraform show -json "{plan_path}" | '
+            'python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"'
+        )
+        assert steps.index(plan) < steps.index(guard)
 
 
-@pytest.mark.parametrize("job_name", ["rollout", "edge"])
-def test_mutating_plans_lock_state_and_preserve_inputs(job_name: str) -> None:
-    script = _step(job_name, "Terraform plan")["run"]
-    assert isinstance(script, str)
-    assert "LOCK=true" in script
-    assert 'if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then\n  LOCK=false\nfi' in script
-    assert '-input=false -no-color -lock="$LOCK"' in script
+def _check_mutating_plans_lock_state_and_preserve_inputs() -> None:
+    for job_name in ["rollout", "edge"]:
+        script = _step(job_name, "Terraform plan")["run"]
+        assert isinstance(script, str)
+        assert "LOCK=true" in script
+        assert 'if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then\n  LOCK=false\nfi' in script
+        assert '-input=false -no-color -lock="$LOCK"' in script
 
 
-def test_rollout_plan_pins_the_selected_artifacts() -> None:
+def _check_rollout_plan_pins_the_selected_artifacts() -> None:
     script = _step("rollout", "Terraform plan")["run"]
     assert '-var "image_tag=$IMAGE_TAG"' in script
     assert '-var "e2b_templates=$E2B_TEMPLATES"' in script
 
 
-@pytest.mark.parametrize(
-    ("workflow", "job_name", "plan_name", "step_name", "apply_condition"),
-    [
+def _check_apply_uses_the_guarded_plan() -> None:
+    for workflow, job_name, plan_name, step_name, apply_condition in [
         (
             "deploy.yml",
             "rollout",
@@ -2146,40 +2127,20 @@ def test_rollout_plan_pins_the_selected_artifacts() -> None:
             "Terraform plan",
             "github.event_name != 'pull_request'",
         ),
-        (
-            "deploy.yml",
-            "edge",
-            "edge",
-            "Terraform plan",
-            "github.event_name != 'pull_request'",
-        ),
-        (
-            "deploy-production.yml",
-            "prepare",
-            "production-access",
-            "Terraform plan",
-            None,
-        ),
-    ],
-)
-def test_apply_uses_the_guarded_plan(
-    workflow: str,
-    job_name: str,
-    plan_name: str,
-    step_name: str,
-    apply_condition: str | None,
-) -> None:
-    plan = _step(job_name, step_name, workflow)
-    guard = _step(job_name, "Reject destructive changes", workflow)
-    apply = _step(job_name, "Terraform apply", workflow)
-    assert plan.get("if") is None
-    assert apply.get("if") == apply_condition
-    assert apply["run"] == f'terraform apply -input=false "$RUNNER_TEMP/{plan_name}.tfplan"'
-    steps = _workflow(WORKFLOWS / workflow)["jobs"][job_name]["steps"]
-    assert steps.index(guard) < steps.index(apply)
+        ("deploy.yml", "edge", "edge", "Terraform plan", "github.event_name != 'pull_request'"),
+        ("deploy-production.yml", "prepare", "production-access", "Terraform plan", None),
+    ]:
+        plan = _step(job_name, step_name, workflow)
+        guard = _step(job_name, "Reject destructive changes", workflow)
+        apply = _step(job_name, "Terraform apply", workflow)
+        assert plan.get("if") is None
+        assert apply.get("if") == apply_condition
+        assert apply["run"] == f'terraform apply -input=false "$RUNNER_TEMP/{plan_name}.tfplan"'
+        steps = _workflow(WORKFLOWS / workflow)["jobs"][job_name]["steps"]
+        assert steps.index(guard) < steps.index(apply)
 
 
-def test_only_testing_owns_account_global_resources() -> None:
+def _check_only_testing_owns_account_global_resources() -> None:
     ecr = _code((ROOT / "infra" / "modules" / "platform" / "ecr.tf").read_text())
     ses = _code((ROOT / "infra" / "modules" / "platform" / "ses.tf").read_text())
 
@@ -2282,7 +2243,7 @@ def test_only_testing_owns_account_global_resources() -> None:
     assert platform_dns == ["sandbox_proxy_validation"]
 
 
-def test_production_deploy_role_trusts_only_the_main_production_workflow() -> None:
+def _check_production_deploy_role_trusts_only_the_main_production_workflow() -> None:
     source = _code((ROOT / "infra" / "production-access" / "main.tf").read_text())
     trust = _terraform_block(source, "data", "github_trust")
     workflow_name = _workflow(WORKFLOWS / "deploy-production.yml")["name"]
@@ -2345,7 +2306,7 @@ def test_production_deploy_role_trusts_only_the_main_production_workflow() -> No
     assert "role/github-deploy" not in prod
 
 
-def test_production_deploy_consumes_the_protected_role_and_artifacts() -> None:
+def _check_production_deploy_consumes_the_protected_role_and_artifacts() -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
     prepare = jobs["prepare"]
@@ -2607,7 +2568,7 @@ def test_production_prepare_rejects_untested_artifact_values(tmp_path: Path) -> 
     assert verify({"commit": target_sha, "image_tag": target_sha[:8]}).returncode != 0
 
 
-def test_production_secrets_fail_before_aws_changes() -> None:
+def _check_production_secrets_fail_before_aws_changes() -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
     validate = jobs["validate"]
@@ -2674,7 +2635,7 @@ def test_production_secrets_fail_before_aws_changes() -> None:
     assert b"present" not in failed.stdout + failed.stderr
 
 
-def test_production_prepare_applies_access_before_deploy() -> None:
+def _check_production_prepare_applies_access_before_deploy() -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
     prepare = jobs["prepare"]
@@ -2961,7 +2922,7 @@ def test_production_authorization_boundary_fails_closed(tmp_path: Path) -> None:
     assert aws_calls.read_text().splitlines() == ["eks describe-cluster --name prod-cluster"]
 
 
-def test_production_deploy_rejects_missing_inputs_before_role_assumption() -> None:
+def _check_production_deploy_rejects_missing_inputs_before_role_assumption() -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
     job = jobs["deploy"]
@@ -3060,7 +3021,7 @@ def test_production_gateway_origin_gate_executes(tmp_path: Path) -> None:
         assert failed.returncode != 0
 
 
-def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
+def _check_production_deploy_applies_guarded_foundation_then_runtime() -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
     job = jobs["deploy"]
@@ -3230,29 +3191,26 @@ def test_production_refresh_reads_the_planned_namespace(tmp_path: Path) -> None:
     assert python_call.read_text().strip() == ("infra/secret_sync.py ufo-system 30774596746-2")
 
 
-@pytest.mark.parametrize(
-    ("workflow", "job_name"),
-    [("deploy.yml", "rollout"), ("deploy-production.yml", "deploy")],
-)
-def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca(workflow: str, job_name: str) -> None:
-    jobs = _workflow(WORKFLOWS / workflow)["jobs"]
-    assert isinstance(jobs, dict)
-    job = jobs[job_name]
-    assert isinstance(job, dict)
-    steps = job["steps"]
-    assert isinstance(steps, list)
-    gate = next(step for step in steps if step.get("name") == "Gate sandbox egress proxy TLS")
-    selector = next(step for step in steps if step.get("name") == "Select sandbox template")
-    assert 'echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"' in selector["run"]
-    assert steps.index(selector) < steps.index(gate)
-    script = gate["run"]
-    assert isinstance(script, str)
-    assert "output -raw sandbox_proxy_ca_cert" in script
-    assert "output -raw sandbox_proxy_url" in script
-    assert "sandbox/proxy_gate.py" in script
+def _check_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca() -> None:
+    for workflow, job_name in [("deploy.yml", "rollout"), ("deploy-production.yml", "deploy")]:
+        jobs = _workflow(WORKFLOWS / workflow)["jobs"]
+        assert isinstance(jobs, dict)
+        job = jobs[job_name]
+        assert isinstance(job, dict)
+        steps = job["steps"]
+        assert isinstance(steps, list)
+        gate = next(step for step in steps if step.get("name") == "Gate sandbox egress proxy TLS")
+        selector = next(step for step in steps if step.get("name") == "Select sandbox template")
+        assert 'echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"' in selector["run"]
+        assert steps.index(selector) < steps.index(gate)
+        script = gate["run"]
+        assert isinstance(script, str)
+        assert "output -raw sandbox_proxy_ca_cert" in script
+        assert "output -raw sandbox_proxy_url" in script
+        assert "sandbox/proxy_gate.py" in script
 
 
-def test_the_template_publish_takes_the_client_binary_a_pipeline_already_built() -> None:
+def _check_the_template_publish_takes_the_client_binary_a_pipeline_already_built() -> None:
     """The sandbox image bakes the compiled `ufo` client, so publishing a template needs a linux
     binary before `build_template.py` runs. The testing deploy takes the one its own client job
     staged — or, when that job was skipped because this client tree already built, the pushed set it
@@ -3293,7 +3251,7 @@ def test_the_template_publish_takes_the_client_binary_a_pipeline_already_built()
     )
 
 
-def test_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready() -> None:
+def _check_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready() -> None:
     for environment in DEPLOY_ENVIRONMENTS:
         terraform = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
         resource = re.search(
@@ -3322,7 +3280,7 @@ def test_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready() -> None:
         assert readiness and readiness.group(1) == "enabled", environment
 
 
-def test_sandbox_proxy_nlb_routes_across_all_enabled_zones() -> None:
+def _check_sandbox_proxy_nlb_routes_across_all_enabled_zones() -> None:
     for environment in DEPLOY_ENVIRONMENTS:
         terraform = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
         _, start, remainder = terraform.partition("  sandbox_proxy_manifests = {")
@@ -3337,150 +3295,144 @@ def test_sandbox_proxy_nlb_routes_across_all_enabled_zones() -> None:
         assert cross_zone, environment
 
 
-@pytest.mark.parametrize(
-    ("workflow", "job_name"),
-    [("deploy.yml", "rollout"), ("deploy-production.yml", "deploy")],
-)
-def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: str) -> None:
-    job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
-    assert isinstance(job, dict)
-    steps = job["steps"]
-    assert isinstance(steps, list)
-    names = [step.get("name") for step in steps if isinstance(step, dict)]
-    wait = names.index("Wait for runtime rollout")
-    assert names.index("Terraform apply") < wait < names.index("Gate sandbox egress proxy TLS")
-    step = steps[wait]
-    assert isinstance(step, dict)
-    script = step["run"]
-    assert isinstance(script, str)
-    assert "output -raw cluster_name" in script
-    assert 'NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"' in script
-    templates = ROOT / "infra" / "templates"
-    manifests = [
-        document
-        for source in (
-            re.sub(
-                TEMPLATE_DIRECTIVE,
-                "",
-                (templates / f"{name}.yaml.tpl").read_text(),
+def _check_runtime_rollout_drains_before_the_proxy_gate() -> None:
+    for workflow, job_name in [("deploy.yml", "rollout"), ("deploy-production.yml", "deploy")]:
+        job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
+        assert isinstance(job, dict)
+        steps = job["steps"]
+        assert isinstance(steps, list)
+        names = [step.get("name") for step in steps if isinstance(step, dict)]
+        wait = names.index("Wait for runtime rollout")
+        assert names.index("Terraform apply") < wait < names.index("Gate sandbox egress proxy TLS")
+        step = steps[wait]
+        assert isinstance(step, dict)
+        script = step["run"]
+        assert isinstance(script, str)
+        assert "output -raw cluster_name" in script
+        assert 'NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"' in script
+        templates = ROOT / "infra" / "templates"
+        manifests = [
+            document
+            for source in (
+                re.sub(
+                    TEMPLATE_DIRECTIVE,
+                    "",
+                    (templates / f"{name}.yaml.tpl").read_text(),
+                )
+                for name in ("hosted", "observability", "cluster-services")
             )
-            for name in ("hosted", "observability", "cluster-services")
-        )
-        for document in yaml.safe_load_all(re.sub(r"\$\{([^}]+)\}", r"\1", source))
-        if isinstance(document, dict)
-    ]
-    readiness_resources = {
-        f"{document['kind'].lower()}/{document['metadata']['name']}"
-        for document in manifests
-        if document.get("kind") in {"Certificate", "ExternalSecret"}
-    }
-    rollout_resources = {
-        f"{document['kind'].lower()}/{document['metadata']['name']}"
-        for document in manifests
-        if document.get("kind") in {"DaemonSet", "Deployment", "StatefulSet"}
-    }
-    assert readiness_resources == {
-        "certificate/ufo-gateway-tls",
-        "certificate/ufo-ingress-tls",
-        "certificate/ufo-serve-tls",
-        "externalsecret/ufo-control-secrets",
-        "externalsecret/ufo-platform-secrets",
-        "externalsecret/ufo-gateway-slack-connect",
-        "externalsecret/ufo-gateway-workos",
-        "externalsecret/ufo-egress-ca",
-        "externalsecret/datadog-api-key",
-    }
-    assert rollout_resources == {
-        "daemonset/otel-logs-agent",
-        "deployment/otel-collector",
-        "deployment/ufo-gateway",
-        "deployment/ufo-preview",
-        "deployment/ufo-sandbox-proxy",
-        "deployment/ufo-ingress",
-        "deployment/ufo-serve",
-    }
-    commands = [
-        shlex.split(line)
-        for line in script.replace("\\\n", " ").splitlines()
-        if line.strip().startswith(("kubectl ", f"{AWAIT_ROLLOUT} "))
-    ]
-    awaited = [command for command in commands if command[0] == AWAIT_ROLLOUT]
-    kubectl_commands = [command for command in commands if command[0] == "kubectl"]
-    assert all(command[1] == "--namespace" for command in kubectl_commands)
-    wait_commands = [command for command in kubectl_commands if command[3] == "wait"]
-    rollout_commands = [command for command in kubectl_commands if command[3] == "rollout"]
-    assert len(kubectl_commands) == len(wait_commands) + len(rollout_commands)
-    assert all(
-        command[:6]
-        == [
-            "kubectl",
-            "--namespace",
-            "$NAMESPACE",
-            "wait",
-            "--for=condition=Ready",
-            "--timeout=15m",
+            for document in yaml.safe_load_all(re.sub(r"\$\{([^}]+)\}", r"\1", source))
+            if isinstance(document, dict)
         ]
-        for command in wait_commands
-    )
-    assert all(
-        len(command) == 7
-        and command[3:5] == ["rollout", "status"]
-        and command[-1] == "--timeout=15m"
-        for command in rollout_commands
-    )
-    assert all(
-        len(command) >= 3 and all(not argument.startswith("-") for argument in command[1:])
-        for command in awaited
-    )
-    gated_readiness = {resource for command in wait_commands for resource in command[6:]}
-    gated_rollouts: dict[str, set[str]] = {}
-    for command in awaited:
-        gated_rollouts.setdefault(command[1], set()).update(
-            f"deployment/{name}" for name in command[2:]
+        readiness_resources = {
+            f"{document['kind'].lower()}/{document['metadata']['name']}"
+            for document in manifests
+            if document.get("kind") in {"Certificate", "ExternalSecret"}
+        }
+        rollout_resources = {
+            f"{document['kind'].lower()}/{document['metadata']['name']}"
+            for document in manifests
+            if document.get("kind") in {"DaemonSet", "Deployment", "StatefulSet"}
+        }
+        assert readiness_resources == {
+            "certificate/ufo-gateway-tls",
+            "certificate/ufo-ingress-tls",
+            "certificate/ufo-serve-tls",
+            "externalsecret/ufo-control-secrets",
+            "externalsecret/ufo-platform-secrets",
+            "externalsecret/ufo-gateway-slack-connect",
+            "externalsecret/ufo-gateway-workos",
+            "externalsecret/ufo-egress-ca",
+            "externalsecret/datadog-api-key",
+        }
+        assert rollout_resources == {
+            "daemonset/otel-logs-agent",
+            "deployment/otel-collector",
+            "deployment/ufo-gateway",
+            "deployment/ufo-preview",
+            "deployment/ufo-sandbox-proxy",
+            "deployment/ufo-ingress",
+            "deployment/ufo-serve",
+        }
+        commands = [
+            shlex.split(line)
+            for line in script.replace("\\\n", " ").splitlines()
+            if line.strip().startswith(("kubectl ", f"{AWAIT_ROLLOUT} "))
+        ]
+        awaited = [command for command in commands if command[0] == AWAIT_ROLLOUT]
+        kubectl_commands = [command for command in commands if command[0] == "kubectl"]
+        assert all(command[1] == "--namespace" for command in kubectl_commands)
+        wait_commands = [command for command in kubectl_commands if command[3] == "wait"]
+        rollout_commands = [command for command in kubectl_commands if command[3] == "rollout"]
+        assert len(kubectl_commands) == len(wait_commands) + len(rollout_commands)
+        assert all(
+            command[:6]
+            == [
+                "kubectl",
+                "--namespace",
+                "$NAMESPACE",
+                "wait",
+                "--for=condition=Ready",
+                "--timeout=15m",
+            ]
+            for command in wait_commands
         )
-    for command in rollout_commands:
-        gated_rollouts.setdefault(command[2], set()).add(command[5])
-    assert gated_readiness == readiness_resources
-    assert gated_rollouts == {
-        "ingress-nginx": {"deployment/ingress-nginx-controller"},
-        "$NAMESPACE": rollout_resources,
-    }
-    assert os.access(ROOT / AWAIT_ROLLOUT, os.X_OK)
-    # The 15m wall the per-Deployment `rollout status` calls carried now lives in the script.
-    assert "DEADLINE=$((SECONDS + 900))" in (ROOT / AWAIT_ROLLOUT).read_text()
+        assert all(
+            len(command) == 7
+            and command[3:5] == ["rollout", "status"]
+            and command[-1] == "--timeout=15m"
+            for command in rollout_commands
+        )
+        assert all(
+            len(command) >= 3 and all(not argument.startswith("-") for argument in command[1:])
+            for command in awaited
+        )
+        gated_readiness = {resource for command in wait_commands for resource in command[6:]}
+        gated_rollouts: dict[str, set[str]] = {}
+        for command in awaited:
+            gated_rollouts.setdefault(command[1], set()).update(
+                f"deployment/{name}" for name in command[2:]
+            )
+        for command in rollout_commands:
+            gated_rollouts.setdefault(command[2], set()).add(command[5])
+        assert gated_readiness == readiness_resources
+        assert gated_rollouts == {
+            "ingress-nginx": {"deployment/ingress-nginx-controller"},
+            "$NAMESPACE": rollout_resources,
+        }
+        assert os.access(ROOT / AWAIT_ROLLOUT, os.X_OK)
+        # The 15m wall the per-Deployment `rollout status` calls carried now lives in the script.
+        assert "DEADLINE=$((SECONDS + 900))" in (ROOT / AWAIT_ROLLOUT).read_text()
 
 
-@pytest.mark.parametrize(
-    ("workflow", "job_name", "refresh"),
-    [
+def _check_runtime_apply_waits_for_prior_drains() -> None:
+    for workflow, job_name, refresh in [
         ("deploy.yml", "rollout", "Refresh testing runtime secrets"),
         ("deploy-production.yml", "deploy", "Refresh production runtime secrets"),
-    ],
-)
-def test_runtime_apply_waits_for_prior_drains(workflow: str, job_name: str, refresh: str) -> None:
-    job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
-    assert isinstance(job, dict)
-    steps = job["steps"]
-    assert isinstance(steps, list)
-    names = [step.get("name") for step in steps if isinstance(step, dict)]
-    wait = names.index("Wait for prior rollout drains")
-    assert names.index(refresh) < wait < names.index("Terraform apply")
-    step = steps[wait]
-    assert isinstance(step, dict)
-    assert step.get("if") == (
-        "github.event_name != 'pull_request'" if workflow == "deploy.yml" else None
-    )
-    script = step["run"]
-    assert isinstance(script, str)
-    assert "output -raw system_namespace" in script
-    assert shlex.split(script.splitlines()[-1]) == [
-        AWAIT_DRAINED,
-        "$NAMESPACE",
-        "ufo-sandbox-proxy",
-        "ufo-ingress",
-        "ufo-serve",
-    ]
-    assert os.access(ROOT / AWAIT_DRAINED, os.X_OK)
+    ]:
+        job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
+        assert isinstance(job, dict)
+        steps = job["steps"]
+        assert isinstance(steps, list)
+        names = [step.get("name") for step in steps if isinstance(step, dict)]
+        wait = names.index("Wait for prior rollout drains")
+        assert names.index(refresh) < wait < names.index("Terraform apply")
+        step = steps[wait]
+        assert isinstance(step, dict)
+        assert step.get("if") == (
+            "github.event_name != 'pull_request'" if workflow == "deploy.yml" else None
+        )
+        script = step["run"]
+        assert isinstance(script, str)
+        assert "output -raw system_namespace" in script
+        assert shlex.split(script.splitlines()[-1]) == [
+            AWAIT_DRAINED,
+            "$NAMESPACE",
+            "ufo-sandbox-proxy",
+            "ufo-ingress",
+            "ufo-serve",
+        ]
+        assert os.access(ROOT / AWAIT_DRAINED, os.X_OK)
 
 
 def test_await_drained_waits_for_terminating_pods(tmp_path: Path) -> None:
@@ -3679,7 +3631,7 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
         assert failed.returncode != 0, overrides
 
 
-def test_runtime_bundle_consumes_the_sandbox_client_artifact() -> None:
+def _check_runtime_bundle_consumes_the_sandbox_client_artifact() -> None:
     build = _step("bundle", "Build + push bundle image")
     run = build["run"]
     assert isinstance(run, str)
@@ -3707,7 +3659,7 @@ def test_runtime_bundle_consumes_the_sandbox_client_artifact() -> None:
     assert steps.index(build) > steps.index(reuse)
 
 
-def test_portal_source_maps_upload_under_the_service_and_version_the_page_records_with() -> None:
+def _check_portal_source_maps_upload_under_the_service_and_version_the_page_records_with() -> None:
     """A fault Datadog reports against a recorded session reads as source only where the upload's
     service and version are the pair the page recorded under — so the upload names the image tag
     the template hands the page, and the service the bundle states. The maps leave the tree before
@@ -3737,7 +3689,7 @@ def test_portal_source_maps_upload_under_the_service_and_version_the_page_record
     assert 'sourcemap: "hidden"' in build_config
 
 
-def test_runtime_certificates_match_ingress_tls() -> None:
+def _check_runtime_certificates_match_ingress_tls() -> None:
     source = re.sub(
         TEMPLATE_DIRECTIVE, "", (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
     )
@@ -3773,7 +3725,7 @@ def test_runtime_certificates_match_ingress_tls() -> None:
     ]
 
 
-def test_runtime_secret_consumers_roll_once_per_production_deploy() -> None:
+def _check_runtime_secret_consumers_roll_once_per_production_deploy() -> None:
     templates = ROOT / "infra" / "templates"
     manifests = [
         document
@@ -3820,7 +3772,7 @@ def test_runtime_secret_consumers_roll_once_per_production_deploy() -> None:
     assert len(re.findall(r'deployment_id\s+= "testing"', testing)) == 2
 
 
-def test_the_cache_sidecar_keeps_the_proxy_probes_on_the_proxy_container() -> None:
+def _check_the_cache_sidecar_keeps_the_proxy_probes_on_the_proxy_container() -> None:
     """With the cache enabled the sandbox-proxy pod runs two containers, and each keeps its own
     health probes — the proxy its TCP probe on the `proxy` port, the cache its own — so the sidecar
     block cannot silently detach the proxy's probes onto a container that lacks the port."""
@@ -3848,7 +3800,7 @@ def test_the_cache_sidecar_keeps_the_proxy_probes_on_the_proxy_container() -> No
     assert "readinessProbe" not in containers["cache"]
 
 
-def test_deployment_gate_joins_every_selected_result() -> None:
+def _check_deployment_gate_joins_every_selected_result() -> None:
     jobs = _workflow(WORKFLOWS / "deploy.yml")["jobs"]
     assert isinstance(jobs, dict)
     deploy = jobs["deploy"]
@@ -3881,88 +3833,37 @@ def test_deployment_gate_joins_every_selected_result() -> None:
         assert f'"${variable}"' in script
 
 
-@pytest.mark.parametrize(
-    (
-        "selected",
-        "event",
-        "rollout",
-        "edge",
-        "production",
-        "access",
-        "accepted",
-    ),
-    [
-        (
-            "true",
-            "pull_request",
-            "success",
-            "success",
-            "success",
-            "success",
-            True,
-        ),
+def _check_deployment_gate_accepts_only_expected_results() -> None:
+    for selected, event, rollout, edge, production, access, accepted in [
+        ("true", "pull_request", "success", "success", "success", "success", True),
         ("true", "push", "success", "success", "skipped", "skipped", True),
         ("false", "push", "skipped", "skipped", "skipped", "skipped", True),
         ("true", "push", "cancelled", "skipped", "skipped", "skipped", True),
         ("true", "push", "success", "cancelled", "skipped", "skipped", True),
-        (
-            "true",
-            "pull_request",
-            "success",
-            "success",
-            "skipped",
-            "success",
-            False,
-        ),
-        (
-            "true",
-            "pull_request",
-            "success",
-            "success",
-            "success",
-            "failure",
-            False,
-        ),
+        ("true", "pull_request", "success", "success", "skipped", "success", False),
+        ("true", "pull_request", "success", "success", "success", "failure", False),
         ("true", "push", "success", "success", "success", "skipped", False),
         ("true", "push", "failure", "skipped", "skipped", "skipped", False),
         ("true", "push", "success", "failure", "skipped", "skipped", False),
         ("true", "push", "success", "success", "skipped", "success", False),
         ("false", "push", "skipped", "skipped", "success", "skipped", False),
         ("false", "push", "skipped", "skipped", "skipped", "success", False),
-        (
-            "invalid",
-            "push",
-            "success",
-            "success",
-            "skipped",
-            "skipped",
-            False,
-        ),
-    ],
-)
-def test_deployment_gate_accepts_only_expected_results(
-    selected: str,
-    event: str,
-    rollout: str,
-    edge: str,
-    production: str,
-    access: str,
-    accepted: bool,
-) -> None:
-    gate = _step("deploy", "Require the selected deployment work")
-    script = gate["run"]
-    assert isinstance(script, str)
-    environment = {
-        "CHANGES_RESULT": "success",
-        "DEPLOY_SELECTED": selected,
-        "EDGE_RESULT": edge,
-        "EVENT_NAME": event,
-        "PRODUCTION_RESULT": production,
-        "PRODUCTION_ACCESS_RESULT": access,
-        "ROLLOUT_RESULT": rollout,
-    }
-    run = subprocess.run(["bash", "-e", "-c", script], env=os.environ | environment)
-    assert (run.returncode == 0) is accepted
+        ("invalid", "push", "success", "success", "skipped", "skipped", False),
+    ]:
+        gate = _step("deploy", "Require the selected deployment work")
+        script = gate["run"]
+        assert isinstance(script, str)
+        environment = {
+            "CHANGES_RESULT": "success",
+            "DEPLOY_SELECTED": selected,
+            "EDGE_RESULT": edge,
+            "EVENT_NAME": event,
+            "PRODUCTION_RESULT": production,
+            "PRODUCTION_ACCESS_RESULT": access,
+            "ROLLOUT_RESULT": rollout,
+        }
+        run = subprocess.run(["bash", "-e", "-c", script], env=os.environ | environment)
+        assert (run.returncode == 0) is accepted
 
 
 def test_manual_deploy_records_before_mutation_and_reports_conclusion(tmp_path: Path) -> None:
@@ -4235,113 +4136,109 @@ def test_the_deploy_monitor_watches_the_check_the_reporter_submits(
     assert succeeded_report["status"] == DATADOG_STATUS_OK
 
 
-@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
-def test_every_monitor_notifies_a_reachable_handle(environment: str) -> None:
-    monitors = re.findall(r'resource "datadog_monitor" "(\w+)"', MONITORS[environment].read_text())
-    assert monitors
-    for monitor in monitors:
-        message = _monitor_attribute(monitor, "message", environment)
-        assert re.search(HANDLE, message), monitor
+def _check_every_monitor_notifies_a_reachable_handle() -> None:
+    for environment in DEPLOY_ENVIRONMENTS:
+        monitors = re.findall(
+            r'resource "datadog_monitor" "(\w+)"', MONITORS[environment].read_text()
+        )
+        assert monitors
+        for monitor in monitors:
+            message = _monitor_attribute(monitor, "message", environment)
+            assert re.search(HANDLE, message), monitor
 
 
-@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
-def test_the_source_sync_monitor_watches_the_check_the_reporters_submit(environment: str) -> None:
+def _check_the_source_sync_monitor_watches_the_check_the_reporters_submit() -> None:
     """The two numbers are the whole behaviour asked of this monitor: a single failed run is one
     CRITICAL out of the last two statuses and pages nobody, the second consecutive one alerts, and a
     single OK clears it. The grouping is the tags `_check_tags` submits, down to the source row —
     two workspaces that each connect Slack run one provider stream, and a group over both would let
     the healthy row's OK clear the failing row's alert. The check name is the one the fleet reports
     under: a monitor over any other name would read as permanently green."""
-    query = _monitor_attribute("source_sync_failed", "query", environment)
-    parsed = re.fullmatch(
-        r'"([\w.]+)"\.over\("([^"]+)"\)\.by\(([^)]+)\)\.last\((\d+)\)\.count_by_status\(\)', query
-    )
-    assert parsed
-    assert _monitor_attribute("source_sync_failed", "type", environment) == "service check"
-    assert parsed.group(1) == f"ufo.{SOURCE_SYNC_CHECK}"
-    assert parsed.group(2) == f"env:{environment}"
-    assert re.findall(r'"(\w+)"', parsed.group(3)) == ["provider", "stream", "source_id"]
-    assert _monitor_attribute("source_sync_failed", "critical", environment) == "2"
-    assert _monitor_attribute("source_sync_failed", "ok", environment) == "1"
-    assert int(parsed.group(4)) >= 2
-    assert _monitor_attribute("source_sync_failed", "notify_no_data", environment) == "false"
-    message = _monitor_attribute("source_sync_failed", "message", environment)
-    assert "{{provider.name}}" in message
-    assert "{{stream.name}}" in message
-    assert "{{source_id.name}}" in message
+    for environment in DEPLOY_ENVIRONMENTS:
+        query = _monitor_attribute("source_sync_failed", "query", environment)
+        parsed = re.fullmatch(
+            r'"([\w.]+)"\.over\("([^"]+)"\)\.by\(([^)]+)\)\.last\((\d+)\)\.count_by_status\(\)',
+            query,
+        )
+        assert parsed
+        assert _monitor_attribute("source_sync_failed", "type", environment) == "service check"
+        assert parsed.group(1) == f"ufo.{SOURCE_SYNC_CHECK}"
+        assert parsed.group(2) == f"env:{environment}"
+        assert re.findall(r'"(\w+)"', parsed.group(3)) == ["provider", "stream", "source_id"]
+        assert _monitor_attribute("source_sync_failed", "critical", environment) == "2"
+        assert _monitor_attribute("source_sync_failed", "ok", environment) == "1"
+        assert int(parsed.group(4)) >= 2
+        assert _monitor_attribute("source_sync_failed", "notify_no_data", environment) == "false"
+        message = _monitor_attribute("source_sync_failed", "message", environment)
+        assert "{{provider.name}}" in message
+        assert "{{stream.name}}" in message
+        assert "{{source_id.name}}" in message
 
 
-@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
-def test_the_source_sync_monitor_reports_both_transitions(environment: str) -> None:
+def _check_the_source_sync_monitor_reports_both_transitions() -> None:
     """A stream that cannot sync holds CRITICAL until somebody fixes it, so the alert repeats hourly
     rather than scrolling away once. The clear is a message of its own: an operator who reads the
     channel has no other place to learn the stream came back, and the failure text would read as a
     second incident if it were sent again on recovery. The handles sit outside both blocks, so both
     transitions reach the same targets."""
-    assert _monitor_attribute("source_sync_failed", "renotify_interval", environment) == "60"
-    message = _monitor_attribute("source_sync_failed", "message", environment)
-    blocks = dict(re.findall(r"{{#(is_alert|is_recovery)}}(.*?){{/\1}}", message))
-    assert set(blocks) == {"is_alert", "is_recovery"}
-    assert "still failing" in blocks["is_alert"]
-    assert "still failing" not in blocks["is_recovery"]
-    assert re.search(HANDLE, message)
-    for block in blocks.values():
-        assert not re.search(HANDLE, block)
+    for environment in DEPLOY_ENVIRONMENTS:
+        assert _monitor_attribute("source_sync_failed", "renotify_interval", environment) == "60"
+        message = _monitor_attribute("source_sync_failed", "message", environment)
+        blocks = dict(re.findall(r"{{#(is_alert|is_recovery)}}(.*?){{/\1}}", message))
+        assert set(blocks) == {"is_alert", "is_recovery"}
+        assert "still failing" in blocks["is_alert"]
+        assert "still failing" not in blocks["is_recovery"]
+        assert re.search(HANDLE, message)
+        for block in blocks.values():
+            assert not re.search(HANDLE, block)
 
 
-@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
-def test_the_fleet_submits_the_stream_check_to_the_datadog_its_monitors_read(
-    environment: str,
-) -> None:
+def _check_the_fleet_submits_the_stream_check_to_the_datadog_its_monitors_read() -> None:
     """The monitor and the reporter are configured in different files and neither fails when they
     disagree: a check submitted to another Datadog site, or tagged with another env, leaves the
     monitor's scope holding no status for any stream — which reads exactly like a fleet whose
     streams all sync. So the fleet's own intake and env tag are held against the provider the
     monitors talk to and the intake the deploy reporter already uses, and against the pod's key."""
-    config = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
-    check_url = re.search(r'datadog_check_url = "(\S+)"', config)
-    api_url = re.search(r'^  api_url += +"(\S+)"$', MONITORS[environment].read_text(), re.MULTILINE)
-    assert check_url and api_url
-    assert urlparse(check_url.group(1)).hostname == urlparse(api_url.group(1)).hostname
-    deploy_reporter = _step("deploy", "Report the deploy conclusion to Datadog")["env"]
-    assert isinstance(deploy_reporter, dict)
-    assert check_url.group(1) == deploy_reporter["DD_CHECK_URL"]
-    environment_tag = re.search(r'datadog_env = "(\w+)"', config)
-    assert environment_tag
-    assert environment_tag.group(1) == environment
-    hosted = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
-    assert "secretKeyRef: {name: datadog-api-key, key: DD_API_KEY}" in hosted
-    assert '- {name: DD_SITE, value: "${rum_site}"}' in hosted
+    for environment in DEPLOY_ENVIRONMENTS:
+        config = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
+        check_url = re.search(r'datadog_check_url = "(\S+)"', config)
+        api_url = re.search(
+            r'^  api_url += +"(\S+)"$', MONITORS[environment].read_text(), re.MULTILINE
+        )
+        assert check_url and api_url
+        assert urlparse(check_url.group(1)).hostname == urlparse(api_url.group(1)).hostname
+        deploy_reporter = _step("deploy", "Report the deploy conclusion to Datadog")["env"]
+        assert isinstance(deploy_reporter, dict)
+        assert check_url.group(1) == deploy_reporter["DD_CHECK_URL"]
+        environment_tag = re.search(r'datadog_env = "(\w+)"', config)
+        assert environment_tag
+        assert environment_tag.group(1) == environment
+        hosted = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+        assert "secretKeyRef: {name: datadog-api-key, key: DD_API_KEY}" in hosted
+        assert '- {name: DD_SITE, value: "${rum_site}"}' in hosted
 
 
-@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
-def test_surface_listener_park_monitor_consumes_the_reported_metric(environment: str) -> None:
-    assert _monitor_attribute("surface_listener_parked", "query", environment) == (
-        "sum(last_15m):sum:ufo.surface_listener_parked_total"
-        f"{{env:{environment}}} by {{surface}}.as_count() >= 1"
-    )
-    message = _monitor_attribute("surface_listener_parked", "message", environment)
-    assert "{{surface.name}}" in message
-    assert _monitor_attribute("surface_listener_parked", "critical", environment) == "1"
-    assert _monitor_attribute("surface_listener_parked", "require_full_window", environment) == (
-        "false"
-    )
+def _check_surface_listener_park_monitor_consumes_the_reported_metric() -> None:
+    for environment in DEPLOY_ENVIRONMENTS:
+        assert _monitor_attribute("surface_listener_parked", "query", environment) == (
+            "sum(last_15m):sum:ufo.surface_listener_parked_total"
+            f"{{env:{environment}}} by {{surface}}.as_count() >= 1"
+        )
+        message = _monitor_attribute("surface_listener_parked", "message", environment)
+        assert "{{surface.name}}" in message
+        assert _monitor_attribute("surface_listener_parked", "critical", environment) == "1"
+        assert _monitor_attribute(
+            "surface_listener_parked", "require_full_window", environment
+        ) == ("false")
 
 
-@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
-@pytest.mark.parametrize(
-    "monitor",
-    [
-        "db_tx_unavailable",
-        "db_pool_exhausted",
-        "surface_listener_parked",
-    ],
-)
-def test_a_sparse_counters_alert_can_clear_itself(monitor: str, environment: str) -> None:
-    assert _monitor_attribute(monitor, "require_full_window", environment) == "false"
+def _check_a_sparse_counters_alert_can_clear_itself() -> None:
+    for environment in DEPLOY_ENVIRONMENTS:
+        for monitor in ["db_tx_unavailable", "db_pool_exhausted", "surface_listener_parked"]:
+            assert _monitor_attribute(monitor, "require_full_window", environment) == "false"
 
 
-def test_testing_owns_one_database_and_model_board_for_both_fleets() -> None:
+def _check_testing_owns_one_database_and_model_board_for_both_fleets() -> None:
     """Both boards read either fleet through `$env`, so the prod root declares no board at all. One
     it declared would be a second copy under its own id rather than the prod view of this one."""
     assert not (ROOT / "infra" / "envs" / "prod" / "dashboards.tf").exists()
@@ -4378,7 +4275,7 @@ def test_testing_owns_one_database_and_model_board_for_both_fleets() -> None:
     assert "first token wait" not in dashboards
 
 
-def test_the_rds_widgets_switch_fleet_on_the_instance_identifier() -> None:
+def _check_the_rds_widgets_switch_fleet_on_the_instance_identifier() -> None:
     """CloudWatch reports the instance's own tags, where the environment reads `ufo-testing` on one
     fleet and `prod` on the other, so no RDS query can ride `$env`. The presets are what keep one
     selection moving both variables together."""
@@ -4397,7 +4294,7 @@ def test_the_rds_widgets_switch_fleet_on_the_instance_identifier() -> None:
     ]
 
 
-def test_eval_dashboard_scopes_every_score_to_the_target_model() -> None:
+def _check_eval_dashboard_scopes_every_score_to_the_target_model() -> None:
     dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
 
     assert 'name             = "target_model"' in dashboard
@@ -4408,7 +4305,7 @@ def test_eval_dashboard_scopes_every_score_to_the_target_model() -> None:
     assert "ufo.evals.cases_scored{$mode}" not in dashboard
 
 
-def test_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:
+def _check_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:
     dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
     assert 'resource "datadog_dashboard" "prompt_cache"' in dashboard
     assert "ufo.model_cache_round_total" in dashboard
@@ -4429,7 +4326,7 @@ def test_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:
     assert "value      = 65.2" in dashboard
 
 
-def test_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> None:
+def _check_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> None:
     """One census tick counts every workspace once, so a workspace count is right only where the
     bucket is the census period: a rate scaled by that period reads a narrower bucket as a whole
     period, and a bucket Datadog sizes for itself holds as many ticks as it is wide. Every query on
@@ -4456,7 +4353,7 @@ def test_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> None
     assert all(block.splitlines()[3].strip() == 'aggregator = "max"' for block in funnel_queries)
 
 
-def test_every_product_card_shows_its_count_and_history() -> None:
+def _check_every_product_card_shows_its_count_and_history() -> None:
     dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
 
     product = dashboard.split('resource "datadog_dashboard" "product" {', 1)[1]
@@ -4470,7 +4367,7 @@ def test_every_product_card_shows_its_count_and_history() -> None:
         assert f"stage:{stage}" in product
 
 
-def test_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
+def _check_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
     """A step is worth what it keeps, so the funnel carries the share beside the count. The
     denominator is `seated` rather than every workspace: one nobody sits in has nobody to move
     through the funnel, and counting it would dilute every step below. Neither formula name may be
@@ -4486,9 +4383,8 @@ def test_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
     assert re.search(r'formula_expression = "(stage|kind|name)"', dashboard) is None
 
 
-@pytest.mark.parametrize(
-    ("environment", "monitor", "query", "critical", "warning"),
-    [
+def _check_database_capacity_monitors() -> None:
+    for environment, monitor, query, critical, warning in [
         (
             "testing",
             "db_memory_low",
@@ -4521,21 +4417,17 @@ def test_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
             "250",
             "208",
         ),
-    ],
-)
-def test_database_capacity_monitors(
-    environment: str, monitor: str, query: str, critical: str, warning: str
-) -> None:
-    assert _monitor_attribute(monitor, "query", environment) == query
-    assert _monitor_attribute(monitor, "critical", environment) == critical
-    assert _monitor_attribute(monitor, "warning", environment) == warning
-    assert _monitor_attribute(monitor, "evaluation_delay", environment) == "900"
-    assert _monitor_attribute(monitor, "tags", environment) == (
-        f'["env:{environment}", "managed-by:terraform"]'
-    )
+    ]:
+        assert _monitor_attribute(monitor, "query", environment) == query
+        assert _monitor_attribute(monitor, "critical", environment) == critical
+        assert _monitor_attribute(monitor, "warning", environment) == warning
+        assert _monitor_attribute(monitor, "evaluation_delay", environment) == "900"
+        assert _monitor_attribute(monitor, "tags", environment) == (
+            f'["env:{environment}", "managed-by:terraform"]'
+        )
 
 
-def test_edge_doors_use_separate_environment_origins() -> None:
+def _check_edge_doors_use_separate_environment_origins() -> None:
     source = (ROOT / "infra" / "envs" / "edge" / "main.tf").read_text()
     doors = dict(
         re.findall(
@@ -4595,7 +4487,7 @@ def test_edge_doors_use_separate_environment_origins() -> None:
         assert "gateway_origin_host              = local.gateway_origin_host" in ufo
 
 
-def test_edge_worker_artifact_substitutes_every_placeholder() -> None:
+def _check_edge_worker_artifact_substitutes_every_placeholder() -> None:
     module = ROOT / "infra" / "modules" / "edge"
     terraform = (module / "main.tf").read_text()
     assert re.search(r'landing_html\s+= file\("\$\{path\.module\}/landing\.html"\)', terraform)
@@ -4617,7 +4509,7 @@ def test_edge_worker_artifact_substitutes_every_placeholder() -> None:
         assert harness.count(f"'\"{placeholder}\"'") == 1
 
 
-def test_the_client_target_set_is_one_set_everywhere() -> None:
+def _check_the_client_target_set_is_one_set_everywhere() -> None:
     def matrix_targets(workflow: str, job: str) -> set[str]:
         jobs = _workflow(WORKFLOWS / workflow)["jobs"]
         assert isinstance(jobs, dict)
@@ -4631,3 +4523,76 @@ def test_the_client_target_set_is_one_set_everywhere() -> None:
     served = set(re.findall(r'"([^"]+)"', literal.group(1)))
     assert matrix_targets("client.yml", "build") == served
     assert matrix_targets("deploy.yml", "client") == served
+
+
+def _check_deploy_workflow_static_contract() -> None:
+    for check in (
+        _check_platform_addons_wait_for_the_load_balancer_webhook,
+        _check_webhook_addons_install_atomically,
+        _check_every_main_push_triggers_deployment,
+        _check_every_pull_request_has_one_deployment_gate,
+        _check_pull_request_plans_active_deployment_inputs,
+        _check_testing_deploy_writes_provider_credentials_before_apply,
+        _check_authorization_expansions_co_deploy_but_contractions_split,
+        _check_plans_run_only_for_selected_deployment_inputs,
+        _check_production_edge_preserves_the_promoted_workspace,
+        _check_production_shared_edge_uses_current_main,
+        _check_pull_requests_guard_the_production_edge_plan,
+        _check_pull_requests_plan_production_foundation_without_applying,
+        _check_production_vcpu_reservation_matches_the_node_group,
+        _check_production_nlb_reservation_matches_the_services,
+        _check_hosted_runtime_receives_the_selected_sandbox_template,
+        _check_hosted_serve_attests_the_deployed_bundle,
+        _check_rollout_plan_pins_the_selected_artifacts,
+        _check_only_testing_owns_account_global_resources,
+        _check_production_deploy_role_trusts_only_the_main_production_workflow,
+        _check_production_deploy_consumes_the_protected_role_and_artifacts,
+        _check_production_secrets_fail_before_aws_changes,
+        _check_production_prepare_applies_access_before_deploy,
+        _check_production_deploy_rejects_missing_inputs_before_role_assumption,
+        _check_production_deploy_applies_guarded_foundation_then_runtime,
+        _check_the_template_publish_takes_the_client_binary_a_pipeline_already_built,
+        _check_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready,
+        _check_sandbox_proxy_nlb_routes_across_all_enabled_zones,
+        _check_runtime_bundle_consumes_the_sandbox_client_artifact,
+        _check_portal_source_maps_upload_under_the_service_and_version_the_page_records_with,
+        _check_runtime_certificates_match_ingress_tls,
+        _check_runtime_secret_consumers_roll_once_per_production_deploy,
+        _check_the_cache_sidecar_keeps_the_proxy_probes_on_the_proxy_container,
+        _check_deployment_gate_joins_every_selected_result,
+        _check_testing_owns_one_database_and_model_board_for_both_fleets,
+        _check_the_rds_widgets_switch_fleet_on_the_instance_identifier,
+        _check_eval_dashboard_scopes_every_score_to_the_target_model,
+        _check_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics,
+        _check_the_product_board_counts_a_workspace_out_of_one_census_bucket,
+        _check_every_product_card_shows_its_count_and_history,
+        _check_the_product_funnel_reads_its_share_against_seated_workspaces,
+        _check_edge_doors_use_separate_environment_origins,
+        _check_edge_worker_artifact_substitutes_every_placeholder,
+        _check_the_client_target_set_is_one_set_everywhere,
+    ):
+        check()
+
+
+def test_deploy_workflow_sync_contract() -> None:
+    for check in (
+        _check_database_storage_monitor_tracks_allocation,
+        _check_flag_resources_keep_their_refresh_address,
+        _check_edge_writers_share_deploy_concurrency,
+        _check_saved_plans_reject_destructive_changes,
+        _check_mutating_plans_lock_state_and_preserve_inputs,
+        _check_apply_uses_the_guarded_plan,
+        _check_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca,
+        _check_runtime_rollout_drains_before_the_proxy_gate,
+        _check_runtime_apply_waits_for_prior_drains,
+        _check_deployment_gate_accepts_only_expected_results,
+        _check_every_monitor_notifies_a_reachable_handle,
+        _check_the_source_sync_monitor_watches_the_check_the_reporters_submit,
+        _check_the_source_sync_monitor_reports_both_transitions,
+        _check_the_fleet_submits_the_stream_check_to_the_datadog_its_monitors_read,
+        _check_surface_listener_park_monitor_consumes_the_reported_metric,
+        _check_a_sparse_counters_alert_can_clear_itself,
+        _check_database_capacity_monitors,
+        _check_deploy_workflow_static_contract,
+    ):
+        check()

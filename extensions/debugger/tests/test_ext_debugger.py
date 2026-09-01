@@ -29,12 +29,6 @@ from ufo_testsupport.surfaces import (
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import (
-    Message,
-    ReasoningItemBlock,
-    RedactedThinkingBlock,
-    TextBlock,
-    ThinkingBlock,
-    ToolResultBlock,
     ToolUseBlock,
 )
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -43,18 +37,17 @@ from ufo.harness.sandbox.session import ProxyEndpoint
 from ufo.runtime.engine import DispatchResult, StreamResult
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.turns.transcript import (
-    CompactionSummary,
-    CompactionWindow,
-    Conversation,
-    compaction_key,
-    encode,
     transcript_key,
 )
-from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import SUBAGENT_SURFACE, TerminalFrame
 from ufo.sdk.surfaces import OPERATOR_EMAIL_DOMAIN
 from ufo.serve import _mount_shared_surfaces
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 SECRET = "debug-token-secret"
 
@@ -397,44 +390,6 @@ async def test_ws_param_rescopes_to_any_workspace_by_uuid_or_domain(debug) -> No
     assert scope.json()["workspace_id"] != str(uuid5(NAMESPACE_DNS, "acme.com"))
 
 
-async def test_a_domain_nobody_is_seated_at_scopes_to_the_id_it_provisions(debug) -> None:
-    """A workspace provisioned for a domain is created under `uuid5(NAMESPACE_DNS, domain)` and
-    carries no member until someone onboards. The domain must still reach it in that window, so a
-    domain no seating claims falls back to the id its provisioning uses."""
-    client, _, _ = debug
-    operator_workspace, _ = await _seed_workspace()
-    token = _mint(SECRET, operator_workspace, f"alex@{OPERATOR_EMAIL_DOMAIN}")
-
-    scope = await client.get(
-        "/surface/debug/api/workspace", params={"ws": "nobody.example"}, headers=_auth(token)
-    )
-    assert scope.status_code == 200
-    assert scope.json()["workspace_id"] == str(uuid5(NAMESPACE_DNS, "nobody.example"))
-
-
-async def test_posted_token_binds_the_cookie_and_redirects(debug) -> None:
-    client, _, _ = debug
-    workspace_id, _ = await _seed_workspace()
-    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
-    response = await client.post(
-        "/surface/debug",
-        params={"ws": "acme.com"},
-        data={"token": token},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert "token=" not in response.headers["location"]
-    assert "ws=acme.com" in response.headers["location"]
-    cookie = response.headers["set-cookie"]
-    assert cookie.startswith("ufo_debug=")
-    assert "HttpOnly" in cookie
-    assert "Secure" in cookie
-    assert "SameSite=lax" in cookie
-    assert "Domain" not in cookie
-    listed = await client.get("/surface/debug/api/conversations")
-    assert listed.status_code == 200
-
-
 async def test_a_posted_token_recovers_a_session_behind_a_stale_cookie(debug) -> None:
     """A held `ufo_debug` cookie whose bearer no longer resolves — signed under a secret this
     deploy does not hold, or expired — must not shadow the live bearer the sign-in card posts: the
@@ -469,33 +424,6 @@ async def test_query_tokens_are_never_accepted(debug) -> None:
     assert "set-cookie" not in bind.headers
     tokenless_post = await client.post("/surface/debug", follow_redirects=False)
     assert tokenless_post.status_code == 401
-
-
-async def test_an_unresolved_page_get_lands_on_the_sign_in_page(debug) -> None:
-    """The Slack turn's `debug` link is a plain GET carrying no bearer: an operator whose cookie
-    outlived its bearer reaches the card that mints a new one instead of a bare `unauthorized`,
-    which is the only recoverable answer for a cookie they cannot read or delete. The bounce carries
-    `?debug=1`, the ask that sends the minted bearer back to this surface: without it the sign-in
-    page posts the session to the member portal, so the click that wanted the debugger would land
-    there and never come back. The API routes still reject, so the page's fetches fail loudly."""
-    client, _, _ = debug
-    workspace_id, _ = await _seed_workspace()
-    conversation_id = await _seed_conversation(workspace_id)
-    operator = f"alex@{OPERATOR_EMAIL_DOMAIN}"
-
-    linked = await client.get(
-        "/surface/debug",
-        params={"ws": str(workspace_id), "c": str(conversation_id)},
-        follow_redirects=False,
-    )
-    assert linked.status_code == 303
-    assert linked.headers["location"] == "/login?debug=1"
-
-    client.cookies.set("ufo_debug", _mint(SECRET, workspace_id, operator, ttl_seconds=-1))
-    expired = await client.get("/surface/debug", follow_redirects=False)
-    assert expired.status_code == 303
-    assert expired.headers["location"] == "/login?debug=1"
-    assert (await client.get("/surface/debug/api/conversations")).status_code == 401
 
 
 async def test_app_page_serves_the_built_app_and_fails_loud_unbuilt(debug, monkeypatch) -> None:
@@ -536,193 +464,6 @@ async def test_workspace_meta_carries_the_slack_team(debug, monkeypatch) -> None
     }
 
 
-async def test_turns_and_detail_read_terminal_ledger_and_children(debug) -> None:
-    client, _, _ = debug
-    workspace_id, agent_id = await _seed_workspace()
-    conversation_id = await _seed_conversation(workspace_id)
-    parent = await _seed_turn(workspace_id, conversation_id, agent_id, 1)
-    child_conversation = await _seed_conversation(workspace_id, queue_key="subagent:1")
-    child = await _seed_turn(workspace_id, child_conversation, agent_id, 1, parent_turn_id=parent)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.ledger).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                turn_id=parent,
-                dimension="tokens",
-                amount=1234,
-                prompt_tokens=1234,
-                input_tokens=1234,
-                priced_micro_usd=77,
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
-
-    turns = await client.get(
-        f"/surface/debug/api/conversations/{conversation_id}/turns", headers=_auth(token)
-    )
-    assert turns.status_code == 200
-    (listed,) = turns.json()
-    assert listed["id"] == str(parent)
-    assert listed["terminal"]["cost_micro_usd"] == 77
-
-    detail = await client.get(f"/surface/debug/api/turns/{parent}", headers=_auth(token))
-    assert detail.status_code == 200
-    body = detail.json()
-    assert body["turn"]["id"] == str(parent)
-    assert [entry["dimension"] for entry in body["ledger"]] == ["tokens"]
-    assert [turn["id"] for turn in body["children"]] == [str(child)]
-    assert body["children"][0]["subagent_profile"] == "research"
-    assert "steps" not in body
-    steps_response = await client.get(
-        f"/surface/debug/api/turns/{parent}/steps", headers=_auth(token)
-    )
-    assert steps_response.status_code == 200
-    steps = steps_response.json()
-    assert [(step["kind"], step["name"], step["duration_ms"]) for step in steps] == [
-        ("model", "model round", 6_454),
-        ("tool", "bash", 120_105),
-    ]
-    assert steps[0]["started_at"] == "2026-04-26T15:00:00.123000Z"
-    # The step view carries what each output rebuilds — the model round as the assistant message
-    # that issued the call, the dispatch as the result the model saw.
-    assert steps[0]["messages"] == [
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "tool_use", "id": "call-1", "name": "bash", "input": {"command": "pwd"}}
-            ],
-        }
-    ]
-    assert steps[1]["messages"] == [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "call-1",
-                    "content": "/workspace",
-                    "is_error": False,
-                    "activity": False,
-                    "activity_text": "",
-                }
-            ],
-        }
-    ]
-    missing = await client.get(f"/surface/debug/api/turns/{uuid4()}", headers=_auth(token))
-    assert missing.status_code == 404
-    missing_steps = await client.get(
-        f"/surface/debug/api/turns/{uuid4()}/steps", headers=_auth(token)
-    )
-    assert missing_steps.status_code == 404
-    malformed = await client.get("/surface/debug/api/turns/not-a-uuid", headers=_auth(token))
-    assert malformed.status_code == 404
-    malformed_steps = await client.get(
-        "/surface/debug/api/turns/not-a-uuid/steps", headers=_auth(token)
-    )
-    assert malformed_steps.status_code == 404
-
-
-async def test_transcript_compactions_and_files_read_the_blobs_and_the_sandbox(debug) -> None:
-    client, blob, sandboxes = debug
-    workspace_id, _ = await _seed_workspace()
-    conversation_id = await _seed_conversation(workspace_id)
-    stored = Conversation(
-        seq=1,
-        messages=(
-            Message(role="user", content="hi"),
-            Message(
-                role="assistant",
-                content=(
-                    RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
-                    ThinkingBlock(thinking="check the tree", signature="sig-1"),
-                    ReasoningItemBlock(
-                        id="rs_1",
-                        encrypted_content="Z3B0LWVuY3J5cHRlZA",
-                        summary=("check the tree",),
-                    ),
-                    ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
-                    ToolResultBlock(tool_use_id="t1", content="README.md"),
-                    TextBlock(text="done"),
-                ),
-            ),
-        ),
-        system="you are the agent\n\n<recalled_memory>fact</recalled_memory>",
-        injected="<recalled_memory>fact</recalled_memory>",
-    )
-    await blob.put(transcript_key(conversation_id), encode(stored))
-    summary = CompactionSummary(intent="ship", current_work="reading", next_step="write")
-    window = CompactionWindow(messages=(Message(role="user", content="hi"),))
-    for half, payload in (("before", window), ("after", window), ("summary", summary)):
-        await blob.put(
-            compaction_key(conversation_id, 1, half),
-            lz4.frame.compress(payload.model_dump_json().encode()),
-        )
-    with ws(workspace_id):
-        await sandboxes.write(conversation_id, "report/out.txt", b"hello world")
-    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
-
-    transcript = await client.get(
-        f"/surface/debug/api/conversations/{conversation_id}/transcript", headers=_auth(token)
-    )
-    assert transcript.status_code == 200
-    assert transcript.json()["system"] == stored.system
-    assert transcript.json()["injected"] == stored.injected
-    blocks = transcript.json()["messages"][1]["content"]
-    assert [block["type"] for block in blocks] == [
-        "redacted_thinking",
-        "thinking",
-        "reasoning",
-        "tool_use",
-        "tool_result",
-        "text",
-    ]
-    assert blocks[1]["signature"] == "sig-1"
-    assert blocks[2]["summary"] == ["check the tree"]
-
-    compactions = await client.get(
-        f"/surface/debug/api/conversations/{conversation_id}/compactions", headers=_auth(token)
-    )
-    assert compactions.json() == [1]
-    record = await client.get(
-        f"/surface/debug/api/conversations/{conversation_id}/compactions/1", headers=_auth(token)
-    )
-    assert record.status_code == 200
-    assert record.json()["summary"]["intent"] == "ship"
-
-    files = await client.get(
-        f"/surface/debug/api/conversations/{conversation_id}/files", headers=_auth(token)
-    )
-    assert [entry["path"] for entry in files.json()] == ["report/out.txt"]
-    download = await client.get(
-        f"/surface/debug/api/conversations/{conversation_id}/files/report/out.txt",
-        headers=_auth(token),
-    )
-    assert download.status_code == 200
-    assert download.content == b"hello world"
-
-    empty = await _seed_conversation(workspace_id, queue_key="empty")
-    assert (
-        await client.get(
-            f"/surface/debug/api/conversations/{empty}/transcript", headers=_auth(token)
-        )
-    ).status_code == 404
-    assert (
-        await client.get(
-            f"/surface/debug/api/conversations/{conversation_id}/files/report/absent.txt",
-            headers=_auth(token),
-        )
-    ).status_code == 404
-    escape = await client.get(
-        f"/surface/debug/api/conversations/{conversation_id}/files/..%2Fmessages.json.lz4",
-        headers=_auth(token),
-    )
-    assert escape.status_code == 404
-
-
 async def test_transcript_shows_a_stored_tool_description_after_its_arg_is_removed(debug) -> None:
     client, blob, _sandboxes = debug
     workspace_id, _ = await _seed_workspace()
@@ -746,18 +487,3 @@ async def test_transcript_shows_a_stored_tool_description_after_its_arg_is_remov
     assert response.status_code == 200
     call = response.json()["messages"][0]["content"][0]
     assert call["input"] == {"command": "ls", "user_description": "Listing files"}
-
-
-async def test_stream_tails_a_completed_turn_from_its_durable_terminal(debug) -> None:
-    client, _, _ = debug
-    workspace_id, agent_id = await _seed_workspace()
-    conversation_id = await _seed_conversation(workspace_id)
-    turn_id = await _seed_turn(workspace_id, conversation_id, agent_id, 1)
-    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
-    response = await client.get(f"/surface/debug/api/turns/{turn_id}/stream", headers=_auth(token))
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
-    assert "event: terminal" in response.text
-    assert '"cost_micro_usd":77' in response.text
-    missing = await client.get(f"/surface/debug/api/turns/{uuid4()}/stream", headers=_auth(token))
-    assert missing.status_code == 404

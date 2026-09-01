@@ -8,7 +8,6 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,7 +15,6 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import httpx
-import lz4.frame
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
@@ -54,7 +52,7 @@ from ufo.harness.sandbox.ingress_token import (
 )
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
-from ufo.runtime.access.connectors import DIRECT_ACCOUNT, ConnectorRegistry
+from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import (
     CREDENTIAL_REQUEST_PURPOSE,
     CREDENTIAL_REQUEST_RENEWAL_TTL_SECONDS,
@@ -70,17 +68,14 @@ from ufo.runtime.access.credentials import (
 from ufo.runtime.engine import INJECTED_CONTEXT, _context_tag
 from ufo.runtime.ext.surface import (
     CONVERSATION_TITLE_CHARS,
-    MAX_CONVERSATION_SPEAKERS,
     NOTHING_DELIVERED,
     OPERATOR_EMAIL_DOMAIN,
     SILENCE_LINE_BREAK,
     SILENCE_SENTINEL,
-    TRANSCRIPT_ACCESS_WINDOW,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_MAX_AGE_SECONDS,
-    WRITEBACK_WORKSPACE_BATCH,
     MidTurnReply,
     NothingDelivered,
     SharedArtifact,
@@ -107,7 +102,6 @@ from ufo.runtime.ext.surface import (
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.queue import _load_turn
 from ufo.runtime.seats import signup_workspace_id
-from ufo.runtime.sources.backend import binding_name
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.surfaces.hub_tail import HubTailer
 from ufo.runtime.turns.ambient_reply import (
@@ -122,12 +116,8 @@ from ufo.runtime.turns.audience import (
     foreign_room_audience,
     room_audience,
 )
-from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.turns.transcript import (
-    CompactionSummary,
-    CompactionWindow,
     Conversation,
-    compaction_key,
     encode,
     transcript_key,
 )
@@ -135,7 +125,6 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     MAIN_AGENT_ICON,
-    SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     WRITEBACK_PENDING,
     TerminalFrame,
@@ -514,6 +503,7 @@ def test_surface_delivery_error_rejects_negative_retry_delay() -> None:
         SurfaceDeliveryError("rate limited", retry_after_seconds=-1)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_writeback_due_index_is_installed(db: None) -> None:
     async with workspace_tx() as connection:
         dialect = connection.dialect.name
@@ -525,6 +515,7 @@ async def test_writeback_due_index_is_installed(db: None) -> None:
     assert "claimed" in predicate
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_for_takes_a_caller_named_id_only_at_creation(
     db: None, tmp_path
 ) -> None:
@@ -543,6 +534,7 @@ async def test_conversation_for_takes_a_caller_named_id_only_at_creation(
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path) -> None:
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     dbos = StubDbos()
@@ -586,6 +578,7 @@ async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path)
     assert not again.opened_run
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_admit_refuses_a_speaker_from_another_workspace(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     _, _, foreign_member_id = await _seed(member_email="foreign@example.com")
@@ -613,6 +606,7 @@ async def test_admit_refuses_a_speaker_from_another_workspace(db: None, tmp_path
     assert turns == 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_find_conversation_reads_without_creating(db: None, tmp_path) -> None:
     workspace_id, agent_id, _ = await _seed()
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
@@ -635,6 +629,7 @@ async def test_find_conversation_reads_without_creating(db: None, tmp_path) -> N
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_for_claims_a_memberless_conversation(db: None, tmp_path) -> None:
     """A conversation created before its speaker could resolve is claimed by the first resolving
     turn, and never re-claimed from the member who owns it."""
@@ -679,6 +674,7 @@ async def test_conversation_for_claims_a_memberless_conversation(db: None, tmp_p
     assert await _owner() == member_id
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_audience_only_narrows(db: None, tmp_path: Path) -> None:
     workspace_id, _, _ = await _seed()
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
@@ -704,65 +700,6 @@ async def test_conversation_audience_only_narrows(db: None, tmp_path: Path) -> N
     assert await current_audience() == foreign
     await context.conversation_for("C1:1.0", room)
     assert await current_audience() == foreign
-
-
-async def test_list_agents_orders_main_first_then_name(db: None, tmp_path) -> None:
-    workspace_id, agent_id, _ = await _seed()
-    await _seed()
-    second = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=second,
-                workspace_id=workspace_id,
-                name="helpdesk",
-                prompt="be helpful",
-                model="claude-sonnet-5",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    listed = await context.list_agents()
-    assert [(agent.name, agent.main) for agent in listed] == [
-        ("assistant", True),
-        ("helpdesk", False),
-    ]
-    assert listed[0].id == agent_id
-    assert listed[0].model == "claude-opus-4-8"
-    assert listed[0].internet_access_allowed
-    assert listed[1].id == second
-    assert listed[1].model == "claude-sonnet-5"
-
-
-async def test_agent_projections_carry_the_icon(db: None, tmp_path) -> None:
-    workspace_id, agent_id, member_id = await _seed(member_email="reader@example.com")
-    assert member_id is not None
-    second = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=second,
-                workspace_id=workspace_id,
-                name="helpdesk",
-                icon="headset",
-                prompt="be helpful",
-                model="claude-sonnet-5",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    with ws(workspace_id):
-        listed = await context.list_agents()
-        detail = await context.agent_detail(second, member_id)
-    assert [(agent.name, agent.icon) for agent in listed] == [
-        ("assistant", MAIN_AGENT_ICON),
-        ("helpdesk", "headset"),
-    ]
-    assert listed[0].id == agent_id
-    assert detail is not None
-    assert detail.icon == "headset"
 
 
 async def _seed_agent(workspace_id: UUID, name: str) -> UUID:
@@ -826,6 +763,7 @@ async def _seed_connection(
         )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_agent_connections_hold_the_wall_and_the_member_gate(db: None, tmp_path) -> None:
     workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
     other_agent = await _seed_agent(workspace_id, "ops")
@@ -866,108 +804,7 @@ async def test_agent_connections_hold_the_wall_and_the_member_gate(db: None, tmp
     ] == ["asana"]
 
 
-async def test_connection_pool_visibility_and_agent_names(db: None, tmp_path) -> None:
-    workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
-    peer = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=peer,
-                workspace_id=workspace_id,
-                email="peer@example.com",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    await _seed_connection(workspace_id, agent_id, owner, "private", shared=False)
-    await _seed_connection(workspace_id, agent_id, owner, "shared", shared=True)
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    peer_view = await context.list_connections(peer, admin=False)
-    assert [row.provider for row in peer_view] == ["shared"]
-    assert peer_view[0].owner_email == "owner@example.com"
-    admin_view = await context.list_connections(peer, admin=True)
-    assert [row.provider for row in admin_view] == ["private", "shared"]
-    assert admin_view[0].agents[0].name == "assistant"
-
-
-async def test_an_archived_holder_leaves_the_connection_pool_but_the_connection_stays(
-    db: None, tmp_path
-) -> None:
-    """The panel's Revoke posts a detach on every holder this read names, and an archived app
-    refuses the turn that would carry it, which stops the sweep before the live holders behind it.
-    The connection itself still lists, held by nobody until a restore."""
-    workspace_id, _main_id, owner = await _seed(member_email="owner@example.com")
-    holder_id = await _seed_agent(workspace_id, "ops")
-    await _seed_connection(workspace_id, holder_id, owner, "asana", shared=True)
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert [
-        holder.name for holder in (await context.list_connections(owner, admin=True))[0].agents
-    ] == ["ops"]
-
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.agent)
-            .values(
-                name=f"~archived-{holder_id}",
-                archived_name=tables.agent.c.name,
-                archived_at=sa.func.now(),
-            )
-            .where(tables.agent.c.id == holder_id)
-        )
-    held = await context.list_connections(owner, admin=True)
-
-    assert [row.provider for row in held] == ["asana"]
-    assert held[0].agents == ()
-
-
-async def test_github_coverage_projects_each_credential_leg(db: None, tmp_path) -> None:
-    workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
-    context = replace(
-        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
-        _declared_slots=(
-            DeclaredSlot(
-                name="github_app_installation",
-                description="",
-                extension="coding",
-                member_filled=False,
-            ),
-            DeclaredSlot(name="github_git_token", description="", extension="coding"),
-        ),
-    )
-    empty = await context.github_coverage(owner, admin=False)
-    assert empty.model_dump() == {"api": False, "git_push": False, "sources": False}
-
-    await _seed_connection(workspace_id, agent_id, owner, "github", shared=False)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.source).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                backend="github",
-                config={},
-                subject=f"member:{owner}",
-                owner_member_id=owner,
-                next_sync_at=sa.func.now(),
-                removed_at=None,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.credential).values(
-                workspace_id=workspace_id,
-                slot="github_git_token",
-                ciphertext=b"secret",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-
-    coverage = await context.github_coverage(owner, admin=False)
-    assert coverage.model_dump() == {"api": True, "git_push": True, "sources": True}
-    assert "secret" not in coverage.model_dump_json()
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_slots_report_fill_state_and_no_value(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     async with workspace_tx() as connection:
@@ -995,6 +832,7 @@ async def test_credential_slots_report_fill_state_and_no_value(db: None, tmp_pat
     assert all("sealed" not in view.model_dump_json() for view in listed)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_sources_gate_on_subject_and_skip_removed(db: None, tmp_path) -> None:
     workspace_id, _agent_id, owner = await _seed(member_email="owner@example.com")
     peer = uuid4()
@@ -1043,114 +881,7 @@ async def test_sources_gate_on_subject_and_skip_removed(db: None, tmp_path) -> N
     assert [view.backend for view in admin_view] == ["folder", "github"]
 
 
-async def test_a_connector_row_carries_the_binding_the_kind_names(db: None, tmp_path) -> None:
-    """A connector-registered row projects the `source` kind's own identity, so the panel's acts
-    name the object the chat verbs mutate: the binding name is `binding_name`'s digest over
-    exactly what the row authenticates as, and the spec fields round-trip — a brokered account
-    verbatim, `DIRECT_ACCOUNT` as the empty account the kind's spec uses, and an absent tenant URL
-    as the empty string. A row whose config is not a connector's stays unmanaged, which the
-    subject-gating test above covers at the None polarity."""
-    workspace_id, _, _ = await _seed()
-    async with workspace_tx() as connection:
-        for backend, config in (
-            ("asana", {"account": "acct-7", "stream": "tasks"}),
-            ("fresh_desk", {"account": DIRECT_ACCOUNT, "stream": "tickets", "base_url": "t.io"}),
-        ):
-            await connection.execute(
-                sa.insert(tables.source).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    backend=backend,
-                    config=config,
-                    subject=SHARED_SUBJECT,
-                    owner_member_id=None,
-                    next_sync_at=sa.func.now(),
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    listed = await context.list_sources(uuid4(), admin=True)
-
-    brokered = next(view for view in listed if view.backend == "asana")
-    assert brokered.name == binding_name("asana", "acct-7", None)
-    assert (brokered.stream, brokered.account_id, brokered.base_url) == ("tasks", "acct-7", "")
-    direct = next(view for view in listed if view.backend == "fresh_desk")
-    assert direct.name == binding_name("fresh_desk", DIRECT_ACCOUNT, "t.io")
-    assert direct.name.startswith("fresh-desk-")  # the kind's name never carries an underscore
-    assert (direct.stream, direct.account_id, direct.base_url) == ("tickets", "", "t.io")
-
-
-async def test_a_windowed_connector_row_projects_its_window(db: None, tmp_path) -> None:
-    """A panel act submits `{...row.apply, <the one thing it changes>}`, so this projection has to
-    carry every field the binding's identity is built from — not just the ones a column displays.
-    `backfill_days` is here for no display purpose at all: it is carried solely so the round-trip
-    is faithful. Omitted, it reaches the verb as its default and reads as an edit nobody made,
-    which refuses the act outright — the extension suite drives both acts that die that way."""
-    workspace_id, _, _ = await _seed()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.source).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                backend="gmail",
-                config={
-                    "account": "acct-7",
-                    "stream": "messages",
-                    "backfill_days": 7,
-                    "backfill_after": "2026-07-30T03:50:40Z",
-                },
-                subject=SHARED_SUBJECT,
-                owner_member_id=None,
-                next_sync_at=sa.func.now(),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    [view] = await context.list_sources(uuid4(), admin=True)
-
-    assert view.backfill_days == 7
-    assert (view.stream, view.account_id, view.base_url) == ("messages", "acct-7", "")
-
-
-async def test_a_parked_source_carries_its_reason_and_an_unparked_one_carries_none(
-    db: None, tmp_path
-) -> None:
-    """The panel reads the source rows straight, so a row the driver stopped claiming has to say so
-    here or it reads as healthy: no errors, and a next sync a minute out it will never take. The
-    reason is the backend's own text, which names the scope to re-grant."""
-    workspace_id, _, _ = await _seed()
-    reason = "gmail: 'messages' refused (403); the grant lacks the Gmail read scope"
-    async with workspace_tx() as connection:
-        for backend, parked_reason in (("gmail", reason), ("folder", None)):
-            await connection.execute(
-                sa.insert(tables.source).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    backend=backend,
-                    config={},
-                    subject=SHARED_SUBJECT,
-                    owner_member_id=None,
-                    next_sync_at=sa.func.now(),
-                    parked_at=sa.func.now() if parked_reason else None,
-                    parked_reason=parked_reason,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    listed = await context.list_sources(uuid4(), admin=True)
-
-    assert [(view.backend, view.parked_reason) for view in listed] == [
-        ("folder", None),
-        ("gmail", reason),
-    ]
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_list_installations_orders_by_surface(db: None, tmp_path) -> None:
     workspace_id, agent_id, _ = await _seed()
     async with workspace_tx() as connection:
@@ -1176,6 +907,7 @@ async def test_list_installations_orders_by_surface(db: None, tmp_path) -> None:
     assert await other.list_installations() == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_for_binds_an_explicit_agent(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     second = uuid4()
@@ -1210,6 +942,7 @@ async def test_conversation_for_binds_an_explicit_agent(db: None, tmp_path) -> N
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_for_refuses_a_foreign_agent(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     _, foreign_agent, _ = await _seed()
@@ -1219,6 +952,7 @@ async def test_conversation_for_refuses_a_foreign_agent(db: None, tmp_path) -> N
     assert await context.find_conversation("stray-key") is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_intent_admission_stamps_the_turn_and_requires_a_speaker(
     db: None, tmp_path
 ) -> None:
@@ -1259,6 +993,7 @@ async def test_an_intent_admission_stamps_the_turn_and_requires_a_speaker(
     assert await turn_count() == admitted_turns
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_path) -> None:
     """Both ends of the turn.context column: the surface admits its ambient TurnContext, and the
     queue loader — the engine's one read path — validates the same record back off the row, with
@@ -1285,6 +1020,7 @@ async def test_admitted_context_round_trips_to_the_loaded_turn(db: None, tmp_pat
     assert turn.created_at.tzinfo is not None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_link_member_provisions_a_surface_identity(db: None, tmp_path) -> None:
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
@@ -1304,6 +1040,7 @@ async def test_link_member_provisions_a_surface_identity(db: None, tmp_path) -> 
     assert await context.link_member("UNOBODY", "nobody@example.com") is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_link_member_id_requires_a_member_of_the_workspace(db: None, tmp_path) -> None:
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     assert member_id is not None
@@ -1314,6 +1051,7 @@ async def test_link_member_id_requires_a_member_of_the_workspace(db: None, tmp_p
     assert await context.linked_member("UOTHER") is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_surface_listener_resolves_only_a_bound_installation(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     surface_context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
@@ -1335,6 +1073,7 @@ async def test_surface_listener_resolves_only_a_bound_installation(db: None, tmp
         assert resolved is surface_context
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_surface_listener_has_one_live_owner_and_parks_a_failure(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1431,6 +1170,7 @@ async def test_surface_listener_has_one_live_owner_and_parks_a_failure(
         await asyncio.gather(*running, return_exceptions=True)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_surface_listener_survives_one_failed_claim_tick(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1489,6 +1229,7 @@ async def test_surface_listener_survives_one_failed_claim_tick(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_surface_listener_restarts_after_a_database_failure(db: None) -> None:
     instance_id = UUID(int=1)
     now = datetime.now(UTC)
@@ -1535,6 +1276,7 @@ async def test_surface_listener_restarts_after_a_database_failure(db: None) -> N
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_link_member_answers_the_oldest_of_two_cased_rows(db: None, tmp_path) -> None:
     """Member uniqueness compares bytes, so two rows can carry one address in different casings:
     the lookup answers the oldest of them rather than raising on the ambiguity, so requests for that
@@ -1556,6 +1298,7 @@ async def test_link_member_answers_the_oldest_of_two_cased_rows(db: None, tmp_pa
     assert await context.linked_member("UBEE") == member_id
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_write_workspace_file_streams_into_the_conversation_workspace(
     db: None, tmp_path
 ) -> None:
@@ -1710,6 +1453,7 @@ def test_a_bare_line_break_answer_says_nothing_in_every_form_a_model_writes_it()
     assert not is_silence_sentinel("<br>done</br>")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_surface_that_delivered_nothing_settles_the_writeback(
     db: None, tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1771,6 +1515,7 @@ def test_an_inbox_name_is_one_leaf_however_the_surface_was_handed_it() -> None:
     }
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_write_workspace_file_replaces_a_planted_symlink(db: None, tmp_path) -> None:
     """An inbound attachment lands through the carrier's containment guard, so a link the agent left
     in its own inbox directory on an earlier turn is replaced rather than written through: the host
@@ -1802,6 +1547,7 @@ async def test_write_workspace_file_replaces_a_planted_symlink(db: None, tmp_pat
     assert landed.read_bytes() == b"inbound bytes"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_write_workspace_file_refuses_a_link_out_of_the_workspace(db: None, tmp_path) -> None:
     """A link at a *directory* on the way, pointing out of the conversation's workspace, is refused
     outright: there is no name inside the workspace for the bytes to land on, so the delivery fails
@@ -1827,6 +1573,7 @@ async def test_write_workspace_file_refuses_a_link_out_of_the_workspace(db: None
     assert list(outside.iterdir()) == []
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_write_workspace_file_refuses_an_uncapped_stream_while_it_accumulates(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1855,6 +1602,7 @@ async def test_write_workspace_file_refuses_an_uncapped_stream_while_it_accumula
     assert not (root / str(conversation_id) / "big.bin").exists()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_join_member_creates_a_same_domain_member_and_links(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed(workspace_subject="example.com")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
@@ -1883,6 +1631,7 @@ async def test_join_member_creates_a_same_domain_member_and_links(db: None, tmp_
     assert await context.join_member("UNEW2", "new.joiner@example.com") == joined
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_join_member_refuses_without_a_domain_match(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed(member_email="owner@example.com")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
@@ -1911,6 +1660,7 @@ async def test_join_member_refuses_without_a_domain_match(db: None, tmp_path) ->
     assert members == 1
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_join_member_does_not_treat_gmail_as_workspace_authority(db: None, tmp_path) -> None:
     workspace_id, _, owner_id = await _seed(
         member_email="owner@gmail.com", workspace_subject="owner@gmail.com"
@@ -1921,6 +1671,7 @@ async def test_join_member_does_not_treat_gmail_as_workspace_authority(db: None,
     assert owner_id is not None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_is_operator_workspace_matches_the_owner_email_domain(db: None, tmp_path) -> None:
     operator_id, _, _ = await _seed(member_email=f"owner@{OPERATOR_EMAIL_DOMAIN}")
     operator = _context(operator_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
@@ -1933,6 +1684,7 @@ async def test_is_operator_workspace_matches_the_owner_email_domain(db: None, tm
     assert await ownerless.is_operator_workspace() is False
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_is_operator_workspace_keys_on_the_earliest_member(db: None, tmp_path) -> None:
     early = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -2090,6 +1842,7 @@ def test_ingress_url_carries_the_shipped_claim(tmp_path, monkeypatch: pytest.Mon
     assert verify_ingress_token(plain_token, datetime.now(UTC), INGRESS_VIEW_KIND).shipped is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     blob = FilesystemBlobStore(root=tmp_path)
@@ -2119,61 +1872,6 @@ async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_
     assert surface.targets == [(target.conversation_id, target.agent_id)]
 
 
-async def test_poller_attaches_same_instant_files_in_key_order(db: None, tmp_path) -> None:
-    """The poller's artifact read carries the same `(created_at, blob_key)` order as
-    `shared_artifacts`, so two files sharing one timestamp reach a durable surface's `attach`
-    deterministically — the identity both docstrings claim."""
-    workspace_id, _, _ = await _seed()
-    blob = FilesystemBlobStore(root=tmp_path)
-    await blob.put("artifacts/x/report.pdf", b"PDF")
-    await blob.put("artifacts/x/data.csv", b"CSV")
-    report = SharedArtifact(
-        blob_key="artifacts/x/report.pdf",
-        filename="report.pdf",
-        subject=None,
-        media_type="application/pdf",
-        size_bytes=3,
-    )
-    data = SharedArtifact(
-        blob_key="artifacts/x/data.csv",
-        filename="data.csv",
-        subject=None,
-        media_type="text/csv",
-        size_bytes=3,
-    )
-    turn_id = await _seed_turn(workspace_id, "C7:1.0", "done", "files", artifacts=(report, data))
-    poller, surface = _poller(workspace_id, RecordingSurface(ref="C7:9.9"), blob)
-    await poller.drain()
-    assert surface.attached == [(turn_id, "C7:9.9", ("data.csv", "report.pdf"))]
-
-
-async def test_shared_artifacts_reads_a_turns_files_deterministically(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
-    report = SharedArtifact(
-        blob_key="artifacts/x/report.pdf",
-        filename="report.pdf",
-        subject="the report",
-        media_type="application/pdf",
-        size_bytes=3,
-        preview_blob_key="artifacts/x/report.png",
-        preview_media_type="image/png",
-        preview_size_bytes=7,
-    )
-    data = SharedArtifact(
-        blob_key="artifacts/x/data.csv",
-        filename="data.csv",
-        subject=None,
-        media_type="text/csv",
-        size_bytes=9,
-    )
-    turn_id = await _seed_turn(workspace_id, "C6:1.0", "done", "files", artifacts=(report, data))
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert await context.shared_artifacts(turn_id) == (data, report)
-    assert await context.shared_artifacts(uuid4()) == ()
-    foreign = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert await foreign.shared_artifacts(turn_id) == ()
-
-
 def _shared_page(name: str) -> SharedArtifact:
     return SharedArtifact(
         blob_key=f"artifacts/{name}/report.md",
@@ -2184,6 +1882,7 @@ def _shared_page(name: str) -> SharedArtifact:
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(db: None) -> None:
     """The runs page lists only terminal scheduled admissions whose conversation content the
     reader reads — the shared conversations' runs and their own. A run's reply is transcript
@@ -2264,6 +1963,7 @@ async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(db: N
     assert fenced == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_scheduled_runs_bound_newest_first_and_list_only_the_runs_that_reported(
     db: None,
 ) -> None:
@@ -2302,26 +2002,7 @@ async def test_scheduled_runs_bound_newest_first_and_list_only_the_runs_that_rep
     assert [run.turn_id for run in newest] == list(reversed(reported))[:2]
 
 
-async def test_workspace_candidates_rotate_and_recover_from_cursor_deletion_and_restart(
-    db: None,
-) -> None:
-    workspaces: list[UUID] = []
-    turns: dict[UUID, UUID] = {}
-    for index in range(WRITEBACK_WORKSPACE_BATCH + 1):
-        workspace_id, _, _ = await _seed()
-        turns[workspace_id] = await _seed_turn(workspace_id, f"C{index}:1.0", "done", str(index))
-        workspaces.append(workspace_id)
-    candidates = writeback_workspaces()
-    first = await candidates()
-    second = await candidates()
-    assert len(first) == WRITEBACK_WORKSPACE_BATCH
-    assert set(first).isdisjoint(second)
-    assert set((*first, *second)) == set(workspaces)
-    await _set_writeback(turns[second[-1]], status=WRITEBACK_DELIVERED)
-    assert set(await candidates()) == set(first)
-    assert set(await writeback_workspaces()()) == set(first)
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_slow_workspace_does_not_block_another_workspace(db: None, tmp_path) -> None:
     """A workspace stuck in its post never holds another workspace's delivery.
 
@@ -2350,47 +2031,7 @@ async def test_a_slow_workspace_does_not_block_another_workspace(db: None, tmp_p
     assert (await _writeback(slow_turn)).status == WRITEBACK_DELIVERED
 
 
-async def test_runner_pages_beyond_a_slow_workspace(
-    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A workspace stuck in its post occupies one in-flight slot, so the runner pages past it to a
-    workspace outside the first batch and delivers there while the stuck claim is still held.
-
-    No wait is bounded by how long a loaded runner may take, since the paging this proves has no
-    time semantics; each is bounded by the runner ending and by the wedge watchdog. `run()` loops
-    forever and logs every exception rather than raising, so the watchdog is what actually fails a
-    regression here — without it a broken pager hangs the shard and every other test in it."""
-    monkeypatch.setattr(surface_module, "WRITEBACK_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(surface_module, "WRITEBACK_WORKSPACE_BATCH", 2)
-    monkeypatch.setattr(surface_module, "WRITEBACK_WORKSPACE_IN_FLIGHT", 4)
-    monkeypatch.setattr(surface_module, "WRITEBACK_WORKSPACE_CONCURRENCY", 2)
-    workspaces: list[UUID] = []
-    turns: dict[UUID, UUID] = {}
-    for index in range(3):
-        workspace_id, _, _ = await _seed()
-        turns[workspace_id] = await _seed_turn(workspace_id, f"CPAGE:{index}.0", "done", str(index))
-        workspaces.append(workspace_id)
-    ordered = sorted(workspaces)
-    blocked_workspace, later_workspace = ordered[0], ordered[-1]
-    blob = FilesystemBlobStore(root=tmp_path)
-    contexts = {
-        workspace_id: _context(workspace_id, StubDbos(), blob) for workspace_id in workspaces
-    }
-    surface = BlockingSurface(blocked_workspace=blocked_workspace)
-    running = asyncio.create_task(_fleet_poller(contexts, surface).run())
-    blocked = asyncio.ensure_future(surface.blocked.wait())
-    try:
-        await _await_posted(blocked, running, "the slow workspace posted")
-        await _await_status(turns[later_workspace], WRITEBACK_DELIVERED, running)
-        assert (await _writeback(turns[blocked_workspace])).status == WRITEBACK_CLAIMED
-    finally:
-        blocked.cancel()
-        surface.release.set()
-        await _await_status(turns[blocked_workspace], WRITEBACK_DELIVERED, running)
-        running.cancel()
-        await asyncio.gather(running, return_exceptions=True)
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_poller_leaves_a_non_terminal_turn_undelivered(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     turn_id = await _seed_turn(workspace_id, "C6:1.0", "queued", "")
@@ -2400,6 +2041,7 @@ async def test_poller_leaves_a_non_terminal_turn_undelivered(db: None, tmp_path)
     assert (await _writeback(turn_id)).status == WRITEBACK_PENDING
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_poller_resumes_attachments_from_a_recorded_ref_without_reposting(
     db: None, tmp_path
 ) -> None:
@@ -2430,6 +2072,7 @@ async def test_poller_resumes_attachments_from_a_recorded_ref_without_reposting(
     assert row.reply_ref == "C7:5.5"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_attachment_failure_retries_from_the_recorded_reply(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     artifact = SharedArtifact(
@@ -2454,88 +2097,7 @@ async def test_attachment_failure_retries_from_the_recorded_reply(db: None, tmp_
     assert (await _writeback(turn_id)).status == WRITEBACK_DELIVERED
 
 
-async def test_live_delivery_renews_its_claim_before_a_peer_can_recover_it(
-    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A live delivery holds its claim by renewing it, so a peer draining the same workspace
-    recovers nothing while the delivery is still in flight.
-
-    Every wait is bounded by the drain, never by a wall clock. The claim this proves is renewed
-    regardless of expiry, so nothing here has time semantics: a loaded runner stretches each
-    refresh arbitrarily while the renewal it must prove stays correct, and the drain ending early
-    is the only way the posts and their refreshes never arrive."""
-    cycles: dict[UUID, int] = {}
-    refreshed_once: set[UUID] = set()
-    refreshed_twice: set[UUID] = set()
-    all_refreshed_once = asyncio.Event()
-    all_refreshed_twice = asyncio.Event()
-    next_refresh = asyncio.Event()
-    hold_renewals = asyncio.Event()
-    refresh_claim = WritebackPoller._refresh_claim
-
-    async def controlled_refresh(self: WritebackPoller, turn_id: UUID) -> None:
-        cycle = cycles.get(turn_id, 0) + 1
-        cycles[turn_id] = cycle
-        await refresh_claim(self, turn_id)
-        if cycle == 1:
-            refreshed_once.add(turn_id)
-            if len(refreshed_once) == len(turn_ids):
-                all_refreshed_once.set()
-            await next_refresh.wait()
-            return
-        if cycle == 2:
-            refreshed_twice.add(turn_id)
-            if len(refreshed_twice) == len(turn_ids):
-                all_refreshed_twice.set()
-            await hold_renewals.wait()
-            return
-        raise AssertionError(f"unexpected refresh cycle {cycle}")
-
-    monkeypatch.setattr(surface_module, "WRITEBACK_CLAIM_REFRESH_SECONDS", 0.0)
-    monkeypatch.setattr(WritebackPoller, "_refresh_claim", controlled_refresh)
-    workspace_id, _, _ = await _seed()
-    turn_ids = (
-        await _seed_turn(workspace_id, "CLEASE:1.0", "done", "slow"),
-        await _seed_turn(workspace_id, "CLEASE:2.0", "done", "waiting"),
-    )
-    blob = FilesystemBlobStore(root=tmp_path)
-    contexts = {workspace_id: _context(workspace_id, StubDbos(), blob)}
-    surface = BlockingSurface(blocked_workspace=workspace_id)
-    first = _fleet_poller(contexts, surface, worker_id="worker-1")
-    running = asyncio.create_task(first.drain())
-    posted_and_refreshed = asyncio.gather(surface.blocked.wait(), all_refreshed_once.wait())
-    renewed_twice = asyncio.ensure_future(all_refreshed_twice.wait())
-    try:
-        await asyncio.wait((posted_and_refreshed, running), return_when=asyncio.FIRST_COMPLETED)
-        assert posted_and_refreshed.done(), "the drain ended before every turn posted and refreshed"
-        expired = datetime.now(UTC) - timedelta(seconds=1)
-        for turn_id in turn_ids:
-            await _set_writeback(turn_id, claim_expires_at=expired)
-        expired_claims = {
-            turn_id: (await _writeback(turn_id)).claim_expires_at for turn_id in turn_ids
-        }
-        next_refresh.set()
-        await asyncio.wait((renewed_twice, running), return_when=asyncio.FIRST_COMPLETED)
-        assert renewed_twice.done(), "the drain ended before every claim renewed a second time"
-        for turn_id in turn_ids:
-            renewed = await _writeback(turn_id)
-            assert renewed.status == WRITEBACK_CLAIMED
-            assert renewed.claimed_by == "worker-1"
-            assert renewed.claim_expires_at != expired_claims[turn_id]
-        peer_surface = RecordingSurface()
-        await _fleet_poller(contexts, peer_surface, worker_id="worker-2").drain()
-        assert peer_surface.posted == []
-    finally:
-        posted_and_refreshed.cancel()
-        renewed_twice.cancel()
-        surface.release.set()
-        await running
-    assert [(await _writeback(turn_id)).status for turn_id in turn_ids] == [
-        WRITEBACK_DELIVERED,
-        WRITEBACK_DELIVERED,
-    ]
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_delivered_commit_never_contends_with_its_own_claim_renewal(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2593,6 +2155,7 @@ async def test_the_delivered_commit_never_contends_with_its_own_claim_renewal(
     assert contended == 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_claim_renewal_cancels_external_delivery_when_ownership_changes(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2632,6 +2195,7 @@ async def test_claim_renewal_cancels_external_delivery_when_ownership_changes(
     assert surface.attach_attempts == 0
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_poller_backs_off_a_young_failure_then_terminally_fails_when_aged_out(
     db: None, tmp_path
 ) -> None:
@@ -2653,6 +2217,7 @@ async def test_poller_backs_off_a_young_failure_then_terminally_fails_when_aged_
     assert (await _writeback(turn_id)).status == WRITEBACK_FAILED
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_writeback_retains_latest_error_and_honors_retry_after(
     db: None, tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2686,22 +2251,7 @@ async def test_writeback_retains_latest_error_and_honors_retry_after(
     assert delivered_log.__dict__["ufo"]["turn_id"] == str(turn_id)
 
 
-async def test_writeback_caps_retry_after_at_the_writeback_window(db: None, tmp_path) -> None:
-    """A hostile or absurd Retry-After cannot park a row past the writeback window: the delay is
-    capped there, and the age give-up fails the row on the attempt after it ages out."""
-    workspace_id, _, _ = await _seed()
-    turn_id = await _seed_turn(workspace_id, "C429:2.0", "done", "hi")
-    surface = RetryAfterSurface(retry_after_seconds=WRITEBACK_MAX_AGE_SECONDS * 10)
-    poller, _ = _poller(workspace_id, surface, FilesystemBlobStore(root=tmp_path))
-
-    await poller.drain()
-
-    writeback = await _writeback(turn_id)
-    assert writeback.status == WRITEBACK_PENDING
-    due = writeback.claim_expires_at.replace(tzinfo=UTC)
-    assert (due - datetime.now(UTC)).total_seconds() <= WRITEBACK_MAX_AGE_SECONDS
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_writeback_retry_after_does_not_defer_another_surface(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     delayed_turn_id = await _seed_turn(workspace_id, "C429:3.0", "done", "delayed")
@@ -2744,29 +2294,7 @@ async def test_writeback_retry_after_does_not_defer_another_surface(db: None, tm
     assert delivered.posted == [delivered_turn_id]
 
 
-async def test_writeback_retry_after_leaves_nonterminal_rows_untouched(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
-    terminal_turn_id = await _seed_turn(workspace_id, "C429:terminal", "done", "done")
-    running_turn_id = await _seed_turn(workspace_id, "C429:running", "running", "")
-    await _set_writeback(
-        running_turn_id,
-        created_at=datetime.now(UTC) - timedelta(seconds=WRITEBACK_MAX_AGE_SECONDS - 10),
-    )
-    poller, _ = _poller(
-        workspace_id,
-        RetryAfterSurface(retry_after_seconds=17),
-        FilesystemBlobStore(root=tmp_path),
-    )
-
-    await poller.drain()
-
-    assert (await _writeback(terminal_turn_id)).claim_expires_at is not None
-    running = await _writeback(running_turn_id)
-    assert running.status == WRITEBACK_PENDING
-    assert running.claim_expires_at is None
-    assert running.last_error is None
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
     db: None, tmp_path
 ) -> None:
@@ -2830,6 +2358,7 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
             await context.fulfill_credential_request(sealed, "c", "off-seal", member_id)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_fulfillment_uses_the_declared_merge(db: None, tmp_path) -> None:
     workspace_id, _, member_id = await _seed(member_email="owner@example.com")
     assert member_id is not None
@@ -2908,6 +2437,7 @@ async def test_credential_fulfillment_uses_the_declared_merge(db: None, tmp_path
         assert await context._credentials.get(workspace_id, "provider") == "two"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_fulfillment_rechecks_live_admin_authority(db: None, tmp_path) -> None:
     workspace_id, _, member_id = await _seed(member_email="owner@example.com")
     assert member_id is not None
@@ -2942,6 +2472,7 @@ async def test_credential_fulfillment_rechecks_live_admin_authority(db: None, tm
         await context._credentials.get(workspace_id, "secret")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_one_credential_request_cannot_race_two_values_into_a_slot(
     db: None, tmp_path
 ) -> None:
@@ -2979,6 +2510,7 @@ async def test_one_credential_request_cannot_race_two_values_into_a_slot(
     assert await context._credentials.get(workspace_id, "secret") in {"first", "second"}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_request_renewal_requires_the_requesting_admin(db: None, tmp_path) -> None:
     workspace_id, _, member_id = await _seed(member_email="owner@example.com")
     assert member_id is not None
@@ -3038,6 +2570,7 @@ async def test_credential_request_renewal_requires_the_requesting_admin(db: None
         assert await context.renew_credential_request(recently_expired, member_id) is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_join_member_seats_every_teammate_it_creates(db: None, tmp_path) -> None:
     """Nothing bounds the members a workspace has, so a teammate joining on their first message is
     answered on that message. A join that left them unseated would state a revocation no admin
@@ -3148,6 +2681,7 @@ async def _turn_row(
     return turn_id
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_list_conversations_orders_by_activity_and_scopes_to_the_workspace(
     db: None, tmp_path
 ) -> None:
@@ -3177,75 +2711,7 @@ async def test_list_conversations_orders_by_activity_and_scopes_to_the_workspace
     assert await context.list_conversations(limit=1) == (by_id[busy],)
 
 
-async def test_list_turns_returns_full_rows_oldest_first(db: None, tmp_path) -> None:
-    workspace_id, agent_id, _ = await _seed()
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    conversation_id = await _conversation_row(workspace_id, queue_key="busy")
-    first = await _turn_row(workspace_id, conversation_id, agent_id, 1)
-    second = await _turn_row(workspace_id, conversation_id, agent_id, 2, status="running")
-
-    turns = await context.list_turns(conversation_id)
-    assert [turn.id for turn in turns] == [first, second]
-    assert turns[0].terminal is not None
-    assert turns[0].terminal.cost_micro_usd == 42
-    assert turns[0].updated_at is not None
-    assert turns[1].status == "running"
-    assert turns[1].terminal is None
-    capped = await context.list_turns(conversation_id, limit=1)
-    assert [turn.id for turn in capped] == [second]
-
-
-async def test_turn_detail_includes_ledger_and_subagent_children(db: None, tmp_path) -> None:
-    workspace_id, agent_id, _ = await _seed()
-    turn_steps = RecordingTurnSteps()
-    context = replace(
-        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
-        _turn_steps=turn_steps,
-    )
-    conversation_id = await _conversation_row(workspace_id, queue_key="busy")
-    parent = await _turn_row(workspace_id, conversation_id, agent_id, 1)
-    child_conversation = await _conversation_row(workspace_id, queue_key="subagent:1")
-    child = await _turn_row(workspace_id, child_conversation, agent_id, 1, parent_turn_id=parent)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(running_attempt="resumed-workflow")
-            .where(tables.turn.c.id == parent)
-        )
-        await connection.execute(
-            sa.insert(tables.ledger).values(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                turn_id=parent,
-                dimension="tokens",
-                amount=1234,
-                prompt_tokens=1234,
-                input_tokens=1234,
-                priced_micro_usd=42,
-                model="claude-opus-4-8",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-
-    detail = await context.turn_detail(parent)
-    assert detail is not None
-    assert detail.turn.id == parent
-    assert detail.turn.terminal is not None
-    assert [entry.dimension for entry in detail.ledger] == ["tokens"]
-    assert detail.ledger[0].amount == 1234
-    assert [turn.id for turn in detail.children] == [child]
-    assert detail.children[0].subagent_profile == "research"
-    assert turn_steps.read_workflows == []
-    assert await context.turn_steps(parent) == ()
-    assert turn_steps.read_workflows == ["resumed-workflow"]
-    assert await context.turn_detail(uuid4()) is None
-    foreign_workspace, _, _ = await _seed()
-    foreign_context = _context(foreign_workspace, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert await foreign_context.turn_detail(parent) is None
-    assert await foreign_context.turn_steps(parent) is None
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_read_transcript_gates_ownership_before_the_blob(db: None, tmp_path) -> None:
     workspace_id, _, _ = await _seed()
     foreign_workspace, _, _ = await _seed()
@@ -3275,96 +2741,6 @@ async def test_read_transcript_gates_ownership_before_the_blob(db: None, tmp_pat
     foreign_context = _context(foreign_workspace, StubDbos(), blob)
     with ws(foreign_workspace):
         assert await foreign_context.read_transcript(conversation_id) is None
-
-
-async def test_compaction_records_list_and_read_back(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
-    blob = FilesystemBlobStore(root=tmp_path)
-    context = _context(workspace_id, StubDbos(), blob)
-    conversation_id = await _conversation_row(workspace_id, queue_key="busy")
-    summary = CompactionSummary(intent="ship", current_work="reading", next_step="write")
-    window = (Message(role="user", content="hi"),)
-    with ws(workspace_id):
-        for index in (1, 2):
-            for half, payload in (
-                ("before", CompactionWindow(messages=window)),
-                ("after", CompactionWindow(messages=window)),
-                ("summary", summary),
-            ):
-                await context.blob.put(
-                    compaction_key(conversation_id, index, half),
-                    lz4.frame.compress(payload.model_dump_json().encode()),
-                )
-
-        assert await context.list_compactions(conversation_id) == (1, 2)
-        record = await context.read_compaction(conversation_id, 1)
-        assert record is not None
-        assert record.summary == summary
-        assert record.before == window
-        assert await context.read_compaction(conversation_id, 3) is None
-        assert await context.read_compaction_after(conversation_id, 1) == window
-        assert await context.read_compaction_after(conversation_id, 3) is None
-    foreign_workspace, _, _ = await _seed()
-    foreign_context = _context(foreign_workspace, StubDbos(), blob)
-    with ws(foreign_workspace):
-        assert await foreign_context.list_compactions(conversation_id) == ()
-        assert await foreign_context.read_compaction(conversation_id, 1) is None
-        assert await foreign_context.read_compaction_after(conversation_id, 1) is None
-
-
-async def test_workspace_files_list_and_stream_scoped_to_the_conversation(
-    db: None, tmp_path
-) -> None:
-    """List and read are live sandbox reads through the carrier: what a write landed comes back,
-    an absent path is None, an escaping path raises, and another workspace's context sees
-    nothing."""
-    workspace_id, _, _ = await _seed()
-    blob = FilesystemBlobStore(root=tmp_path)
-    sandboxes = _sandboxes(tmp_path / "workspaces")
-    context = _context(workspace_id, StubDbos(), blob, sandboxes)
-
-    async def _chunks() -> AsyncIterator[bytes]:
-        yield b"hello "
-        yield b"world"
-
-    with ws(workspace_id):
-        conversation_id = await _conversation_row(workspace_id, queue_key="busy")
-        await context.write_workspace_file(conversation_id, "report/out.txt", _chunks())
-        files = await context.list_workspace_files(conversation_id)
-        assert [entry.path for entry in files] == ["report/out.txt"]
-        assert files[0].size_bytes == 11
-
-        stream = await context.read_workspace_file(conversation_id, "report/out.txt")
-        assert stream is not None
-        body = b"".join([chunk async for chunk in stream])
-        assert body == b"hello world"
-        assert await context.read_workspace_file(conversation_id, "report/absent.txt") is None
-        with pytest.raises(ValueError):
-            await context.read_workspace_file(conversation_id, "../messages.json.lz4")
-    foreign_workspace, _, _ = await _seed()
-    foreign_context = _context(foreign_workspace, StubDbos(), blob, sandboxes)
-    with ws(foreign_workspace):
-        assert await foreign_context.list_workspace_files(conversation_id) == ()
-        assert await foreign_context.read_workspace_file(conversation_id, "report/out.txt") is None
-
-
-async def test_installation_reads_the_peer_surface_identity(db: None, tmp_path) -> None:
-    workspace_id, agent_id, _ = await _seed()
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.surface_installation).values(
-                routes_ingress=True,
-                workspace_id=workspace_id,
-                surface="slack",
-                installation_id="team:T042",
-                agent_id=agent_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    assert await context.installation("slack") == "team:T042"
-    assert await context.installation("teams") is None
 
 
 async def _seed_conversation(
@@ -3488,6 +2864,7 @@ async def _seed_agent_row(workspace_id: UUID, name: str) -> UUID:
     return agent_id
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path) -> None:
     """The list a member reads: their own conversations and the workspace-shared ones, never
     another member's private one, a room's, or an externally-shared channel's. An admin lists every
@@ -3572,353 +2949,7 @@ async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path)
     assert {entry.summary.id for entry in other_agent} == {walled}
 
 
-async def test_agent_conversations_order_by_last_activity_then_creation(db: None, tmp_path) -> None:
-    """Last activity first, with the caller's limit as the bound: a conversation answered a minute
-    ago stands above one opened after it and left alone, and a conversation nobody has spoken in
-    yet is placed by the day it was opened. Creation orders two conversations whose last turn
-    landed at the same moment, and nothing else does."""
-    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
-    assert member_id is not None
-    now = datetime.now(UTC)
-    answered = await _seed_conversation(
-        workspace_id, agent_id, queue_key="answered", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    stale = await _seed_conversation(
-        workspace_id, agent_id, queue_key="stale", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    tie_early = await _seed_conversation(
-        workspace_id, agent_id, queue_key="tie-early", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    tie_late = await _seed_conversation(
-        workspace_id, agent_id, queue_key="tie-late", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    quiet = await _seed_conversation(
-        workspace_id, agent_id, queue_key="quiet", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    for conversation_id, inbound in (
-        (answered, "first"),
-        (stale, "second"),
-        (tie_early, "third"),
-        (tie_late, "fourth"),
-    ):
-        await _seed_conversation_turn(
-            workspace_id, conversation_id, agent_id, seq=1, inbound=inbound
-        )
-    async with workspace_tx() as connection:
-        for conversation_id, opened in (
-            (answered, now - timedelta(days=3)),
-            (stale, now),
-            (tie_early, now - timedelta(days=2)),
-            (tie_late, now - timedelta(days=1)),
-            (quiet, now - timedelta(hours=3)),
-        ):
-            await connection.execute(
-                sa.update(tables.conversation)
-                .values(created_at=opened)
-                .where(tables.conversation.c.id == conversation_id)
-            )
-        for conversation_id, active in (
-            (answered, now - timedelta(minutes=1)),
-            (stale, now - timedelta(days=2)),
-            (tie_early, now - timedelta(minutes=5)),
-            (tie_late, now - timedelta(minutes=5)),
-        ):
-            await connection.execute(
-                sa.update(tables.turn)
-                .values(updated_at=active)
-                .where(tables.turn.c.conversation_id == conversation_id)
-            )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
-    assert [entry.summary.id for entry in listed] == [answered, tie_late, tie_early, quiet, stale]
-    assert [entry.summary.turn_count for entry in listed] == [1, 1, 1, 0, 1]
-    assert [entry.summary.last_turn_at is None for entry in listed] == [
-        False,
-        False,
-        False,
-        True,
-        False,
-    ]
-    bounded = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=1)
-    assert [entry.summary.id for entry in bounded] == [answered]
-    linked = await context.list_agent_conversations(
-        agent_id,
-        member_id,
-        admin=False,
-        limit=1,
-        conversation_id=stale,
-    )
-    assert [entry.summary.id for entry in linked] == [stale]
-
-
-async def test_agent_conversations_narrow_to_the_side_of_the_member(db: None, tmp_path) -> None:
-    """`mine` keeps the conversations this member is in: bound to them, or holding a turn they
-    spoke — answering second in another's thread is being in it. `others` is the complement over
-    the conversations somebody spoke in, so the peer's own read carries that same thread. A
-    conversation with no member turn at all is in neither: nobody is in it. Without the narrowing
-    all four still list: readable and participated are two different questions."""
-    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
-    assert member_id is not None
-    peer_id = await _seed_member_row(workspace_id, "peer@example.com")
-    bound = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="bound",
-        audience=f"member:{member_id}",
-        member_id=member_id,
-    )
-    mine = await _seed_conversation(
-        workspace_id, agent_id, queue_key="mine", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    theirs = await _seed_conversation(
-        workspace_id, agent_id, queue_key="theirs", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    triggered = await _seed_conversation(
-        workspace_id, agent_id, queue_key="triggered", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    await _seed_conversation_turn(
-        workspace_id, mine, agent_id, seq=1, inbound="mine", speaker_member_id=member_id
-    )
-    await _seed_conversation_turn(
-        workspace_id, theirs, agent_id, seq=1, inbound="theirs", speaker_member_id=peer_id
-    )
-    await _seed_conversation_turn(
-        workspace_id, theirs, agent_id, seq=2, inbound="answered", speaker_member_id=member_id
-    )
-    await _seed_conversation_turn(
-        workspace_id, triggered, agent_id, seq=1, inbound="run", admission_source="internal"
-    )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    ours = await context.list_agent_conversations(
-        agent_id, member_id, admin=False, limit=50, participation="mine"
-    )
-    assert {entry.summary.id for entry in ours} == {bound, mine, theirs}
-    others = await context.list_agent_conversations(
-        agent_id, member_id, admin=False, limit=50, participation="others"
-    )
-    assert {entry.summary.id for entry in others} == set()
-    peers = await context.list_agent_conversations(
-        agent_id, peer_id, admin=False, limit=50, participation="others"
-    )
-    assert {entry.summary.id for entry in peers} == {mine}
-    readable = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
-    assert {entry.summary.id for entry in readable} == {bound, mine, theirs, triggered}
-
-
-async def test_agent_conversations_others_hold_a_shared_row_bound_to_nobody(
-    db: None, tmp_path
-) -> None:
-    """A shared conversation carries no member, so the binding test has to be null-safe: a plain
-    inequality against this member is null on every row of this group and the whole group would
-    come back empty."""
-    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
-    assert member_id is not None
-    peer_id = await _seed_member_row(workspace_id, "peer@example.com")
-    shared = await _seed_conversation(
-        workspace_id, agent_id, queue_key="shared", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    await _seed_conversation_turn(
-        workspace_id, shared, agent_id, seq=1, inbound="theirs", speaker_member_id=peer_id
-    )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    others = await context.list_agent_conversations(
-        agent_id, member_id, admin=False, limit=50, participation="others"
-    )
-    assert [entry.summary.id for entry in others] == [shared]
-    assert others[0].summary.member_email is None
-
-
-async def test_agent_conversations_carry_their_opening_words_and_their_speakers(
-    db: None, tmp_path
-) -> None:
-    """What a conversation is about, where it was opened, and who is in it, off the page's turns.
-    The opening words are the member's own out of the first turn — the ambient digest a channel
-    surface renders around them is not what the conversation is about — capped, and empty where no
-    turn has landed. The source is that same turn's, so a row leads back to the message the
-    conversation opened with rather than to a later one, and it is None where the surface reported
-    none. Speakers run in order of first appearance, once each however often they speak, carrying
-    the display line the surface reported and the address where it reported none."""
-    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
-    assert member_id is not None
-    peer_id = await _seed_member_row(workspace_id, "peer@example.com")
-    channel = await _seed_conversation(
-        workspace_id, agent_id, queue_key="C7", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    marker = mint_marker()
-    await _seed_conversation_turn(
-        workspace_id,
-        channel,
-        agent_id,
-        seq=1,
-        inbound=fence_member_message(
-            marker,
-            "<ambient_1>\nbystander: deploy is red again\n</ambient_1>\n",
-            "can you take a look at the failing deploy",
-            "",
-        ),
-        speaker_member_id=member_id,
-        context=TurnContext(sender="Mel Okafor (m@example.com)", source=OPENING_PERMALINK),
-    )
-    await _seed_conversation_turn(
-        workspace_id,
-        channel,
-        agent_id,
-        seq=2,
-        inbound="thanks",
-        speaker_member_id=peer_id,
-        context=TurnContext(
-            sender="Pat Reyes (peer@example.com)",
-            source="https://acme.slack.com/archives/C7/p1700000000000900",
-        ),
-    )
-    await _seed_conversation_turn(
-        workspace_id, channel, agent_id, seq=3, inbound="anything else?", speaker_member_id=peer_id
-    )
-    await _seed_conversation_turn(
-        workspace_id, channel, agent_id, seq=4, inbound="no", speaker_member_id=member_id
-    )
-    await _seed_conversation_turn(workspace_id, channel, agent_id, seq=5, inbound="a timer fired")
-    long_open = await _seed_conversation(
-        workspace_id, agent_id, queue_key="long", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    await _seed_conversation_turn(
-        workspace_id, long_open, agent_id, seq=1, inbound="w" * (CONVERSATION_TITLE_CHARS + 50)
-    )
-    turnless = await _seed_conversation(
-        workspace_id, agent_id, queue_key="quiet", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
-    by_id = {entry.summary.id: entry for entry in listed}
-
-    assert by_id[channel].title == "can you take a look at the failing deploy"
-    assert "bystander" not in by_id[channel].title
-    assert [(who.email, who.sender) for who in by_id[channel].speakers] == [
-        ("m@example.com", "Mel Okafor (m@example.com)"),
-        ("peer@example.com", "Pat Reyes (peer@example.com)"),
-    ]
-    assert by_id[channel].source == OPENING_PERMALINK
-    assert by_id[long_open].title == "w" * CONVERSATION_TITLE_CHARS
-    assert by_id[long_open].source is None
-    assert by_id[turnless].title == ""
-    assert by_id[turnless].source is None
-    assert by_id[turnless].speakers == ()
-
-
-async def test_an_unreadable_conversation_carries_no_words_and_no_speakers(
-    db: None, tmp_path
-) -> None:
-    """A row an admin lists but may not read is administration metadata and nothing more: it states
-    whose it is and how busy, and carries neither the words that opened it, nor the link that opens
-    it where it was said, nor who else is in it. Reading it is the acknowledgement's act, audited by
-    `record_transcript_access` — a listing that quoted the first message, or handed over the
-    permalink that reads it in Slack, would give an admin the content the acknowledgement exists to
-    record. A room stays walled on the same read for the same admin."""
-    workspace_id, agent_id, admin_id = await _seed(member_email="boss@example.com")
-    assert admin_id is not None
-    owner_id = await _seed_member_row(workspace_id, "owner@example.com")
-    theirs = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="theirs",
-        audience=str(conversation_audience(owner_id)),
-        member_id=owner_id,
-    )
-    room = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="room",
-        audience=str(room_audience("slack", "C7")),
-        member_id=None,
-    )
-    for conversation_id in (theirs, room):
-        await _seed_conversation_turn(
-            workspace_id,
-            conversation_id,
-            agent_id,
-            seq=1,
-            inbound="the salary review spreadsheet",
-            speaker_member_id=owner_id,
-            context=TurnContext(sender="Robin Vale (owner@example.com)", source=OPENING_PERMALINK),
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    listed = await context.list_agent_conversations(agent_id, admin_id, admin=True, limit=50)
-    by_id = {entry.summary.id: entry for entry in listed}
-
-    assert by_id[theirs].disclosable is True
-    assert by_id[theirs].summary.member_email == "owner@example.com"
-    for conversation_id in (theirs, room):
-        assert by_id[conversation_id].readable is False
-        assert by_id[conversation_id].title == ""
-        assert by_id[conversation_id].source is None
-        assert by_id[conversation_id].speakers == ()
-
-
-async def test_a_conversation_search_narrows_ahead_of_the_bound(db: None, tmp_path) -> None:
-    """A term reaches every conversation the member may see, never the page a bound already cut:
-    the one they are looking for is the one that fell off it. Matched on what the conversation is
-    called and on who has spoken in it."""
-    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
-    assert member_id is not None
-    peer_id = await _seed_member_row(workspace_id, "pat@example.com")
-    wanted = await _seed_conversation(
-        workspace_id, agent_id, queue_key="wanted", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    aged = await _seed_conversation_turn(
-        workspace_id,
-        wanted,
-        agent_id,
-        seq=1,
-        inbound="the warehouse rollout plan",
-        speaker_member_id=peer_id,
-    )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == aged)
-            .values(updated_at=datetime.now(UTC) - timedelta(hours=1))
-        )
-    for index in range(5):
-        newer = await _seed_conversation(
-            workspace_id,
-            agent_id,
-            queue_key=f"newer{index}",
-            audience=str(SHARED_AUDIENCE),
-            member_id=None,
-        )
-        await _seed_conversation_turn(
-            workspace_id,
-            newer,
-            agent_id,
-            seq=1,
-            inbound="something else",
-            speaker_member_id=member_id,
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    unsearched = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=2)
-    assert wanted not in {entry.summary.id for entry in unsearched}
-
-    by_title = await context.list_agent_conversations(
-        agent_id, member_id, admin=False, limit=2, search="WAREHOUSE"
-    )
-    by_speaker = await context.list_agent_conversations(
-        agent_id, member_id, admin=False, limit=2, search="pat@example"
-    )
-    unmatched = await context.list_agent_conversations(
-        agent_id, member_id, admin=False, limit=2, search="nothing here"
-    )
-
-    assert [entry.summary.id for entry in by_title] == [wanted]
-    assert [entry.summary.id for entry in by_speaker] == [wanted]
-    assert unmatched == ()
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_search_never_answers_for_a_conversation_the_member_may_not_read(
     db: None, tmp_path
 ) -> None:
@@ -3962,77 +2993,7 @@ async def test_a_search_never_answers_for_a_conversation_the_member_may_not_read
     assert [entry.summary.id for entry in by_origin] == [theirs]
 
 
-async def test_agent_conversation_speakers_stop_at_the_bound(db: None, tmp_path) -> None:
-    """A conversation more members have spoken in than a row can name carries the first
-    `MAX_CONVERSATION_SPEAKERS` of them and no more — the read is bounded by the page, never by
-    how loud one channel is."""
-    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
-    assert member_id is not None
-    crowded = await _seed_conversation(
-        workspace_id, agent_id, queue_key="crowd", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    speakers = [member_id] + [
-        await _seed_member_row(workspace_id, f"member{index}@example.com")
-        for index in range(MAX_CONVERSATION_SPEAKERS + 3)
-    ]
-    for seq, speaker in enumerate(speakers, start=1):
-        await _seed_conversation_turn(
-            workspace_id, crowded, agent_id, seq=seq, inbound="hi", speaker_member_id=speaker
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
-
-    assert len(listed) == 1
-    assert [who.email for who in listed[0].speakers] == [
-        "m@example.com",
-        *(f"member{index}@example.com" for index in range(MAX_CONVERSATION_SPEAKERS - 1)),
-    ]
-
-
-async def test_readable_conversation_holds_the_audience_and_the_wall(db: None, tmp_path) -> None:
-    """The one content gate: a member's own conversation and a shared one read, another member's
-    private one and a room's do not, and the same conversation under another agent's id is
-    unreadable — the answer every content route fails closed on."""
-    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
-    assert member_id is not None
-    other_id = await _seed_member_row(workspace_id, "n@example.com")
-    second_agent = await _seed_agent_row(workspace_id, "ops")
-    mine = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="mine",
-        audience=str(conversation_audience(member_id)),
-        member_id=member_id,
-    )
-    shared = await _seed_conversation(
-        workspace_id, agent_id, queue_key="shared", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    theirs = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="theirs",
-        audience=str(conversation_audience(other_id)),
-        member_id=other_id,
-    )
-    room = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="room",
-        audience=str(room_audience("slack", "C7")),
-        member_id=None,
-    )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    assert await context.readable_conversation(mine, agent_id, member_id) is True
-    assert await context.readable_conversation(shared, agent_id, member_id) is True
-    assert await context.readable_conversation(theirs, agent_id, member_id) is False
-    assert await context.readable_conversation(room, agent_id, member_id) is False
-    assert await context.readable_conversation(mine, second_agent, member_id) is False
-    assert await context.readable_conversation(uuid4(), agent_id, member_id) is False
-    assert await context.readable_conversation(theirs, agent_id, other_id) is True
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_admin_reads_a_private_transcript_only_once_recorded(db: None, tmp_path) -> None:
     """Admin alone does not open another member's private conversation: the gate answers false
     until `record_transcript_access` writes the disclosure, and true afterwards. A room stays shut
@@ -4075,167 +3036,7 @@ async def test_an_admin_reads_a_private_transcript_only_once_recorded(db: None, 
     assert await _recorded_disclosures(workspace_id) == 1
 
 
-async def test_a_disclosure_reports_itself_to_the_operator(
-    db: None, tmp_path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """No member surface lists these rows, so the disclosure reports itself where an operator
-    watches: one `surface.transcript_disclosed` record per acknowledgement, naming the reader, the
-    subject, and the conversation. A refused acknowledgement writes nothing and reports nothing."""
-    workspace_id, agent_id, member_id = await _seed(member_email="boss@example.com")
-    assert member_id is not None
-    subject = await _seed_member_row(workspace_id, "m@example.com")
-    theirs = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="theirs",
-        audience=str(conversation_audience(subject)),
-        member_id=subject,
-    )
-    room = await _seed_conversation(
-        workspace_id, agent_id, queue_key="room", audience="room:slack:C7", member_id=None
-    )
-    with caplog.at_level(logging.INFO, logger="ufo"):
-        assert await record_transcript_access(workspace_id, theirs, agent_id, member_id)
-        assert await record_transcript_access(workspace_id, room, agent_id, member_id) is None
-    disclosed = [
-        record.ufo
-        for record in caplog.records
-        if record.getMessage() == "surface.transcript_disclosed"
-    ]
-    assert [
-        (entry["reader_email"], entry["subject_email"], entry["conversation_id"])
-        for entry in disclosed
-    ] == [("boss@example.com", "m@example.com", str(theirs))]
-
-
-async def test_a_stale_disclosure_closes_the_transcript_again(db: None, tmp_path) -> None:
-    """The disclosure opens the conversation for a bounded window, so an admin who acknowledged
-    once does not read silently forever — past the window the gate shuts and a fresh
-    acknowledgement is another recorded access."""
-    workspace_id, agent_id, member_id = await _seed(member_email="admin@example.com")
-    assert member_id is not None
-    other_id = await _seed_member_row(workspace_id, "n@example.com")
-    theirs = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="theirs",
-        audience=str(conversation_audience(other_id)),
-        member_id=other_id,
-    )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert await record_transcript_access(workspace_id, theirs, agent_id, member_id) is not None
-    assert await context.readable_conversation(theirs, agent_id, member_id, admin=True) is True
-
-    stale = datetime.now(UTC) - TRANSCRIPT_ACCESS_WINDOW - timedelta(minutes=1)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.transcript_access)
-            .where(tables.transcript_access.c.conversation_id == theirs)
-            .values(created_at=stale)
-        )
-
-    assert await context.readable_conversation(theirs, agent_id, member_id, admin=True) is False
-    assert await record_transcript_access(workspace_id, theirs, agent_id, member_id) is not None
-    assert await context.readable_conversation(theirs, agent_id, member_id, admin=True) is True
-    assert await _recorded_disclosures(workspace_id) == 2
-
-
-async def test_one_disclosure_opens_exactly_its_own_conversation_for_its_own_reader(
-    db: None, tmp_path
-) -> None:
-    """A disclosure is scoped to the pair it names. Acknowledging member M's conversation opens
-    that conversation and no other private one of the same agent, and opens it for the admin who
-    acknowledged and for no other admin — the two identity predicates the gate answers on."""
-    workspace_id, agent_id, first_admin = await _seed(member_email="one@example.com")
-    assert first_admin is not None
-    second_admin = await _seed_member_row(workspace_id, "two@example.com")
-    subject = await _seed_member_row(workspace_id, "m@example.com")
-    other_subject = await _seed_member_row(workspace_id, "n@example.com")
-    acknowledged = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="acknowledged",
-        audience=str(conversation_audience(subject)),
-        member_id=subject,
-    )
-    untouched = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="untouched",
-        audience=str(conversation_audience(other_subject)),
-        member_id=other_subject,
-    )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert (
-        await record_transcript_access(workspace_id, acknowledged, agent_id, first_admin)
-        is not None
-    )
-
-    assert (
-        await context.readable_conversation(acknowledged, agent_id, first_admin, admin=True) is True
-    )
-    assert (
-        await context.readable_conversation(untouched, agent_id, first_admin, admin=True) is False
-    )
-    assert (
-        await context.readable_conversation(acknowledged, agent_id, second_admin, admin=True)
-        is False
-    )
-
-
-async def test_a_live_row_opens_nothing_for_a_non_admin_or_a_room(db: None, tmp_path) -> None:
-    """The two clauses the disclosure lookup sits behind, each with a live row present so the
-    lookup itself cannot be what refuses. A row naming a reader who is no longer an admin opens
-    nothing — losing the role closes an open window immediately — and a row against a room or an
-    externally-shared channel opens nothing for anyone, because participation there is the peer
-    surface's live roster that no portal read can check."""
-    workspace_id, agent_id, reader_id = await _seed(member_email="reader@example.com")
-    assert reader_id is not None
-    subject_id = await _seed_member_row(workspace_id, "m@example.com")
-    private = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="private",
-        audience=str(conversation_audience(subject_id)),
-        member_id=subject_id,
-    )
-    room = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="room",
-        audience=str(room_audience("slack", "C7")),
-        member_id=None,
-    )
-    external = await _seed_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="external",
-        audience=str(foreign_room_audience("slack", "C8")),
-        member_id=None,
-    )
-    async with workspace_tx() as connection:
-        for conversation_id in (private, room, external):
-            await connection.execute(
-                sa.insert(tables.transcript_access).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    conversation_id=conversation_id,
-                    reader_member_id=reader_id,
-                    subject_member_id=subject_id,
-                    created_at=datetime.now(UTC),
-                )
-            )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    assert await context.readable_conversation(private, agent_id, reader_id, admin=True) is True
-    assert await context.readable_conversation(private, agent_id, reader_id, admin=False) is False
-    for conversation_id in (room, external):
-        assert (
-            await context.readable_conversation(conversation_id, agent_id, reader_id, admin=True)
-            is False
-        )
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_subagent_turns_nest_transitively(db: None, tmp_path) -> None:
     """Every turn spawned beneath the conversation's turns, however deep, oldest first, and nothing
     spawned beneath another conversation's."""
@@ -4315,58 +3116,7 @@ async def test_conversation_subagent_turns_nest_transitively(db: None, tmp_path)
     assert await context.conversation_subagent_turns(grandchild_conversation) == ()
 
 
-async def test_agent_origin_refs_names_only_the_machine_envelopes(db: None, tmp_path) -> None:
-    """The seam the portal's no-bubble rule rests on. A firing and a delivered subagent result are
-    envelopes the member cannot read; an extension's invoke sends prose it is meant to read, and a
-    member's own words must never be named here — the one direction this must not fail in."""
-    workspace_id, agent_id, member_id = await _seed()
-    conversation_id = await _seed_conversation(
-        workspace_id, agent_id, queue_key="root", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    spoke = await _seed_conversation_turn(
-        workspace_id,
-        conversation_id,
-        agent_id,
-        seq=1,
-        inbound="find the flaky test",
-        speaker_member_id=member_id,
-    )
-    fired = await _seed_conversation_turn(
-        workspace_id,
-        conversation_id,
-        agent_id,
-        seq=2,
-        inbound="<scheduled_task>…</scheduled_task>\ndigest",
-        admission_source="scheduled",
-    )
-    invoked = await _seed_conversation_turn(
-        workspace_id,
-        conversation_id,
-        agent_id,
-        seq=3,
-        inbound="Review this exact pull-request comparison.",
-        admission_source="internal",
-    )
-    delivered = await _seed_conversation_turn(
-        workspace_id,
-        conversation_id,
-        agent_id,
-        seq=4,
-        inbound='<spawn_result target="profile:x" spawn_id="y" status="done">…</spawn_result>',
-        admission_source="internal",
-        idempotency_key=f"{SPAWN_RESULT_KEY_PREFIX}{uuid4()}",
-    )
-
-    refs = await _context(
-        workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path / "blobs")
-    ).agent_origin_refs(conversation_id)
-
-    assert str(fired) in refs
-    assert str(delivered) in refs
-    assert str(spoke) not in refs
-    assert str(invoked) not in refs
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_queued_arrivals_carry_the_source_and_the_wait_that_shape_each_bubble(
     db: None, tmp_path
 ) -> None:

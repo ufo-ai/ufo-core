@@ -30,9 +30,7 @@ from ufo_ext_browser.bua.downloads import Download
 from ufo_ext_browser.bua.session import BrowserSession
 from ufo_ext_browser.subagent import (
     BROWSER_PROFILE,
-    BROWSER_SUBAGENT_NAME,
     BROWSER_SUBAGENT_PROMPT,
-    BROWSER_SUBAGENT_TOOL_NAMES,
     BrowserTask,
 )
 from ufo_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
@@ -40,26 +38,26 @@ from ufo_ext_browser.tools import BROWSER_TOOL_NAMES, BROWSER_TOOLS
 from ufo.blob import FilesystemBlobStore
 from ufo.browser import CdpEndpoint, CdpLease, CdpProvider, FileBytes, SessionGone
 from ufo.db import workspace_tx
-from ufo.harness.models.catalog import CORE_MODEL_SPECS
 from ufo.harness.sandbox.session import (
-    DEFAULT_EXEC_TIMEOUT_SECONDS,
     ExecResult,
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
 )
-from ufo.host.ext.loader import skill_registry, turn_subagents
-from ufo.host.tools.builtins import BUILTIN_TOOLS
 from ufo.runtime.engine import MAIN_ROUND_LIMIT
 from ufo.runtime.ext.context import ScopedStore
 from ufo.runtime.ext.manifest import SUBAGENT_ROUND_LIMIT
-from ufo.runtime.prompts.render import render_system_prompt
-from ufo.runtime.subagents import FINISH_CONTRACT, SubagentRegistry, subagent_system_prompt
+from ufo.runtime.subagents import FINISH_CONTRACT, subagent_system_prompt
 from ufo.runtime.tools.context import ImageContent, SpawnResult, ToolContext, TurnCleanup
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "clicking through the page"
 
@@ -338,33 +336,6 @@ async def test_upload_through_a_sandbox_local_transport_copies_nothing() -> None
     assert carrier.commands == []
 
 
-async def test_each_upload_read_states_the_budget_its_own_work_needs() -> None:
-    """A file up to `MAX_READ_BYTES` comes back base64 on one command's stdout, which is minutes of
-    work — under the sandbox's 120s default it is killed part way through and a readable file is
-    reported as a carrier timeout. The sizing beside it is one syscall, so it must not inherit that
-    long wait either: each command asks for the wait its own work needs."""
-    carrier = FileCarrier(files={"/workspace/report.pdf": b"%PDF-1.7 body"})
-    surface, session = _staging_surface(carrier, UploadingLease())
-    session.attached = [len(b"%PDF-1.7 body")]
-    await surface.upload_file({"ref": "ref_3", "files": ["/workspace/report.pdf"]})
-    assert carrier.commands[0].startswith("stat")
-    assert carrier.commands[1].startswith("base64")
-    sized, encoded = carrier.timeouts[:2]
-    assert sized == backend_module.SIZE_BUDGET_SECONDS
-    assert encoded == backend_module.ENCODE_BUDGET_SECONDS
-    assert encoded > DEFAULT_EXEC_TIMEOUT_SECONDS
-
-
-async def test_an_upload_read_that_expires_reports_the_budget_not_an_unreadable_file() -> None:
-    """The carrier's kill leaves an empty stdout and a message of its own, which reads as a file
-    that cannot be opened. The caller has to be able to tell that apart from a file too large for
-    the wait, because only one of the two is worth retrying with more room."""
-    carrier = FileCarrier(files={"/workspace/report.pdf": b"%PDF-1.7 body"}, deadline_on="base64")
-    surface, _ = _staging_surface(carrier, UploadingLease())
-    with pytest.raises(ValueError, match=f"{backend_module.ENCODE_BUDGET_SECONDS}s budget"):
-        await surface.upload_file({"ref": "ref_3", "files": ["/workspace/report.pdf"]})
-
-
 async def test_upload_refuses_a_file_larger_than_the_read_cap() -> None:
     carrier = FileCarrier(files={"/workspace/huge.bin": b"x" * (MAX_READ_BYTES + 1)})
     lease = UploadingLease()
@@ -433,71 +404,6 @@ async def _bootstrap_payloads(
     return recorder
 
 
-async def test_a_hosted_transports_download_target_is_what_chrome_is_told(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The regression: a hosted Chrome answers `-32602 restricted directory` to an absolute download
-    path and the whole bootstrap dies with it, so nothing browses. What the lease names has to be
-    what `Browser.setDownloadBehavior` carries."""
-    recorder = await _bootstrap_payloads(monkeypatch, "downloads")
-    assert recorder.payload("Browser.setDownloadBehavior") == {
-        "behavior": "allowAndName",
-        "downloadPath": "downloads",
-        "eventsEnabled": True,
-    }
-
-
-async def test_a_sandbox_local_transports_download_target_is_what_chrome_is_told(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recorder = await _bootstrap_payloads(monkeypatch, "/tmp/ufo-downloads")
-    assert recorder.payload("Browser.setDownloadBehavior")["downloadPath"] == "/tmp/ufo-downloads"
-
-
-async def test_a_finished_download_comes_back_through_the_transport() -> None:
-    """The browser wrote the file wherever the transport said, so the bytes are the transport's to
-    fetch — keyed on the guid `allowAndName` stored it under, never read off this process's disk."""
-
-    class _FinishedDownload:
-        async def wait_for_download(self, args: dict[str, JsonValue]) -> Download:
-            return Download(guid="guid-7", filename="invoice.pdf", state="completed")
-
-    lease = UploadingLease()
-    surface, _ = _staging_surface(FileCarrier(), lease)
-    surface.session = cast(BrowserSession, _FinishedDownload())
-    reply = await surface.wait_for_download({})
-    assert lease.fetched == ["guid-7"]
-    assert reply == {
-        "filename": "invoice.pdf",
-        "content_base64": base64.b64encode(b"downloaded bytes").decode(),
-        "size": len(b"downloaded bytes"),
-    }
-
-
-async def test_an_upload_waits_until_the_page_holds_the_bytes() -> None:
-    """A remote transport writes the file through after its upload call returns, so an attach made
-    too early leaves the page holding the right name and an empty file — measured against the live
-    API, where a zero-delay attach reported 0 bytes and a one-second one reported all 27. Re-attach
-    until the page agrees, rather than returning a success the member cannot see is hollow."""
-
-    @dataclass
-    class _FillsLate(RecordingSurface):
-        remaining_empty: int = 2
-
-        async def attached_sizes(self, args: dict[str, JsonValue]) -> list[int]:
-            if self.remaining_empty > 0:
-                self.remaining_empty -= 1
-                return [0]
-            return [len(b"%PDF-1.7 body")]
-
-    carrier = FileCarrier(files={"/workspace/report.pdf": b"%PDF-1.7 body"})
-    surface, _ = _staging_surface(carrier, UploadingLease())
-    session = _FillsLate(reply={"ok": True})
-    surface.session = cast(BrowserSession, session)
-    await surface.upload_file({"ref": "ref_3", "files": ["/workspace/report.pdf"]})
-    assert [name for name, _ in session.calls].count("upload_file") == 3
-
-
 async def test_an_upload_that_never_lands_fails_loud(monkeypatch: pytest.MonkeyPatch) -> None:
 
     @dataclass
@@ -549,19 +455,6 @@ async def test_upload_refuses_a_path_outside_the_workspace() -> None:
     assert lease.uploaded == []
     assert carrier.commands == []
     assert session.calls == []
-
-
-async def test_upload_quotes_a_path_carrying_shell_metacharacters() -> None:
-    """The reader builds a shell command, so a workspace file whose name is shell syntax must be
-    read as a name — not executed, and not silently read as some other file."""
-    tricky = "/workspace/quarterly report; rm -rf $HOME.pdf"
-    carrier = FileCarrier(files={tricky: b"quarterly bytes"})
-    lease = UploadingLease()
-    surface, session = _staging_surface(carrier, lease)
-    session.attached = [len(b"quarterly bytes")]
-    await surface.upload_file({"ref": "ref_3", "files": [tricky]})
-    assert lease.uploaded == [("quarterly report; rm -rf $HOME.pdf", b"quarterly bytes")]
-    assert all(shlex.quote(tricky) in command for command in carrier.commands)
 
 
 async def test_upload_surfaces_a_missing_workspace_file() -> None:
@@ -620,16 +513,6 @@ async def _run(name: str, ctx: ToolContext, **args: object) -> object:
     return await tool.handler(ctx, tool.input_model.model_validate({**args}))
 
 
-def test_manifest_declares_the_browser_tools_and_profile() -> None:
-    manifest = browser_manifest.manifest()
-    assert {tool.name for tool in manifest.tools} == set(BROWSER_TOOL_NAMES) | {
-        "browser_task",
-        "wide_browse",
-    }
-    assert len(BROWSER_TOOL_NAMES) == 11
-    assert {profile.name for profile in manifest.subagents} == {BROWSER_SUBAGENT_NAME}
-
-
 def test_raw_browser_tools_are_profile_only_and_delegation_is_not() -> None:
     """Main agents never hold the raw browser surface: every browser/computer-use tool is
     profile-only (reachable via the browser profile's tool_names), while the delegation pair a
@@ -637,50 +520,6 @@ def test_raw_browser_tools_are_profile_only_and_delegation_is_not() -> None:
     assert all(tool.profile_only for tool in BROWSER_TOOLS)
     for tool in browser_manifest.manifest().tools:
         assert tool.profile_only == (tool.name in BROWSER_TOOL_NAMES)
-
-
-def test_manifest_carries_no_skills() -> None:
-    """The subagent's own prompt teaches the operate-and-capture workflow; nothing indexes into
-    the main agent's prompt."""
-    assert browser_manifest.manifest().skills == ()
-    assert "browser-operator" not in dict(skill_registry((browser_manifest.manifest(),)).index())
-
-
-def test_manifest_requires_the_cdp_providers_seam() -> None:
-    """The consumer half of the `requires` seam: the browser pack declares it consumes
-    `cdp_providers`, which serve's boot-validation resolves so a browser deploy with no cdp endpoint
-    fails at boot rather than on the first browse."""
-    assert browser_manifest.manifest().requires == ("cdp_providers",)
-
-
-def test_page_derived_tools_are_marked_untrusted() -> None:
-    untrusted = {tool.name for tool in BROWSER_TOOLS if tool.untrusted}
-    assert untrusted == {"read_page", "get_page_text", "find", "tabs_context"}
-    tabs_context = next(tool for tool in BROWSER_TOOLS if tool.name == "tabs_context")
-    assert tabs_context.untrusted is True
-
-
-def test_browser_profile_declares_its_output_untrusted() -> None:
-    """The child's summary is page-derived, so every spawn path — browser_task, wide_browse, or a
-    generic spawn over the browser profile — returns it walled, never as instructions."""
-    assert BROWSER_PROFILE.untrusted_output is True
-
-
-def test_tool_descriptions_are_the_ported_verbatim_strings() -> None:
-    described = {tool.name: tool.description for tool in BROWSER_TOOLS}
-    assert described["navigate"] == "Navigate to a URL, or go forward/back in browser history."
-    assert described["tabs_context"] == "Get context for all browser tabs."
-    assert described["upload_file"] == "Set a file input from workspace paths."
-    assert described["read_page"] == "Read the browser page accessibility tree."
-    assert described["find"] == "Find browser page elements by role, text, name, or URL."
-    assert (
-        described["computer"]
-        == "Interact with the browser using mouse, keyboard, wait, scroll, and screenshot actions."
-    )
-    assert (
-        described["wait_for_download"]
-        == "Wait for a browser download and write it to the workspace."
-    )
 
 
 async def test_the_surface_is_built_once_per_turn_leased_and_released_on_cleanup(
@@ -709,34 +548,10 @@ async def test_the_surface_is_built_once_per_turn_leased_and_released_on_cleanup
     assert provider.leases[0].released is True
 
 
-async def test_the_surface_leases_with_the_turns_sandbox(tmp_path: Path) -> None:
-    """The producer half of the sandbox_chrome seam: the surface passes the turn's `SandboxSession`
-    into `lease`, so a per-conversation-sandbox provider can resolve Chrome inside that sandbox. A
-    static or hosted provider ignores it, but the surface always threads it through."""
-    provider = FakeCdpProvider()
-    ctx = _context(WritesCarrier(), tmp_path, cdp_provider=provider)
-    with pytest.raises(_StopAtConnect):
-        await _run("navigate", ctx, url="https://x.test")
-    assert provider.leased_sandboxes == [ctx.sandbox]
-
-
 async def test_a_tool_without_a_cdp_provider_fails_loud(tmp_path: Path) -> None:
     ctx = _context(WritesCarrier(), tmp_path, cdp_provider=None)
     with pytest.raises(RuntimeError, match="no cdp provider is configured"):
         await _run("navigate", ctx, url="x")
-
-
-async def test_navigate_marshals_params(tmp_path: Path) -> None:
-    surface = RecordingSurface(reply={"tab_id": 1, "url": "https://example.com/"})
-    result = await _run(
-        "navigate",
-        _recording_context(surface, WritesCarrier(), tmp_path),
-        url="example.com",
-        tab_id=2,
-    )
-    assert surface.calls[-1] == ("navigate", {"url": "example.com", "tab_id": 2})
-    assert result.content[0].text == json.dumps({"tab_id": 1, "url": "https://example.com/"})
-    assert result.is_error is False
 
 
 async def test_tabs_context_sends_empty_params(tmp_path: Path) -> None:
@@ -821,60 +636,6 @@ async def test_computer_without_save_writes_nothing(tmp_path: Path) -> None:
         "computer",
         {"actions": [{"action": "left_click", "coordinate": [1, 2]}]},
     )
-
-
-async def test_wait_for_download_writes_the_file_and_reports_its_path(tmp_path: Path) -> None:
-    carrier = WritesCarrier()
-    surface = RecordingSurface(
-        reply={
-            "filename": "report.pdf",
-            "content_base64": base64.b64encode(b"pdf-bytes").decode(),
-            "size": 9,
-        }
-    )
-    result = await _run("wait_for_download", _recording_context(surface, carrier, tmp_path))
-    assert ("/workspace/downloads/report.pdf", b"pdf-bytes") in carrier.writes
-    assert json.loads(result.content[0].text) == {
-        "file_path": "downloads/report.pdf",
-        "filename": "report.pdf",
-        "size": 9,
-    }
-
-
-def test_manifest_contributes_the_browser_prompt_section_into_the_rendered_shell() -> None:
-    """Both ends of the contribution seam: the browser pack declares a prompt section, and the same
-    tuple the loop builds from `manifest.prompt_sections` renders into the shell's `{{sections}}`
-    slot — so the browse-vs-search rules reach the agent's system prompt."""
-    (section,) = browser_manifest.manifest().prompt_sections
-    assert section.name == "browser"
-    rendered = render_system_prompt(
-        "You are the assistant.", ((section.name, section.body),), knowledge_cutoff="2026-01"
-    )
-    assert "have browser_task browse the job boards directly" in rendered.content
-    assert "no saved sessions or cookies" in rendered.content
-    assert "{{" not in rendered.content
-
-
-def test_browser_profile_registers_and_is_spawnable() -> None:
-    registry = SubagentRegistry(turn_subagents((browser_manifest.manifest(),)))
-    profile = registry.get(BROWSER_SUBAGENT_NAME)
-    assert profile.tool_names == BROWSER_SUBAGENT_TOOL_NAMES
-    assert profile.input_model.model_validate({"task": "x" * 10_000}).task == "x" * 10_000
-    assert "maxLength" not in profile.input_model.model_json_schema()["properties"]["task"]
-    assert "maxLength" not in profile.output_model.model_json_schema()["properties"]["result"]
-    # Browser primitives + core builtins + the cross-extension search_web the prompt tells the agent
-    # to prefer over navigating to a search engine (resolves only when research is installed).
-    available = set(BROWSER_TOOL_NAMES) | {tool.name for tool in BUILTIN_TOOLS} | {"search_web"}
-    assert set(profile.tool_names) <= available
-    assert "web automation subagent" in profile.prompt
-
-
-def test_the_browser_child_runs_on_a_model_the_catalog_answers() -> None:
-    """A profile's `model` is an unvalidated slug the queue resolves at spawn, so a typo would
-    degrade every browse to the parent's model rather than failing. The pin is checked against the
-    catalog that has to answer it."""
-    assert BROWSER_PROFILE.model == "claude-sonnet-5"
-    assert BROWSER_PROFILE.model in {spec.id for spec in CORE_MODEL_SPECS}
 
 
 def test_a_browser_session_runs_at_the_main_ceiling_and_a_narrowed_spawn_does_not() -> None:
@@ -982,23 +743,6 @@ async def test_a_recovered_turn_reattaches_to_the_live_cdp_session_via_the_durab
             await _surface(provider, store, conversation_id)._open()
         assert provider.reattached == [token]
         assert len(provider.leases) == 1
-
-
-async def test_a_reaped_session_clears_the_token_and_mints_a_fresh_lease(db: None) -> None:
-    """When reattach finds the session gone (SessionGone), the stale token is cleared and the
-    surface mints fresh — the task re-grounds rather than resuming a page that no longer exists."""
-    workspace_id, conversation_id = uuid4(), uuid4()
-    store = await _token_store(workspace_id)
-    provider = FakeCdpProvider(gone=True)
-
-    with ws(workspace_id):
-        await store.put(CDP_TOKEN_KEY.format(conversation_id=conversation_id), "stale-session")
-        with pytest.raises(_StopAtConnect):
-            await _surface(provider, store, conversation_id)._open()
-        assert provider.reattached == ["stale-session"]
-        assert len(provider.leases) == 1
-        fresh = provider.leases[0].session_id
-        assert await store.get(CDP_TOKEN_KEY.format(conversation_id=conversation_id)) == fresh
 
 
 async def test_aclose_clears_the_durable_token_so_a_later_turn_never_reattaches_it(

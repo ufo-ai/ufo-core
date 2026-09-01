@@ -540,7 +540,7 @@ async def test_register_source_without_a_target_requires_a_main_agent(db: None) 
             )
 
 
-def test_brokered_source_row_id_includes_connection_generation() -> None:
+def _check_brokered_source_row_id_includes_connection_generation() -> None:
     workspace_id = uuid4()
     config = {"account": "same-account", "stream": "messages"}
     first_connection, second_connection = uuid4(), uuid4()
@@ -550,7 +550,7 @@ def test_brokered_source_row_id_includes_connection_generation() -> None:
     ) != source_row_id(workspace_id, "gmail", config, connection_id=second_connection)
 
 
-def test_source_body_ref_matches_the_claim_scoped_page_digest() -> None:
+def _check_source_body_ref_matches_the_claim_scoped_page_digest() -> None:
     source_id, page_id = uuid4(), uuid4()
     digest = f"sha256:{'a' * 64}"
 
@@ -562,7 +562,7 @@ def test_source_body_ref_matches_the_claim_scoped_page_digest() -> None:
     )
 
 
-def test_source_row_id_ignores_the_fields_a_config_model_declares_non_identity() -> None:
+def _check_source_row_id_ignores_the_fields_a_config_model_declares_non_identity() -> None:
     """How far back a row backfills is a parameter of the dataset it syncs, not which dataset it is:
     the id is the one the same account and stream always hashed to, so a window neither duplicates a
     live row nor splits one stream across two.
@@ -2444,7 +2444,7 @@ async def _tombstone(page_id: UUID) -> bool:
         )
 
 
-def test_page_requires_browse_metadata() -> None:
+def _check_page_requires_browse_metadata() -> None:
     page = {
         "source_ref": "docs/launch",
         "body": "Launch window",
@@ -2456,14 +2456,14 @@ def test_page_requires_browse_metadata() -> None:
             Page.model_validate(page | {field_name: ""})
 
 
-def test_page_derives_digest_from_body() -> None:
+def _check_page_derives_digest_from_body() -> None:
     page = Page(source_ref="docs/launch", body="Launch window", stream="docs", title="Launch")
     assert page.digest == "sha256:" + hashlib.sha256(page.body.encode()).hexdigest()
     with pytest.raises(ValueError):
         Page.model_validate(page.model_dump() | {"digest": "sha256:caller-controlled"})
 
 
-def test_page_normalizes_browse_timestamps() -> None:
+def _check_page_normalizes_browse_timestamps() -> None:
     page = Page(
         source_ref="docs/launch",
         body="Launch window",
@@ -2476,35 +2476,32 @@ def test_page_normalizes_browse_timestamps() -> None:
     assert page.updated_at == "2026-07-23T18:30:00.000000+00:00"
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
+def _check_page_normalizes_provider_timestamp_shapes() -> None:
+    for value, expected in [
         ("2026-07-23", "2026-07-23T00:00:00.000000+00:00"),
         ("1700000000", "2023-11-14T22:13:20.000000+00:00"),
         ("1700000000000", "2023-11-14T22:13:20.000000+00:00"),
-    ],
-)
-def test_page_normalizes_provider_timestamp_shapes(value: str, expected: str) -> None:
-    page = Page(
-        source_ref="docs/launch",
-        body="Launch window",
-        stream="docs",
-        title="Launch window",
-        created_at=value,
-    )
-    assert page.created_at == expected
-
-
-@pytest.mark.parametrize("value", ["not-a-time", "2026-07-23T18:30:00"])
-def test_page_rejects_invalid_browse_timestamps(value: str) -> None:
-    with pytest.raises(ValueError, match="timestamp"):
-        Page(
+    ]:
+        page = Page(
             source_ref="docs/launch",
             body="Launch window",
             stream="docs",
             title="Launch window",
             created_at=value,
         )
+        assert page.created_at == expected
+
+
+def _check_page_rejects_invalid_browse_timestamps() -> None:
+    for value in ["not-a-time", "2026-07-23T18:30:00"]:
+        with pytest.raises(ValueError, match="timestamp"):
+            Page(
+                source_ref="docs/launch",
+                body="Launch window",
+                stream="docs",
+                title="Launch window",
+                created_at=value,
+            )
 
 
 async def _seed_prior_page(workspace_id: UUID, source_id: UUID, source_ref: str) -> UUID:
@@ -3923,3 +3920,10 @@ async def test_removed_source_ids_answers_only_with_positive_evidence(db: None) 
         none_asked = await ctx.removed_source_ids(())
     assert answered == frozenset({gone})
     assert none_asked == frozenset()
+
+
+def test_sources_pure_sync_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 8
+    for check in checks:
+        check()

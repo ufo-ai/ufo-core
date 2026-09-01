@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import uuid4
 
+import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 
@@ -23,6 +24,7 @@ from ufo.schema.records import MEMBER_ADMISSION, Agent, CredentialRequest, Turn
 ADD_MEMBER_ID = f"action:{MEMBER_KIND}:add_member"
 RESTORE_ID = f"action:{AGENT_KIND}:restore_application"
 REQUEST_CREDENTIALS_ID = f"action:{CREDENTIAL_KIND}:request_credentials"
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
 
 async def _unavailable_spawn(
@@ -31,7 +33,7 @@ async def _unavailable_spawn(
     raise AssertionError("restore does not spawn")
 
 
-def test_the_core_actions_register_on_their_kinds_with_their_flags() -> None:
+def test_the_core_actions_register_on_their_kinds_with_their_flags(database_url: str) -> None:
     tools, _ext, verbs = turn_tools(
         (),
         CredentialStore(fernet=Fernet(Fernet.generate_key())),

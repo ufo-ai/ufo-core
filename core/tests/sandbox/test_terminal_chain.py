@@ -86,6 +86,7 @@ TOKEN_SECRET = "terminal-chain-token-secret"
 CHANNEL = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
 PROOF_FILENAME = "PROOF.txt"
 PROOF_CONTENT = b"hello"
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 ANSWER_TEXT = "the proof file is written"
 CLIENT_TIMEOUT_SECONDS = 180
 SERVER_START_TIMEOUT_SECONDS = 10.0

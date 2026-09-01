@@ -127,11 +127,11 @@ EXPECTED_NPM = (
 )
 
 
-def test_apt_packages_match_the_expected_toolchain() -> None:
+def _check_apt_packages_match_the_expected_toolchain() -> None:
     assert APT_PACKAGES == EXPECTED_APT
 
 
-def test_runtime_apt_sources_use_https_proxy_tunnels() -> None:
+def _check_runtime_apt_sources_use_https_proxy_tunnels() -> None:
     dockerfile = pod_dockerfile()
     assert APT_HTTPS_COMMAND in dockerfile
     for host in (
@@ -146,28 +146,28 @@ def test_runtime_apt_sources_use_https_proxy_tunnels() -> None:
         assert f"https://{host}" in APT_HTTPS_COMMAND
 
 
-def test_pip_packages_match_the_expected_toolchain() -> None:
+def _check_pip_packages_match_the_expected_toolchain() -> None:
     """markitdown[pptx] carries the pptx extra the office skills need — the bare package would drop
     it silently."""
     assert PIP_PACKAGES == EXPECTED_PIP
 
 
-def test_ready_probe_imports_the_document_python_libraries() -> None:
+def _check_ready_probe_imports_the_document_python_libraries() -> None:
     assert (
         "python3 -c 'import brotli, docx, fontTools, reportlab'" in SANDBOX_TEMPLATE_READY_COMMAND
     )
 
 
-def test_npm_packages_match_the_expected_toolchain() -> None:
+def _check_npm_packages_match_the_expected_toolchain() -> None:
     assert NPM_PACKAGES == EXPECTED_NPM
 
 
-def test_the_playwright_pin_matches_the_edge_suite() -> None:
+def _check_the_playwright_pin_matches_the_edge_suite() -> None:
     edge = json.loads((ROOT / "infra/modules/edge/package.json").read_text())
     assert edge["devDependencies"]["playwright"] == PLAYWRIGHT_VERSION
 
 
-def test_the_sandbox_installs_the_repository_node_and_pnpm_versions() -> None:
+def _check_the_sandbox_installs_the_repository_node_and_pnpm_versions() -> None:
     dockerfile = pod_dockerfile()
     package_files = (
         "extensions/debugger/frontend/package.json",
@@ -185,7 +185,7 @@ def test_the_sandbox_installs_the_repository_node_and_pnpm_versions() -> None:
     assert f'test "$(pnpm --version)" = "{PNPM_VERSION}"' in SANDBOX_TEMPLATE_READY_COMMAND
 
 
-def test_sandbox_tiers_scale_cpu_and_memory_together() -> None:
+def _check_sandbox_tiers_scale_cpu_and_memory_together() -> None:
     """large sits on E2B's build ceiling (8 vCPU / 8192 MiB); small is the pre-tier template's exact
     size, so an agent that never picks a size runs the sandbox it always ran."""
     assert SANDBOX_TIERS == {
@@ -196,7 +196,7 @@ def test_sandbox_tiers_scale_cpu_and_memory_together() -> None:
     assert tuple(SANDBOX_TIERS) == SANDBOX_SIZES
 
 
-def test_template_names_carry_the_size() -> None:
+def _check_template_names_carry_the_size() -> None:
     assert [template_name(size) for size in SANDBOX_TIERS] == [
         "ufo-sbx-small",
         "ufo-sbx-medium",
@@ -204,7 +204,7 @@ def test_template_names_carry_the_size() -> None:
     ]
 
 
-def test_no_kubernetes_toolchain_baked() -> None:
+def _check_no_kubernetes_toolchain_baked() -> None:
     """The k8s bits (kubectl, kubeconfig, KUBECONFIG) are dropped — ufo's sandbox has no
     control-plane egress, so a kubectl reappearing is drift."""
     for name in ("kubectl", "ufo-tool", "kubeconfig"):
@@ -215,7 +215,7 @@ def test_no_kubernetes_toolchain_baked() -> None:
         assert token not in dockerfile
 
 
-def test_ready_probe_checks_every_baked_entrypoint() -> None:
+def _check_ready_probe_checks_every_baked_entrypoint() -> None:
     """`set -e` is what makes the probe a gate: a multi-line script's exit status is otherwise the
     last command's alone, so every earlier check could fail while the template still reports
     READY."""
@@ -234,7 +234,7 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
     assert "chromium" in SANDBOX_TEMPLATE_READY_COMMAND
 
 
-def test_scratch_resolves_onto_the_disk_not_the_memory_backed_tmpfs() -> None:
+def _check_scratch_resolves_onto_the_disk_not_the_memory_backed_tmpfs() -> None:
     """The guest mounts `/tmp` as a tmpfs sized to half its memory, so scratch there is spent RAM.
     `tempfile.gettempdir()` walks past an unusable TMPDIR to `/tmp` without saying so, which would
     put every scratch byte back in memory silently — so the probe asserts what temp resolves to
@@ -245,7 +245,7 @@ def test_scratch_resolves_onto_the_disk_not_the_memory_backed_tmpfs() -> None:
     assert f"TMPDIR={SANDBOX_TMPDIR} python3 -c" in SANDBOX_TEMPLATE_READY_COMMAND
 
 
-def test_the_scratch_dir_is_one_no_container_has_to_be_built_with() -> None:
+def _check_the_scratch_dir_is_one_no_container_has_to_be_built_with() -> None:
     """This env reaches resumed containers built by an earlier template, and a carrier may defer
     preparing one, so a scratch path some layer had to create would be absent on exactly those
     boxes — where the client's one-level lock directory create fails, and `write` and `edit` fail
@@ -254,7 +254,7 @@ def test_the_scratch_dir_is_one_no_container_has_to_be_built_with() -> None:
     assert f"mkdir -p {SANDBOX_TMPDIR}" not in pod_dockerfile()
 
 
-def test_the_baked_in_sandbox_cli_is_the_compiled_client() -> None:
+def _check_the_baked_in_sandbox_cli_is_the_compiled_client() -> None:
     """One binary where the image used to bake two Python scripts: `ufo fs` serves the file ops and
     `ufo llm` the egress CLI. It is COPY'd from a staged path inside the repository, because the
     build context is the repository root and `.dockerignore` keeps the crate's own `target/` out."""
@@ -265,7 +265,7 @@ def test_the_baked_in_sandbox_cli_is_the_compiled_client() -> None:
         assert gone not in dockerfile
 
 
-def test_the_containment_guard_is_baked_beside_the_client() -> None:
+def _check_the_containment_guard_is_baked_beside_the_client() -> None:
     """An in-sandbox python program imports the guard as the sibling module `containment`, and the
     bin dir is `sys.path[0]` for a program run from there — so the image carries the same file the
     serve process imports as `ufo.harness.containment`, never a second copy of the checks."""
@@ -273,7 +273,7 @@ def test_the_containment_guard_is_baked_beside_the_client() -> None:
     assert "/usr/local/bin/containment.py" in pod_dockerfile()
 
 
-def test_system_skills_are_baked_into_each_sandbox_image() -> None:
+def _check_system_skills_are_baked_into_each_sandbox_image() -> None:
     dockerfile = pod_dockerfile()
     bundle = system_skill_bundle()
     manifest = json.loads(bundle.manifest)
@@ -357,7 +357,7 @@ def test_the_baked_client_target_is_covered_by_the_drift_digest(monkeypatch) -> 
     assert build_definition_digest(None) != before
 
 
-def test_the_client_definition_names_the_target_it_is_built_for() -> None:
+def _check_the_client_definition_names_the_target_it_is_built_for() -> None:
     assert client_definition()["target"] == build_template.SANDBOX_CLIENT_TARGET
 
 
@@ -369,7 +369,7 @@ def test_baked_modules_are_covered_by_the_drift_digest(monkeypatch) -> None:
     assert build_definition_digest(None) != before
 
 
-def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
+def _check_rendered_dockerfile_carries_the_full_install_sequence() -> None:
     """The Docker image and the E2B template render from one `apply_layers`, so this over the
     Dockerfile covers both: the apt line with --no-install-recommends and the lists cleanup, the
     sudo strip, the pip --no-cache-dir install, the npm global install, the separate playwright
@@ -389,7 +389,7 @@ def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
     assert "sbxcred" not in dockerfile
 
 
-def test_rendered_dockerfile_runs_as_the_non_root_user() -> None:
+def _check_rendered_dockerfile_runs_as_the_non_root_user() -> None:
     """A sandbox that ran as root after sudo is stripped would be a regression; the render must end
     switched to the non-root runtime user, and the carrier chowns the workspace to that user."""
     dockerfile = pod_dockerfile()
@@ -397,18 +397,18 @@ def test_rendered_dockerfile_runs_as_the_non_root_user() -> None:
     assert dockerfile.rstrip().rfind(f"USER {RUNTIME_USER}") > dockerfile.rfind("USER root")
 
 
-def test_runtime_root_is_writable_by_the_sandbox_user() -> None:
+def _check_runtime_root_is_writable_by_the_sandbox_user() -> None:
     dockerfile = pod_dockerfile()
     assert f"install -d -o {SANDBOX_UID} -g {SANDBOX_GID} -m 0700 {SANDBOX_RUNS_ROOT}" in dockerfile
 
 
-def test_build_definition_digest_is_stable_and_prefixed() -> None:
+def _check_build_definition_digest_is_stable_and_prefixed() -> None:
     digest = build_definition_digest(None)
     assert digest.startswith("sha256:")
     assert digest == build_definition_digest(None)
 
 
-def test_gh_installs_from_the_official_cli_repo() -> None:
+def _check_gh_installs_from_the_official_cli_repo() -> None:
     """`gh` is the sandboxed GitHub CLI behind the grant-sentinel GH_TOKEN; it installs from
     GitHub's own apt repo (the distro archives lag years behind), and pytest also imports this via
     the drift digest so a dropped layer fails the publish gate."""
@@ -423,7 +423,7 @@ def test_gh_install_is_covered_by_the_drift_digest(monkeypatch) -> None:
     assert build_definition_digest(None) != before
 
 
-def test_sizing_is_covered_by_the_drift_digest() -> None:
+def _check_sizing_is_covered_by_the_drift_digest() -> None:
     """Sizing is fixed at build time and carried by no layer, so without it in the digest a live
     template built at another tier's size would pass --check and keep serving turns mis-sized."""
     digests = {build_definition_digest(sizing) for sizing in SANDBOX_TIERS.values()}
@@ -469,6 +469,7 @@ def test_publish_builds_every_tier_and_prints_the_size_map(monkeypatch, capsys) 
         }
         for size in SANDBOX_TIERS
     ]
+
     assert built == [
         {"cpu_count": sizing.cpu_count, "memory_mb": sizing.memory_mb}
         for sizing in SANDBOX_TIERS.values()
@@ -494,3 +495,10 @@ def test_check_reads_every_tier_against_its_own_digest(monkeypatch) -> None:
         (template_name(size), build_definition_digest(sizing))
         for size, sizing in SANDBOX_TIERS.items()
     ]
+
+
+def test_sandbox_build_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 23
+    for check in checks:
+        check()

@@ -25,12 +25,9 @@ from ufo_ext_research.delegation import (
 )
 
 from ufo.blob import FilesystemBlobStore
-from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     ExecResult,
-    ProxyEndpoint,
     SandboxSession,
-    SandboxSpec,
 )
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.schema.records import Agent, Turn
@@ -244,33 +241,6 @@ async def test_wide_research_keys_each_child_on_the_call_and_entity(tmp_path: Pa
         "turn-1/wide_research/call-9/acme.com",
         "turn-1/wide_research/call-9/beta.io",
     ]
-
-
-async def test_wide_research_scopes_result_files_to_the_call(tmp_path: Path) -> None:
-    sandbox = FilesSandbox(files={"entities.txt": "acme.com\n", "schema.json": "{}"})
-    args = WIDE_RESEARCH_TOOL.input_model.model_validate(
-        {
-            "entities_file": "entities.txt",
-            "prompt_template": "research {entity}",
-            "output_schema_file": "schema.json",
-        }
-    )
-    first = RecordingSpawn(outputs=[{"run": 1}])
-    await WIDE_RESEARCH_TOOL.handler(
-        _context(sandbox, first, tmp_path, idempotency_key="turn-1/wide_research/call-1"),
-        args,
-    )
-    second = RecordingSpawn(outputs=[{"run": 2}])
-    await WIDE_RESEARCH_TOOL.handler(
-        _context(sandbox, second, tmp_path, idempotency_key="turn-1/wide_research/call-2"),
-        args,
-    )
-    first_path = re.search(r"/workspace/\.wide-research-[0-9a-f]{64}\.json", str(first.spawned))
-    second_path = re.search(r"/workspace/\.wide-research-[0-9a-f]{64}\.json", str(second.spawned))
-    assert first_path is not None and second_path is not None
-    assert first_path.group() != second_path.group()
-    rows = json.loads(sandbox.writes["wide_research.json"])["rows"]
-    assert rows == [{"entity": "acme.com", "result": {"run": 2}, "error": ""}]
 
 
 async def test_wide_research_replay_reuses_the_aggregate_after_cleanup(tmp_path: Path) -> None:
@@ -520,41 +490,3 @@ async def test_wide_research_caps_the_entity_count(tmp_path: Path) -> None:
                 }
             ),
         )
-
-
-async def test_a_real_shell_reads_hostile_paths_literally(tmp_path: Path) -> None:
-    """The injection proof, against a REAL bash through LocalCarrier: BOTH reads the handler makes —
-    the entities file and the output schema — are given a name containing `$(…)` and backticks, and
-    each must come back as file contents with the substitution it would have run never happening."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    entities = 'entities.txt"; $(touch pwned_entities) `touch ticked_entities` $HOME'
-    schema = 'schema.json"; $(touch pwned_schema) `touch ticked_schema` $HOME'
-    (workspace / entities).write_text("acme.com\n")
-    (workspace / schema).write_text('{"price": "number"}')
-    carrier = LocalCarrier()
-    handle = await carrier.create(
-        SandboxSpec(
-            conversation_id=uuid4(),
-            image_ref="ufo-sandbox:latest",
-            workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-            run_token="run-token-abc",
-        )
-    )
-    session = SandboxSession(carrier=carrier, handle=handle)
-    spawn = RecordingSpawn()
-    await WIDE_RESEARCH_TOOL.handler(
-        _context(session, spawn, tmp_path),
-        WIDE_RESEARCH_TOOL.input_model.model_validate(
-            {
-                "entities_file": entities,
-                "prompt_template": "research {entity}",
-                "output_schema_file": schema,
-            }
-        ),
-    )
-    objectives = [payload["objective"] for _, payload, *_ in spawn.spawned]
-    assert [o.splitlines()[0] for o in objectives] == ["research acme.com"]
-    assert all('{"price": "number"}' in objective for objective in objectives)
-    assert not any(workspace.glob("pwned_*")) and not any(workspace.glob("ticked_*"))

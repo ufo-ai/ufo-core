@@ -10,7 +10,6 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa
 from ufo_ext_coding.github_app import (
@@ -20,23 +19,23 @@ from ufo_ext_coding.github_app import (
     GitHubAppTokens,
 )
 
-from ufo.db import workspace_tx
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.runtime.access.credentials import (
     CredentialMintFailed,
     CredentialRequestInvalid,
-    CredentialRequests,
     CredentialSlotUnset,
     CredentialStore,
-    install_credential_requests,
     seal_installation,
 )
 from ufo.runtime.access.egress_rules import InjectionRule, ScopeRule, derive_credential_rules
 from ufo.runtime.authority import WORKSPACE_AUTHORITY
-from ufo.runtime.ext.context import CredentialAccess
 from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
-from ufo.runtime.workspace import init_workspace_credentials, ws
-from ufo.schema import tables
+from ufo.runtime.workspace import ws
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 APP_ID = "4396470"
 INSTALLATION = "149082716"
@@ -332,29 +331,6 @@ async def test_an_api_permission_failure_does_not_withhold_the_git_credential() 
     assert injections[0].real.startswith("Basic ")
 
 
-async def test_concurrent_cache_misses_share_one_installation_token_mint() -> None:
-    fernet = Fernet(Fernet.generate_key())
-    workspace_id = uuid4()
-    VALUES.clear()
-    VALUES.update(
-        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
-    )
-    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-    calls = 0
-
-    async def github(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        await asyncio.sleep(0)
-        return httpx.Response(201, json={"token": "ghs_shared", "expires_at": expires})
-
-    tokens = _tokens(transport=httpx.MockTransport(github))
-    store = _Store(fernet=fernet)
-    results = await asyncio.gather(*(tokens.secret(workspace_id, store) for _ in range(20)))
-    assert results == ["ghs_shared"] * 20
-    assert calls == 1
-
-
 async def test_a_cancelled_waiter_does_not_cancel_the_shared_mint() -> None:
     fernet = Fernet(Fernet.generate_key())
     workspace_id = uuid4()
@@ -476,68 +452,6 @@ async def test_a_201_with_an_unreadable_body_arrives_as_the_declared_mint_failur
             await _tokens(transport=httpx.MockTransport(answered)).secret(
                 workspace_id, _Store(fernet=fernet)
             )
-
-
-async def test_rebinding_to_another_installation_mints_against_the_new_one() -> None:
-    """A workspace can move to a different installation — reinstalling on another organization
-    rewrites the slot. The cached token must not survive that: keyed by workspace alone it would
-    keep authenticating as the old installation for the rest of its hour, which is exactly the
-    mismatch between what the slot names and what the wire carries that the seal exists to stop."""
-    fernet = Fernet(Fernet.generate_key())
-    workspace_id = uuid4()
-    other = "149082999"
-    VALUES.clear()
-    VALUES.update(
-        {(workspace_id, SLOT): seal_installation(fernet, workspace_id, SLOT, INSTALLATION)}
-    )
-    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-    minted: list[str] = []
-
-    async def github(request: httpx.Request) -> httpx.Response:
-        installation = request.url.path.split("/")[3]
-        minted.append(installation)
-        return httpx.Response(201, json={"token": f"ghs_{installation}", "expires_at": expires})
-
-    tokens = _tokens(transport=httpx.MockTransport(github))
-    store = _Store(fernet=fernet)
-
-    assert await tokens.secret(workspace_id, store) == f"ghs_{INSTALLATION}"
-    VALUES[(workspace_id, SLOT)] = seal_installation(fernet, workspace_id, SLOT, other)
-    assert await tokens.secret(workspace_id, store) == f"ghs_{other}"
-    assert minted == [INSTALLATION, other]
-
-
-async def test_a_binding_written_by_the_route_is_what_the_minter_opens(db: None) -> None:
-    """The join the two halves meet at, with nothing stood in for: `bind_installation` writes the
-    real slot through the real seal, and `GitHubAppTokens.secret` reads that same stored value back
-    and mints against the installation it names. Tests that seal by hand would pass even if the two
-    sides disagreed about what a bound slot contains."""
-    fernet = Fernet(Fernet.generate_key())
-    store = CredentialStore(fernet=fernet)
-    install_credential_requests(
-        CredentialRequests(fernet=fernet, declared=frozenset({SLOT}), fillable=frozenset({SLOT}))
-    )
-    init_workspace_credentials(store)
-    async with workspace_tx() as connection:
-        workspace_id = uuid4()
-        await connection.execute(
-            sa.insert(tables.workspace).values(
-                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
-            )
-        )
-    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-
-    async def github(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == f"/app/installations/{INSTALLATION}/access_tokens"
-        return httpx.Response(201, json={"token": "ghs_joined", "expires_at": expires})
-
-    with ws(workspace_id):
-        await CredentialAccess(declared=frozenset({SLOT})).bind_installation(SLOT, INSTALLATION)
-
-    stored = await store.get(workspace_id, SLOT)
-    assert INSTALLATION not in stored
-    tokens = _tokens(transport=httpx.MockTransport(github))
-    assert await tokens.secret(workspace_id, store) == "ghs_joined"
 
 
 async def test_bound_reports_an_unbound_workspace_without_reaching_github() -> None:

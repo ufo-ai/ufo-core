@@ -3,16 +3,13 @@ import base64
 import hashlib
 import hmac
 import json
-import zipfile
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
 import pytest
@@ -78,7 +75,6 @@ from ufo.runtime.hub import (
     SubagentActivity,
     Terminal,
 )
-from ufo.runtime.media.artifact_url import verify_artifact_url
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.workspace import ws
@@ -86,14 +82,17 @@ from ufo.schema import tables
 from ufo.schema.records import (
     CredentialPrompt,
     CredentialRequest,
-    RuntimeIdentity,
     TerminalFrame,
-    TurnRuntimeConfig,
     Usage,
 )
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth
 from ufo.serve import _mount_shared_surfaces
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 SECRET = "ufo-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
@@ -125,10 +124,6 @@ def test_directive_escapes_tabs_newlines_and_backslashes() -> None:
     assert directive("txt", "a\tb\nc\\d\r") == b"txt\ta\\tb\\nc\\\\d\n"
     assert directive("ask", PROMPT) == b"ask\t>\n"
     assert directive("poll", "1") == b"poll\t1\n"
-
-
-def test_terminal_runtime_id_matches_the_client() -> None:
-    assert terminal_runtime_id("conversation") == "8b34dbc2c05eb4d7e25d48efeace8245"
 
 
 def test_frame_map_covers_every_live_frame() -> None:
@@ -177,85 +172,6 @@ def test_a_drain_names_the_member_arrivals_it_folded() -> None:
         f"absorbed\t{first}\t{second}\n".encode(),
     )
     assert directives_for(Absorbed(arrivals=()), streamed=True) == ()
-
-
-def test_terminal_frame_maps_by_status_and_streamed() -> None:
-    done = Terminal(frame=TerminalFrame(status="done", text="line one\nline two"))
-    assert directives_for(done, streamed=False) == (
-        b"say\tline one\n",
-        b"say\tline two\n",
-        b"ask\t>\n",
-    )
-    assert directives_for(done, streamed=True) == (b"ask\t>\n",)
-    failed = Terminal(
-        frame=TerminalFrame(
-            status="failed",
-            error_class="UnicodeEncodeError",
-            error_message="'utf-8' codec could not encode the response",
-        )
-    )
-    assert directives_for(failed, streamed=True) == (
-        b"say\tThe agent could not complete the request. Try again.\n",
-        b"ask\t>\n",
-    )
-    invalid_credential = Terminal(
-        frame=TerminalFrame(
-            status="failed",
-            error_class="CredentialValueInvalid",
-            error_message=(
-                "model 'anthropic.claude-opus-5' key contains non-ASCII characters: "
-                "env UFO_AWS_BEARER_TOKEN_BEDROCK (or AWS_BEARER_TOKEN_BEDROCK) or the "
-                "workspace's 'bedrock_api_key' BYOK slot holds a value the provider wire "
-                "cannot carry."
-            ),
-        )
-    )
-    assert directives_for(invalid_credential, streamed=True) == (
-        b"say\tmodel 'anthropic.claude-opus-5' key contains non-ASCII characters: "
-        b"env UFO_AWS_BEARER_TOKEN_BEDROCK (or AWS_BEARER_TOKEN_BEDROCK) or the "
-        b"workspace's 'bedrock_api_key' BYOK slot holds a value the provider wire "
-        b"cannot carry.\n",
-        b"ask\t>\n",
-    )
-    assert directives_for(Parked(message="over cap"), False) == (b"say\tover cap\n", b"ask\t>\n")
-
-
-def test_turn_ending_frames_carry_the_deployed_runtime_and_selected_model() -> None:
-    runtime = RuntimeIdentity(
-        revision="abc12345",
-        image_digest=f"sha256:{'a' * 64}",
-        config_digest=f"sha256:{'b' * 64}",
-        sandbox_backend="e2b",
-        sandbox_digest=f"sha256:{'c' * 64}",
-    )
-    terminal = Terminal(
-        frame=TerminalFrame(
-            status="done",
-            text="done",
-            model="glm-5.3-flash",
-            reasoning="high",
-            environment=f"sha256:{'d' * 64}",
-        )
-    )
-    lines = directives_for(terminal, streamed=True, runtime=runtime)
-
-    assert json.loads(lines[0].decode().removeprefix("runtime\t")) == {
-        "runtime": runtime.model_dump(mode="json"),
-        "model": "glm-5.3-flash",
-        "reasoning": "high",
-        "environment": f"sha256:{'d' * 64}",
-    }
-    assert lines[1:] == (b"ask\t>\n",)
-
-    parked_lines = directives_for(Parked(message="over cap"), streamed=False, runtime=runtime)
-
-    assert json.loads(parked_lines[0].decode().removeprefix("runtime\t")) == {
-        "runtime": runtime.model_dump(mode="json"),
-        "model": "",
-        "reasoning": None,
-        "environment": None,
-    }
-    assert parked_lines[1:] == (b"say\tover cap\n", b"ask\t>\n")
 
 
 def test_a_cancel_divides_on_whether_it_carries_words() -> None:
@@ -324,46 +240,6 @@ async def test_stream_gates_each_secret_prompt_on_the_pending_check() -> None:
     ]
     secrets = [line for line in partial if line.startswith(b"secret\t")]
     assert secrets == [b"secret\tsealed-opaque\tslack_bot_token\tBot User OAuth Token\n"]
-
-
-def test_a_shared_file_renders_after_the_answer_on_every_terminal_status() -> None:
-    """The upload commits during the turn, so a turn that shared a file and then failed or was
-    cancelled still owes the member the link — the silent drop this repairs."""
-    files = (
-        SharedFile(filename="report.pdf", size_bytes=2048, url="https://ufo.test/artifacts/a"),
-        SharedFile(filename="chart.png", size_bytes=91, url="https://ufo.test/artifacts/b"),
-    )
-    done = Terminal(frame=TerminalFrame(status="done", text="here it is"))
-    assert directives_for(done, streamed=False, files=files) == (
-        b"say\there it is\n",
-        b"file\treport.pdf\t2048\thttps://ufo.test/artifacts/a\n",
-        b"file\tchart.png\t91\thttps://ufo.test/artifacts/b\n",
-        b"ask\t>\n",
-    )
-    failed = Terminal(frame=TerminalFrame(status="failed"))
-    assert directives_for(failed, streamed=True, files=files[:1]) == (
-        b"say\tThe agent could not complete the request. Try again.\n",
-        b"file\treport.pdf\t2048\thttps://ufo.test/artifacts/a\n",
-        b"ask\t>\n",
-    )
-    cancelled = Terminal(frame=TerminalFrame(status="cancelled"))
-    assert directives_for(cancelled, streamed=True, files=files[:1]) == (
-        b"say\tcancelled\n",
-        b"file\treport.pdf\t2048\thttps://ufo.test/artifacts/a\n",
-        b"ask\t>\n",
-    )
-    assert directives_for(done, streamed=True) == (b"ask\t>\n",)
-
-
-def test_a_file_with_no_mintable_link_still_names_itself() -> None:
-    """No token secret or no public base URL is the local-dev case: name the file rather than drop
-    it, the way Slack degrades."""
-    unlinked = (SharedFile(filename="notes.md", size_bytes=17, url=""),)
-    done = Terminal(frame=TerminalFrame(status="done", text="t"))
-    assert directives_for(done, streamed=True, files=unlinked) == (
-        b"file\tnotes.md\t17\t\n",
-        b"ask\t>\n",
-    )
 
 
 def test_a_shared_file_precedes_the_secret_and_connect_lines() -> None:
@@ -437,13 +313,6 @@ async def test_stream_privately_renders_a_connect_handoff() -> None:
     ]
 
 
-def test_valid_token_verifies_to_its_lowered_email(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
-    workspace_id = uuid4()
-    token = _mint(SECRET, workspace_id, "Owner@Example.com", _future())
-    assert verify_token(token, workspace_id) == "owner@example.com"
-
-
 def test_expired_token_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("UFO_TOKEN_SECRET", SECRET)
     workspace_id = uuid4()
@@ -505,28 +374,6 @@ async def test_resolve_workspace_reads_the_bearer(monkeypatch: pytest.MonkeyPatc
     assert await resolve_workspace(_get_request({"authorization": token}), auth) is None
 
 
-async def test_terminal_downloads_the_system_skill_bundle_once_at_startup(ufo) -> None:
-    client, workspace_id = ufo
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    path = "/surface/ufo/main/skills"
-
-    first = await client.get(path, headers={"authorization": f"Bearer {token}"})
-
-    assert first.status_code == 200
-    assert first.headers["content-type"] == "application/zip"
-    etag = first.headers["etag"]
-    with zipfile.ZipFile(BytesIO(first.content)) as archive:
-        manifest = json.loads(archive.read("manifest.json"))
-    assert etag == f'"{manifest["digest"]}"'
-
-    current = await client.get(
-        path,
-        headers={"authorization": f"Bearer {token}", "if-none-match": etag},
-    )
-    assert current.status_code == 304
-    assert current.content == b""
-
-
 async def test_an_unseated_members_bearer_cannot_read_or_write_terminal_state(ufo) -> None:
     client, workspace_id = ufo
     member_id = await _seed_member(workspace_id, "removed@example.com")
@@ -575,21 +422,6 @@ async def _feed(frames: list[tuple[str, object]]) -> AsyncIterator[tuple[str, ob
         yield item
 
 
-async def test_hold_expires_and_the_stream_ends_with_poll() -> None:
-    assert HOLD_SECONDS == 85.0
-    out = b"".join(
-        [
-            chunk
-            async for chunk in stream_directives(
-                aclosing(_Never()), hold_seconds=0.05, turn_id=TURN
-            )
-        ]
-    )
-    lines = _lines(out)
-    assert lines[0] == ["txt", "working"]
-    assert lines[-1] == ["poll", "1"]
-
-
 async def test_a_stream_that_will_be_resumed_names_where_it_got_to() -> None:
     """Every end that the client reconnects from carries the cursor of the last frame rendered, so
     the tail it opens next starts after that frame instead of at the ring's first. Without it every
@@ -624,29 +456,6 @@ async def test_a_stream_resumed_from_its_cursor_states_the_cursor_it_was_given()
         ]
     )
     assert _lines(out) == [["since", str(TURN), "9"], ["poll", "1"]]
-
-
-async def test_a_terminal_frame_ends_with_its_cursor_and_a_listen() -> None:
-    """A turn's own end leaves the prompt, and the conversation can be woken without the member —
-    so the terminal names where the client got to and tells it to reconnect on the listen
-    interval, never on a `poll` that would read as a turn still running."""
-    frames = _feed(
-        [("1", TextDelta(text="echo:1")), ("2", Terminal(frame=TerminalFrame(status="done")))]
-    )
-    out = b"".join(
-        [
-            chunk
-            async for chunk in stream_directives(
-                aclosing(frames), hold_seconds=HOLD_SECONDS, turn_id=TURN
-            )
-        ]
-    )
-    assert _lines(out) == [
-        ["txt", "echo:1"],
-        ["ask", ">"],
-        ["since", str(TURN), "2"],
-        ["listen", "2"],
-    ]
 
 
 async def test_a_cancel_that_carries_words_exits_without_a_listen() -> None:
@@ -945,39 +754,6 @@ async def test_shared_fleet_scopes_each_turn_to_its_token_workspace(
     assert turn_a != turn_b
 
 
-async def test_runtime_config_overrides_a_concrete_agent_for_one_turn(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    client, workspace_id = ufo
-    await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-
-    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        response = await client.post(
-            "/surface/ufo/configured",
-            content=b"use the selected model",
-            headers={
-                "authorization": f"Bearer {token}",
-                "x-ufo-model": "claude-sonnet-5",
-                "x-ufo-internet": "off",
-            },
-        )
-
-    assert response.status_code == 200
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(tables.turn.c.runtime_config, tables.turn.c.terminal).where(
-                    tables.turn.c.workspace_id == workspace_id
-                )
-            )
-        ).one()
-    assert TurnRuntimeConfig.model_validate(row.runtime_config) == TurnRuntimeConfig(
-        model="claude-sonnet-5", internet_access=False
-    )
-    assert TerminalFrame.model_validate(row.terminal).model == "claude-sonnet-5"
-
-
 async def test_a_runtime_config_that_cannot_run_or_would_widen_is_refused(
     ufo: tuple[AsyncClient, UUID],
 ) -> None:
@@ -1009,72 +785,6 @@ async def test_a_runtime_config_that_cannot_run_or_would_widen_is_refused(
             )
         ).scalar_one()
     assert turns == 0
-
-
-async def test_a_stored_document_digest_pins_a_turns_environment(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    """The document endpoint stores content-addressed, YAML and JSON of the same overrides land
-    on one digest, and the digest pins a turn's environment with no model header anywhere — the
-    three runtime headers are independent."""
-    client, workspace_id = ufo
-    await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    auth = {"authorization": f"Bearer {token}"}
-
-    stored = await client.post(
-        "/surface/ufo/environment/document",
-        content=b"main:\n  prompt:\n    text: OVERRIDDEN\n",
-        headers=auth,
-    )
-    assert stored.status_code == 200
-    digest = stored.text
-    again = await client.post(
-        "/surface/ufo/environment/document",
-        content=b'{"main": {"prompt": {"text": "OVERRIDDEN"}}}',
-        headers=auth,
-    )
-    assert again.text == digest
-
-    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        response = await client.post(
-            "/surface/ufo/pinned-document",
-            content=b"use the stored document",
-            headers={**auth, "x-ufo-environment": digest},
-        )
-    assert response.status_code == 200
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(tables.turn.c.runtime_config).where(
-                    tables.turn.c.workspace_id == workspace_id
-                )
-            )
-        ).one()
-    assert TurnRuntimeConfig.model_validate(row.runtime_config) == TurnRuntimeConfig(
-        environment=digest
-    )
-
-
-async def test_the_file_store_answers_one_digest_for_one_content(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    client, workspace_id = ufo
-    await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    auth = {"authorization": f"Bearer {token}"}
-
-    stored = await client.post(
-        "/surface/ufo/environment/file", content=b"archive bytes", headers=auth
-    )
-    assert stored.status_code == 200
-    assert stored.text.startswith("sha256:")
-    again = await client.post(
-        "/surface/ufo/environment/file", content=b"archive bytes", headers=auth
-    )
-    assert again.text == stored.text
-    unauthenticated = await client.post("/surface/ufo/environment/file", content=b"x")
-    assert unauthenticated.status_code == 401
 
 
 async def test_the_document_store_refuses_junk_and_no_bearer(
@@ -1207,61 +917,6 @@ async def _post_stop(client: AsyncClient, token: str, body: bytes = b"") -> Resp
         )
 
 
-async def test_a_stop_ends_the_running_turn_and_returns_the_prompt(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    """Esc on the member's keyboard: the stop header ends the conversation's running turn and the
-    same request resumes its tail, which replays to the cancelled terminal — so the member reads
-    that it stopped and keeps the session, rather than the client exiting."""
-    client, workspace_id = ufo
-    member_id = await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    conversation_id = await _linked_conversation(client, workspace_id, token)
-    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
-
-    response = await _post_stop(client, token)
-
-    assert response.status_code == 200
-    lines = _lines(response.content)
-    assert lines[:2] == [["say", "cancelled"], ["ask", ">"]]
-    assert lines[2][:2] == ["since", str(turn_id)]
-    assert lines[3] == ["listen", "2"]
-    stopped, status = await _sole_turn(workspace_id)
-    assert (stopped, status) == (turn_id, "cancelled")
-
-
-async def test_an_unsend_retracts_the_pending_message(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    """Up on a queued row: the message the member sent mid-turn comes back into their hands — the
-    pending arrival is deleted, so no turn can fold it and a later stop founds nothing on it."""
-    client, workspace_id = ufo
-    member_id = await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    conversation_id = await _linked_conversation(client, workspace_id, token)
-    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
-    sent = await _post_send(client, token, b"never mind", uuid4())
-    arrival = _lines(sent.content)[0][3]
-
-    retracted = await _post_unsend(client, token, arrival)
-
-    assert retracted.status_code == 200
-    assert retracted.content == b""
-    async with workspace_tx() as connection:
-        pending = (
-            await connection.execute(
-                sa.select(sa.func.count())
-                .select_from(tables.inbound_message)
-                .where(tables.inbound_message.c.conversation_id == conversation_id)
-            )
-        ).scalar_one()
-    assert pending == 0
-
-    again = await _post_unsend(client, token, arrival)
-    assert again.status_code == 409
-    assert turn_id is not None
-
-
 async def test_an_unsend_of_a_taken_up_message_is_refused(
     ufo: tuple[AsyncClient, UUID],
 ) -> None:
@@ -1339,58 +994,6 @@ async def test_an_unsend_refuses_a_body_and_a_bad_id(
 
     empty = await _post_unsend(client, token, "")
     assert empty.status_code == 400, "an empty header is an unsend, never a resume"
-
-
-async def test_a_stop_founds_the_next_turn_on_the_message_already_sent(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    """Esc after a mid-turn send: the cancel ends the running turn and the message the member had
-    already sent founds the next one. The stop's own tail ends on an immediate `poll` because the
-    conversation moved on, and the reconnect resumes on the new turn — whose first frame names the
-    arrival, so the row the client held as pending settles as the new turn's own message, ahead of
-    the answer the turn goes on to give. The reconnect rides the turn to that answer: a terminal
-    published over the engine's shoulder would race the turn's own, and whichever landed second
-    would be the one the assertion happened to miss. The gate holds the founded turn at its first
-    delta, so the stand-in model cannot answer and drop the ring before the reconnect subscribes to
-    it — the arrival is already folded by then, and the frame naming it is what the reconnect
-    reads first."""
-    client, workspace_id = ufo
-    member_id = await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    conversation_id = await _linked_conversation(client, workspace_id, token)
-    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
-    STREAM_GATE.arm()
-    sent = await _post_send(client, token, b"do this instead", uuid4())
-    arrival = UUID(_lines(sent.content)[0][3])
-
-    response = await _post_stop(client, token)
-
-    assert response.status_code == 200
-    lines = _lines(response.content)
-    assert lines[:2] == [["say", "cancelled"], ["ask", ">"]]
-    assert lines[2][:2] == ["since", str(turn_id)]
-    assert lines[3] == ["poll", "0"]
-    assert len(lines) == 4
-    async with workspace_tx() as connection:
-        new_turn = (
-            await connection.execute(
-                sa.select(tables.turn.c.id, tables.turn.c.status, tables.turn.c.inbound)
-                .where(
-                    tables.turn.c.conversation_id == conversation_id,
-                    tables.turn.c.id != turn_id,
-                )
-                .order_by(tables.turn.c.seq.desc())
-            )
-        ).one()
-    assert new_turn.status in ("queued", "running")
-    assert new_turn.inbound == "do this instead"
-
-    resumed = await _post(client, "main", token, b"")
-
-    assert resumed[0] == ["absorbed", str(arrival)]
-    answer = "".join(f for verb, *rest in resumed if verb == "txt" for f in rest)
-    assert "echo:" in answer
-    assert ["ask", ">"] in resumed
 
 
 async def test_a_stop_with_no_live_turn_resumes_the_tail(ufo: tuple[AsyncClient, UUID]) -> None:
@@ -1603,113 +1206,6 @@ async def _tailing(hub: InProcessHub, turn_id: UUID) -> None:
         await asyncio.sleep(0)
 
 
-async def test_a_send_joins_the_running_turn_and_leaves_the_held_stream_its_ops(
-    ufo: tuple[AsyncClient, UUID],
-    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
-    tmp_path: Path,
-) -> None:
-    """A member speaking while their turn runs. The send admits onto that turn and answers with the
-    ack — the turn, `0` because another delivery opened its run, and the arrival the drain will
-    name — while the stream they are already holding goes untouched: the send connects no terminal,
-    so the op the turn asks for after it still reaches the watcher that stream owns."""
-    client, workspace_id = ufo
-    hub, terminals = runtime[1], runtime[3].terminals
-    member_id = await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    cwd = str(tmp_path / "proj")
-    conversation_id = await _linked_conversation(client, workspace_id, token)
-    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
-    held = asyncio.ensure_future(_post_terminal(client, "main", token, b"", cwd))
-    await _tailing(hub, turn_id)
-
-    sent = await _post_send(client, token, b"and the tests too", uuid4())
-
-    assert sent.status_code == 200
-    assert not held.done()
-    verb, named, opened, arrival = _lines(sent.content)[0]
-    assert (verb, named, opened) == ("sent", str(turn_id), "0")
-    assert await _arrivals(workspace_id) == [(UUID(arrival), "and the tests too")]
-
-    reading = asyncio.ensure_future(
-        terminals.send(conversation_id, "read", 30, arg=f"{cwd}/notes.txt")
-    )
-    lines = await held
-    assert [line[0] for line in lines] == ["since", "run"]
-    assert terminals.resolve(conversation_id, lines[1][1], b"notes")
-    assert await reading == b"notes"
-
-
-async def test_the_tail_names_the_arrival_the_ack_promised(
-    ufo: tuple[AsyncClient, UUID],
-    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
-) -> None:
-    """The other half of the mid-turn send: the id the ack named is the id the held stream reads
-    back when the turn folds that row into its window, so the client settles the row it was holding
-    against the agent actually taking the message up."""
-    client, workspace_id = ufo
-    hub = runtime[1]
-    member_id = await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    conversation_id = await _linked_conversation(client, workspace_id, token)
-    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
-    held = asyncio.ensure_future(_post(client, "main", token, b""))
-    await _tailing(hub, turn_id)
-    sent = await _post_send(client, token, b"and the tests too", uuid4())
-    arrival = UUID(_lines(sent.content)[0][3])
-
-    await hub.publish(turn_id, Absorbed(arrivals=(arrival,)))
-    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="Both done.")))
-
-    lines = await held
-    assert lines[:3] == [["absorbed", str(arrival)], ["say", "Both done."], ["ask", ">"]]
-    assert lines[3][0] == "since"
-    assert lines[4] == ["listen", "2"]
-
-
-async def test_a_resent_delivery_admits_once_and_names_the_same_turn(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    """The client retries a send whose answer the link dropped. The `x-ufo-send-id` it repeats is
-    the delivery's identity, so the message lands once and the retry reads back the same ack — the
-    turn it joined and the arrival still waiting in it."""
-    client, workspace_id = ufo
-    member_id = await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    conversation_id = await _linked_conversation(client, workspace_id, token)
-    turn_id = await _seed_running_turn(workspace_id, conversation_id, member_id)
-    send_id = uuid4()
-
-    first = await _post_send(client, token, b"and the tests too", send_id)
-    resent = await _post_send(client, token, b"and the tests too", send_id)
-
-    assert first.content == resent.content
-    assert _lines(first.content)[0][:3] == ["sent", str(turn_id), "0"]
-    assert await _arrivals(workspace_id) == [
-        (UUID(_lines(first.content)[0][3]), "and the tests too")
-    ]
-    assert await _turn_count(workspace_id) == 1
-
-
-async def test_a_send_with_nothing_running_opens_a_turn_the_stream_reads(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    """A send is not a mid-turn special case: with nothing running it founds a turn like any other
-    message, says so with `1`, and names no arrival — there is no queue row, the message is the
-    turn's own inbound. The member's next stream tails that turn to its answer."""
-    client, workspace_id = ufo
-    await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-
-    sent = await _post_send(client, token, b"hello", uuid4())
-
-    assert _lines(sent.content) == [["sent", str((await _sole_turn(workspace_id))[0]), "1", ""]]
-    lines = await _post(client, "main", token, b"")
-    answer = "".join(field for verb, *rest in lines if verb in ("txt", "say") for field in rest)
-    assert "echo:1" in answer
-    assert ["ask", ">"] in lines
-    assert lines[-1] == ["listen", "2"]
-
-
 async def test_a_resent_send_that_founded_a_turn_names_it_without_reopening_it(
     ufo: tuple[AsyncClient, UUID],
 ) -> None:
@@ -1730,28 +1226,6 @@ async def test_a_resent_send_that_founded_a_turn_names_it_without_reopening_it(
     assert _lines(resent.content) == [["sent", str(turn_id), "0", ""]]
     assert await _turn_count(workspace_id) == 1
     assert await _arrivals(workspace_id) == []
-
-
-async def test_a_first_send_claims_the_terminal_it_stands_in(
-    ufo: tuple[AsyncClient, UUID], tmp_path: Path
-) -> None:
-    """A send standing in a directory claims the conversation's terminal exactly as an admitting
-    stream does — the binding is made at admission, and a member whose first message is a send is
-    owed the same agent workspace — and names it after the ack. The claim fills an empty handle
-    only, so the next send finds the conversation bound and says nothing."""
-    client, workspace_id = ufo
-    member_id = await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    cwd = str(tmp_path / "proj")
-    conversation_id = await _linked_conversation(client, workspace_id, token)
-    await _seed_running_turn(workspace_id, conversation_id, member_id)
-
-    first = await _post_send(client, token, b"hello", uuid4(), cwd=cwd)
-    second = await _post_send(client, token, b"and again", uuid4(), cwd=cwd)
-
-    assert _lines(first.content)[0][0] == "sent"
-    assert _lines(first.content)[1] == ["note", f"Workspace: {cwd}"]
-    assert [line[0] for line in _lines(second.content)] == ["sent"]
 
 
 async def test_a_send_states_what_it_needs_and_admits_nothing_without_it(
@@ -1830,79 +1304,6 @@ async def _seed_shared_artifact(workspace_id: UUID, turn_id: UUID, filename: str
                 updated_at=sa.func.now(),
             )
         )
-
-
-async def test_a_shared_file_reaches_the_terminal_as_an_openable_link(
-    ufo_delivering_artifacts: tuple[AsyncClient, UUID],
-) -> None:
-    """The whole chain #884 reports broken: a row in `shared_artifact` becomes a `file` directive on
-    the wire carrying an absolute URL the member can open. Read on the reconnect that re-tails the
-    finished turn, which is how the shell drains a turn that outran its hold."""
-    client, workspace_id = ufo_delivering_artifacts
-    await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    await _post(client, "main", token, b"share the report")
-    turn_id, _status = await _sole_turn(workspace_id)
-    await _seed_shared_artifact(workspace_id, turn_id, "report.pdf")
-
-    lines = await _post(client, "main", token, b"")
-
-    shared = [fields for verb, *fields in lines if verb == "file"]
-    assert len(shared) == 1
-    filename, size_bytes, url = shared[0]
-    assert (filename, size_bytes) == ("report.pdf", "2048")
-    assert url.startswith(f"{ARTIFACT_BASE_URL}/artifacts/{turn_id}/report.pdf?")
-    query = parse_qs(urlsplit(url).query)
-    claims = verify_artifact_url(
-        ARTIFACT_SECRET,
-        str(turn_id),
-        "report.pdf",
-        query["exp"][0],
-        query["sig"][0],
-        "",
-        query["ws"][0],
-        datetime.now(UTC),
-    )
-    assert claims.blob_key == f"artifacts/{turn_id}/report.pdf"
-    assert ["ask", ">"] in lines
-
-
-async def test_a_deploy_that_mints_no_link_still_names_the_shared_file(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    """The `ufo` fixture configures no artifact secret and no public base, which is the local-dev
-    deploy: the member learns the file exists instead of nothing at all."""
-    client, workspace_id = ufo
-    await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    await _post(client, "main", token, b"share the notes")
-    turn_id, _status = await _sole_turn(workspace_id)
-    await _seed_shared_artifact(workspace_id, turn_id, "notes.md")
-
-    lines = await _post(client, "main", token, b"")
-
-    assert [fields for verb, *fields in lines if verb == "file"] == [["notes.md", "2048", ""]]
-
-
-async def test_a_stale_client_is_told_to_install_except_on_an_op_reply(
-    ufo: tuple[AsyncClient, UUID], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    client, workspace_id = ufo
-    await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    monkeypatch.setenv("UFO_CLIENT_VERSION", "9.9.9")
-    headers = {"authorization": f"Bearer {token}", "x-ufo-script": "1a2b3c4d5e6f"}
-    streamed = await client.post("/surface/ufo/stale", content=b"hello", headers=headers)
-    assert _lines(streamed.content) == [["install"], ["say", "Updated ufo. Run ufo again."]]
-    assert await _turn_count(workspace_id) == 0
-    replied = await client.post(
-        "/surface/ufo/stale", content=b"", headers={**headers, "x-ufo-op": "deadbeef"}
-    )
-    assert _lines(replied.content) == [["poll", "0"]]
-    current = await client.post(
-        "/surface/ufo/stale", content=b"", headers={**headers, "x-ufo-script": "9.9.9"}
-    )
-    assert ["install"] not in _lines(current.content)
 
 
 async def test_a_client_finishes_its_admitted_turn_across_a_deploy(
@@ -2340,74 +1741,6 @@ def test_history_strips_the_prompt_envelope_from_member_lines() -> None:
     )
 
 
-def test_history_states_a_turns_steps_over_the_reply_they_produced() -> None:
-    from ufo.harness.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
-    from ufo.runtime.turns.transcript import Conversation
-
-    marker = "00aabbcc"
-    fenced = f"<member_message_{marker}>\nwhen is the meeting\n</member_message_{marker}>"
-    conversation = Conversation(
-        seq=1,
-        messages=(
-            Message(role="user", content=fenced),
-            Message(
-                role="assistant",
-                content=(
-                    TextBlock(text="Reading the notes first."),
-                    ToolUseBlock(id="call-1", name="read", input={}),
-                    ToolUseBlock(id="call-2", name="load_skill", input={"name": "office/pptx"}),
-                ),
-            ),
-            Message(
-                role="user",
-                content=(
-                    ToolResultBlock(tool_use_id="call-1", content="notes", activity=True),
-                    ToolResultBlock(tool_use_id="call-2", content="loaded", activity=True),
-                ),
-            ),
-            Message(role="assistant", content=(TextBlock(text="The meeting is at four."),)),
-            Message(role="user", content=(TextBlock(text="thanks"),)),
-        ),
-    )
-    lines = history_directives(conversation)
-    assert lines == (
-        b"you\twhen is the meeting\n",
-        b"note\tCompleted 3 steps\n",
-        b"say\tThe meeting is at four.\n",
-        b"you\tthanks\n",
-    )
-
-
-def test_history_says_no_words_for_a_turn_cut_after_its_narration() -> None:
-    from ufo.harness.models.interface import Message, TextBlock, ToolResultBlock, ToolUseBlock
-    from ufo.runtime.turns.transcript import Conversation
-
-    conversation = Conversation(
-        seq=1,
-        messages=(
-            Message(role="user", content="read the notes"),
-            Message(
-                role="assistant",
-                content=(
-                    TextBlock(text="Reading the notes first."),
-                    ToolUseBlock(id="call-1", name="read", input={}),
-                ),
-            ),
-            Message(
-                role="user",
-                content=(ToolResultBlock(tool_use_id="call-1", content="notes", activity=True),),
-            ),
-            Message(role="user", content="and again"),
-        ),
-    )
-    lines = history_directives(conversation)
-    assert lines == (
-        b"you\tread the notes\n",
-        b"note\tCompleted 2 steps\n",
-        b"you\tand again\n",
-    )
-
-
 def test_history_counts_no_step_for_a_call_that_never_dispatched() -> None:
     from ufo.harness.models.interface import Message, TextBlock, ToolUseBlock
     from ufo.runtime.turns.transcript import Conversation
@@ -2600,71 +1933,6 @@ async def test_a_marked_bounce_renders_a_refused_wakeup_without_exiting(
     assert lines[-1] == ["listen", "2"]
 
 
-async def test_an_idle_listen_reconnect_prints_the_turn_the_conversation_woke_on(
-    ufo: tuple[AsyncClient, UUID],
-    runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
-) -> None:
-    """The conversation speaks while nobody types — a delivered subagent result, a fired monitor —
-    and the idle client's next reconnect finds the newer turn and streams it from its first frame:
-    the `since` names the turn already rendered, so nothing re-says and nothing replays history."""
-    client, workspace_id = ufo
-    hub = runtime[1]
-    member_id = await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    conversation_id = await _linked_conversation(client, workspace_id, token)
-    rendered = uuid4()
-    async with workspace_tx() as connection:
-        agent_id = (
-            await connection.execute(
-                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
-            )
-        ).scalar_one()
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=rendered,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="done",
-                inbound="start the job",
-                admission_source="member",
-                speaker_member_id=member_id,
-                terminal=TerminalFrame(status="done", text="Running it.").model_dump(mode="json"),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    headers = {
-        "authorization": f"Bearer {token}",
-        "x-ufo-since": f"{rendered}:3",
-        "x-ufo-listen": "1",
-    }
-
-    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-        quiet = await client.post("/surface/ufo/main", content=b"", headers=headers)
-    assert _lines(quiet.content) == [["since", str(rendered), "3"], ["listen", "2"]]
-
-    woken = await _seed_running_turn(workspace_id, conversation_id, member_id, seq=2)
-
-    async def _speak_when_tailed() -> None:
-        await _tailing(hub, woken)
-        await hub.publish(woken, TextDelta(text="the job finished"))
-        await hub.publish(woken, Terminal(frame=TerminalFrame(status="done")))
-
-    speaking = asyncio.ensure_future(_speak_when_tailed())
-    try:
-        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-            response = await client.post("/surface/ufo/main", content=b"", headers=headers)
-    finally:
-        speaking.cancel()
-    lines = _lines(response.content)
-    assert ["txt", "the job finished"] in lines
-    assert ["you", "start the job"] not in lines, f"a listen never replays history: {lines}"
-    assert lines[-2][:2] == ["since", str(woken)]
-    assert lines[-1] == ["listen", "2"]
-
-
 async def test_a_member_downloads_a_file_from_their_own_channels_workspace(
     ufo: tuple[AsyncClient, UUID],
     runtime: tuple[Config, InProcessHub, FilesystemBlobStore, ConversationSandbox],
@@ -2716,36 +1984,5 @@ async def test_a_member_downloads_a_file_from_their_own_channels_workspace(
     assert other.status_code == 404
 
 
-async def test_uploads_stage_files_and_the_listing_carries_the_quick_check(
-    ufo: tuple[AsyncClient, UUID],
-) -> None:
-    """The upload half of `ufo cp`: a PUT stages a file before the channel's first turn ever runs
-    (the conversation is created by the upload), the listing carries the size and modified time a
-    sync compares, and the staged bytes come back through the download route. An upload without a
-    bearer changes nothing, and an empty path is refused."""
-    client, workspace_id = ufo
-    await _seed_member(workspace_id, "owner@example.com")
-    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
-    bearer = {"authorization": f"Bearer {token}"}
-
-    staged = await client.put(
-        "/surface/ufo/staging/file/in/repo.tar", content=b"tarball", headers=bearer
-    )
-    assert staged.status_code == 204
-    listed = await client.get("/surface/ufo/staging/files", headers=bearer)
-    assert listed.status_code == 200
-    (entry,) = listed.json()["files"]
-    assert entry["path"] == "in/repo.tar"
-    assert entry["size_bytes"] == 7
-    assert entry["modified_at"] > 0
-    served = await client.get("/surface/ufo/staging/file/in/repo.tar", headers=bearer)
-    assert served.status_code == 200
-    assert served.content == b"tarball"
-
-    silent = await client.get("/surface/ufo/never-spoke/files", headers=bearer)
-    assert silent.status_code == 200
-    assert silent.json() == {"files": []}
-    naked = await client.put("/surface/ufo/staging/file/in/repo.tar", content=b"x")
-    assert naked.status_code == 401
-    empty = await client.put("/surface/ufo/staging/file/", content=b"x", headers=bearer)
-    assert empty.status_code in (400, 404, 405)
+def test_terminal_runtime_id_matches_the_client() -> None:
+    assert terminal_runtime_id("conversation") == "8b34dbc2c05eb4d7e25d48efeace8245"

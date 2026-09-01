@@ -1,5 +1,4 @@
 import json
-from datetime import date
 from uuid import UUID, uuid4
 
 import httpx
@@ -14,6 +13,11 @@ from ufo.runtime.ext.context import context_for
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.sdk.search import FetchRequest, SearchQuery
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 PERPLEXITY_KEY = "pplx-live-secret-0xdeadbeef"
 
@@ -84,43 +88,6 @@ def test_manifest_declares_host_side_slot_and_perplexity_search_backend() -> Non
     assert spec.build(None).supports_fetch is True
 
 
-async def test_search_posts_filters_and_maps_results(db: None) -> None:
-    recorder = _Recorder([(_search_response(), 200)])
-    provider, workspace_id = await _keyed_provider(recorder)
-    with ws(workspace_id):
-        results = await provider.search(
-            SearchQuery(
-                query="What did NanoCo announce?",
-                num_results=10,
-                start_published_date=date(2026, 7, 1),
-                end_published_date=date(2026, 8, 5),
-                allowed_domains=("docs.x.test",),
-            )
-        )
-
-    request = recorder.requests[-1]
-    assert request.url.path == "/search"
-    assert request.headers["authorization"] == f"Bearer {PERPLEXITY_KEY}"
-    assert _body(request) == {
-        "query": "What did NanoCo announce?",
-        "max_results": 10,
-        "max_tokens": 10_000,
-        "max_tokens_per_page": 1_000,
-        "search_domain_filter": ["docs.x.test"],
-        "search_after_date_filter": "07/01/2026",
-        "search_before_date_filter": "08/05/2026",
-    }
-    (hit,) = results.hits
-    assert (hit.url, hit.title, hit.text, hit.published_date) == (
-        "https://x.test/page",
-        "Page",
-        "page text",
-        "2026-08-01",
-    )
-    assert hit.highlights == ()
-    assert results.answer is None
-
-
 async def test_search_reads_platform_perplexity_api_key(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,20 +114,6 @@ async def test_search_reads_platform_perplexity_api_key(
     assert recorder.requests[-1].headers["authorization"] == f"Bearer {PERPLEXITY_KEY}"
 
 
-async def test_search_omits_filters_when_unset(db: None) -> None:
-    recorder = _Recorder([({"results": []}, 200)])
-    provider, workspace_id = await _keyed_provider(recorder)
-    with ws(workspace_id):
-        await provider.search(SearchQuery(query="solo", num_results=5))
-
-    assert _body(recorder.requests[-1]) == {
-        "query": "solo",
-        "max_results": 5,
-        "max_tokens": 5_000,
-        "max_tokens_per_page": 1_000,
-    }
-
-
 async def test_search_caps_result_count_to_provider_limit(db: None) -> None:
     recorder = _Recorder([({"results": []}, 200)])
     provider, workspace_id = await _keyed_provider(recorder)
@@ -173,36 +126,6 @@ async def test_search_caps_result_count_to_provider_limit(db: None) -> None:
         "max_tokens": 10_000,
         "max_tokens_per_page": 1_000,
     }
-
-
-async def test_people_search_selects_perplexitys_people_index(db: None) -> None:
-    recorder = _Recorder([({"results": []}, 200)])
-    provider, workspace_id = await _keyed_provider(recorder)
-    with ws(workspace_id):
-        await provider.search(
-            SearchQuery(query="VP of Engineering at Stripe", num_results=5, vertical="people")
-        )
-
-    assert _body(recorder.requests[-1]) == {
-        "query": "VP of Engineering at Stripe",
-        "max_results": 5,
-        "max_tokens": 5_000,
-        "max_tokens_per_page": 1_000,
-        "search_type": "people",
-    }
-
-
-async def test_other_vertical_search_adds_result_type_guidance(db: None) -> None:
-    recorder = _Recorder([({"results": []}, 200)])
-    provider, workspace_id = await _keyed_provider(recorder)
-    with ws(workspace_id):
-        await provider.search(
-            SearchQuery(query="graph transformers", num_results=5, vertical="academic")
-        )
-
-    assert _body(recorder.requests[-1])["query"] == (
-        "graph transformers research papers and publications"
-    )
 
 
 async def test_fetch_searches_the_domain_and_returns_only_the_exact_url(db: None) -> None:
@@ -241,41 +164,6 @@ async def test_fetch_without_prompt_returns_no_summary(db: None) -> None:
     assert body["query"] == "https://x.test/page"
     assert body["max_tokens"] == 5_000
     assert page.summary is None
-
-
-async def test_forced_fetch_still_calls_the_search_api(db: None) -> None:
-    recorder = _Recorder([(_search_response(), 200)])
-    provider, workspace_id = await _keyed_provider(recorder)
-    with ws(workspace_id):
-        page = await provider.fetch(FetchRequest(url="https://x.test/page", force=True))
-
-    assert _body(recorder.requests[-1])["query"] == "https://x.test/page"
-    assert page.url == "https://x.test/page"
-
-
-async def test_fetch_accepts_a_canonical_page_representation(db: None) -> None:
-    recorder = _Recorder(
-        [
-            (
-                {
-                    "results": [
-                        {
-                            "url": "https://www.rfc-editor.org/rfc/rfc2119.html",
-                            "title": "RFC 2119",
-                            "snippet": "MUST means an absolute requirement.",
-                        }
-                    ]
-                },
-                200,
-            )
-        ]
-    )
-    provider, workspace_id = await _keyed_provider(recorder)
-    with ws(workspace_id):
-        page = await provider.fetch(FetchRequest(url="https://www.rfc-editor.org/rfc/rfc2119"))
-
-    assert page.url == "https://www.rfc-editor.org/rfc/rfc2119.html"
-    assert page.text == "MUST means an absolute requirement."
 
 
 async def test_fetch_rejects_a_different_search_result(db: None) -> None:

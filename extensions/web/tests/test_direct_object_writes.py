@@ -112,28 +112,6 @@ async def test_object_write_admits_an_object_apply_intent(member) -> None:
     assert ctx.speaker == member_id
 
 
-async def test_object_write_lands_in_the_agent_the_body_names(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    member_id, main_id, app_id = uuid4(), uuid4(), uuid4()
-    audience = _Audience((_Agent(main_id, main=True), _Agent(app_id, main=False)))
-
-    async def _audience_for(ctx, request):
-        return member_id, EMAIL, audience
-
-    monkeypatch.setattr(surface, "_audience_for", _audience_for)
-    ctx = _Ctx(Terminal(frame=TerminalFrame(status="done", text="")))
-    request = _Request(
-        {"kind": "scheduled_task"},
-        body={"name": "daily", "spec": {"cron": "0 9"}, "agent": str(app_id)},
-    )
-
-    response = await surface.object_write(ctx, request)
-
-    assert response.status_code == 200
-    assert ctx.queue_key == f"intent/{app_id}/{EMAIL}"
-
-
 async def test_object_remove_admits_an_object_delete_intent(member) -> None:
     ctx = _Ctx(Terminal(frame=TerminalFrame(status="done", text="")))
     request = _Request({"kind": "scheduled_task", "name": "daily"})

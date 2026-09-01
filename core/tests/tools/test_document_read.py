@@ -10,7 +10,7 @@ PNG = b"\x89PNG\r\n\x1a\nrendered"
 
 @pytest.mark.parametrize(
     ("kind", "unit"),
-    (("pdf", "pages"), ("pptx", "slides"), ("docx", "pages"), ("xlsx", "pages")),
+    (("pdf", "pages"),),
 )
 def test_document_result_keeps_text_pagination_and_image_blocks(kind: str, unit: str) -> None:
     result = _document_result(

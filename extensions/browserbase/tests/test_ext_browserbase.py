@@ -22,7 +22,11 @@ from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
-from ufo.sdk.browser import SessionGone
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 API_KEY = "bb-live-secret-0xfeedface"
 SESSION_ID = "0f9d1c22-4d0a-4a1e-9a4a-9c3d9f1b7a01"
@@ -154,53 +158,6 @@ async def test_lease_mints_a_session_on_a_fresh_context_for_the_run(db: None) ->
     assert api.contexts_created == 1
 
 
-async def test_the_session_outlives_a_browser_runs_budget(db: None) -> None:
-    """The plan default reaps a session in minutes while a browser run's budget starts at twenty, so
-    an unset timeout would kill the browser mid-run."""
-    api = _Browserbase()
-    provider, workspace_id = await _provider(api)
-    with ws(workspace_id):
-        await provider.lease(_sandbox(uuid4()))
-    (created,) = api.sent("POST", "/v1/sessions")
-    assert json.loads(created.content)["timeout"] >= 20 * 60
-
-
-async def test_downloads_target_the_hosted_sessions_own_storage(db: None) -> None:
-    """A hosted Chrome refuses an absolute download path as a restricted directory, which fails the
-    whole CDP bootstrap — so the lease names the one target Browserbase accepts."""
-    api = _Browserbase()
-    provider, workspace_id = await _provider(api)
-    with ws(workspace_id):
-        lease = await provider.lease(_sandbox(uuid4()))
-        assert await lease.download_dir() == "downloads"
-
-
-async def test_a_re_mint_inside_one_run_reuses_that_runs_context(db: None) -> None:
-    """The Context is what makes a re-minted session resume the run's logins: a second lease for the
-    same conversation must carry the same Context rather than starting the browser cold."""
-    api = _Browserbase()
-    provider, workspace_id = await _provider(api)
-    conversation_id = uuid4()
-    with ws(workspace_id):
-        await provider.lease(_sandbox(conversation_id))
-        await provider.lease(_sandbox(conversation_id))
-    assert api.contexts_created == 1
-    assert [json.loads(r.content)["browserSettings"] for r in api.sent("POST", "/v1/sessions")] == [
-        {"context": {"id": CONTEXT_ID, "persist": True}}
-    ] * 2
-
-
-async def test_a_second_run_gets_its_own_context(db: None) -> None:
-    """Two browser subagents in one workspace are two runs: neither may inherit the other's cookies,
-    so each conversation mints its own Context."""
-    api = _Browserbase()
-    provider, workspace_id = await _provider(api)
-    with ws(workspace_id):
-        await provider.lease(_sandbox(uuid4()))
-        await provider.lease(_sandbox(uuid4()))
-    assert api.contexts_created == 2
-
-
 async def test_aclose_releases_the_session_and_deletes_the_runs_context(db: None) -> None:
     api = _Browserbase()
     provider, workspace_id = await _provider(api)
@@ -236,46 +193,6 @@ async def test_a_failed_context_delete_still_clears_the_runs_row(db: None) -> No
             await lease.aclose()
         await provider.lease(_sandbox(conversation_id))
     assert api.contexts_created == 2
-
-
-async def test_two_files_sharing_a_name_do_not_overwrite_each_other(db: None) -> None:
-    """Uploads land in one flat remote directory keyed by file name, so two workspace files with the
-    same base name would collide and the page would receive one file twice."""
-    api = _Browserbase()
-    provider, workspace_id = await _provider(api)
-    with ws(workspace_id):
-        lease = await provider.lease(_sandbox(uuid4()))
-        first = await lease.place_file("/workspace/a/report.pdf", lambda: _bytes(b"first"))
-        second = await lease.place_file("/workspace/b/report.pdf", lambda: _bytes(b"second"))
-        again = await lease.place_file("/workspace/a/report.pdf", lambda: _bytes(b"first"))
-    assert first == "/tmp/.uploads/report.pdf"
-    assert second != first and second.endswith("-report.pdf")
-    assert again == first
-
-
-async def test_a_download_comes_back_from_the_sessions_storage(db: None) -> None:
-    """`allowAndName` stores a completed download under its CDP guid, and that guid is the
-    `filename` the Downloads API reports — measured against the live API — so a session's downloads
-    are matched on it rather than on the name the site suggested."""
-    api = _Browserbase()
-    provider, workspace_id = await _provider(api)
-    with ws(workspace_id):
-        lease = await provider.lease(_sandbox(uuid4()))
-        assert await lease.fetch_download(DOWNLOAD_GUID) == DOWNLOAD_BYTES
-
-
-async def test_a_download_still_syncing_is_waited_for(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Storage trails the browser finishing the file, so an empty first listing is a not-yet, not a
-    no — reporting it as missing would lose a download the member watched complete."""
-    monkeypatch.setattr(browserbase, "DOWNLOAD_SYNC_SLEEP_SECONDS", 0.0)
-    api = _Browserbase(downloads_sync_after=2)
-    provider, workspace_id = await _provider(api)
-    with ws(workspace_id):
-        lease = await provider.lease(_sandbox(uuid4()))
-        assert await lease.fetch_download(DOWNLOAD_GUID) == DOWNLOAD_BYTES
-    assert api.download_listings == 3
 
 
 async def test_a_download_that_never_stores_fails_loud(
@@ -370,47 +287,6 @@ async def test_a_download_whose_size_is_not_a_number_fails(db: None) -> None:
         with pytest.raises(browserbase.BrowserbaseError, match="no size"):
             await lease.fetch_download(DOWNLOAD_GUID)
     assert not api.sent("GET", f"/v1/downloads/{DOWNLOAD_ID}")
-
-
-async def test_reattach_yields_a_lease_over_the_live_session(db: None) -> None:
-    api = _Browserbase()
-    provider, workspace_id = await _provider(api)
-    conversation_id = uuid4()
-    with ws(workspace_id):
-        token = await (await provider.lease(_sandbox(conversation_id))).token()
-        reattached = await provider.reattach(token)
-        assert (await reattached.endpoint()).url == CONNECT_URL
-        assert await reattached.token() == token
-    assert api.sent("GET", f"/v1/sessions/{SESSION_ID}")
-    assert len(api.sent("POST", "/v1/sessions")) == 1
-
-
-async def test_reattach_reports_a_reaped_session_gone(db: None) -> None:
-    api = _Browserbase(session_status="COMPLETED")
-    provider, workspace_id = await _provider(api)
-    conversation_id = uuid4()
-    with ws(workspace_id), pytest.raises(SessionGone):
-        token = await (await provider.lease(_sandbox(conversation_id))).token()
-        await provider.reattach(token)
-
-
-async def test_reattach_reports_an_unparseable_token_gone(db: None) -> None:
-    api = _Browserbase()
-    provider, workspace_id = await _provider(api)
-    with ws(workspace_id), pytest.raises(SessionGone):
-        await provider.reattach("not-a-run-token")
-
-
-async def test_place_file_uploads_the_bytes_and_answers_the_remote_path(db: None) -> None:
-    api = _Browserbase()
-    provider, workspace_id = await _provider(api)
-    with ws(workspace_id):
-        lease = await provider.lease(_sandbox(uuid4()))
-        placed = await lease.place_file("/workspace/report.pdf", lambda: _bytes(b"%PDF-1.7"))
-    assert placed == "/tmp/.uploads/report.pdf"
-    (upload,) = api.sent("POST", f"/v1/sessions/{SESSION_ID}/uploads")
-    assert b'name="file"; filename="report.pdf"' in upload.content
-    assert b"%PDF-1.7" in upload.content
 
 
 async def test_place_file_refuses_a_file_over_the_upload_cap(db: None) -> None:

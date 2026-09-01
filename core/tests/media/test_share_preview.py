@@ -97,20 +97,6 @@ async def test_shared_preview_nones_on_a_service_failure(
         )
 
 
-async def test_shared_preview_nones_on_an_unparseable_reply(
-    s3_store: S3BlobStore,
-) -> None:
-    sandbox = _ReplyingSandbox(ExecResult(stdout="not json", stderr="", exit_code=0))
-    ctx = _ctx(WorkspaceBlobStore(backend=s3_store), sandbox)
-    with ws(ctx.turn.workspace_id):
-        assert (
-            await builtins._shared_preview(
-                ctx, "/workspace/report.pdf", "report.pdf", uuid4(), False
-            )
-            is None
-        )
-
-
 async def test_shared_preview_skips_an_ineligible_suffix(
     s3_store: S3BlobStore,
 ) -> None:

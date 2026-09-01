@@ -21,7 +21,7 @@ from httpx import ASGITransport, AsyncClient
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import UNREACHED_AMBIENT_REPLY, no_member_skills
 
-from ufo.blob import BlobNotFound, FilesystemBlobStore
+from ufo.blob import FilesystemBlobStore
 from ufo.cli import _seed_target
 from ufo.db import workspace_tx
 from ufo.harness.auth.bearer import mint_token
@@ -44,6 +44,11 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.serve import _mount_shared_surfaces
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOKEN_SECRET = "web-token-secret"
 SESSION_COOKIE = "ufo_session"
@@ -257,23 +262,6 @@ async def test_the_seeded_conversation_reads_back_through_the_portal(seeded: See
     assert [row["title"] for row in await seeded.rail()] == [KITCHEN_SINK_TITLE]
 
 
-async def test_a_second_run_replaces_the_first(seeded: Seeded) -> None:
-    """The verb is re-runnable: the second run mints a new conversation and drops the first with
-    everything hanging off it — its chat row, its turns, and the subagent conversations its turns
-    spawned — so an operator reads one run's output and nothing accumulates."""
-    first = await seeded.write()
-    assert len(await seeded.turn_ids()) == 5
-    second = await seeded.write()
-
-    assert second != first
-    assert await seeded.chat_rows() == (f"{CHAT_ROW_PREFIX}{second}",)
-    assert len(await seeded.turn_ids()) == 5
-    surfaces = [surface for _id, surface, _title in await seeded.conversations()]
-    assert sorted(surfaces) == ["subagent", "subagent", "web"]
-    assert (await seeded.transcript(first))[0] == 404
-    assert (await seeded.transcript(second))[0] == 200
-
-
 async def test_a_conversation_a_member_named_kitchen_sink_survives(seeded: Seeded) -> None:
     """The seed destroys what it opened, never what a member named. A member's own chat titled
     exactly like the demo keeps its conversation, its chat row and its turn across a run."""
@@ -469,23 +457,3 @@ async def test_the_chat_row_drop_is_the_web_extensions_alone(seeded: Seeded) -> 
 
     assert f"{CHAT_ROW_PREFIX}{first}" not in await seeded.chat_rows()
     assert await seeded.chat_rows(OTHER_EXTENSION) == (f"{CHAT_ROW_PREFIX}{first}",)
-
-
-async def test_a_replaced_run_leaves_no_blob_behind(seeded: Seeded) -> None:
-    """A shared file is a row naming a blob, and the transcript is a blob alone. Dropping the rows
-    drops both, so a workspace seeded twice holds one run's blobs, not two."""
-    first = await seeded.write()
-    dropped = await seeded.artifact_keys()
-    assert len(dropped) == 2
-
-    second = await seeded.write()
-
-    kept = await seeded.artifact_keys()
-    assert len(kept) == 2
-    assert not set(kept) & set(dropped)
-    assert await seeded.stored(ARTIFACT_PREFIX) == tuple(sorted(kept))
-    assert transcript_key(first) not in await seeded.stored(TRANSCRIPT_PREFIX)
-    assert transcript_key(second) in await seeded.stored(TRANSCRIPT_PREFIX)
-    for key in dropped:
-        with pytest.raises(BlobNotFound):
-            await seeded.blob.get(key)

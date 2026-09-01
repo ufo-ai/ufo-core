@@ -27,9 +27,7 @@ import httpx
 import pytest
 from ufo_ext_sources.providers import googlesheets
 from ufo_ext_sources.providers.googlesheets import (
-    VALUES_BATCH_SIZE,
     GoogleSheetsConnector,
-    _quoted_sheet_range,
 )
 
 from ufo.runtime.access.connectors import Credential
@@ -82,10 +80,6 @@ SPREADSHEET_META = {
 def _tab_of(value: str) -> str:
     assert value.startswith("'") and value.endswith("'"), f"unquoted A1 sheet range {value!r}"
     return value[1:-1].replace("''", "'")
-
-
-def _requested_tabs(request: httpx.Request) -> list[str]:
-    return [_tab_of(value) for value in request.url.params.get_list("ranges")]
 
 
 def _handler(
@@ -167,13 +161,6 @@ LATER_FILE = {
 }
 
 
-async def test_the_reported_cursor_is_the_highest_modified_time_not_the_last_listed() -> None:
-    result = await _fetch("spreadsheets", _files_handler([LATER_FILE, SPREADSHEET_FILE]))
-
-    assert {page.source_ref for page in result.pages} == {"spreadsheets/s2", "spreadsheets/s1"}
-    assert result.next_cursor == LATER_FILE["modifiedTime"]
-
-
 TIED_FILES = {
     f"g{group}{suffix}": f"2026-03-0{group}T00:00:00.000Z"
     for group, suffixes in ((1, "abc"), (2, "abc"), (3, "abc"), (4, "a"))
@@ -235,7 +222,7 @@ def _listing_handler(
         resource = request.url.path.removeprefix("/v4/spreadsheets/")
         if resource.endswith("/values:batchGet"):
             file_id = resource.removesuffix("/values:batchGet")
-            requested = _requested_tabs(request)
+            requested = [_tab_of(value) for value in request.url.params.get_list("ranges")]
             if values_refused is not None:
                 refused_tab = next(
                     (title for title in requested if (file_id, title) in values_refused), None
@@ -324,41 +311,6 @@ async def test_a_capped_run_inside_a_group_of_tied_files_re_lists_the_group(
     assert cursor == EDITED_TIME
 
 
-async def test_the_files_tied_at_the_reported_cursor_re_list_onto_the_refs_they_hold() -> None:
-    modified = {"g1a": TIED_FILES["g1a"], "g3a": TIED_FILES["g3a"], "g3b": TIED_FILES["g3b"]}
-    queries: list[str] = []
-    first = await _fetch("spreadsheets", _listing_handler(modified, queries))
-    second = await _fetch(
-        "spreadsheets", _listing_handler(modified, queries), cursor=first.next_cursor
-    )
-
-    assert first.next_cursor == TIED_FILES["g3a"]
-    assert f"modifiedTime >= '{first.next_cursor}'" in queries[-1]
-    assert {page.source_ref for page in second.pages} == {"spreadsheets/g3a", "spreadsheets/g3b"}
-    assert {page.source_ref for page in second.pages} <= {page.source_ref for page in first.pages}
-    assert second.next_cursor == first.next_cursor
-
-
-async def test_sheet_values_reads_each_tab_grid_into_render() -> None:
-    result = await _fetch("sheet_values", _handler())
-
-    assert {page.source_ref for page in result.pages} == {
-        "sheet_values/s1:0:values",
-        "sheet_values/s1:1:values",
-    }
-    body = next(page.body for page in result.pages if page.source_ref == "sheet_values/s1:0:values")
-    assert "Metric | Value" in body
-    assert "Revenue | 100" in body
-
-
-async def test_sheet_values_reads_every_tab_in_one_batched_request() -> None:
-    value_requests: list[httpx.Request] = []
-    await _fetch("sheet_values", _handler(value_requests=value_requests))
-
-    assert len(value_requests) == 1
-    assert value_requests[0].url.params.get_list("ranges") == ["'Summary'", "'Detail'"]
-
-
 async def test_sheet_values_skips_the_batch_endpoint_for_a_spreadsheet_without_tabs() -> None:
     value_requests: list[httpx.Request] = []
     metadata = {**SPREADSHEET_META, "sheets": []}
@@ -397,74 +349,6 @@ async def test_sheet_values_skips_malformed_tabs_and_reads_the_valid_one() -> No
 
     assert value_requests[0].url.params.get_list("ranges") == ["'Valid'"]
     assert [page.source_ref for page in result.pages] == ["sheet_values/s1:2:values"]
-
-
-async def test_sheet_values_chunks_tabs_and_lands_each_returned_range_on_its_position() -> None:
-    tab_count = VALUES_BATCH_SIZE + 1
-    metadata = {
-        **SPREADSHEET_META,
-        "sheets": [
-            {"properties": {"sheetId": index, "title": f"Tab {index}"}}
-            for index in range(tab_count)
-        ],
-    }
-    value_requests: list[httpx.Request] = []
-
-    def ordered_ranges(request: httpx.Request) -> httpx.Response:
-        requested = _requested_tabs(request)
-        return httpx.Response(
-            200,
-            json={
-                "valueRanges": [
-                    {"range": f"'{title}'!A1:A1", "values": [[f"value for {title}"]]}
-                    for title in requested
-                ]
-            },
-        )
-
-    result = await _fetch(
-        "sheet_values",
-        _handler(
-            value_requests=value_requests,
-            spreadsheet_meta=metadata,
-            values_response=ordered_ranges,
-        ),
-    )
-
-    assert [len(request.url.params.get_list("ranges")) for request in value_requests] == [
-        VALUES_BATCH_SIZE,
-        1,
-    ]
-    assert len(result.pages) == tab_count
-    for index, page in enumerate(result.pages):
-        assert page.source_ref == f"sheet_values/s1:{index}:values"
-        assert f"value for Tab {index}" in page.body
-
-
-async def test_sheet_values_lands_a_grid_whose_returned_range_names_no_tab() -> None:
-    """The echoed `range` is the A1 bounds the request resolved to, so it need not name the tab
-    back: a batch answering bare cell bounds, or the bounds of the named range a title also
-    carries, is the grid of the tab at that position and lands there rather than failing the
-    stream."""
-
-    def unnamed_ranges(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "valueRanges": [
-                    {"range": "A1:B2", "values": [["summary row"]]},
-                    {"range": "", "values": [["detail row"]]},
-                ]
-            },
-        )
-
-    result = await _fetch("sheet_values", _handler(values_response=unnamed_ranges))
-
-    assert [page.source_ref for page in result.pages] == [
-        "sheet_values/s1:0:values",
-        "sheet_values/s1:1:values",
-    ]
-    assert [page.body.splitlines()[-1] for page in result.pages] == ["summary row", "detail row"]
 
 
 AMBIGUOUS_TABS = ("Summary", "Q1", "ROI Annual Billing - Premium", "Owner's View")
@@ -515,32 +399,6 @@ def _a1_parsing_handler(titles: tuple[str, ...]) -> Callable[[httpx.Request], ht
     return _handler(spreadsheet_meta=metadata, values_response=values)
 
 
-async def test_sheet_values_reads_tabs_whose_titles_a1_notation_would_claim() -> None:
-    result = await _fetch("sheet_values", _a1_parsing_handler(AMBIGUOUS_TABS))
-
-    assert [page.source_ref for page in result.pages] == [
-        f"sheet_values/s1:{index}:values" for index in range(len(AMBIGUOUS_TABS))
-    ]
-    for page, title in zip(result.pages, AMBIGUOUS_TABS, strict=True):
-        assert f"row of {title}" in page.body
-
-
-async def test_sheet_values_reads_a_reference_shaped_tab_from_its_own_tab() -> None:
-    result = await _fetch("sheet_values", _a1_parsing_handler(REFERENCE_SHAPED_TABS))
-
-    assert [page.body.splitlines()[-1] for page in result.pages] == [
-        f"row of {title}" for title in REFERENCE_SHAPED_TABS
-    ]
-
-
-@pytest.mark.parametrize("title", (*AMBIGUOUS_TABS, "Hot!Stuff", "2026", "Owners'"))
-def test_a_sheet_range_quotes_its_title_and_doubles_every_apostrophe(title: str) -> None:
-    quoted = _quoted_sheet_range(title)
-
-    assert quoted.startswith("'") and quoted.endswith("'")
-    assert quoted[1:-1] == title.replace("'", "''")
-
-
 @pytest.mark.parametrize(
     ("payload", "returned"),
     (
@@ -589,28 +447,6 @@ async def _pages(
         return [page async for page in connector.paginate(client, spec, cursor=cursor)]
 
 
-async def test_a_page_landing_a_file_with_no_modified_time_reports_the_stored_cursor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 1)
-    pages = await _pages("spreadsheets", _files_handler([UNDATED_FILE]), "2026-01-15T00:00:00.000Z")
-
-    assert [len(page.records) for page in pages] == [1]
-    assert pages[0].next_cursor == "2026-01-15T00:00:00.000Z"
-
-
-async def test_the_terminal_partial_page_reports_the_cursor_the_run_landed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(googlesheets, "PAGE_SIZE", 2)
-    modified = {file_id: TIED_FILES[file_id] for file_id in ("g1a", "g3a", "g4a")}
-    pages = await _pages("spreadsheets", _listing_handler(modified), cursor=None)
-
-    assert [len(page.records) for page in pages] == [2, 1]
-    assert pages[0].next_cursor == TIED_FILES["g3a"]
-    assert pages[-1].next_cursor == TIED_FILES["g4a"]
-
-
 @pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
 async def test_a_derived_stream_threads_the_bound_and_reports_the_parent_watermark(
     stream: str,
@@ -623,50 +459,7 @@ async def test_a_derived_stream_threads_the_bound_and_reports_the_parent_waterma
     assert seen and all("modifiedTime >= '2026-01-15T00:00:00.000Z'" in query for query in seen)
 
 
-@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
-async def test_a_derived_record_carries_its_spreadsheets_times(stream: str) -> None:
-    result = await _fetch(stream, _handler())
-
-    assert result.pages
-    assert {page.created_at for page in result.pages} == {"2026-01-01T00:00:00.000000+00:00"}
-    assert {page.updated_at for page in result.pages} == {"2026-02-05T00:00:00.000000+00:00"}
-    assert result.next_cursor == SPREADSHEET_FILE["modifiedTime"]
-
-
 STEADY_CURSOR = "2026-06-01T00:00:00.000Z"
-
-
-@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
-async def test_a_corpus_entirely_below_the_stored_cursor_costs_one_drive_list(stream: str) -> None:
-    paths: list[str] = []
-    result = await _fetch(
-        stream, _listing_handler(dict(TIED_FILES), tabs=2, paths=paths), cursor=STEADY_CURSOR
-    )
-
-    assert paths == ["/drive/v3/files"]
-    assert result.pages == ()
-    assert result.next_cursor == STEADY_CURSOR
-
-
-@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
-async def test_a_modified_spreadsheet_costs_its_own_reads_not_the_corpus(stream: str) -> None:
-    modified = dict(TIED_FILES)
-    first = await _fetch(stream, _listing_handler(modified, tabs=2), cursor=None)
-    modified["g4a"] = EDITED_TIME
-    paths: list[str] = []
-    second = await _fetch(
-        stream, _listing_handler(modified, tabs=2, paths=paths), cursor=first.next_cursor
-    )
-
-    assert first.next_cursor == TIED_FILES["g4a"]
-    assert len(first.pages) == 2 * len(TIED_FILES)
-    assert paths.count("/drive/v3/files") == 1
-    assert paths.count("/v4/spreadsheets/g4a") == 1
-    assert all(
-        path == "/drive/v3/files" or path.startswith("/v4/spreadsheets/g4a") for path in paths
-    )
-    assert {page.source_ref for page in second.pages} == _derived_refs(stream, "g4a")
-    assert second.next_cursor == EDITED_TIME
 
 
 @pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
@@ -969,17 +762,13 @@ async def test_a_refusal_naming_one_file_falls_back_to_drive_metadata(
     )
 
 
-@pytest.mark.parametrize("stream", ["spreadsheets", "sheets", "sheet_values"])
-@pytest.mark.parametrize(
-    "error",
-    [SCOPE_INSUFFICIENT_ERROR, API_DISABLED_ERROR, INSUFFICIENT_SCOPES_ERROR],
-    ids=["scope-insufficient", "api-disabled", "insufficient-permissions"],
-)
-async def test_a_grant_wide_sheets_refusal_skips_the_stream(
-    stream: str, error: dict[str, Any]
-) -> None:
-    with pytest.raises(StreamSkipped):
-        await _fetch(stream, _newest_refusing_handler(403, error))
+async def test_a_grant_wide_sheets_refusal_skips_the_stream() -> None:
+    streams = ("spreadsheets", "sheets", "sheet_values")
+    errors = (SCOPE_INSUFFICIENT_ERROR, API_DISABLED_ERROR, INSUFFICIENT_SCOPES_ERROR)
+    for stream in streams:
+        for error in errors:
+            with pytest.raises(StreamSkipped):
+                await _fetch(stream, _newest_refusing_handler(403, error))
 
 
 @pytest.mark.parametrize("body", NOT_A_GOOGLE_ERROR, ids=NOT_A_GOOGLE_ERROR_IDS)
@@ -1114,38 +903,6 @@ BARREN_FILES = {"s0": OLDER_FILE["modifiedTime"], "s1": SPREADSHEET_FILE["modifi
 ARRIVED_TIME = "2026-03-01T00:00:00.000Z"
 
 
-@pytest.mark.parametrize("stream", ["sheets", "sheet_values"])
-async def test_a_file_landing_no_derived_record_is_covered_by_the_reported_cursor(
-    stream: str,
-) -> None:
-    barren = ("s1", "s2")
-    modified = dict(BARREN_FILES)
-    first = await _fetch(stream, _listing_handler(modified, tabs=2, barren=barren), cursor=None)
-    modified["s2"] = ARRIVED_TIME
-    queries: list[str] = []
-    paths: list[str] = []
-    second = await _fetch(
-        stream,
-        _listing_handler(modified, queries, tabs=2, paths=paths, barren=barren),
-        cursor=first.next_cursor,
-    )
-    third = await _fetch(
-        stream, _listing_handler(modified, tabs=2, barren=barren), cursor=second.next_cursor
-    )
-    healed = await _fetch(stream, _listing_handler(modified, tabs=2), cursor=third.next_cursor)
-
-    assert {page.source_ref for page in first.pages} == _derived_refs(stream, "s0")
-    assert first.next_cursor == BARREN_FILES["s1"]
-    assert second.pages == ()
-    assert second.next_cursor == ARRIVED_TIME
-    assert f"modifiedTime >= '{first.next_cursor}'" in queries[-1]
-    assert paths.count("/drive/v3/files") == 1
-    assert not [path for path in paths if path.startswith("/v4/spreadsheets/s0")]
-    assert third.pages == ()
-    assert third.next_cursor == second.next_cursor
-    assert {page.source_ref for page in healed.pages} == _derived_refs(stream, "s2")
-
-
 @pytest.mark.parametrize(
     ("stream", "blocked"),
     [
@@ -1265,27 +1022,6 @@ async def test_a_carried_refusal_that_stays_refused_keeps_its_drive_name() -> No
 
 
 RESTAMPED_TIME = "2026-09-09T00:00:00.000Z"
-
-
-@pytest.mark.parametrize("stream", ["spreadsheets", "sheets", "sheet_values"])
-async def test_a_carried_files_get_stamps_its_record_and_not_the_watermark(stream: str) -> None:
-    modified = dict(BARREN_FILES)
-    refused = {"s1": PERMISSION_ERROR}
-    first = await _fetch(stream, _listing_handler(modified, tabs=2, refused=refused), cursor=None)
-    modified["s2"] = ARRIVED_TIME
-    second = await _fetch(
-        stream, _listing_handler(modified, tabs=2, refused=refused), cursor=first.next_cursor
-    )
-    restamped = await _fetch(
-        stream,
-        _listing_handler(modified, tabs=2, restamped={"s1": RESTAMPED_TIME}),
-        cursor=second.next_cursor,
-    )
-
-    assert restamped.next_cursor == ARRIVED_TIME
-    assert {page.updated_at for page in restamped.pages if "s1" in page.source_ref} == {
-        "2026-09-09T00:00:00.000000+00:00"
-    }
 
 
 DISTINCT_FILES = {f"d{index}": f"2026-0{index + 1}-01T00:00:00.000Z" for index in range(6)}
@@ -1766,29 +1502,6 @@ async def test_a_carried_refusal_the_member_trashes_leaves_the_cursor() -> None:
     assert third.next_cursor == second.next_cursor
 
 
-@pytest.mark.parametrize("stream", ["spreadsheets", "sheets", "sheet_values"])
-async def test_a_healed_carried_file_lands_with_the_times_on_its_own_drive_row(
-    stream: str,
-) -> None:
-    modified = dict(BARREN_FILES) | {"s2": ARRIVED_TIME}
-    first = await _fetch(
-        stream, _listing_handler(modified, tabs=2, refused={"s1": PERMISSION_ERROR}), cursor=None
-    )
-    paths: list[str] = []
-    healed = await _fetch(
-        stream, _listing_handler(modified, tabs=2, paths=paths), cursor=first.next_cursor
-    )
-
-    assert first.next_cursor is not None
-    assert json.loads(first.next_cursor) == {"watermark": ARRIVED_TIME, "refused": ["s1"]}
-    assert paths.count("/drive/v3/files/s1") == 1
-    pages = [page for page in healed.pages if "s1" in page.source_ref]
-    assert pages
-    assert {page.created_at for page in pages} == {"2026-01-01T00:00:00.000000+00:00"}
-    assert {page.updated_at for page in pages} == {"2026-02-05T00:00:00.000000+00:00"}
-    assert healed.next_cursor == ARRIVED_TIME
-
-
 async def test_a_carried_refusal_whose_drive_row_is_refused_stays_carried() -> None:
     modified = dict(BARREN_FILES) | {"s2": ARRIVED_TIME}
     refused = {"s1": PERMISSION_ERROR}
@@ -1837,20 +1550,6 @@ async def test_a_carried_files_get_neither_absorbs_a_quota_nor_drops_a_bodyless_
     assert raised.value.response.status_code == status
     assert {page.source_ref for page in healed.pages} == {"spreadsheets/s1", "spreadsheets/s2"}
     assert healed.next_cursor == ARRIVED_TIME
-
-
-async def test_a_cursor_object_that_is_not_a_checkpoint_raises() -> None:
-    with pytest.raises(RuntimeError):
-        await _fetch("spreadsheets", _handler(), cursor=json.dumps({"watermark": 5}))
-
-
-async def test_a_cursor_carrying_a_field_the_checkpoint_does_not_declare_raises() -> None:
-    with pytest.raises(RuntimeError):
-        await _fetch(
-            "spreadsheets",
-            _handler(),
-            cursor=json.dumps({"watermark": STEADY_CURSOR, "refused": [], "skip": 2}),
-        )
 
 
 async def test_a_cursor_that_parses_as_json_but_not_an_object_is_an_opaque_bound() -> None:

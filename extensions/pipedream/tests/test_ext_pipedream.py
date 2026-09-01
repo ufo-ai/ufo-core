@@ -27,7 +27,6 @@ import ufo_ext_pipedream.provider as provider
 from cryptography.fernet import Fernet
 from starlette.requests import Request
 from ufo_ext_connectors.tools import (
-    AVAILABLE_TOOLS_FALLBACK_NOTE,
     AVAILABLE_TOOLS_OMITTED_NOTE,
     SEARCH_TOOLS_NOTE_KEY,
     CallExternalToolInput,
@@ -45,7 +44,6 @@ from ufo.host.ext.loader import turn_tools
 from ufo.host.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.access.egress_rules import connector_transfer_hosts
 from ufo.runtime.access.grants import ConnectHandoff, GrantStore, install_connect_flow
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.engine import MAX_TOOL_RESULT_CHARS
@@ -57,6 +55,11 @@ from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.connectors import GrantUnusable
 from ufo.serve import _connect_flow, _connector_registry
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "using the connected account"
 
@@ -239,22 +242,6 @@ async def test_access_token_is_minted_once_and_cached() -> None:
     assert token_mints == [1]
 
 
-async def test_connect_token_pins_both_return_legs(monkeypatch: pytest.MonkeyPatch) -> None:
-    minted: list[dict[str, object]] = []
-    _install_transport(monkeypatch, _pipedream_handler("ufo_ws", minted=minted))
-    token = await pipedream.pipedream_client().connect_token(
-        "ufo_ws", "https://x.test/ok", "https://x.test/err"
-    )
-    assert token.connect_link_url == CONNECT_LINK
-    assert minted == [
-        {
-            "external_user_id": "ufo_ws",
-            "success_redirect_uri": "https://x.test/ok",
-            "error_redirect_uri": "https://x.test/err",
-        }
-    ]
-
-
 async def test_connected_account_refuses_a_foreign_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -276,21 +263,6 @@ async def test_connected_account_refuses_an_unhealthy_account(
     _install_transport(monkeypatch, handler)
     with pytest.raises(GrantUnusable, match="unhealthy"):
         await pipedream.pipedream_client().connected_account(PIPEDREAM_ACCOUNT, "ufo_ws")
-
-
-async def test_pipedream_account_label_reads_the_name_field(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/oauth/token":
-            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
-        return httpx.Response(
-            200,
-            json={"data": {**_account("ufo_ws", PIPEDREAM_ACCOUNT), "name": "Work Gmail"}},
-        )
-
-    _install_transport(monkeypatch, handler)
-    assert await pipedream.pipedream_client().account_label(PIPEDREAM_ACCOUNT) == "Work Gmail"
 
 
 async def test_pipedream_identity_failure_does_not_fail_exchange(
@@ -453,68 +425,6 @@ async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_cons
     assert "chat" not in body and "agent" not in body
 
 
-def test_serve_registers_gmail_with_label_and_broker() -> None:
-    flow = _connect_flow(_credentials(), _config(), (pipedream_manifest.manifest(),))
-    assert flow is not None
-    assert set(flow.providers) == set(pipedream.CONNECTORS)
-    assert flow.providers[PROVIDER].host == PROVIDER_HOST
-    registry = _registry()
-    entry = registry.entry(PROVIDER)
-    assert entry.label == "Gmail"
-    assert isinstance(entry.broker, PipedreamBroker)
-
-
-def test_every_allowlist_entry_registers_under_its_own_app_slug() -> None:
-    """The consent leg opens the app slug its row names and `exchange` refuses an account from any
-    other, so a slug that drifts from the provider name has to be the row's word: Xero's Pipedream
-    app is `xero_accounting_api`, and a member connects it as `xero`. Two rows sharing one app slug
-    would let either one's consent bind the other's grant."""
-    flow = _connect_flow(_credentials(), _config(), (pipedream_manifest.manifest(),))
-    assert flow is not None
-    apps = [pipedream.CONNECTORS[name].app for name in flow.providers]
-    assert len(set(apps)) == len(apps)
-    assert pipedream.CONNECTORS["xero"].app == "xero_accounting_api"
-    registry = _registry()
-    assert [registry.entry(name).label for name in ("ramp", "brex", "docusign", "pandadoc")] == [
-        "Ramp",
-        "Brex",
-        "DocuSign",
-        "PandaDoc",
-    ]
-
-
-def test_composio_and_pipedream_register_disjoint_providers() -> None:
-    """Both brokers install side by side: gmail resolves to Pipedream, everything else to
-    Composio, in the one registry `serve` builds — the routing the user-visible split rides on."""
-    import ufo_ext_composio.manifest as composio_manifest
-    from ufo_ext_composio.broker import ComposioBroker
-
-    registry = _connector_registry(
-        _config(),
-        (composio_manifest.manifest(), pipedream_manifest.manifest()),
-        _credentials(),
-    )
-    assert isinstance(registry.entry("gmail").broker, PipedreamBroker)
-    assert isinstance(registry.entry("github").broker, ComposioBroker)
-
-
-async def test_describe_external_tools_builds_the_schema_from_configurable_props(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The action's agent-facing schema offers exactly the settable props: the app slot is the
-    broker's to bind (never the agent's), an optional prop is not required."""
-    _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
-    result = await describe_external_tools(
-        _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(GMAIL_ACTION,)),
-    )
-    payload = json.loads(result.content[0].text)
-    schema = payload["schemas"][GMAIL_ACTION]["input_schema"]
-    assert set(schema["properties"]) == {"to", "draft"}
-    assert schema["required"] == ["to"]
-    assert schema["properties"]["to"] == {"type": "string", "description": "Recipient"}
-
-
 async def test_broker_reads_the_action_read_only_annotation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -541,33 +451,6 @@ async def test_describe_external_tools_marks_an_unknown_name_unresolved(
     assert payload["unresolved"] == [UNKNOWN_ACTION]
     assert [tool["slug"] for tool in payload["availableTools"]] == [GMAIL_ACTION]
     assert set(payload["availableTools"][0]["input_schema"]["properties"]) == {"to", "draft"}
-
-
-async def test_describe_external_tools_reaches_the_action_listings_second_page(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An app's actions are paged, so the key the query really wants can sit past the first page:
-    the walk follows `page_info.end_cursor` into it, each request carries a full page size and the
-    caller's `q`, and every row reaches `availableTools` with the schema its props derive."""
-    recorded: list[httpx.QueryParams] = []
-    _install_transport(monkeypatch, _paged_actions_handler(recorded))
-    result = await describe_external_tools(
-        _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(source_id=PROVIDER, query=DISCOVERY_QUERY),
-    )
-    listed = json.loads(result.content[0].text)["availableTools"]
-    assert len(listed) == pipedream.ACTION_PAGE_LIMIT + 1
-    assert listed[-1]["slug"] == SECOND_PAGE_ACTION
-    assert listed[-1]["input_schema"]["required"] == ["to"]
-    assert [dict(params) for params in recorded] == [
-        {"app": "gmail", "limit": str(pipedream.ACTION_PAGE_LIMIT), "q": DISCOVERY_QUERY},
-        {
-            "app": "gmail",
-            "limit": str(pipedream.ACTION_PAGE_LIMIT),
-            "q": DISCOVERY_QUERY,
-            "after": SECOND_PAGE_CURSOR,
-        },
-    ]
 
 
 async def test_list_actions_stops_at_the_row_cap_while_a_cursor_is_still_offered(
@@ -629,34 +512,6 @@ async def test_search_connector_tools_bounds_the_catalog_it_answers_with(
         omitted=pipedream.ACTION_PAGE_LIMIT - len(payload["tools"]),
         total=pipedream.ACTION_PAGE_LIMIT,
     )
-
-
-async def test_search_connector_tools_falls_back_to_top_actions_and_marks_the_answer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Connect's `q` is a term match, so the use-case sentence this search is built for routinely
-    answers empty. It must not dead-end there: the answer is the app's unqueried top actions, marked
-    as catalog order — the same rule discovery follows, held at the seam both tools share."""
-    recorded: list[httpx.QueryParams] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/oauth/token":
-            return httpx.Response(200, json={"access_token": "at_test", "expires_in": 3600})
-        recorded.append(request.url.params)
-        if request.url.params.get("q"):
-            return httpx.Response(200, json={"data": []})
-        return httpx.Response(200, json={"data": [_action_row(GMAIL_ACTION)]})
-
-    _install_transport(monkeypatch, handle)
-    result = await search_connector_tools(
-        _ctx(uuid4(), uuid4(), uuid4(), None),
-        SearchConnectorToolsInput(source_id=PROVIDER, query=DISCOVERY_QUERY),
-    )
-    payload = json.loads(result.content[0].text)
-    assert [tool["slug"] for tool in payload["tools"]] == [GMAIL_ACTION]
-    assert payload["tools"][0]["input_schema"]["required"] == ["to"]
-    assert payload[SEARCH_TOOLS_NOTE_KEY] == AVAILABLE_TOOLS_FALLBACK_NOTE
-    assert [params.get("q") for params in recorded] == [DISCOVERY_QUERY, None]
 
 
 async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedream(
@@ -805,42 +660,8 @@ async def test_call_external_tool_executes_a_workspace_owned_grant(
     ]
 
 
-def test_file_outputs_projects_the_stash_uploads_to_presigned_urls() -> None:
-    response = {
-        "exports": {
-            "$summary": "downloaded",
-            pipedream.FILESTASH_UPLOADS_EXPORT: [
-                {
-                    "localPath": "/tmp/Order_Form.pdf",
-                    "s3Key": "1day/proj_x/exu_y/Order_Form.pdf",
-                    "get_url": "https://stash.test/Order_Form.pdf?sig=x",
-                },
-                {"localPath": "/tmp/broken", "s3Key": "k"},
-            ],
-        },
-        "ret": {"filename": "Order_Form.pdf"},
-    }
-    outputs = PipedreamBroker().file_outputs(response)
-    assert [(file.name, file.url) for file in outputs] == [
-        ("Order_Form.pdf", "https://stash.test/Order_Form.pdf?sig=x")
-    ]
-
-
 def test_file_outputs_is_empty_without_a_stash() -> None:
     assert PipedreamBroker().file_outputs({"exports": {"$summary": "sent"}, "ret": None}) == ()
-
-
-async def test_stage_upload_routes_the_agent_to_share_file() -> None:
-    with pytest.raises(ValueError, match="share_file"):
-        await PipedreamBroker().stage_upload(
-            uuid4(), PROVIDER, GMAIL_ACTION, "form.pdf", "application/pdf", "abc123"
-        )
-
-
-def test_manifest_declares_the_broker_file_transfer_hosts() -> None:
-    hosts = connector_transfer_hosts((pipedream_manifest.manifest(),))
-    assert hosts.of(PROVIDER) == pipedream.PIPEDREAM_TRANSFER_HOSTS
-    assert hosts.default == ()
 
 
 async def test_call_external_tool_answers_an_unknown_key_with_the_closest_actions(

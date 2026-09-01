@@ -202,47 +202,43 @@ def _run(plan: object) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.parametrize("actions", [["delete"], ["delete", "create"], ["create", "delete"]])
-@pytest.mark.parametrize(("address", "resource_type"), PERSISTENT_DELETIONS)
-def test_rejects_persistent_deletions(address: str, resource_type: str, actions: list[str]) -> None:
-    plan = {"resource_changes": [_change(address, resource_type, actions)]}
-    assert _guard().rejected_deletions(plan) == [f"{address} ({'/'.join(actions)})"]
+def _check_rejects_persistent_deletions() -> None:
+    guard = _guard()
+    for address, resource_type in PERSISTENT_DELETIONS:
+        for actions in (["delete"], ["delete", "create"], ["create", "delete"]):
+            plan = {"resource_changes": [_change(address, resource_type, actions)]}
+            assert guard.rejected_deletions(plan) == [f"{address} ({'/'.join(actions)})"]
 
 
-@pytest.mark.parametrize("actions", [["delete"], ["delete", "create"], ["create", "delete"]])
-@pytest.mark.parametrize(
-    ("address", "resource_type"),
-    REGENERABLE_TYPE_DELETIONS + REGENERABLE_MODULE_DELETIONS,
-)
-def test_allows_regenerable_deletions(address: str, resource_type: str, actions: list[str]) -> None:
-    plan = {"resource_changes": [_change(address, resource_type, actions)]}
-    assert _guard().rejected_deletions(plan) == []
+def _check_allows_regenerable_deletions() -> None:
+    guard = _guard()
+    cases = REGENERABLE_TYPE_DELETIONS + REGENERABLE_MODULE_DELETIONS
+    for address, resource_type in cases:
+        for actions in (["delete"], ["delete", "create"], ["create", "delete"]):
+            plan = {"resource_changes": [_change(address, resource_type, actions)]}
+            assert guard.rejected_deletions(plan) == []
 
 
-@pytest.mark.parametrize(
-    "address",
-    (
+def _check_allows_a_tombstoned_flag_deletion() -> None:
+    for address in (
         'cloudflare_flagship_flag.testing_portal["enable-usage-tab"]',
         'cloudflare_flagship_flag.prod_portal["enable-usage-tab"]',
-    ),
-)
-def test_allows_a_tombstoned_flag_deletion(address: str) -> None:
-    plan = {
-        "resource_changes": [
-            _change(
-                address,
-                "cloudflare_flagship_flag",
-                ["delete"],
-                before={"flag_key": "enable-usage-tab"},
-            )
-        ]
-    }
-    assert _guard().rejected_deletions(plan) == []
+    ):
+        plan = {
+            "resource_changes": [
+                _change(
+                    address,
+                    "cloudflare_flagship_flag",
+                    ["delete"],
+                    before={"flag_key": "enable-usage-tab"},
+                )
+            ]
+        }
+        assert _guard().rejected_deletions(plan) == []
 
 
-@pytest.mark.parametrize(
-    ("address", "actions", "before"),
-    (
+def _check_rejects_other_flag_deletions() -> None:
+    cases = (
         (
             'cloudflare_flagship_flag.testing_portal["enable-memory-tab"]',
             ["delete"],
@@ -258,18 +254,17 @@ def test_allows_a_tombstoned_flag_deletion(address: str) -> None:
             ["delete"],
             {"flag_key": "enable-usage-tab"},
         ),
-    ),
-)
-def test_rejects_other_flag_deletions(
-    address: str, actions: list[str], before: dict[str, str]
-) -> None:
-    plan = {
-        "resource_changes": [_change(address, "cloudflare_flagship_flag", actions, before=before)]
-    }
-    assert _guard().rejected_deletions(plan) == [f"{address} ({'/'.join(actions)})"]
+    )
+    for address, actions, before in cases:
+        plan = {
+            "resource_changes": [
+                _change(address, "cloudflare_flagship_flag", actions, before=before)
+            ]
+        }
+        assert _guard().rejected_deletions(plan) == [f"{address} ({'/'.join(actions)})"]
 
 
-def test_regenerable_cases_cover_the_guard_tables() -> None:
+def _check_regenerable_cases_cover_the_guard_tables() -> None:
     guard = _guard()
     assert {resource_type for _, resource_type in REGENERABLE_TYPE_DELETIONS} == (
         guard.REGENERABLE_RESOURCE_TYPES
@@ -292,7 +287,7 @@ def test_regenerable_cases_cover_the_guard_tables() -> None:
     assert all(owner(address) is not None for address, _ in REGENERABLE_MODULE_DELETIONS)
 
 
-def test_local_cases_name_declared_resources() -> None:
+def _check_local_cases_name_declared_resources() -> None:
     declared = set()
     roots = (
         (ROOT / "infra" / "envs" / "testing", ""),
@@ -324,66 +319,56 @@ def test_local_cases_name_declared_resources() -> None:
     assert {address.split("[", maxsplit=1)[0] for address, _ in cases} <= declared
 
 
-@pytest.mark.parametrize("actions", [["create"], ["update"], ["no-op"], ["read"]])
-def test_allows_non_deletions(actions: list[str]) -> None:
-    plan = {"resource_changes": [_change("example.resource", "future_resource", actions)]}
-    assert _guard().rejected_deletions(plan) == []
+def _check_allows_non_deletions() -> None:
+    for actions in (["create"], ["update"], ["no-op"], ["read"]):
+        plan = {"resource_changes": [_change("example.resource", "future_resource", actions)]}
+        assert _guard().rejected_deletions(plan) == []
 
 
-@pytest.mark.parametrize(
-    "address",
-    (
+def _check_rejects_module_scoped_type_outside_its_module() -> None:
+    for address in (
         "module.platform.module.other.time_sleep.this",
         "module.platform.module.eks_other.time_sleep.this",
-    ),
-)
-def test_rejects_module_scoped_type_outside_its_module(address: str) -> None:
-    plan = {"resource_changes": [_change(address, "time_sleep", ["delete"])]}
-    assert _guard().rejected_deletions(plan) == [f"{address} (delete)"]
+    ):
+        plan = {"resource_changes": [_change(address, "time_sleep", ["delete"])]}
+        assert _guard().rejected_deletions(plan) == [f"{address} (delete)"]
 
 
-def test_rejects_an_unknown_resource_deletion() -> None:
+def _check_rejects_an_unknown_resource_deletion() -> None:
     plan = {"resource_changes": [_change("future.database", "future_database", ["delete"])]}
     assert _guard().rejected_deletions(plan) == ["future.database (delete)"]
 
 
-@pytest.mark.parametrize(
-    "plan",
-    [{"format_version": "1.2"}, {"format_version": "1.2", "resource_changes": []}],
-)
-def test_allows_a_plan_with_no_resource_changes(plan: object) -> None:
-    assert _guard().rejected_deletions(plan) == []
+def _check_allows_a_plan_with_no_resource_changes() -> None:
+    plans = ({"format_version": "1.2"}, {"format_version": "1.2", "resource_changes": []})
+    assert all(_guard().rejected_deletions(plan) == [] for plan in plans)
 
 
-@pytest.mark.parametrize(
-    ("plan", "error"),
-    [
+def _check_rejects_invalid_plan_shapes() -> None:
+    cases = (
         ({"resource_changes": None}, "invalid resource_changes"),
         ({"resource_changes": "none"}, "invalid resource_changes"),
         ({}, "no resource_changes list"),
         ([], "no resource_changes list"),
-    ],
-)
-def test_rejects_invalid_plan_shapes(plan: object, error: str) -> None:
-    with pytest.raises(ValueError, match=error):
-        _guard().rejected_deletions(plan)
+    )
+    for plan, error in cases:
+        with pytest.raises(ValueError, match=error):
+            _guard().rejected_deletions(plan)
 
 
-@pytest.mark.parametrize(
-    ("resource", "error"),
-    [
+def _check_rejects_invalid_resource_shapes() -> None:
+    cases = (
         ({"type": "aws_s3_bucket", "change": {"actions": ["delete"]}}, "invalid shape"),
         ({"address": "bucket", "change": {"actions": ["delete"]}}, "invalid shape"),
         ({"address": "bucket", "type": "aws_s3_bucket", "change": {}}, "invalid shape"),
         (_change("bucket", "aws_s3_bucket", [["delete"]]), "actions must be strings"),
-    ],
-)
-def test_rejects_invalid_resource_shapes(resource: object, error: str) -> None:
-    with pytest.raises(ValueError, match=error):
-        _guard().rejected_deletions({"resource_changes": [resource]})
+    )
+    for resource, error in cases:
+        with pytest.raises(ValueError, match=error):
+            _guard().rejected_deletions({"resource_changes": [resource]})
 
 
-def test_entrypoint_reports_every_rejected_address() -> None:
+def _check_entrypoint_reports_every_rejected_address() -> None:
     plan = {
         "resource_changes": [
             _change("module.platform.random_password.rds", "random_password", ["delete", "create"]),
@@ -400,14 +385,14 @@ def test_entrypoint_reports_every_rejected_address() -> None:
     )
 
 
-def test_entrypoint_accepts_a_clean_plan() -> None:
+def _check_entrypoint_accepts_a_clean_plan() -> None:
     allowed = _run({"format_version": "1.2"})
     assert allowed.returncode == 0
     assert allowed.stdout == ""
     assert allowed.stderr == ""
 
 
-def test_entrypoint_reports_malformed_json_without_a_traceback() -> None:
+def _check_entrypoint_reports_malformed_json_without_a_traceback() -> None:
     rejected = subprocess.run(
         [sys.executable, str(GUARD)],
         input="not-json",
@@ -420,9 +405,8 @@ def test_entrypoint_reports_malformed_json_without_a_traceback() -> None:
     assert "Traceback" not in rejected.stderr
 
 
-@pytest.mark.parametrize(
-    ("plan", "error"),
-    [
+def _check_entrypoint_reports_invalid_plans_without_a_traceback() -> None:
+    cases = (
         (
             {"resource_changes": "none"},
             "Terraform plan JSON has an invalid resource_changes value",
@@ -433,10 +417,16 @@ def test_entrypoint_reports_malformed_json_without_a_traceback() -> None:
             {"resource_changes": [_change("bucket", "aws_s3_bucket", [["delete"]])]},
             "Terraform resource actions must be strings",
         ),
-    ],
-)
-def test_entrypoint_reports_invalid_plans_without_a_traceback(plan: object, error: str) -> None:
-    rejected = _run(plan)
-    assert rejected.returncode == 1
-    assert rejected.stdout == ""
-    assert rejected.stderr == f"{error}\n"
+    )
+    for plan, error in cases:
+        rejected = _run(plan)
+        assert rejected.returncode == 1
+        assert rejected.stdout == ""
+        assert rejected.stderr == f"{error}\n"
+
+
+def test_terraform_plan_guard_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 16
+    for check in checks:
+        check()

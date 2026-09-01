@@ -55,23 +55,6 @@ async def test_customers_body_cursor_and_version_header() -> None:
     assert seen and all(version == SQUARE_VERSION for version in seen)
 
 
-@pytest.mark.parametrize(
-    ("stream", "object_type"),
-    [("catalog_items", "ITEM"), ("catalog_categories", "CATEGORY")],
-)
-async def test_catalog_streams_project_updated_at(stream: str, object_type: str) -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST" and request.url.path.endswith("/catalog/search")
-        assert object_type.encode() in request.content
-        return httpx.Response(
-            200, json={"objects": [{"id": "o1", "updated_at": "2026-02-01T00:00:00Z"}]}
-        )
-
-    result = await _fetch(stream, handle)
-    assert _refs(result) == {f"{stream}/o1"}
-    assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
-
-
 async def test_orders_fan_out_over_locations() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/locations"):

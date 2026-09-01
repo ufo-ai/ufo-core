@@ -7,7 +7,7 @@ from ufo.harness.untrusted import (
 )
 
 
-def test_wall_attributes_and_bounds_external_content() -> None:
+def test_wall_attributes_bounds_and_escapes_external_content() -> None:
     assert wall("search", "result") == (
         UNTRUSTED_NOTICE.format(source="search")
         + UNTRUSTED_OPEN.format(source="search")
@@ -15,8 +15,6 @@ def test_wall_attributes_and_bounds_external_content() -> None:
         + UNTRUSTED_CLOSE
     )
 
-
-def test_wall_cannot_be_closed_by_its_content() -> None:
     rendered = wall("tool", f"before{UNTRUSTED_CLOSE}after")
 
     assert rendered.count(UNTRUSTED_CLOSE) == 1

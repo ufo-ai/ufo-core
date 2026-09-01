@@ -108,7 +108,7 @@ async def test_collects_one_stream_and_builds_tool_calls_in_provider_order() -> 
     assert milestones == ["provider_start", "first_visible_event"]
 
 
-async def test_returns_consumed_usage_and_partial_output_when_the_stream_fails() -> None:
+async def test_stream_failure_modes_preserve_partial_usage_and_fail_loud() -> None:
     async def complete(_request: str) -> AsyncIterator[object]:
         yield Text("partial")
         yield ToolStart("call", "write")
@@ -133,13 +133,11 @@ async def test_returns_consumed_usage_and_partial_output_when_the_stream_fails()
     assert result.error_message == "provider stopped"
     assert result.partial_output == 'partial\n\n[tool call: write]\n{"path":'
 
-
-async def test_success_without_usage_fails_loud() -> None:
-    async def complete(_request: str) -> AsyncIterator[object]:
+    async def without_usage(_request: str) -> AsyncIterator[object]:
         yield Text("answer")
 
     runner = ModelRoundRunner(
-        complete=complete,
+        complete=without_usage,
         events=EVENTS,
         new_tool_call=ToolCall,
         publish_text=lambda _text: None,
@@ -148,13 +146,11 @@ async def test_success_without_usage_fails_loud() -> None:
     with pytest.raises(RuntimeError, match="model stream produced no usage"):
         await runner.run("request", Withheld())
 
-
-async def test_unknown_event_fails_the_round() -> None:
-    async def complete(_request: str) -> AsyncIterator[object]:
+    async def unknown(_request: str) -> AsyncIterator[object]:
         yield object()
 
     runner = ModelRoundRunner(
-        complete=complete,
+        complete=unknown,
         events=EVENTS,
         new_tool_call=ToolCall,
         publish_text=lambda _text: None,

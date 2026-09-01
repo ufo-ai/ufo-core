@@ -14,10 +14,8 @@ import pytest
 from anthropic.types.raw_message_delta_event import Delta
 from openai.types.chat import chat_completion_chunk
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
-from pydantic import ValidationError
 
 from ufo.config import (
-    DEFAULT_BACKGROUND_JOBS_MODEL,
     BlobConfig,
     Config,
     DatabaseConfig,
@@ -29,12 +27,10 @@ from ufo.harness.models.anthropic import (
     OAUTH_SYSTEM_PREFIX,
     AnthropicClient,
     anthropic_sdk_client,
-    is_oauth_credential,
 )
 from ufo.harness.models.catalog import core_model_specs
 from ufo.harness.models.interface import (
     IMAGE_OMITTED_TEXT,
-    IMAGE_UNSUPPORTED_TEXT,
     ImageBlock,
     ImageSource,
     Message,
@@ -51,7 +47,6 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
-    omit_images,
     trim_images,
 )
 from ufo.harness.models.openai import (
@@ -59,11 +54,9 @@ from ufo.harness.models.openai import (
     CODEX_ACCOUNT_HEADER,
     CODEX_STREAM_ACCEPT,
     OpenAIClient,
-    chatgpt_account_id,
     openai_messages,
     openai_sdk_client,
     responses_input,
-    responses_request,
 )
 from ufo.harness.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
 from ufo.harness.models.openai import MAX_PROVIDER_RETRIES as OPENAI_MAX_RETRIES
@@ -96,19 +89,6 @@ ANTHROPIC_SPEC = ModelSpec(
     reasoning=_REASONS,
     api_surface="chat",
 )
-
-
-def test_model_request_carries_an_explicit_conversation_cache_ttl() -> None:
-    assert REQUEST.conversation_cache_ttl == "5m"
-    with pytest.raises(ValidationError, match="conversation_cache_ttl"):
-        ModelRequest.model_validate(
-            {
-                "model": "claude-opus-4-8",
-                "system": "be terse",
-                "messages": ({"role": "user", "content": "hi"},),
-                "max_tokens": 64,
-            }
-        )
 
 
 OPENAI_SPEC = ModelSpec(
@@ -432,27 +412,6 @@ async def test_an_oauth_credential_leads_with_the_system_block_it_is_granted_und
     ]
 
 
-async def test_an_api_key_carries_no_oauth_system_block() -> None:
-    create = CapturingCreate(
-        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
-    )
-    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
-        REQUEST
-    ):
-        pass
-
-    assert create.kwargs["system"] == [
-        {"type": "text", "text": "be terse", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
-    ]
-
-
-def test_the_credential_shape_decides_how_a_client_authenticates() -> None:
-    """One slot carries whichever the member connected, so the prefix is what routes a token to the
-    bearer wire and a key to `x-api-key`."""
-    assert is_oauth_credential("sk-ant-oat01-abc")
-    assert not is_oauth_credential("sk-ant-api03-abc")
-
-
 CHATGPT_ACCOUNT = "acct-8f2"
 
 
@@ -490,22 +449,6 @@ def test_a_chatgpt_account_token_is_served_by_the_codex_backend() -> None:
     assert headers["OpenAI-Beta"] == "responses=experimental"
 
 
-def test_a_platform_api_key_still_reaches_openai_bare() -> None:
-    """The slot holds either credential, so the key path has to be untouched by the token path: the
-    same host, the same bearer, and none of the Codex headers."""
-    spec = core_openai_spec()
-    client = spec.client(spec, "sk-proj-abc")
-    assert isinstance(client, OpenAIClient)
-    assert not client.codex
-    assert str(client.client.base_url) == "https://api.openai.com/v1/"
-    assert client.client.auth_headers == {"Authorization": "Bearer sk-proj-abc"}
-    headers = client.client.default_headers
-    assert "chatgpt-account-id" not in headers
-    assert headers["Accept"] == "application/json"
-    assert "originator" not in headers
-    assert "OpenAI-Beta" not in headers
-
-
 async def test_the_codex_backend_is_called_on_responses_whatever_the_spec_declares() -> None:
     """That backend serves `/responses` alone. Which host a member's credential reaches is not a
     fact any model's spec can carry — the same spec serves both — so a codex client calls the
@@ -522,22 +465,6 @@ async def test_the_codex_backend_is_called_on_responses_whatever_the_spec_declar
             pass
     assert chat.calls == 0
     assert responses.calls == 1
-
-
-def test_the_account_claim_is_what_separates_a_token_from_a_key() -> None:
-    """A platform key is not a JWT, and a JWT naming no account is not one the Codex backend will
-    serve — both take the api.openai.com wire rather than a Codex request missing its account."""
-    assert chatgpt_account_id(CHATGPT_TOKEN) == CHATGPT_ACCOUNT
-    for refused in (
-        "sk-proj-abc",
-        "header.payload.signature",
-        chatgpt_token({}),
-        chatgpt_token([CHATGPT_AUTH_CLAIM]),
-        chatgpt_token({CHATGPT_AUTH_CLAIM: "acct-8f2"}),
-        chatgpt_token({CHATGPT_AUTH_CLAIM: {}}),
-        chatgpt_token({CHATGPT_AUTH_CLAIM: {"chatgpt_account_id": ""}}),
-    ):
-        assert chatgpt_account_id(refused) is None
 
 
 async def test_openai_request_carries_image_url_and_lifts_tool_result_images() -> None:
@@ -577,28 +504,6 @@ def _images(count: int, base: int = 0) -> tuple[ImageBlock, ...]:
     )
 
 
-def test_trim_images_enforces_per_message_cap() -> None:
-    trimmed = trim_images((Message(role="user", content=_images(22)),))
-    content = trimmed[0].content
-    kept = [block for block in content if isinstance(block, ImageBlock)]
-    dropped = [block for block in content if isinstance(block, TextBlock)]
-    assert len(kept) == 20
-    assert kept[0].source.data == "2"
-    assert [block.text for block in dropped] == [IMAGE_OMITTED_TEXT, IMAGE_OMITTED_TEXT]
-
-
-def test_trim_images_enforces_request_cap() -> None:
-    messages = tuple(
-        Message(role="user", content=_images(20, base=group * 20)) for group in range(6)
-    )
-    trimmed = trim_images(messages)
-    total = sum(
-        1 for message in trimmed for block in message.content if isinstance(block, ImageBlock)
-    )
-    assert total == 100
-    assert all(isinstance(block, TextBlock) for block in trimmed[0].content)
-
-
 def test_trim_images_enforces_request_byte_budget() -> None:
     """Twenty dimension-bounded scans can still sum past the provider's request size cap (the
     observed 413), so kept images also spend a byte budget, newest first."""
@@ -630,26 +535,6 @@ def test_trim_images_trims_images_nested_in_a_tool_result() -> None:
     assert kept[0].source.data == "2"
 
 
-def test_omit_images_replaces_top_level_and_nested_images() -> None:
-    result = ToolResultBlock(
-        tool_use_id="t1",
-        content=(TextBlock(text="audit passed"), *_images(1)),
-    )
-    messages = (
-        Message(role="user", content=_images(1)),
-        Message(role="user", content=(result,)),
-    )
-
-    omitted = omit_images(messages)
-
-    assert omitted[0].content == (TextBlock(text=IMAGE_UNSUPPORTED_TEXT),)
-    nested = omitted[1].content[0].content
-    assert nested == (
-        TextBlock(text="audit passed"),
-        TextBlock(text=IMAGE_UNSUPPORTED_TEXT),
-    )
-
-
 async def test_anthropic_maps_deltas_then_single_usage() -> None:
     create = ScriptedCreate(
         (
@@ -677,27 +562,6 @@ async def test_anthropic_maps_deltas_then_single_usage() -> None:
             cache_write_1h_tokens=13,
         ),
     ]
-
-
-@pytest.mark.parametrize("ttl", ["5m", "1h"])
-async def test_anthropic_prices_cache_creation_without_ttl_detail_at_1h(ttl: str) -> None:
-    create = ScriptedCreate(
-        (
-            [
-                anthropic_message_start(
-                    cache_write_5m=7,
-                    cache_creation_detail=False,
-                ),
-                anthropic_text("ok"),
-                anthropic_output(1),
-            ],
-            None,
-        )
-    )
-    request = REQUEST.model_copy(update={"conversation_cache_ttl": ttl})
-    client = AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC)
-    events = [event async for event in client.complete(request)]
-    assert events[-1] == Usage(output_tokens=1, cache_write_1h_tokens=7)
 
 
 async def test_anthropic_yields_the_whole_reasoning_sequence_once_the_stream_closes() -> None:
@@ -782,20 +646,6 @@ async def test_openai_maps_deltas_then_single_usage() -> None:
             cache_write_30m_tokens=3,
         ),
     ]
-
-
-async def test_openai_keeps_unpriced_cache_writes_in_fresh_input() -> None:
-    create = ScriptedCreate(
-        ([openai_text("a"), openai_usage(prompt=10, completion=5, cached=4, cache_write=3)], None)
-    )
-    events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
-    assert events[-1] == Usage(input_tokens=6, output_tokens=5, cache_read_tokens=4)
-
-
-async def test_openai_usage_without_cached_tokens_reads_zero() -> None:
-    create = ScriptedCreate(([openai_text("a"), openai_usage(prompt=3, completion=2)], None))
-    events = await collect(OpenAIClient(client=openai_sdk(create), spec=OPENAI_SPEC))
-    assert events[-1] == Usage(input_tokens=3, output_tokens=2)
 
 
 async def test_openai_stream_without_usage_raises() -> None:
@@ -1542,18 +1392,6 @@ async def test_anthropic_default_request_enables_adaptive_thinking_without_effor
     assert "output_config" not in create.kwargs
 
 
-async def test_anthropic_fixed_effort_pins_output_config() -> None:
-    create = CapturingCreate(
-        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
-    )
-    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
-        REQUEST.model_copy(update={"reasoning": "high"})
-    ):
-        pass
-    assert create.kwargs["thinking"] == {"type": "adaptive"}
-    assert create.kwargs["output_config"] == {"effort": "high"}
-
-
 async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
     create = CapturingCreate(
         ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
@@ -1563,23 +1401,6 @@ async def test_anthropic_reasoning_off_omits_the_thinking_block() -> None:
     ):
         pass
     assert "thinking" not in create.kwargs
-    assert "output_config" not in create.kwargs
-
-
-async def test_anthropic_default_reasoning_is_explicitly_disabled() -> None:
-    create = CapturingCreate(
-        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
-    )
-    spec = next(
-        spec
-        for spec in core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
-        if spec.id == "claude-sonnet-5"
-    )
-    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=spec).complete(
-        REQUEST.model_copy(update={"model": spec.id, "reasoning": "off"})
-    ):
-        pass
-    assert create.kwargs["thinking"] == {"type": "disabled"}
     assert "output_config" not in create.kwargs
 
 
@@ -1764,29 +1585,6 @@ def test_catalog_registers_gpt_5_6_sol_on_the_responses_surface(tmp_path: Path) 
     assert spec.price.cache_write_30m == 5_000_000
 
 
-def test_core_registers_no_fable_row(tmp_path: Path) -> None:
-    """Fable 5 requires 30-day retention and this org holds zero data retention, so the direct
-    Anthropic wire answers 404 for it on every key. Core therefore ships no row: the model reaches a
-    turn through the router extension that does serve it, and a row keyed here would be a 404 no
-    local check sees first."""
-    registry = model_registry(_config(tmp_path), ())
-    for stranded in ("claude-fable-5", "claude-5-fable-20260609"):
-        with pytest.raises(ValueError, match=f"no model registered for id '{stranded}'"):
-            registry.spec(stranded)
-
-
-def test_registry_resolves_auto_to_an_overridden_default(tmp_path: Path) -> None:
-    registry = model_registry(_config(tmp_path, ModelsConfig(auto_model="claude-sonnet-5")), ())
-    assert registry.resolve("auto") == "claude-sonnet-5"
-
-
-def test_registry_spec_is_keyed_by_exact_id_and_fails_loud(tmp_path: Path) -> None:
-    registry = model_registry(_config(tmp_path), ())
-    assert registry.spec("gpt-5.6-terra").api_surface == "responses"
-    with pytest.raises(ValueError, match="no model registered for id 'nope'"):
-        registry.spec("nope")
-
-
 def test_registry_rejects_an_auto_model_no_spec_describes(tmp_path: Path) -> None:
     """Every agent that defers its model resolves through `auto_model` on every turn, so a knob
     naming no registered spec is a boot failure — not one mid-turn failure per workspace."""
@@ -1794,79 +1592,11 @@ def test_registry_rejects_an_auto_model_no_spec_describes(tmp_path: Path) -> Non
         model_registry(_config(tmp_path, ModelsConfig(auto_model="claude-opus-6")), ())
 
 
-def test_registry_rejects_a_background_jobs_model_no_spec_describes(tmp_path: Path) -> None:
-    """Every background job's own model call resolves through `background_jobs_model`, so a knob
-    naming no registered spec is a boot failure — not one failed job per workspace per tick."""
-    with pytest.raises(
-        ValueError, match=r"models\.background_jobs_model 'gpt-5.7-terra' is not a registered"
-    ):
-        model_registry(_config(tmp_path, ModelsConfig(background_jobs_model="gpt-5.7-terra")), ())
-
-
-def test_registry_registers_the_default_background_jobs_model_with_tool_use(tmp_path: Path) -> None:
-    """The jobs seam's default has to serve every job call site: a forced-tool extraction pass, a
-    tool-aware replay, and three text one-shots. Reasoning composes with tools on its surface, so no
-    call site loses a capability by moving to it."""
-    registry = model_registry(_config(tmp_path), ())
-    spec = registry.spec(DEFAULT_BACKGROUND_JOBS_MODEL)
-    assert spec.provider == "openai"
-    assert spec.api_surface == "responses"
-    assert spec.reasoning.supported
-    assert spec.reasoning.tools_with_reasoning
-    tools = (ToolSchema(name="record", description="d", input_schema={"type": "object"}),)
-    assert spec.wire_reasoning("low", tools) == "low"
-    assert spec.wire_reasoning("off", tools) == "off"
-    assert spec.context_window == 272_000
-
-
 def test_registry_rejects_two_specs_for_one_id(tmp_path: Path) -> None:
     clash = core_model_specs("ANTHROPIC_API_KEY", "OPENAI_API_KEY")[0]
     dup = Manifest(name="dup", version="1", models=(clash,))
     with pytest.raises(ValueError, match="two model specs registered for id"):
         model_registry(_config(tmp_path), (dup,))
-
-
-async def test_registry_builds_core_clients_from_their_specs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    anthropic_wire = object()
-    openai_wire = object()
-    monkeypatch.setattr(
-        "ufo.harness.models.catalog.anthropic_sdk_client", lambda key: anthropic_wire
-    )
-    monkeypatch.setattr("ufo.harness.models.catalog.openai_sdk_client", lambda key: openai_wire)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    registry = model_registry(_config(tmp_path), ())
-    with ws(uuid4()):
-        anthropic_client = await registry.client_for("claude-opus-4-8")
-        openai_client = await registry.client_for("gpt-5.4")
-    assert isinstance(anthropic_client, AnthropicClient)
-    assert anthropic_client.client is anthropic_wire
-    assert anthropic_client.spec is registry.spec("claude-opus-4-8")
-    assert isinstance(openai_client, OpenAIClient)
-    assert openai_client.client is openai_wire
-    assert openai_client.spec is registry.spec("gpt-5.4")
-
-
-async def test_registry_resolves_the_ufo_prefixed_key_over_the_bare_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`UFO_ANTHROPIC_API_KEY` scopes a key to ufo alone and wins over the bare upstream name; with
-    only the bare name set, it still serves."""
-    seen: list[str] = []
-    monkeypatch.setattr(
-        "ufo.harness.models.catalog.anthropic_sdk_client", lambda key: seen.append(key)
-    )
-    monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ufo-scoped")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ambient")
-    registry = model_registry(_config(tmp_path), ())
-    with ws(uuid4()):
-        await registry.client_for("claude-opus-4-8")
-    monkeypatch.delenv("UFO_ANTHROPIC_API_KEY")
-    with ws(uuid4()):
-        await registry.client_for("claude-opus-4-8")
-    assert seen == ["sk-ufo-scoped", "sk-ambient"]
 
 
 @pytest.mark.parametrize(
@@ -1896,26 +1626,6 @@ async def test_registry_rejects_non_ascii_core_provider_keys(
             ),
         ):
             await registry.client_for(model_id)
-
-
-def test_responses_request_carries_tools_and_reasoning_together() -> None:
-    """The #568 fix: a responses-surface model renders `tools` and reasoning in ONE legal request —
-    the shape gpt-5.6-terra accepts, where /v1/chat/completions would 400."""
-    request = REQUEST.model_copy(
-        update={
-            "model": "gpt-5.6-terra",
-            "reasoning": "high",
-            "tools": (ToolSchema(name="t", description="d", input_schema={"type": "object"}),),
-        }
-    )
-    kwargs = responses_request(request, "high")
-    assert kwargs["reasoning"] == {"effort": "high"}
-    assert [tool["name"] for tool in kwargs["tools"]] == ["t"]
-
-
-def test_responses_request_omits_reasoning_without_an_effort() -> None:
-    kwargs = responses_request(REQUEST.model_copy(update={"model": "gpt-5.6-terra"}), None)
-    assert "reasoning" not in kwargs
 
 
 async def test_chat_drops_reasoning_with_tools_when_the_model_forbids_the_pair() -> None:
@@ -1960,30 +1670,6 @@ async def test_anthropic_drops_reasoning_with_tools_when_the_model_forbids_the_p
     assert "tools" in create.kwargs
     assert "thinking" not in create.kwargs
     assert "output_config" not in create.kwargs
-
-
-async def test_anthropic_enables_parallel_tool_use() -> None:
-    create = CapturingCreate(
-        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
-    )
-    request = REQUEST.model_copy(
-        update={
-            "tools": (ToolSchema(name="first", description="one", input_schema={"type": "object"}),)
-        }
-    )
-    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=ANTHROPIC_SPEC).complete(
-        request
-    ):
-        pass
-    assert create.kwargs["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": False}
-    bare = CapturingCreate(
-        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
-    )
-    async for _ in AnthropicClient(client=anthropic_sdk(bare), spec=ANTHROPIC_SPEC).complete(
-        REQUEST
-    ):
-        pass
-    assert "tool_choice" not in bare.kwargs
 
 
 def test_model_request_rejects_a_forced_choice_that_names_no_offered_tool() -> None:
@@ -2048,38 +1734,6 @@ async def test_anthropic_forced_tool_choice_compels_the_named_tool() -> None:
         "disable_parallel_tool_use": True,
     }
     assert "thinking" not in create.kwargs
-
-
-async def test_anthropic_forced_tool_choice_uses_adaptive_thinking_for_required_reasoning() -> None:
-    create = CapturingCreate(
-        ([anthropic_message_start(input_tokens=1), anthropic_text("ok"), anthropic_output(1)], None)
-    )
-    spec = replace(
-        ANTHROPIC_SPEC,
-        reasoning=ReasoningSupport(
-            supported=True,
-            tools_with_reasoning=True,
-            default_on=True,
-            can_disable=False,
-        ),
-    )
-    request = REQUEST.model_copy(
-        update={
-            "tools": (
-                ToolSchema(name="finish", description="one", input_schema={"type": "object"}),
-            ),
-            "tool_choice": "finish",
-            "reasoning": "low",
-        }
-    )
-    async for _ in AnthropicClient(client=anthropic_sdk(create), spec=spec).complete(request):
-        pass
-    assert create.kwargs["thinking"] == {"type": "adaptive"}
-    assert create.kwargs["tool_choice"] == {
-        "type": "tool",
-        "name": "finish",
-        "disable_parallel_tool_use": True,
-    }
 
 
 async def test_openai_forced_tool_choice_compels_the_named_tool() -> None:

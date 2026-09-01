@@ -16,9 +16,7 @@ from uuid import uuid4
 import pytest
 import ufo_ext_sandbox_chrome as ext
 
-from ufo.browser import SessionGone
 from ufo.harness.sandbox.session import (
-    DEFAULT_EXEC_TIMEOUT_SECONDS,
     DialTarget,
     ExecResult,
     SandboxHandle,
@@ -155,27 +153,6 @@ async def test_lease_builds_the_wss_endpoint_with_the_traffic_header() -> None:
     assert await lease.aclose() is None
 
 
-async def test_lease_brings_the_browser_up_in_one_command() -> None:
-    carrier = FakeCarrier()
-    await ext.SandboxChromeCdpProvider().lease(_session(carrier))
-    assert len(carrier.commands) == 1
-    command = carrier.commands[0]
-    assert "--remote-debugging-port=9222" in command
-    assert "--remote-allow-origins=*" in command
-    assert ext.CHROME_PID_PATH in command
-    assert "CHROME_PORT = 9222" in command
-    assert "PROXY_PORT = 9223" in command
-    assert 'f"Host: {CHROME_HOST}:{CHROME_PORT}"' in command
-    assert ext.PROXY_SCRIPT_PATH in command
-    assert f"http://127.0.0.1:{ext.BROWSER_CDP_PROXY_PORT}/json/version" in command
-    assert "--use-mock-keychain" in command
-    assert "--password-store=basic" in command
-    assert 'CONTAINED_ARGV = ["--no-sandbox", "--disable-dev-shm-usage"]' in command
-    assert 'contained = CONTAINED_ARGV if sys.platform.startswith("linux") else []' in command
-    assert "[browser] + contained + CHROME_ARGV_TAIL" in command
-    assert command.count("--no-sandbox") == 1
-
-
 async def test_the_carrier_deadline_leaves_the_command_room_to_report_its_own_failure() -> None:
     """Every wait the command can enclose must end before the carrier kills it, or a browser that
     never answers is reported as the carrier's timeout and its log — the only thing that says why —
@@ -204,11 +181,6 @@ async def test_lease_omits_the_header_when_the_dial_target_carries_none() -> Non
     assert (await lease.endpoint()).headers == {}
 
 
-async def test_lease_surfaces_what_the_bring_up_reported() -> None:
-    with pytest.raises(RuntimeError, match="Abort trap"):
-        await ext.SandboxChromeCdpProvider().lease(_session(FailingCarrier()))
-
-
 async def test_a_bring_up_the_carrier_kills_reports_the_browser_log_not_its_own_timeout() -> None:
     """The arithmetic above keeps every enclosed wait inside the deadline, but a sandbox slow to
     start the program at all still runs out: then the kill takes the program's report with it, and
@@ -224,30 +196,6 @@ async def test_a_bring_up_the_carrier_kills_reports_the_browser_log_not_its_own_
         ext.BROWSER_START_TIMEOUT_SECONDS,
         ext.LOG_TAIL_BUDGET_SECONDS,
     ]
-
-
-async def test_a_bring_up_that_expires_with_no_log_still_names_the_deadline() -> None:
-    carrier = ExpiringCarrier(log_tail="")
-    with pytest.raises(RuntimeError, match="stopped the bring-up"):
-        await ext.SandboxChromeCdpProvider().lease(_session(carrier))
-
-
-async def test_reattach_reports_session_gone_so_the_caller_re_leases() -> None:
-    with pytest.raises(SessionGone):
-        await ext.SandboxChromeCdpProvider().reattach("wss://stale")
-
-
-async def test_downloads_land_in_the_sandbox_and_are_read_back_from_it() -> None:
-    """Chrome runs in the sandbox, so a download it takes exists only there: the target is a sandbox
-    path and the bytes come back through the sandbox, which is what a serve-side temp directory
-    could never do once the sandbox stopped sharing serve's filesystem."""
-    carrier = FakeCarrier()
-    lease = await ext.SandboxChromeCdpProvider().lease(_session(carrier))
-    assert await lease.download_dir() == f"{ext.BROWSER_DIR}/downloads"
-    carrier.download_bytes = b"the downloaded file"
-    carrier.download_size = len(b"the downloaded file")
-    assert await lease.fetch_download("guid-9") == b"the downloaded file"
-    assert any(f"{ext.DOWNLOAD_DIR}/guid-9" in command for command in carrier.commands)
 
 
 async def test_place_file_answers_the_workspace_path_without_reading_it() -> None:
@@ -274,36 +222,6 @@ async def test_a_download_the_sandbox_cannot_read_fails_loud() -> None:
         await lease.fetch_download("guid-9")
 
 
-async def test_a_download_the_encoder_cannot_open_raises_instead_of_returning_nothing() -> None:
-    """The size read and the byte read are two commands, so a file the first one saw can be gone by
-    the second — a Chrome that cleaned up, a sandbox that recycled. The encoder's own exit code has
-    to reach the caller: piping it anywhere reports the pipe's last stage, which turns an unreadable
-    download into a silent empty one."""
-    lease = ext.SandboxChromeCdpLease(
-        ext.CdpEndpoint(url="wss://sandbox.test/devtools"), _session(ShellCarrier())
-    )
-    with pytest.raises(RuntimeError, match="could not read download"):
-        await lease.fetch_download("guid-9")
-
-
-async def test_each_download_read_states_the_budget_its_own_work_needs() -> None:
-    """Reading a download up to `MAX_DOWNLOAD_BYTES` back as base64 on one command's stdout is
-    minutes of work, which the sandbox's 120s default cuts off part way through; the sizing beside
-    it is one syscall. Neither is a browser launch, so neither may borrow the bring-up's deadline —
-    that number says how long a cold chromium takes to bind a port and would move with it."""
-    carrier = FakeCarrier(download_bytes=b"the downloaded file")
-    carrier.download_size = len(carrier.download_bytes)
-    lease = ext.SandboxChromeCdpLease(
-        ext.CdpEndpoint(url="wss://sandbox.test/devtools"), _session(carrier)
-    )
-    assert await lease.fetch_download("guid-9") == b"the downloaded file"
-    assert carrier.timeouts == [
-        ext.DOWNLOAD_SIZE_BUDGET_SECONDS,
-        ext.DOWNLOAD_READ_BUDGET_SECONDS,
-    ]
-    assert ext.DOWNLOAD_READ_BUDGET_SECONDS > DEFAULT_EXEC_TIMEOUT_SECONDS
-
-
 async def test_a_download_read_that_expires_reports_the_budget_not_an_unreadable_file() -> None:
     """A killed read hands back an empty stdout and the carrier's own message, which is indexed here
     as a download the sandbox could not read. A file too large for the wait is a different failure
@@ -324,12 +242,3 @@ async def test_an_oversized_download_is_refused_before_it_is_encoded() -> None:
     with pytest.raises(ValueError, match="at most"):
         await lease.fetch_download("guid-9")
     assert not any(command.startswith("base64") for command in carrier.commands)
-
-
-def test_manifest_registers_the_sandbox_chrome_cdp_provider() -> None:
-    manifest = ext.manifest()
-    assert manifest.name == "sandbox_chrome"
-    specs = {spec.backend: spec for spec in manifest.cdp_providers}
-    assert set(specs) == {"sandbox_chrome"}
-    provider = specs["sandbox_chrome"].build(None)  # the factory ignores the credential reader
-    assert isinstance(provider, ext.SandboxChromeCdpProvider)

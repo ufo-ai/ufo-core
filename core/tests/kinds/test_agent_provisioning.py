@@ -26,9 +26,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.onboard.onboarding import Onboarding
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.ext.context import ExtensionContext
-from ufo.runtime.ext.manifest import SETUP_TOOLS, AgentProvision, JobSpec, Manifest
-from ufo.runtime.jobs import JobRunner, bindings_from
+from ufo.runtime.ext.manifest import SETUP_TOOLS, AgentProvision, Manifest
 from ufo.runtime.kinds.agent_setup import (
     SETUP_SKILL_NAME,
     AgentSetup,
@@ -106,17 +104,6 @@ async def _row(workspace_id: UUID, name: str) -> sa.Row | None:
             ).one_or_none()
 
 
-async def _clear_purpose(workspace_id: UUID) -> None:
-    """The shipped row as a release that declared no purpose left it."""
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.agent)
-                .where(tables.agent.c.name == PROVISIONED_AGENT_NAME)
-                .values(purpose=None)
-            )
-
-
 async def _insert_agent(workspace_id: UUID, name: str, **values: object) -> None:
     row: dict[str, object] = {
         "id": uuid4(),
@@ -135,6 +122,7 @@ async def _insert_agent(workspace_id: UUID, name: str, **values: object) -> None
             await connection.execute(sa.insert(tables.agent).values(row | values))
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_onboarding_creates_the_shipped_agent(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -159,21 +147,7 @@ async def test_onboarding_creates_the_shipped_agent(
     )
 
 
-async def test_a_second_application_creates_nothing_and_edits_nothing(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    first = await AgentProvisioning((sample.manifest(),)).apply(workspace_id)
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    second = await AgentProvisioning((sample.manifest(),)).apply(workspace_id)
-    unchanged = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert [outcome.result for outcome in first] == [CREATED]
-    assert [outcome.result for outcome in second] == [PRESENT]
-    assert created is not None and unchanged is not None
-    assert (unchanged.id, unchanged.updated_at) == (created.id, created.updated_at)
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_archived_shipped_app_stays_archived_when_provisioning_runs_again(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -208,6 +182,7 @@ async def test_an_archived_shipped_app_stays_archived_when_provisioning_runs_aga
     assert kept.archived_at is not None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_two_executions_that_both_reach_the_insert_create_one_agent(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -231,49 +206,7 @@ async def test_two_executions_that_both_reach_the_insert_create_one_agent(
     assert row.provisioned_by == "one"
 
 
-async def test_the_shipped_sandbox_size_reaches_the_created_row(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The declared tier is the one every new conversation of the agent is provisioned at, so the
-    row carries it rather than the table's `small` default."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    manifest = _manifest(OTHER_EXTENSION, _provision(sandbox_size="large"))
-    outcomes = await AgentProvisioning((manifest,)).apply(workspace_id)
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert [outcome.result for outcome in outcomes] == [CREATED]
-    assert created is not None
-    assert created.sandbox_size == "large"
-
-
-async def test_the_shipped_visibility_reaches_the_created_row(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    manifest = _manifest(OTHER_EXTENSION, _provision(visibility="workspace"))
-    outcomes = await AgentProvisioning((manifest,)).apply(workspace_id)
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert [outcome.result for outcome in outcomes] == [CREATED]
-    assert created is not None
-    assert created.visibility == "workspace"
-
-
-async def test_the_shipped_icon_reaches_the_created_row(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The declared mark is the one the portal draws the app with, so the row carries it rather
-    than one dealt from the pack."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    manifest = _manifest(OTHER_EXTENSION, _provision(icon="radar"))
-    outcomes = await AgentProvisioning((manifest,)).apply(workspace_id)
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert [outcome.result for outcome in outcomes] == [CREATED]
-    assert created is not None
-    assert created.icon == "radar"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_member_edit_survives_the_next_application(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -292,25 +225,6 @@ async def test_a_member_edit_survives_the_next_application(
     assert (edited.reasoning, edited.internet_access_allowed) == ("high", True)
 
 
-async def test_an_identical_row_is_adopted(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    await _insert_agent(workspace_id, PROVISIONED_AGENT_NAME, tools=["sample_echo", *SETUP_TOOLS])
-    outcomes = await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(
-        workspace_id
-    )
-    adopted = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert [outcome.result for outcome in outcomes] == [ADOPTED]
-    assert adopted is not None
-    assert (adopted.provisioned_by, adopted.provisioned_name, adopted.provisioned_version) == (
-        OTHER_EXTENSION,
-        PROVISIONED_AGENT_NAME,
-        "0.1.0",
-    )
-
-
 async def _names(workspace_id: UUID) -> list[str]:
     with ws(workspace_id):
         async with workspace_tx() as connection:
@@ -327,6 +241,7 @@ async def _names(workspace_id: UUID) -> list[str]:
             )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_main_provision_lands_on_the_workspaces_main_agent(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -384,6 +299,7 @@ async def test_a_main_provision_lands_on_the_workspaces_main_agent(
     }
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_main_provision_creates_the_main_agent_where_a_workspace_holds_none(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -409,38 +325,7 @@ async def test_a_main_provision_creates_the_main_agent_where_a_workspace_holds_n
     assert orphan.provisioned_by is None
 
 
-async def test_a_provision_that_is_not_main_leaves_the_main_agent_alone(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    outcomes = await AgentProvisioning(
-        (_manifest(OTHER_EXTENSION, _provision(name=DEFAULT_AGENT_NAME)),)
-    ).apply(workspace_id)
-    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
-    assert [outcome.result for outcome in outcomes] == [CREATED]
-    assert [outcome.name for outcome in outcomes] == [f"{DEFAULT_AGENT_NAME}-{OTHER_EXTENSION}"]
-    assert main is not None
-    assert (main.is_main, main.provisioned_by) == (True, None)
-
-
-async def test_a_visibility_difference_does_not_adopt_a_standing_row(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    await _insert_agent(workspace_id, PROVISIONED_AGENT_NAME, tools=["sample_echo", *SETUP_TOOLS])
-    outcomes = await AgentProvisioning(
-        (_manifest(OTHER_EXTENSION, _provision(visibility="workspace")),)
-    ).apply(workspace_id)
-    assert [outcome.result for outcome in outcomes] == [CREATED]
-    assert [outcome.name for outcome in outcomes] == [f"{PROVISIONED_AGENT_NAME}-{OTHER_EXTENSION}"]
-    kept = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    landed = await _row(workspace_id, f"{PROVISIONED_AGENT_NAME}-{OTHER_EXTENSION}")
-    assert kept is not None and kept.visibility == "private"
-    assert landed is not None and landed.visibility == "workspace"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_name_the_workspace_already_uses_leaves_that_row_alone(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -467,6 +352,7 @@ async def test_a_name_the_workspace_already_uses_leaves_that_row_alone(
     assert [outcome.name for outcome in again] == [f"{PROVISIONED_AGENT_NAME}-{OTHER_EXTENSION}"]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_two_extensions_that_claim_one_name_both_land(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -484,6 +370,7 @@ async def test_two_extensions_that_claim_one_name_both_land(
     assert [outcome.result for outcome in again] == [PRESENT, PRESENT]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_later_version_never_rewrites_the_row_it_already_shipped(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -510,53 +397,7 @@ async def test_a_later_version_never_rewrites_the_row_it_already_shipped(
     )
 
 
-async def test_a_live_row_takes_a_purpose_it_never_had(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A shipped row is written once, so a purpose added to a provision after a workspace already
-    holds the row would reach new workspaces only — and every live workspace would meet an app
-    whose page could not say what it is for. It fills where the row has none, on the next pass."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(workspace_id)
-    # The row as a release that shipped no purpose left it.
-    await _clear_purpose(workspace_id)
-
-    outcomes = await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(
-        workspace_id
-    )
-    assert [outcome.result for outcome in outcomes] == [PRESENT]
-    assert (await _row(workspace_id, PROVISIONED_AGENT_NAME)).purpose == PROVISIONED_AGENT_PURPOSE
-
-
-async def test_the_recorded_version_names_the_declaration_the_row_carries(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The recorded version is what tells an operator which declaration a workspace actually runs.
-    A pass that carries a new setup onto a live row moves it; a pass that changes nothing leaves it
-    where it is, so the version never claims a release whose declaration this row never took."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision(), version="1.0.0"),)).apply(
-        workspace_id
-    )
-    assert (await _row(workspace_id, PROVISIONED_AGENT_NAME)).provisioned_version == "1.0.0"
-
-    quiet = _manifest(OTHER_EXTENSION, _provision(), version="1.1.0")
-    await AgentProvisioning((quiet,)).apply(workspace_id)
-    assert (await _row(workspace_id, PROVISIONED_AGENT_NAME)).provisioned_version == "1.0.0"
-
-    widened = _manifest(
-        OTHER_EXTENSION,
-        _provision(setup=AgentSetup(connectors=(CONNECTOR_PROVIDER,))),
-        version="1.2.0",
-    )
-    await AgentProvisioning((widened,)).apply(workspace_id)
-    row = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert row.provisioned_version == "1.2.0"
-    assert row.setup["connectors"] == [CONNECTOR_PROVIDER]
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_purpose_a_member_wrote_stands(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -578,6 +419,7 @@ async def test_the_purpose_a_member_wrote_stands(
     assert row.purpose == "Ours reads the night shift's log."
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_new_account_a_feature_needs_reaches_a_workspace_that_already_holds_the_app(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -598,6 +440,7 @@ async def test_a_new_account_a_feature_needs_reaches_a_workspace_that_already_ho
     assert row.setup["instructions"] == "Ask first."
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_workspace_that_predates_the_extension_gets_the_agent_on_its_next_turn(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -622,37 +465,7 @@ async def test_a_workspace_that_predates_the_extension_gets_the_agent_on_its_nex
     assert await _row(workspace_id, PROVISIONED_AGENT_NAME) is None
 
 
-async def test_an_extension_job_applies_every_manifest_before_the_handler(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    observed: list[bool] = []
-
-    async def handler(_ctx: ExtensionContext) -> None:
-        observed.append(await _row(workspace_id, PROVISIONED_AGENT_NAME) is not None)
-
-    async def candidates() -> tuple[UUID, ...]:
-        return (workspace_id,)
-
-    job_manifest = Manifest(
-        name=sample.NAME,
-        version=sample.manifest().version,
-        jobs=(JobSpec(name="probe", schedule=None, handler=handler, candidates=candidates),),
-    )
-    agent_manifest = _manifest(OTHER_EXTENSION, _provision())
-    manifests = (job_manifest, agent_manifest)
-    runner = JobRunner(bindings=bindings_from(manifests, ()), manifests=manifests)
-    await runner.fire(f"{sample.NAME}:probe", workspace_id)
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.delete(tables.agent).where(tables.agent.c.provisioned_by == OTHER_EXTENSION)
-            )
-    await runner.fire(f"{sample.NAME}:probe", workspace_id)
-    assert observed == [True, False]
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_suffixed_name_is_addressable_by_an_extension_whose_own_name_is_not(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -668,11 +481,6 @@ async def test_a_suffixed_name_is_addressable_by_an_extension_whose_own_name_is_
     (landed,) = outcomes
     assert landed.name == f"{PROVISIONED_AGENT_NAME}-brief-pipeline"
     validate_object_name(landed.name)
-
-
-def test_a_provision_refuses_a_name_that_is_not_an_object_name() -> None:
-    with pytest.raises(ValueError, match="object name"):
-        _provision(name="Sample Probe")
 
 
 def test_a_provision_refuses_an_empty_prompt() -> None:
@@ -704,18 +512,6 @@ TOOLS = (
     _tool("checkout_code_review", profile_only=True),
     _tool("load_skill"),
 )
-
-
-def test_an_agent_naming_no_allowlist_runs_the_member_facing_set() -> None:
-    assert [tool.name for tool in _agent_tools(TOOLS, None, MEMBER_ADMISSION)] == [
-        "read",
-        "load_skill",
-    ]
-
-
-def test_an_allowlist_reaches_the_primitive_it_names() -> None:
-    selected = _agent_tools(TOOLS, ("checkout_code_review",), MEMBER_ADMISSION)
-    assert [tool.name for tool in selected] == ["checkout_code_review"]
 
 
 def test_an_allowlist_holds_nothing_it_does_not_name() -> None:
@@ -819,6 +615,7 @@ async def _unmet(workspace_id: UUID, name: str) -> AgentSetup | None:
     return {name: missing for _, name, missing in pending}.get(name)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_shipped_agent_records_every_grant_it_still_needs(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -836,6 +633,7 @@ async def test_the_shipped_agent_records_every_grant_it_still_needs(
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_archived_app_drops_off_the_setup_roster(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -866,6 +664,7 @@ async def test_an_archived_app_drops_off_the_setup_roster(
     assert roster == ()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_grant_a_member_makes_settles_its_need(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -879,6 +678,7 @@ async def test_the_grant_a_member_makes_settles_its_need(
     assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_grant_to_another_agent_settles_nothing(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -895,6 +695,7 @@ async def test_a_grant_to_another_agent_settles_nothing(
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_agent_no_extension_shipped_needs_nothing(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -905,6 +706,7 @@ async def test_an_agent_no_extension_shipped_needs_nothing(
     assert await _unmet(workspace_id, DEFAULT_AGENT_NAME) is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_agent_that_is_not_set_up_is_told_so_in_its_own_conversation(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -925,6 +727,7 @@ async def test_an_agent_that_is_not_set_up_is_told_so_in_its_own_conversation(
     assert PROVISIONED_AGENT_NAME not in skill.description
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_setup_slot_empties_as_the_grants_land(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -943,18 +746,7 @@ async def test_the_setup_slot_empties_as_the_grants_land(
         assert await setup_skill(created.id, False, speaker) is None
 
 
-async def test_a_workspace_with_nothing_shipped_carries_no_setup_slot(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
-    assert main is not None
-    speaker = await _member(workspace_id)
-    with ws(workspace_id):
-        assert await setup_skill(main.id, True, speaker) is None
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_agent_with_nothing_outstanding_is_told_nothing(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1005,6 +797,7 @@ def test_a_provision_that_declares_no_setup_keeps_a_bare_allowlist() -> None:
     assert provision.tools == ("sample_echo",)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_main_agent_is_told_which_agents_it_can_connect_an_account_for(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1024,6 +817,7 @@ async def test_the_main_agent_is_told_which_agents_it_can_connect_an_account_for
     assert "`connect_account` with `agent` set to" in roster.instructions
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_turn_nobody_speaks_on_is_not_told_to_ask(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

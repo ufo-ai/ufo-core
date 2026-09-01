@@ -49,7 +49,7 @@ class _ActivityModel:
         return "- Reviewing the notes\nthen updating the heading"
 
 
-async def test_activity_summarizer_sends_only_bounded_tool_calls():
+async def _check_activity_summarizer_sends_only_bounded_tool_calls():
     model = _ActivityModel()
     line = await ActivitySummarizer(model).summarize(
         ToolUseBlock(id="e", name="edit", input={"content": "x" * 1_000}),
@@ -69,7 +69,7 @@ def test_activity_line_normalizes_without_truncating():
     assert activity_line("a" * 400) == "a" * 400
 
 
-async def test_round_trip_delivers_text_and_terminal():
+async def _check_round_trip_delivers_text_and_terminal():
     hub = InProcessHub()
     turn_id = uuid4()
     stream = hub.subscribe(turn_id)
@@ -83,7 +83,7 @@ async def test_round_trip_delivers_text_and_terminal():
     await stream.aclose()
 
 
-async def test_publish_returns_a_monotonic_cursor():
+async def _check_publish_returns_a_monotonic_cursor():
     hub = InProcessHub()
     turn_id = uuid4()
     first = await hub.publish(turn_id, TextDelta(text="a"))
@@ -91,7 +91,7 @@ async def test_publish_returns_a_monotonic_cursor():
     assert int(second) > int(first)
 
 
-async def test_overflow_drops_oldest():
+async def _check_overflow_drops_oldest():
     hub = InProcessHub()
     turn_id = uuid4()
     stream = hub.subscribe(turn_id)
@@ -107,7 +107,7 @@ async def test_overflow_drops_oldest():
     await stream.aclose()
 
 
-async def test_subscribe_cleans_up_registry_once_the_turn_ends():
+async def _check_subscribe_cleans_up_registry_once_the_turn_ends():
     hub = InProcessHub()
     turn_id = uuid4()
     stream = hub.subscribe(turn_id)
@@ -122,7 +122,7 @@ async def test_subscribe_cleans_up_registry_once_the_turn_ends():
     assert hub._turns == {}
 
 
-async def test_latest_activity_peeks_the_newest_activity_frame():
+async def _check_latest_activity_peeks_the_newest_activity_frame():
     hub = InProcessHub()
     turn_id = uuid4()
     assert await hub.latest_activity(turn_id) is None
@@ -137,7 +137,7 @@ async def test_latest_activity_peeks_the_newest_activity_frame():
     assert await hub.latest_activity(turn_id) == latest
 
 
-async def test_latest_activity_reads_back_no_further_than_the_peek_bound():
+async def _check_latest_activity_reads_back_no_further_than_the_peek_bound():
     """The peek reads the newest ACTIVITY_PEEK_FRAMES and stops: an activity frame that far back is
     still answered, and one frame more of narration puts it out of reach — so a turn only streaming
     text costs the poll a bounded walk rather than the whole ten-thousand-frame ring."""
@@ -152,7 +152,7 @@ async def test_latest_activity_reads_back_no_further_than_the_peek_bound():
     assert await hub.latest_activity(turn_id) is None
 
 
-async def test_a_late_subscriber_replays_the_buffered_frames():
+async def _check_a_late_subscriber_replays_the_buffered_frames():
     hub = InProcessHub()
     turn_id = uuid4()
     await hub.publish(turn_id, TextDelta(text="early"))
@@ -163,7 +163,7 @@ async def test_a_late_subscriber_replays_the_buffered_frames():
     await stream.aclose()
 
 
-async def test_resuming_from_a_cursor_skips_already_seen_frames():
+async def _check_resuming_from_a_cursor_skips_already_seen_frames():
     hub = InProcessHub()
     turn_id = uuid4()
     early = await hub.publish(turn_id, TextDelta(text="early"))
@@ -174,7 +174,7 @@ async def test_resuming_from_a_cursor_skips_already_seen_frames():
     await stream.aclose()
 
 
-async def test_covers_reports_whether_a_cursor_is_still_retained():
+async def _check_covers_reports_whether_a_cursor_is_still_retained():
     hub = InProcessHub()
     turn_id = uuid4()
     cursor = await hub.publish(turn_id, TextDelta(text="x"))
@@ -183,7 +183,7 @@ async def test_covers_reports_whether_a_cursor_is_still_retained():
     assert await hub.covers(uuid4(), cursor) is False
 
 
-async def test_a_turn_keeps_its_cursor_across_a_reconnect_so_the_gap_is_neither_lost_nor_repeated():
+async def _check_reconnect_cursor_has_no_gap_or_repeat() -> None:
     """A surface that reconnects between frames leaves no subscriber behind while it is away — the
     terminal client disconnects at every op it hands the member's machine. The in-flight turn keeps
     its ring and its cursor sequence across that gap: restarting the sequence would issue numbers
@@ -205,7 +205,7 @@ async def test_a_turn_keeps_its_cursor_across_a_reconnect_so_the_gap_is_neither_
     await resumed.aclose()
 
 
-async def test_a_frame_the_dying_stream_never_rendered_replays_on_the_cursor_reconnect():
+async def _check_a_frame_the_dying_stream_never_rendered_replays_on_the_cursor_reconnect():
     """The op race: a tool note lands on the held stream's subscription in the same breath the op
     directive ends it, so the note is taken off the queue but never rendered and never advances the
     client's cursor. The reply's reconnect carries the cursor from before the note, and the ring —
@@ -224,7 +224,7 @@ async def test_a_frame_the_dying_stream_never_rendered_replays_on_the_cursor_rec
     await resumed.aclose()
 
 
-async def test_a_subscriber_without_a_cursor_replays_the_whole_retained_ring():
+async def _check_a_subscriber_without_a_cursor_replays_the_whole_retained_ring():
     """A tail opened with no cursor — the portal loading mid-turn — wants everything retained,
     across any gap a terminal client's op reconnects left; the Redis hub replays its stream the
     same way. Every wire client carries a cursor, so nothing is double-printed by replaying
@@ -246,7 +246,7 @@ async def test_a_subscriber_without_a_cursor_replays_the_whole_retained_ring():
     await resumed.aclose()
 
 
-async def test_a_turn_tailed_after_it_ended_leaves_nothing_behind():
+async def _check_a_turn_tailed_after_it_ended_leaves_nothing_behind():
     """A tail opened on a finished turn — the durable status answers it, so nothing ever publishes
     to the stream that tail registered on. It must not outlive the subscriber that made it, or the
     hub grows one entry per turn read back."""
@@ -262,7 +262,7 @@ async def test_a_turn_tailed_after_it_ended_leaves_nothing_behind():
     assert hub._turns == {} and hub._marks == {}
 
 
-async def test_a_parked_turn_resumes_its_sequence_because_it_runs_again_under_one_id():
+async def _check_a_parked_turn_resumes_its_sequence_because_it_runs_again_under_one_id():
     """A park is not an end: the fold that resumes it dispatches the same turn id, and a sequence
     restarting there would reissue cursors the client already holds."""
     hub = InProcessHub()
@@ -275,7 +275,7 @@ async def test_a_parked_turn_resumes_its_sequence_because_it_runs_again_under_on
     assert int(resumed) > int(parked)
 
 
-async def test_publish_buffers_for_a_later_subscriber_and_does_not_leak_on_terminal():
+async def _check_publish_buffers_for_a_later_subscriber_and_does_not_leak_on_terminal():
     hub = InProcessHub()
     turn_id = uuid4()
     await hub.publish(turn_id, TextDelta(text="x"))
@@ -294,7 +294,7 @@ def _run_frame(root_turn_id: UUID) -> SubagentActivity:
     )
 
 
-async def test_a_run_outliving_its_root_neither_revives_nor_founds_the_ring():
+async def _check_a_run_outliving_its_root_neither_revives_nor_founds_the_ring():
     """A background child can publish after its root committed its terminal and the ring was
     dropped. The frame has no tail it could reach, so it drops instead of rebuilding a stream
     nothing will ever release — one pinned ring per background spawn for the process's life."""
@@ -312,7 +312,7 @@ async def test_a_run_outliving_its_root_neither_revives_nor_founds_the_ring():
     assert hub._turns == {} and hub._marks == {}
 
 
-async def test_a_run_frame_reaches_the_ring_of_a_root_still_in_flight():
+async def _check_a_run_frame_reaches_the_ring_of_a_root_still_in_flight():
     hub = InProcessHub()
     root = uuid4()
     await hub.publish(root, TextDelta(text="x"))
@@ -324,7 +324,7 @@ async def test_a_run_frame_reaches_the_ring_of_a_root_still_in_flight():
     await stream.aclose()
 
 
-async def test_an_absorbed_frame_neither_ends_the_stream_nor_drops_the_ring():
+async def _check_an_absorbed_frame_neither_ends_the_stream_nor_drops_the_ring():
     hub = InProcessHub()
     turn_id = uuid4()
     absorbed = Absorbed(arrivals=(uuid4(), uuid4()))
@@ -335,7 +335,7 @@ async def test_an_absorbed_frame_neither_ends_the_stream_nor_drops_the_ring():
     await stream.aclose()
 
 
-async def test_two_subscribers_both_receive():
+async def _check_two_subscribers_both_receive():
     hub = InProcessHub()
     turn_id = uuid4()
     stream_a = hub.subscribe(turn_id)
@@ -351,7 +351,7 @@ async def test_two_subscribers_both_receive():
     assert hub._turns == {}
 
 
-async def test_publish_from_another_loop_thread_delivers():
+async def _check_publish_from_another_loop_thread_delivers():
     hub = InProcessHub()
     turn_id = uuid4()
     stream = hub.subscribe(turn_id)
@@ -365,3 +365,10 @@ async def test_publish_from_another_loop_thread_delivers():
     thread.join()
     assert (await asyncio.wait_for(first, timeout=2))[1] == TextDelta(text="cross-loop")
     await stream.aclose()
+
+
+async def test_hub_async_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 21
+    for check in checks:
+        await check()

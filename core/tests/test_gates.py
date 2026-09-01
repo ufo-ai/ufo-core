@@ -34,7 +34,7 @@ def _migration(revision: str, down: str, depends: str = "None") -> ast.Module:
     )
 
 
-def test_the_gate_walk_skips_vendored_dependency_trees() -> None:
+def _check_the_gate_walk_skips_vendored_dependency_trees() -> None:
     """A frontend build checks an npm tree out inside `extensions/`, and a virtualenv can sit under
     any source root. Neither is code this repo gates, and a single vendored `.py` would otherwise
     fail every push — so the walk skips both at any depth while gating the tree around them."""
@@ -45,33 +45,33 @@ def test_the_gate_walk_skips_vendored_dependency_trees() -> None:
     assert not gates._vendored(Path("extensions/web/tests/test_ext_web.py"))
 
 
-def test_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
+def _check_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
     trees = {ROGUE: ast.parse("from ufo.db import workspace_tx\n")}
     failures = gates._sdk_import_failures(trees)
     assert failures and "ufo.db" in failures[0]
 
 
-def test_sdk_only_gate_rejects_bare_ufo_import_from_extensions() -> None:
+def _check_sdk_only_gate_rejects_bare_ufo_import_from_extensions() -> None:
     trees = {ROGUE: ast.parse("import ufo\n")}
     assert gates._sdk_import_failures(trees)
 
 
-def test_sdk_only_gate_allows_sdk_import_from_extensions() -> None:
+def _check_sdk_only_gate_allows_sdk_import_from_extensions() -> None:
     trees = {ROGUE: ast.parse("from ufo.sdk.tools import ToolDef\nimport ufo.sdk.jobs\n")}
     assert gates._sdk_import_failures(trees) == []
 
 
-def test_sdk_only_gate_ignores_core_internal_imports() -> None:
+def _check_sdk_only_gate_ignores_core_internal_imports() -> None:
     trees = {CORE_FILE: ast.parse("from ufo.db import workspace_tx\n")}
     assert gates._sdk_import_failures(trees) == []
 
 
-def test_sdk_only_gate_exempts_extension_test_scaffold() -> None:
+def _check_sdk_only_gate_exempts_extension_test_scaffold() -> None:
     trees = {EXT_TEST: ast.parse("from ufo.db import workspace_tx\n")}
     assert gates._sdk_import_failures(trees) == []
 
 
-def test_sdk_only_gate_still_binds_the_shipped_extension_package() -> None:
+def _check_sdk_only_gate_still_binds_the_shipped_extension_package() -> None:
     trees = {
         EXT_SHIPPED_MODULE: ast.parse("from ufo.db import workspace_tx\n"),
         EXT_SHIPPED_PACKAGE: ast.parse("from ufo.db import workspace_tx\n"),
@@ -80,7 +80,7 @@ def test_sdk_only_gate_still_binds_the_shipped_extension_package() -> None:
     assert len(failures) == 2 and all("ufo.db" in failure for failure in failures)
 
 
-def test_engine_core_gate_rejects_runtime_and_host_dependencies() -> None:
+def _check_engine_core_gate_rejects_runtime_and_host_dependencies() -> None:
     for imported in (
         "from ufo.runtime.billing import accounting",
         "from ufo.harness.models.registry import ModelRegistry",
@@ -95,12 +95,12 @@ def test_engine_core_gate_rejects_runtime_and_host_dependencies() -> None:
         assert len(failures) == 1 and "engine core" in failures[0]
 
 
-def test_engine_core_gate_allows_standard_library_and_other_core_modules() -> None:
+def _check_engine_core_gate_allows_standard_library_and_other_core_modules() -> None:
     tree = ast.parse("import asyncio\nfrom ufo.harness.rounds import ModelRoundRunner\n")
     assert gates._harness_import_failures({HARNESS_FILE: tree}) == []
 
 
-def test_engine_core_gate_ignores_files_outside_the_core() -> None:
+def _check_engine_core_gate_ignores_files_outside_the_core() -> None:
     trees = {
         CORE_FILE: ast.parse("from sqlalchemy import select\n"),
         Path("core/src/ufo/harness/models/registry.py"): ast.parse("import httpx\n"),
@@ -108,7 +108,7 @@ def test_engine_core_gate_ignores_files_outside_the_core() -> None:
     assert gates._harness_import_failures(trees) == []
 
 
-def test_core_layout_gate_requires_a_source_or_test_owner() -> None:
+def _check_core_layout_gate_requires_a_source_or_test_owner() -> None:
     outside = Path("core/probe.py")
     trees = {
         outside: ast.parse("VALUE = 1\n"),
@@ -121,7 +121,7 @@ def test_core_layout_gate_requires_a_source_or_test_owner() -> None:
     ]
 
 
-def test_conformance_gate_flags_a_manifest_point_the_sample_drops() -> None:
+def _check_conformance_gate_flags_a_manifest_point_the_sample_drops() -> None:
     manifest_src = (
         "class Manifest:\n"
         "    name: str\n"
@@ -138,16 +138,16 @@ def test_conformance_gate_flags_a_manifest_point_the_sample_drops() -> None:
     assert any("jobs" in failure for failure in failures)
 
 
-def test_skills_gate_passes_for_the_shipped_core_skills() -> None:
+def _check_skills_gate_passes_for_the_shipped_core_skills() -> None:
     assert gates._skill_failures() == []
 
 
-def test_skills_gate_flags_a_skill_outside_the_fixed_set() -> None:
+def _check_skills_gate_flags_a_skill_outside_the_fixed_set() -> None:
     failures = gates._rogue_skill_failures(gates.CORE_SKILL_NAMES | {"rogue"})
     assert any("rogue" in failure for failure in failures)
 
 
-def test_skills_gate_flags_a_missing_core_skill() -> None:
+def _check_skills_gate_flags_a_missing_core_skill() -> None:
     failures = gates._rogue_skill_failures(gates.CORE_SKILL_NAMES - {"sandbox"})
     assert any("sandbox" in failure for failure in failures)
 
@@ -170,36 +170,36 @@ def _app_failures(
     )
 
 
-def test_app_bundle_gate_passes_for_the_apps_this_repo_ships() -> None:
+def _check_app_bundle_gate_passes_for_the_apps_this_repo_ships() -> None:
     assert gates._app_bundle_failures() == []
 
 
-def test_app_bundle_gate_flags_a_home_skill_named_for_another_slug() -> None:
+def _check_app_bundle_gate_flags_a_home_skill_named_for_another_slug() -> None:
     """The failure this gate exists for: the extension installs, the deploy builds a bundle with no
     page in it, and a member opens the app to a blank frame."""
     failures = _app_failures(homes=frozenset({"app-radar-home", "app-wikipage-home"}))
     assert any("app_wiki" in failure and "app-wiki-home" in failure for failure in failures)
 
 
-def test_app_bundle_gate_flags_an_app_the_bundle_never_names() -> None:
+def _check_app_bundle_gate_flags_an_app_the_bundle_never_names() -> None:
     failures = _app_failures(
         built=frozenset({"radar"}), entries=frozenset({"radar"}), typechecked=frozenset({"radar"})
     )
     assert any("does not build 'wiki'" in failure for failure in failures)
 
 
-def test_app_bundle_gate_flags_a_built_page_with_no_entry_document() -> None:
+def _check_app_bundle_gate_flags_a_built_page_with_no_entry_document() -> None:
     failures = _app_failures(entries=frozenset({"radar"}))
     assert any("apps/wiki/index.html" in failure for failure in failures)
 
 
-def test_app_bundle_gate_flags_a_bundle_entry_no_extension_ships() -> None:
+def _check_app_bundle_gate_flags_a_bundle_entry_no_extension_ships() -> None:
     built = APP_BUILT | {"ghost"}
     failures = _app_failures(built=built, entries=built, typechecked=built)
     assert any("app_ghost" in failure for failure in failures)
 
 
-def test_app_bundle_gate_flags_a_slug_the_homepage_read_cannot_key() -> None:
+def _check_app_bundle_gate_flags_a_slug_the_homepage_read_cannot_key() -> None:
     """A slug is lowercase letters and digits, because the homepage read keys an agent by the one
     in its extension name — so a page under any other name is unreachable however carefully the
     rest is spelled."""
@@ -207,14 +207,14 @@ def test_app_bundle_gate_flags_a_slug_the_homepage_read_cannot_key() -> None:
     assert any("app_code_review" in failure and "lowercase" in failure for failure in failures)
 
 
-def test_app_rebuild_gate_passes_for_the_home_skills_this_repo_ships() -> None:
+def _check_app_rebuild_gate_passes_for_the_home_skills_this_repo_ships() -> None:
     """Every app's home skill says what a rebuild takes. A member's page is built against the kit of
     the day it was built, and the skill is the only place the agent doing the rebuild reads that —
     so a page nobody rebuilds silently keeps the kit it started on."""
     assert gates._app_rebuild_failures() == []
 
 
-def test_app_bundle_gate_flags_a_page_the_typecheck_never_reads() -> None:
+def _check_app_bundle_gate_flags_a_page_the_typecheck_never_reads() -> None:
     """A page left off the typecheck's file list is built and shipped having never been checked:
     the bundle transpiles without types, so a prop the kit does not declare is dropped in silence
     and the page draws without it."""
@@ -222,20 +222,20 @@ def test_app_bundle_gate_flags_a_page_the_typecheck_never_reads() -> None:
     assert any("does not read the 'wiki' page" in failure for failure in failures)
 
 
-def test_skill_boundary_gate_flags_a_script_importing_ufo() -> None:
+def _check_skill_boundary_gate_flags_a_script_importing_ufo() -> None:
     trees = {Path("extensions/x/skills/y/s.py"): ast.parse("from ufo.sdk.tools import ToolDef\n")}
     failures = gates._skill_boundary_failures(trees)
     assert failures and "ufo.sdk" in failures[0]
 
 
-def test_skill_boundary_gate_allows_stdlib_and_third_party_imports() -> None:
+def _check_skill_boundary_gate_allows_stdlib_and_third_party_imports() -> None:
     trees = {
         Path("extensions/x/skills/y/s.py"): ast.parse("import sys\nfrom pypdf import PdfReader\n")
     }
     assert gates._skill_boundary_failures(trees) == []
 
 
-def test_naming_gate_flags_a_dash_in_a_registered_name() -> None:
+def _check_naming_gate_flags_a_dash_in_a_registered_name() -> None:
     from ufo.runtime.ext.manifest import CdpProviderSpec, Manifest, Pack
 
     bad_ext = Manifest(name="bad-ext", version="0")
@@ -253,11 +253,11 @@ def test_naming_gate_flags_a_dash_in_a_registered_name() -> None:
     assert any("bad-pack" in failure for failure in gates._naming_failures((), (bad_pack,)))
 
 
-def test_naming_gate_passes_on_the_installed_tree() -> None:
+def _check_naming_gate_passes_on_the_installed_tree() -> None:
     assert gates._registered_naming_failures() == []
 
 
-def test_skill_content_is_held_out_of_the_code_gates() -> None:
+def _check_skill_content_is_held_out_of_the_code_gates() -> None:
     """A bundled skill script (a .py file under a SKILL.md folder) is sandbox content, not framework
     code: it appears in `_skill_scripts` for the boundary gate and never in `_python_files`, so the
     process-side code gates skip it."""
@@ -281,7 +281,7 @@ def test_skill_content_is_held_out_of_the_code_gates() -> None:
     assert gates._conformance_failures(trees) == []
 
 
-def test_migration_gate_allows_one_core_merge_head() -> None:
+def _check_migration_gate_allows_one_core_merge_head() -> None:
     base, left, right, merge = CORE_STAMPS
     trees = {
         CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
@@ -292,7 +292,7 @@ def test_migration_gate_allows_one_core_merge_head() -> None:
     assert gates._migration_failures(trees) == []
 
 
-def test_migration_gate_checks_every_merge_parent() -> None:
+def _check_migration_gate_checks_every_merge_parent() -> None:
     base, left, _, merge = CORE_STAMPS
     trees = {
         CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
@@ -303,7 +303,7 @@ def test_migration_gate_checks_every_merge_parent() -> None:
     assert any("references no known revision" in failure for failure in failures)
 
 
-def test_migration_gate_rejects_cross_owner_merge_parents() -> None:
+def _check_migration_gate_rejects_cross_owner_merge_parents() -> None:
     base, left, _, merge = CORE_STAMPS
     trees = {
         CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
@@ -315,7 +315,7 @@ def test_migration_gate_rejects_cross_owner_merge_parents() -> None:
     assert any("chains across owners" in failure for failure in failures)
 
 
-def test_migration_gate_still_rejects_multiple_heads_with_a_merge() -> None:
+def _check_migration_gate_still_rejects_multiple_heads_with_a_merge() -> None:
     base, left, right, merge = CORE_STAMPS
     trees = {
         CORE_MIGRATIONS / f"{base}_base.py": _migration(base, "None"),
@@ -327,7 +327,7 @@ def test_migration_gate_still_rejects_multiple_heads_with_a_merge() -> None:
     assert any("has 2 heads" in failure for failure in failures)
 
 
-def test_migration_gate_rejects_a_new_core_revision_that_is_not_a_stamp() -> None:
+def _check_migration_gate_rejects_a_new_core_revision_that_is_not_a_stamp() -> None:
     """A hand-numbered id races: two branches read the same directory listing, both write the next
     number, and one of them is renumbered before it can land."""
     base, *_ = CORE_STAMPS
@@ -339,7 +339,7 @@ def test_migration_gate_rejects_a_new_core_revision_that_is_not_a_stamp() -> Non
     assert any("is not a UTC stamp" in failure for failure in failures)
 
 
-def test_migration_gate_grandfathers_the_ids_that_predate_the_stamp_rule() -> None:
+def _check_migration_gate_grandfathers_the_ids_that_predate_the_stamp_rule() -> None:
     """A live database is stamped with the hand-numbered chain, and both test targets and extension
     `depends_on` values name those ids, so nothing renumbers them."""
     trees = {
@@ -352,7 +352,7 @@ def test_migration_gate_grandfathers_the_ids_that_predate_the_stamp_rule() -> No
     assert gates._migration_failures(trees) == []
 
 
-def test_migration_gate_leaves_an_extension_family_to_its_own_ids() -> None:
+def _check_migration_gate_leaves_an_extension_family_to_its_own_ids() -> None:
     """An extension namespaces its ids by its own name, so two extensions never race for one."""
     base, *_ = CORE_STAMPS
     trees = {
@@ -362,24 +362,24 @@ def test_migration_gate_leaves_an_extension_family_to_its_own_ids() -> None:
     assert gates._migration_failures(trees) == []
 
 
-def test_job_selector_gate_rejects_a_jobspec_without_candidates() -> None:
+def _check_job_selector_gate_rejects_a_jobspec_without_candidates() -> None:
     trees = {CORE_FILE: ast.parse("JobSpec(name='x', schedule=None, handler=h)\n")}
     failures = gates._job_selector_failures(trees)
     assert failures and "candidates" in failures[0]
 
 
-def test_job_selector_gate_rejects_a_none_selector() -> None:
+def _check_job_selector_gate_rejects_a_none_selector() -> None:
     trees = {CORE_FILE: ast.parse("JobSpec(name='x', schedule=None, handler=h, candidates=None)\n")}
     failures = gates._job_selector_failures(trees)
     assert failures and "None" in failures[0]
 
 
-def test_job_selector_gate_allows_a_declared_selector() -> None:
+def _check_job_selector_gate_allows_a_declared_selector() -> None:
     trees = {CORE_FILE: ast.parse("JobSpec(name='x', schedule=None, handler=h, candidates=sel)\n")}
     assert gates._job_selector_failures(trees) == []
 
 
-def test_schedule_authority_gate_rejects_explicit_agent_selection() -> None:
+def _check_schedule_authority_gate_rejects_explicit_agent_selection() -> None:
     trees = {
         gates.SCHEDULING_MODULE: ast.parse(
             "class ScheduleStore:\n"
@@ -394,7 +394,7 @@ def test_schedule_authority_gate_rejects_explicit_agent_selection() -> None:
     assert all("ambient" in failure for failure in failures)
 
 
-def test_schedule_authority_gate_refuses_a_store_it_cannot_find() -> None:
+def _check_schedule_authority_gate_refuses_a_store_it_cannot_find() -> None:
     """The store moves — out of core, and later wherever it goes next. A gate that answers green
     when its module is absent would follow that move by silently checking nothing."""
     failures = gates._schedule_authority_failures({})
@@ -402,7 +402,7 @@ def test_schedule_authority_gate_refuses_a_store_it_cannot_find() -> None:
     assert "repoint" in failures[0]
 
 
-def test_schedule_authority_gate_allows_ambient_agent_selection() -> None:
+def _check_schedule_authority_gate_allows_ambient_agent_selection() -> None:
     trees = {
         gates.SCHEDULING_MODULE: ast.parse(
             "class ScheduleStore:\n"
@@ -415,7 +415,7 @@ def test_schedule_authority_gate_allows_ambient_agent_selection() -> None:
     assert gates._schedule_authority_failures(trees) == []
 
 
-def test_execution_authority_gate_rejects_nullable_identity_in_shipped_code() -> None:
+def _check_execution_authority_gate_rejects_nullable_identity_in_shipped_code() -> None:
     for source in (
         "use(acting_member_id)\n",
         "def use(acting_member_id): ...\n",
@@ -426,19 +426,19 @@ def test_execution_authority_gate_rejects_nullable_identity_in_shipped_code() ->
         assert "ExecutionAuthority" in failures[0]
 
 
-def test_execution_authority_gate_leaves_durable_identity_fields_alone() -> None:
+def _check_execution_authority_gate_leaves_durable_identity_fields_alone() -> None:
     tree = ast.parse("persist(speaker_member_id=speaker, on_behalf_of_member_id=delegated)\n")
     assert gates._execution_authority_failures({CORE_FILE: tree}) == []
 
 
-def test_execution_authority_gate_keeps_extension_liveness_in_core() -> None:
+def _check_execution_authority_gate_keeps_extension_liveness_in_core() -> None:
     trees = {ROGUE: ast.parse("await Seats(workspace_id).admits(connection, authority)\n")}
     failures = gates._execution_authority_failures(trees)
     assert len(failures) == 1
     assert "core capability" in failures[0]
 
 
-def test_execution_authority_gate_allows_core_liveness_and_extension_access_reads() -> None:
+def _check_execution_authority_gate_allows_core_liveness_and_extension_access_reads() -> None:
     trees = {
         CORE_FILE: ast.parse("await Seats(workspace_id).admits(connection, authority)\n"),
         ROGUE: ast.parse("await ctx.member_has_access(member_id)\n"),
@@ -446,7 +446,7 @@ def test_execution_authority_gate_allows_core_liveness_and_extension_access_read
     assert gates._execution_authority_failures(trees) == []
 
 
-def test_wiring_gate_counts_database_program_reads_and_writes() -> None:
+def _check_wiring_gate_counts_database_program_reads_and_writes() -> None:
     trees = {
         gates.SCHEMA_TABLES: ast.parse(
             "workspace = sa.Table(\n"
@@ -466,7 +466,7 @@ def test_wiring_gate_counts_database_program_reads_and_writes() -> None:
     assert gates._wiring_failures(trees) == []
 
 
-def test_wiring_gate_does_not_count_column_declaration_as_a_write() -> None:
+def _check_wiring_gate_does_not_count_column_declaration_as_a_write() -> None:
     trees = {
         gates.SCHEMA_TABLES: ast.parse(
             "page = sa.Table('page', metadata, sa.Column('revision', sa.BigInteger))\n"
@@ -482,18 +482,18 @@ def test_wiring_gate_does_not_count_column_declaration_as_a_write() -> None:
 WEB_SURFACE = Path("extensions/web/ufo_ext_web/surface.py")
 
 
-def test_set_cookie_gate_flags_raw_set_cookie_outside_the_factory() -> None:
+def _check_set_cookie_gate_flags_raw_set_cookie_outside_the_factory() -> None:
     trees = {WEB_SURFACE: ast.parse("response.set_cookie('s', token)\n")}
     failures = gates._set_cookie_failures(trees)
     assert failures and "set_session_cookie" in failures[0]
 
 
-def test_set_cookie_gate_exempts_the_factory_module() -> None:
+def _check_set_cookie_gate_exempts_the_factory_module() -> None:
     trees = {gates.SESSION_COOKIE_FACTORY: ast.parse("response.set_cookie('s', token)\n")}
     assert gates._set_cookie_failures(trees) == []
 
 
-def test_set_cookie_gate_allows_the_factory_helper_at_call_sites() -> None:
+def _check_set_cookie_gate_allows_the_factory_helper_at_call_sites() -> None:
     trees = {WEB_SURFACE: ast.parse("set_session_cookie(response, 's', token, samesite='lax')\n")}
     assert gates._set_cookie_failures(trees) == []
 
@@ -507,23 +507,23 @@ TAG_CONFIGURATION = 'resource "datadog_metric_tag_configuration" "turn_ms" {}\n'
 METRIC_METADATA = 'resource "datadog_metric_metadata" "turn_ms" {}\n'
 
 
-def test_shared_singleton_gate_flags_an_integration_declared_in_two_roots() -> None:
+def _check_shared_singleton_gate_flags_an_integration_declared_in_two_roots() -> None:
     failures = gates._shared_singleton_failures({TESTING_TF: INTEGRATION, PROD_TF: INTEGRATION})
     assert failures and "prod, testing" in failures[0]
 
 
-def test_shared_singleton_gate_allows_one_root() -> None:
+def _check_shared_singleton_gate_allows_one_root() -> None:
     assert gates._shared_singleton_failures({TESTING_TF: INTEGRATION + EXTERNAL_ID}) == []
 
 
-def test_shared_singleton_gate_covers_the_external_id_that_pairs_with_it() -> None:
+def _check_shared_singleton_gate_covers_the_external_id_that_pairs_with_it() -> None:
     """The external id carries no arguments, so nothing about a second declaration looks wrong on
     its own — it is the integration it pairs with that cannot exist twice."""
     failures = gates._shared_singleton_failures({TESTING_TF: EXTERNAL_ID, PROD_TF: EXTERNAL_ID})
     assert failures and "datadog_integration_aws_external_id" in failures[0]
 
 
-def test_shared_singleton_gate_covers_the_metric_tag_configuration() -> None:
+def _check_shared_singleton_gate_covers_the_metric_tag_configuration() -> None:
     """A tag configuration is keyed by metric name alone, so the same metric declared from two roots
     is one remote object with two owners — and the per-environment `env` tag on the metric makes a
     second declaration read as environment-scoped when nothing about it is."""
@@ -533,7 +533,7 @@ def test_shared_singleton_gate_covers_the_metric_tag_configuration() -> None:
     assert failures and "datadog_metric_tag_configuration" in failures[0]
 
 
-def test_shared_singleton_gate_covers_the_metric_metadata() -> None:
+def _check_shared_singleton_gate_covers_the_metric_metadata() -> None:
     """A metric's unit is org-wide and keyed by metric name, so a second root declaring it is two
     states owning one object — and a unit reads correctly from either, which is what would make a
     divergence here silent."""
@@ -543,7 +543,7 @@ def test_shared_singleton_gate_covers_the_metric_metadata() -> None:
     assert failures and "datadog_metric_metadata" in failures[0]
 
 
-def test_shared_singleton_gate_covers_the_dashboard() -> None:
+def _check_shared_singleton_gate_covers_the_dashboard() -> None:
     """A board selects its fleet through an `env` template variable, so one declaration already
     reads both. A second root declaring the same board builds a second board nobody chose between,
     and each apply keeps its own id, so the two drift instead of colliding loudly."""
@@ -551,7 +551,7 @@ def test_shared_singleton_gate_covers_the_dashboard() -> None:
     assert failures and "datadog_dashboard" in failures[0]
 
 
-def test_env_terraform_reaches_every_environment_root() -> None:
+def _check_env_terraform_reaches_every_environment_root() -> None:
     """The gate above judges what this collects, so a root it cannot see is a rule that quietly
     stops applying. Nothing else in the suite would notice: a glob matching nothing yields no
     sources, no failures, and a green gate."""
@@ -559,13 +559,13 @@ def test_env_terraform_reaches_every_environment_root() -> None:
     assert {"prod", "testing"} <= roots
 
 
-def test_shared_singleton_gate_allows_two_files_in_one_root() -> None:
+def _check_shared_singleton_gate_allows_two_files_in_one_root() -> None:
     """A root may split its terraform across files. The rule is one root, not one file."""
     other = Path("infra/envs/testing/datadog_extra.tf")
     assert gates._shared_singleton_failures({TESTING_TF: INTEGRATION, other: INTEGRATION}) == []
 
 
-def test_portal_style_gate_reaches_the_source_it_judges() -> None:
+def _check_portal_style_gate_reaches_the_source_it_judges() -> None:
     """The gate reads a fixed path, so a rename makes the rule quietly stop applying: a scan root
     that resolves to nothing yields no files, no failures, and a green gate. It names the miss
     instead."""
@@ -577,11 +577,11 @@ def test_portal_style_gate_reaches_the_source_it_judges() -> None:
     assert gates._portal_style_failures() == []
 
 
-def test_palette_gate_matches_the_aa_safe_portal_secondary_step() -> None:
+def _check_palette_gate_matches_the_aa_safe_portal_secondary_step() -> None:
     assert gates._skill_palette_failures() == []
 
 
-def test_portal_style_gate_names_a_missing_source_rather_than_passing() -> None:
+def _check_portal_style_gate_names_a_missing_source_rather_than_passing() -> None:
     """The failure this gate cannot afford is silence, so an absent root is itself a failure."""
     original = gates.PORTAL_SOURCE
     gates.PORTAL_SOURCE = Path("extensions/web/frontend/renamed")
@@ -592,7 +592,7 @@ def test_portal_style_gate_names_a_missing_source_rather_than_passing() -> None:
     assert failures == ["extensions/web/frontend/renamed: the portal source is missing"]
 
 
-def test_portal_style_gate_refuses_a_stylesheet_a_single_quoted_import_hides() -> None:
+def _check_portal_style_gate_refuses_a_stylesheet_a_single_quoted_import_hides() -> None:
     """Prettier writes double quotes, so a single-quoted import is exactly how a stylesheet would
     arrive unnoticed. The rule is about the import, not the quoting."""
     source = gates.ROOT / gates.PORTAL_SOURCE
@@ -607,7 +607,7 @@ def test_portal_style_gate_refuses_a_stylesheet_a_single_quoted_import_hides() -
     ]
 
 
-def test_portal_style_gate_holds_an_app_page_to_the_portal_rules() -> None:
+def _check_portal_style_gate_holds_an_app_page_to_the_portal_rules() -> None:
     """The app pages are the portal's former views, compiled in the browser against the portal's
     own theme, so a stylesheet import or a raw bracket value erodes the same design system from a
     different directory. The gate scans them by glob, so the probe is a new sibling skill dir."""
@@ -630,7 +630,7 @@ def test_portal_style_gate_holds_an_app_page_to_the_portal_rules() -> None:
     ]
 
 
-def test_portal_style_gate_refuses_a_raw_value_a_bracket_class_smuggles() -> None:
+def _check_portal_style_gate_refuses_a_raw_value_a_bracket_class_smuggles() -> None:
     """A bracket utility naming a raw measurement re-decides a token inline, which is how the
     design system erodes under Tailwind. The var-resolving and structural forms stay allowed —
     the rule is about the raw value, not the bracket."""
@@ -652,7 +652,7 @@ def test_portal_style_gate_refuses_a_raw_value_a_bracket_class_smuggles() -> Non
     ]
 
 
-def test_portal_style_gate_reads_a_pages_own_data_as_data() -> None:
+def _check_portal_style_gate_reads_a_pages_own_data_as_data() -> None:
     """An issue reference and a percentage are spelled exactly like a raw colour and a raw length,
     and a page carries them as its content. A Tailwind arbitrary value is always a utility holding
     one — `w-[3px]` — or an arbitrary property, which spells `[prop:value]`. A bare `[...]` is a
@@ -671,7 +671,7 @@ def test_portal_style_gate_reads_a_pages_own_data_as_data() -> None:
     assert failures == []
 
 
-def test_portal_style_gate_refuses_the_long_spelling_of_a_class_that_has_a_short_one() -> None:
+def _check_portal_style_gate_refuses_the_long_spelling_of_a_class_that_has_a_short_one() -> None:
     """Each refused shape has a shorter spelling that already means the same thing, so the long
     form is drift, not intent. The short forms beside them stay allowed."""
     source = gates.ROOT / gates.PORTAL_SOURCE
@@ -696,7 +696,7 @@ def test_portal_style_gate_refuses_the_long_spelling_of_a_class_that_has_a_short
     ]
 
 
-def test_containment_gate_flags_a_new_ingress_that_opens_what_it_was_handed() -> None:
+def _check_containment_gate_flags_a_new_ingress_that_opens_what_it_was_handed() -> None:
     """The rule issue #1112 is about: a site that builds a host path from agent, model, connector or
     provider input and then opens it. Validating the name is not validating the path — the open is
     where a planted symlink wins — so the write has to go through the shared guard."""
@@ -711,7 +711,7 @@ def test_containment_gate_flags_a_new_ingress_that_opens_what_it_was_handed() ->
     assert "(target)" in failures[0], "the failure names the value the call opened"
 
 
-def test_containment_gate_passes_a_site_that_goes_through_the_guard() -> None:
+def _check_containment_gate_passes_a_site_that_goes_through_the_guard() -> None:
     trees = {
         INGRESS_FILE: ast.parse(
             "def stage(name, root):\n"
@@ -722,7 +722,7 @@ def test_containment_gate_passes_a_site_that_goes_through_the_guard() -> None:
     assert gates._ingress_containment_failures(trees) == []
 
 
-def test_containment_gate_leaves_a_path_the_module_fixed_itself_alone() -> None:
+def _check_containment_gate_leaves_a_path_the_module_fixed_itself_alone() -> None:
     """A path built from the package's own constants is not ingress, and a gate that fired on it
     would be turned off within a week."""
     trees = {
@@ -731,7 +731,7 @@ def test_containment_gate_leaves_a_path_the_module_fixed_itself_alone() -> None:
     assert gates._ingress_containment_failures(trees) == []
 
 
-def test_containment_gate_exempts_the_guard_itself_and_the_test_scaffold() -> None:
+def _check_containment_gate_exempts_the_guard_itself_and_the_test_scaffold() -> None:
     """The guard is the implementation every other file is held to, and a test names its own
     roots."""
     source = "def stage(name, root):\n    (root / name).write_bytes(b'body')\n"
@@ -739,7 +739,7 @@ def test_containment_gate_exempts_the_guard_itself_and_the_test_scaffold() -> No
     assert gates._ingress_containment_failures(trees) == []
 
 
-def test_containment_gate_honours_the_deferred_row_allowlist() -> None:
+def _check_containment_gate_honours_the_deferred_row_allowlist() -> None:
     """A row #1112 deliberately left unrouted is named with its reason, which is the review the gate
     exists to force — and every name in the allowlist still points at a site in the tree."""
     trees = {
@@ -755,7 +755,7 @@ def test_containment_gate_honours_the_deferred_row_allowlist() -> None:
         assert site in (gates.ROOT / rel).read_text(), f"{rel} no longer defines {site}"
 
 
-def test_containment_gate_reads_a_core_module_that_opens_a_handed_path() -> None:
+def _check_containment_gate_reads_a_core_module_that_opens_a_handed_path() -> None:
     """The file ops moved into the `ufo` client, so the sandbox holds no Python script of ours to
     scan — but the gate still governs every core module that builds a host path from model, agent,
     connector or provider input."""
@@ -767,7 +767,7 @@ def test_containment_gate_reads_a_core_module_that_opens_a_handed_path() -> None
     assert len(failures) == 1 and "op_leak" in failures[0]
 
 
-def test_containment_gate_does_not_let_one_guarded_call_launder_a_function() -> None:
+def _check_containment_gate_does_not_let_one_guarded_call_launder_a_function() -> None:
     """A name handed *to* a guard is not proved by it. In a handler shaped like the real ops,
     marking every name mentioned in the guard call would prove `params` and pass every other
     `params[...]` open in the same function."""
@@ -783,7 +783,7 @@ def test_containment_gate_does_not_let_one_guarded_call_launder_a_function() -> 
     assert len(failures) == 1 and ".read_text" in failures[0]
 
 
-def test_containment_gate_proves_a_call_that_takes_the_guard_result_itself() -> None:
+def _check_containment_gate_proves_a_call_that_takes_the_guard_result_itself() -> None:
     """What the guard returns may reach the filesystem, however it is spelled: bound to a name,
     given straight to the call, or unpacked from a pair."""
     trees = {
@@ -800,7 +800,7 @@ def test_containment_gate_proves_a_call_that_takes_the_guard_result_itself() -> 
     assert gates._ingress_containment_failures(trees) == []
 
 
-def test_the_lexical_only_guard_is_not_in_the_guard_vocabulary() -> None:
+def _check_the_lexical_only_guard_is_not_in_the_guard_vocabulary() -> None:
     """`workspace_path` resolves a container path this process cannot stat, so proving a name with
     it and then opening that name is the gap the gate exists to find — it is allowlisted as a
     deferred site, never counted as a guard."""
@@ -818,7 +818,7 @@ def test_the_lexical_only_guard_is_not_in_the_guard_vocabulary() -> None:
     assert len(failures) == 1 and ".read_bytes" in failures[0]
 
 
-def test_the_lexical_tier_does_not_launder_the_open_that_follows_it() -> None:
+def _check_the_lexical_tier_does_not_launder_the_open_that_follows_it() -> None:
     """`contained_leaf(name)` joined under a module constant and written is CVE-2026-56692's own
     shape: the leaf says nothing about the root, so a link at the root or at any component still
     steers the bytes. Every lexical helper returns a string its caller must still open through a
@@ -843,7 +843,7 @@ def test_the_lexical_tier_does_not_launder_the_open_that_follows_it() -> None:
         assert "safe" in failures[0] and "lexical tier" in failures[0], guard
 
 
-def test_containment_gate_follows_a_path_through_the_loop_that_hands_it_out() -> None:
+def _check_containment_gate_follows_a_path_through_the_loop_that_hands_it_out() -> None:
     """A staging site is shaped `for file in files:`, so a name the iteration hands out is as much
     the caller's as the sequence it came from — a gate that lost the path at the loop would pass
     every fetch-each-produced-file site in the tree."""
@@ -860,7 +860,7 @@ def test_containment_gate_follows_a_path_through_the_loop_that_hands_it_out() ->
     assert len(failures) == 1 and "(file)" in failures[0]
 
 
-def test_containment_gate_flags_a_sandbox_program_that_checks_paths_itself() -> None:
+def _check_containment_gate_flags_a_sandbox_program_that_checks_paths_itself() -> None:
     """An in-sandbox program opens files on paths the model named, where a planted link needs no
     race to win. The bootstrap carries the guard into the program so it can import it."""
     trees = {INGRESS_FILE: ast.parse('READ_PROG = "import os\\nopen(sys.argv[1])\\n"\n')}
@@ -872,7 +872,7 @@ def test_containment_gate_flags_a_sandbox_program_that_checks_paths_itself() -> 
     assert gates._sandbox_program_failures(guarded) == []
 
 
-def test_containment_gate_flags_a_seventh_hand_rolled_lexical_check() -> None:
+def _check_containment_gate_flags_a_seventh_hand_rolled_lexical_check() -> None:
     """Six near-duplicate `..` checks is the census #1112 opened with, each a different subset of
     the same rule. The lexical tier is published, so a fresh one is a finding, not a fix."""
     trees = {
@@ -887,7 +887,7 @@ def test_containment_gate_flags_a_seventh_hand_rolled_lexical_check() -> None:
     assert len(failures) == 1 and "'..' in" in failures[0]
 
 
-def test_containment_gate_ignores_a_membership_test_that_is_not_about_paths() -> None:
+def _check_containment_gate_ignores_a_membership_test_that_is_not_about_paths() -> None:
     """`in` is the most common operator in the codebase; only the guard's own vocabulary is
     fenced."""
     trees = {
@@ -914,7 +914,7 @@ def _flags_tf(*keys: str) -> str:
     return "locals {\n  portal_flags = {\n    testing = {\n" + body + "    }\n  }\n}\n"
 
 
-def test_flag_gate_names_a_key_the_code_reads_and_the_environment_omits() -> None:
+def _check_flag_gate_names_a_key_the_code_reads_and_the_environment_omits() -> None:
     """The failure with no other signal: the deploy comes up, the flag service is never told about
     that key, and every workspace reads the call-site default forever."""
     failures = gates._declared_flag_failures(
@@ -924,7 +924,7 @@ def test_flag_gate_names_a_key_the_code_reads_and_the_environment_omits() -> Non
     assert any("enable-wiki-app" in failure and "omits" in failure for failure in failures)
 
 
-def test_flag_gate_names_a_key_the_environment_declares_and_nothing_reads() -> None:
+def _check_flag_gate_names_a_key_the_environment_declares_and_nothing_reads() -> None:
     """The reverse, which reads worse: an operator sets it, the dashboard says the feature moved,
     and no code ever asked."""
     failures = gates._declared_flag_failures(
@@ -934,19 +934,19 @@ def test_flag_gate_names_a_key_the_environment_declares_and_nothing_reads() -> N
     assert not [failure for failure in failures if "omits" in failure]
 
 
-def test_flag_gate_refuses_a_tombstoned_key() -> None:
+def _check_flag_gate_refuses_a_tombstoned_key() -> None:
     failures = gates._declared_flag_failures(
         {ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: _flags_tf(*_declared_keys(), "enable-usage-tab")}
     )
     assert any("tombstoned key 'enable-usage-tab'" in failure for failure in failures)
 
 
-def test_flag_gate_passes_where_the_two_lists_agree() -> None:
+def _check_flag_gate_passes_where_the_two_lists_agree() -> None:
     declared = _flags_tf(*_declared_keys())
     assert gates._declared_flag_failures({ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: declared}) == []
 
 
-def test_flag_gate_names_an_environment_with_no_map_of_its_own() -> None:
+def _check_flag_gate_names_an_environment_with_no_map_of_its_own() -> None:
     """Each environment answers for itself: a root whose deploy reads flags and whose map is absent
     would apply nothing, and every flag in it would read its default."""
     failures = gates._declared_flag_failures(
@@ -958,7 +958,7 @@ def test_flag_gate_names_an_environment_with_no_map_of_its_own() -> None:
 CENSUS_BOARD_TF = Path("infra/envs/testing/dashboards.tf")
 
 
-def test_census_period_gate_flags_a_board_bucketing_at_the_wrong_period() -> None:
+def _check_census_period_gate_flags_a_board_bucketing_at_the_wrong_period() -> None:
     """Terraform and the census hold the same number in two languages. A bucket wider than the
     census fires counts one workspace once per tick it covers, which reads as growth rather than
     as a bug, so it has to fail here instead."""
@@ -969,13 +969,13 @@ def test_census_period_gate_flags_a_board_bucketing_at_the_wrong_period() -> Non
     assert failures and f"every {PRODUCT_CENSUS_SECONDS}s" in failures[0]
 
 
-def test_census_period_gate_allows_the_period_the_census_fires_on() -> None:
+def _check_census_period_gate_allows_the_period_the_census_fires_on() -> None:
     right = f"locals {{\n  product_census_seconds = {PRODUCT_CENSUS_SECONDS}\n}}\n"
 
     assert gates._census_period_failures({CENSUS_BOARD_TF: right}) == []
 
 
-def test_census_period_gate_flags_a_board_that_declares_no_period() -> None:
+def _check_census_period_gate_flags_a_board_that_declares_no_period() -> None:
     """A glob that matches nothing turns this gate into a no-op reporting success, which is the one
     failure a gate must not have."""
     failures = gates._census_period_failures({CENSUS_BOARD_TF: 'resource "datadog_dashboard" {}\n'})
@@ -983,14 +983,14 @@ def test_census_period_gate_flags_a_board_that_declares_no_period() -> None:
     assert failures == ["product board: no env root declares product_census_seconds"]
 
 
-def test_layering_gate_rejects_a_host_import_from_runtime_or_harness() -> None:
+def _check_layering_gate_rejects_a_host_import_from_runtime_or_harness() -> None:
     tree = ast.parse("from ufo.host.ext.loader import turn_tools\n")
     for rel in (Path("core/src/ufo/runtime/queue.py"), Path("core/src/ufo/harness/agent.py")):
         failures = gates._layering_failures({rel: tree})
         assert len(failures) == 1 and "composition root" in failures[0]
 
 
-def test_layering_gate_allows_the_named_boot_modules_and_the_host_itself() -> None:
+def _check_layering_gate_allows_the_named_boot_modules_and_the_host_itself() -> None:
     tree = ast.parse("from ufo.host.ext.loader import load_manifests\n")
     trees = {
         Path("core/src/ufo/harness/sandbox/ingress_serve.py"): tree,
@@ -998,3 +998,99 @@ def test_layering_gate_allows_the_named_boot_modules_and_the_host_itself() -> No
         Path("core/src/ufo/serve.py"): tree,
     }
     assert gates._layering_failures(trees) == []
+
+
+def test_repository_gates() -> None:
+    for check in (
+        _check_the_gate_walk_skips_vendored_dependency_trees,
+        _check_sdk_only_gate_rejects_core_internal_import_from_extensions,
+        _check_sdk_only_gate_rejects_bare_ufo_import_from_extensions,
+        _check_sdk_only_gate_allows_sdk_import_from_extensions,
+        _check_sdk_only_gate_ignores_core_internal_imports,
+        _check_sdk_only_gate_exempts_extension_test_scaffold,
+        _check_sdk_only_gate_still_binds_the_shipped_extension_package,
+        _check_engine_core_gate_rejects_runtime_and_host_dependencies,
+        _check_engine_core_gate_allows_standard_library_and_other_core_modules,
+        _check_engine_core_gate_ignores_files_outside_the_core,
+        _check_core_layout_gate_requires_a_source_or_test_owner,
+        _check_conformance_gate_flags_a_manifest_point_the_sample_drops,
+        _check_skills_gate_passes_for_the_shipped_core_skills,
+        _check_skills_gate_flags_a_skill_outside_the_fixed_set,
+        _check_skills_gate_flags_a_missing_core_skill,
+        _check_app_bundle_gate_passes_for_the_apps_this_repo_ships,
+        _check_app_bundle_gate_flags_a_home_skill_named_for_another_slug,
+        _check_app_bundle_gate_flags_an_app_the_bundle_never_names,
+        _check_app_bundle_gate_flags_a_built_page_with_no_entry_document,
+        _check_app_bundle_gate_flags_a_bundle_entry_no_extension_ships,
+        _check_app_bundle_gate_flags_a_slug_the_homepage_read_cannot_key,
+        _check_app_rebuild_gate_passes_for_the_home_skills_this_repo_ships,
+        _check_app_bundle_gate_flags_a_page_the_typecheck_never_reads,
+        _check_skill_boundary_gate_flags_a_script_importing_ufo,
+        _check_skill_boundary_gate_allows_stdlib_and_third_party_imports,
+        _check_naming_gate_flags_a_dash_in_a_registered_name,
+        _check_naming_gate_passes_on_the_installed_tree,
+        _check_skill_content_is_held_out_of_the_code_gates,
+        _check_migration_gate_allows_one_core_merge_head,
+        _check_migration_gate_checks_every_merge_parent,
+        _check_migration_gate_rejects_cross_owner_merge_parents,
+        _check_migration_gate_still_rejects_multiple_heads_with_a_merge,
+        _check_migration_gate_rejects_a_new_core_revision_that_is_not_a_stamp,
+        _check_migration_gate_grandfathers_the_ids_that_predate_the_stamp_rule,
+        _check_migration_gate_leaves_an_extension_family_to_its_own_ids,
+        _check_job_selector_gate_rejects_a_jobspec_without_candidates,
+        _check_job_selector_gate_rejects_a_none_selector,
+        _check_job_selector_gate_allows_a_declared_selector,
+        _check_schedule_authority_gate_rejects_explicit_agent_selection,
+        _check_schedule_authority_gate_refuses_a_store_it_cannot_find,
+        _check_schedule_authority_gate_allows_ambient_agent_selection,
+        _check_execution_authority_gate_rejects_nullable_identity_in_shipped_code,
+        _check_execution_authority_gate_leaves_durable_identity_fields_alone,
+        _check_execution_authority_gate_keeps_extension_liveness_in_core,
+        _check_execution_authority_gate_allows_core_liveness_and_extension_access_reads,
+        _check_wiring_gate_counts_database_program_reads_and_writes,
+        _check_wiring_gate_does_not_count_column_declaration_as_a_write,
+        _check_set_cookie_gate_flags_raw_set_cookie_outside_the_factory,
+        _check_set_cookie_gate_exempts_the_factory_module,
+        _check_set_cookie_gate_allows_the_factory_helper_at_call_sites,
+        _check_shared_singleton_gate_flags_an_integration_declared_in_two_roots,
+        _check_shared_singleton_gate_allows_one_root,
+        _check_shared_singleton_gate_covers_the_external_id_that_pairs_with_it,
+        _check_shared_singleton_gate_covers_the_metric_tag_configuration,
+        _check_shared_singleton_gate_covers_the_metric_metadata,
+        _check_shared_singleton_gate_covers_the_dashboard,
+        _check_env_terraform_reaches_every_environment_root,
+        _check_shared_singleton_gate_allows_two_files_in_one_root,
+        _check_portal_style_gate_reaches_the_source_it_judges,
+        _check_palette_gate_matches_the_aa_safe_portal_secondary_step,
+        _check_portal_style_gate_names_a_missing_source_rather_than_passing,
+        _check_portal_style_gate_refuses_a_stylesheet_a_single_quoted_import_hides,
+        _check_portal_style_gate_holds_an_app_page_to_the_portal_rules,
+        _check_portal_style_gate_refuses_a_raw_value_a_bracket_class_smuggles,
+        _check_portal_style_gate_reads_a_pages_own_data_as_data,
+        _check_portal_style_gate_refuses_the_long_spelling_of_a_class_that_has_a_short_one,
+        _check_containment_gate_flags_a_new_ingress_that_opens_what_it_was_handed,
+        _check_containment_gate_passes_a_site_that_goes_through_the_guard,
+        _check_containment_gate_leaves_a_path_the_module_fixed_itself_alone,
+        _check_containment_gate_exempts_the_guard_itself_and_the_test_scaffold,
+        _check_containment_gate_honours_the_deferred_row_allowlist,
+        _check_containment_gate_reads_a_core_module_that_opens_a_handed_path,
+        _check_containment_gate_does_not_let_one_guarded_call_launder_a_function,
+        _check_containment_gate_proves_a_call_that_takes_the_guard_result_itself,
+        _check_the_lexical_only_guard_is_not_in_the_guard_vocabulary,
+        _check_the_lexical_tier_does_not_launder_the_open_that_follows_it,
+        _check_containment_gate_follows_a_path_through_the_loop_that_hands_it_out,
+        _check_containment_gate_flags_a_sandbox_program_that_checks_paths_itself,
+        _check_containment_gate_flags_a_seventh_hand_rolled_lexical_check,
+        _check_containment_gate_ignores_a_membership_test_that_is_not_about_paths,
+        _check_flag_gate_names_a_key_the_code_reads_and_the_environment_omits,
+        _check_flag_gate_names_a_key_the_environment_declares_and_nothing_reads,
+        _check_flag_gate_refuses_a_tombstoned_key,
+        _check_flag_gate_passes_where_the_two_lists_agree,
+        _check_flag_gate_names_an_environment_with_no_map_of_its_own,
+        _check_census_period_gate_flags_a_board_bucketing_at_the_wrong_period,
+        _check_census_period_gate_allows_the_period_the_census_fires_on,
+        _check_census_period_gate_flags_a_board_that_declares_no_period,
+        _check_layering_gate_rejects_a_host_import_from_runtime_or_harness,
+        _check_layering_gate_allows_the_named_boot_modules_and_the_host_itself,
+    ):
+        check()

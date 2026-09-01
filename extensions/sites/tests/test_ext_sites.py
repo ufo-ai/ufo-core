@@ -1,7 +1,6 @@
 import asyncio
 import json
 import re
-import shlex
 import subprocess
 import sys
 from base64 import urlsafe_b64decode, urlsafe_b64encode
@@ -19,18 +18,15 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
 from ufo_ext_sites import manifest as sites_manifest
-from ufo_ext_sites import share_card
 from ufo_ext_sites import tools as sites_tools
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
-    APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
     APPLICATION_DESIGN_FOLD,
     APPLICATION_DESIGN_MAX_HEIGHT,
     APPLICATION_REGION_MIN_AREA,
     APPLICATION_REGION_MIN_HEIGHT,
     APPLICATION_REGION_MIN_WIDTH,
-    DESIGN_REGION_FOLD_SLOP,
     DESIGN_VISIBLE_TEXT_MAX_CHARS,
     DESKTOP_WIDTH,
     KIT_QUIET_TEXT_MIN,
@@ -53,7 +49,6 @@ from ufo_ext_sites.application_audit import (
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
     APPLICATION_BUILDER_DELEGATION_TOOL,
-    APPLICATION_BUILDER_DEPLOY_GUARD_REASON,
     APPLICATION_BUILDER_DEPLOY_TOOL,
     APPLICATION_BUILDER_DESIGN_TOOL,
     APPLICATION_BUILDER_EDIT_TOOL,
@@ -80,10 +75,6 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_DESIGN_RELEASE_ACCEPTED,
     APPLICATION_DESIGN_RELEASE_CLAIM,
     APPLICATION_FIXED_CALL_CLAIM,
-    APPLICATION_INDEX,
-    APPLICATION_KIT_COMPONENTS,
-    APPLICATION_PLACEHOLDER,
-    APPLICATION_PREVIEW_SCAFFOLD,
     APPLICATION_SCAFFOLD_PATH,
     APPLICATION_SOURCE_CLAIM,
     APPLICATION_SOURCE_PATH,
@@ -95,14 +86,12 @@ from ufo_ext_sites.application_builder import (
     ApplicationBuilderResult,
     ApplicationBuilderTask,
     ApplicationSourceEdit,
-    ApplicationWireframeResult,
     BuildUfoApplicationInput,
     DesignUfoApplicationInput,
     EditApplicationSourceInput,
     ReadApplicationSourceInput,
     WriteApplicationDesignInput,
     WriteApplicationSourceInput,
-    _validate_application_design,
     _validate_application_source,
     accept_application_wireframe,
     application_design_acceptance_relative,
@@ -119,32 +108,11 @@ from ufo_ext_sites.application_builder import (
     write_application_design,
     write_application_source,
 )
-from ufo_ext_sites.delegation import BuildWebsiteInput, _build_website
+from ufo_ext_sites.delegation import BuildWebsiteInput
 from ufo_ext_sites.objects import (
     CONVERSATION_DIGEST_HEX,
-    SITE_KIND,
     site_name_from_object,
     site_object_name,
-)
-from ufo_ext_sites.share_card import (
-    BROWSER_COMMANDS,
-    CARD_HEIGHT,
-    CARD_SHOT_DRAWN,
-    CARD_TIMEOUT_SECONDS,
-    CARD_WIDTH,
-    FONT_ASSET,
-    FRAME_SECONDS,
-    LOAD_WALL_SECONDS,
-    LOGO_ASSET,
-    PANEL_WIDTH,
-    SETTLE_WALL_SECONDS,
-    SHOT_DEADLINE_SECONDS,
-    SHOT_TOKEN,
-    SHOT_WIDTH,
-    STORED_SHOT_DRAWN,
-    UNATTENDED_FLAGS,
-    card_page,
-    shot_command,
 )
 from ufo_ext_sites.store import (
     SITE_NAME_MAX,
@@ -156,18 +124,12 @@ from ufo_ext_sites.store import (
     hosted_site,
     site_name,
 )
-from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
+from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE
 from ufo_ext_sites.tools import (
     APPLICATION_AUDIT_MAX_ATTEMPTS,
-    APPLICATION_AUDIT_SCRIPT,
-    DEPLOY_LOG,
-    ENUMERATE_PROG,
     LOG_CLEAR_PROG,
     LOG_TAIL_TIMEOUT_SECONDS,
     PORT_STOP_PROG,
-    PREVIEW_HEIGHT,
-    PREVIEW_WIDTH,
-    PUBLISH_LOG,
     READINESS_TIMEOUT_SECONDS,
     SITES_TOOLS,
     TOOL_OUTPUT_DIR,
@@ -181,58 +143,35 @@ from ufo_ext_sites.tools import (
     _audit_builder_application,
     _redeploy_homepage,
     _require_current_application_qa,
-    deploy_ufo_application,
-    deploy_website,
-    publish_website,
     qa_ufo_application,
-    set_homepage,
     start_server,
     website,
 )
 
-from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.harness.models.interface import (
-    ModelEvent,
-    ModelRequest,
-    TextDelta,
-    ToolCallDelta,
-    ToolCallStart,
-    ToolResultBlock,
-    ToolUseBlock,
-)
 from ufo.harness.sandbox.session import (
-    SANDBOX_MODULE_BOOTSTRAP,
-    SANDBOX_PYTHON_FLAG,
     ExecResult,
     SandboxHandle,
 )
 from ufo.host.ext.loader import skill_registry
 from ufo.host.tools.builtins import BUILTIN_TOOLS, LoadSkillInput
-from ufo.runtime.access.connectors import ConnectorRegistry
-from ufo.runtime.compaction import Compaction
-from ufo.runtime.engine import TurnEngine
 from ufo.runtime.ext.context import ExtensionContext, context_for
-from ufo.runtime.ext.hooks import HookChain
-from ufo.runtime.hub import InProcessHub
 from ufo.runtime.media.previews import StoredPreview
 from ufo.runtime.object_name import OBJECT_NAME_MAX_LENGTH
-from ufo.runtime.object_scope import ObjectActionTarget
-from ufo.runtime.prompts.render import rendered_prompt
-from ufo.runtime.skills.runtime import install_skill
 from ufo.runtime.subagents import subagent_system_prompt
 from ufo.runtime.tools.context import SpawnResult, ToolContext
-from ufo.runtime.tools.registry import ToolRegistry
-from ufo.runtime.transcript import Transcript
-from ufo.runtime.turns.activity import ActivitySummarizer
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION, Agent, ToolIntent, Turn, Usage
+from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION, Agent, ToolIntent, Turn
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.manifest import Deny, HookContext, PreToolUse
-from ufo.sdk.objects import AGENT_KIND
 from ufo.sdk.sandbox import WORKSPACE_DIR
-from ufo.sdk.tools import ObjectBinding, TextContent, ToolResult
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "building the site"
 RUNTIME_ROOT = "/home/user/.ufo/runs/test"
@@ -722,122 +661,6 @@ def test_application_creation_route_recognizes_apps_not_sites() -> None:
         assert not is_application_creation_request(text)
 
 
-async def test_application_creation_route_requires_its_skill(tmp_path: Path) -> None:
-    base = _context(FakeSandbox(), tmp_path)
-    turn = base.turn.model_copy(
-        update={
-            "inbound": "Build an app that displays three time zones.",
-            "speaker_member_id": uuid4(),
-            "admission_source": MEMBER_ADMISSION,
-        }
-    )
-    store = FakeHookStore()
-    ext = cast(ExtensionContext, FakeHookExt(store))
-    agent = base.agent.model_copy(update={"is_main": True})
-
-    def hook(payload: PreToolUse) -> HookContext:
-        return HookContext(ext=ext, payload=payload, turn=turn, agent=agent)
-
-    refused = await enforce_application_creation_route(
-        hook(PreToolUse(tool_name="write", tool_input=BuildUfoApplicationInput()))
-    )
-    assert isinstance(refused, Deny)
-    assert refused.reason == APPLICATION_CREATION_ROUTE_REASON
-    wrong_skill = LoadSkillInput(name="website-building")
-    wrong = await enforce_application_creation_route(
-        hook(PreToolUse(tool_name="load_skill", tool_input=wrong_skill))
-    )
-    assert isinstance(wrong, Deny)
-    assert wrong.reason == APPLICATION_CREATION_ROUTE_REASON
-    load = LoadSkillInput(name="create-application")
-    assert (
-        await enforce_application_creation_route(
-            hook(PreToolUse(tool_name="load_skill", tool_input=load))
-        )
-        is None
-    )
-    assert store.values[APPLICATION_CREATION_ROUTE_KEY.format(turn_id=turn.id)] is True
-    assert (
-        await enforce_application_creation_route(
-            hook(PreToolUse(tool_name="load_skill", tool_input=wrong_skill))
-        )
-        is None
-    )
-    assert (
-        await enforce_application_creation_route(
-            hook(PreToolUse(tool_name="write", tool_input=BuildUfoApplicationInput()))
-        )
-        is None
-    )
-
-
-async def test_application_creation_route_leaves_a_prepared_intent_alone(tmp_path: Path) -> None:
-    base = _context(FakeSandbox(), tmp_path)
-    turn = base.turn.model_copy(
-        update={
-            "inbound": ToolIntent(
-                tool="object_apply",
-                input={
-                    "kind": "agent",
-                    "name": "finance-app",
-                    "spec": {"prompt": "Set up an application that files new invoices."},
-                },
-            ).model_dump_json(),
-            "speaker_member_id": uuid4(),
-            "admission_source": INTENT_ADMISSION,
-        }
-    )
-    store = FakeHookStore()
-    ext = cast(ExtensionContext, FakeHookExt(store))
-    agent = base.agent.model_copy(update={"is_main": True})
-    assert is_application_creation_request(turn.inbound)
-    payload = PreToolUse(tool_name="object_apply", tool_input=BuildUfoApplicationInput())
-    assert (
-        await enforce_application_creation_route(
-            HookContext(ext=ext, payload=payload, turn=turn, agent=agent)
-        )
-        is None
-    )
-    assert store.values == {}
-
-
-def test_hosting_writes_declare_side_effecting() -> None:
-    tools = {tool.name: tool for tool in SITES_TOOLS}
-    assert tools["deploy_website"].side_effecting is True
-    assert tools["publish_website"].side_effecting is True
-    assert tools["set_homepage"].side_effecting is True
-    assert tools["website"].side_effecting is False
-    assert tools["start_server"].side_effecting is False
-
-
-def test_site_actions_bind_to_their_objects_and_the_runtime_stays_global() -> None:
-    tools = {tool.name: tool for tool in sites_manifest.manifest().tools}
-    collection = ObjectBinding(kind=SITE_KIND, binding="collection")
-    for name in (
-        "deploy_website",
-        "publish_website",
-        "build_website",
-        APPLICATION_BUILDER_DELEGATION_TOOL,
-        APPLICATION_BUILDER_WIREFRAME_TOOL,
-    ):
-        assert tools[name].bound == collection
-        assert tools[name].canonical_id == f"action:site:{name}"
-    assert tools["set_homepage"].bound == ObjectBinding(kind=AGENT_KIND, binding="instance")
-    assert tools["set_homepage"].canonical_id == "action:agent:set_homepage"
-    for name in (
-        "website",
-        "start_server",
-        APPLICATION_BUILDER_QA_TOOL,
-        APPLICATION_BUILDER_DEPLOY_TOOL,
-        APPLICATION_BUILDER_DESIGN_TOOL,
-        APPLICATION_BUILDER_ACCEPT_DESIGN_TOOL,
-        APPLICATION_BUILDER_READ_TOOL,
-        APPLICATION_BUILDER_EDIT_TOOL,
-        APPLICATION_BUILDER_WRITE_TOOL,
-    ):
-        assert tools[name].bound is None
-
-
 @pytest.mark.parametrize(
     ("model", "payload"),
     [
@@ -885,206 +708,6 @@ def _keyed_server_task(sandbox: FakeSandbox, key: str, port: int, log: str) -> N
         f"{RUNTIME_ROOT}/{TOOL_OUTPUT_DIR}/server-tasks/"
         f"{sha256(identity.encode()).hexdigest()[:16]}"
     ]
-
-
-async def test_deploy_website_keys_its_server_task_on_the_call(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("UFO_TOKEN_SECRET", "sites-test-secret")
-    workspace_id = await _seeded_workspace()
-    listing = {"index.html": {"size": 17, "sha256": "ab" * 32}}
-    sandbox = FakeSandbox(
-        scripted_programs={ENUMERATE_PROG: ExecResult(json.dumps(listing), "", 0)}
-    )
-    base = _context(sandbox, tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={"workspace_id": workspace_id, "on_behalf_of_member_id": uuid4()}
-        ),
-        blob=WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path)),
-        idempotency_key=f"{base.turn.id}/deploy_website/call-1",
-        public_base_url="https://ufo.example.test",
-        ext=context_for("sites", frozenset()),
-    )
-
-    with ws(workspace_id):
-        result = await deploy_website(
-            ctx,
-            DeployWebsiteInput(
-                project_path="/workspace/dist", site_name="marketing", entry_point="index.html"
-            ),
-        )
-
-    payload = json.loads(result.content[0].text)
-    assert payload["site_name"] == "marketing"
-    assert ctx.idempotency_key is not None
-    log = f"{RUNTIME_ROOT}/{DEPLOY_LOG.format(port=payload['port'])}"
-    _keyed_server_task(sandbox, ctx.idempotency_key, payload["port"], log)
-
-
-async def test_publish_website_keys_its_server_task_on_the_call(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("UFO_TOKEN_SECRET", "sites-test-secret")
-    workspace_id = await _seeded_workspace()
-    sandbox = FakeSandbox()
-    base = _context(sandbox, tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={"workspace_id": workspace_id, "on_behalf_of_member_id": uuid4()}
-        ),
-        idempotency_key=f"{base.turn.id}/publish_website/call-1",
-        public_base_url="https://ufo.example.test",
-        ext=context_for("sites", frozenset()),
-    )
-
-    with ws(workspace_id):
-        result = await publish_website(
-            ctx,
-            PublishWebsiteInput(
-                project_path="/workspace/app", dist_path="/workspace/app/dist", app_name="crm"
-            ),
-        )
-
-    payload = json.loads(result.content[0].text)
-    assert payload["site_name"] == "crm"
-    assert ctx.idempotency_key is not None
-    log = f"{RUNTIME_ROOT}/{PUBLISH_LOG.format(port=payload['port'])}"
-    _keyed_server_task(sandbox, ctx.idempotency_key, payload["port"], log)
-
-
-async def test_set_homepage_repeats_cleanly_under_its_call_key(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("UFO_TOKEN_SECRET", "sites-test-secret")
-    workspace_id = uuid4()
-    member_id = uuid4()
-    now = datetime(2026, 8, 26, tzinfo=UTC)
-    sandbox = FakeSandbox()
-    base = _context(sandbox, tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(update={"workspace_id": workspace_id}),
-        speaker_member_id=member_id,
-        idempotency_key=f"{base.turn.id}/action:agent:set_homepage/call-1",
-        public_base_url="https://ufo.example.test",
-        ext=context_for("sites", frozenset()),
-        target=ObjectActionTarget(
-            kind=AGENT_KIND, name="tasks", agent=None, generation=None, expected_generation=None
-        ),
-    )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.workspace).values(id=workspace_id, created_at=now, updated_at=now)
-        )
-        await connection.execute(
-            sa.insert(tables.member).values(
-                id=member_id,
-                workspace_id=workspace_id,
-                email="owner@example.com",
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=ctx.turn.agent_id,
-                workspace_id=workspace_id,
-                name="tasks",
-                prompt="Track the team's work.",
-                model="claude-opus-4-8",
-                visibility="workspace",
-                is_main=False,
-                owner_member_id=member_id,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-
-    with ws(workspace_id):
-        site = await HostedSites(workspace_id, workspace_tx).register(
-            sandbox.conversation_id,
-            "marketing",
-            41000,
-            member_id,
-            None,
-            SHARED_AUDIENCE,
-            True,
-            manifest=None,
-        )
-        args = SetHomepageInput(site=site_object_name(site.conversation_id, site.name))
-        first = json.loads((await set_homepage(ctx, args)).content[0].text)
-        second = json.loads((await set_homepage(ctx, args)).content[0].text)
-
-    assert ctx.idempotency_key is not None
-    assert first == second
-    assert first["homepage_agent"] == str(ctx.turn.agent_id)
-    async with workspace_tx() as connection:
-        bound = (
-            (
-                await connection.execute(
-                    sa.select(hosted_site.c.homepage_agent_id).where(
-                        hosted_site.c.workspace_id == workspace_id
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert bound == [ctx.turn.agent_id]
-
-
-def test_application_audit_accepts_measured_interactive_facts() -> None:
-    report = ApplicationAuditReport.model_validate(
-        {
-            "url": "http://localhost:3000/preview.html",
-            "floor": 4.5,
-            "designRegions": AUDIT_DESIGN_REGIONS,
-            "views": [
-                {
-                    "scheme": scheme,
-                    "width": width,
-                    "textChecked": 8,
-                    "text": [],
-                    "documentWidth": width,
-                    "clipped": [],
-                    "overlaps": [],
-                    "console": [],
-                    "aboveFoldText": "Acme renewal Aug 27 #2042",
-                    "regions": AUDIT_DESIGN_REGIONS,
-                }
-                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
-                for scheme in ("light", "dark")
-            ],
-            "interaction": {
-                "controls": [
-                    {"selector": "button:nth-of-type(1)", "name": "Open brief"},
-                    {"selector": "button:nth-of-type(2)", "name": "Show risks"},
-                ],
-                "successes": [
-                    {"selector": "button:nth-of-type(1)", "name": "Open brief"},
-                    {"selector": "button:nth-of-type(2)", "name": "Show risks"},
-                ],
-                "states": [["Acme renewal", "Aug 27", "#2042"]],
-                "console": [],
-            },
-        }
-    )
-    contract = ApplicationAuditContract(
-        facts=(
-            ApplicationAuditFact(label="customer", alternatives=("Acme renewal",)),
-            ApplicationAuditFact(label="date", alternatives=("Aug 27", "August 27")),
-            ApplicationAuditFact(label="issue", alternatives=("#2042",)),
-        )
-    )
-
-    assert audit_application(report, contract).issues == ()
-    without_design = report.model_copy(update={"design_regions": ()})
-    assert {issue.code for issue in audit_application(without_design, contract).issues} == {
-        "design"
-    }
 
 
 def test_application_audit_uses_the_quiet_floor_only_for_exact_kit_slots() -> None:
@@ -1531,71 +1154,6 @@ def test_application_design_regions_do_not_cross_the_first_screen_boundary() -> 
     )
 
 
-def test_application_design_region_ending_on_the_fold_row_holds_at_every_page_height() -> None:
-    def band(page_height: int, top_row: int, rows: int) -> ApplicationAuditRegion:
-        return ApplicationAuditRegion(
-            name="queue",
-            left=0.0,
-            top=top_row / page_height,
-            width=1.0,
-            height=rows / page_height,
-        )
-
-    allowed_rows = APPLICATION_DESIGN_FOLD + DESIGN_REGION_FOLD_SLOP + 1
-    assert application_design_region_fold_failure((band(846, 32, 812),), 846) is None
-    assert application_design_region_fold_failure((band(846, 32, 813),), 846) is None
-    assert application_design_region_fold_failure((band(848, 32, 815),), 848) is None
-    assert application_design_region_fold_failure((band(848, 32, 816),), 848) == (
-        "design region queue crosses the first-screen boundary"
-    )
-
-    swept = 0
-    rounded = 0
-    for page_height in range(APPLICATION_DESIGN_FOLD + 1, APPLICATION_DESIGN_MAX_HEIGHT + 1):
-        fold = APPLICATION_DESIGN_FOLD / page_height
-        for top_row in range(0, APPLICATION_DESIGN_FOLD, 8):
-            swept += 1
-            ends_on_fold = band(page_height, top_row, APPLICATION_DESIGN_FOLD - top_row)
-            if ends_on_fold.top + ends_on_fold.height <= fold:
-                continue
-            rounded += 1
-            assert application_design_region_fold_failure((ends_on_fold,), page_height) is None
-            painted = band(page_height, top_row, APPLICATION_DESIGN_FOLD + 1 - top_row)
-            assert application_design_region_fold_failure((painted,), page_height) is None
-            if page_height <= allowed_rows:
-                continue
-            allowance = band(page_height, top_row, allowed_rows - top_row)
-            assert application_design_region_fold_failure((allowance,), page_height) is None
-            crosses = band(page_height, top_row, allowed_rows + 1 - top_row)
-            assert application_design_region_fold_failure((crosses,), page_height) == (
-                "design region queue crosses the first-screen boundary"
-            )
-
-    assert rounded > swept // 10
-
-
-def test_application_design_region_stroked_on_the_fold_row_holds() -> None:
-    def rows(page_height: int, painted_rows: int) -> ApplicationAuditRegion:
-        return ApplicationAuditRegion(
-            name="queue",
-            left=0.0,
-            top=0.0,
-            width=1.0,
-            height=painted_rows / page_height,
-            aboveFold=True,
-        )
-
-    for page_height in (848, 1050, APPLICATION_DESIGN_MAX_HEIGHT):
-        stroked = rows(page_height, APPLICATION_DESIGN_FOLD + 1)
-        assert application_design_region_fold_failure((stroked,), page_height) is None
-        allowance = rows(page_height, APPLICATION_DESIGN_FOLD + DESIGN_REGION_FOLD_SLOP + 1)
-        assert application_design_region_fold_failure((allowance,), page_height) is None
-        past = rows(page_height, APPLICATION_DESIGN_FOLD + DESIGN_REGION_FOLD_SLOP + 2)
-        assert application_design_region_fold_failure((past,), page_height) == (
-            "design region queue crosses the first-screen boundary"
-        )
-
-
 def _side_by_side_bands(page_height: int) -> tuple[dict[str, object], ...]:
     """Two 60 px bands 100 px down one page, side by side in the 305 px lane."""
     return tuple(
@@ -1680,37 +1238,6 @@ def test_application_design_keeps_side_by_side_bands_horizontal_on_a_tall_applic
     assert "design" not in {issue.code for issue in audit_application(report).issues}
 
 
-def test_application_audit_reports_the_page_height_regions_divide_by() -> None:
-    source = APPLICATION_AUDIT_SCRIPT.decode()
-
-    assert "const pageHeight = Math.max(document.documentElement.scrollHeight, " in source
-    assert (
-        "    const top = Math.max(0, Math.min(1, (box.top + window.scrollY) / pageHeight));"
-        in source
-    )
-    assert "    viewportHeight: window.innerHeight,\n    pageHeight,\n" in source
-
-
-def test_application_audit_runs_views_in_parallel_in_declared_order() -> None:
-    source = APPLICATION_AUDIT_SCRIPT.decode()
-
-    assert "await Promise.all(VIEWS.map(async (view) => {" in source
-    assert "views.push(" not in source
-    assert "waitForTimeout(700)" not in source
-    assert "waitForTimeout(300)" not in source
-    assert "waitForTimeout(100)" not in source
-    assert "waitForApplicationReady(indexFrame)" in source
-    assert "beginApplicationObservation(frame)" in source
-    assert "endApplicationObservation(frame, epoch, APPLICATION_INTERACTION_TIMEOUT_MS)" in source
-    assert "waitForApplicationInteraction(frame, stepBefore)" in source
-    assert "APPLICATION_INTERACTION_TIMEOUT_MS = 300" in source
-    assert "if (!(error instanceof ApplicationLifecycleError)" in source
-    assert "sameLifecycle(probe.before, probe.after)" in source
-    assert "finally {\n        await context.close();" in source
-    assert "if (browser) await browser.close();" in source
-    assert "await closeApplicationServer(server, sockets);" in source
-
-
 def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
     report = ApplicationAuditReport.model_validate(
         {
@@ -1767,130 +1294,6 @@ def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
     }
     assert len(verdict.issues) <= 8
     assert all(len(issue.message) <= 500 for issue in verdict.issues)
-
-
-async def test_application_builder_audit_returns_feedback_to_the_same_worker(
-    tmp_path: Path,
-) -> None:
-    def _report(issue: bool) -> str:
-        return json.dumps(
-            {
-                "views": [
-                    {
-                        "scheme": scheme,
-                        "width": width,
-                        "textChecked": 8,
-                        "text": (
-                            [
-                                {
-                                    "text": "Needs review",
-                                    "selector": "span.muted",
-                                    "px": 14,
-                                    "weight": 400,
-                                    "ratio": 3.2,
-                                    "colour": "rgb(120, 120, 120)",
-                                    "background": "rgb(255, 255, 255)",
-                                }
-                            ]
-                            if issue
-                            else []
-                        ),
-                        "documentWidth": width,
-                        "clipped": [],
-                        "overlaps": [],
-                        "console": [],
-                        "aboveFoldText": "#2042",
-                        "regions": AUDIT_DESIGN_REGIONS,
-                    }
-                    for width in (DESKTOP_WIDTH, NARROW_WIDTH)
-                    for scheme in ("light", "dark")
-                ],
-                "designRegions": AUDIT_DESIGN_REGIONS,
-                "interaction": {
-                    "controls": [
-                        {"selector": "#first", "name": "First"},
-                        {"selector": "#second", "name": "Second"},
-                    ],
-                    "successes": [
-                        {"selector": "#first", "name": "First"},
-                        {"selector": "#second", "name": "Second"},
-                    ],
-                    "states": [["#2042"]],
-                    "console": [],
-                },
-            }
-        )
-
-    contract = ApplicationAuditContract(
-        facts=(ApplicationAuditFact(label="issue", alternatives=("#2042",)),)
-    ).model_dump_json()
-    sandbox = FakeSandbox(
-        scripted_paths={
-            "/application-audit/": ExecResult(_report(True), "", 0),
-        }
-    )
-    parent_turn_id = uuid4()
-    store = FakeHookStore(
-        values={
-            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=parent_turn_id): json.loads(contract)
-        }
-    )
-    base = _context(sandbox, tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={
-                "parent_turn_id": parent_turn_id,
-                "subagent_profile": APPLICATION_BUILDER_NAME,
-            }
-        ),
-        ext=cast(ExtensionContext, FakeHookExt(store)),
-    )
-    _seed_accepted_application_design(sandbox, ctx.turn.id)
-
-    feedback = await _audit_builder_application(ctx, "/workspace/ufo-app")
-
-    key = APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id)
-    assert isinstance(feedback, ApplicationAuditFeedback)
-    assert feedback.status == "repair_required"
-    assert {issue.code for issue in feedback.issues} == {"contrast"}
-    assert feedback.issues[0].message == (
-        f'Fix text contrast: light {DESKTOP_WIDTH}px "Needs review" at span.muted '
-        "rgb(120, 120, 120) on rgb(255, 255, 255) is 3.2:1; needs 4.5:1; "
-        f'dark {DESKTOP_WIDTH}px "Needs review" at span.muted rgb(120, 120, 120) on '
-        f"rgb(255, 255, 255) is 3.2:1; needs 4.5:1; light {NARROW_WIDTH}px "
-        '"Needs review" '
-        "at span.muted rgb(120, 120, 120) on rgb(255, 255, 255) is 3.2:1; needs 4.5:1; "
-        f'dark {NARROW_WIDTH}px "Needs review" at span.muted rgb(120, 120, 120) on '
-        "rgb(255, 255, 255) is 3.2:1; needs 4.5:1."
-    )
-    assert store.values[key] == 1
-    sandbox.scripted_paths["/application-audit/"] = ExecResult(_report(False), "", 0)
-    report = await _audit_builder_application(ctx, "/workspace/ufo-app")
-    assert isinstance(report, ApplicationAuditReport)
-    audits = [entry for entry in sandbox.shells if entry[0].startswith("node ")]
-    assert len(audits) == 2
-    script_path = f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}.cjs"
-    report_path = f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}.json"
-    assert audits[0] == (
-        'node "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"',
-        (
-            script_path,
-            "/workspace/ufo-app",
-            report_path,
-            f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-light.png",
-            f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-dark.png",
-            f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-interactive.html",
-            f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-static.html",
-            f"{RUNTIME_ROOT}/"
-            f"{application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)}",
-            f"{RUNTIME_ROOT}/"
-            f"{application_design_evidence_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)}",
-        ),
-        sites_tools.APPLICATION_AUDIT_TIMEOUT_SECONDS,
-    )
-    assert sandbox.tasks == []
-    assert all(program != PORT_STOP_PROG for program, _args in sandbox.programs)
 
 
 async def test_application_builder_lifecycle_failure_keeps_audit_feedback_bytes(
@@ -1971,284 +1374,6 @@ async def test_application_builder_audit_stops_after_two_failed_attempts(
     assert sandbox.commands == []
 
 
-async def test_application_builder_deploy_requires_the_scaffold_root(tmp_path: Path) -> None:
-    sandbox = FakeSandbox()
-    base = _context(sandbox, tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match="project_path must be /workspace/ufo-app, not /workspace/ufo-app/dist",
-    ):
-        await deploy_website(
-            ctx,
-            DeployWebsiteInput(
-                project_path="/workspace/ufo-app/dist",
-                site_name="meeting-tasks",
-                entry_point="index.html",
-            ),
-        )
-
-    assert sandbox.commands == []
-    assert sandbox.programs == []
-
-
-async def test_application_deploy_tool_owns_the_fixed_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    captured: list[DeployWebsiteInput] = []
-    returned = ToolResult(content=(TextContent(text="deployed"),))
-
-    async def _deploy(_ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
-        captured.append(args)
-        return returned
-
-    monkeypatch.setattr(sites_tools, "deploy_website", _deploy)
-    base = _context(FakeSandbox(), tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
-    )
-    args = DeployUfoApplicationInput(site_name="meeting-tasks")
-
-    assert await deploy_ufo_application(ctx, args) is returned
-    assert captured == [
-        DeployWebsiteInput(
-            project_path="/workspace/ufo-app",
-            site_name="meeting-tasks",
-            entry_point="index.html",
-        )
-    ]
-    tool = next(
-        tool
-        for tool in sites_manifest.manifest().tools
-        if tool.name == APPLICATION_BUILDER_DEPLOY_TOOL
-    )
-    assert set(tool.input_model.model_json_schema()["properties"]) == {"site_name"}
-
-
-def test_website_profile_receives_the_complete_per_turn_skill_index() -> None:
-    profile = sites_manifest.manifest().subagents[0]
-    prompt = subagent_system_prompt(
-        profile, skills=(("extension-skill", "A turn-specific website workflow."),)
-    )
-    assert "{{skill_index}}" not in prompt
-    assert "<available_skills>" in prompt
-    assert "- extension-skill: A turn-specific website workflow." in prompt
-
-
-async def test_build_website_forwards_the_optional_knobs_into_the_spawn(tmp_path: Path) -> None:
-    captured: dict[str, object] = {}
-
-    async def _capture(
-        profile: str,
-        payload: dict,
-        background: bool = False,
-        dedup_key: str | None = None,
-    ) -> SpawnResult:
-        captured["profile"] = profile
-        captured["payload"] = payload
-        captured["dedup_key"] = dedup_key
-        return SpawnResult(
-            turn_id=uuid4(),
-            conversation_id=uuid4(),
-            output=WebsiteBuildingResult(result="built"),
-        )
-
-    ctx = replace(
-        _context(FakeSandbox(), tmp_path),
-        spawn=_capture,
-        idempotency_key="turn-1/build_website/call-2",
-    )
-    result = await _build_website(
-        ctx,
-        BuildWebsiteInput(
-            objective="build a landing page",
-            preload_skills=("website-building",),
-            extended_context=True,
-        ),
-    )
-    assert captured["profile"] == "profile:website_building"
-    assert captured["payload"] == {
-        "objective": "build a landing page",
-        "preload_skills": ("website-building",),
-        "extended_context": True,
-    }
-    assert captured["dedup_key"] == "turn-1/build_website/call-2"
-    assert json.loads(result.content[0].text)["result"] == "built"
-
-
-async def test_build_website_omits_the_unset_knobs(tmp_path: Path) -> None:
-    captured: dict[str, object] = {}
-
-    async def _capture(
-        profile: str,
-        payload: dict,
-        background: bool = False,
-        dedup_key: str | None = None,
-    ) -> SpawnResult:
-        captured["payload"] = payload
-        return SpawnResult(
-            turn_id=uuid4(),
-            conversation_id=uuid4(),
-            output=WebsiteBuildingResult(result="built"),
-        )
-
-    ctx = replace(_context(FakeSandbox(), tmp_path), spawn=_capture)
-    await _build_website(ctx, BuildWebsiteInput(objective="minimal"))
-    assert captured["payload"] == {"objective": "minimal"}
-
-
-def test_application_delegation_claim_publishes_one_safe_complete_key(tmp_path: Path) -> None:
-    root = tmp_path / "runtime"
-    root.mkdir()
-    target = root / "tool-output" / "application-builder" / "turn.delegated"
-    containment_dir = Path(__file__).parents[3] / "core" / "src" / "ufo" / "harness"
-
-    def claim(key: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            (
-                sys.executable,
-                "-c",
-                APPLICATION_FIXED_CALL_CLAIM,
-                str(target),
-                str(root),
-                key,
-            ),
-            cwd=containment_dir,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-
-    first = claim("turn-1/build_ufo_application/call-1")
-    same = claim("turn-1/build_ufo_application/call-1")
-    different = claim("turn-1/build_ufo_application/call-2")
-
-    assert first.returncode == 0
-    assert same.returncode == 18
-    assert different.returncode == 17
-    assert target.read_text() == "turn-1/build_ufo_application/call-1"
-    assert not tuple(target.parent.glob(".ufo-staged-*"))
-
-    target.unlink()
-    outside = tmp_path / "outside"
-    outside.write_text("outside")
-    target.symlink_to(outside)
-
-    linked = claim("turn-1/build_ufo_application/call-1")
-
-    assert linked.returncode not in (0, 17, 18)
-    assert outside.read_text() == "outside"
-
-
-async def test_build_ufo_application_uses_the_fixed_worker_contract(tmp_path: Path) -> None:
-    captured: dict[str, object] = {}
-    spawns = 0
-
-    async def _capture(
-        profile: str,
-        payload: dict,
-        background: bool = False,
-        dedup_key: str | None = None,
-    ) -> SpawnResult:
-        nonlocal spawns
-        spawns += 1
-        captured["profile"] = profile
-        captured["payload"] = payload
-        captured["dedup_key"] = dedup_key
-        return SpawnResult(
-            turn_id=uuid4(),
-            conversation_id=uuid4(),
-            output=ApplicationBuilderResult(
-                status="blocked",
-                source_path="/workspace/ufo-app/app.tsx",
-                browser_batches=0,
-                blocker="The connector is unavailable.",
-            ),
-        )
-
-    sandbox = FakeSandbox(track_design_claim=True)
-    ctx = replace(
-        _application_context(sandbox, tmp_path),
-        spawn=_capture,
-        idempotency_key="turn-1/build_ufo_application/call-2",
-        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
-    )
-    assert set(BuildUfoApplicationInput.model_fields) == set()
-    result = await build_ufo_application(
-        ctx,
-        BuildUfoApplicationInput(),
-    )
-
-    assert captured == {
-        "profile": "profile:ufo_application_builder",
-        "payload": {
-            "objective": (
-                f"Application instructions:\n{ctx.agent.prompt}\n\n"
-                f"Current request:\n{ctx.turn.inbound}"
-            ),
-            "scaffold_path": "/workspace/ufo-app",
-            "source_path": "/workspace/ufo-app/app.tsx",
-            "phase": "build",
-            "accepted_design_digest": "",
-            "preload_skills": ("ufo-style",),
-        },
-        "dedup_key": "turn-1/build_ufo_application/call-2",
-    }
-    assert sandbox.programs[0] == (
-        APPLICATION_FIXED_CALL_CLAIM,
-        (
-            f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated",
-            RUNTIME_ROOT,
-            "turn-1/build_ufo_application/call-2",
-        ),
-    )
-    returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
-    assert spawns == 1
-    assert returned.status == "blocked"
-    assert returned.blocker == "The connector is unavailable."
-
-
-async def test_build_ufo_application_creates_the_product_scaffold(tmp_path: Path) -> None:
-    async def _capture(
-        profile: str,
-        payload: dict,
-        background: bool = False,
-        dedup_key: str | None = None,
-    ) -> SpawnResult:
-        return SpawnResult(
-            turn_id=uuid4(),
-            conversation_id=uuid4(),
-            output=ApplicationBuilderResult(
-                status="blocked",
-                source_path="/workspace/ufo-app/app.tsx",
-                browser_batches=0,
-                blocker="No connector.",
-            ),
-        )
-
-    sandbox = FakeSandbox(
-        scripted_programs={APPLICATION_SOURCE_READ: ExecResult("", "not found", 1)}
-    )
-    ctx = replace(
-        _application_context(sandbox, tmp_path),
-        spawn=_capture,
-        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
-    )
-
-    await build_ufo_application(ctx, BuildUfoApplicationInput())
-
-    assert sandbox.writes == {
-        "/workspace/ufo-app/index.html": APPLICATION_INDEX,
-        "/workspace/ufo-app/app.tsx": APPLICATION_PLACEHOLDER,
-        "/workspace/ufo-app/preview.html": APPLICATION_PREVIEW_SCAFFOLD,
-    }
-
-
 async def test_build_ufo_application_keeps_the_wireframe_after_the_prompt_changes(
     tmp_path: Path,
 ) -> None:
@@ -2298,135 +1423,6 @@ async def test_build_ufo_application_keeps_the_wireframe_after_the_prompt_change
     payload = cast(dict[str, object], captured["payload"])
     assert payload["phase"] == "build"
     assert payload["accepted_design_digest"] == digest
-
-
-async def test_build_ufo_application_frees_the_wireframe_once_it_binds_the_page(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    digest = sha256(APPLICATION_DESIGN.encode()).hexdigest()
-    blocked = ApplicationBuilderResult(
-        status="blocked",
-        source_path=APPLICATION_SOURCE_PATH,
-        browser_batches=0,
-        blocker="The connector is unavailable.",
-    )
-    deployed = ApplicationBuilderResult(
-        status="deployed",
-        source_path=APPLICATION_SOURCE_PATH,
-        site_name="support-desk-homepage",
-        site_url="https://ufo.example.test/support-desk-homepage",
-        browser_batches=2,
-    )
-    worker = blocked
-    handed: list[str] = []
-
-    async def _capture(
-        profile: str,
-        payload: dict,
-        background: bool = False,
-        dedup_key: str | None = None,
-    ) -> SpawnResult:
-        handed.append(str(payload["accepted_design_digest"]))
-        return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=worker)
-
-    async def _accept(
-        _acceptance: ApplicationBuildAcceptance, result: ApplicationBuilderResult
-    ) -> ApplicationBuilderResult:
-        return result
-
-    monkeypatch.setattr(ApplicationBuildAcceptance, "accept", _accept)
-    store = FakeHookStore(
-        values={
-            "application-wireframe/support-desk": AcceptedApplicationWireframe(
-                design_digest=digest,
-                content=APPLICATION_DESIGN,
-            ).model_dump(mode="json")
-        }
-    )
-    ctx = replace(
-        _application_context(FakeSandbox(track_design_claim=True), tmp_path),
-        agent=Agent(
-            prompt="You triage support requests.",
-            model="claude-opus-4-8",
-            name="support-desk",
-        ),
-        spawn=_capture,
-        ext=cast(ExtensionContext, FakeHookExt(store)),
-    )
-
-    await build_ufo_application(ctx, BuildUfoApplicationInput())
-    assert "application-wireframe/support-desk" in store.values
-
-    worker = deployed
-    later = ctx.turn.model_copy(update={"id": uuid4()})
-    ctx = replace(ctx, turn=later, idempotency_key=f"{later.id}/build_ufo_application/call-1")
-    await build_ufo_application(ctx, BuildUfoApplicationInput())
-    assert "application-wireframe/support-desk" not in store.values
-
-    reshape = ctx.turn.model_copy(update={"id": uuid4()})
-    ctx = replace(ctx, turn=reshape, idempotency_key=f"{reshape.id}/build_ufo_application/call-1")
-    await build_ufo_application(ctx, BuildUfoApplicationInput())
-
-    assert handed == [digest, digest, ""]
-
-
-async def test_concurrent_application_requests_bind_their_own_audit_contracts(
-    tmp_path: Path,
-) -> None:
-    async def _capture(
-        profile: str,
-        payload: dict,
-        background: bool = False,
-        dedup_key: str | None = None,
-    ) -> SpawnResult:
-        return SpawnResult(
-            turn_id=uuid4(),
-            conversation_id=uuid4(),
-            output=ApplicationBuilderResult(
-                status="blocked",
-                source_path="/workspace/ufo-app/app.tsx",
-                browser_batches=0,
-                blocker="No connector.",
-            ),
-        )
-
-    first = _application_context(FakeSandbox(), tmp_path)
-    second = _application_context(FakeSandbox(), tmp_path)
-    store = FakeHookStore()
-    first = replace(
-        first,
-        turn=first.turn.model_copy(update={"inbound": "Build the first app."}),
-        spawn=_capture,
-        ext=cast(ExtensionContext, FakeHookExt(store)),
-    )
-    second = replace(
-        second,
-        turn=second.turn.model_copy(update={"inbound": "Build the second app."}),
-        spawn=_capture,
-        ext=cast(ExtensionContext, FakeHookExt(store)),
-    )
-    first_contract = {"facts": [{"label": "first", "alternatives": ["one"]}]}
-    second_contract = {"facts": [{"label": "second", "alternatives": ["two"]}]}
-    for ctx, contract in ((first, first_contract), (second, second_contract)):
-        store.values[
-            APPLICATION_AUDIT_REQUEST_CONTRACT_KEY.format(
-                request_sha256=sha256(ctx.turn.inbound.encode()).hexdigest()
-            )
-        ] = contract
-
-    await asyncio.gather(
-        build_ufo_application(first, BuildUfoApplicationInput()),
-        build_ufo_application(second, BuildUfoApplicationInput()),
-    )
-
-    assert (
-        store.values[APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=first.turn.id)]
-        == first_contract
-    )
-    assert (
-        store.values[APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=second.turn.id)]
-        == second_contract
-    )
 
 
 async def test_build_ufo_application_returns_one_blocked_result_when_the_worker_fails(
@@ -2598,104 +1594,6 @@ async def test_build_ufo_application_same_key_resumes_after_claim_publication_fa
     returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
     assert returned.status == "blocked"
     assert spawns == 1
-
-
-async def test_build_ufo_application_concurrent_same_key_uses_spawn_dedup(tmp_path: Path) -> None:
-    both_spawns = asyncio.Event()
-    release = asyncio.Event()
-    spawn_calls = 0
-    worker_starts = 0
-    worker: asyncio.Task[SpawnResult] | None = None
-
-    async def _worker() -> SpawnResult:
-        nonlocal worker_starts
-        worker_starts += 1
-        await release.wait()
-        return SpawnResult(
-            turn_id=uuid4(),
-            conversation_id=uuid4(),
-            output=ApplicationBuilderResult(
-                status="blocked",
-                source_path=APPLICATION_SOURCE_PATH,
-                browser_batches=0,
-                blocker="The connector is unavailable.",
-            ),
-        )
-
-    async def _capture(
-        profile: str,
-        payload: dict,
-        background: bool = False,
-        dedup_key: str | None = None,
-    ) -> SpawnResult:
-        nonlocal spawn_calls, worker
-        spawn_calls += 1
-        if worker is None:
-            worker = asyncio.create_task(_worker())
-        if spawn_calls == 2:
-            both_spawns.set()
-        return await asyncio.shield(worker)
-
-    ctx = replace(
-        _application_context(FakeSandbox(track_design_claim=True), tmp_path),
-        spawn=_capture,
-        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
-    )
-
-    calls = tuple(
-        asyncio.create_task(build_ufo_application(ctx, BuildUfoApplicationInput()))
-        for _ in range(2)
-    )
-    await both_spawns.wait()
-    release.set()
-    results = await asyncio.gather(*calls)
-
-    assert results[0].content == results[1].content
-    assert spawn_calls == 2
-    assert worker_starts == 1
-
-
-async def test_build_ufo_application_allows_a_new_parent_turn(tmp_path: Path) -> None:
-    spawns = 0
-
-    async def _capture(
-        profile: str,
-        payload: dict,
-        background: bool = False,
-        dedup_key: str | None = None,
-    ) -> SpawnResult:
-        nonlocal spawns
-        spawns += 1
-        return SpawnResult(
-            turn_id=uuid4(),
-            conversation_id=uuid4(),
-            output=ApplicationBuilderResult(
-                status="blocked",
-                source_path=APPLICATION_SOURCE_PATH,
-                browser_batches=0,
-                blocker="The connector is unavailable.",
-            ),
-        )
-
-    sandbox = FakeSandbox(track_design_claim=True)
-    ctx = replace(
-        _application_context(sandbox, tmp_path),
-        spawn=_capture,
-        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
-    )
-
-    await build_ufo_application(ctx, BuildUfoApplicationInput())
-    next_ctx = replace(ctx, turn=ctx.turn.model_copy(update={"id": uuid4()}))
-    await build_ufo_application(next_ctx, BuildUfoApplicationInput())
-
-    claims = [
-        args[0] for program, args in sandbox.programs if program == APPLICATION_FIXED_CALL_CLAIM
-    ]
-    assert claims == [
-        f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated",
-        f"{RUNTIME_ROOT}/tool-output/application-builder/{next_ctx.turn.id}.delegated",
-    ]
-    assert spawns == 2
 
 
 async def test_build_ufo_application_same_key_retries_after_scaffold_setup_fails(
@@ -3069,112 +1967,6 @@ async def test_application_build_acceptance_blocks_missing_qa(tmp_path: Path) ->
     assert accepted.blocker == "The worker returned no passed product QA proof."
 
 
-async def test_application_wireframe_shares_and_stores_the_builder_svg(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    sandbox = FakeSandbox()
-    shared: list[tuple[str, bytes, str | None, StoredPreview | None]] = []
-    design = APPLICATION_DESIGN.encode()
-    digest = sha256(design).hexdigest()
-    captured: dict[str, object] = {}
-
-    async def _share(
-        _ctx: ToolContext,
-        filename: str,
-        data: bytes,
-        subject: str | None = None,
-        *,
-        preview: StoredPreview | None = None,
-    ) -> None:
-        shared.append((filename, data, subject, preview))
-
-    async def _store_preview(
-        _ctx: ToolContext, path: str, name: str, *, extension: str = "png"
-    ) -> StoredPreview:
-        assert path == (
-            f"{RUNTIME_ROOT}/{APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=digest)}"
-        )
-        assert sandbox.writes[path] == sandbox.design_preview
-        assert name == f"support-desk-wireframe-{digest[:12]}-preview"
-        assert extension == "png"
-        return StoredPreview(
-            blob_key=f"artifacts/{uuid4()}/{name}.png",
-            size_bytes=len(sandbox.design_preview),
-        )
-
-    async def _capture(
-        profile: str,
-        payload: dict,
-        background: bool = False,
-        dedup_key: str | None = None,
-    ) -> SpawnResult:
-        captured["profile"] = profile
-        captured["payload"] = payload
-        captured["dedup_key"] = dedup_key
-        sandbox.writes[APPLICATION_DESIGN_PATH] = design
-        sandbox.writes[
-            f"{RUNTIME_ROOT}/{APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=digest)}"
-        ] = sandbox.design_preview
-        rejected = sha256(APPLICATION_DESIGN.replace("183", "170").encode()).hexdigest()
-        sandbox.writes[
-            f"{RUNTIME_ROOT}/{APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=rejected)}"
-        ] = b"\x89PNG rejected wireframe"
-        return SpawnResult(
-            turn_id=uuid4(),
-            conversation_id=uuid4(),
-            output=ApplicationBuilderResult(
-                status="wireframe",
-                design_path=APPLICATION_DESIGN_PATH,
-                design_digest=digest,
-                browser_batches=0,
-            ),
-        )
-
-    monkeypatch.setattr(ToolContext, "share_artifact", _share)
-    monkeypatch.setattr(ToolContext, "store_preview", _store_preview)
-    store = FakeHookStore()
-    ctx = replace(
-        _application_context(sandbox, tmp_path),
-        spawn=_capture,
-        ext=cast(ExtensionContext, FakeHookExt(store)),
-        idempotency_key="turn-1/design_ufo_application/call-1",
-    )
-    args = DesignUfoApplicationInput(
-        application_name="support-desk",
-        application_prompt="You review support requests before assignment.",
-    )
-
-    result = await design_ufo_application(ctx, args)
-
-    rendered = ApplicationWireframeResult.model_validate_json(result.content[0].text)
-    assert rendered.status == "ready"
-    assert rendered.shared_filename == f"support-desk-wireframe-{digest[:12]}.svg"
-    assert rendered.design_digest == digest
-    assert captured == {
-        "profile": "profile:ufo_application_builder",
-        "payload": {
-            "objective": (
-                "Application instructions:\nYou review support requests before assignment."
-            ),
-            "scaffold_path": APPLICATION_SCAFFOLD_PATH,
-            "source_path": APPLICATION_SOURCE_PATH,
-            "phase": "wireframe",
-            "accepted_design_digest": "",
-            "preload_skills": ("ufo-style",),
-        },
-        "dedup_key": "turn-1/design_ufo_application/call-1",
-    }
-    assert shared[0][:3] == (rendered.shared_filename, design, "Application wireframe")
-    assert shared[0][3] is not None
-    assert shared[0][3].blob_key.endswith(".png")
-    assert shared[0][3].size_bytes == len(sandbox.design_preview)
-    stored = AcceptedApplicationWireframe.model_validate(
-        store.values["application-wireframe/support-desk"]
-    )
-    assert stored.design_digest == digest
-    assert stored.content == APPLICATION_DESIGN
-
-
 async def test_wireframe_revision_replaces_the_stored_svg_only_after_share(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3246,82 +2038,6 @@ async def test_wireframe_revision_replaces_the_stored_svg_only_after_share(
     assert store.values["application-wireframe/support-desk"] == prior
 
 
-def test_application_preview_scaffold_answers_the_app_bridge() -> None:
-    assert b'message.ufo==="ready"' in APPLICATION_PREVIEW_SCAFFOLD
-    assert b'ufo:"init"' in APPLICATION_PREVIEW_SCAFFOLD
-    assert b"agents:[agent]" in APPLICATION_PREVIEW_SCAFFOLD
-    assert b'ufo:"data"' in APPLICATION_PREVIEW_SCAFFOLD
-    assert b'path.startsWith("objects/")' in APPLICATION_PREVIEW_SCAFFOLD
-    assert b"response={ok:true,name,detail:result}" in APPLICATION_PREVIEW_SCAFFOLD
-    assert b'status:{state:"applied",result:stored.result}' in APPLICATION_PREVIEW_SCAFFOLD
-
-
-def test_application_preview_scaffold_answers_object_reads_and_actions() -> None:
-    script = APPLICATION_PREVIEW_SCAFFOLD.decode().split("<script>", 1)[1].split("</script>", 1)[0]
-    program = """
-const handlers=[];
-const values=new Map();
-global.location={origin:"http://preview.test"};
-global.localStorage={
-  getItem:key=>values.get(key)||null,
-  setItem:(key,value)=>values.set(key,value)
-};
-global.window={addEventListener:(_name,handler)=>handlers.push(handler)};
-eval(process.argv[1]);
-const replies=[];
-const source={postMessage:message=>replies.push(message)};
-const send=data=>handlers[0]({data,source});
-send({ufo:"ready"});
-send({ufo:"call",id:"list",method:"GET",path:"/objects/conversation?agent=preview-agent"});
-send({ufo:"call",id:"write",method:"POST",path:"/objects/eval_app_action",body:JSON.stringify({name:"assign",spec:{owner:"Alex"}})});
-send({ufo:"call",id:"read",method:"GET",path:"/objects/eval_app_action/assign"});
-send({ufo:"call",id:"stream",method:"GET",path:"/turns/t1/stream"});
-process.stdout.write(JSON.stringify(replies));
-"""
-
-    completed = subprocess.run(
-        ("node", "-e", program, script),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    replies = json.loads(completed.stdout)
-    bodies = {reply["id"]: json.loads(reply["body"]) for reply in replies if reply["ufo"] == "data"}
-
-    assert replies[0]["ufo"] == "init"
-    assert bodies["list"]["objects"] == []
-    assert bodies["list"]["next_cursor"] is None
-    assert bodies["write"] == {
-        "ok": True,
-        "name": "assign",
-        "detail": "Prepared action accepted.",
-    }
-    assert bodies["read"]["spec"] == {"owner": "Alex"}
-    assert bodies["read"]["status"] == {
-        "state": "applied",
-        "result": "Prepared action accepted.",
-    }
-    assert [reply["ufo"] for reply in replies if reply.get("id") == "stream"] == [
-        "opened",
-        "frame",
-        "end",
-    ]
-    terminal = next(
-        reply for reply in replies if reply.get("id") == "stream" and reply["ufo"] == "frame"
-    )
-    assert terminal["event"] == "terminal"
-    assert json.loads(terminal["data"])["status"] == "done"
-
-
-def test_application_audit_excludes_hidden_text_from_contrast() -> None:
-    source = (
-        Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
-    ).read_text()
-
-    assert "if (!visible(element, box)) continue;" in source
-    assert "visuallyHidden(element, style, box)" not in source
-
-
 def test_six_maximal_design_regions_fit_the_browser_output_boundary() -> None:
     program = """
 const visibleText = String.fromCodePoint(1).repeat(Number(process.argv[1]));
@@ -3359,62 +2075,6 @@ process.stdout.write(JSON.stringify(regions));
     assert f"const DESIGN_VISIBLE_TEXT_MAX_CHARS = {DESIGN_VISIBLE_TEXT_MAX_CHARS};" in source
 
 
-def test_application_audit_returns_copy_grader_text() -> None:
-    source = (
-        Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
-    ).read_text()
-
-    returned = source.split("textUnderFloor: underFloor,", 1)[1].split("};", 1)[0]
-    assert "renderedText," in returned
-    assert "renderedParts," in returned
-    assert "aboveFoldText," in returned
-    assert "aboveFold.join" not in returned
-
-
-def test_application_audit_accepts_framed_and_direct_pages() -> None:
-    source = (
-        Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
-    ).read_text()
-
-    application_frame = source.split("async function applicationFrame(page) {", 1)[1].split(
-        "\n}", 1
-    )[0]
-    assert "await page.$" in application_frame
-    assert "if (!element) return page;" in application_frame
-    assert "await element.contentFrame()" in application_frame
-
-
-def test_application_product_audit_has_no_design_http_pass() -> None:
-    source = (
-        Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
-    ).read_text()
-
-    assert "designRegionAudit" not in source
-    assert "acceptedDesignUrl" not in source
-    assert "acceptedDesignRegions(acceptedDesignPath, acceptedEvidencePath)" in source
-    assert "design-url" not in source
-    assert (
-        "const report = { url, floor: AA_FLOOR, designHeight, designRegions, views, interaction };"
-        in source
-    )
-
-
-def test_application_page_builds_with_relative_asset_urls() -> None:
-    vite_config = (Path(sites_manifest.__file__).parent / "page" / "vite.config.ts").read_text()
-
-    assert 'base: "./"' in vite_config
-
-
-def test_website_building_indexes_the_parent_and_the_webapp_route() -> None:
-    registry = skill_registry((sites_manifest.manifest(),))
-    index = dict(registry.index())
-    assert "website-building" in index
-    assert index["website-building/webapp"].startswith(
-        "Load when building a full-stack browser application"
-    )
-    assert len(index["website-building/webapp"].split()) <= 50
-
-
 def test_website_building_parent_keeps_its_own_subdirs_but_not_the_child_subtree() -> None:
     registry = skill_registry((sites_manifest.manifest(),))
     parent_files = {path for path, _ in registry.named("website-building").files}
@@ -3422,30 +2082,6 @@ def test_website_building_parent_keeps_its_own_subdirs_but_not_the_child_subtree
     assert any(path.startswith("shared/") for path in parent_files)
     assert any(path.startswith("informational/") for path in parent_files)
     assert not any(path.startswith("webapp/") for path in parent_files)
-
-
-async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> None:
-    registry = skill_registry((sites_manifest.manifest(),))
-
-    child = registry.named("website-building/webapp")
-    assert child.name == "website-building/webapp"
-    assert child.parent == "website-building"
-
-    assert [ref.card.name for ref in registry.closure("website-building/webapp")] == [
-        "website-building/webapp",
-        "website-building",
-        HOUSE_STYLE,
-    ]
-
-    written: dict[str, bytes] = {}
-
-    for entry in await registry.materialize(registry.closure("website-building/webapp")):
-        await install_skill(_SkillSandbox(written), entry.skill)
-
-    assert "$UFO_HOME/skills/website-building/SKILL.md" in written
-    assert "$UFO_HOME/skills/website-building/webapp/SKILL.md" in written
-    assert "$UFO_HOME/skills/website-building/shared/01-design-tokens.md" in written
-    assert not any(path.startswith("$UFO_HOME/skills/website-building-") for path in written)
 
 
 def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
@@ -3589,111 +2225,6 @@ def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
         )
 
 
-async def test_application_product_qa_owns_the_fixed_root_and_records_passed_proof(
-    tmp_path: Path,
-) -> None:
-    report = json.dumps(
-        {
-            "designRegions": AUDIT_DESIGN_REGIONS,
-            "views": [
-                {
-                    "scheme": scheme,
-                    "width": width,
-                    "textChecked": 8,
-                    "text": [],
-                    "documentWidth": width,
-                    "clipped": [],
-                    "overlaps": [],
-                    "console": [],
-                    "aboveFoldText": "#2042",
-                    "regions": AUDIT_DESIGN_REGIONS,
-                }
-                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
-                for scheme in ("light", "dark")
-            ],
-            "interaction": {
-                "controls": [
-                    {"selector": "#first", "name": "First"},
-                    {"selector": "#second", "name": "Second"},
-                ],
-                "successes": [
-                    {"selector": "#first", "name": "First"},
-                    {"selector": "#second", "name": "Second"},
-                ],
-                "states": [["#2042"]],
-                "console": [],
-            },
-        }
-    )
-    source = "import { mountApp } from 'ufo/kit';\n"
-    sandbox = FakeSandbox(
-        scripted_paths={"/application-audit/": ExecResult(report, "", 0)},
-        require_application_source_root=True,
-    )
-    sandbox.writes["/workspace/ufo-app/app.tsx"] = source.encode()
-    parent_turn_id = uuid4()
-    store = FakeHookStore(
-        values={
-            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(
-                turn_id=parent_turn_id
-            ): ApplicationAuditContract(
-                facts=(ApplicationAuditFact(label="issue", alternatives=("#2042",)),)
-            ).model_dump()
-        }
-    )
-    base = _context(sandbox, tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={
-                "parent_turn_id": parent_turn_id,
-                "subagent_profile": APPLICATION_BUILDER_NAME,
-            }
-        ),
-        ext=cast(ExtensionContext, FakeHookExt(store)),
-    )
-    _seed_accepted_application_design(sandbox, ctx.turn.id)
-    result = await qa_ufo_application(
-        ctx,
-        QaUfoApplicationInput(),
-    )
-
-    payload = json.loads(result.content[0].text)
-    assert payload == {
-        "status": "passed",
-        "views_checked": [
-            f"light {DESKTOP_WIDTH}px",
-            f"dark {DESKTOP_WIDTH}px",
-            f"light {NARROW_WIDTH}px",
-            f"dark {NARROW_WIDTH}px",
-        ],
-        "controls_checked": ["First", "Second"],
-        "interactions_verified": ["First", "Second"],
-    }
-    proof = ApplicationQaProof.model_validate(
-        store.values[APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id)]
-    )
-    assert proof == ApplicationQaProof(
-        source_sha256=sha256(source.encode()).hexdigest(),
-        browser_batches=1,
-    )
-    qa_tool = next(
-        tool for tool in sites_manifest.manifest().tools if tool.name == APPLICATION_BUILDER_QA_TOOL
-    )
-    assert set(qa_tool.input_model.model_json_schema()["properties"]) == set()
-    await qa_ufo_application(ctx, QaUfoApplicationInput())
-    await qa_ufo_application(ctx, QaUfoApplicationInput())
-    proof = ApplicationQaProof.model_validate(
-        store.values[APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id)]
-    )
-    assert proof.browser_batches == 3
-    with pytest.raises(RuntimeError, match="stopped after 3 product audits"):
-        await qa_ufo_application(
-            ctx,
-            QaUfoApplicationInput(),
-        )
-
-
 async def test_application_product_qa_bounds_dense_control_evidence_before_proof(
     tmp_path: Path,
 ) -> None:
@@ -3812,30 +2343,6 @@ async def test_application_product_qa_does_not_record_its_failed_audit(
     assert store.values[APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id)] == 1
 
 
-async def test_application_builder_deployment_requires_passed_product_qa(
-    tmp_path: Path,
-) -> None:
-    ctx = _context(FakeSandbox(), tmp_path)
-    turn = ctx.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME})
-    store = FakeHookStore()
-    ext = cast(ExtensionContext, FakeHookExt(store))
-    deployment = HookContext(
-        ext=ext,
-        payload=PreToolUse(
-            tool_name=APPLICATION_BUILDER_DEPLOY_TOOL,
-            tool_input=DeployUfoApplicationInput(site_name="meeting-tasks"),
-        ),
-        turn=turn,
-    )
-    refused = await require_application_builder_qa(deployment)
-    assert isinstance(refused, Deny)
-    assert refused.reason == APPLICATION_BUILDER_DEPLOY_GUARD_REASON
-    store.values[APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=turn.id)] = ApplicationQaProof(
-        source_sha256="a" * 64, browser_batches=1
-    ).model_dump()
-    assert await require_application_builder_qa(deployment) is None
-
-
 async def test_application_builder_wireframe_phase_refuses_build_work(tmp_path: Path) -> None:
     base = _context(FakeSandbox(), tmp_path)
     task = ApplicationBuilderTask(
@@ -3870,17 +2377,6 @@ async def test_application_builder_wireframe_phase_refuses_build_work(tmp_path: 
     ):
         refused = await enforce_application_builder_phase(phase_hook(tool_name))
         assert isinstance(refused, Deny)
-
-
-def test_application_builder_prompt_states_the_wireframe_phase_contract() -> None:
-    wireframe, build = APPLICATION_BUILDER_PROFILE.prompt.split("For `build`", 1)
-
-    assert f"call `{APPLICATION_BUILDER_DESIGN_TOOL}`" in wireframe
-    assert "`status: wireframe`" in wireframe
-    assert "`design_path` and `design_digest`" in wireframe
-    assert "do not inspect connectors or write application source" in wireframe
-    assert "list_external_tools" not in wireframe
-    assert "Inspect the needed connected sources" in build
 
 
 async def test_application_deploy_accepts_only_the_exact_qa_source(tmp_path: Path) -> None:
@@ -3942,86 +2438,6 @@ async def test_application_builder_limits_consecutive_source_reads_after_audit(
         assert await limit_application_builder_repair_reads(read) is None
 
 
-async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) -> None:
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path="/workspace/application",
-        source_path="/workspace/application/app.tsx",
-    )
-    sandbox = FakeSandbox()
-    base = _context(sandbox, tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={
-                "inbound": task.model_dump_json(),
-                "subagent_profile": APPLICATION_BUILDER_NAME,
-            }
-        ),
-    )
-    ctx = _application_design_context(ctx)
-
-    result = await write_application_design(
-        ctx,
-        WriteApplicationDesignInput(
-            content=APPLICATION_DESIGN,
-        ),
-    )
-
-    payload = json.loads(result.content[0].text)
-    assert payload == {
-        "path": "/workspace/application/application-design.svg",
-        "design_digest": sha256(APPLICATION_DESIGN.encode()).hexdigest(),
-        "size_bytes": len(APPLICATION_DESIGN.encode()),
-        "page_height": APPLICATION_DESIGN_FOLD,
-        "rendered_regions": list(AUDIT_DESIGN_REGIONS),
-    }
-    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
-    accepted_evidence_path = (
-        f"{RUNTIME_ROOT}/{application_design_evidence_relative(payload['path'], ctx.turn.id)}"
-    )
-    accepted_evidence = AcceptedApplicationDesignEvidence.model_validate_json(
-        sandbox.writes[accepted_evidence_path]
-    )
-    assert accepted_evidence.design_sha256 == payload["design_digest"]
-    assert accepted_evidence.kit_components == ("Card",)
-    assert accepted_evidence.regions == tuple(
-        ApplicationAuditRegion.model_validate(region) for region in AUDIT_DESIGN_REGIONS
-    )
-    with pytest.raises(ValueError, match="SVG drawing elements only"):
-        await write_application_design(
-            ctx,
-            WriteApplicationDesignInput(
-                content='<svg viewBox="0 0 305 844" width="305" height="844">'
-                '<script>fetch("https://bad")</script></svg>',
-            ),
-        )
-    for invalid in (
-        '<svg viewBox="0 0 0 0"><rect width="1" height="1" /></svg>',
-        '<svg viewBox="not-a-box"><rect width="1" height="1" /></svg>',
-        '<svg viewBox="0 0 1280 800"><metadata>no screen</metadata></svg>',
-        '<svg viewBox="0 0 1280 800"><rect /></svg>',
-        '<svg viewBox="0 0 1280 800"><path /></svg>',
-        '<svg viewBox="0 0 1280 800"><text /></svg>',
-        '<svg viewBox="0 0 1280 800"><use /></svg>',
-    ):
-        with pytest.raises(ValueError):
-            await write_application_design(
-                replace(ctx, turn=ctx.turn.model_copy(update={"id": uuid4()})),
-                WriteApplicationDesignInput(
-                    content=invalid,
-                ),
-            )
-    with pytest.raises(ValueError, match="requires 2 to 6 unique regions"):
-        await write_application_design(
-            ctx,
-            WriteApplicationDesignInput(
-                content='<svg viewBox="0 0 305 844" width="305" height="844">'
-                '<rect width="305" height="844" /></svg>',
-            ),
-        )
-
-
 async def test_application_builder_seals_the_exact_member_wireframe(tmp_path: Path) -> None:
     digest = sha256(APPLICATION_DESIGN.encode()).hexdigest()
     task = ApplicationBuilderTask(
@@ -4052,175 +2468,6 @@ async def test_application_builder_seals_the_exact_member_wireframe(tmp_path: Pa
         f"{application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)}"
     )
     assert sandbox.writes[accepted] == APPLICATION_DESIGN.encode()
-
-
-async def test_application_builder_design_dispatch_gets_stable_call_key(
-    db: None, tmp_path: Path
-) -> None:
-    call_id = "design-call-1"
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path=APPLICATION_SCAFFOLD_PATH,
-        source_path=APPLICATION_SOURCE_PATH,
-    )
-    workspace_id, agent_id, conversation_id, turn_id, parent_turn_id = (uuid4() for _ in range(5))
-    created_at = datetime(2026, 7, 9, tzinfo=UTC)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.workspace).values(
-                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.agent).values(
-                id=agent_id,
-                workspace_id=workspace_id,
-                name=APPLICATION_BUILDER_NAME,
-                prompt="p",
-                model=APPLICATION_BUILDER_MODEL,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=conversation_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                surface="cli",
-                queue_key=uuid4().hex,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.insert(tables.turn).values(
-                id=turn_id,
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                seq=1,
-                status="queued",
-                inbound=task.model_dump_json(),
-                parent_turn_id=parent_turn_id,
-                subagent_profile=APPLICATION_BUILDER_NAME,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    turn = Turn(
-        id=turn_id,
-        workspace_id=workspace_id,
-        conversation_id=conversation_id,
-        agent_id=agent_id,
-        seq=1,
-        status="queued",
-        inbound=task.model_dump_json(),
-        parent_turn_id=parent_turn_id,
-        subagent_profile=APPLICATION_BUILDER_NAME,
-        created_at=created_at,
-    )
-
-    @dataclass(frozen=True)
-    class DesignModel:
-        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-            if any(
-                isinstance(message.content, tuple)
-                and any(isinstance(block, ToolResultBlock) for block in message.content)
-                for message in request.messages
-            ):
-                yield TextDelta(text="done")
-                yield Usage(input_tokens=1, output_tokens=1)
-                return
-            yield ToolCallStart(id=call_id, name=APPLICATION_BUILDER_DESIGN_TOOL)
-            yield ToolCallDelta(
-                id=call_id,
-                partial_json=json.dumps({"content": APPLICATION_DESIGN}),
-            )
-            yield Usage(input_tokens=1, output_tokens=1)
-
-    @dataclass(frozen=True)
-    class ActivityModel:
-        model = APPLICATION_BUILDER_MODEL
-
-        async def complete(self, request: ModelRequest) -> str:
-            return "Validating design"
-
-    class DispatchSandbox(FakeSandbox):
-        @property
-        def created(self) -> bool:
-            return False
-
-    manifest = sites_manifest.manifest()
-    design_tool = next(
-        tool for tool in manifest.tools if tool.name == APPLICATION_BUILDER_DESIGN_TOOL
-    )
-    audience = conversation_audience(None)
-    sandbox = DispatchSandbox(
-        track_design_claim=True,
-        handle=SandboxHandle(conversation_id=conversation_id, container_id="sites-test"),
-    )
-    blob = FilesystemBlobStore(root=tmp_path)
-    model = DesignModel()
-    engine = TurnEngine(
-        turn=turn,
-        agent=Agent(prompt="p", model=APPLICATION_BUILDER_MODEL),
-        byok=True,
-        system_prompt=rendered_prompt("p"),
-        model=model,
-        activity_summarizer=ActivitySummarizer(ActivityModel()),
-        provider="openrouter",
-        transcript=Transcript(blob=blob, conversation_id=conversation_id),
-        compaction=Compaction(
-            client=model,
-            model=APPLICATION_BUILDER_MODEL,
-            blob=blob,
-            conversation_id=conversation_id,
-        ),
-        hub=InProcessHub(),
-        sandbox=sandbox,
-        cdp_provider=None,
-        search_provider=None,
-        connectors=ConnectorRegistry(entries={}),
-        tools=ToolRegistry((*BUILTIN_TOOLS, design_tool)),
-        tool_ext={design_tool.name: context_for(manifest.name, frozenset(), blob=blob)},
-        hooks=HookChain(audience=audience),
-        blob=blob,
-        spawn=_unavailable_spawn,
-        audience=audience,
-        artifact_token_secret="",
-        grants=None,
-    )
-
-    with ws(workspace_id):
-        frame = await engine.run()
-
-    assert design_tool.side_effecting is True
-    assert frame is not None and frame.status == "done"
-    transcript = await engine.transcript.read()
-    assert transcript is not None
-    tool_use = next(
-        block
-        for message in transcript.messages
-        if isinstance(message.content, tuple)
-        for block in message.content
-        if isinstance(block, ToolUseBlock)
-    )
-    tool_result = next(
-        block
-        for message in transcript.messages
-        if isinstance(message.content, tuple)
-        for block in message.content
-        if isinstance(block, ToolResultBlock)
-    )
-    expected_key = f"{turn_id}/{APPLICATION_BUILDER_DESIGN_TOOL}/{call_id}"
-    assert tool_use.id == call_id
-    assert tool_result.tool_use_id == call_id
-    assert tool_result.is_error is False
-    assert isinstance(tool_result.content, str)
-    assert json.loads(tool_result.content)["rendered_regions"] == list(AUDIT_DESIGN_REGIONS)
-    (claim_identity,) = sandbox.fixed_call_claims.values()
-    assert json.loads(claim_identity)[:3] == [str(parent_turn_id), str(turn_id), expected_key]
 
 
 @pytest.mark.parametrize("crash_after_link", (1, 2))
@@ -5052,163 +3299,6 @@ async def test_application_builder_rejects_small_region_before_acceptance(tmp_pa
     assert sandbox.programs == []
 
 
-async def test_application_builder_accepts_a_compact_band_on_a_tall_page(tmp_path: Path) -> None:
-    page_height = APPLICATION_DESIGN_MAX_HEIGHT
-    band_height = 80
-    design = (
-        f'<svg viewBox="0 0 305 {page_height}" width="305" height="{page_height}">'
-        f'<g data-app-region="queue" data-kit-component="Card">'
-        f'<rect width="305" height="{band_height}" /></g>'
-        f'<g data-app-region="detail"><rect y="{APPLICATION_DESIGN_FOLD}" width="305" '
-        f'height="{page_height - APPLICATION_DESIGN_FOLD}" /></g>'
-        "</svg>"
-    )
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path=APPLICATION_SCAFFOLD_PATH,
-        source_path=APPLICATION_SOURCE_PATH,
-    )
-    sandbox = FakeSandbox()
-    base = _context(sandbox, tmp_path)
-    ctx = _application_design_context(
-        replace(
-            base,
-            turn=base.turn.model_copy(
-                update={
-                    "inbound": task.model_dump_json(),
-                    "subagent_profile": APPLICATION_BUILDER_NAME,
-                }
-            ),
-        )
-    )
-    sandbox.design_audit = ExecResult(
-        json.dumps(
-            (
-                {
-                    "name": "queue",
-                    "left": 0.0,
-                    "top": 0.0,
-                    "width": 1.0,
-                    "height": band_height / page_height,
-                    "aboveFold": True,
-                },
-                {
-                    "name": "detail",
-                    "left": 0.0,
-                    "top": APPLICATION_DESIGN_FOLD / page_height,
-                    "width": 1.0,
-                    "height": (page_height - APPLICATION_DESIGN_FOLD) / page_height,
-                    "aboveFold": False,
-                },
-            )
-        ),
-        "",
-        0,
-    )
-
-    result = await write_application_design(ctx, WriteApplicationDesignInput(content=design))
-
-    payload = json.loads(result.content[0].text)
-    assert payload["design_digest"] == sha256(design.encode()).hexdigest()
-    assert sandbox.writes[payload["path"]] == design.encode()
-
-
-async def test_application_builder_states_the_region_fold_rule_the_design_gate_enforces(
-    tmp_path: Path,
-) -> None:
-    rule = (
-        f"Keep the primary task and the required facts above y={APPLICATION_DESIGN_FOLD}, and do "
-        f"not draw one region as a band across y={APPLICATION_DESIGN_FOLD}."
-    )
-    design_paragraph = next(
-        block
-        for block in APPLICATION_BUILDER_PROFILE.prompt.split("\n\n")
-        if "data-app-region" in block
-    )
-    design_tool = next(
-        tool
-        for tool in sites_manifest.manifest().tools
-        if tool.name == APPLICATION_BUILDER_DESIGN_TOOL
-    )
-    for stated in (design_paragraph, design_tool.description):
-        assert rule in " ".join(stated.split())
-
-    page_height = 1050
-    band_height = 240
-    gap = 16
-
-    def design(detail_top: int) -> str:
-        return (
-            f'<svg viewBox="0 0 305 {page_height}" width="305" height="{page_height}">'
-            f'<g data-app-region="queue" data-kit-component="Card">'
-            f'<rect width="305" height="{band_height}" /></g>'
-            f'<g data-app-region="detail"><rect y="{detail_top}" width="305" '
-            f'height="{page_height - detail_top}" /></g>'
-            "</svg>"
-        )
-
-    def measured(detail_top: int) -> ExecResult:
-        return ExecResult(
-            json.dumps(
-                (
-                    {
-                        "name": "queue",
-                        "left": 0.0,
-                        "top": 0.0,
-                        "width": 1.0,
-                        "height": band_height / page_height,
-                        "aboveFold": True,
-                    },
-                    {
-                        "name": "detail",
-                        "left": 0.0,
-                        "top": detail_top / page_height,
-                        "width": 1.0,
-                        "height": (page_height - detail_top) / page_height,
-                        "aboveFold": detail_top < APPLICATION_DESIGN_FOLD,
-                    },
-                )
-            ),
-            "",
-            0,
-        )
-
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path=APPLICATION_SCAFFOLD_PATH,
-        source_path=APPLICATION_SOURCE_PATH,
-    )
-    sandbox = FakeSandbox()
-    base = _context(sandbox, tmp_path)
-    ctx = _application_design_context(
-        replace(
-            base,
-            turn=base.turn.model_copy(
-                update={
-                    "inbound": task.model_dump_json(),
-                    "subagent_profile": APPLICATION_BUILDER_NAME,
-                }
-            ),
-        )
-    )
-    sandbox.design_audit = measured(band_height + gap)
-
-    with pytest.raises(ValueError, match="design region detail crosses the first-screen boundary"):
-        await write_application_design(
-            ctx, WriteApplicationDesignInput(content=design(band_height + gap))
-        )
-
-    assert sandbox.workspace_writes == []
-    obedient = design(APPLICATION_DESIGN_FOLD)
-    sandbox.design_audit = measured(APPLICATION_DESIGN_FOLD)
-
-    result = await write_application_design(ctx, WriteApplicationDesignInput(content=obedient))
-
-    payload = json.loads(result.content[0].text)
-    assert payload["design_digest"] == sha256(obedient.encode()).hexdigest()
-    assert sandbox.writes[payload["path"]] == obedient.encode()
-
-
 @pytest.mark.parametrize(
     ("failed_audit", "error_type", "message"),
     (
@@ -5275,112 +3365,6 @@ async def test_application_builder_design_audit_failure_leaves_design_repairable
     assert sandbox.writes[preview_path] == sandbox.design_preview
 
 
-async def test_application_builder_accepts_one_corrected_native_design(tmp_path: Path) -> None:
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path=APPLICATION_SCAFFOLD_PATH,
-        source_path=APPLICATION_SOURCE_PATH,
-    )
-    sandbox = FakeSandbox(
-        design_audit=ExecResult(
-            "",
-            "Error: application design extends outside its viewBox: region=queue tag=text "
-            'text="Queue" edge=right overflow=12px',
-            1,
-        ),
-        track_design_claim=True,
-    )
-    base = _context(sandbox, tmp_path)
-    ctx = _application_design_context(
-        replace(
-            base,
-            turn=base.turn.model_copy(
-                update={
-                    "inbound": task.model_dump_json(),
-                    "subagent_profile": APPLICATION_BUILDER_NAME,
-                }
-            ),
-        )
-    )
-
-    with pytest.raises(ValueError, match=r"region=queue.*edge=right.*overflow=12px"):
-        await write_application_design(
-            ctx,
-            WriteApplicationDesignInput(content=APPLICATION_DESIGN),
-        )
-
-    assert sandbox.programs == []
-    assert sandbox.workspace_writes == []
-    assert not sandbox.design_claimed
-    sandbox.design_audit = ExecResult(json.dumps(AUDIT_DESIGN_REGIONS), "", 0)
-    corrected = replace(
-        ctx,
-        idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-2",
-    )
-    result = await write_application_design(
-        corrected,
-        WriteApplicationDesignInput(content=APPLICATION_DESIGN),
-    )
-
-    payload = json.loads(result.content[0].text)
-    assert payload["design_digest"] == sha256(APPLICATION_DESIGN.encode()).hexdigest()
-    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
-
-
-async def test_application_builder_accepts_one_corrected_internal_overlap_design(
-    tmp_path: Path,
-) -> None:
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path=APPLICATION_SCAFFOLD_PATH,
-        source_path=APPLICATION_SOURCE_PATH,
-    )
-    sandbox = FakeSandbox(
-        design_audit=ExecResult(
-            "",
-            "Error: application design has accidental internal overlap: "
-            'region=queue text="Suggested owner:" overlaps text="alex" by 6.5x13px',
-            1,
-        ),
-        track_design_claim=True,
-    )
-    base = _context(sandbox, tmp_path)
-    ctx = _application_design_context(
-        replace(
-            base,
-            turn=base.turn.model_copy(
-                update={
-                    "inbound": task.model_dump_json(),
-                    "subagent_profile": APPLICATION_BUILDER_NAME,
-                }
-            ),
-        )
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=r"application design has accidental internal overlap:.*Suggested owner:.*6.5x13px",
-    ):
-        await write_application_design(
-            ctx,
-            WriteApplicationDesignInput(content=APPLICATION_DESIGN),
-        )
-
-    sandbox.design_audit = ExecResult(json.dumps(AUDIT_DESIGN_REGIONS), "", 0)
-    corrected = replace(
-        ctx,
-        idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-2",
-    )
-    result = await write_application_design(
-        corrected,
-        WriteApplicationDesignInput(content=APPLICATION_DESIGN),
-    )
-
-    payload = json.loads(result.content[0].text)
-    assert payload["design_digest"] == sha256(APPLICATION_DESIGN.encode()).hexdigest()
-    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
-
-
 @pytest.mark.parametrize(
     "effect",
     (
@@ -5436,98 +3420,6 @@ async def test_application_builder_rejects_svg_effect_before_one_correction(
     assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
 
 
-def test_application_builder_design_uses_rendered_region_contract() -> None:
-    names, kit_components, page_height = _validate_application_design(
-        '<svg viewBox="0 0 305 844" width="305" height="844">'
-        '<g transform="translate(183 0)"><g data-app-region="detail" '
-        'data-kit-component="Card">'
-        '<text y="100">Detail</text></g></g>'
-        '<g data-app-region="queue"><g data-kit-component="Badge">'
-        '<use href="#card" /></g><g data-kit-component="Card" /></g>'
-        '<defs><symbol id="card"><path d="M0 0H122V844H0Z" /></symbol></defs>'
-        "</svg>"
-    )
-    first = ApplicationAuditRegion(name="queue", left=0, top=0, width=0.6, height=1, aboveFold=True)
-    within_slop = ApplicationAuditRegion(
-        name="detail", left=0.59, top=0, width=0.4, height=1, aboveFold=True
-    )
-    beyond_slop = within_slop.model_copy(update={"left": 0.579})
-
-    assert names == ("detail", "queue")
-    assert kit_components == ("Card", "Badge")
-    assert page_height == APPLICATION_DESIGN_FOLD
-    assert application_region_relation(first, within_slop) == ("horizontal", -1)
-    assert application_region_relation(first, beyond_slop) is None
-    with pytest.raises(ValueError, match="active or external content"):
-        _validate_application_design(
-            '<svg viewBox="0 0 305 844" width="305" height="844">'
-            '<g data-app-region="queue"><image href="https://example.com/a.png" '
-            'width="183" height="844" /></g>'
-            '<g data-app-region="detail"><rect x="183" width="122" height="844" /></g>'
-            "</svg>"
-        )
-    source = APPLICATION_AUDIT_SCRIPT.decode()
-    assert "await context.route(/^https?:/" in source
-
-
-def test_application_builder_design_requires_the_native_lane() -> None:
-    with pytest.raises(ValueError, match='viewBox="0 0 305 H"'):
-        _validate_application_design(
-            '<svg viewBox="0 0 1280 800" width="1280" height="800">'
-            '<g data-app-region="queue"><rect width="640" height="800" /></g>'
-            '<g data-app-region="detail"><rect x="640" width="640" height="800" /></g>'
-            "</svg>"
-        )
-
-    assert _validate_application_design(APPLICATION_DESIGN) == (
-        ("queue", "detail"),
-        ("Card",),
-        844,
-    )
-
-
-@pytest.mark.parametrize(
-    ("annotation", "message"),
-    [
-        ("", "application design requires data-kit-component on at least one SVG g element"),
-        (
-            '<g data-kit-component="" />',
-            "application design data-kit-component must name one visual ufo/kit export",
-        ),
-        (
-            '<g data-kit-component="Card Badge" />',
-            "application design data-kit-component must be one ComponentName",
-        ),
-        (
-            '<g data-kit-component=" Card" />',
-            "application design data-kit-component must be one ComponentName",
-        ),
-        (
-            '<g data-kit-component="MadeUp" />',
-            "application design data-kit-component 'MadeUp' is not a visual ufo/kit export",
-        ),
-        (
-            '<rect data-kit-component="Card" width="1" height="1" />',
-            "application design data-kit-component must be on an SVG g element",
-        ),
-    ],
-)
-def test_application_builder_design_requires_individual_kit_components(
-    annotation: str, message: str
-) -> None:
-    design = (
-        '<svg viewBox="0 0 305 844" width="305" height="844">'
-        '<g data-app-region="queue"><rect width="183" height="844" /></g>'
-        '<g data-app-region="detail"><rect x="183" width="122" height="844" /></g>'
-        f"{annotation}</svg>"
-    )
-
-    with pytest.raises(ValueError) as error:
-        _validate_application_design(design)
-
-    assert str(error.value) == message
-
-
 def test_ufo_style_uses_the_application_audit_narrow_width() -> None:
     skill = (
         Path(__file__).parents[3] / "core/src/ufo/runtime/skills/ufo-style/SKILL.md"
@@ -5575,68 +3467,6 @@ async def test_application_builder_design_is_isolated_per_build_turn(tmp_path: P
     claims = [args[4] for program, args in sandbox.programs if program == APPLICATION_DESIGN_ACCEPT]
     assert len(set(claims)) == 2
     assert b"170" in sandbox.writes["/workspace/application/application-design.svg"]
-
-
-async def test_application_builder_same_turn_accepts_the_candidate_it_audited(
-    tmp_path: Path,
-) -> None:
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path="/workspace/application",
-        source_path="/workspace/application/app.tsx",
-    )
-    first_design = APPLICATION_DESIGN
-    second_design = APPLICATION_DESIGN.replace("183", "170")
-    sandbox = FakeSandbox(
-        track_design_claim=True,
-        design_audit_barrier=asyncio.Barrier(2),
-    )
-    base = _context(sandbox, tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={
-                "inbound": task.model_dump_json(),
-                "subagent_profile": APPLICATION_BUILDER_NAME,
-            }
-        ),
-    )
-    ctx = _application_design_context(ctx)
-
-    results = await asyncio.gather(
-        write_application_design(
-            ctx,
-            WriteApplicationDesignInput(content=first_design),
-        ),
-        write_application_design(
-            ctx,
-            WriteApplicationDesignInput(content=second_design),
-        ),
-        return_exceptions=True,
-    )
-
-    assert sum(isinstance(result, ToolResult) for result in results) == 1
-    assert (
-        sum(isinstance(result, ValueError) and "already fixed" in str(result) for result in results)
-        == 1
-    )
-    candidates = {
-        path: sandbox.writes[path]
-        for path in sandbox.runtime_writes
-        if path.endswith(".candidate.svg")
-    }
-    assert len(candidates) == 2
-    assert set(candidates.values()) == {first_design.encode(), second_design.encode()}
-    assert {path for path in sandbox.writes if path.endswith(".design.png")} == {
-        f"{RUNTIME_ROOT}/"
-        + APPLICATION_DESIGN_PREVIEW_RELATIVE.format(digest=sha256(design.encode()).hexdigest())
-        for design in (first_design, second_design)
-    }
-    design_path = "/workspace/application/application-design.svg"
-    accepted_path = (
-        f"{RUNTIME_ROOT}/{application_design_acceptance_relative(design_path, ctx.turn.id)}"
-    )
-    assert sandbox.writes[accepted_path] == sandbox.writes[design_path]
 
 
 async def test_application_builder_rejected_second_design_keeps_the_accepted_preview(
@@ -5878,84 +3708,6 @@ async def test_application_qa_fails_loud_on_invalid_durable_design_evidence(
     assert sandbox.shells == []
 
 
-async def test_application_source_requires_the_svg_design(tmp_path: Path) -> None:
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path="/workspace/application",
-        source_path="/workspace/application/app.tsx",
-    )
-    base = _context(FakeSandbox(), tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={
-                "inbound": task.model_dump_json(),
-                "subagent_profile": APPLICATION_BUILDER_NAME,
-            }
-        ),
-    )
-
-    with pytest.raises(ValueError, match="write_application_design must complete"):
-        await write_application_source(
-            ctx,
-            WriteApplicationSourceInput(
-                content=(
-                    'import { mountApp } from "ufo/kit";\n'
-                    'mountApp(document.getElementById("root")!, () => <main />);'
-                ),
-            ),
-        )
-
-
-async def test_application_source_requires_this_build_turns_svg_design(tmp_path: Path) -> None:
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path="/workspace/application",
-        source_path="/workspace/application/app.tsx",
-    )
-    sandbox = FakeSandbox()
-    base = _context(sandbox, tmp_path)
-    first = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={
-                "inbound": task.model_dump_json(),
-                "subagent_profile": APPLICATION_BUILDER_NAME,
-            }
-        ),
-    )
-    first = _application_design_context(first)
-    await write_application_design(
-        first,
-        WriteApplicationDesignInput(
-            content=APPLICATION_DESIGN,
-        ),
-    )
-    second = replace(first, turn=first.turn.model_copy(update={"id": uuid4()}))
-    design_path = "/workspace/application/application-design.svg"
-    second_claim = (
-        f"{RUNTIME_ROOT}/tool-output/application-builder/"
-        f"{sha256(design_path.encode()).hexdigest()}.{second.turn.id}.claimed"
-    )
-    sandbox.scripted_paths[second_claim] = ExecResult("", "", 17)
-
-    with pytest.raises(ValueError, match="write_application_design must complete"):
-        await write_application_source(
-            second,
-            WriteApplicationSourceInput(
-                content=(
-                    'import { mountApp } from "ufo/kit";\n'
-                    'mountApp(document.getElementById("root")!, () => <main />);'
-                ),
-            ),
-        )
-
-    assert (
-        APPLICATION_SOURCE_REQUIRE_CLAIM,
-        (second_claim, RUNTIME_ROOT),
-    ) in sandbox.programs
-
-
 async def test_application_builder_write_tool_writes_only_the_contract_source(
     tmp_path: Path,
 ) -> None:
@@ -6044,78 +3796,6 @@ async def test_application_builder_write_tool_rejects_another_module(tmp_path: P
     assert [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
 
 
-async def test_application_builder_write_tool_requires_each_designed_kit_component(
-    tmp_path: Path,
-) -> None:
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path="/workspace/application",
-        source_path="/workspace/application/app.tsx",
-    )
-    sandbox = FakeSandbox()
-    _seed_application_design(sandbox)
-    ctx = _context(sandbox, tmp_path)
-    ctx = replace(
-        ctx,
-        turn=ctx.turn.model_copy(
-            update={
-                "inbound": task.model_dump_json(),
-                "subagent_profile": APPLICATION_BUILDER_NAME,
-            }
-        ),
-    )
-
-    with pytest.raises(ValueError) as error:
-        await write_application_source(
-            ctx,
-            WriteApplicationSourceInput(
-                content=(
-                    'import { Group, mountApp } from "ufo/kit";\n'
-                    'mountApp(document.getElementById("root")!, () => <Group />);'
-                )
-            ),
-        )
-
-    assert str(error.value).startswith(
-        "app.tsx must directly render designed Kit component: Card Candidate retained;"
-    )
-
-
-async def test_application_builder_write_tool_allows_apostrophes_in_jsx_text(
-    tmp_path: Path,
-) -> None:
-    task = ApplicationBuilderTask(
-        objective="Build the queue",
-        scaffold_path="/workspace/application",
-        source_path="/workspace/application/app.tsx",
-    )
-    sandbox = FakeSandbox()
-    _seed_application_design(sandbox)
-    ctx = _context(sandbox, tmp_path)
-    ctx = replace(
-        ctx,
-        turn=ctx.turn.model_copy(
-            update={
-                "inbound": task.model_dump_json(),
-                "subagent_profile": APPLICATION_BUILDER_NAME,
-            }
-        ),
-    )
-    source = (
-        'import { Card, mountApp } from "ufo/kit";\n'
-        "function App() { return <main><h1>Today's queue</h1>"
-        "<Card>Draft the brief</Card><p>Nothing's overdue</p></main>; }\n"
-        'mountApp(document.getElementById("root")!, () => <App />);'
-    )
-
-    await write_application_source(
-        ctx,
-        WriteApplicationSourceInput(content=source),
-    )
-
-    assert sandbox.writes["/workspace/application/app.tsx"] == source.encode()
-
-
 def test_application_source_rejects_literal_white_on_scheme_ink() -> None:
     source = (
         'import { Group, mountApp } from "ufo/kit";\n'
@@ -6140,22 +3820,6 @@ def _page(body: str) -> str:
     )
 
 
-def test_application_source_kit_contract_matches_three_app_evidence() -> None:
-    root = Path(__file__).parents[3]
-    kit = (root / "extensions/web/frontend/src/apps/kit.ts").read_text()
-    exports = set(re.findall(r"(?m)^  ([A-Z][A-Za-z0-9]*),$", kit.rsplit("export {", 1)[1]))
-    assert APPLICATION_KIT_COMPONENTS <= exports
-    meeting_tasks = (
-        root / "extensions/app_meetings/ufo_ext_app_meetings/skills/app-meetings-home/app.tsx"
-    )
-    _validate_application_source(meeting_tasks.read_text())
-
-    for name in ("issue-owner", "pre-meeting-briefs"):
-        source = root / f"evals/fixtures/ufo_app_qa_replay/{name}/app.tsx"
-        with pytest.raises(ValueError, match="render at least one UI component"):
-            _validate_application_source(source.read_text())
-
-
 @pytest.mark.parametrize(
     "imports",
     [
@@ -6174,32 +3838,6 @@ def test_application_source_rejects_kit_imports_without_a_rendered_component(
 
     with pytest.raises(ValueError, match="render at least one UI component"):
         _validate_application_source(source)
-
-
-def test_application_source_accepts_a_rendered_aliased_kit_component_and_hooks() -> None:
-    _validate_application_source(
-        'import { Card as MeetingCard, mountApp, useState } from "ufo/kit";\n'
-        "function App() { const [open] = useState(true); "
-        "return open ? <MeetingCard>Ready</MeetingCard> : null; }\n"
-        'mountApp(document.getElementById("root")!, () => <App />);'
-    )
-
-
-def test_application_source_renders_each_designed_kit_component_through_aliases() -> None:
-    source = (
-        'import { Badge as State, Card as Panel, mountApp } from "ufo/kit";\n'
-        "function App() { return <Panel><State>Ready</State></Panel>; }\n"
-        'mountApp(document.getElementById("root")!, () => <App />);'
-    )
-
-    _validate_application_source(source, ("Card", "Badge"))
-
-    with pytest.raises(ValueError) as error:
-        _validate_application_source(
-            source.replace("<State>Ready</State>", "Ready"), ("Card", "Badge")
-        )
-
-    assert str(error.value) == "app.tsx must directly render designed Kit component: Badge"
 
 
 def test_application_source_rejects_namespace_and_local_look_alike_components() -> None:
@@ -6248,64 +3886,6 @@ def test_application_source_rejects_a_destructured_local_kit_shadow() -> None:
 
     with pytest.raises(ValueError, match="render at least one UI component"):
         _validate_application_source(source)
-
-
-@pytest.mark.parametrize(
-    "evidence",
-    [
-        'const unused = Card; const example = "<Card />";',
-        "const unused = Card; /* <Card /> */",
-    ],
-)
-def test_application_source_does_not_count_non_jsx_component_evidence(evidence: str) -> None:
-    source = (
-        'import { Card, mountApp } from "ufo/kit";\n'
-        f"{evidence}\n"
-        'mountApp(document.getElementById("root")!, () => <main />);'
-    )
-
-    with pytest.raises(ValueError, match="render at least one UI component"):
-        _validate_application_source(source)
-
-
-@pytest.mark.parametrize(
-    ("body", "refusal"),
-    [
-        ('<p className="w-[3px]">x</p>', "names a raw value"),
-        ('<p className="text-[#676767]">x</p>', "names a raw value"),
-        ('<p className="[color:#676767]">x</p>', "names a raw value"),
-        ('<p className="flex gap-lg">x</p>', "is not a composition step"),
-        ('<p className="flex gap-px">x</p>', "is not a composition step"),
-        ('<p className="flex gap-0">x</p>', "is not a composition step"),
-        ('<p className="flex gap-4">x</p>', "is not a composition step"),
-        ('<p className="flex gap-[10px]">x</p>', "names a raw value"),
-        ('<Stat className="border border-edge">x</Stat>', "a Stat carries a border"),
-        ('<div className="space-y-2">x</div>', "stack with flex and a gap"),
-        ('<p className="dark:text-ink">x</p>', "carries itself"),
-        ("<style>{`p{color:red}`}</style>", "may not emit a <style> tag"),
-        ("<p className={`flex ${wide}`}>x</p>", "compose classes with cn()"),
-    ],
-)
-def test_application_source_holds_a_generated_page_to_the_shipped_page_rules(
-    body: str, refusal: str
-) -> None:
-    """A shipped app page is walked by `gates.py` in the repo; a generated one exists only in a
-    member's sandbox, so this validator is the one place the same rules can be true of it. Each
-    refusal is worded as the repair, because the builder's own repair loop is what reads it."""
-    with pytest.raises(ValueError, match=re.escape(refusal)):
-        _validate_application_source(_page(body))
-
-
-def test_application_source_accepts_a_page_that_follows_the_rules() -> None:
-    _validate_application_source(
-        _page('<p className="flex gap-2xl rounded-card bg-fill text-label text-ink-quiet">x</p>')
-    )
-    # The rule is the tile's own frame, not the word: a part of the stat may be bordered, and a
-    # Stat that spaces itself is what the rule asks for.
-    _validate_application_source(
-        _page('<Stat className="flex gap-sm"><StatValue>1</StatValue></Stat>')
-    )
-    _validate_application_source(_page('<StatLabel className="border-b border-edge">x</StatLabel>'))
 
 
 def test_application_source_reserves_kit_slot_ownership() -> None:
@@ -6785,106 +4365,6 @@ async def test_application_builder_read_tool_rejects_an_initial_build(tmp_path: 
     assert len(sandbox.programs) == 1
 
 
-async def test_website_building_pulls_the_house_style_and_scopes_it_to_our_own_pages() -> None:
-    """A page of ours is built in the house tokens with no second load, so the tokens mount with the
-    skill and the art-direction ladder states the exception before its first rung. A site with a
-    subject of its own, or a member who named a style, still overrides it — without that the ladder
-    below would be dead wording and every site would come out looking like the portal."""
-    registry = skill_registry((sites_manifest.manifest(),))
-    assert [ref.card.name for ref in registry.closure("website-building")] == [
-        "website-building",
-        HOUSE_STYLE,
-    ]
-
-    written: dict[str, bytes] = {}
-
-    for entry in await registry.materialize(registry.closure("website-building")):
-        await install_skill(_SkillSandbox(written), entry.skill)
-    assert f"$UFO_HOME/skills/{HOUSE_STYLE}/{HOUSE_STYLE_TOKENS}" in written
-
-    instructions = registry.named("website-building").instructions
-    assert HOUSE_STYLE in instructions
-    assert "Member-supplied design direction wins" in instructions
-
-
-def test_ufo_application_homepages_use_one_end_to_end_worker() -> None:
-    instructions = (
-        skill_registry((sites_manifest.manifest(),)).named("website-building").instructions
-    )
-    application = instructions.partition("## ufo application homepage")[2].partition(
-        "## Build and verify"
-    )[0]
-    application_text = " ".join(application.split())
-
-    assert application
-    assert PLAYWRIGHT_GUIDANCE not in application
-    assert "checks decide acceptance and bind the homepage" in application_text
-    assert "build_ufo_application(" not in application
-    assert "user_description" not in application
-    assert "worker receives the fixed scaffold and source paths" in application_text
-    assert "parent does not inspect connector data, source, or browser output" in application_text
-    assert "does not repair, deploy, verify, or delegate again" in application_text
-    assert "Deterministic product checks decide acceptance" in application_text
-    assert "no stable worker or harness rule" in application
-    assert "repair_diagnostics" not in application
-    assert "source_facts" not in application
-    assert "requirements" not in application
-    assert "Do not call `build_website`" in application
-
-
-def test_interactive_internal_homepages_route_to_the_application_workflow() -> None:
-    instructions = (
-        skill_registry((sites_manifest.manifest(),)).named("website-building").instructions
-    )
-    shape = instructions.partition("## Choose the build shape")[2].partition(
-        "For a sparse internal-page request"
-    )[0]
-
-    assert (
-        "Interactive homepage, dashboard, tracker, board, console, or operational workspace"
-        in shape
-    )
-    assert "Non-interactive internal reference page" in shape
-
-
-def test_ufo_application_qa_is_progressive_and_batches_full_proof() -> None:
-    guidance = _application_qa_guidance()
-
-    assert 'start_server(project_path="/workspace/ufo-app", port=3000)' in guidance
-    assert "open the returned URL at `/preview.html`" in guidance
-    assert 'page.frame({ name: "ufo-app" })' in guidance
-    assert "Run locators and evaluations on that" in guidance
-    assert "frame. The top page is only the product preview shell" in guidance
-    assert "Call 1 opens the page and completes every functional check" in guidance
-    assert "Call 2 completes every visual check" in guidance
-    assert "Call `emitImage` three times" in guidance
-    assert "Do not call `js_repl` a fifth time" in guidance
-    assert "separate smoke, setup" in guidance
-    assert "Never carry variables" in guidance
-    assert "Playwright objects across calls" in guidance
-    assert "console.log(JSON.stringify(out))" in guidance
-    assert "returns stdout, not the value of a final expression" in guidance
-    assert "complete defect-discovery pass" in guidance
-    assert "Reserve calls 3 and 4 for final repair proof" in guidance
-    assert "Do not edit after a repair-proof call" in guidance
-    assert "page default timeout to 5 seconds" in guidance
-    assert "accessible role and name" in guidance
-    assert "guessed CSS selector" in guidance
-    assert "every accessible control" in guidance
-    assert "light and dark" in guidance
-    assert "initial, hover, focus" in guidance
-    assert "phone width" in guidance
-    assert "Measure every visible text node" in guidance
-    assert "for contrast in light and dark modes" in guidance
-    assert "console errors" in guidance
-    assert "Do not use one call per control" in guidance
-    assert Path(PLAYWRIGHT_GUIDANCE).name in guidance
-    assert "--remote-debugging-port" in guidance
-    assert "background=true" in guidance
-    assert "connectOverCDP" in guidance
-    assert "browser.close()" in guidance
-
-
 def test_start_server_schema_makes_the_static_path_the_default() -> None:
     schema = StartServerInput.model_json_schema()
 
@@ -6934,13 +4414,6 @@ def test_the_website_building_profile_names_only_meaningful_tools() -> None:
     assert WEBSITE_BUILDING_PROFILE.max_rounds == 100
 
 
-def test_the_website_building_profile_uses_the_shared_finish_contract() -> None:
-    prompt = subagent_system_prompt(WEBSITE_BUILDING_PROFILE)
-    assert "A delivery crosses an agent boundary" in prompt
-    assert "call `finish` directly" not in WEBSITE_BUILDING_PROFILE.prompt
-    assert "End the turn by calling the `finish` tool" in prompt
-
-
 def test_the_playwright_guidance_keeps_the_browser_outside_the_cell() -> None:
     """`js_repl` runs one `node` process per call and returns only when that process exits, so a
     browser held open for the next cell keeps the process on the event loop until the budget expires
@@ -6955,74 +4428,6 @@ def test_the_playwright_guidance_keeps_the_browser_outside_the_cell() -> None:
     assert "keep the handles alive" not in lowered
     assert "handles alive across" not in lowered
     assert "bootstrap" not in lowered, "the bootstrap cell is the timeout this guidance replaced"
-
-
-def test_the_qa_guidance_starts_a_browser_that_touches_no_keychain() -> None:
-    for guidance in (_playwright_guidance(), _application_qa_guidance()):
-        launch = next(
-            block
-            for block in re.findall(r"```\n(.*?)```", guidance, re.S)
-            if "--headless=new" in block
-        )
-        for text in (
-            "--use-mock-keychain",
-            "--password-store=basic",
-            'PROFILE="$(mktemp -d /tmp/ufo-chrome-qa.XXXXXX)"',
-            "trap 'rm -rf \"$PROFILE\"' EXIT INT TERM",
-            '--user-data-dir="$PROFILE"',
-        ):
-            assert text in launch
-        assert "/Applications" not in launch
-        assert 'if [ "$(uname -s)" = Linux ]; then CONTAINED=' in launch
-        assert "--password-store=basic $CONTAINED" in launch
-
-
-def test_every_playwright_example_cell_can_exit() -> None:
-    """Each example is a cell the model runs verbatim, so a connect with no matching close is a
-    documented deadline loss. The close sits in `finally`, so a check that throws still exits."""
-    cells = [cell for cell in JS_CELL.findall(_playwright_guidance()) if "connectOverCDP" in cell]
-    assert len(cells) >= 3
-    for cell in cells:
-        assert "browser.close()" in cell
-        assert "} finally {" in cell
-
-
-def test_the_playwright_signoff_gates_a_visual_claim_on_a_screenshot() -> None:
-    """A turn whose every browser call failed still reported "Verified at desktop and phone widths".
-    Signoff names the evidence a visual claim rests on, and names what the reply must say when that
-    evidence does not exist."""
-    signoff = _playwright_guidance().split("### Signoff", 1)[1].split("\n## ", 1)[0]
-    assert "At least one screenshot came back successfully" in signoff
-    assert "exit_code: 0" in signoff
-    assert "make no visual claim" in signoff
-    assert "visual verification was skipped" in signoff
-
-
-def test_the_website_building_prompt_gates_a_visual_claim_on_a_screenshot() -> None:
-    """The child's result is what the parent repeats to the member, so the same gate has to hold in
-    the profile prompt: the skill file only binds a child that read it."""
-    prompt = WEBSITE_BUILDING_PROFILE.prompt
-    assert "connects to Chromium over CDP" in prompt
-    assert "exit_code: 0" in prompt
-    assert "visual verification was skipped" in prompt
-
-
-async def test_website_builds_and_lists_the_output(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(
-        scripted={"ls -1A": ExecResult(stdout="index.html\nstyle.css\n", stderr="", exit_code=0)}
-    )
-    ctx = _context(sandbox, tmp_path)
-    result = await website(
-        ctx,
-        WebsiteInput(
-            run_command="npm run build",
-            project_path="/workspace/site",
-        ),
-    )
-    payload = json.loads(result.content[0].text)
-    assert payload["project_path"] == "/workspace/site"
-    assert payload["files"] == ["index.html", "style.css"]
-    assert any("npm run build" in command for command in sandbox.commands)
 
 
 async def test_website_build_failure_fails_loud(tmp_path: Path) -> None:
@@ -7079,24 +4484,6 @@ async def test_start_server_stops_its_task_when_readiness_fails(tmp_path: Path) 
     ]
 
 
-async def test_a_second_start_in_one_turn_starts_its_own_server(tmp_path: Path) -> None:
-    """One turn starts a server on the same port and log more than once — three product audits are
-    permitted, and each one starts the audit server again — so the task identity repeats by design.
-    `ufo run --task` reattaches to a journal that holds a pid and launches nothing, and the port is
-    free by then, so the second start serves only because the journal it lands on is cleared."""
-    sandbox = JournalSandbox()
-    ctx = _context(sandbox, tmp_path)
-    args = StartServerInput(command="python3 app.py", project_path="/workspace", port=5173)
-
-    first = json.loads((await start_server(ctx, args)).content[0].text)
-    second = json.loads((await start_server(ctx, args)).content[0].text)
-
-    base = sandbox.tasks[0][1]
-    assert [task[1] for task in sandbox.tasks] == [base, base]
-    assert sandbox.launches == [base, base]
-    assert first["url"] == second["url"] == "http://localhost:5173"
-
-
 async def test_start_server_serves_a_static_folder_without_a_command(tmp_path: Path) -> None:
     sandbox = FakeSandbox()
     ctx = _context(sandbox, tmp_path)
@@ -7123,26 +4510,6 @@ async def test_start_server_serves_a_static_folder_without_a_command(tmp_path: P
             READINESS_TIMEOUT_SECONDS + 5,
         )
     ]
-
-
-async def test_application_builder_start_server_returns_the_framed_preview(tmp_path: Path) -> None:
-    sandbox = FakeSandbox()
-    base = _context(sandbox, tmp_path)
-    ctx = replace(
-        base,
-        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
-    )
-
-    result = await start_server(
-        ctx,
-        StartServerInput(
-            project_path="/workspace/ufo-app",
-            port=5173,
-        ),
-    )
-
-    payload = json.loads(result.content[0].text)
-    assert payload["url"] == "http://localhost:5173/preview.html"
 
 
 async def test_application_builder_start_server_rejects_an_alternate_server(tmp_path: Path) -> None:
@@ -7269,34 +4636,6 @@ async def test_a_server_log_defaults_into_the_runs_own_offload_dir(tmp_path: Pat
     assert "exec env PORT=5173 bash -lc" in launch[:redirect]
 
 
-async def test_the_log_name_is_freed_through_the_guard_before_the_redirect_creates_it(
-    tmp_path: Path,
-) -> None:
-    """`exec … >log` follows a link and truncates what it points at, and the log's name is a
-    predictable one in a directory the agent writes. So the name is emptied through the containment
-    guard first and the redirect runs under `set -C`, which creates the file `O_CREAT|O_EXCL`: a
-    link replanted between the two commands fails the launch rather than steering it. A clear the
-    guard refuses stops the launch instead of running the redirect anyway."""
-    sandbox = FakeSandbox(
-        claim=ExecResult(stdout="", stderr="log.txt is not a regular file", exit_code=1)
-    )
-    ctx = _context(sandbox, tmp_path)
-
-    with pytest.raises(RuntimeError, match="not a regular file"):
-        await start_server(
-            ctx,
-            StartServerInput(
-                command="python3 app.py",
-                project_path="/workspace",
-                log_file="log.txt",
-            ),
-        )
-
-    assert sandbox.programs == [(LOG_CLEAR_PROG, ("/workspace/log.txt", "/workspace"))]
-    assert "containment" in LOG_CLEAR_PROG
-    assert sandbox.commands == []
-
-
 def test_site_name_slugs_bounds_and_refuses_a_nameless_site() -> None:
     """The name is the site's identity, half its link, and its object name, so a name that slugs to
     nothing is refused rather than stored as one — and the bound leaves room for the conversation
@@ -7317,129 +4656,6 @@ def test_site_name_slugs_bounds_and_refuses_a_nameless_site() -> None:
             site_name(nameless)
 
 
-def test_the_card_page_carries_the_approved_composition() -> None:
-    """The card's measurements live in one page, so they are read back off it: the 1200x630 board,
-    the 456px panel and the 744px the site's page fills, the kicker above the lockup, and the name
-    at the foot clamped to two lines. The brand files ride inside the page rather than being
-    fetched, because the sandbox that draws it has no checkout and no route to the portal.
-
-    The name is the member's own text landing in markup, so the escape is asserted here too."""
-    page = card_page("Marketing <script>alert(1)</script>", CARD_SHOT_DRAWN)
-
-    assert CARD_WIDTH == PANEL_WIDTH + SHOT_WIDTH
-    assert f"width:{CARD_WIDTH}px; height:{CARD_HEIGHT}px" in page
-    assert f"width:{PANEL_WIDTH}px" in page
-    assert f"width:{SHOT_WIDTH}px" in page
-    assert ">Made with<" in page
-    assert "font-size:26px" in page and "letter-spacing:0.15em" in page
-    assert "font-size:34px" in page and "line-height:1.28" in page
-    assert "-webkit-line-clamp:2" in page
-    assert "<svg" in page and "<?xml" not in page
-    assert "data:font/woff2;base64," in page
-    assert SHOT_TOKEN in page
-    assert "<script>" not in page
-    assert "&lt;script&gt;" in page
-    # The shot is sized two ways and fitted neither: halved for a shot taken at the card's own
-    # width, at its own size for a stored page picture the box then crops.
-    assert f"width:{SHOT_WIDTH}px;height:{CARD_HEIGHT}px" in page
-    assert "width:auto;height:auto" in card_page("marketing", STORED_SHOT_DRAWN)
-
-
-def test_the_cards_brand_files_are_the_portals_own() -> None:
-    """The panel is drawn inside the sandbox, so the lockup and the face are copied into this
-    package rather than read from the portal's source tree. A copy is only honest while it stays
-    identical, so both are held byte for byte — the rule the gateway's own mark is held to."""
-    portal = Path("extensions/web/frontend/src/assets")
-    assets = Path(share_card.__file__).parent / "assets"
-
-    assert (assets / LOGO_ASSET).read_bytes() == (portal / "ufo-logo.svg").read_bytes()
-    assert (assets / FONT_ASSET).read_bytes() == (portal / "fonts" / FONT_ASSET).read_bytes()
-
-
-def test_the_shot_is_drawn_by_the_sandbox_browser_under_its_own_wall() -> None:
-    """Both shots a card costs are taken by the browser available to the sandbox and the CI runner,
-    which is the one the site's page shot is taken with, so a card costs no second renderer.
-
-    The wall is asserted with it, because nothing on the browser's command line ends a run: the
-    driver walls itself and kills the browser through its one exit. `--virtual-time-budget` is
-    asserted absent, because the capture waits for that budget and virtual time stands still while
-    any fetch is pending, so a browser carrying it draws nothing at all wherever a background
-    service holds one open.
-
-    The unattended flags ride in every run for the same reason: a runner has no keyring, no keychain
-    and no crash server, and a browser that waits on one of those spends the whole wall and draws
-    nothing."""
-    shot = f"{RUNTIME_ROOT}/tool-output/share-card-shot-marketing.png"
-    command = shot_command(
-        url="http://127.0.0.1:8000",
-        width=SHOT_WIDTH,
-        height=CARD_HEIGHT,
-        scale=2,
-        shot=shot,
-        root="/workspace",
-    )
-
-    assert f"for candidate in {shlex.join(BROWSER_COMMANDS)}; do" in command
-    assert "/Applications" not in command
-    assert "playwright" not in command
-    assert "--virtual-time-budget" not in command
-    for flag in UNATTENDED_FLAGS.split():
-        assert flag in command
-    assert "--password-store=basic" in command
-    assert "--use-mock-keychain" in command
-    assert "--disable-component-extensions-with-background-pages" in command
-    assert f"DEADLINE = {SHOT_DEADLINE_SECONDS}" in command
-    assert "timeout " not in command
-    assert SHOT_DEADLINE_SECONDS < CARD_TIMEOUT_SECONDS
-    assert f"test -s {shlex.quote(shot)}" in command
-    assert 'CONTAINED = "--no-sandbox --disable-dev-shm-usage"' in command
-    assert 'CONTAINED.split() if sys.platform.startswith("linux") else []' in command
-    assert 'profile="$(mktemp -d /tmp/ufo-share-card.XXXXXX)"' in command
-    assert "trap 'rm -rf \"$profile\"' EXIT INT TERM" in command
-
-
-def test_the_shot_is_driven_to_a_settle_point_inside_its_wall() -> None:
-    """The browser is driven rather than one-shot, because the load event is the only settle point a
-    one-shot chromium offers and it is too early: a page that reveals its content with an entrance
-    animation, or writes its DOM after load, is photographed blank there — and a blank shot is a
-    white PNG, which is not an empty file, so the size check accepts it as a picture.
-
-    So the run carries the driver: it speaks the DevTools protocol over the browser's own pipe,
-    waits for the load event and then for a frame that repeats with no request in flight, and
-    refuses a shot that is one flat colour. Every wait it takes is walled, and the two walls
-    together sit inside the kill wall, so a page that never goes idle is photographed rather than
-    waited on — the failure `--virtual-time-budget` had, which is why it is asserted absent
-    above."""
-    shot = f"{RUNTIME_ROOT}/tool-output/preview-8000.png"
-    command = shot_command(
-        url="http://127.0.0.1:8000",
-        width=PREVIEW_WIDTH,
-        height=PREVIEW_HEIGHT,
-        scale=1,
-        shot=shot,
-        root="/workspace",
-    )
-
-    assert "--screenshot=" not in command
-    assert "--remote-debugging-pipe" in command
-    assert "Page.loadEventFired" in command
-    assert "Network.enable" in command
-    assert "Page.captureScreenshot" in command
-    assert "Emulation.setDeviceMetricsOverride" in command
-    assert "flat colour" in command
-    # The driver runs isolated with the baked guard on its path, and writes the shot through the
-    # guard rather than letting the browser create a name the agent's own directory holds.
-    assert f"python3 {SANDBOX_PYTHON_FLAG} -" in command
-    assert SANDBOX_MODULE_BOOTSTRAP in command
-    assert "contained_file" in command
-    assert LOAD_WALL_SECONDS + SETTLE_WALL_SECONDS < SHOT_DEADLINE_SECONDS
-    assert f"LOAD_WALL = {LOAD_WALL_SECONDS}" in command
-    assert f"SETTLE_WALL = {SETTLE_WALL_SECONDS}" in command
-    assert f"FRAME = {FRAME_SECONDS}" in command
-    for argument in (shlex.quote(shot), '"$profile"', "/workspace"):
-        assert argument in command
-
-
 def test_start_server_rejects_an_out_of_range_port() -> None:
     with pytest.raises(ValidationError, match="between 1 and 65535"):
         StartServerInput(
@@ -7447,3 +4663,92 @@ def test_start_server_rejects_an_out_of_range_port() -> None:
             project_path="/workspace",
             port=99999,
         )
+
+
+async def test_application_creation_route_requires_its_skill(tmp_path: Path) -> None:
+    base = _context(FakeSandbox(), tmp_path)
+    turn = base.turn.model_copy(
+        update={
+            "inbound": "Build an app that displays three time zones.",
+            "speaker_member_id": uuid4(),
+            "admission_source": MEMBER_ADMISSION,
+        }
+    )
+    store = FakeHookStore()
+    ext = cast(ExtensionContext, FakeHookExt(store))
+    agent = base.agent.model_copy(update={"is_main": True})
+
+    def hook(payload: PreToolUse) -> HookContext:
+        return HookContext(ext=ext, payload=payload, turn=turn, agent=agent)
+
+    refused = await enforce_application_creation_route(
+        hook(PreToolUse(tool_name="write", tool_input=BuildUfoApplicationInput()))
+    )
+    assert isinstance(refused, Deny)
+    assert refused.reason == APPLICATION_CREATION_ROUTE_REASON
+    wrong_skill = LoadSkillInput(name="website-building")
+    wrong = await enforce_application_creation_route(
+        hook(PreToolUse(tool_name="load_skill", tool_input=wrong_skill))
+    )
+    assert isinstance(wrong, Deny)
+    assert wrong.reason == APPLICATION_CREATION_ROUTE_REASON
+    load = LoadSkillInput(name="create-application")
+    assert (
+        await enforce_application_creation_route(
+            hook(PreToolUse(tool_name="load_skill", tool_input=load))
+        )
+        is None
+    )
+    assert store.values[APPLICATION_CREATION_ROUTE_KEY.format(turn_id=turn.id)] is True
+    assert (
+        await enforce_application_creation_route(
+            hook(PreToolUse(tool_name="load_skill", tool_input=wrong_skill))
+        )
+        is None
+    )
+    assert (
+        await enforce_application_creation_route(
+            hook(PreToolUse(tool_name="write", tool_input=BuildUfoApplicationInput()))
+        )
+        is None
+    )
+
+
+async def test_application_creation_route_leaves_a_prepared_intent_alone(tmp_path: Path) -> None:
+    base = _context(FakeSandbox(), tmp_path)
+    turn = base.turn.model_copy(
+        update={
+            "inbound": ToolIntent(
+                tool="object_apply",
+                input={
+                    "kind": "agent",
+                    "name": "finance-app",
+                    "spec": {"prompt": "Set up an application that files new invoices."},
+                },
+            ).model_dump_json(),
+            "speaker_member_id": uuid4(),
+            "admission_source": INTENT_ADMISSION,
+        }
+    )
+    store = FakeHookStore()
+    ext = cast(ExtensionContext, FakeHookExt(store))
+    agent = base.agent.model_copy(update={"is_main": True})
+    assert is_application_creation_request(turn.inbound)
+    payload = PreToolUse(tool_name="object_apply", tool_input=BuildUfoApplicationInput())
+    assert (
+        await enforce_application_creation_route(
+            HookContext(ext=ext, payload=payload, turn=turn, agent=agent)
+        )
+        is None
+    )
+    assert store.values == {}
+
+
+def test_website_building_indexes_the_parent_and_the_webapp_route() -> None:
+    registry = skill_registry((sites_manifest.manifest(),))
+    index = dict(registry.index())
+    assert "website-building" in index
+    assert index["website-building/webapp"].startswith(
+        "Load when building a full-stack browser application"
+    )
+    assert len(index["website-building/webapp"].split()) <= 50

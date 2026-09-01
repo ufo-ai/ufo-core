@@ -91,7 +91,7 @@ def _platform_projections() -> dict[str, str]:
     return {item["secretKey"]: item["remoteRef"]["property"] for item in platform["spec"]["data"]}
 
 
-def test_secret_schema_matches_terraform() -> None:
+def _check_secret_schema_matches_terraform() -> None:
     """The declared properties are exactly what the cluster projects, and terraform owns no version
     of either runtime document.
 
@@ -138,7 +138,7 @@ def test_secret_schema_matches_terraform() -> None:
     assert "gateway_secret_id" not in testing_outputs
 
 
-def test_production_selects_the_redis_terminal_transport() -> None:
+def _check_production_selects_the_redis_terminal_transport() -> None:
     """The shared fleet's held connection and its turn's workflow land on different pods, so both
     hosted configs select the cross-pod terminal transport the redis_hub extension registers beside
     the redis hub — both ends, over the one Redis the hub already runs."""
@@ -150,7 +150,7 @@ def test_production_selects_the_redis_terminal_transport() -> None:
     assert any(spec.backend == "redis" for spec in manifest.terminal_transports)
 
 
-def test_configured_production_backends_receive_platform_credentials() -> None:
+def _check_configured_production_backends_receive_platform_credentials() -> None:
     config = _serve_config("prod")
     providers = (
         (config["memory"]["index_backend"], "indexes"),
@@ -187,7 +187,7 @@ def test_configured_production_backends_receive_platform_credentials() -> None:
         assert API_KEY_INPUTS[property_name] == environment_name
 
 
-def test_the_configured_flag_backend_receives_its_deploy_keys() -> None:
+def _check_the_configured_flag_backend_receives_its_deploy_keys() -> None:
     """Both hosted environments select a flag backend, and the fleet is handed every deploy key that
     backend reads — the producer of the three keys beside their consumer. A key the projection omits
     would leave serve with no provider to build, so every flagged feature would stay dark on a
@@ -203,7 +203,7 @@ def test_the_configured_flag_backend_receives_its_deploy_keys() -> None:
             assert projections[name] in FAIL_CLOSED_PROPERTIES
 
 
-def test_an_unseeded_flag_key_reads_closed_instead_of_failing_the_deploy() -> None:
+def _check_an_unseeded_flag_key_reads_closed_instead_of_failing_the_deploy() -> None:
     """A flag key nobody seeded is written as an empty string rather than refused. The cluster
     projects each one by name, so a property the document lacks would leave the ExternalSecret
     unready and time the deploy out; an empty one projects fine and serve builds no flag provider,
@@ -217,7 +217,7 @@ def test_an_unseeded_flag_key_reads_closed_instead_of_failing_the_deploy() -> No
     assert {written[name] for name in FAIL_CLOSED_PROPERTIES} == {""}
 
 
-def test_a_seeded_flag_key_is_carried_to_the_fleet() -> None:
+def _check_a_seeded_flag_key_is_carried_to_the_fleet() -> None:
     seeded = json.dumps(
         {name: f"owned-{name}" for name in sorted(API_KEYS_PROPERTIES - FAIL_CLOSED_PROPERTIES)}
         | {"cloudflare-flagship-app-id": "flagship-app-7", "cloudflare-account-id": "cf-account-42"}
@@ -231,7 +231,7 @@ def test_a_seeded_flag_key_is_carried_to_the_fleet() -> None:
     assert written["cloudflare-flagship-token"] == ""
 
 
-def test_production_secret_writes_preserve_owned_values() -> None:
+def _check_production_secret_writes_preserve_owned_values() -> None:
     writes = production_secret_writes(
         _environment(), _payload(API_KEYS_PROPERTIES), _payload(GATEWAY_PROPERTIES)
     )
@@ -274,7 +274,7 @@ def test_production_secret_writes_preserve_owned_values() -> None:
     assert all(value not in part for write in writes for value in values for part in write.command)
 
 
-def test_production_secret_writes_add_a_configured_property() -> None:
+def _check_production_secret_writes_add_a_configured_property() -> None:
     existing = json.dumps(
         {name: f"owned-{name}" for name in sorted(API_KEYS_PROPERTIES - {"perplexity-api-key"})}
         | {"unmanaged-api-key": "unmanaged-value"}
@@ -287,31 +287,27 @@ def test_production_secret_writes_add_a_configured_property() -> None:
     assert written["unmanaged-api-key"] == "unmanaged-value"
 
 
-def test_main_rejects_unknown_arguments() -> None:
+def _check_main_rejects_unknown_arguments() -> None:
     with pytest.raises(RuntimeError, match=r"usage: production_secrets\.py"):
         main(("unknown",))
 
 
-@pytest.mark.parametrize(
-    ("name", "error"),
-    (
+def test_production_secret_writes_reject_missing_inputs() -> None:
+    for name, error in (
         (DEPLOYMENT_ID_ENV, DEPLOYMENT_ID_ENV),
         (API_KEYS_SECRET_ID_ENV, API_KEYS_SECRET_ID_ENV),
         (GATEWAY_SECRET_ID_ENV, GATEWAY_SECRET_ID_ENV),
         *[(name, name) for name in API_KEY_INPUTS.values()],
-    ),
-)
-def test_production_secret_writes_reject_missing_inputs(name: str, error: str) -> None:
-    environment = _environment() | {name: ""}
-    with pytest.raises(RuntimeError, match=error):
-        production_secret_writes(
-            environment, _payload(API_KEYS_PROPERTIES), _payload(GATEWAY_PROPERTIES)
-        )
+    ):
+        environment = _environment() | {name: ""}
+        with pytest.raises(RuntimeError, match=error):
+            production_secret_writes(
+                environment, _payload(API_KEYS_PROPERTIES), _payload(GATEWAY_PROPERTIES)
+            )
 
 
-@pytest.mark.parametrize(
-    ("api_keys", "gateway", "error"),
-    (
+def test_production_secret_writes_reject_invalid_owned_values() -> None:
+    for api_keys, gateway, error in (
         (b"{}", _payload(GATEWAY_PROPERTIES), "generated/api-keys must contain every declared"),
         (_payload(API_KEYS_PROPERTIES), b"{}", "generated/gateway must contain every declared"),
         (b"not-json", _payload(GATEWAY_PROPERTIES), "generated/api-keys must contain valid JSON"),
@@ -320,13 +316,9 @@ def test_production_secret_writes_reject_missing_inputs(name: str, error: str) -
             _payload(GATEWAY_PROPERTIES),
             "generated/api-keys properties must be strings",
         ),
-    ),
-)
-def test_production_secret_writes_reject_invalid_owned_values(
-    api_keys: bytes, gateway: bytes, error: str
-) -> None:
-    with pytest.raises(RuntimeError, match=error):
-        production_secret_writes(_environment(), api_keys, gateway)
+    ):
+        with pytest.raises(RuntimeError, match=error):
+            production_secret_writes(_environment(), api_keys, gateway)
 
 
 def _stub_aws(tmp_path: Path) -> Path:
@@ -467,7 +459,7 @@ def test_main_propagates_write_failure(monkeypatch: pytest.MonkeyPatch, tmp_path
         main()
 
 
-def test_production_secret_versions_are_retry_stable_and_deployment_unique() -> None:
+def _check_production_secret_versions_are_retry_stable_and_deployment_unique() -> None:
     payloads = (_payload(API_KEYS_PROPERTIES), _payload(GATEWAY_PROPERTIES))
     first = production_secret_writes(_environment(deployment_id="run-1"), *payloads)[0]
     retry = production_secret_writes(_environment(deployment_id="run-1"), *payloads)[0]
@@ -483,7 +475,7 @@ def test_production_secret_versions_are_retry_stable_and_deployment_unique() -> 
     assert len({tokens[0], tokens[2], tokens[3]}) == 3
 
 
-def test_a_retired_property_is_carried_rather_than_wedging_the_deploy() -> None:
+def _check_a_retired_property_is_carried_rather_than_wedging_the_deploy() -> None:
     """Retiring a setting must not need two deploys or a hand-edited secret. Rejecting the extra
     would fail every deploy; dropping it would be a step too early, because the write runs before
     the terraform apply that replaces the ExternalSecret still projecting it — the forced re-sync
@@ -500,7 +492,7 @@ def test_a_retired_property_is_carried_rather_than_wedging_the_deploy() -> None:
     assert set(API_KEYS_PROPERTIES) <= set(written)
 
 
-def test_a_test_mode_credential_never_reaches_production() -> None:
+def _check_a_test_mode_credential_never_reaches_production() -> None:
     """Production's secret document is seeded by hand from copies of the testing values, and every
     layer below the deploy accepts what that produces — the payload check reads only that values are
     strings, and the runtime verifies a testing key happily against the testing provider. A
@@ -514,7 +506,7 @@ def test_a_test_mode_credential_never_reaches_production() -> None:
         production_secret_writes(_environment(), seeded, _payload(GATEWAY_PROPERTIES))
 
 
-def test_a_live_credential_passes_the_mode_check() -> None:
+def _check_a_live_credential_passes_the_mode_check() -> None:
     """The guard reads the credential's own format, so a live key of the same family is untouched —
     a Metronome sandbox token and a testing Slack secret look exactly like production's and stay the
     runbook's job."""
@@ -526,3 +518,10 @@ def test_a_live_credential_passes_the_mode_check() -> None:
         _environment(), live, _payload(GATEWAY_PROPERTIES)
     )
     assert json.loads(api_keys.payload)["stripe-secret-key"] == "sk_live_51abcdef"
+
+
+def test_production_secret_static_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 13
+    for check in checks:
+        check()

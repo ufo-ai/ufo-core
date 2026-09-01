@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel
 
@@ -18,6 +19,11 @@ from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 
 class _Task(BaseModel):

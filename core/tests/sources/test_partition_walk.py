@@ -102,7 +102,7 @@ def _landed(pages: list[StreamPage]) -> list[str]:
     return [record["id"] for page in pages for record in page.records]
 
 
-async def test_ascending_checkpoints_running_max_per_page() -> None:
+async def _check_ascending_checkpoints_running_max_per_page() -> None:
     fake = _FakePartitions(Ordering.ascending, {"p": ["a1", "a2", "a3"]})
     pages = await _collect(fake, None)
     assert _landed(pages) == ["a1", "a2", "a3"]
@@ -110,14 +110,14 @@ async def test_ascending_checkpoints_running_max_per_page() -> None:
     assert fake.seen == [("p", PartitionBound(after=None))]
 
 
-async def test_ascending_resumes_from_the_stored_watermark() -> None:
+async def _check_ascending_resumes_from_the_stored_watermark() -> None:
     fake = _FakePartitions(Ordering.ascending, {"p": ["a1", "a2", "a3", "a4"]})
     pages = await _collect(fake, json.dumps({"p": "a3"}))
     assert _landed(pages) == ["a4"]
     assert fake.seen == [("p", PartitionBound(after="a3"))]
 
 
-async def test_newest_first_backfill_windows_then_dissolves() -> None:
+async def _check_newest_first_backfill_windows_then_dissolves() -> None:
     fake = _FakePartitions(Ordering.newest_first, {"p": ["n1", "n2", "n3"]})
     pages = await _collect(fake, None)
     assert _landed(pages) == ["n3", "n2", "n1"]
@@ -129,7 +129,7 @@ async def test_newest_first_backfill_windows_then_dissolves() -> None:
     assert pages[-1].records == []
 
 
-async def test_a_floor_stops_a_fresh_backfill_descending_past_it() -> None:
+async def _check_a_floor_stops_a_fresh_backfill_descending_past_it() -> None:
     """Without a floor a fresh partition walks to the beginning of its history, and the fan-out
     multiplies that by the partition count — every message in every channel. The floor rides down
     as `PartitionBound.since` so the factory never fetches below it, and the walk then exhausts
@@ -143,7 +143,7 @@ async def test_a_floor_stops_a_fresh_backfill_descending_past_it() -> None:
     assert _cursors(pages)[-1] == {"p": "n4"}  # dissolved: steady state next run
 
 
-async def test_a_floor_bounds_a_resumed_backfill_too() -> None:
+async def _check_a_floor_bounds_a_resumed_backfill_too() -> None:
     """A capped run leaves `{high, until}` and the resume descends from `until`. The floor has to
     reach that request as well, or the bound would hold on a first run and be forgotten on every
     instalment after it — which is the case that actually walks the long tail."""
@@ -155,7 +155,7 @@ async def test_a_floor_bounds_a_resumed_backfill_too() -> None:
     assert _cursors(pages)[-1] == {"p": "n4"}
 
 
-async def test_a_floor_leaves_steady_state_alone() -> None:
+async def _check_a_floor_leaves_steady_state_alone() -> None:
     """Once a partition has dissolved to a watermark it is incremental, and the floor is a bound on
     the FIRST walk only. Passing it as `since` beside `after` would re-assert a backfill bound on
     an incremental pass — and on a row whose floor is older than its watermark that is simply
@@ -167,7 +167,7 @@ async def test_a_floor_leaves_steady_state_alone() -> None:
     assert _landed(pages) == ["n3", "n2"]
 
 
-async def test_a_floor_does_not_reach_an_ascending_walk() -> None:
+async def _check_a_floor_does_not_reach_an_ascending_walk() -> None:
     """`ascending` climbs from a watermark and `none` re-walks whole; neither descends, so neither
     can overshoot a floor and neither takes one."""
     fake = _FakePartitions(Ordering.ascending, {"p": ["a1", "a2", "a3"]})
@@ -179,7 +179,7 @@ async def test_a_floor_does_not_reach_an_ascending_walk() -> None:
     assert plain.seen == [("p", PartitionBound())]
 
 
-async def test_a_factory_that_ignores_the_floor_still_stops_descending() -> None:
+async def _check_a_factory_that_ignores_the_floor_still_stops_descending() -> None:
     """`since` is a request, and an API that cannot bound server-side answers it with everything.
     The walk stops itself on the first page that reaches the floor and dissolves, so such a factory
     costs one page of overshoot rather than the whole history. Filtering those records is the
@@ -204,7 +204,7 @@ async def test_a_factory_that_ignores_the_floor_still_stops_descending() -> None
     assert _cursors(pages)[-1] == {"p": "n4"}
 
 
-async def test_newest_first_backfill_resumes_downward_from_until() -> None:
+async def _check_newest_first_backfill_resumes_downward_from_until() -> None:
     fake = _FakePartitions(Ordering.newest_first, {"p": ["n1", "n2", "n3", "n4"]})
     pages = await _collect(fake, json.dumps({"p": {"high": "n4", "until": "n3"}}))
     assert _landed(pages) == ["n3", "n2", "n1"]
@@ -212,7 +212,7 @@ async def test_newest_first_backfill_resumes_downward_from_until() -> None:
     assert _cursors(pages)[-1] == {"p": "n4"}
 
 
-async def test_newest_first_steady_stops_early_below_the_watermark() -> None:
+async def _check_newest_first_steady_stops_early_below_the_watermark() -> None:
     """Steady state re-yields the page tying the watermark and stops paging only once a whole page
     sits strictly below it — the tied repeat dedups downstream."""
     fake = _FakePartitions(Ordering.newest_first, {"p": ["n1", "n2", "n3"]}, page_size=1)
@@ -222,7 +222,7 @@ async def test_newest_first_steady_stops_early_below_the_watermark() -> None:
     assert fake.seen == [("p", PartitionBound(after="n2"))]
 
 
-async def test_newest_first_steady_lands_a_tied_but_new_record() -> None:
+async def _check_newest_first_steady_lands_a_tied_but_new_record() -> None:
     """A record created at exactly the watermark's value must land: dropping the tying page as
     already-seen would lose it forever, since the watermark never advances past a tie."""
 
@@ -246,7 +246,7 @@ async def test_newest_first_steady_lands_a_tied_but_new_record() -> None:
     assert "3" not in _landed(pages)
 
 
-async def test_none_marks_boundaries_within_a_pass_but_dissolves_on_completion() -> None:
+async def _check_none_marks_boundaries_within_a_pass_but_dissolves_on_completion() -> None:
     fake = _FakePartitions(Ordering.none, {"p1": ["x"], "p2": ["y"]})
     pages = await _collect(fake, None)
     assert _landed(pages) == ["x", "y"]
@@ -254,13 +254,13 @@ async def test_none_marks_boundaries_within_a_pass_but_dissolves_on_completion()
     assert _cursors(pages)[-1] == {}
 
 
-async def test_none_capped_resume_skips_the_partition_already_finished() -> None:
+async def _check_none_capped_resume_skips_the_partition_already_finished() -> None:
     resume = _FakePartitions(Ordering.none, {"p1": ["x"], "p2": ["y"]})
     await _collect(resume, json.dumps({"p1": ""}))
     assert [partition for partition, _ in resume.seen] == ["p2"]
 
 
-async def test_completed_pass_prunes_partitions_no_longer_enumerated() -> None:
+async def _check_completed_pass_prunes_partitions_no_longer_enumerated() -> None:
     """A dropped partition's watermark dies with the pass that no longer sees it, so a partition
     later recreated under the same name starts from scratch instead of inheriting it."""
     fake = _FakePartitions(Ordering.ascending, {"kept": ["1", "2"]})
@@ -268,7 +268,7 @@ async def test_completed_pass_prunes_partitions_no_longer_enumerated() -> None:
     assert _cursors(pages)[-1] == {"kept": "2"}
 
 
-async def test_capped_abandonment_closes_the_partition_enumerator() -> None:
+async def _check_capped_abandonment_closes_the_partition_enumerator() -> None:
     """Abandoning the walk mid-pass — the adapter's cap — unwinds the partitions enumerator
     itself, not only the page factories."""
     closed: list[str] = []
@@ -289,7 +289,7 @@ async def test_capped_abandonment_closes_the_partition_enumerator() -> None:
     assert closed == ["enumerator"]
 
 
-async def test_partition_skip_mid_backfill_keeps_the_window() -> None:
+async def _check_partition_skip_mid_backfill_keeps_the_window() -> None:
     """A partition refusal mid-backfill must not read as exhaustion: the walk keeps the
     `{high, until}` window through the skip, so the next run resumes the descent — dissolving to a
     bare watermark there would orphan every record below `until` forever."""
@@ -322,7 +322,7 @@ async def test_partition_skip_mid_backfill_keeps_the_window() -> None:
     assert _cursors(resumed)[-1] == {"p1": "5"}
 
 
-async def test_partition_map_decoder_rejects_extra_window_keys() -> None:
+async def _check_partition_map_decoder_rejects_extra_window_keys() -> None:
     with pytest.raises(RuntimeError, match="malformed partition cursor entry"):
         PartitionWalk._decode(json.dumps({"p": {"high": "a", "until": "b", "junk": 1}}))
 
@@ -538,3 +538,10 @@ async def test_capped_run_closes_the_nested_walk_factory(monkeypatch: pytest.Mon
     result = await _fetch(connector, None)
     assert len(result.pages) == 2
     assert connector.factory_closed is True
+
+
+async def test_partition_walk_in_memory_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 17
+    for check in checks:
+        await check()

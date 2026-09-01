@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
@@ -44,6 +45,12 @@ async def _catalog_member(workspace_id, admin: bool = False):
             )
         )
     return member_id
+
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 
 class _Payload(BaseModel):

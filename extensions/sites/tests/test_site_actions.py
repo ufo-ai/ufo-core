@@ -52,6 +52,11 @@ from ufo.schema.records import MEMBER_ADMISSION, SCHEDULED_ADMISSION, Agent, Tur
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.objects import AGENT_KIND
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 PUBLIC_BASE_URL = "https://ufo.example.test"
 SITE_ACTIONS = (
     APPLICATION_BUILDER_DELEGATION_TOOL,

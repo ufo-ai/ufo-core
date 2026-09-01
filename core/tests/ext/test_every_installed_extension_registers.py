@@ -18,7 +18,6 @@ route to the extension's spec, never fail loud that no extension registers the n
 from pathlib import Path
 from uuid import uuid4
 
-import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from ufo_testsupport.surfaces import (
@@ -384,33 +383,33 @@ def test_dev_mode_connector_providers_are_unique() -> None:
     assert _connector_entries(load_manifests())
 
 
-@pytest.mark.parametrize("name", sorted(INSTALLED))
-def test_installed_extension_registers_every_declared_point(name: str, tmp_path: Path) -> None:
-    manifest, _entry = INSTALLED[name]
-    store = _credential_store()
-    _check_tools(manifest, store)
-    _check_connectors(manifest, store)
-    _check_indexes(manifest, store)
-    _check_embeds(manifest, store)
-    _check_hubs(manifest)
-    _check_carriers(manifest)
-    _check_cdp_providers(manifest, store)
-    _check_models(manifest)
-    _check_sources(manifest)
-    _check_auth_proxies(manifest, store)
-    _check_search_providers(manifest, store)
-    _check_flag_providers(manifest)
-    _check_memory_search(manifest, store)
-    _check_surfaces(manifest, store, tmp_path)
-    _check_routes(manifest, store)
-    _check_hooks(manifest, store)
-    _check_jobs(manifest)
-    _check_skills(manifest)
-    _check_subagents(manifest)
-    _check_credentials(manifest, store)
-    _check_onboarding(manifest, store)
-    _check_prompt_sections(manifest)
-    _check_conversation_slots(manifest)
+def test_installed_extensions_register_every_declared_point(tmp_path: Path) -> None:
+    for name in sorted(INSTALLED):
+        manifest, _entry = INSTALLED[name]
+        store = _credential_store()
+        _check_tools(manifest, store)
+        _check_connectors(manifest, store)
+        _check_indexes(manifest, store)
+        _check_embeds(manifest, store)
+        _check_hubs(manifest)
+        _check_carriers(manifest)
+        _check_cdp_providers(manifest, store)
+        _check_models(manifest)
+        _check_sources(manifest)
+        _check_auth_proxies(manifest, store)
+        _check_search_providers(manifest, store)
+        _check_flag_providers(manifest)
+        _check_memory_search(manifest, store)
+        _check_surfaces(manifest, store, tmp_path)
+        _check_routes(manifest, store)
+        _check_hooks(manifest, store)
+        _check_jobs(manifest)
+        _check_skills(manifest)
+        _check_subagents(manifest)
+        _check_credentials(manifest, store)
+        _check_onboarding(manifest, store)
+        _check_prompt_sections(manifest)
+        _check_conversation_slots(manifest)
 
 
 def test_no_registered_tool_takes_a_user_description() -> None:
@@ -424,24 +423,24 @@ def test_no_registered_tool_takes_a_user_description() -> None:
     )
 
 
-@pytest.mark.parametrize("pack_name", sorted(PACKS))
-def test_installed_pack_narrows_to_its_bundle_and_own_manifest(pack_name: str) -> None:
+def test_installed_packs_narrow_to_their_bundle_and_own_manifest() -> None:
     """Each installed pack bundles only installed extensions, and activating it narrows the active
     set to exactly those extensions' manifests followed by one synthetic manifest carrying the
     pack's own skills and onboarding — the coherent config `serve` and `init` bring up for it."""
-    pack = PACKS[pack_name]
     installed = set(INSTALLED)
-    for extension_name in pack.extensions:
-        assert extension_name in installed
+    for pack_name in sorted(PACKS):
+        pack = PACKS[pack_name]
+        for extension_name in pack.extensions:
+            assert extension_name in installed
 
-    manifests = load_manifests(pack_name)
-    assert [manifest.name for manifest in manifests] == [*pack.extensions, pack_name]
+        manifests = load_manifests(pack_name)
+        assert [manifest.name for manifest in manifests] == [*pack.extensions, pack_name]
 
-    pack_manifest = manifests[-1]
-    assert pack_manifest.name == pack_name
-    assert {spec.path.name for spec in pack_manifest.skills} == {
-        spec.path.name for spec in pack.skills
-    }
-    assert {step.name for step in pack_manifest.onboarding_steps} == {
-        step.name for step in pack.onboarding_steps
-    }
+        pack_manifest = manifests[-1]
+        assert pack_manifest.name == pack_name
+        assert {spec.path.name for spec in pack_manifest.skills} == {
+            spec.path.name for spec in pack.skills
+        }
+        assert {step.name for step in pack_manifest.onboarding_steps} == {
+            step.name for step in pack.onboarding_steps
+        }

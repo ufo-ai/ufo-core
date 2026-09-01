@@ -17,6 +17,8 @@ from ufo.runtime.turns.audience import conversation_audience, foreign_room_audie
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+
 
 async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
     workspace_id, member_id, other_member_id = uuid4(), uuid4(), uuid4()
@@ -95,7 +97,7 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
 
 
 async def test_member_blob_read_closes_a_bounded_stream(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     closed = False
 

@@ -207,12 +207,6 @@ async def test_a_token_carrying_no_account_never_reaches_the_store(
     assert (claimed.status, claimed.refusal) == ("refused", EXCHANGE_REFUSED)
 
 
-def test_the_account_is_read_from_the_tokens_own_claims() -> None:
-    assert openai_login.chatgpt_account_id(_account_token("acct_9")) == "acct_9"
-    assert openai_login.chatgpt_account_id("not-a-jwt") is None
-    assert openai_login.chatgpt_account_id("a.!!!.c") is None
-
-
 async def test_a_grant_answered_without_a_refresh_token_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

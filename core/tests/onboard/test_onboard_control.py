@@ -49,6 +49,7 @@ def onboard_client(db: None) -> AsyncClient:
     )
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_the_guard_refuses_a_request_carrying_no_token(db: None) -> None:
     app = FastAPI()
     app.include_router(OnboardControl(control_token=CONTROL_TOKEN).router())
@@ -60,6 +61,7 @@ async def test_the_guard_refuses_a_request_carrying_no_token(db: None) -> None:
         assert wrong.status_code == 401
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
     onboard_client: AsyncClient,
 ) -> None:
@@ -111,6 +113,7 @@ async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
     ]
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_seat_grants_the_signup_balance_once(onboard_client: AsyncClient) -> None:
     workspace_id = signup_workspace_id("acme.com")
     body = {
@@ -152,6 +155,7 @@ async def test_seat_grants_the_signup_balance_once(onboard_client: AsyncClient) 
     assert after_join.granted_micro_usd == SIGNUP_GRANT_MICRO_USD, "the grant is once per founding"
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_seat_stores_a_member_model_key_where_the_connect_flow_does(
     onboard_client: AsyncClient,
 ) -> None:
@@ -201,6 +205,7 @@ async def test_seat_stores_a_member_model_key_where_the_connect_flow_does(
         init_workspace_credentials(None)
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_seat_refuses_a_workspace_its_domain_no_longer_names(
     onboard_client: AsyncClient,
 ) -> None:
@@ -230,6 +235,7 @@ async def test_seat_refuses_a_workspace_its_domain_no_longer_names(
     assert "no longer belongs to other.com" in refused.json()["detail"]
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_seat_refuses_an_identity_with_a_mismatched_domain(
     onboard_client: AsyncClient,
 ) -> None:
@@ -256,6 +262,7 @@ async def test_seat_refuses_an_identity_with_a_mismatched_domain(
         assert refused.json()["detail"] == "domain must match the verified email"
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_the_intake_profile_opens_the_main_agents_prompt(
     onboard_client: AsyncClient,
 ) -> None:
@@ -302,6 +309,7 @@ def test_an_absent_profile_leaves_the_core_default_untouched() -> None:
     assert agent_prompt(None) == DEFAULT_AGENT_PROMPT
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_choices_offers_the_domain_workspace_and_every_exact_membership(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -343,6 +351,7 @@ async def test_choices_offers_the_domain_workspace_and_every_exact_membership(
     assert by_id[str(domain_workspace)]["label"] == "acme.com"
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_choices_refuses_a_domain_that_maps_to_two_workspaces(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -372,6 +381,7 @@ async def test_choices_refuses_a_domain_that_maps_to_two_workspaces(
     assert "maps to 2 workspaces" in refused.json()["detail"]
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_two_workspaces_sharing_a_label_are_told_apart(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -412,6 +422,7 @@ async def test_two_workspaces_sharing_a_label_are_told_apart(
     assert labels == {f"acme.com ({str(workspace_id)[:8]})" for workspace_id in ids}
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_personal_mail_addresses_create_separate_workspaces(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -452,6 +463,7 @@ async def test_personal_mail_addresses_create_separate_workspaces(
     assert signup_workspace_id(first) != signup_workspace_id(second)
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_a_personal_mail_member_can_enter_the_workspace_they_were_added_to(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -483,6 +495,7 @@ async def test_a_personal_mail_member_can_enter_the_workspace_they_were_added_to
     }
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_the_previous_gateway_shape_is_still_answered_across_a_rollout(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -515,6 +528,7 @@ async def test_the_previous_gateway_shape_is_still_answered_across_a_rollout(
     }
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_the_previous_gateway_shape_continues_a_personal_claim(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -554,6 +568,7 @@ async def test_the_previous_gateway_shape_continues_a_personal_claim(
     assert stranger.json() == {"choices": []}
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_the_previous_gateway_shape_reaches_no_personal_mail_workspace(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -593,6 +608,7 @@ async def test_the_previous_gateway_shape_reaches_no_personal_mail_workspace(
     assert f"workspace {personal} no longer belongs to gmail.com" in refused.json()["detail"]
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_a_personal_mail_call_states_its_exact_identity(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -634,6 +650,7 @@ async def test_a_personal_mail_call_states_its_exact_identity(
     assert stranger.json() == {"choices": []}
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_a_call_stating_no_domain_still_refuses_an_address_that_is_not_one(
     onboard_client: AsyncClient,
 ) -> None:
@@ -650,6 +667,7 @@ async def test_a_call_stating_no_domain_still_refuses_an_address_that_is_not_one
     assert offered.status_code == 422
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_choices_is_empty_for_an_address_nothing_holds(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -667,6 +685,7 @@ async def test_choices_is_empty_for_an_address_nothing_holds(
     assert response.json() == {"choices": []}
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_membership_reads_the_admin_flag_and_refuses_a_removed_member(
     onboard_client: AsyncClient,
 ) -> None:
@@ -698,6 +717,7 @@ async def test_membership_reads_the_admin_flag_and_refuses_a_removed_member(
     assert "no longer a member" in gone.json()["detail"]
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_the_fleet_counts_every_workspace(onboard_client: AsyncClient) -> None:
     async with onboard_client as client:
         before = (await client.get("/internal/onboard/fleet")).json()["craft"]
@@ -739,6 +759,7 @@ async def _stamp(member_id: UUID, invited_by: UUID, at: datetime) -> None:
         )
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_invitations_lists_the_teammates_an_admin_added(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -780,6 +801,7 @@ def _cursor(row: dict[str, str]) -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_the_invitation_page_cursor_walks_past_a_shared_stamp(
     onboard_client: AsyncClient, database_url: str
 ) -> None:
@@ -811,6 +833,7 @@ async def test_the_invitation_page_cursor_walks_past_a_shared_stamp(
     assert after_second.json()["invitations"] == []
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_a_page_cursor_missing_part_of_the_ordering_key_is_refused(
     onboard_client: AsyncClient,
 ) -> None:
@@ -829,6 +852,7 @@ def _warned_routes(caplog: pytest.LogCaptureFixture) -> list[str]:
     ]
 
 
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
 async def test_the_invitation_page_logs_no_cross_workspace_read_warning(
     onboard_client: AsyncClient, database_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:

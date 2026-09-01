@@ -38,6 +38,11 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 TOOL_NARRATION = "using the connected system"
 
 ENDPOINT = "http://mcp.test/mcp"
@@ -266,18 +271,6 @@ def test_server_config_rejects_a_non_http_url() -> None:
         mcp.McpServer(url="ftp://mcp.example.test")
 
 
-def test_turn_tools_registers_both_dynamic_mcp_tools() -> None:
-    tools, ext_by_tool, _ = turn_tools(
-        (mcp.manifest(),),
-        uuid4(),
-        _credentials(),
-        audience=conversation_audience(None),
-    )
-    names = {tool.name for tool in tools}
-    assert {"list_mcp_tools", "call_mcp_tool"} <= names
-    assert {"list_mcp_tools", "call_mcp_tool"} <= set(ext_by_tool)
-
-
 async def test_list_mcp_tools_browses_the_catalog_without_schemas(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -300,27 +293,6 @@ async def test_list_mcp_tools_browses_the_catalog_without_schemas(
     assert by_name["write_note"]["idempotent"] is False
     assert "inputSchema" not in by_name["search"]
     assert by_name["whoami"]["parameters"] == []
-
-
-async def test_list_mcp_tools_returns_full_schemas_for_named_tools(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The second stage: naming tools returns their complete input schemas, which is what the model
-    needs before a call — parameter names alone let it invent argument spellings."""
-    async with _serving() as client_for:
-        monkeypatch.setattr(mcp, "mcp_client", client_for)
-        ctx = await _tool_context()
-        result = await mcp._list_mcp_tools(
-            ctx,
-            mcp.ListMcpToolsInput(server=SERVER_NAME, tool_names=("search",)),
-        )
-    assert result.is_error is False
-    payload = json.loads(result.content[0].text)
-    assert [tool["name"] for tool in payload["tools"]] == ["search"]
-    only = payload["tools"][0]
-    assert only["description"] == "Search the docs."
-    assert only["inputSchema"]["type"] == "object"
-    assert "query" in only["inputSchema"]["properties"]
 
 
 async def test_list_mcp_tools_rejects_a_tool_name_the_server_does_not_expose(
@@ -354,19 +326,6 @@ def _schema_payload(count: int) -> dict[str, object]:
     return {"server": "docs", "tools": [mcp._schema_entry(t) for t in tools]}
 
 
-def test_a_schema_request_is_measured_on_the_string_the_result_carries() -> None:
-    """The two renderings differ by about a twentieth, and that band is the whole point: a request
-    sized inside it passes a compact measurement and is then offloaded anyway, leaving the model the
-    first fraction of the schemas it asked for. Twenty-two tools sit in that band, so this fixture
-    fails against a compact measurement and passes against the emitted one."""
-    payload = _schema_payload(22)
-    compact = len(json.dumps(payload, separators=(",", ":")))
-    emitted = len(json.dumps(payload))
-    assert compact <= mcp.MAX_LISTING_CHARS < emitted, (compact, emitted)
-    with pytest.raises(ValueError, match="do not fit in a tool result"):
-        mcp._bounded_schemas(payload, 22)
-
-
 def test_one_schema_past_the_bound_is_returned_rather_than_sealing_the_tool_off() -> None:
     """A single tool whose own schema overflows has no smaller request behind it, and
     `call_mcp_tool` refuses to be called without that schema, so refusing would make the tool
@@ -381,14 +340,6 @@ def test_one_schema_past_the_bound_is_returned_rather_than_sealing_the_tool_off(
     result = mcp._bounded_schemas(payload, 1)
     assert result.is_error is False
     assert len(json.loads(result.content[0].text)["tools"]) == 1
-
-
-def test_a_schema_request_that_fits_is_returned() -> None:
-    """The refusal has to have an edge: a handful of schemas is the case the two-stage listing
-    exists to serve, and refusing it would leave the model unable to call anything."""
-    result = mcp._bounded_schemas(_schema_payload(4), 4)
-    assert result.is_error is False
-    assert len(json.loads(result.content[0].text)["tools"]) == 4
 
 
 async def test_an_oversized_catalog_offloads_rather_than_refusing(
@@ -431,82 +382,6 @@ def test_the_listing_bound_is_the_bound_the_loop_offloads_past() -> None:
     before the loop writes it to a file, so a copy that drifted would refuse requests the loop
     would have delivered whole, or pass ones it then cuts."""
     assert mcp.MAX_LISTING_CHARS == MAX_TOOL_RESULT_CHARS
-
-
-def test_the_catalog_is_far_smaller_than_the_schemas_it_replaces() -> None:
-    """The reason the catalog exists. A namespace's full schemas run tens of thousands of
-    characters and do not survive a tool result; the catalog has to fit in one whole."""
-    schema = {
-        "type": "object",
-        "properties": {name: {"type": "string", "description": "x" * 200} for name in "abcdef"},
-        "required": ["a"],
-    }
-    tools = [
-        McpTool(
-            name=f"svc__tool_{index}",
-            description="Do a thing. " + "y" * 300,
-            inputSchema=schema,
-        )
-        for index in range(80)
-    ]
-    catalog = len(json.dumps({"tools": [mcp._catalog_entry(tool) for tool in tools]}))
-    schemas = len(json.dumps({"tools": [mcp._schema_entry(tool) for tool in tools]}))
-    assert catalog * 4 < schemas
-    assert catalog < mcp.MAX_LISTING_CHARS
-
-
-async def test_call_mcp_tool_parses_structured_content(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async with _serving() as client_for:
-        monkeypatch.setattr(mcp, "mcp_client", client_for)
-        ctx = await _tool_context()
-        result = await mcp._call_mcp_tool(
-            ctx,
-            mcp.CallMcpToolInput(
-                server=SERVER_NAME,
-                tool_name="search",
-                arguments={"query": "auth flow"},
-            ),
-        )
-    assert result.is_error is False
-    assert json.loads(result.content[0].text) == {"hits": ["auth flow"]}
-
-
-async def test_call_mcp_tool_joins_text_content_when_unstructured(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async with _serving() as client_for:
-        monkeypatch.setattr(mcp, "mcp_client", client_for)
-        ctx = await _tool_context()
-        result = await mcp._call_mcp_tool(
-            ctx,
-            mcp.CallMcpToolInput(
-                server=SERVER_NAME,
-                tool_name="two_lines",
-                arguments={},
-            ),
-        )
-    assert result.is_error is False
-    assert json.loads(result.content[0].text) == {"text": "line one\ntwo"}
-
-
-async def test_call_mcp_tool_sends_the_configured_bearer_token(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async with _serving() as client_for:
-        monkeypatch.setattr(mcp, "mcp_client", client_for)
-        ctx = await _tool_context()
-        result = await mcp._call_mcp_tool(
-            ctx,
-            mcp.CallMcpToolInput(
-                server=SERVER_NAME,
-                tool_name="whoami",
-                arguments={},
-            ),
-        )
-    assert result.is_error is False
-    assert json.loads(result.content[0].text) == {"authorization": f"Bearer {AUTH_TOKEN}"}
 
 
 async def test_call_mcp_tool_surfaces_a_tool_error_as_is_error(

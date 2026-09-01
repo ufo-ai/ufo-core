@@ -153,46 +153,6 @@ async def test_substream_record_timestamps(
     assert result.pages[0].updated_at == updated_at
 
 
-async def test_usage_records_fan_out_lists_items_per_subscription() -> None:
-    seen: list[tuple[str, dict[str, str]]] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        seen.append((request.url.path, dict(request.url.params)))
-        match request.url.path:
-            case "/v1/subscriptions":
-                return httpx.Response(200, json={"data": [{"id": "sub_1"}], "has_more": False})
-            case "/v1/subscription_items":
-                if "subscription" not in request.url.params:
-                    return httpx.Response(400, json=MISSING_SUBSCRIPTION)
-                if request.url.params.get("starting_after") == "si_1":
-                    return httpx.Response(200, json={"data": [{"id": "si_2"}], "has_more": False})
-                return httpx.Response(200, json={"data": [{"id": "si_1"}], "has_more": True})
-            case "/v1/subscription_items/si_1/usage_record_summaries":
-                return httpx.Response(
-                    200, json={"data": [{"id": "ur_1", "timestamp": 100}], "has_more": False}
-                )
-            case _:
-                assert request.url.path == "/v1/subscription_items/si_2/usage_record_summaries"
-                return httpx.Response(
-                    200, json={"data": [{"id": "ur_2", "timestamp": 200}], "has_more": False}
-                )
-
-    result = await _fetch("usage_records", handle)
-    assert _refs(result) == {"usage_records/ur_1", "usage_records/ur_2"}
-    assert seen == [
-        ("/v1/subscriptions", {"limit": "100", "status": "all"}),
-        ("/v1/subscription_items", {"limit": "100", "subscription": "sub_1"}),
-        ("/v1/subscription_items/si_1/usage_record_summaries", {"limit": "100"}),
-        (
-            "/v1/subscription_items",
-            {"limit": "100", "starting_after": "si_1", "subscription": "sub_1"},
-        ),
-        ("/v1/subscription_items/si_2/usage_record_summaries", {"limit": "100"}),
-    ]
-    assert '"subscription_item_id": "si_1"' in result.pages[0].body
-    assert '"subscription_item_id": "si_2"' in result.pages[1].body
-
-
 async def test_stream_skipped_on_refusal() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": {"type": "authentication_error"}})

@@ -22,6 +22,8 @@ from ufo.runtime.objects import UnknownObject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+
 
 async def _changes(workspace_id: object) -> list[sa.Row]:
     async with workspace_tx() as connection:

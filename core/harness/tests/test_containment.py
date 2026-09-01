@@ -18,25 +18,22 @@ from ufo.harness.containment import (
 )
 
 
-@pytest.mark.parametrize("value", ["", ".", "..", "/tmp/file"])
-def test_relative_path_refuses_an_unusable_name(value: str) -> None:
-    with pytest.raises(ContainmentError):
-        contained_relative(value, "/workspace")
+def test_relative_path_refuses_unusable_names() -> None:
+    for value in ("", ".", "..", "/tmp/file"):
+        with pytest.raises(ContainmentError):
+            contained_relative(value, "/workspace")
 
 
-def test_relative_path_keeps_a_nested_name() -> None:
+def test_lexical_guards_keep_nested_names_and_refuse_escapes(tmp_path: Path) -> None:
     assert contained_relative("a/../b.txt", "/workspace") == "/workspace/b.txt"
     assert contained_leaf("a/b.txt", "fallback.txt") == "b.txt"
-
-
-def test_pattern_refuses_an_absolute_or_parent_traversal(tmp_path: Path) -> None:
     with pytest.raises(RelativeEscape):
         contained_pattern("../*.txt", tmp_path)
     with pytest.raises(LocationEscape):
         contained_pattern("/tmp/*.txt", tmp_path)
 
 
-def test_contained_root_refuses_a_symlink(tmp_path: Path) -> None:
+def test_root_policy_refuses_agent_symlinks_and_follows_operator_symlinks(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
     root = tmp_path / "root"
@@ -44,18 +41,10 @@ def test_contained_root_refuses_a_symlink(tmp_path: Path) -> None:
 
     with pytest.raises(NonDirectoryAncestor):
         contained_root(root)
-
-
-def test_configured_root_follows_an_operator_symlink(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    root = tmp_path / "root"
-    root.symlink_to(target, target_is_directory=True)
-
     assert configured_root(root, "workspace_root") == target.resolve()
 
 
-def test_contained_file_reads_through_a_pinned_parent(tmp_path: Path) -> None:
+def test_contained_file_reads_pinned_parents_and_refuses_symlink_escapes(tmp_path: Path) -> None:
     root = tmp_path / "root"
     target = root / "nested" / "value.txt"
     target.parent.mkdir(parents=True)
@@ -64,26 +53,18 @@ def test_contained_file_reads_through_a_pinned_parent(tmp_path: Path) -> None:
     with contained_file("nested/value.txt", root) as contained:
         assert contained.read_bytes(16) == b"value"
 
-
-def test_contained_file_refuses_a_final_symlink(tmp_path: Path) -> None:
-    root = tmp_path / "root"
-    root.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("outside")
-    (root / "value.txt").symlink_to(outside)
+    (root / "linked.txt").symlink_to(outside)
 
-    with pytest.raises(NotRegularFile), contained_file("value.txt", root) as contained:
+    with pytest.raises(NotRegularFile), contained_file("linked.txt", root) as contained:
         contained.read_bytes(16)
 
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (root / "escape").symlink_to(outside_dir, target_is_directory=True)
 
-def test_contained_file_refuses_an_escaping_ancestor(tmp_path: Path) -> None:
-    root = tmp_path / "root"
-    outside = tmp_path / "outside"
-    root.mkdir()
-    outside.mkdir()
-    (root / "nested").symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(LocationEscape), contained_file("nested/value.txt", root):
+    with pytest.raises(LocationEscape), contained_file("escape/value.txt", root):
         pass
 
 

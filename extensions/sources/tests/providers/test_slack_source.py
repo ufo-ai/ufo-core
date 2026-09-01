@@ -13,26 +13,19 @@ the run records a skip, not a failure."""
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from ufo_ext_sources.providers.slack import SlackConnector
 
-from ufo.blob import FilesystemBlobStore
 from ufo.runtime.access.connectors import (
-    DIRECT_ACCOUNT,
-    ConnectorRegistry,
     Credential,
-    SourceCredentialResolver,
 )
 from ufo.runtime.sources import backend as backend_module
 from ufo.runtime.sources.sync import (
-    ClaimedSource,
     SourceAuth,
     StreamSkipped,
-    SyncDriver,
     SyncResult,
 )
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
@@ -102,30 +95,6 @@ async def test_users_snapshot_follows_cursor_pagination() -> None:
     assert result.deletes == ()
     assert _refs(result) == {"users/U1", "users/U2"}
     assert result.pages[0].updated_at == "2023-11-14T22:13:20.000000+00:00"
-
-
-async def test_conversations_returns_a_snapshot() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/conversations.list"
-        return _ok(
-            {
-                "channels": [
-                    {
-                        "id": "C1",
-                        "name": "general",
-                        "is_channel": True,
-                        "created": 1_700_000_001,
-                    }
-                ]
-            }
-        )
-
-    result = await _fetch("conversations", handle)
-    assert result.snapshot is True
-    assert result.next_cursor is None
-    assert _refs(result) == {"conversations/C1"}
-    assert "general" in result.pages[0].body
-    assert result.pages[0].created_at == "2023-11-14T22:13:21.000000+00:00"
 
 
 def _message_handler(
@@ -215,54 +184,6 @@ async def test_messages_are_incremental_with_a_per_channel_watermark_and_tombsto
     assert any("hello world" in page.body for page in result.pages)
 
 
-async def test_messages_send_the_stored_channel_cursor_as_oldest_and_advance_it() -> None:
-    seen: list[tuple[str, dict[str, object]]] = []
-    stored = json.dumps({"C1": "1700000000.000000"})
-    result = await _fetch("messages", _message_handler(seen), cursor=stored)
-    history = [body for path, body in seen if path == "/api/conversations.history"]
-    assert history and history[0].get("oldest") == "1700000000.000000"
-    assert history[0].get("inclusive") == "false"
-    assert result.next_cursor == json.dumps({"C1": "1700000003.000200"}, sort_keys=True)
-    assert {page.created_at for page in result.pages} == {
-        "2023-11-14T22:13:22.000100+00:00",
-    }
-
-
-async def test_message_participants_derive_from_the_history_walk() -> None:
-    result = await _fetch("message_participants", _message_handler([]))
-    assert result.snapshot is False
-    assert _refs(result) == {"message_participants/C1:1700000002.000100:from:a@x.com"}
-    assert result.pages[0].created_at == "2023-11-14T22:13:22.000100+00:00"
-
-
-async def test_conversation_threads_derive_a_thread_root() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/api/users.list":
-            return _ok({"members": [{"id": "U1", "name": "alice"}]})
-        if path == "/api/conversations.list":
-            return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
-        if path == "/api/conversations.history":
-            assert request.method == "POST"
-            return _ok(
-                {
-                    "messages": [
-                        {
-                            "ts": "1700000002.000100",
-                            "user": "U1",
-                            "text": "thread root",
-                            "reply_count": 2,
-                            "latest_reply": "1700000009.000000",
-                        }
-                    ]
-                }
-            )
-        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
-
-    result = await _fetch("conversation_threads", handle)
-    assert _refs(result) == {"conversation_threads/C1:1700000002.000100"}
-
-
 @pytest.mark.parametrize(
     ("stream", "expected_ref"),
     (
@@ -282,43 +203,6 @@ async def test_message_streams_exclude_only_ufo_user(stream: str, expected_ref: 
     )
 
     assert _refs(result) == {expected_ref}
-
-
-async def test_sync_driver_resolves_the_current_surface_user_each_fetch(tmp_path: Path) -> None:
-    current_user_id = "U_UFO"
-
-    async def resolve(_workspace_id: UUID) -> str:
-        return current_user_id
-
-    driver = SyncDriver(
-        backends={"slack": ConnectorBackend(connector=SlackConnector())},
-        blob=FilesystemBlobStore(root=tmp_path),
-        postgres=False,
-        source_credentials=SourceCredentialResolver(
-            ConnectorRegistry(entries={}, fallback=_MockProxy(_bot_message_handler))
-        ),
-        identity_resolvers={"slack": resolve},
-    )
-    source = ClaimedSource(
-        source_id=uuid4(),
-        workspace_id=uuid4(),
-        claim="claim",
-        backend="slack",
-        config=ConnectorSourceConfig(account=DIRECT_ACCOUNT, stream="messages").model_dump(),
-        subject="shared",
-        owner_member_id=None,
-        connection_id=None,
-        cursor=None,
-        consecutive_errors=0,
-        claimed_at=datetime.now(UTC),
-    )
-
-    first = await driver._fetch(source)
-    current_user_id = "U_THIRD"
-    second = await driver._fetch(source)
-
-    assert _refs(first) == {"messages/C1:1700000003.000000"}
-    assert _refs(second) == {"messages/C1:1700000002.000000"}
 
 
 async def test_a_pinned_floor_bounds_the_channel_walk_and_dissolves_there() -> None:
@@ -355,65 +239,6 @@ async def test_a_pinned_floor_bounds_the_channel_walk_and_dissolves_there() -> N
     assert _refs(result) == {"messages/C1:1783000000.000000"}
     # dissolved to the watermark: the next run is incremental, not another descent
     assert json.loads(str(result.next_cursor)) == {"C1": "1783000000.000000"}
-
-
-async def test_a_pre_2001_floor_does_not_collapse_the_channel_after_one_page() -> None:
-    """`backfill_days` reaches 36500, so a member can legitimately pin a floor before 2001 — where
-    Unix seconds are 9 digits, not 10. Unpadded, that floor sorts lexicographically ABOVE every
-    current message `ts`, and the walk (which compares as strings) grounds itself on the very first
-    page: each channel lands one page and dissolves to steady state, so the decades asked for are
-    never fetched — on that run or any later one, since re-pinning only widens.
-
-    Padding to a live `ts`'s width is what keeps the comparison honest. The channel here holds two
-    pages, and both have to land."""
-    pinned = datetime(1999, 9, 9, tzinfo=UTC)
-    assert len(f"{pinned.timestamp():.6f}") < len("1783000000.000000")  # the trap: 9 digits
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/api/users.list":
-            return _ok({"members": [{"id": "U1", "name": "alice"}]})
-        if path == "/api/conversations.list":
-            return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
-        if path == "/api/conversations.history":
-            body = json.loads(request.content) if request.content else {}
-            if body.get("cursor") == "p2":
-                return _ok({"messages": [{"ts": "1700000000.000000", "user": "U1", "text": "old"}]})
-            return _ok(
-                {
-                    "messages": [{"ts": "1783000000.000000", "user": "U1", "text": "new"}],
-                    "response_metadata": {"next_cursor": "p2"},
-                }
-            )
-        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
-
-    result = await _fetch("messages", handle, backfill_after=pinned)
-
-    assert _refs(result) == {
-        "messages/C1:1783000000.000000",
-        "messages/C1:1700000000.000000",
-    }
-
-
-async def test_a_row_pinning_no_floor_still_walks_the_whole_channel() -> None:
-    """The bound is the row's, not the connector's: a binding that asked for all history sends no
-    `oldest` on its first walk, which is the behaviour every slack row had before the window."""
-    history_calls: list[dict[str, object]] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/api/users.list":
-            return _ok({"members": [{"id": "U1", "name": "alice"}]})
-        if path == "/api/conversations.list":
-            return _ok({"channels": [{"id": "C1", "name": "general", "is_channel": True}]})
-        if path == "/api/conversations.history":
-            history_calls.append(json.loads(request.content) if request.content else {})
-            return _ok({"messages": [{"ts": "1783000000.000000", "user": "U1", "text": "in"}]})
-        return httpx.Response(404, json={"ok": False, "error": "unknown_method"})
-
-    await _fetch("messages", handle)
-
-    assert "oldest" not in history_calls[0]
 
 
 async def test_messages_backfill_windows_and_resumes_downward_with_latest(

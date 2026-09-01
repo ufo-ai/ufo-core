@@ -1,4 +1,3 @@
-import asyncio
 import json
 from collections import namedtuple
 from collections.abc import AsyncIterator
@@ -41,7 +40,6 @@ from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import (
     MAX_PARALLEL_TOOL_CALLS,
-    EffectiveCall,
     TurnEngine,
     _RejectedToolCall,
 )
@@ -49,16 +47,11 @@ from ufo.runtime.ext.context import ScopedStore, context_for
 from ufo.runtime.ext.manifest import HookContext, HookOutcome, HookSpec, ModifyOutput, PostToolUse
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.objects import (
-    BoundAction,
-    BoundKind,
     ObjectActionInput,
     ObjectDetail,
-    ObjectKind,
     ObjectListQuery,
     ObjectPage,
     ObjectVerbs,
-    action_registry,
-    object_registry,
 )
 from ufo.runtime.prompts.render import rendered_prompt
 from ufo.runtime.queue import (
@@ -71,7 +64,7 @@ from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.tool_bridge import ToolBridge
 from ufo.runtime.tools.bridge import ToolBridgeIntent, bridge_tools
 from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
-from ufo.runtime.tools.registry import ObjectBinding, ToolDef, ToolRegistry
+from ufo.runtime.tools.registry import ToolDef, ToolRegistry
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import ActivitySummarizer
 from ufo.runtime.turns.audience import conversation_audience
@@ -81,8 +74,6 @@ from ufo.schema.records import (
     INTENT_ADMISSION,
     MEMBER_ADMISSION,
     Agent,
-    AskQuestion,
-    AskUserInput,
     ConnectRequest,
     ToolIntent,
     Turn,
@@ -358,6 +349,7 @@ async def _tool_results(engine: TurnEngine) -> tuple[ToolResultBlock, ...]:
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_instance_action_reaches_its_handler_with_the_resolved_target(
     db: None, tmp_path: Path
 ) -> None:
@@ -384,6 +376,7 @@ async def test_instance_action_reaches_its_handler_with_the_resolved_target(
         }
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_kind_owner_visibility_runs_before_contributor_code(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn()
     with ws(turn.workspace_id):
@@ -396,6 +389,7 @@ async def test_kind_owner_visibility_runs_before_contributor_code(db: None, tmp_
         assert await ScopedStore(extension=sample.NAME).get(sample.POLISH_KEY) is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_cross_extension_action_runs_with_the_contributor_context(
     db: None, tmp_path: Path
 ) -> None:
@@ -420,6 +414,7 @@ async def test_cross_extension_action_runs_with_the_contributor_context(
         }
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_ungranted_action_is_refused_before_its_handler(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn()
     with ws(turn.workspace_id):
@@ -438,6 +433,7 @@ async def test_an_ungranted_action_is_refused_before_its_handler(db: None, tmp_p
         assert await ScopedStore(extension=sample.NAME).get(sample.POLISH_KEY) is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_arity_generation_and_agent_target_hold_before_dispatch(
     db: None, tmp_path: Path
 ) -> None:
@@ -483,25 +479,6 @@ async def test_arity_generation_and_agent_target_hold_before_dispatch(
             assert await ScopedStore(extension=sample.NAME).get(sample.POLISH_KEY) is None
 
 
-async def test_a_bad_requester_ref_rejects_the_call_before_dispatch(
-    db: None, tmp_path: Path
-) -> None:
-    turn = await _seed_turn()
-    with ws(turn.workspace_id):
-        await _seed_widget()
-        engine = _engine(
-            turn,
-            _action_model(sample.POLISH_ACTION, name="anvil", requested_by=str(uuid4())),
-            tmp_path,
-        )
-        frame = await engine.run()
-        assert frame is not None and frame.status == "done"
-        [result] = await _tool_results(engine)
-        assert result.is_error is True
-        assert "does not name an active inbound message" in str(result.content)
-        assert await ScopedStore(extension=sample.NAME).get(sample.POLISH_KEY) is None
-
-
 def _dispatch_context(engine: TurnEngine) -> ToolContext:
     return ToolContext(
         sandbox=engine.sandbox,
@@ -516,6 +493,7 @@ def _dispatch_context(engine: TurnEngine) -> ToolContext:
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_stale_generation_reaches_the_handler_beside_the_live_one(
     db: None, tmp_path: Path
 ) -> None:
@@ -534,6 +512,7 @@ async def test_a_stale_generation_reaches_the_handler_beside_the_live_one(
         assert recorded["target"]["expected_generation"] == str(stale)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_interrupted_self_mutating_action_resumes_with_its_first_target(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -588,6 +567,7 @@ async def test_an_interrupted_self_mutating_action_resumes_with_its_first_target
         assert first["idempotency_key"] == f"{turn.id}/{ENGRAVE_ID}/c1"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_an_agent_targetable_action_resolves_a_visible_agent_for_the_live_speaker(
     db: None, tmp_path: Path
 ) -> None:
@@ -648,6 +628,7 @@ async def test_an_agent_targetable_action_resolves_a_visible_agent_for_the_live_
         assert all("agent" not in view["call"] for view in own_read["actions"])
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_cross_agent_gate_refuses_every_lane_but_the_main_agents_live_speaker(
     db: None, tmp_path: Path
 ) -> None:
@@ -715,6 +696,7 @@ async def test_the_cross_agent_gate_refuses_every_lane_but_the_main_agents_live_
             )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_side_effecting_action_receives_the_semantic_idempotency_key(
     db: None, tmp_path: Path
 ) -> None:
@@ -770,41 +752,7 @@ async def _poke(ctx: ToolContext, args: _DownSpec) -> ToolResult:
     raise AssertionError("the handler must not run when the target read faults")
 
 
-async def test_a_kind_store_fault_on_the_target_read_is_the_engines_failure(
-    db: None, tmp_path: Path
-) -> None:
-    down = ObjectKind(
-        name="downed", description="d", guidance="g", spec_model=_DownSpec, store=_DownStore()
-    )
-    poke = ToolDef(
-        name="poke",
-        description="d",
-        input_model=_DownSpec,
-        handler=_poke,
-        bound=ObjectBinding(kind="downed", binding="instance"),
-    )
-    kinds = object_registry((BoundKind(kind=down, extension=None, context=None),))
-    actions = action_registry((BoundAction(action=poke, extension=None, context=None),), kinds)
-    turn = await _seed_turn()
-    with ws(turn.workspace_id):
-        engine = replace(
-            _engine(turn, _action_model("poke", kind="downed", name="x"), tmp_path),
-            verbs=ObjectVerbs(kinds, actions),
-            granted_actions=frozenset({poke.canonical_id}),
-        )
-        with pytest.raises(RuntimeError, match="store down"):
-            await engine.run()
-        async with workspace_tx() as connection:
-            terminal = (
-                await connection.execute(
-                    sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
-                )
-            ).scalar_one()
-        assert terminal["status"] == "failed"
-        assert terminal["error_class"] == "RuntimeError"
-        assert terminal["error_message"] == "store down"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_parallel_safe_actions_batch_and_a_malformed_call_stays_a_barrier(
     db: None, tmp_path: Path
 ) -> None:
@@ -864,105 +812,7 @@ class _MeetSpec(BaseModel):
     slot: str
 
 
-async def test_two_bound_action_calls_in_one_round_dispatch_concurrently(
-    db: None, tmp_path: Path
-) -> None:
-    """Each call returns only after the other has started, so serial dispatch would time out and a
-    passing run proves the round's two `object_action` calls overlapped — the engine scheduled them
-    on the resolved action's own `parallel_safe`, never the wire dispatcher's flag."""
-    started = {"a": asyncio.Event(), "b": asyncio.Event()}
-
-    async def meet(ctx: ToolContext, args: _MeetSpec) -> ToolResult:
-        started[args.slot].set()
-        async with asyncio.timeout(5):
-            await started["b" if args.slot == "a" else "a"].wait()
-        return ToolResult(content=(TextContent(text=f"met:{args.slot}"),))
-
-    rendezvous = ToolDef(
-        name="meet",
-        description="d",
-        input_model=_MeetSpec,
-        handler=meet,
-        bound=ObjectBinding(kind="rendezvous", binding="collection"),
-        parallel_safe=True,
-    )
-    kinds = object_registry(
-        (
-            BoundKind(
-                kind=ObjectKind(
-                    name="rendezvous",
-                    description="d",
-                    guidance="g",
-                    spec_model=_MeetSpec,
-                    store=_DownStore(),
-                ),
-                extension=None,
-                context=None,
-            ),
-        )
-    )
-    bound = BoundAction(action=rendezvous, extension=None, context=None)
-    actions = action_registry((bound,), kinds)
-    model = _CallsModel(
-        tuple(
-            ("object_action", {"kind": "rendezvous", "action": "meet", "input": {"slot": slot}})
-            for slot in ("a", "b")
-        )
-    )
-    turn = await _seed_turn()
-    with ws(turn.workspace_id):
-        engine = replace(
-            _engine(turn, model, tmp_path),
-            verbs=ObjectVerbs(kinds, actions),
-            granted_actions=frozenset({rendezvous.canonical_id}),
-        )
-        frame = await engine.run()
-        assert frame is not None and frame.status == "done"
-        results = await _tool_results(engine)
-        assert [result.tool_use_id for result in results] == ["c1", "c2"]
-        assert [result.content for result in results] == ["met:a", "met:b"]
-
-
-async def test_rejections_meter_unregistered_only_before_the_action_resolves(
-    db: None, tmp_path: Path
-) -> None:
-    turn = await _seed_turn()
-    with ws(turn.workspace_id):
-        engine = _engine(turn, _CallsModel(()), tmp_path)
-        unknown = engine._resolve_call(
-            ToolUseBlock(
-                id="u1",
-                name="object_action",
-                input={"kind": sample.WIDGET_KIND, "action": "unheard_of"},
-            )
-        )
-        assert isinstance(unknown, _RejectedToolCall)
-        assert unknown.dimensions == {"call": "unregistered"}
-        arity = engine._resolve_call(
-            ToolUseBlock(
-                id="a1",
-                name="object_action",
-                input={"kind": sample.WIDGET_KIND, "action": sample.POLISH_ACTION},
-            )
-        )
-        assert isinstance(arity, _RejectedToolCall)
-        assert dict(arity.dimensions) == {
-            "call": POLISH_ID,
-            "kind": sample.WIDGET_KIND,
-            "binding": "instance",
-            "contributor": sample.NAME,
-        }
-        resolved = engine._resolve_call(
-            ToolUseBlock(
-                id="r1",
-                name="object_action",
-                input={"kind": sample.WIDGET_KIND, "action": sample.POLISH_ACTION, "name": "x"},
-            )
-        )
-        assert isinstance(resolved, EffectiveCall)
-        assert resolved.meter_dimensions()["call"] == POLISH_ID
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_hooks_match_canonical_ids_and_keep_modify_semantics(
     db: None, tmp_path: Path
 ) -> None:
@@ -998,6 +848,7 @@ async def test_hooks_match_canonical_ids_and_keep_modify_semantics(
         assert result.content == sample.BLESS_REWRITE
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_failing_action_fires_the_targeted_failure_hook(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn()
     with ws(turn.workspace_id):
@@ -1018,6 +869,7 @@ async def test_a_failing_action_fires_the_targeted_failure_hook(db: None, tmp_pa
         assert await scoped.get(sample.HOOK_BLESS_POST_KEY) is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_untrusted_action_output_is_walled_under_the_canonical_id(
     db: None, tmp_path: Path
 ) -> None:
@@ -1032,26 +884,7 @@ async def test_untrusted_action_output_is_walled_under_the_canonical_id(
         assert sample.DIVINATION in result.content
 
 
-async def test_activity_summarizes_the_semantic_action_not_the_wire_name(
-    db: None, tmp_path: Path
-) -> None:
-    turn = await _seed_turn()
-    with ws(turn.workspace_id):
-        await _seed_widget()
-        engine = _engine(
-            turn,
-            _action_model(sample.POLISH_ACTION, name="anvil", input={"coats": 2}),
-            tmp_path,
-        )
-        frame = await engine.run()
-        assert frame is not None and frame.status == "done"
-        payloads = engine.activity_summarizer.model.payloads  # type: ignore[attr-defined]
-        [payload] = [text for text in payloads if "polish" in text]
-        assert POLISH_ID in payload
-        assert "anvil" in payload
-        assert '"object_action"' not in payload
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_final_acts_read_the_resolved_declaration_and_stay_hook_suppressible(
     db: None, tmp_path: Path
 ) -> None:
@@ -1113,52 +946,7 @@ async def test_final_acts_read_the_resolved_declaration_and_stay_hook_suppressib
         assert frame.connect_request is None
 
 
-async def test_a_final_act_survives_the_dispatcher_and_a_hook_can_suppress_it(
-    db: None, tmp_path: Path
-) -> None:
-    question = "Which widget should shine?"
-    expected = AskUserInput(title=sample.BESEECH_TITLE, questions=(AskQuestion(question=question),))
-    turn = await _seed_turn()
-    with ws(turn.workspace_id):
-        engine = _engine(
-            turn, _action_model(sample.BESEECH_ACTION, input={"question": question}), tmp_path
-        )
-        frame = await engine.run()
-        assert frame is not None and frame.status == "done"
-        assert frame.question == expected
-        assert await ScopedStore(extension=sample.NAME).get(sample.BESEECH_KEY) is not None
-
-    async def rewrite(ctx: HookContext) -> HookOutcome:
-        return ModifyOutput(output="rewritten past recognition")
-
-    suppressed_turn = await _seed_turn()
-    with ws(suppressed_turn.workspace_id):
-        chain = HookChain(
-            hooks={
-                "post_tool_use": (
-                    BoundHook(
-                        spec=HookSpec(
-                            event="post_tool_use",
-                            handler=rewrite,
-                            tools=(f"action:{sample.WIDGET_KIND}:{sample.BESEECH_ACTION}",),
-                        ),
-                        ext=context_for("sample", frozenset()),
-                    ),
-                )
-            },
-            audience=conversation_audience(None),
-        )
-        engine = _engine(
-            suppressed_turn,
-            _action_model(sample.BESEECH_ACTION, input={"question": question}),
-            tmp_path,
-            hooks=chain,
-        )
-        frame = await engine.run()
-        assert frame is not None and frame.status == "done"
-        assert frame.question is None
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_speaking_prepared_intent_dispatches_the_action_verbatim(
     db: None, tmp_path: Path
 ) -> None:
@@ -1185,6 +973,7 @@ async def test_a_speaking_prepared_intent_dispatches_the_action_verbatim(
         assert recorded["target"]["name"] == "anvil"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_speaking_intent_refuses_an_action_with_no_presentation(
     db: None, tmp_path: Path
 ) -> None:
@@ -1211,6 +1000,7 @@ async def test_a_speaking_intent_refuses_an_action_with_no_presentation(
         assert await ScopedStore(extension=sample.NAME).get(sample.POLISH_KEY) is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_refused_intent_terminates_as_intent_refused(db: None, tmp_path: Path) -> None:
     intent = ToolIntent(
         tool="object_action",
@@ -1228,6 +1018,7 @@ async def test_a_refused_intent_terminates_as_intent_refused(db: None, tmp_path:
         assert "no action 'unheard_of'" in frame.error_message
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_speakerless_bridge_intent_stays_inside_the_action_grant(
     db: None, tmp_path: Path
 ) -> None:

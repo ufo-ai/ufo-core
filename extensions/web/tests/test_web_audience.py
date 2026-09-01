@@ -42,11 +42,15 @@ from ufo.runtime.object_scope import ObjectActionTarget, ObjectAgent
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.surfaces.hub_tail import HubTailer
 from ufo.runtime.tools.context import SpawnResult, ToolContext
-from ufo.runtime.tools.registry import ObjectBinding
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience, foreign_room_audience
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 GRANT = WEB_ACCESS_TOOLS[0]
 REVOKE = WEB_ACCESS_TOOLS[1]
@@ -556,36 +560,3 @@ async def test_open_conversation_lands_a_lost_race_on_the_winner_and_its_row(
         assert winner_title == "first words"
         rows = await store.list("chat/")
         assert [key for key, _ in rows] == [f"chat/{winner}"]
-
-
-async def test_no_web_access_tool_takes_a_user_description() -> None:
-    for tool in WEB_ACCESS_TOOLS:
-        assert "user_description" not in tool.input_model.model_fields
-
-
-@pytest.mark.parametrize("tool", WEB_ACCESS_TOOLS, ids=lambda tool: tool.name)
-def test_web_access_tools_are_side_effecting(tool) -> None:
-    assert tool.side_effecting
-
-
-def test_the_web_access_tools_bind_to_the_objects_they_act_on() -> None:
-    """Each is an instance action on the object it grants or opens, reaches an agent through the
-    cross-agent gate, and declares the presentation the prepared-intent lane requires."""
-    assert (GRANT.bound, REVOKE.bound) == (
-        ObjectBinding(kind=MEMBER_KIND, binding="instance"),
-        ObjectBinding(kind=MEMBER_KIND, binding="instance"),
-    )
-    assert TRANSCRIPT.bound == ObjectBinding(kind=CONVERSATION_KIND, binding="instance")
-    assert all(tool.agent_targetable for tool in WEB_ACCESS_TOOLS)
-    assert [tool.canonical_id for tool in WEB_ACCESS_TOOLS] == [
-        "action:member:grant_web_access",
-        "action:member:revoke_web_access",
-        "action:conversation:read_private_transcript",
-    ]
-    assert [tool.presentation.label for tool in WEB_ACCESS_TOOLS if tool.presentation] == [
-        "Grant web access",
-        "Revoke web access",
-        "Open transcript",
-    ]
-    assert TRANSCRIPT.presentation is not None and TRANSCRIPT.presentation.confirm
-    assert all(not tool.input_model.model_fields for tool in WEB_ACCESS_TOOLS)

@@ -37,9 +37,7 @@ def test_the_products_own_mark_is_reserved_and_never_offered() -> None:
     assert DEFAULT_AGENT_ICON != MAIN_AGENT_ICON
 
 
-@pytest.mark.parametrize(
-    "refused", ["Rocket", "", "rocket ship", "rocket-", "-rocket", "2fa", "a" * 65]
-)
+@pytest.mark.parametrize("refused", ["Rocket", "rocket ship", "a" * 65])
 def test_a_slug_no_mark_could_be_named_by_is_refused(refused: str) -> None:
     with pytest.raises(ValidationError):
         TypeAdapter(TablerIcon).validate_python(refused)

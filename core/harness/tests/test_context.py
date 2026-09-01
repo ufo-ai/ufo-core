@@ -32,7 +32,7 @@ def policy(**overrides: int) -> ContextWindow[Message]:
     )
 
 
-def test_selection_keeps_complete_tool_rounds() -> None:
+def test_window_selects_complete_rounds_and_counts_all_content() -> None:
     messages = (
         Message("user", "request"),
         Message("assistant", "call one"),
@@ -47,8 +47,6 @@ def test_selection_keeps_complete_tool_rounds() -> None:
     assert selection.head == ((messages[0],), (messages[1], messages[2]))
     assert selection.tail == messages[3:]
 
-
-def test_trigger_counts_text_opaque_content_and_images() -> None:
     window = policy(trigger_tokens=20)
     messages = (Message("user", "abcdefghij", opaque=10, images=1),) * 3
 
@@ -57,7 +55,7 @@ def test_trigger_counts_text_opaque_content_and_images() -> None:
     assert not window.should_compact(messages, force=False, automatic_suppressed=True)
 
 
-def test_force_still_requires_a_compactible_head() -> None:
+def test_compaction_boundaries_require_a_head_and_a_fitting_replacement() -> None:
     window = policy(keep_messages=2)
 
     assert not window.should_compact(
@@ -66,8 +64,6 @@ def test_force_still_requires_a_compactible_head() -> None:
         automatic_suppressed=False,
     )
 
-
-def test_budget_rejects_a_replacement_that_could_have_fit() -> None:
     with pytest.raises(RuntimeError, match="stays over the compaction trigger"):
         policy().require_budget(
             before_tokens=100,

@@ -60,6 +60,7 @@ SEARCH_REF = re.compile(r"\((memory|page)/([0-9a-f-]{36})")
 LINK_NARRATION = "following the trail back to the source"
 PAGE_BODY = "# Acme contract\n\nThe Acme renewal closes on September 30 for 120k."
 DERIVED_FACT = "The Acme renewal closes on September 30"
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 EXTRACTION = {
     "notability": "high",
     "memory_kind": "fact",
@@ -705,6 +706,6 @@ async def test_malformed_relations_kinds_and_target_names_fail_at_the_boundary(
                 )
 
 
-def test_no_generic_object_or_edge_table_exists() -> None:
+def test_no_generic_object_or_edge_table_exists(database_url: str) -> None:
     table_names = set(tables.metadata.tables) | set(memory_item.metadata.tables)
     assert not {"object", "objects", "edge", "edges", "object_link", "link"} & table_names

@@ -107,6 +107,7 @@ REFUSED_POLICY_KEPT = "default-src 'self'; img-src *"
 REPORT_ONLY_POLICY = "frame-ancestors 'none'"
 FRAMING_ONLY_PATH = "/framing-only"
 FRAMING_ONLY_POLICY = "  frame-ancestors 'self' ;  "
+pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
@@ -679,7 +680,9 @@ async def test_bad_sessions_and_view_tokens_are_403(db, ingress) -> None:
         assert refused.text == SESSION_ENDED_PAGE
 
 
-def test_the_ingress_refuses_to_boot_without_a_base(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_ingress_refuses_to_boot_without_a_base(
+    database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The one piece `run()` reads off the knob, and its fail-loud. Unset, the ingress would resolve
     no request's site and answer 404 to every viewer, so it dies before its readiness probe reports
     green rather than serving nothing."""
@@ -935,7 +938,9 @@ async def test_a_sites_own_framing_directive_is_replaced_not_added_to(db, ingres
     assert _framers(got) == [APP_ORIGIN]
 
 
-def test_the_frame_ancestor_is_an_origin_and_nothing_frames_a_site_without_one() -> None:
+def test_the_frame_ancestor_is_an_origin_and_nothing_frames_a_site_without_one(
+    database_url: str,
+) -> None:
     """An origin, not the whole configured URL: a path in `frame-ancestors` is matched by the
     browser and would name a source no page has. Unset, `'none'` — there is no frame to allow, and
     unset is not a reason to permit what a configured base would forbid."""
@@ -1358,7 +1363,9 @@ async def socket_ingress(
             yield _bound_port(server)
 
 
-async def test_a_connection_still_open_at_stop_does_not_hold_the_ingress() -> None:
+async def test_a_connection_still_open_at_stop_does_not_hold_the_ingress(
+    database_url: str,
+) -> None:
     entered = asyncio.Event()
 
     async def never_answers(
@@ -1846,6 +1853,7 @@ async def test_a_viewer_that_vanishes_mid_push_leaves_the_ingress_serving(
 
 
 def test_the_ingress_refuses_to_bind_when_its_database_is_unreachable(
+    database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`ufo-ingress` has no `/healthz` either; a TCP probe confirms the bind (`hosted.yaml.tpl`), so

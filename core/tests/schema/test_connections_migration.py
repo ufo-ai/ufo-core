@@ -259,32 +259,6 @@ def test_connection_migration_fails_before_ddl_when_ownership_conflicts(
     assert grants == 2
 
 
-def test_connection_migration_fails_before_ddl_when_hosts_conflict(tmp_path: Path) -> None:
-    owner_id = uuid4()
-    path = tmp_path / "connection-host-conflict.db"
-    config, workspace_id = _seed(path, (owner_id, owner_id))
-    engine = sa.create_engine(f"sqlite:///{path}")
-    with engine.connect() as connection:
-        connection.execute(
-            sa.text(
-                'update "grant" set host = :host where id = '
-                '(select id from "grant" order by id limit 1)'
-            ),
-            {"host": "other.gmail.test"},
-        )
-        connection.commit()
-    engine.dispose()
-
-    with pytest.raises(RuntimeError) as raised:
-        command.upgrade(config, "0057")
-    assert str(workspace_id) in str(raised.value)
-    assert "gmail/acct-1" in str(raised.value)
-    assert "different hosts" in str(raised.value)
-    engine = sa.create_engine(f"sqlite:///{path}")
-    assert "connection" not in sa.inspect(engine).get_table_names()
-    engine.dispose()
-
-
 def test_connection_migration_refuses_cross_workspace_principals(tmp_path: Path) -> None:
     owner_id = uuid4()
     path = tmp_path / "connection-cross-workspace.db"

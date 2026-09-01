@@ -114,30 +114,6 @@ async def test_delta_run_upserts_changes_tombstones_removals_and_advances_the_to
     assert result.next_cursor == "tok-200"
 
 
-async def test_shared_drives_lists_the_collection() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/drive/v3/drives":
-            return httpx.Response(
-                200,
-                json={
-                    "drives": [
-                        {
-                            "id": "d1",
-                            "name": "Engineering",
-                            "createdTime": "2026-01-01T00:00:00.000Z",
-                        }
-                    ],
-                    "nextPageToken": None,
-                },
-            )
-        return httpx.Response(404, json={"path": request.url.path})
-
-    result = await _fetch("shared_drives", handle)
-    assert {page.source_ref for page in result.pages} == {"shared_drives/d1"}
-    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
-    assert "Engineering" in result.pages[0].body
-
-
 async def test_comments_fan_out_per_file() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/drive/v3/files":

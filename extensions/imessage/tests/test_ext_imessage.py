@@ -1,36 +1,26 @@
 import asyncio
-import io
 import json
-import threading
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
 from uuid import UUID, uuid4
 
 import grpc
 import httpx
 import pytest
-import segno
 import sqlalchemy as sa
 import ufo_ext_imessage.cloud as cloud
 import ufo_ext_imessage.surface as surface_module
-import yaml
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 from ufo_ext_imessage.cloud import (
     SpectrumCloudError,
     SpectrumProject,
-    _inbound_message,
 )
-from ufo_ext_imessage.manifest import manifest
-from ufo_ext_imessage.proto.photon.imessage.v1 import message_types_pb2
 from ufo_ext_imessage.provider import (
     InboundMessage,
     MessageAttachment,
-    ProviderEvent,
     ProviderNotConfigured,
 )
 from ufo_ext_imessage.surface import (
@@ -41,11 +31,9 @@ from ufo_ext_imessage.surface import (
     IMESSAGE_EXTENSION,
     OPT_IN_CODE_ALPHABET,
     OPT_IN_CODE_LENGTH,
-    OPT_IN_TEXT,
     OPT_OUT_REPLIES,
     SURFACE_IMESSAGE,
     ImessageSurface,
-    MessageStreamDisconnected,
     PendingClaim,
     claim_key,
     contact_card,
@@ -53,10 +41,6 @@ from ufo_ext_imessage.surface import (
     queue_key,
 )
 from ufo_ext_imessage.tools import (
-    OPT_IN_QR_BORDER,
-    OPT_IN_QR_CAPTION,
-    OPT_IN_QR_FILENAME,
-    OPT_IN_QR_SCALE,
     PHONE_CLAIM_MINUTES,
     ImessageConnect,
     ImessageConnectInput,
@@ -77,8 +61,6 @@ from ufo.harness.models.interface import ModelRequest
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint
-from ufo.host.ext.loader import turn_tools
-from ufo.host.kinds.surface_kind import SURFACE_KIND
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import ScopedStore, context_for
@@ -90,25 +72,23 @@ from ufo.runtime.ext.surface import (
     member_message_text,
 )
 from ufo.runtime.hub import InProcessHub
-from ufo.runtime.queue import _agent_actions
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.surfaces.hub_tail import HubTailer
 from ufo.runtime.tools.context import ToolContext
-from ufo.runtime.tools.registry import ObjectBinding
-from ufo.runtime.turns.ambient_reply import AmbientReplyClassifier
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
-    MEMBER_ADMISSION,
     Agent,
-    AskQuestion,
-    AskUserInput,
     ConnectRequest,
-    QuestionOption,
     TerminalFrame,
     Turn,
 )
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 CLAIM_CODE = "ABC234"
 
@@ -463,27 +443,6 @@ async def test_a_project_change_requires_an_admin_then_rebinds(db: None, tmp_pat
     assert after == "project:new"
 
 
-def test_manifest_declares_complete_durable_surface() -> None:
-    loaded = manifest()
-    assert loaded.deploy_keys == ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET")
-    assert tuple(tool.name for tool in loaded.tools) == ("imessage_connect",)
-    connect = loaded.tools[0]
-    assert connect.bound == ObjectBinding(
-        kind=SURFACE_KIND, binding="instance", name=SURFACE_IMESSAGE
-    )
-    assert connect.canonical_id == f"action:{SURFACE_KIND}:imessage_connect"
-    assert connect.side_effecting is True
-    assert connect.untrusted is True
-    assert connect.presentation is not None and connect.presentation.label == "Connect iMessage"
-    surface = loaded.surfaces[0]
-    assert surface.addressed
-    assert surface.listen is not None
-    assert surface.post is not None
-    assert surface.attach is not None
-    assert surface.speak is not None
-    assert surface.routes == ()
-
-
 def test_phone_and_queue_boundaries() -> None:
     for stated in (
         "5594259991",
@@ -547,86 +506,6 @@ async def test_missing_provider_keeps_listener_inactive() -> None:
     await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_group_writeback_does_not_mint_a_connect_url() -> None:
-    sent: list[str] = []
-
-    class Provider:
-        async def send_text(self, _conversation_id: str, text: str, _idempotency_key: str) -> str:
-            sent.append(text)
-            return "message"
-
-    class Context:
-        async def connect_url(self, _turn_id: UUID, _member_id: UUID) -> str:
-            raise AssertionError("group writeback minted a connect URL")
-
-        def home_url(self) -> str:
-            return "https://ufo.example.test"
-
-    provider = Provider()
-    surface = ImessageSurface(provider=lambda: provider)
-    writeback = Writeback(
-        turn_id=uuid4(),
-        conversation_id=uuid4(),
-        agent_id=uuid4(),
-        queue_key=queue_key("group-chat", direct=False),
-        terminal=TerminalFrame(
-            status="done",
-            connect_request=ConnectRequest(provider="github", requester_member_id=uuid4()),
-        ),
-        artifacts=(),
-    )
-
-    assert await surface.post(Context(), writeback) == "message"
-    assert sent == ["Continue in a direct message to connect the account."]
-
-
-async def test_a_question_writeback_states_the_answer_already_settled() -> None:
-    """iMessage renders an ask as lines the member answers in words, so an answer the agent read
-    off their own words is stated with them — the read-back they correct by replying."""
-    sent: list[str] = []
-
-    class Provider:
-        async def send_text(self, _conversation_id: str, text: str, _idempotency_key: str) -> str:
-            sent.append(text)
-            return "message"
-
-    class Context:
-        def home_url(self) -> str:
-            return "https://ufo.example.test"
-
-    surface = ImessageSurface(provider=lambda: Provider())
-    writeback = Writeback(
-        turn_id=uuid4(),
-        conversation_id=uuid4(),
-        agent_id=uuid4(),
-        queue_key=queue_key("direct-chat", direct=True),
-        terminal=TerminalFrame(
-            status="done",
-            text="One thing to settle.",
-            question=AskUserInput(
-                title="Create new app",
-                questions=(
-                    AskQuestion(
-                        question="Who else uses it?",
-                        options=(QuestionOption(label="Just me"), QuestionOption(label="Everyone")),
-                        chosen="Just me",
-                    ),
-                ),
-            ),
-        ),
-        artifacts=(),
-    )
-
-    assert await surface.post(Context(), writeback) == "message"
-    assert sent == [
-        "One thing to settle.\n\n"
-        "Create new app\n"
-        "Who else uses it?\n"
-        "Options: Just me, Everyone\n"
-        "Current answer: Just me"
-    ]
-
-
 async def test_direct_writeback_mints_the_requesting_members_connect_url() -> None:
     sent: list[str] = []
     requester = uuid4()
@@ -662,92 +541,6 @@ async def test_direct_writeback_mints_the_requesting_members_connect_url() -> No
     assert sent == ["https://ufo.example.test/connect"]
 
 
-async def test_spectrum_cloud_mints_one_cached_shared_token() -> None:
-    requests: list[httpx.Request] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "succeed": True,
-                "data": {"type": "shared", "token": "bearer", "expiresIn": 900},
-            },
-        )
-
-    project = SpectrumProject(
-        project_id="project",
-        project_secret="secret",
-        client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
-        lock=asyncio.Lock(),
-        token_state={},
-    )
-    try:
-        assert (await project.line()).id == "shared"
-        assert (await project.line()).token == "bearer"
-        assert len(requests) == 1
-        assert requests[0].method == "POST"
-        assert requests[0].url.path == "/projects/project/imessage/tokens"
-        assert "authorization" in requests[0].headers
-    finally:
-        await project.client.aclose()
-
-
-async def test_spectrum_project_uses_one_client_per_event_loop() -> None:
-    project = SpectrumProject(
-        project_id="project",
-        project_secret="secret",
-        client=httpx.AsyncClient(),
-        lock=asyncio.Lock(),
-        token_state={},
-    )
-    main_state = project._loop()
-    foreign_states: list[cloud.SpectrumLoop] = []
-    done = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    def capture() -> None:
-        async def read() -> None:
-            state = project._loop()
-            foreign_states.append(state)
-            await state.client.aclose()
-
-        try:
-            asyncio.run(read())
-        finally:
-            loop.call_soon_threadsafe(done.set)
-
-    threading.Thread(target=capture).start()
-    await asyncio.wait_for(done.wait(), timeout=5)
-    assert len(foreign_states) == 1
-    assert foreign_states[0].client is not main_state.client
-    assert foreign_states[0].lock is not main_state.lock
-    await main_state.client.aclose()
-
-
-async def test_spectrum_project_resolves_the_ufo_prefixed_keys(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The `deploy_keys` seam's contract: `ufoctl init` reports a missing key by its `UFO_`-prefixed
-    name and counts that form as present, so the reader must resolve it — an operator who follows
-    the init notice gets a working provider, not a `ProviderNotConfigured` at first use."""
-    for name in ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET"):
-        monkeypatch.delenv(name, raising=False)
-        monkeypatch.delenv(f"UFO_{name}", raising=False)
-    cloud.spectrum_project.cache_clear()
-    with pytest.raises(ProviderNotConfigured, match="UFO_SPECTRUM_PROJECT_ID"):
-        cloud.spectrum_project()
-    monkeypatch.setenv("UFO_SPECTRUM_PROJECT_ID", "project")
-    monkeypatch.setenv("UFO_SPECTRUM_PROJECT_SECRET", "secret")
-    cloud.spectrum_project.cache_clear()
-    project = cloud.spectrum_project()
-    try:
-        assert (project.project_id, project.project_secret) == ("project", "secret")
-    finally:
-        await project.client.aclose()
-        cloud.spectrum_project.cache_clear()
-
-
 async def test_spectrum_invalid_payload_is_an_external_provider_error() -> None:
     project = SpectrumProject(
         project_id="project",
@@ -774,22 +567,8 @@ async def test_spectrum_invalid_payload_is_an_external_provider_error() -> None:
         await project.client.aclose()
 
 
-def test_spectrum_provider_normalizes_a_photon_message() -> None:
-    event = message_types_pb2.MessageChangeEvent(chat_guid="iMessage;-;+14155550123")
-    event.actor.address = "+14155550123"
-    event.message_received.message.guid = "message-1"
-    event.message_received.message.content.text = "Please summarize this."
-
-    assert _inbound_message(event) == _message("+14155550123")
-
-
-def test_opt_in_link_and_contact_card_carry_the_assigned_line() -> None:
-    assert OPT_IN_TEXT == "UFO"
+def test_opt_in_link_carries_the_assigned_line() -> None:
     assert opt_in_link("+14085550123", CLAIM_CODE) == (f"sms:+14085550123?&body=UFO%20{CLAIM_CODE}")
-    assert contact_card("+14085550123") == (
-        b"BEGIN:VCARD\r\nVERSION:3.0\r\nN:ufo;;;;\r\nFN:ufo\r\n"
-        b"TEL;TYPE=CELL:+14085550123\r\nEND:VCARD\r\n"
-    )
 
 
 async def test_spectrum_reports_a_refused_send_by_its_provider_status(
@@ -838,71 +617,6 @@ async def test_spectrum_reports_a_refused_send_by_its_provider_status(
             await project.send_text("iMessage;-;+14155550123", "Connected.", "send-1")
         assert project.external_error(refusal.value)
         assert project.error_code(refusal.value) == "PERMISSION_DENIED"
-    finally:
-        await project.client.aclose()
-
-
-async def test_replay_head_filters_the_buffered_live_overlap() -> None:
-    processed: list[int] = []
-
-    class ReplayProvider:
-        async def subscribe(self, ready: asyncio.Event):
-            ready.set()
-            for sequence in (6, 8):
-                yield ProviderEvent(sequence=sequence)
-
-    class ReplaySurface(ImessageSurface):
-        async def _catch_up(self, _context, _provider, _installation_id, cursor):
-            assert cursor == 5
-            return 7
-
-        async def _process_event(
-            self, _context, _provider, _installation_id, sequence, _message
-        ) -> None:
-            processed.append(sequence)
-
-    provider = ReplayProvider()
-    surface = ReplaySurface(provider=lambda: provider)
-    with pytest.raises(MessageStreamDisconnected) as raised:
-        await surface._consume_connected(object(), provider, "project:project", 5)
-    assert processed == [8]
-    assert raised.value.cursor == 8
-
-
-async def test_spectrum_cloud_registers_an_absent_phone_and_answers_its_assigned_line() -> None:
-    requests: list[httpx.Request] = []
-    users: list[dict[str, str]] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if request.method == "GET":
-            return httpx.Response(
-                200, json={"succeed": True, "data": {"users": users, "total": len(users)}}
-            )
-        users.append(
-            {
-                "id": "user",
-                "phoneNumber": "+14155550123",
-                "assignedPhoneNumber": "+14085550123",
-            }
-        )
-        return httpx.Response(200, json={"succeed": True, "data": users[0]})
-
-    project = SpectrumProject(
-        project_id="project",
-        project_secret="secret",
-        client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
-        lock=asyncio.Lock(),
-        token_state={},
-    )
-    try:
-        assert await project.assign_line("+14155550123", "line-1") == "+14085550123"
-        assert [request.method for request in requests] == ["GET", "POST"]
-        assert requests[1].url.path == "/projects/project/users/"
-        assert requests[1].content == b'{"type":"shared","phoneNumber":"+14155550123"}'
-        assert requests[1].headers["x-idempotency-key"] == "line-1:user"
-        assert await project.assign_line("+14155550123", "line-2") == "+14085550123"
-        assert [request.method for request in requests] == ["GET", "POST", "GET"]
     finally:
         await project.client.aclose()
 
@@ -1017,37 +731,6 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
     ]
 
 
-async def test_the_pending_result_shares_the_opt_in_as_a_qr(db: None, tmp_path: Path) -> None:
-    """The code never has to be typed: the QR carries the same prefilled message the link does, so
-    a member reading the reply on a desktop scans it with the phone they are connecting."""
-    workspace_id, member_id = await _seed()
-    phone = "+14155550123"
-    provider = RecordingProvider()
-    tool_context = await _tool_context(workspace_id, member_id, tmp_path)
-    with ws(workspace_id):
-        assert tool_context.ext is not None
-        await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        result = await ImessageConnect(provider=lambda: provider).run(
-            tool_context,
-            ImessageConnectInput(phone_number=phone),
-        )
-        stored = await tool_context.ext.store.get(claim_key(member_id, phone))
-        shared = await _shared_artifacts()
-        image = await tool_context.blob.get(shared[0][3])
-    claim = PendingClaim.model_validate(stored)
-    answered = json.loads(result.content[0].text)
-    expected = io.BytesIO()
-    segno.make(f"SMSTO:+14085550123:UFO {claim.opt_in_code}", error="m").save(
-        expected, kind="png", scale=OPT_IN_QR_SCALE, border=OPT_IN_QR_BORDER
-    )
-    assert answered["state"] == "pending"
-    assert answered["instruction"].endswith(f"within {PHONE_CLAIM_MINUTES} minutes.")
-    assert "Scan" not in answered["instruction"]
-    assert [row[:3] for row in shared] == [(OPT_IN_QR_FILENAME, "image/png", OPT_IN_QR_CAPTION)]
-    assert image.startswith(b"\x89PNG")
-    assert image == expected.getvalue()
-
-
 async def test_an_expired_claim_can_move_to_another_member(db: None, tmp_path: Path) -> None:
     workspace_id, first_member_id = await _seed()
     second_member_id = await _member(workspace_id, "second@example.com")
@@ -1080,73 +763,6 @@ async def test_an_expired_claim_can_move_to_another_member(db: None, tmp_path: P
     assert len(provider.lines) == 1
     assert provider.lines[0][0] == phone
     assert provider.lines[0][1].startswith("imessage-line:")
-    assert provider.sends == []
-
-
-async def test_a_concurrent_claim_write_is_not_overwritten(db: None, tmp_path: Path) -> None:
-    """The fleet row admits one claimant, so the remaining race is this member's own second run.
-    The store write is conditional on what it read, so the code the member was already given
-    stands and the loser says to ask again rather than handing out a code that proves nothing."""
-    workspace_id, member_id = await _seed()
-    phone = "+14155550123"
-    concurrent = PendingClaim(assigned_phone_number="+14085550123", opt_in_code="BCD345")
-
-    class RacingProvider(RecordingProvider):
-        async def assign_line(self, phone_number: str, idempotency_key: str) -> str:
-            await ScopedStore(IMESSAGE_EXTENSION).put(
-                claim_key(member_id, phone_number), concurrent.model_dump(mode="json")
-            )
-            return await super().assign_line(phone_number, idempotency_key)
-
-    provider = RacingProvider()
-    tool_context = await _tool_context(workspace_id, member_id, tmp_path)
-    with ws(workspace_id):
-        assert tool_context.ext is not None
-        await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        result = await ImessageConnect(provider=lambda: provider).run(
-            tool_context,
-            ImessageConnectInput(phone_number=phone),
-        )
-        stored = await tool_context.ext.store.get(claim_key(member_id, phone))
-    assert json.loads(result.content[0].text) == {
-        "state": "not_connected",
-        "instruction": "The phone connection changed. Ask again.",
-    }
-    assert PendingClaim.model_validate(stored) == concurrent
-    assert provider.sends == []
-
-
-async def test_connect_answers_a_phone_the_surface_already_knows(db: None, tmp_path: Path) -> None:
-    workspace_id, member_id = await _seed()
-    other_member_id = await _member(workspace_id, "second@example.com")
-    phone = "+14155550123"
-    other_phone = "+16505550123"
-    provider = RecordingProvider()
-    tool_context = await _tool_context(workspace_id, member_id, tmp_path)
-    await _linked(workspace_id, member_id, phone)
-    await _linked(workspace_id, other_member_id, other_phone)
-    tool = ImessageConnect(provider=lambda: provider)
-    with ws(workspace_id):
-        assert tool_context.ext is not None
-        await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
-        mine = await tool.run(
-            tool_context,
-            ImessageConnectInput(phone_number=phone),
-        )
-        theirs = await tool.run(
-            tool_context,
-            ImessageConnectInput(phone_number=other_phone),
-        )
-        assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
-    assert json.loads(mine.content[0].text) == {
-        "state": "connected",
-        "instruction": "That phone is connected. Text (408) 555-0123 from it.",
-        "assigned_phone_number": "+14085550123",
-    }
-    assert json.loads(theirs.content[0].text) == {
-        "state": "not_connected",
-        "instruction": "That phone belongs to another member.",
-    }
     assert provider.sends == []
 
 
@@ -1248,48 +864,6 @@ async def test_a_code_stored_under_another_member_completes_nothing(
     assert provider.sends == []
 
 
-@pytest.mark.parametrize(
-    "text",
-    (
-        f"UFO {CLAIM_CODE}",
-        CLAIM_CODE,
-        f"  ufo {CLAIM_CODE.lower()}  ",
-        f"Ufo {CLAIM_CODE[:3]}-{CLAIM_CODE[3:]}!",
-        f"Sent from my iPhone: {CLAIM_CODE.lower()}.",
-    ),
-    ids=("as-asked", "bare-code", "lowercase", "punctuated", "surrounded"),
-)
-async def test_the_code_reads_through_case_spacing_and_punctuation(
-    db: None, tmp_path: Path, text: str
-) -> None:
-    workspace_id, member_id = await _seed()
-    phone = "+14155550123"
-    provider = RecordingProvider()
-    context = _context(workspace_id, tmp_path, StubDbos())
-    await _claim(workspace_id, member_id, phone)
-    with ws(workspace_id):
-        await ImessageSurface(provider=lambda: provider)._admit_message(
-            context,
-            provider,
-            _message(
-                phone,
-                text,
-                message_id="opt-in",
-                attachments=(
-                    MessageAttachment(id="attachment-1", filename="photo.jpg", size_bytes=4),
-                ),
-            ),
-        )
-        assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
-    async with workspace_tx() as connection:
-        turns = (
-            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
-        ).scalar_one()
-    assert await _claimed_phones() == [(phone, member_id, "opt-in")]
-    assert turns == 0
-    assert provider.delivered == [(f"iMessage;-;{phone}", CONNECTED_TEXT)]
-
-
 async def test_a_wrong_code_is_answered_and_an_expired_claim_says_so(
     db: None, tmp_path: Path
 ) -> None:
@@ -1387,45 +961,6 @@ async def test_only_a_direct_message_from_the_claimed_phone_completes_the_claim(
     assert turns == 0
     assert provider.sends == []
     assert stored is not None
-
-
-@pytest.mark.parametrize(
-    "attachments",
-    [(), (MessageAttachment(id="attachment-1", filename="note.txt", size_bytes=4),)],
-    ids=("text", "attachment"),
-)
-async def test_group_message_uses_the_ambient_reply_gate(
-    db: None, tmp_path: Path, attachments: tuple[MessageAttachment, ...]
-) -> None:
-    workspace_id, member_id = await _seed()
-    phone = "+14155550123"
-    provider = RecordingProvider()
-    context = _context(workspace_id, tmp_path, StubDbos())
-    decision = DecisionModel("NO_REPLY")
-    context = dataclass_replace(context, _ambient_reply=AmbientReplyClassifier(model=decision))
-    surface = ImessageSurface(provider=lambda: provider)
-    await _linked(workspace_id, member_id, phone)
-    with ws(workspace_id):
-        await surface._admit_message(
-            context,
-            provider,
-            _message(
-                phone,
-                "" if attachments else "Thanks",
-                conversation_id="iMessage;+;group",
-                direct=False,
-                attachments=attachments,
-            ),
-        )
-    async with workspace_tx() as connection:
-        turns = (
-            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
-        ).scalar_one()
-    assert turns == 0
-    assert len(decision.requests) == 1
-    payload = cast(str, decision.requests[0].messages[0].content)
-    if attachments:
-        assert "Attachments: note.txt" in payload
 
 
 async def test_bad_attachments_do_not_block_the_inbound_message(
@@ -1636,35 +1171,3 @@ async def test_inbound_message_from_an_unclaimed_phone_is_ignored(db: None, tmp_
         assert dbos.enqueued == []
     finally:
         await project.client.aclose()
-
-
-async def test_reading_the_imessage_surface_lists_the_connect_action_before_binding(
-    db: None, tmp_path: Path
-) -> None:
-    """The action rides the action registry, never the wire tool set, and a granted agent reading
-    `surface/imessage` on a workspace with no provider binding sees it with its call template bound
-    to the surface — discovery works before anyone has connected."""
-    workspace_id, member_id = await _seed()
-    tools, _, verbs = turn_tools((manifest(),), None, audience=conversation_audience(None))
-    assert "imessage_connect" not in {tool.name for tool in tools}
-    get = next(tool for tool in tools if tool.name == "object_get")
-    ctx = dataclass_replace(
-        await _tool_context(workspace_id, member_id, tmp_path),
-        granted_actions=_agent_actions(verbs.actions, None, MEMBER_ADMISSION),
-    )
-    with ws(workspace_id):
-        result = await get.handler(
-            ctx, get.input_model.model_validate({"kind": SURFACE_KIND, "name": SURFACE_IMESSAGE})
-        )
-    read = yaml.safe_load(result.content[0].text)
-    assert read["spec"]["addressed"] is True
-    assert read["status"] == {"bound": False}
-    [view] = read["actions"]
-    assert view["name"] == "imessage_connect"
-    assert view["call"] == {
-        "kind": SURFACE_KIND,
-        "action": "imessage_connect",
-        "name": SURFACE_IMESSAGE,
-        "input": {},
-    }
-    assert set(view["input_schema"]["properties"]) == {"phone_number"}

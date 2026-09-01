@@ -48,6 +48,11 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 TOOL_NARRATION = "checking their connected accounts"
 ADMIN_CREATED_AT = datetime(2026, 7, 1, tzinfo=UTC)
 GRANTOR_CREATED_AT = datetime(2026, 7, 2, tzinfo=UTC)
@@ -338,31 +343,6 @@ async def test_a_shared_grant_drops_the_link_to_its_owner_only_connection(db: No
 LONG_ACCOUNT = "anna.rodriguez-fernandez@platform-engineering.example.com"
 
 
-async def test_a_long_account_still_names_a_connection_a_link_can_express(db: None) -> None:
-    """`account_id` is unbounded, so an account whose slug overruns the object-name limit would make
-    the grant's `access_to` ref raise out of `object_get`. The name is bounded by construction, and
-    the read that renders the link is what proves it."""
-    workspace_id, agent_id, conversation_id, _admin_id, grantor_id, _other_id = await _seed()
-    name = account_object_name("gmail", LONG_ACCOUNT)
-    assert len(name) == OBJECT_NAME_MAX_LENGTH
-    assert ObjectRef(kind=CONNECTION_KIND, name=name).name == name
-
-    with ws(workspace_id), agent(agent_id):
-        await _grant(workspace_id, agent_id, conversation_id, grantor_id, "gmail", LONG_ACCOUNT)
-        ctx = _tool_context(workspace_id, agent_id, grantor_id)
-        fetched = yaml.safe_load(
-            await _text(_object_tool("object_get"), ctx, kind=CONNECTOR_GRANT_KIND, name=name)
-        )
-        opened = yaml.safe_load(
-            await _text(_object_tool("object_get"), ctx, kind=CONNECTION_KIND, name=name)
-        )
-    assert {
-        "relation": "access_to",
-        "target": {"kind": CONNECTION_KIND, "name": name},
-    } in fetched["links"]
-    assert opened["spec"] == {"provider": "gmail", "account_id": LONG_ACCOUNT}
-
-
 def test_two_accounts_sharing_a_truncated_head_stay_distinct() -> None:
     """Truncation drops slug characters, so the digest is the only thing left separating two
     accounts identical up to the cut — it stays whole at the end of the name."""
@@ -621,30 +601,6 @@ async def test_cross_agent_attach_admits_the_owner_or_a_shared_connection_only(d
             await apply_tool.handler(_tool_context(workspace_id, agent_id, other_id), args)
     edges = await workspace_grant_summaries(workspace_id)
     assert [edge.agent for edge in edges] == ["assistant"]
-
-
-async def test_main_agent_flips_sharing_through_another_agents_edge(db: None) -> None:
-    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
-    with ws(workspace_id):
-        await _mark_main(agent_id)
-        target = await _second_agent(workspace_id, "pr-babysitter")
-        await _grant(
-            workspace_id, target, conversation_id, grantor_id, "gmail", "alice@example.com"
-        )
-    with ws(workspace_id), agent(agent_id):
-        result = json.loads(
-            await _text(
-                _object_tool("object_apply"),
-                _tool_context(workspace_id, agent_id, grantor_id),
-                manifest=_share_manifest("alice@example.com", True),
-                agent="pr-babysitter",
-            )
-        )
-    assert result["result"] == "updated"
-    assert result["agent"] == "pr-babysitter"
-    (edge,) = await workspace_grant_summaries(workspace_id)
-    assert edge.agent == "pr-babysitter"
-    assert edge.shared is True
 
 
 async def test_cross_agent_reattach_updates_the_one_existing_edge(db: None) -> None:

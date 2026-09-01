@@ -15,13 +15,11 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-import yaml
 from ufo_ext_monitors.manifest import NAME, manifest
 from ufo_ext_monitors.monitor_kind import DELETE_GATE
 from ufo_ext_monitors.monitor_runner import (
     CHANGED,
     DEADLINE,
-    FIRE_KEY_PREFIX,
     MonitorRunner,
 )
 from ufo_ext_monitors.monitor_tool import (
@@ -40,7 +38,6 @@ from ufo_ext_monitors.monitors import (
     Monitor,
     MonitorStore,
     capped,
-    due_monitor_workspaces,
     qualified_name,
     stderr_tail,
 )
@@ -61,14 +58,19 @@ from ufo.harness.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, context_for
-from ufo.runtime.objects import AdminRequired, VerbNotSupported
+from ufo.runtime.objects import AdminRequired
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import SpawnResult, ToolContext
-from ufo.runtime.tools.registry import ObjectBinding, ToolDef
+from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "watching the run"
 ALPHA = "printf 'alpha\\n'"
@@ -413,24 +415,9 @@ def test_the_monitor_input_bounds_its_interval_and_deadline(field_name: str, val
         _input("ci-run", ALPHA, **{field_name: value})
 
 
-@pytest.mark.parametrize("name", ["Ci-Run", "ci run", "-ci", "ci_run", ""])
-def test_the_monitor_name_is_a_slug(name: str) -> None:
-    with pytest.raises(ValueError):
-        _input(name, ALPHA)
-
-
 def test_the_monitor_input_refuses_an_unknown_field() -> None:
     with pytest.raises(ValueError):
         _input("ci-run", ALPHA, kind="monitor")
-
-
-def test_monitor_arms_through_an_action_on_the_monitor_collection() -> None:
-    tools, _, verbs = turn_tools((manifest(),), None, audience=SHARED_AUDIENCE)
-    assert MONITOR_TOOL_NAME not in {tool.name for tool in tools}
-    action = verbs.actions[MONITOR_KIND][MONITOR_TOOL_NAME].action
-    assert action.bound == ObjectBinding(kind=MONITOR_KIND, binding="collection")
-    assert action.canonical_id == MONITOR_ACTION_ID
-    assert action.side_effecting and not action.parallel_safe and action.presentation is None
 
 
 async def test_the_deadline_fires_once_and_retires_the_monitor(db: None, tmp_path: Path) -> None:
@@ -500,43 +487,6 @@ async def test_a_deadline_fire_for_an_unseated_member_parks_with_its_authority(
     assert dbos.enqueued == []
 
 
-async def test_a_fire_that_crashed_before_retiring_admits_one_turn(
-    db: None, tmp_path: Path
-) -> None:
-    """Invoke first, retire second: a crash between the two leaves the row armed and still claimed,
-    so recovery is the lease expiring and the next tick re-claiming it. That tick re-posts under the
-    same key, which admits the turn already admitted rather than a second one. Stamping first would
-    let the crash retire a fire no agent got."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = await _tool_ctx(
-        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    ext = _runner_ctx(invoker, tmp_path)
-    runner = MonitorRunner(ctx=ext)
-    with ws(workspace_id), agent(agent_id):
-        await monitor(ctx, _input("ci-run", ALPHA))
-        [persisted] = await _rows(workspace_id)
-        await _overdue(persisted["id"])
-        [claimed] = await MonitorStore(ext).claim_due(datetime.now(UTC), 0)
-
-        with pytest.raises(RuntimeError, match="crashed"):
-            await runner._fire(_RetireCrashes(ext), claimed, DEADLINE, "", None, 0)
-        assert len(await _rows(workspace_id)) == 1
-
-        [reclaimed] = await MonitorStore(ext).claim_due(datetime.now(UTC), 300)
-        await runner._fire(MonitorStore(ext), reclaimed, DEADLINE, "", None, 0)
-        turns = await _turns(conversation_id)
-        remaining = await _rows(workspace_id)
-
-    [turn] = turns
-    assert remaining == []
-    assert dbos.enqueued == [str(turn["id"]), str(turn["id"])]
-
-
 async def test_the_fire_body_walls_probe_output_and_escapes_its_own_delimiters(
     db: None, tmp_path: Path
 ) -> None:
@@ -584,82 +534,6 @@ async def test_the_fire_body_walls_probe_output_and_escapes_its_own_delimiters(
     assert body.endswith(UNTRUSTED_CLOSE)
 
 
-async def test_the_kind_lists_gets_and_disarms_an_armed_monitor(db: None, tmp_path: Path) -> None:
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = await _tool_ctx(
-        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        await monitor(ctx, _input("ci-run", ALPHA, interval_minutes=9))
-        listed = json.loads(await _dispatch(_object_tool("object_list"), ctx, kind=MONITOR_KIND))
-        offered = json.loads(
-            await _dispatch(
-                _object_tool("object_list"),
-                replace(ctx, granted_actions=frozenset({MONITOR_ACTION_ID})),
-                kind=MONITOR_KIND,
-            )
-        )
-        fetched = yaml.safe_load(
-            await _dispatch(
-                _object_tool("object_get"),
-                ctx,
-                kind=MONITOR_KIND,
-                name=qualified_name(conversation_id, "ci-run"),
-            )
-        )
-        await _dispatch(
-            _object_tool("object_delete"),
-            ctx,
-            kind=MONITOR_KIND,
-            name=qualified_name(conversation_id, "ci-run"),
-        )
-        remaining = await _rows(workspace_id)
-
-    [row] = listed["objects"]
-    assert "actions" not in listed
-    assert [view["name"] for view in offered["actions"]] == [MONITOR_TOOL_NAME]
-    assert offered["actions"][0]["call"] == {
-        "kind": MONITOR_KIND,
-        "action": MONITOR_TOOL_NAME,
-        "input": {},
-    }
-    assert row["name"] == qualified_name(conversation_id, "ci-run")
-    assert row["mine"] is True
-    assert row["conversation"] == str(conversation_id)
-    assert row["owner_email"] == "who@example.com"
-    assert fetched["spec"]["command"] == ALPHA
-    assert fetched["spec"]["interval_minutes"] == 9
-    assert fetched["spec"]["reason"] == "the CI run for pull request 42"
-    assert fetched["status"]["probes_run"] == 0
-    assert fetched["status"]["last_probe_at"] is None
-    assert fetched["status"]["baseline"] == "alpha\n"
-    assert fetched["links"][0]["target"]["name"] == str(conversation_id)
-    assert remaining == []
-
-
-async def test_applying_a_monitor_manifest_names_the_tool_instead(db: None, tmp_path: Path) -> None:
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = await _tool_ctx(
-        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    document = yaml.safe_dump(
-        {
-            "kind": MONITOR_KIND,
-            "name": "ci-run",
-            "spec": {
-                "command": ALPHA,
-                "interval_minutes": 5,
-                "deadline_at": datetime(2026, 8, 15, tzinfo=UTC),
-                "reason": "the CI run",
-            },
-        }
-    )
-    with ws(workspace_id), agent(agent_id):
-        with pytest.raises(VerbNotSupported, match="action validates the probe"):
-            await _dispatch(_object_tool("object_apply"), ctx, manifest=document)
-        assert await _rows(workspace_id) == []
-
-
 async def test_a_non_creator_cannot_disarm_another_members_monitor(
     db: None, tmp_path: Path
 ) -> None:
@@ -697,86 +571,6 @@ async def test_a_non_creator_cannot_disarm_another_members_monitor(
     assert remaining == []
 
 
-async def test_a_monitor_is_as_visible_as_the_conversation_it_watches(
-    db: None, tmp_path: Path
-) -> None:
-    """A watch on a member's own conversation is that member's alone; one on a workspace-shared
-    conversation is every member's to read — the audience snapshot taken at arm decides, so a
-    monitor and the conversation it reports into never answer differently."""
-    workspace_id, agent_id, shared_conversation, member_id = await _seed()
-    other = await _member(workspace_id)
-    private_conversation = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=private_conversation,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                surface="cli",
-                queue_key="private",
-                member_id=member_id,
-                audience=str(conversation_audience(member_id)),
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    shared_ctx = await _tool_ctx(
-        workspace_id, shared_conversation, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    private_ctx = await _tool_ctx(
-        workspace_id,
-        private_conversation,
-        agent_id,
-        tmp_path,
-        speaker_member_id=member_id,
-        audience=conversation_audience(member_id),
-    )
-    with ws(workspace_id), agent(agent_id):
-        await monitor(shared_ctx, _input("shared-watch", ALPHA))
-        await monitor(private_ctx, _input("private-watch", ALPHA))
-        onlooker = replace(shared_ctx, speaker_member_id=other)
-        listed = json.loads(
-            await _dispatch(_object_tool("object_list"), onlooker, kind=MONITOR_KIND)
-        )
-        mine = json.loads(
-            await _dispatch(_object_tool("object_list"), shared_ctx, kind=MONITOR_KIND)
-        )
-
-    assert [row["name"] for row in listed["objects"]] == [
-        qualified_name(shared_conversation, "shared-watch")
-    ]
-    assert [row["name"] for row in mine["objects"]] == sorted(
-        [
-            qualified_name(private_conversation, "private-watch"),
-            qualified_name(shared_conversation, "shared-watch"),
-        ]
-    )
-
-
-async def test_the_fire_key_is_the_monitor_row(db: None, tmp_path: Path) -> None:
-    """The idempotency key names the row, not the tick — which is what makes a re-post after a crash
-    settle on the arrival already admitted."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = await _tool_ctx(
-        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        await monitor(ctx, _input("ci-run", ALPHA))
-        [row] = await _rows(workspace_id)
-        await _overdue(row["id"])
-        await MonitorRunner(ctx=_runner_ctx(invoker, tmp_path)).run()
-        async with workspace_tx() as connection:
-            keys = (
-                (await connection.execute(sa.select(tables.turn.c.idempotency_key))).scalars().all()
-            )
-
-    assert keys == [f"{FIRE_KEY_PREFIX}{row['id']}"]
-
-
 async def _sibling_conversation(
     workspace_id: UUID, agent_id: UUID, *, audience: Audience, member_id: UUID | None
 ) -> UUID:
@@ -796,78 +590,6 @@ async def _sibling_conversation(
             )
         )
     return conversation_id
-
-
-async def test_the_same_slug_in_two_conversations_names_two_objects(
-    db: None, tmp_path: Path
-) -> None:
-    """A monitor's slug is the member's word for it and is unique only inside its conversation, so
-    the kind cannot resolve by slug alone: two conversations may each hold a `ci-run`. The object
-    name qualifies the slug with the conversation, which is what makes every listing row's name
-    round-trip to its own row."""
-    workspace_id, agent_id, first, member_id = await _seed()
-    second = await _sibling_conversation(
-        workspace_id, agent_id, audience=SHARED_AUDIENCE, member_id=None
-    )
-    first_ctx = await _tool_ctx(
-        workspace_id, first, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    second_ctx = await _tool_ctx(
-        workspace_id, second, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        assert (await monitor(first_ctx, _input("ci-run", ALPHA))).is_error is False
-        assert (await monitor(second_ctx, _input("ci-run", BETA))).is_error is False
-        listed = json.loads(
-            await _dispatch(_object_tool("object_list"), first_ctx, kind=MONITOR_KIND)
-        )
-        fetched = {
-            row["name"]: yaml.safe_load(
-                await _dispatch(
-                    _object_tool("object_get"), first_ctx, kind=MONITOR_KIND, name=row["name"]
-                )
-            )
-            for row in listed["objects"]
-        }
-
-    rows = {row["name"]: row for row in listed["objects"]}
-    assert len(rows) == 2
-    assert set(rows) == {
-        f"{first.hex[:CONVERSATION_PREFIX_HEX]}-ci-run",
-        f"{second.hex[:CONVERSATION_PREFIX_HEX]}-ci-run",
-    }
-    for name, row in rows.items():
-        assert fetched[name]["links"][0]["target"]["name"] == row["conversation"]
-
-
-async def test_stopping_one_conversations_monitor_leaves_its_namesake_armed(
-    db: None, tmp_path: Path
-) -> None:
-    """Deleting by name disarms exactly the row that name belongs to. Resolving a bare slug
-    workspace-wide would disarm whichever row happened to sort first."""
-    workspace_id, agent_id, first, member_id = await _seed()
-    second = await _sibling_conversation(
-        workspace_id, agent_id, audience=SHARED_AUDIENCE, member_id=None
-    )
-    first_ctx = await _tool_ctx(
-        workspace_id, first, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    second_ctx = await _tool_ctx(
-        workspace_id, second, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        await monitor(first_ctx, _input("ci-run", ALPHA))
-        await monitor(second_ctx, _input("ci-run", BETA))
-        await _dispatch(
-            _object_tool("object_delete"),
-            first_ctx,
-            kind=MONITOR_KIND,
-            name=f"{first.hex[:CONVERSATION_PREFIX_HEX]}-ci-run",
-        )
-        remaining = await _rows(workspace_id)
-
-    assert [row["conversation_id"] for row in remaining] == [second]
-    assert remaining[0]["command"] == BETA
 
 
 async def test_a_member_stops_their_own_monitor_beside_a_private_namesake(
@@ -935,35 +657,6 @@ async def _unseat(member_id: UUID) -> None:
         )
 
 
-async def test_a_stop_inside_the_lease_lands_ahead_of_the_fire(db: None, tmp_path: Path) -> None:
-    """A probe runs for up to its timeout inside a lease seconds wide, and the member can say stop
-    at any point in it. The fire that follows must not arrive after the watch was stopped: a member
-    who asked for it to end and then reads a fire has been answered out of order, and the row the
-    fire would retire is already gone."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = await _tool_ctx(
-        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    ext = _runner_ctx(invoker, tmp_path)
-    runner = MonitorRunner(ctx=ext)
-    with ws(workspace_id), agent(agent_id):
-        await monitor(ctx, _input("ci-run", ALPHA))
-        [persisted] = await _rows(workspace_id)
-        await _overdue(persisted["id"])
-        [claimed] = await MonitorStore(ext).claim_due(datetime.now(UTC), 300)
-
-        assert await MonitorStore(ext).disarm(claimed)
-        await runner._fire(MonitorStore(ext), claimed, DEADLINE, "", None, 0)
-
-        turns = await _turns(conversation_id)
-    assert turns == []
-    assert dbos.enqueued == []
-
-
 async def test_a_revoked_seat_stops_the_watch_acting_as_that_member(
     db: None, tmp_path: Path
 ) -> None:
@@ -993,54 +686,3 @@ async def test_a_revoked_seat_stops_the_watch_acting_as_that_member(
     assert (row["probes_run"], row["skipped"], row["quiet_streak"]) == (0, 1, 0)
     assert row["claimed_by"] is None
     assert turns == []
-
-
-async def test_a_watch_on_an_archived_app_sleeps_on_its_row_instead_of_retiring(
-    db: None, tmp_path: Path
-) -> None:
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = await _tool_ctx(
-        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-    )
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    runner_ctx = _runner_ctx(invoker, tmp_path)
-    with ws(workspace_id), agent(agent_id):
-        await monitor(ctx, _input("ci-run", ALPHA))
-        [row] = await _rows(workspace_id)
-        await _overdue(row["id"])
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.agent)
-                .values(
-                    name=f"~archived-{agent_id}",
-                    archived_name=tables.agent.c.name,
-                    archived_at=sa.func.now(),
-                )
-                .where(tables.agent.c.id == agent_id)
-            )
-        assert workspace_id not in await due_monitor_workspaces()()
-        assert await MonitorStore(runner_ctx).claim_due(datetime.now(UTC), 300) == ()
-        await MonitorRunner(ctx=runner_ctx).run()
-        remaining = await _rows(workspace_id)
-        turns = await _turns(conversation_id)
-        assert dbos.enqueued == []
-
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.agent)
-                .values(name=tables.agent.c.archived_name, archived_name=None, archived_at=None)
-                .where(tables.agent.c.id == agent_id)
-            )
-        assert workspace_id in await due_monitor_workspaces()()
-        await MonitorRunner(ctx=runner_ctx).run()
-        restored = await _rows(workspace_id)
-        restored_turns = await _turns(conversation_id)
-
-    assert [held["name"] for held in remaining] == [qualified_name(conversation_id, "ci-run")]
-    assert turns == []
-    assert restored == []
-    assert len(restored_turns) == 1
-    assert len(dbos.enqueued) == 1

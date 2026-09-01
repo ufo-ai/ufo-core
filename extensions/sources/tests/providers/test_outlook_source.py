@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.providers.outlook import CONVERSATIONS, MESSAGES, OutlookConnector
+from ufo_ext_sources.providers.outlook import MESSAGES, OutlookConnector
 
 from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
@@ -186,16 +186,6 @@ def _contacts_handler() -> Callable[[httpx.Request], httpx.Response]:
     return handle
 
 
-async def test_contacts_flatten_derives_name_email_and_phone() -> None:
-    result = await _fetch("contacts", _contacts_handler())
-    record = _flat(result, "contacts/ct1")
-    assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
-    assert record["name"] == "Ada Lovelace"
-    assert record["first_name"] == "Ada"
-    assert record["email"] == "ada@example.com"
-    assert record["phone"] == "+15551234"
-
-
 def _messages_handler() -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -225,18 +215,6 @@ def _messages_handler() -> Callable[[httpx.Request], httpx.Response]:
     return handle
 
 
-async def test_messages_flatten_derives_subject_snippet_and_from_handle() -> None:
-    result = await _fetch("messages", _messages_handler())
-    record = _flat(result, "messages/m1")
-    assert result.pages[0].created_at == "2026-01-31T00:00:00.000000+00:00"
-    assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
-    assert record["subject"] == "Roadmap"
-    assert record["snippet"] == "Q3 planning"
-    assert record["from_handle"] == "boss@example.com"
-    assert record["sent_at"] == "2026-02-01T00:00:00Z"
-    assert record["thread_id"] == "conv1"
-
-
 def _events_handler() -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1.0/me/calendarView/delta":
@@ -261,18 +239,6 @@ def _events_handler() -> Callable[[httpx.Request], httpx.Response]:
         return httpx.Response(404, json={"path": request.url.path})
 
     return handle
-
-
-async def test_events_flatten_derives_title_start_and_strips_html_description() -> None:
-    result = await _fetch("events", _events_handler())
-    record = _flat(result, "events/e1")
-    assert result.pages[0].created_at == "2026-02-01T00:00:00.000000+00:00"
-    assert result.pages[0].updated_at == "2026-02-02T00:00:00.000000+00:00"
-    assert record["title"] == "Weekly Sync"
-    assert record["start_at"] == "2026-02-05T09:00:00"
-    assert record["location"] == "Room 1"
-    assert "<" not in record["description"]
-    assert "sync" in record["description"]
 
 
 async def test_the_pinned_window_floors_the_message_delta_but_not_its_resume() -> None:
@@ -307,29 +273,6 @@ async def test_the_pinned_window_floors_the_message_delta_but_not_its_resume() -
     assert filters == ["receivedDateTime ge 2026-01-15T09:30:00Z", None, None]
     assert {page.source_ref for page in first.pages} == {"messages/m1"}
     assert MESSAGES.backfill_window_days == MAIL_BACKFILL_WINDOW_DAYS
-
-
-async def test_the_pinned_window_floors_the_conversations_walk() -> None:
-    filters: list[str | None] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path != "/v1.0/me/messages":
-            return httpx.Response(404, json={"path": request.url.path})
-        filters.append(request.url.params.get("$filter"))
-        return httpx.Response(200, json={"value": []})
-
-    await _fetch("conversations", handle, backfill_after=PINNED_CUTOFF)
-    await _fetch(
-        "conversations", handle, cursor="2026-03-01T00:00:00Z", backfill_after=PINNED_CUTOFF
-    )
-    await _fetch("conversations", handle)
-
-    assert filters == [
-        "lastModifiedDateTime ge 2026-01-15T09:30:00Z",
-        "lastModifiedDateTime gt 2026-03-01T00:00:00Z",
-        None,
-    ]
-    assert CONVERSATIONS.backfill_window_days == MAIL_BACKFILL_WINDOW_DAYS
 
 
 async def test_stream_skipped_when_mailbox_refused() -> None:

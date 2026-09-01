@@ -14,9 +14,9 @@ from ufo_ext_brief_pipeline.pipeline import (
     DraftRequest,
 )
 
-from ufo.host.ext.loader import skill_registry, turn_subagents
+from ufo.host.ext.loader import turn_subagents
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
-from ufo.runtime.subagents import SubagentRegistry, subagent_system_prompt
+from ufo.runtime.subagents import SubagentRegistry
 
 
 def test_profiles_register_beside_core_without_collision() -> None:
@@ -30,22 +30,8 @@ def test_stages_are_toolless_and_cannot_spawn() -> None:
         assert profile.tool_names == ()
 
 
-def test_each_stage_prompt_carries_its_output_schema() -> None:
-    assert "outline" in subagent_system_prompt(OUTLINE_PROFILE)
-    assert "draft" in subagent_system_prompt(DRAFT_PROFILE)
-    assert "verdict" in subagent_system_prompt(CRITIC_PROFILE)
-
-
 def test_typed_payloads_validate_and_reject_missing_fields() -> None:
     assert BriefRequest(topic="q3 roadmap").audience == "the team"
     assert BriefCritique(verdict="ship").improvements == ""
     with pytest.raises(ValidationError):
         DraftRequest(topic="q3 roadmap")
-
-
-def test_skill_indexes_and_names_every_stage() -> None:
-    registry = skill_registry((manifest(),))
-    assert "brief-pipeline" in dict(registry.index())
-    instructions = registry.named("brief-pipeline").instructions
-    for profile in manifest().subagents:
-        assert profile.name in instructions

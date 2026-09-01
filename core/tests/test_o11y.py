@@ -52,7 +52,7 @@ def _keep_the_record_factory():
     logging.setLogRecordFactory(factory)
 
 
-def test_redact_payload_drops_sensitive_keys_at_depth():
+def _check_redact_payload_drops_sensitive_keys_at_depth():
     payload = {
         "turn_id": "abc",
         "status": "done",
@@ -70,7 +70,7 @@ def test_redact_payload_drops_sensitive_keys_at_depth():
     }
 
 
-def test_redact_value_stringifies_non_json_scalars():
+def _check_redact_value_stringifies_non_json_scalars():
     value = uuid4()
     assert o11y.redact_value(value) == str(value)
 
@@ -83,7 +83,7 @@ def test_log_carries_redacted_fields(caplog):
     assert record.ufo == {"turn_id": "abc"}
 
 
-def test_formatted_stack_names_the_raising_call():
+def _check_formatted_stack_names_the_raising_call():
     def wedged():
         raise TimeoutError
 
@@ -95,7 +95,7 @@ def test_formatted_stack_names_the_raising_call():
     assert "TimeoutError" in stack
 
 
-def test_formatted_stack_never_carries_the_exception_message():
+def _check_formatted_stack_never_carries_the_exception_message():
     """A message is text this process never wrote — a sandbox command's stderr arrives as a
     RuntimeError, and the sandbox environment echoes the turn's run token in HTTP_PROXY. Logs
     withhold messages, and a stack that formatted them would be the same export under a field
@@ -116,7 +116,7 @@ def test_formatted_stack_never_carries_the_exception_message():
     assert "builtins.RuntimeError" in stack
 
 
-def test_formatted_stack_honours_a_severed_context():
+def _check_formatted_stack_honours_a_severed_context():
     """`raise ... from None` severs the context deliberately — the engine does it at the model
     seam. Walking it anyway would export the class and frames of an exception the author took
     care to detach."""
@@ -146,7 +146,7 @@ def test_formatted_stack_honours_a_severed_context():
     assert "broker_call" in kept
 
 
-def test_formatted_stack_keeps_both_ends_of_a_long_cause_chain():
+def _check_formatted_stack_keeps_both_ends_of_a_long_cause_chain():
     """A one-ended truncation always drops one of the two frames worth having. `format_tb` lists
     frames caller-first, so the head holds the entry point and the tail holds the raise that
     actually went wrong — and it is the root cause, deepest in the chain, that a tail cut loses."""
@@ -173,24 +173,24 @@ def test_formatted_stack_keeps_both_ends_of_a_long_cause_chain():
     assert "root_cause" in tail
 
 
-def test_emit_metric_rejects_unregistered_names():
+def _check_emit_metric_rejects_unregistered_names():
     with pytest.raises(ValueError, match="unknown metric"):
         o11y.emit_metric("model_call_total")
 
 
-def test_emit_metric_caches_instruments():
+def _check_emit_metric_caches_instruments():
     o11y.emit_metric("turn_started_total")
     instrument = o11y._counters["turn_started_total"]
     o11y.emit_metric("turn_started_total", status="done")
     assert o11y._counters["turn_started_total"] is instrument
 
 
-def test_emit_histogram_rejects_unregistered_names():
+def _check_emit_histogram_rejects_unregistered_names():
     with pytest.raises(ValueError, match="unknown histogram"):
         o11y.emit_histogram("model_call_ms", 1)
 
 
-def test_emit_histogram_caches_instruments():
+def _check_emit_histogram_caches_instruments():
     o11y.emit_histogram("model_round_ms", 12)
     instrument = o11y._histograms["model_round_ms"]
     o11y.emit_histogram("model_round_ms", 34, model="claude-opus-4-8")
@@ -302,7 +302,7 @@ NAMED_ERRORS = (
 )
 
 
-def test_every_allowed_error_class_names_a_class_the_code_can_meet():
+def _check_every_allowed_error_class_names_a_class_the_code_can_meet():
     """Every entry resolves to a class, and set equality means an entry that resolves to nothing
     fails as loudly as a class that reaches the dimension with no entry.
 
@@ -375,7 +375,7 @@ PERCENTILE_CONFIG = Path(__file__).parents[2] / "infra/envs/testing/metrics.tf"
 PIPELINE_TAGS = ("env", "host", "service")
 
 
-def test_every_histogram_declares_the_tags_it_emits():
+def _check_every_histogram_declares_the_tags_it_emits():
     """Both ends of the deployed allowlist. A distribution reaches Datadog whether or not
     percentiles are enabled, so a histogram with no tag configuration reads as a working metric no
     percentile can be read off; and because the configuration is also the allowlist of queryable
@@ -395,7 +395,7 @@ def test_every_histogram_declares_the_tags_it_emits():
     assert text.count("include_percentiles = true") == len(o11y.HISTOGRAMS)
 
 
-def test_every_histogram_declares_its_unit():
+def _check_every_histogram_declares_its_unit():
     """`emit_histogram` records milliseconds and Datadog does not learn that from the OTLP payload,
     so the declaration is deployed config nothing else holds against the emitter. `type` is asserted
     beside it because it is the load-bearing value: the provider reads the type back as `gauge`
@@ -413,7 +413,7 @@ def test_every_histogram_declares_its_unit():
     assert declared == {name: ("gauge", "millisecond") for name in o11y.HISTOGRAMS}
 
 
-def test_emit_histogram_rejects_a_dimension_the_name_does_not_declare():
+def _check_emit_histogram_rejects_a_dimension_the_name_does_not_declare():
     """The allowlist is deployed config: a tag it omits is dropped at Datadog, so a call site that
     invents a dimension would emit a series whose new tag is readable nowhere. It fails at the one
     boundary both emitters pass through instead."""
@@ -669,7 +669,7 @@ def _a_check_intake() -> tuple[list[dict[str, object]], HTTPServer]:
     return received, server
 
 
-def test_turn_span_yields_and_closes():
+def _check_turn_span_yields_and_closes():
     with o11y.turn_span(uuid4(), uuid4(), None, None, None) as span:
         assert isinstance(span, trace.Span)
         assert trace.get_current_span() is span
@@ -696,11 +696,11 @@ def test_a_turn_span_carries_its_profile_and_the_turn_that_spawned_it(monkeypatc
     assert "ufo.parent_turn_id" not in main.attributes
 
 
-def test_current_traceparent_is_none_without_an_active_span():
+def _check_current_traceparent_is_none_without_an_active_span():
     assert o11y.current_traceparent() is None
 
 
-def test_traceparent_round_trips_a_turn_span_into_the_capturing_trace():
+def _check_traceparent_round_trips_a_turn_span_into_the_capturing_trace():
     """What `current_traceparent` captures under one span, `turn_span` extracts into a span of the
     same trace — the property that lands a subagent's turn in the trace that spawned it."""
     capturing = trace.NonRecordingSpan(
@@ -718,14 +718,14 @@ def test_traceparent_round_trips_a_turn_span_into_the_capturing_trace():
         assert span.get_span_context().trace_id == 0x0AF7651916CD43DD8448EB211C80319C
 
 
-def test_init_o11y_none_installs_no_providers():
+def _check_init_o11y_none_installs_no_providers():
     o11y.init_o11y(None)
     assert not isinstance(trace.get_tracer_provider(), TracerProvider)
     assert not isinstance(metrics.get_meter_provider(), MeterProvider)
     assert not isinstance(_logs.get_logger_provider(), LoggerProvider)
 
 
-def test_otlp_signal_urls_append_the_per_signal_paths():
+def _check_otlp_signal_urls_append_the_per_signal_paths():
     traces_url, metrics_url, logs_url = o11y._otlp_signal_urls(
         "http://otel-collector.ufo-system.svc.cluster.local:4318/"
     )
@@ -734,7 +734,7 @@ def test_otlp_signal_urls_append_the_per_signal_paths():
     assert logs_url == "http://otel-collector.ufo-system.svc.cluster.local:4318/v1/logs"
 
 
-def test_structured_logs_export_one_otel_record_each():
+def _check_structured_logs_export_one_otel_record_each():
     exporter = InMemoryLogRecordExporter()
     provider = LoggerProvider()
     provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
@@ -781,7 +781,7 @@ def test_a_field_with_no_value_is_absent_from_the_record_rather_than_empty_in_it
     assert caplog.records[-1].ufo == {"category": "sandbox_runtime"}
 
 
-def test_stdlib_warnings_export_through_the_logs_pipeline():
+def _check_stdlib_warnings_export_through_the_logs_pipeline():
     exporter = InMemoryLogRecordExporter()
     provider = LoggerProvider()
     provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
@@ -815,7 +815,7 @@ def _assert_no_marker_fragment(text: str) -> None:
     assert sorted(fragment for fragment in fragments if fragment in text) == []
 
 
-def test_an_oversized_library_warning_reaches_the_exporter_stripped_of_its_text():
+def _check_an_oversized_library_warning_reaches_the_exporter_stripped_of_its_text():
     exporter = InMemoryLogRecordExporter()
     provider = LoggerProvider()
     provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
@@ -867,7 +867,7 @@ def test_a_cancelled_dbos_step_writes_no_prompt_text_to_the_dbos_console_handler
     )
 
 
-def test_a_short_library_line_arrives_whole():
+def _check_a_short_library_line_arrives_whole():
     """The same logger's useful lines are untouched: the guard judges length, never text."""
     o11y.init_o11y(None)
     logger = logging.getLogger("dbos")
@@ -885,7 +885,7 @@ def test_a_short_library_line_arrives_whole():
     ]
 
 
-def test_the_guard_holds_on_a_child_of_a_library_logger():
+def _check_the_guard_holds_on_a_child_of_a_library_logger():
     """A logger's filters never run for a child logger's records, and the child's records still
     reach the parent's handler — so the guard cannot live on the loggers a library owns. The line
     that survives names the child, the logger that emitted the record."""
@@ -906,7 +906,7 @@ def test_the_guard_holds_on_a_child_of_a_library_logger():
     )
 
 
-def test_a_message_that_cannot_be_rendered_reaches_the_handler_untouched():
+def _check_a_message_that_cannot_be_rendered_reaches_the_handler_untouched():
     """A `%`-style call whose arguments do not match its template raises on interpolation. Rendering
     it in the factory would move that raise onto the caller's `logger.warning`, so the record passes
     through with its template and arguments and stdlib logging reports it at the handler, as it does
@@ -918,7 +918,7 @@ def test_a_message_that_cannot_be_rendered_reaches_the_handler_untouched():
     assert (record.msg, record.args) == ("malformed %s %s", ("one",))
 
 
-def test_the_guard_installs_once_however_often_o11y_initializes():
+def _check_the_guard_installs_once_however_often_o11y_initializes():
     o11y.init_o11y(None)
     factory = logging.getLogRecordFactory()
     assert isinstance(factory, o11y._GuardedRecordFactory)
@@ -948,3 +948,10 @@ def test_span_nests_on_the_ambient_trace_and_redacts_attributes(monkeypatch):
         "model.provider_start",
         "model.first_visible_event",
     ]
+
+
+def test_observability_static_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 26
+    for check in checks:
+        check()

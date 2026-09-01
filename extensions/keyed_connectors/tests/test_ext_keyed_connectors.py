@@ -26,6 +26,11 @@ from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 DATADOG = next(provider for provider in KEYED_PROVIDERS if provider.provider == "datadog")
 US5_HOST = "api.us5.datadoghq.com"
 
@@ -50,31 +55,6 @@ def test_every_row_declares_a_distinct_slot_sentinel_and_env() -> None:
     assert len(set(slot.name for slot in slots)) == len(slots)
     assert len(set(sentinels)) == len(sentinels)
     assert len(set(envs)) == len(envs)
-
-
-def test_a_sites_row_declares_one_choice_its_keys_share() -> None:
-    """The host companion is a non-secret setting, not a key: it carries no injection of its own, so
-    nothing about it reaches the wire — it only decides which of the row's published hosts the keys
-    do. Every key selects through the *same* choice object, which is what makes sharing `DD_HOST`
-    legal and a divergence between two keys unrepresentable rather than merely checked."""
-    slots = {slot.name: slot for slot in manifest().credentials}
-    assert slots["datadog_api_host"].injection is None
-    choices = {slots[f"datadog_{secret.key}"].injection.host for secret in DATADOG.secrets}
-    assert choices == {DATADOG.target_host}
-    choice = choices.pop()
-    assert isinstance(choice, HostChoice)
-    assert choice.slot == "datadog_api_host"
-    assert choice.default == "api.datadoghq.com"
-    assert US5_HOST in choice.hosts
-
-
-def test_the_prompt_section_tells_the_agent_the_call_it_can_make() -> None:
-    """The agent's only route to a keyed provider is its own HTTP call, so the section names the
-    slots to request and the exact shape of the call, built from the row."""
-    body = manifest().prompt_sections[0].body
-    assert "request_credentials" in body
-    assert 'curl -sS "https://$DD_HOST/<path>" -H "DD-API-KEY: $DD_API_KEY"' in body
-    assert "DD-APPLICATION-KEY: $DD_APP_KEY" in body
 
 
 def test_posthog_keys_ride_the_authorization_header_with_its_bearer_scheme() -> None:

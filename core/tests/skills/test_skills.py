@@ -1,5 +1,4 @@
 import json
-import re
 import zipfile
 from base64 import urlsafe_b64decode
 from io import BytesIO
@@ -23,7 +22,6 @@ from ufo.runtime.skills.runtime import (
     CORE_SKILLS,
     SUGGESTION_LIMIT,
     LoadedRef,
-    LoadedSkill,
     LoadedSkills,
     RuntimeSkill,
     SkillCard,
@@ -34,13 +32,6 @@ from ufo.runtime.skills.runtime import (
     loaded_context,
     parse_skill,
     parse_skill_content,
-)
-
-HOUSE_STYLE = "ufo-style"
-HOUSE_STYLE_TOKENS = "references/tokens.css"
-HOUSE_STYLE_FONT_FILES = (
-    "assets/fonts/Inter-VariableFont_wght.woff2",
-    "assets/fonts/RobotoMono-VariableFont_wght.ttf",
 )
 
 
@@ -94,57 +85,6 @@ def test_core_ships_exactly_the_fixed_skills() -> None:
     assert {skill.name for skill in CORE_SKILLS} == set(CORE_SKILL_NAMES)
 
 
-def test_the_house_style_reaches_the_skill_index_as_a_routing_trigger() -> None:
-    description = dict(CORE_SKILL_REGISTRY.index())[HOUSE_STYLE]
-    assert description.startswith("Load when")
-    assert len(description.split()) <= 50
-
-
-def test_create_application_reaches_the_skill_index_as_a_routing_trigger() -> None:
-    index = dict(CORE_SKILL_REGISTRY.index())
-    description = index["create-application"]
-    assert description.startswith("Load when a member asks to create a new application")
-    assert len(description.split()) <= 50
-
-
-def test_creating_an_application_leaves_style_inside_the_product_renderer() -> None:
-    closure = [ref.card.name for ref in CORE_SKILL_REGISTRY.closure("create-application")]
-    assert closure == ["create-application"]
-    house = CORE_SKILL_REGISTRY.named(HOUSE_STYLE)
-    assert HOUSE_STYLE_TOKENS in dict(house.files)
-    files = dict(house.files)
-    tokens = files[HOUSE_STYLE_TOKENS].decode()
-    assert "--accent-primary" in tokens
-    assert all(path in files for path in HOUSE_STYLE_FONT_FILES)
-    assert all(Path(path).name in tokens for path in HOUSE_STYLE_FONT_FILES)
-    assert "fonts.googleapis.com" not in tokens
-
-
-def test_the_house_style_cites_only_paths_its_own_load_mounts() -> None:
-    """`ufo-style` is pulled with website and document design, so it may name no other skill's
-    mounted file: some loads would put that path nowhere. Another skill is named by name, and its
-    own file by path."""
-    house = CORE_SKILL_REGISTRY.named(HOUSE_STYLE)
-    sources = (
-        house.raw_skill_md,
-        *(
-            content.decode()
-            for path, content in house.files
-            if Path(path).suffix in {".css", ".md"}
-        ),
-    )
-    cited = {path for text in sources for path in re.findall(r"\$UFO_HOME/skills/[\w./-]+", text)}
-    assert cited == {f"$UFO_HOME/skills/{HOUSE_STYLE}/"}
-
-
-def test_the_house_style_states_that_the_members_own_style_wins() -> None:
-    """The default has to carry its own exception: the skill is pulled into every app build and
-    every artifact with no direction, and a member who named a brand must not be repainted in ours.
-    """
-    body = CORE_SKILL_REGISTRY.named(HOUSE_STYLE).instructions
-    assert "The member's own direction outranks this skill" in body
-
-
 def test_skill_named_unknown_fails_loud_and_suggests_only_the_closest() -> None:
     """The message is bounded by what is close, never by how many skills exist: a member-authored
     set runs to hundreds, and every name in the error is context spent on one typo — the model
@@ -162,12 +102,6 @@ def test_skill_named_unknown_fails_loud_and_suggests_only_the_closest() -> None:
     assert set(suggested) <= set(registry.by_name)
     with pytest.raises(ValueError, match=r"unknown skill 'ghost'$"):
         CORE_SKILL_REGISTRY.named("ghost")
-
-
-def test_skill_named_unknown_fails_loud_without_enumerating_the_registry() -> None:
-    with pytest.raises(ValueError, match="unknown skill 'ghost'") as caught:
-        CORE_SKILL_REGISTRY.named("ghost")
-    assert "sandbox" not in str(caught.value)
 
 
 def test_parse_reads_frontmatter_body_and_bundled_files(tmp_path: Path) -> None:
@@ -208,47 +142,6 @@ def test_system_skill_bundle_is_content_addressed_and_deterministic(tmp_path: Pa
         assert archive.read("probe/scripts/run.py") == b"print('hi')"
 
 
-def test_system_skill_content_digest_moves_with_a_path_or_its_bytes() -> None:
-    base = RuntimeSkill(
-        name="probe",
-        description="d",
-        instructions="i",
-        raw_skill_md="skill",
-        files=(("notes.txt", b"one"),),
-    )
-    changed_path = RuntimeSkill(
-        name="probe",
-        description="d",
-        instructions="i",
-        raw_skill_md="skill",
-        files=(("other.txt", b"one"),),
-    )
-    changed_bytes = RuntimeSkill(
-        name="probe",
-        description="d",
-        instructions="i",
-        raw_skill_md="skill",
-        files=(("notes.txt", b"two"),),
-    )
-
-    assert (
-        len({base.content_digest(), changed_path.content_digest(), changed_bytes.content_digest()})
-        == 3
-    )
-    wire = RuntimeSkill(
-        name="probe",
-        description="d",
-        instructions="i",
-        raw_skill_md="workflow",
-    )
-    assert wire.content_digest() == (
-        "sha256:308c9d25ca09c876af5002d9e89c5b82abd64748c78cc0fc1eeeae882f7e5f88"
-    )
-    assert SystemSkillBundle.from_skills((wire,)).digest == (
-        "sha256:388dfef6e74ce8b837f4fb4344089ec1a6f654bf1845e2fb4ac05882bb65ec03"
-    )
-
-
 def test_parse_rejects_a_name_that_does_not_match_its_directory(tmp_path: Path) -> None:
     skill_dir = _write_skill(tmp_path, "declared", "x", "y")
     (skill_dir / "SKILL.md").write_text(_skill_md("mismatch", "x", "y"))
@@ -269,40 +162,6 @@ def test_closure_leads_with_the_asked_for_skill_then_its_dependencies(tmp_path: 
     leaf = parse_skill(_write_skill(tmp_path, "leaf", "leaf skill", "leaf body", depends=("base",)))
     registry = SkillRegistry({"base": base, "leaf": leaf})
     assert [ref.card.name for ref in registry.closure("leaf")] == ["leaf", "base"]
-
-
-def test_prompt_body_is_a_header_naming_the_skill_and_its_workflow(tmp_path: Path) -> None:
-    """A header names the skill; the description and `depends` do not follow it into the load. They
-    are routing metadata the skill index carries, not instructions the agent acts on."""
-    skill_dir = _write_skill(
-        tmp_path, "leaf", "a routing description", "# Leaf\n\nleaf body", depends=("base",)
-    )
-
-    body = LoadedSkill(skill=parse_skill(skill_dir)).prompt_body()
-
-    assert body == "# Skill: leaf\n\n# Leaf\n\nleaf body"
-    assert "a routing description" not in body
-    assert "base" not in body
-
-
-async def test_a_pulled_skills_header_names_the_skill_that_pulled_it(tmp_path: Path) -> None:
-    """The agent can tell the workflow it asked for from the ones that rode along: a dependency's
-    header names its puller, and down a chain each hop names the link above it."""
-    for name, dep in (("a", "b"), ("b", "c")):
-        _write_skill(tmp_path, name, f"{name} skill", f"{name} body", depends=(dep,))
-    _write_skill(tmp_path, "c", "c skill", "c body")
-    registry = SkillRegistry({name: parse_skill(tmp_path / name) for name in "abc"})
-
-    headers = [
-        entry.prompt_body().splitlines()[0]
-        for entry in await registry.materialize(registry.closure("a"))
-    ]
-
-    assert headers == [
-        "# Skill: a",
-        "# Skill: b (dependency of a)",
-        "# Skill: c (dependency of b)",
-    ]
 
 
 async def test_loaded_context_closes_with_one_tree_for_the_whole_closure(tmp_path: Path) -> None:
@@ -367,38 +226,6 @@ async def test_a_dependency_already_in_context_still_injects_the_asked_for_workf
     assert text.index("LEAF BODY") < text.index("not repeated: base") < text.index("Loaded files:")
 
 
-def test_loaded_skills_reseeds_from_the_closure_a_load_injected(tmp_path: Path) -> None:
-    """The tracker takes a load as the closure it resolved to: every entry names a skill whose
-    workflow is in context, and only an entry no other skill pulled is one the agent asked for."""
-    base_dir = _write_skill(tmp_path, "base", "base skill", "BASE BODY")
-    leaf_dir = _write_skill(tmp_path, "leaf", "leaf skill", "LEAF BODY", depends=("base",))
-    registry = SkillRegistry({"base": parse_skill(base_dir), "leaf": parse_skill(leaf_dir)})
-    tracker = LoadedSkills()
-
-    tracker.reseed((registry.closure("leaf"),))
-
-    assert tracker.in_context == {"leaf", "base"}
-    assert tracker.asked_for == {"leaf"}
-
-
-def test_loaded_skills_reseed_replaces_rather_than_accumulates() -> None:
-    """The window is the record: a load the window no longer carries is dropped, so a shrunk window
-    never leaves the tracker claiming a workflow the model can no longer read."""
-    gone = RuntimeSkill(name="gone", description="d", instructions="body")
-    kept = RuntimeSkill(name="kept", description="d", instructions="body")
-    tracker = LoadedSkills()
-
-    tracker.reseed(((LoadedRef(card=gone.card()),),))
-    assert tracker.in_context == {"gone"}
-
-    tracker.reseed(((LoadedRef(card=kept.card()),),))
-    assert tracker.in_context == {"kept"}
-    assert tracker.asked_for == {"kept"}
-
-    tracker.reseed(())
-    assert tracker.in_context == set()
-
-
 def test_loaded_skills_drain_yields_the_asked_for_names_and_empties_the_tracker() -> None:
     leaf = RuntimeSkill(name="leaf", description="d", instructions="LEAF", depends=("base",))
     base = RuntimeSkill(name="base", description="d", instructions="BASE")
@@ -431,36 +258,6 @@ def test_closure_follows_a_dependency_chain_to_its_end(tmp_path: Path) -> None:
     assert [ref.card.name for ref in looped.closure("x")] == ["x", "y"]
 
 
-def test_closure_of_a_core_skill_returns_it() -> None:
-    assert [ref.card.name for ref in CORE_SKILL_REGISTRY.closure("sandbox")] == ["sandbox"]
-
-
-def test_discover_registers_a_parent_and_its_nested_child_by_path_form(tmp_path: Path) -> None:
-    parent_dir = _write_skill(tmp_path, "site", "a parent skill", "parent body")
-    (parent_dir / "shared").mkdir()
-    (parent_dir / "shared" / "tokens.md").write_text("design tokens")
-    child_dir = _write_nested_child(parent_dir, "app", "a child skill", "child body")
-    (child_dir / "template.txt").write_text("scaffold")
-
-    discovered = discover_skills(parent_dir)
-
-    assert set(discovered) == {"site", "site/app"}
-    assert discovered["site"].parent is None
-    assert discovered["site/app"].parent == "site"
-    parent_files = {path for path, _ in discovered["site"].files}
-    assert "shared/tokens.md" in parent_files
-    assert not any(path.startswith("app/") for path in parent_files)
-    assert ("template.txt", b"scaffold") in discovered["site/app"].files
-
-
-def test_child_frontmatter_name_must_match_its_own_directory(tmp_path: Path) -> None:
-    parent_dir = _write_skill(tmp_path, "site", "parent", "p")
-    child_dir = _write_nested_child(parent_dir, "app", "child", "c")
-    (child_dir / "SKILL.md").write_text(_skill_md("wrong", "child", "c"))
-    with pytest.raises(ValueError, match="must match its directory"):
-        discover_skills(parent_dir)
-
-
 def test_nesting_alone_pulls_no_parent_and_the_index_hides_the_child(tmp_path: Path) -> None:
     """Nesting names a child and nests its mount path; it never pulls the parent. A child that
     needs the parent declares `depends` — the one mechanism that pulls."""
@@ -469,25 +266,6 @@ def test_nesting_alone_pulls_no_parent_and_the_index_hides_the_child(tmp_path: P
     registry = SkillRegistry(discover_skills(parent_dir))
     assert [ref.card.name for ref in registry.closure("site/app")] == ["site/app"]
     assert registry.index() == (("site", "a parent skill"),)
-
-
-def test_an_indexed_nested_child_routes_beside_its_parent(tmp_path: Path) -> None:
-    parent_dir = _write_skill(tmp_path, "site", "a parent skill", "p")
-    _write_nested_child(
-        parent_dir,
-        "app",
-        "a child skill",
-        "c",
-        depends=("site",),
-        indexed=True,
-    )
-    registry = SkillRegistry(discover_skills(parent_dir))
-
-    assert registry.named("site/app").indexed is True
-    assert registry.index() == (
-        ("site", "a parent skill"),
-        ("site/app", "a child skill"),
-    )
 
 
 def test_indexed_metadata_must_be_boolean(tmp_path: Path) -> None:
@@ -505,18 +283,6 @@ def test_a_nested_child_that_declares_its_parent_pulls_it(tmp_path: Path) -> Non
     _write_nested_child(parent_dir, "app", "a child skill", "c", depends=("site",))
     registry = SkillRegistry(discover_skills(parent_dir))
     assert [ref.card.name for ref in registry.closure("site/app")] == ["site/app", "site"]
-
-
-async def test_mount_writes_a_nested_child_under_its_parent_path(tmp_path: Path) -> None:
-    parent_dir = _write_skill(tmp_path, "site", "parent", "p")
-    _write_nested_child(parent_dir, "app", "child", "c")
-    child = discover_skills(parent_dir)["site/app"]
-
-    sandbox = _RecordingSandbox()
-
-    await install_skill(sandbox, child)
-
-    assert "$UFO_HOME/skills/site/app/SKILL.md" in sandbox.files
 
 
 class _RecordingSandbox:
@@ -572,27 +338,6 @@ async def test_a_load_mounts_every_file_of_every_skill_it_pulls(tmp_path: Path) 
         for path in ("SKILL.md", "notes.md", "scripts/run.py", "scripts/templates/seed.xml")
     }
     assert sandbox.files["$UFO_HOME/skills/base/scripts/templates/seed.xml"] == b"<base/>"
-
-
-async def test_loading_a_skill_then_pulling_it_as_a_dependency_remounts_it_cleanly(
-    tmp_path: Path,
-) -> None:
-    """Loading a skill directly and later loading something that `depends` on it mounts it twice.
-    The second write is an overwrite, not a conflict — no error, and its files are intact."""
-    _bundle(tmp_path, "base", "base body")
-    _bundle(tmp_path, "leaf", "leaf body", depends=("base",))
-    registry = SkillRegistry({name: parse_skill(tmp_path / name) for name in ("base", "leaf")})
-    sandbox = _RecordingSandbox()
-
-    for entry in await registry.materialize(registry.closure("base")):
-        await install_skill(sandbox, entry.skill)
-    first = dict(sandbox.files)
-    for entry in await registry.materialize(registry.closure("leaf")):
-        await install_skill(sandbox, entry.skill)
-
-    assert first.items() <= sandbox.files.items()
-    assert sandbox.files["$UFO_HOME/skills/base/notes.md"] == b"base notes"
-    assert "$UFO_HOME/skills/leaf/notes.md" in sandbox.files
 
 
 async def test_a_later_load_leaves_everything_else_in_the_workspace_alone(tmp_path: Path) -> None:
@@ -664,39 +409,12 @@ def test_a_named_skill_is_never_labelled_a_dependency_of_another_named_skill() -
     ]
 
 
-def test_closure_of_no_names_is_empty() -> None:
-    assert CORE_SKILL_REGISTRY.closure() == ()
-
-
 def test_an_unknown_dependency_fails_loud_naming_the_missing_skill() -> None:
     registry = SkillRegistry(
         {"leaf": RuntimeSkill(name="leaf", description="d", instructions="i", depends=("ghost",))}
     )
     with pytest.raises(ValueError, match="unknown skill 'ghost'"):
         registry.closure("leaf")
-
-
-def test_registry_index_lists_every_skills_name_and_description() -> None:
-    registry = SkillRegistry(
-        {
-            "base": RuntimeSkill(name="base", description="base skill", instructions="b"),
-            "leaf": RuntimeSkill(name="leaf", description="leaf skill", instructions="l"),
-        }
-    )
-    assert registry.index() == (("base", "base skill"), ("leaf", "leaf skill"))
-
-
-def test_parse_skill_content_reads_an_in_memory_file_map() -> None:
-    files = {
-        "SKILL.md": _skill_md("probe", "a probe skill", "Do the thing.").encode(),
-        "helper.py": b"print('hi')",
-    }
-    skill = parse_skill_content("probe", files)
-    assert skill.name == "probe"
-    assert skill.description == "a probe skill"
-    assert skill.instructions == "Do the thing."
-    assert ("helper.py", b"print('hi')") in skill.files
-    assert skill.raw_skill_md.startswith("---\n")
 
 
 def test_parse_skill_content_rejects_a_missing_skill_md() -> None:

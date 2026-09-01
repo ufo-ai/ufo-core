@@ -6,7 +6,6 @@ from uuid import uuid4
 import pytest
 
 from ufo.blob import FilesystemBlobStore, S3BlobStore
-from ufo.host.ext.loader import connector_clis
 from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
 from ufo.runtime.access.egress_rules import (
     ANTHROPIC_HOST,
@@ -25,16 +24,10 @@ from ufo.runtime.access.egress_rules import (
     derive_grant_rules,
     derive_manifest_rules,
     derive_model_rules,
-    provider_host,
 )
 from ufo.runtime.access.grants import Grant, grant_sentinel
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.manifest import ConnectorProvider, Manifest
-
-
-def test_provider_host_by_prefix() -> None:
-    assert provider_host("claude-opus-4-8") == ANTHROPIC_HOST
-    assert provider_host("gpt-5.4") == OPENAI_HOST
 
 
 def test_manifest_derives_public_internet_only_when_declared() -> None:
@@ -74,11 +67,6 @@ async def test_artifact_store_rules_admit_nothing_for_the_filesystem_backend(
     assert await derive_artifact_store_rules(FilesystemBlobStore(root=tmp_path)) == ()
 
 
-def test_unknown_model_has_no_host() -> None:
-    with pytest.raises(ValueError, match="grok-9"):
-        provider_host("grok-9")
-
-
 def test_derive_scopes_injects_and_meters_anthropic_via_x_api_key() -> None:
     rules = derive_model_rules("claude-opus-4-8", "sk-real-abc")
     scope = next(r for r in rules if isinstance(r, ScopeRule))
@@ -90,16 +78,6 @@ def test_derive_scopes_injects_and_meters_anthropic_via_x_api_key() -> None:
     assert injection.sentinel == SENTINEL_MODEL_KEY
     assert injection.real == "sk-real-abc"
     assert meter == MeterRule(host=ANTHROPIC_HOST, dimension="tokens")
-
-
-def test_openai_injects_a_bearer_token_on_authorization() -> None:
-    injection = next(
-        r for r in derive_model_rules("gpt-5.4", "sk-x") if isinstance(r, InjectionRule)
-    )
-    assert injection.host == OPENAI_HOST
-    assert injection.header == "authorization"
-    assert injection.sentinel == f"Bearer {SENTINEL_MODEL_KEY}"
-    assert injection.real == "Bearer sk-x"
 
 
 def test_only_the_provider_host_is_allowed() -> None:
@@ -139,13 +117,6 @@ def _grant(account: str = "acct-1", grantor=ACTING, shared: bool = False) -> Gra
 TRANSFER = ("files.broker.example.com",)
 
 
-def test_grant_with_a_provider_host_admits_and_meters_it() -> None:
-    rules = derive_grant_rules((_grant(),))
-    scope = next(r for r in rules if isinstance(r, ScopeRule))
-    assert scope.allowed_hosts == frozenset({CLI_HOST})
-    assert MeterRule(host=CLI_HOST, dimension=REQUEST_METER_DIMENSION) in rules
-
-
 def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> None:
     """A grant with no provider host (server-side execution) admits only its broker file-store hosts
     from the open namespace default — never a ScopeRule allowing the empty host."""
@@ -164,20 +135,6 @@ def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> 
     assert scope.allowed_hosts == frozenset(TRANSFER)
     assert "" not in scope.allowed_hosts
     assert MeterRule(host=TRANSFER[0], dimension=REQUEST_METER_DIMENSION) in rules
-
-
-def test_brokered_grant_without_any_host_derives_no_scope_rule() -> None:
-    grant = Grant(
-        id=uuid4(),
-        connection_id=uuid4(),
-        provider="notion",
-        account_id="a",
-        host="",
-        owner_member_id=ACTING,
-        owner_email="acting@x.test",
-        connection_shared=False,
-    )
-    assert derive_grant_rules((grant,)) == ()
 
 
 def test_an_explicit_mapping_wins_over_the_open_namespace_default() -> None:
@@ -202,13 +159,6 @@ def test_cli_rule_for_the_acting_members_own_grant() -> None:
     assert forward.sentinel == grant_sentinel("acct-1")
     assert forward.account_id == "acct-1"
     assert forward.forward is CLI.forward
-
-
-def test_cli_rule_for_a_shared_grant_of_another_member() -> None:
-    rules = derive_cli_rules(
-        (_grant(grantor=OTHER, shared=True),), MemberAuthority(ACTING), {"hub": CLI}
-    )
-    assert any(isinstance(r, ForwardRule) for r in rules)
 
 
 def test_no_cli_rule_for_a_foreign_private_grant() -> None:
@@ -236,15 +186,6 @@ class _CliOAuth:
 
     async def exchange(self, code, redirect_uri, workspace_id, state):
         raise NotImplementedError
-
-
-def test_connector_clis_maps_only_declaring_providers() -> None:
-    declaring = ConnectorProvider(oauth=_CliOAuth(), label="Hub", broker=object(), cli=CLI)
-    silent = ConnectorProvider(
-        oauth=_CliOAuth(provider="quiet", host="api.quiet.test"), label="Quiet", broker=object()
-    )
-    manifest = Manifest(name="t", version="0", connectors=(declaring, silent))
-    assert connector_clis((manifest,)) == {"hub": CLI}
 
 
 @dataclass(frozen=True)

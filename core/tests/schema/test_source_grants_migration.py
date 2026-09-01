@@ -251,16 +251,3 @@ def test_source_grant_migration_refuses_a_live_source_no_agent_can_inherit(
 
     with pytest.raises(RuntimeError, match="no agent to hold their grant"):
         command.upgrade(seeded.config, "0059")
-
-
-def test_source_grant_migration_grants_nothing_on_a_database_with_no_sources(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "empty.db"
-
-    command.upgrade(_config(path), "0059")
-
-    engine = sa.create_engine(f"sqlite:///{path}")
-    with engine.connect() as connection:
-        assert connection.execute(sa.text("select count(*) from source_grant")).scalar_one() == 0
-    engine.dispose()

@@ -54,12 +54,11 @@ def test_conversation_slot_declarations_preserve_manifest_order() -> None:
     )
 
 
-@pytest.mark.parametrize("slot_id", ["", "Changes", "two words", "_hidden", "x" * 65])
-def test_conversation_slot_declarations_reject_invalid_ids(slot_id: str) -> None:
-    manifest = Manifest(name="bad", version="1", conversation_slots=(_provider(slot_id),))
-
-    with pytest.raises(RuntimeError, match="invalid conversation slot id"):
-        conversation_slot_declarations((manifest,))
+def test_conversation_slot_declarations_reject_invalid_ids() -> None:
+    for slot_id in ("", "Changes", "two words", "_hidden", "x" * 65):
+        manifest = Manifest(name="bad", version="1", conversation_slots=(_provider(slot_id),))
+        with pytest.raises(RuntimeError, match="invalid conversation slot id"):
+            conversation_slot_declarations((manifest,))
 
 
 def test_conversation_slot_declarations_reject_duplicate_ids() -> None:
@@ -176,25 +175,23 @@ def test_tasks_payload_rejects_impossible_progress() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "url",
-    ["javascript:alert(1)", "file:///etc/passwd", "https://user:secret@example.com"],
-)
-def test_conversation_artifacts_reject_unsafe_links(url: str) -> None:
-    with pytest.raises(ValueError, match="artifact URL must be HTTP"):
-        ConversationArtifact(
-            filename="unsafe.txt",
-            subject=None,
-            media_type="text/plain",
-            size_bytes=1,
-            created_at=datetime(2026, 8, 6, tzinfo=UTC),
-            url=url,
-        )
+def test_conversation_artifacts_reject_unsafe_links() -> None:
+    for url in ("javascript:alert(1)", "file:///etc/passwd", "https://user:secret@example.com"):
+        with pytest.raises(ValueError, match="artifact URL must be HTTP"):
+            ConversationArtifact(
+                filename="unsafe.txt",
+                subject=None,
+                media_type="text/plain",
+                size_bytes=1,
+                created_at=datetime(2026, 8, 6, tzinfo=UTC),
+                url=url,
+            )
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
+def test_image_previews_accept_only_credential_free_http_urls() -> None:
+    """A picture link names the host serving it, because an app page draws the chat framed on a site
+    origin of its own and resolves a root-relative link against that site."""
+    for url in (
         "/image.png",
         "//example.com/image.png",
         "javascript:alert(1)",
@@ -206,13 +203,9 @@ def test_conversation_artifacts_reject_unsafe_links(url: str) -> None:
         "https://example.com/image\x00.png",
         "https://example.com/image%0d.png",
         "https://example.com/image\x7f.png",
-    ],
-)
-def test_image_previews_accept_only_credential_free_http_urls(url: str) -> None:
-    """A picture link names the host serving it, because an app page draws the chat framed on a site
-    origin of its own and resolves a root-relative link against that site."""
-    with pytest.raises(ValueError, match="image preview URL"):
-        ImagePreview(media_type="image/png", url=url)
+    ):
+        with pytest.raises(ValueError, match="image preview URL"):
+            ImagePreview(media_type="image/png", url=url)
 
 
 def test_an_image_preview_carries_the_link_the_deploy_minted() -> None:
@@ -224,25 +217,19 @@ def test_an_image_preview_carries_the_link_the_deploy_minted() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("path", "media_type"),
-    [
+def test_raster_image_media_types_are_a_closed_set() -> None:
+    for path, media_type in (
         ("chart.GIF", "image/gif"),
         ("chart.jpeg", "image/jpeg"),
         ("chart.jpg", "image/jpeg"),
         ("chart.PNG", "image/png"),
         ("chart.webp", "image/webp"),
         ("chart.svg", None),
-    ],
-)
-def test_raster_image_media_types_are_a_closed_set(path: str, media_type: str | None) -> None:
-    assert raster_image_media_type(path) == media_type
+    ):
+        assert raster_image_media_type(path) == media_type
 
 
-@pytest.mark.parametrize(
-    "url",
-    ["javascript:alert(1)", "file:///etc/passwd", "https://user:secret@example.com"],
-)
-def test_conversation_sources_reject_unsafe_links(url: str) -> None:
-    with pytest.raises(ValueError, match="source URL must be HTTP"):
-        ConversationSource(url=url, title="unsafe", snippet="", published_date=None)
+def test_conversation_sources_reject_unsafe_links() -> None:
+    for url in ("javascript:alert(1)", "file:///etc/passwd", "https://user:secret@example.com"):
+        with pytest.raises(ValueError, match="source URL must be HTTP"):
+            ConversationSource(url=url, title="unsafe", snippet="", published_date=None)

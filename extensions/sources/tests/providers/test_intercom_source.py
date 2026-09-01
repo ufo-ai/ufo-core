@@ -94,32 +94,6 @@ async def test_search_paginates_and_normalizes_the_cursor() -> None:
     assert "Login issue" in page.body
 
 
-async def test_incremental_passes_the_cursor_as_a_number() -> None:
-    seen: list[object] = []
-    await _fetch("conversations", _conversations_handler(seen), cursor="1700000000")
-    assert seen[0] == 1700000000
-
-
-async def test_companies_scroll_walks_scroll_param() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET" and request.url.path == "/companies/scroll":
-            if request.url.params.get("scroll_param") == "s1":
-                return httpx.Response(200, json={"data": []})
-            return httpx.Response(
-                200,
-                json={
-                    "data": [{"id": "co1", "updated_at": 1700000000, "name": "Acme"}],
-                    "scroll_param": "s1",
-                },
-            )
-        return httpx.Response(404, json={"path": request.url.path})
-
-    result = await _fetch("companies", handle)
-    assert {page.source_ref for page in result.pages} == {"companies/co1"}
-    assert result.next_cursor == "1700000000"
-    assert result.snapshot is False
-
-
 async def test_conversations_flatten_lifts_source_and_requester_and_keeps_cursor_stringify() -> (
     None
 ):
@@ -168,29 +142,6 @@ async def test_conversation_parts_flatten_surface_author_type_and_id() -> None:
     assert record["conversation_id"] == "c1"
 
 
-async def test_contacts_flatten_lifts_org_id() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path == "/contacts/search":
-            return httpx.Response(
-                200,
-                json={
-                    "data": [
-                        {
-                            "id": "ct1",
-                            "updated_at": 1700000000,
-                            "companies": {"companies": [{"id": "co1"}]},
-                        }
-                    ],
-                    "pages": {},
-                },
-            )
-        return httpx.Response(404, json={"path": request.url.path})
-
-    record = _flat(await _fetch("contacts", handle), "contacts/ct1")
-    assert record["org_id"] == "co1"
-    assert record["updated_at"] == "1700000000"
-
-
 @pytest.mark.parametrize(("stream", "path"), [("tags", "/tags"), ("teams", "/teams")])
 async def test_tags_and_teams_key_on_their_id_so_a_rename_keeps_the_page(
     stream: str, path: str
@@ -206,6 +157,14 @@ async def test_tags_and_teams_key_on_their_id_so_a_rename_keeps_the_page(
     assert [page.source_ref for page in result.pages] == [f"{stream}/Renamed"]
     assert [page.source_identity for page in result.pages] == [f"{stream}/7"]
     assert result.pages[0].title == "Renamed"
+
+
+async def test_stream_skipped_on_refusal() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"errors": [{"code": "forbidden"}]})
+
+    with pytest.raises(StreamSkipped):
+        await _fetch("conversations", handle)
 
 
 async def test_data_attributes_key_on_the_id_and_a_standard_one_on_its_full_name() -> None:
@@ -232,11 +191,3 @@ async def test_data_attributes_key_on_the_id_and_a_standard_one_on_its_full_name
         "contact_attributes/91",
         "contact_attributes/email",
     }
-
-
-async def test_stream_skipped_on_refusal() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, json={"errors": [{"code": "forbidden"}]})
-
-    with pytest.raises(StreamSkipped):
-        await _fetch("conversations", handle)

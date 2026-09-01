@@ -11,27 +11,27 @@ from ufo.harness.sandbox.cache import (
 )
 
 
-def test_parse_cache_daemon_splits_host_and_port() -> None:
+def _check_parse_cache_daemon_splits_host_and_port() -> None:
     assert parse_cache_daemon("127.0.0.1:9110") == ("127.0.0.1", 9110)
 
 
-def test_parse_cache_daemon_is_none_when_unset() -> None:
+def _check_parse_cache_daemon_is_none_when_unset() -> None:
     assert parse_cache_daemon(None) is None
 
 
-@pytest.mark.parametrize("value", ["nohost", ":9110", ""])
-def test_parse_cache_daemon_fails_loud_on_a_malformed_address(value: str) -> None:
-    with pytest.raises(ValueError):
-        parse_cache_daemon(value)
+def _check_parse_cache_daemon_fails_loud_on_a_malformed_address() -> None:
+    for value in ["nohost", ":9110", ""]:
+        with pytest.raises(ValueError):
+            parse_cache_daemon(value)
 
 
-def test_cache_git_config_routes_github_to_the_cache_and_keeps_pushes_direct() -> None:
+def _check_cache_git_config_routes_github_to_the_cache_and_keeps_pushes_direct() -> None:
     settings = dict(cache_git_config())
     assert settings[f"url.https://{CACHE_HOST}/git/github.com/.insteadOf"] == "https://github.com/"
     assert settings["url.https://github.com/.pushInsteadOf"] == "https://github.com/"
 
 
-def test_the_pkg_host_allowlist_matches_the_daemons_default() -> None:
+def _check_the_pkg_host_allowlist_matches_the_daemons_default() -> None:
     """The proxy intercepts exactly the hosts the daemon will fetch: a host the proxy routes but the
     daemon refuses would 404 every fetch of it. Both default to one list — the proxy's Python and
     the daemon's Rust — so this gate keeps the two copies in step, as no deploy overrides them."""
@@ -42,7 +42,7 @@ def test_the_pkg_host_allowlist_matches_the_daemons_default() -> None:
     assert daemon_hosts == CACHE_PKG_HOSTS
 
 
-def test_github_release_assets_follow_the_package_cache_route() -> None:
+def _check_github_release_assets_follow_the_package_cache_route() -> None:
     assert {
         "raw.githubusercontent.com",
         "objects.githubusercontent.com",
@@ -52,9 +52,8 @@ def test_github_release_assets_follow_the_package_cache_route() -> None:
     } <= set(CACHE_PKG_HOSTS)
 
 
-@pytest.mark.parametrize(
-    ("manager", "hosts"),
-    (
+def _check_package_manager_hosts_follow_the_package_cache_route() -> None:
+    for manager, hosts in (
         (
             "apt",
             (
@@ -71,9 +70,12 @@ def test_github_release_assets_follow_the_package_cache_route() -> None:
         ("go", ("proxy.golang.org", "sum.golang.org")),
         ("npm", ("registry.npmjs.org",)),
         ("pip", ("pypi.org", "files.pythonhosted.org")),
-    ),
-)
-def test_package_manager_hosts_follow_the_package_cache_route(
-    manager: str, hosts: tuple[str, ...]
-) -> None:
-    assert set(hosts) <= set(CACHE_PKG_HOSTS), manager
+    ):
+        assert set(hosts) <= set(CACHE_PKG_HOSTS), manager
+
+
+def test_sandbox_cache_sync_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 7
+    for check in checks:
+        check()

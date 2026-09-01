@@ -38,6 +38,11 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Turn
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 
 class _StubDbos:
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:

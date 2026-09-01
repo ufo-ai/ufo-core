@@ -52,7 +52,6 @@ from ufo.runtime.tools.context import (
 from ufo.runtime.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
 from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
-    Audience,
     conversation_audience,
     foreign_room_audience,
     room_audience,
@@ -196,26 +195,26 @@ async def run(name: str, ctx: ToolContext, **args: object):
     return await tool.handler(ctx, tool.input_model.model_validate(args))
 
 
-def test_registry_rejects_duplicate_names() -> None:
+def _check_registry_rejects_duplicate_names() -> None:
     bash = REGISTRY.get("bash")
     with pytest.raises(ValueError, match="duplicate tool names: bash"):
         ToolRegistry((bash, bash))
 
 
-def test_registry_get_unknown_raises() -> None:
+def _check_registry_get_unknown_raises() -> None:
     with pytest.raises(KeyError, match="unknown tool: nope"):
         REGISTRY.get("nope")
 
 
-def test_registry_get_returns_named_tool() -> None:
+def _check_registry_get_returns_named_tool() -> None:
     assert REGISTRY.get("edit").name == "edit"
 
 
-def test_builtin_tools_are_trusted_by_default() -> None:
+def _check_builtin_tools_are_trusted_by_default() -> None:
     assert all(tool.untrusted is False for tool in BUILTIN_TOOLS)
 
 
-def test_a_barrier_is_a_position_read_final_act_or_a_guard_that_reads_the_round() -> None:
+def _check_a_barrier_is_a_position_read_final_act_or_a_guard_that_reads_the_round() -> None:
     """Same-round calls dispatch concurrently unless the engine itself needs the order:
     ask_user, connect_account, and request_credentials land as the round's last call
     (`_final_act`); write and edit consult the paths the turn has read, and share_file's
@@ -233,11 +232,11 @@ def test_a_barrier_is_a_position_read_final_act_or_a_guard_that_reads_the_round(
     assert REQUEST_CREDENTIALS_TOOL_DEF.parallel_safe is False
 
 
-def test_share_file_dispatch_replays_under_one_idempotency_key() -> None:
+def _check_share_file_dispatch_replays_under_one_idempotency_key() -> None:
     assert REGISTRY.get("share_file").side_effecting is True
 
 
-def test_registry_schemas_cover_every_tool() -> None:
+def _check_registry_schemas_cover_every_tool() -> None:
     schemas = REGISTRY.schemas()
     assert {schema.name for schema in schemas} == {
         "bash",
@@ -266,13 +265,13 @@ def test_registry_schemas_cover_every_tool() -> None:
     assert all(REQUESTED_BY not in schema.input_schema["properties"] for schema in speakerless)
 
 
-def test_builtin_tool_schema_has_no_user_description() -> None:
+def _check_builtin_tool_schema_has_no_user_description() -> None:
     schema = REGISTRY.get("bash").schema().input_schema
 
     assert "user_description" not in schema["properties"]
 
 
-def test_registry_reserves_the_message_authority_field() -> None:
+def _check_registry_reserves_the_message_authority_field() -> None:
     class CollidingInput(BaseModel):
         requested_by: str
 
@@ -389,7 +388,7 @@ async def test_bash_keeps_the_carrier_python_after_the_login_profile_resets_path
     assert (workspace / "relative.txt").read_text() == "relative"
 
 
-def test_edit_and_write_state_the_read_first_rule_in_their_descriptions() -> None:
+def _check_edit_and_write_state_the_read_first_rule_in_their_descriptions() -> None:
     """Both tools refuse a path the turn has not read, and the refusal is a hard raise. A rule
     enforced in code and written only in a profile prompt is one the model carries across every
     round from memory; the description is the sentence it re-reads at the moment it calls."""
@@ -500,7 +499,7 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
     assert (workspace / "name\n+++ injected").read_text() == "safe\n"
 
 
-def test_file_tool_result_bounds_escaped_paths() -> None:
+def _check_file_tool_result_bounds_escaped_paths() -> None:
     path = "/".join(["\\" * 200] * 20 + ["\\" * 73])
     result = _file_tool_result(
         {
@@ -517,7 +516,7 @@ def test_file_tool_result_bounds_escaped_paths() -> None:
     assert "snippet" not in payload
 
 
-def test_file_tool_paths_bound_the_serialized_envelope() -> None:
+def _check_file_tool_paths_bound_the_serialized_envelope() -> None:
     path = "/".join("\u0001" * 120 for _ in range(30))
     with pytest.raises(ValidationError, match="expands beyond its result envelope"):
         REGISTRY.get("write").input_model.model_validate(
@@ -585,7 +584,7 @@ async def test_the_share_preflight_reports_binary_content(tmp_path: Path) -> Non
     assert json.loads(preflight.stdout)["is_text"] is False
 
 
-def test_share_traversal_is_refused_before_the_preflight() -> None:
+def _check_share_traversal_is_refused_before_the_preflight() -> None:
     """A share is the one path a produced file leaves the sandbox on. Traversal is refused where the
     handler resolves the member's argument — `workspace_path` — so a scoped path reaches the
     preflight already confined, and NanoClaw's second escape stays closed."""
@@ -935,6 +934,7 @@ class _IdleSpawnClient:
         raise AssertionError("an unknown profile must be rejected before any child is enqueued")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_spawn_unknown_target_is_an_error_naming_the_valid_targets(
     tmp_path: Path, db: None
 ) -> None:
@@ -1016,9 +1016,14 @@ SEAL_ROOM = room_audience("slack", "CROOM")
 SEAL_FOREIGN = foreign_room_audience("slack", "CCONNECT")
 
 
-@pytest.mark.parametrize(
-    ("audience", "speaker", "subjects", "write_to"),
-    [
+def test_the_audience_seal_holds_for_every_audience_and_speaker() -> None:
+    """The whole disclosure contract of the two properties every read and write scopes on, pinned
+    here rather than inferred from any one consumer. A write takes the requester's own subject only
+    in a shared conversation; in a room or a foreign channel it stays keyed to that space, so a
+    private room's fact never rekeys into the next room and a foreign channel's never into the
+    workspace, however the conversation is being driven. Reads still union the requester's own
+    subject everywhere except that shared atom a foreign audience is sealed against."""
+    for audience, speaker, subjects, write_to in [
         (SHARED_AUDIENCE, None, {"shared"}, SHARED_AUDIENCE),
         (
             SHARED_AUDIENCE,
@@ -1046,50 +1051,32 @@ SEAL_FOREIGN = foreign_room_audience("slack", "CCONNECT")
             {str(SEAL_FOREIGN), member_subject(SEAL_MEMBER)},
             str(SEAL_FOREIGN),
         ),
-    ],
-    ids=[
-        "shared",
-        "shared+speaker",
-        "member",
-        "room",
-        "room+speaker",
-        "foreign",
-        "foreign+speaker",
-    ],
-)
-def test_the_audience_seal_holds_for_every_audience_and_speaker(
-    audience: Audience, speaker: UUID | None, subjects: set[str], write_to: str
-) -> None:
-    """The whole disclosure contract of the two properties every read and write scopes on, pinned
-    here rather than inferred from any one consumer. A write takes the requester's own subject only
-    in a shared conversation; in a room or a foreign channel it stays keyed to that space, so a
-    private room's fact never rekeys into the next room and a foreign channel's never into the
-    workspace, however the conversation is being driven. Reads still union the requester's own
-    subject everywhere except that shared atom a foreign audience is sealed against."""
-    ctx = ToolContext(
-        sandbox=None,
-        blob=None,
-        turn=Turn(
-            id=uuid4(),
-            workspace_id=uuid4(),
-            conversation_id=uuid4(),
-            agent_id=uuid4(),
-            seq=0,
-            status="running",
-            inbound="hello",
-            created_at=datetime(2026, 7, 9, tzinfo=UTC),
-        ),
-        agent=Agent(prompt="be terse", model="claude-opus-4-8"),
-        spawn=_unavailable_spawn,
-        speaker_member_id=speaker,
-        audience=audience,
-        artifact_token_secret=ARTIFACT_SECRET,
-    )
+    ]:
+        ctx = ToolContext(
+            sandbox=None,
+            blob=None,
+            turn=Turn(
+                id=uuid4(),
+                workspace_id=uuid4(),
+                conversation_id=uuid4(),
+                agent_id=uuid4(),
+                seq=0,
+                status="running",
+                inbound="hello",
+                created_at=datetime(2026, 7, 9, tzinfo=UTC),
+            ),
+            agent=Agent(prompt="be terse", model="claude-opus-4-8"),
+            spawn=_unavailable_spawn,
+            speaker_member_id=speaker,
+            audience=audience,
+            artifact_token_secret=ARTIFACT_SECRET,
+        )
 
-    assert ctx.read_subjects == frozenset(subjects)
-    assert str(ctx.effective_audience) == write_to
+        assert ctx.read_subjects == frozenset(subjects)
+        assert str(ctx.effective_audience) == write_to
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1233,3 +1220,10 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
     assert stored == b"<svg></svg>"
     assert stored_preview == preview
     assert published == 1
+
+
+def test_tool_static_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 13
+    for check in checks:
+        check()

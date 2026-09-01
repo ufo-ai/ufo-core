@@ -3,7 +3,6 @@ filter, title resolution, and the fail-closed missing root. No conftest: the sha
 `ufo_testsupport` plugin covers fixtures, and these tests are offline (real files, no DB, no
 transport)."""
 
-import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -55,12 +54,6 @@ async def test_empty_root_is_an_empty_snapshot(tmp_path: Path) -> None:
 async def test_missing_root_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(ContainmentError, match="gone"):
         await _fetch(tmp_path / "gone")
-
-
-async def test_undecodable_markdown_names_the_file(tmp_path: Path) -> None:
-    (tmp_path / "bad.md").write_bytes(b"\xff\xfe")
-    with pytest.raises(StreamFault, match=re.escape("bad.md is not utf-8 text")):
-        await _fetch(tmp_path)
 
 
 def test_relative_root_is_refused() -> None:

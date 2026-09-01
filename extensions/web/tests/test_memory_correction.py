@@ -69,6 +69,11 @@ from ufo.schema import tables
 from ufo.schema.records import Usage
 from ufo.serve import _mount_shared_surfaces
 
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
+
 TOKEN_SECRET = "web-token-secret"
 
 

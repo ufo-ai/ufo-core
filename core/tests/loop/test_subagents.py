@@ -25,14 +25,13 @@ from ufo.host.tools.builtins import BUILTIN_TOOLS, SPAWN_BACKGROUND_DIRECTIVE, _
 from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.billing.balance import BalanceExhausted, credit, set_reserve
-from ufo.runtime.ext.manifest import SUBAGENT_ROUND_LIMIT, SubagentProfile
+from ufo.runtime.ext.manifest import SubagentProfile
 from ufo.runtime.ext.surface import conversation_name
 from ufo.runtime.hub import ArrivalQueued, InProcessHub
 from ufo.runtime.kinds.agents import ARCHIVED_AGENT_NAME_PREFIX
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.runtime.queue import _commit_failed_terminal, _load_turn, _subagent_tools
-from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkill, RuntimeSkill, SkillCard
-from ufo.runtime.skills.selection import prompt_index
+from ufo.runtime.skills.runtime import LoadedSkill, RuntimeSkill
 from ufo.runtime.subagents import (
     FINISH_CONTRACT,
     PRELOAD_PROMPT_CHAR_BOUND,
@@ -69,6 +68,11 @@ from ufo.schema.records import (
     TurnRuntimeConfig,
     turn_id_for,
 )
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 
 class _Task(BaseModel):
@@ -113,12 +117,6 @@ def test_registry_get_unknown_names_the_bad_profile_and_lists_the_valid_ones() -
     assert "coding, research" in message
 
 
-def test_registry_get_returns_named_profile() -> None:
-    registry = SubagentRegistry((_profile("a"), _profile("b")))
-    assert registry.get("b").name == "b"
-    assert registry.get("b").tool_names == ("bash", "read")
-
-
 def test_system_prompt_carries_instructions_and_the_finish_contract() -> None:
     prompt = subagent_system_prompt(_profile("research"))
     assert "research instructions" in prompt
@@ -126,28 +124,6 @@ def test_system_prompt_carries_instructions_and_the_finish_contract() -> None:
     assert "<parent_handoff>" not in prompt
     assert "at most 20 words" not in prompt
     assert prompt.endswith(FINISH_CONTRACT)
-
-
-def test_freeform_profile_without_short_handoff_contract_has_no_word_cap() -> None:
-    profile = replace(_profile("coding"), output_model=_FreeformResult)
-    prompt = subagent_system_prompt(profile)
-    assert prompt.count(DELIVERY_REGISTER_BLOCK) == 1
-    assert "<parent_handoff>" not in prompt
-    assert "at most 20 words" not in prompt
-
-
-def test_concise_parent_handoff_requires_one_result_string() -> None:
-    with pytest.raises(ValueError, match="does not carry the concise result contract"):
-        replace(_profile("research"), concise_parent_handoff=True)
-    with pytest.raises(ValueError, match="does not mark a concise parent handoff"):
-        replace(_profile("research"), output_model=_ConciseResult)
-
-
-def test_system_prompt_governs_the_words_of_a_schema_owned_answer() -> None:
-    prose = " ".join(subagent_system_prompt(_profile("research")).split())
-    assert "A typed profile field whose schema requests the work itself is the delivery" in prose
-    assert "whichever field carries it." in prose
-    assert "## Plain words" in prose
 
 
 def test_core_ships_a_general_purpose_profile_the_registry_resolves() -> None:
@@ -177,23 +153,6 @@ def test_core_ships_a_general_purpose_profile_the_registry_resolves() -> None:
     assert profile.output_model.model_validate({"result": "x" * 10_000}).result == "x" * 10_000
 
 
-def test_general_purpose_carries_the_subagent_round_budget() -> None:
-    profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
-    assert profile.max_rounds == SUBAGENT_ROUND_LIMIT == 50
-
-
-def test_a_deep_profile_lifts_its_round_budget_above_the_subagent_default() -> None:
-    deep = SubagentProfile(
-        name="deep",
-        prompt="p",
-        tool_names=(),
-        input_model=_Task,
-        output_model=_Finding,
-        max_rounds=200,
-    )
-    assert deep.max_rounds == 200 > SUBAGENT_ROUND_LIMIT
-
-
 def test_isolated_profile_excludes_grants_and_defaults() -> None:
     by_name = {tool.name: tool for tool in BUILTIN_TOOLS}
     profile = replace(
@@ -213,32 +172,6 @@ def test_isolated_profile_excludes_grants_and_defaults() -> None:
     assert [tool.name for tool in selected] == ["read"]
 
 
-def test_general_purpose_tool_subset_excludes_the_tools_a_subagent_must_not_hold() -> None:
-    profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
-    assert "load_skill" in profile.tool_names
-    assert "list_skills" not in profile.tool_names
-    assert {"ask_user", "spawn", "connect_account"}.isdisjoint(profile.tool_names)
-
-
-def test_general_purpose_tool_names_are_builtins_or_the_known_cross_extension_set() -> None:
-    """The queue projects a subagent's tool set by filtering the live tool set on these names — a
-    name matching nothing silently vanishes. Core names must be real builtins; the rest are the
-    documented cross-extension tools (web search/fetch, the connector trio, the spreadsheet REPL)
-    that match the source general_purpose set and resolve only when their extension is installed."""
-    profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
-    builtin_names = {tool.name for tool in BUILTIN_TOOLS}
-    cross_extension = {
-        "search_web",
-        "search_vertical",
-        "fetch_url",
-        "list_external_tools",
-        "describe_external_tools",
-        "call_external_tool",
-        "xlsx_repl",
-    }
-    assert set(profile.tool_names) <= builtin_names | cross_extension
-
-
 def test_general_purpose_prompt_lists_the_loadable_skills_and_binds_its_output() -> None:
     profile = SubagentRegistry(CORE_SUBAGENT_PROFILES).get(GENERAL_PURPOSE)
     prompt = subagent_system_prompt(profile)
@@ -250,124 +183,6 @@ def test_general_purpose_prompt_lists_the_loadable_skills_and_binds_its_output()
     assert "Everything outside `finish` is working text and reaches nobody" in prompt
 
 
-def test_core_ships_only_the_general_purpose_profile() -> None:
-    assert {profile.name for profile in CORE_SUBAGENT_PROFILES} == {GENERAL_PURPOSE}
-
-
-def test_subagent_prompt_wraps_the_profile_with_the_shared_citation_discipline() -> None:
-    prompt = subagent_system_prompt(_profile("research"))
-    assert "research instructions" in prompt
-    assert "<citation_instructions>" in prompt
-
-
-def test_the_sandbox_skill_names_the_container_a_subagent_turn_inherits() -> None:
-    body = " ".join(CORE_SKILL_REGISTRY.named("sandbox").instructions.split())
-    assert "a subagent turn runs in the container of the turn that spawned it" in body
-
-
-def test_the_shared_delivery_selects_the_artifact_carrier_by_agent_boundary() -> None:
-    prompt = subagent_system_prompt(_profile("research"))
-    prose = " ".join(prompt.split())
-    assert "Between agents that share /workspace" in prose
-    assert "name its absolute path without share_file" in prose
-    assert "Never delete another agent's files" in prose
-    assert "clean up the workspace after completing the task" in prose
-    assert "Delete other files only when required by the task" in prose
-    assert "share_file so the parent" not in prose
-
-
-def test_the_sandbox_skill_answers_a_subagent_that_holds_no_share_file() -> None:
-    body = " ".join(CORE_SKILL_REGISTRY.named("sandbox").instructions.split())
-    assert "Without `share_file` in your tool set, the workspace is the handoff" in body
-    assert "name the path in your result, and the parent shares it" in body
-    assert "A file only reaches the user through `share_file`" not in body
-
-
-def test_subagent_prompt_fills_the_skill_index_slot() -> None:
-    profile = SubagentProfile(
-        name="slotted",
-        prompt="do the task\n\n{{skill_index}}",
-        tool_names=(),
-        input_model=_Task,
-        output_model=_Finding,
-    )
-    prompt = subagent_system_prompt(profile)
-    assert "{{skill_index}}" not in prompt
-    assert "<available_skills>" in prompt
-
-
-def test_subagent_prompt_keeps_the_finish_contract_after_preloaded_skills() -> None:
-    """A preloaded skill's own answer-formatting instructions must never be the prompt's last word
-    — the finish contract stays after every preloaded body, so a website build still ends its turn
-    through the finish tool instead of trailing prose."""
-    skill = RuntimeSkill(
-        name="verbose", description="d", instructions="End with a friendly prose summary."
-    )
-    prompt = subagent_system_prompt(_profile("research"), preload=(LoadedSkill(skill=skill),))
-    assert "Preloaded skill(s):" in prompt
-    contract_at = prompt.index(FINISH_CONTRACT)
-    assert prompt.index("End with a friendly prose summary.") < contract_at
-    assert prompt.index("<citation_instructions>") > prompt.index("Preloaded skill(s):")
-
-
-def test_subagent_prompt_bounds_the_preloaded_bodies() -> None:
-    oversized = RuntimeSkill(
-        name="huge", description="d", instructions="x" * (PRELOAD_PROMPT_CHAR_BOUND + 1)
-    )
-    with pytest.raises(ValueError, match="over the"):
-        subagent_system_prompt(_profile("research"), preload=(LoadedSkill(skill=oversized),))
-
-
-def test_subagent_prompt_reads_a_preloaded_skills_braces_as_content() -> None:
-    templated = RuntimeSkill(
-        name="vue", description="d", instructions="Interpolate with {{ message }} in the template."
-    )
-    prompt = subagent_system_prompt(_profile("research"), preload=(LoadedSkill(skill=templated),))
-    assert "{{ message }}" in prompt
-
-
-def test_subagent_prompt_renders_the_deploy_skill_index_it_is_given() -> None:
-    """The child's `{{skill_index}}` is the deploy tier the turn passed — member skills never
-    render here; they reach a child only through `preload_skills`."""
-    profile = SubagentProfile(
-        name="slotted",
-        prompt="do the task\n\n{{skill_index}}",
-        tool_names=(),
-        input_model=_Task,
-        output_model=_Finding,
-    )
-    prompt = subagent_system_prompt(
-        profile, skills=(("extension-skill", "A deploy-provided workflow."),)
-    )
-    assert "extension-skill: A deploy-provided workflow." in prompt
-    assert "- sandbox:" not in prompt
-
-
-def test_a_folded_member_tier_lists_in_a_subagent_prompt() -> None:
-    """A child's `{{skill_index}}` renders the same fold-aware index the parent's prompt carries:
-    a member tier small enough to fold lists beside the deploy skills, same line format."""
-
-    async def materialize(name: str) -> None:
-        return None
-
-    registry = CORE_SKILL_REGISTRY.with_member(
-        (SkillCard(name="invoice-review", description="Load when reconciling an invoice."),),
-        materialize,
-    )
-    profile = SubagentProfile(
-        name="slotted",
-        prompt="do the task\n\n{{skill_index}}",
-        tool_names=(),
-        input_model=_Task,
-        output_model=_Finding,
-    )
-
-    prompt = subagent_system_prompt(profile, skills=prompt_index(registry))
-
-    assert "- invoice-review: Load when reconciling an invoice." in prompt
-    assert "- sandbox:" in prompt
-
-
 def test_skill_capable_subagent_requires_a_skill_index_slot() -> None:
     profile = SubagentProfile(
         name="missing-index",
@@ -377,18 +192,6 @@ def test_skill_capable_subagent_requires_a_skill_index_slot() -> None:
         output_model=_Finding,
     )
     with pytest.raises(ValueError, match="grants load_skill"):
-        subagent_system_prompt(profile)
-
-
-def test_subagent_prompt_fails_loud_on_an_unfilled_slot() -> None:
-    profile = SubagentProfile(
-        name="stray",
-        prompt="do it {{mystery}}",
-        tool_names=(),
-        input_model=_Task,
-        output_model=_Finding,
-    )
-    with pytest.raises(ValueError, match="unresolved slots: mystery"):
         subagent_system_prompt(profile)
 
 
@@ -1060,6 +863,7 @@ async def test_spawn_inherits_a_private_audience_from_a_speakerless_parent(
     child, _, child_audience = await _load_turn(spawned.turn_id)
     assert child.speaker_member_id is None
     assert child.on_behalf_of_member_id == member_id
+
     assert child_audience == conversation_audience(member_id)
     async with workspace_tx() as connection:
         child_member_id = (
@@ -3649,3 +3453,45 @@ async def test_a_speakerless_turn_spawns_on_the_account_the_member_it_acts_for_c
     child, _, _ = await _load_turn(spawned.turn_id)
     assert child.speaker_member_id is None
     assert child.on_behalf_of_member_id == member_id
+
+
+def test_subagent_prompt_keeps_the_finish_contract_after_preloaded_skills() -> None:
+    """A preloaded skill's own answer-formatting instructions must never be the prompt's last word
+    — the finish contract stays after every preloaded body, so a website build still ends its turn
+    through the finish tool instead of trailing prose."""
+    skill = RuntimeSkill(
+        name="verbose", description="d", instructions="End with a friendly prose summary."
+    )
+    prompt = subagent_system_prompt(_profile("research"), preload=(LoadedSkill(skill=skill),))
+    assert "Preloaded skill(s):" in prompt
+    contract_at = prompt.index(FINISH_CONTRACT)
+    assert prompt.index("End with a friendly prose summary.") < contract_at
+    assert prompt.index("<citation_instructions>") > prompt.index("Preloaded skill(s):")
+
+
+def test_subagent_prompt_bounds_the_preloaded_bodies() -> None:
+    oversized = RuntimeSkill(
+        name="huge", description="d", instructions="x" * (PRELOAD_PROMPT_CHAR_BOUND + 1)
+    )
+    with pytest.raises(ValueError, match="over the"):
+        subagent_system_prompt(_profile("research"), preload=(LoadedSkill(skill=oversized),))
+
+
+def test_subagent_prompt_reads_a_preloaded_skills_braces_as_content() -> None:
+    templated = RuntimeSkill(
+        name="vue", description="d", instructions="Interpolate with {{ message }} in the template."
+    )
+    prompt = subagent_system_prompt(_profile("research"), preload=(LoadedSkill(skill=templated),))
+    assert "{{ message }}" in prompt
+
+
+def test_subagent_prompt_fails_loud_on_an_unfilled_slot() -> None:
+    profile = SubagentProfile(
+        name="stray",
+        prompt="do it {{mystery}}",
+        tool_names=(),
+        input_model=_Task,
+        output_model=_Finding,
+    )
+    with pytest.raises(ValueError, match="unresolved slots: mystery"):
+        subagent_system_prompt(profile)

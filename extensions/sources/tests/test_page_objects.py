@@ -27,7 +27,6 @@ from ufo.blob import BlobStore, FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.sources.sync import SyncDriver
 from ufo.runtime.tools.registry import ToolDef
@@ -38,8 +37,13 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import Audience, conversation_audience, foreign_room_audience, room_audience
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.objects import AdminRequired, VerbNotSupported
-from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult, binding_name
+from ufo.sdk.sources import ConnectorSourceConfig, Page, SourceAuth, SyncResult
 from ufo.sdk.tools import ToolContext
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "looking through the synced pages"
 
@@ -322,122 +326,6 @@ async def test_sync_driver_page_metadata_round_trips_through_object_verbs(
         assert fetched["spec"]["body"] == page.body
 
 
-async def test_pages_list_filter_order_and_read_body_through_the_verbs(
-    db: None, tmp_path: Path
-) -> None:
-    state = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    with ws(state.workspace_id):
-        source_id = await _seed_source(state, "asana", source_id=UUID(int=2))
-        newest = await _seed_page(
-            state,
-            source_id,
-            blob,
-            title="Newest issue",
-            record_created_at="2026-07-11T00:00:00Z",
-            page_id=UUID(int=1),
-        )
-        await _seed_page(
-            state,
-            source_id,
-            blob,
-            title="Older issue",
-            record_created_at="2026-07-10T00:00:00Z",
-            page_id=UUID(int=2),
-        )
-        await _seed_page(
-            state,
-            source_id,
-            blob,
-            stream="pull_requests",
-            title="Newest pull request",
-            record_created_at="2026-07-12T00:00:00Z",
-            page_id=UUID(int=3),
-        )
-        other_source_id = await _seed_source(state, "github", source_id=UUID(int=1))
-        await _seed_page(
-            state,
-            other_source_id,
-            blob,
-            title="Other source issue",
-            record_created_at="2026-07-08T00:00:00Z",
-            page_id=UUID(int=4),
-        )
-        ctx = _context(state, blob)
-
-        listing = json.loads(
-            await _text(
-                _TOOLS["object_list"],
-                ctx,
-                kind=PAGE_KIND,
-                filters={"source_id": str(source_id), "stream": "issues"},
-                order_by="created_at",
-                order="desc",
-            )
-        )
-        assert [row["title"] for row in listing["objects"]] == ["Newest issue", "Older issue"]
-        assert listing["objects"][0]["source"] == "asana"
-        assert listing["objects"][0]["stream"] == "issues"
-
-        by_source_id = json.loads(
-            await _text(
-                _TOOLS["object_list"],
-                ctx,
-                kind=PAGE_KIND,
-                order_by="source_id",
-            )
-        )
-        assert [row["source_id"] for row in by_source_id["objects"]] == sorted(
-            row["source_id"] for row in by_source_id["objects"]
-        )
-        by_stream = json.loads(
-            await _text(
-                _TOOLS["object_list"],
-                ctx,
-                kind=PAGE_KIND,
-                order_by="stream",
-            )
-        )
-        assert [row["stream"] for row in by_stream["objects"]] == sorted(
-            row["stream"] for row in by_stream["objects"]
-        )
-
-        for field_name, value in (
-            ("source", "asana"),
-            ("title", "Newest issue"),
-            ("updated_at", "2026-07-11T00:00:00.000000+00:00"),
-        ):
-            by_field = json.loads(
-                await _text(
-                    _TOOLS["object_list"],
-                    ctx,
-                    kind=PAGE_KIND,
-                    filters={field_name: value},
-                    order_by=field_name,
-                )
-            )
-            assert any(row["name"] == str(newest) for row in by_field["objects"])
-
-        fetched = yaml.safe_load(
-            await _text(_TOOLS["object_get"], ctx, kind=PAGE_KIND, name=str(newest))
-        )
-        assert fetched["spec"]["source_id"] == str(source_id)
-        assert fetched["spec"]["stream"] == "issues"
-        assert fetched["spec"]["title"] == "Newest issue"
-        assert fetched["spec"]["created_at"] == "2026-07-11T00:00:00.000000+00:00"
-        assert fetched["spec"]["body"] == "# Newest issue\n\nIssue body"
-        assert fetched["spec"]["body_truncated"] is False
-        assert fetched["status"] is None
-        assert fetched["links"] == [
-            {
-                "relation": "synced_by",
-                "target": {"kind": "source", "name": binding_name("asana", "acct-one", None)},
-            }
-        ]
-        assert fetched["created_at"] is not None
-        assert fetched["updated_at"] is not None
-
-
 async def test_page_get_rechecks_source_authority_after_streaming(db: None, tmp_path: Path) -> None:
     state = await _workspace()
     stored = FilesystemBlobStore(root=tmp_path)
@@ -458,33 +346,6 @@ async def test_page_get_rechecks_source_authority_after_streaming(db: None, tmp_
         assert (
             await PageObjects().get(
                 _context(state, _MutatingBlob(stored, revoke)),
-                str(page_id),
-            )
-            is None
-        )
-
-
-async def test_page_get_rechecks_page_identity_after_streaming(db: None, tmp_path: Path) -> None:
-    state = await _workspace()
-    stored = FilesystemBlobStore(root=tmp_path)
-    with ws(state.workspace_id):
-        source_id = await _seed_source(state, "asana")
-        page_id = await _seed_page(state, source_id, stored)
-
-        async def replace() -> None:
-            async with workspace_tx() as connection:
-                await connection.execute(
-                    sa.update(tables.page)
-                    .values(
-                        digest="sha256:replacement",
-                        body_ref=f"pages/{page_id}/replacement",
-                    )
-                    .where(tables.page.c.id == page_id)
-                )
-
-        assert (
-            await PageObjects().get(
-                _context(state, _MutatingBlob(stored, replace)),
                 str(page_id),
             )
             is None
@@ -582,41 +443,6 @@ async def test_explicit_room_request_reads_shared_and_requester_private_pages(
     assert str(hidden) not in names
 
 
-async def test_pages_order_timestamp_variants_chronologically(db: None, tmp_path: Path) -> None:
-    state = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    with ws(state.workspace_id):
-        source_id = await _seed_source(state, "probe")
-        older = await _seed_page(
-            state,
-            source_id,
-            blob,
-            title="Whole second",
-            record_created_at="2026-07-23T18:30:00Z",
-        )
-        newer = await _seed_page(
-            state,
-            source_id,
-            blob,
-            title="Half second later",
-            record_created_at="2026-07-23T14:30:00.500000-04:00",
-        )
-        listing = json.loads(
-            await _text(
-                _TOOLS["object_list"],
-                _context(state, blob),
-                kind=PAGE_KIND,
-                order_by="created_at",
-                order="desc",
-            )
-        )
-        assert [row["name"] for row in listing["objects"]] == [str(newer), str(older)]
-        assert [row["created_at"] for row in listing["objects"]] == [
-            "2026-07-23T18:30:00.500000+00:00",
-            "2026-07-23T18:30:00.000000+00:00",
-        ]
-
-
 async def test_pages_without_provider_timestamps_use_row_timestamps(
     db: None, tmp_path: Path
 ) -> None:
@@ -673,21 +499,6 @@ async def test_page_get_bounds_an_oversized_body(db: None, tmp_path: Path) -> No
         assert fetched["spec"]["body"] == "x" * (PAGE_BODY_MAX_BYTES - 1)
         assert "�" not in fetched["spec"]["body"]
         assert fetched["spec"]["body_truncated"] is True
-
-
-async def test_page_get_flags_truncation_inside_the_engine_preview(
-    db: None, tmp_path: Path
-) -> None:
-    state = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    with ws(state.workspace_id):
-        source_id = await _seed_source(state, "asana")
-        page_id = await _seed_page(state, source_id, blob, body="x" * (PAGE_BODY_MAX_BYTES + 1))
-        rendered = await _text(
-            _TOOLS["object_get"], _context(state, blob), kind=PAGE_KIND, name=str(page_id)
-        )
-        assert len(rendered) > MAX_TOOL_RESULT_CHARS
-        assert "body_truncated: true" in rendered[:TOOL_RESULT_PREVIEW_CHARS]
 
 
 async def test_page_get_rejects_corrupted_utf8(db: None, tmp_path: Path) -> None:

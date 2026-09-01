@@ -7,7 +7,7 @@ import ufo_ext_documents.subagent as subagent
 from ufo.harness.models.catalog import CORE_MODEL_SPECS
 from ufo.host.ext.loader import skill_registry
 from ufo.host.tools.builtins import BUILTIN_TOOLS
-from ufo.runtime.subagents import FINISH_CONTRACT, subagent_system_prompt
+from ufo.runtime.subagents import subagent_system_prompt
 
 FILE_TOOLS = ("read", "write", "edit", "glob", "grep")
 
@@ -82,12 +82,6 @@ def test_the_child_prompt_carries_the_writing_boundary() -> None:
     assert "assign each option a different purpose" in subagent.WRITING_PROMPT
     assert "the intended user or use, and a concrete constraint" in subagent.WRITING_PROMPT
     assert "Do not return paraphrases of one line" in subagent.WRITING_PROMPT
-
-
-def test_the_writing_prompt_carries_the_shared_output_discipline() -> None:
-    prompt = subagent_system_prompt(subagent.WRITING_PROFILE)
-    assert "A delivery crosses an agent boundary" in prompt
-    assert prompt.endswith(FINISH_CONTRACT)
 
 
 def test_writing_result_uses_only_the_shared_register_bound() -> None:

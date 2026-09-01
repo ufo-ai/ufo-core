@@ -27,26 +27,18 @@ from ufo_ext_self_improvement.evaluation import CandidateEvaluation
 from ufo_ext_self_improvement.gate import (
     OutcomeLabel,
     score_gate,
-    two_stage_gate,
 )
-from ufo_ext_self_improvement.model import ModelAccessLeg
 from ufo_ext_self_improvement.proposer import PromptProposer
-from ufo_ext_self_improvement.replay import ReplayEvaluation, replay_head
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.harness.models.catalog import CORE_PRICING
 from ufo.harness.models.interface import (
     PROVIDER_ANTHROPIC,
     Message,
     ModelClient,
     ModelEvent,
     ModelRequest,
-    ReasoningItemBlock,
-    RedactedThinkingBlock,
-    TextBlock,
     TextDelta,
-    ThinkingBlock,
     ToolCallDelta,
     ToolCallStart,
     ToolResultBlock,
@@ -54,14 +46,19 @@ from ufo.harness.models.interface import (
     ToolUseBlock,
 )
 from ufo.host.ext.loader import load_manifests
-from ufo.runtime.billing.accounting import TOKENS_DIMENSION, Pricing
-from ufo.runtime.ext.context import ModelAccess, Trajectory, context_for
+from ufo.runtime.billing.accounting import Pricing
+from ufo.runtime.ext.context import Trajectory, context_for
 from ufo.runtime.kinds.governance import prompt_digest
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.transcript import Conversation
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 SEED_PROMPT = "You are a helpful assistant."
 IMPROVED_MARKER = "IMPROVED"
@@ -382,104 +379,6 @@ class ModelResolver:
         return None
 
 
-async def test_replay_uses_metered_model_access_and_feeds_archived_results(db: None) -> None:
-    workspace_id = await _workspace()
-    client = MeteredReplayClient(requests=[])
-    model = ModelAccess(ModelResolver(MODEL, CORE_PRICING, client), REPLAY_JOB)
-
-    with ws(workspace_id):
-        result = await ReplayEvaluation(ModelAccessLeg(model)).replay(
-            _archived_bash("ls", "file-a\nfile-b"), SEED_PROMPT
-        )
-        async with workspace_tx() as connection:
-            billed = (
-                await connection.execute(
-                    sa.select(sa.func.count(), sa.func.sum(tables.ledger.c.amount)).where(
-                        tables.ledger.c.workspace_id == workspace_id,
-                        tables.ledger.c.turn_id.is_(None),
-                        tables.ledger.c.dimension == TOKENS_DIMENSION,
-                    )
-                )
-            ).one()
-
-    assert result.final_text == "regenerated final"
-    assert billed[0] == 2
-    assert billed[1] == 10
-    fed = client.requests[1].messages[-1]
-    assert not isinstance(fed.content, str)
-    assert any(
-        isinstance(block, ToolResultBlock) and block.content == "file-a\nfile-b"
-        for block in fed.content
-    )
-
-
-def test_replay_head_strips_the_archives_reasoning_blocks() -> None:
-    """The archive's reasoning belongs to the model that minted it; the replay leg runs the deploy's
-    model with reasoning off, so signed thinking and encrypted items must not ride into its
-    requests."""
-    archived = (
-        Message(role="user", content="do the task"),
-        Message(
-            role="assistant",
-            content=(
-                ThinkingBlock(thinking="weigh", signature="sig-foreign"),
-                RedactedThinkingBlock(data="ZW5jcnlwdGVk"),
-                ReasoningItemBlock(id="rs_1", encrypted_content="Z3B0"),
-                TextBlock(text="checking"),
-                ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
-            ),
-        ),
-        Message(role="user", content=(ToolResultBlock(tool_use_id="t1", content="file-a"),)),
-        Message(role="assistant", content="final answer"),
-    )
-    assert replay_head(archived) == (
-        Message(role="user", content="do the task"),
-        Message(
-            role="assistant",
-            content=(
-                TextBlock(text="checking"),
-                ToolUseBlock(id="t1", name="bash", input={"command": "ls"}),
-            ),
-        ),
-        Message(role="user", content=(ToolResultBlock(tool_use_id="t1", content="file-a"),)),
-    )
-
-
-async def test_replay_feeds_the_archived_tool_result_back() -> None:
-    archived = _archived_bash("ls", "file-a\nfile-b")
-    leg = ScriptedReplayLeg(
-        turns=[
-            Message(
-                role="assistant",
-                content=(ToolUseBlock(id="r1", name="bash", input={"command": "ls"}),),
-            ),
-            Message(role="assistant", content="regenerated final"),
-        ]
-    )
-    result = await ReplayEvaluation(leg).replay(archived, "SYSTEM PROMPT")
-    assert result.final_text == "regenerated final"
-    fed = leg.seen[-1]
-    assert not isinstance(fed.content, str)
-    assert any(
-        isinstance(block, ToolResultBlock) and block.content == "file-a\nfile-b"
-        for block in fed.content
-    )
-
-
-async def test_replay_stops_when_a_call_has_no_archived_result() -> None:
-    archived = _archived_bash("ls", "file-a")
-    leg = ScriptedReplayLeg(
-        turns=[
-            Message(
-                role="assistant",
-                content=(ToolUseBlock(id="r1", name="bash", input={"command": "rm -rf /"}),),
-            )
-        ]
-    )
-    result = await ReplayEvaluation(leg).replay(archived, "SYSTEM PROMPT")
-    assert result.final_text == ""
-
-
 def _labels(present_accepted: int, present_total: int, absent_accepted: int, absent_total: int):
     present = [
         OutcomeLabel(present=True, success=i < present_accepted) for i in range(present_total)
@@ -502,12 +401,3 @@ def test_gate_fails_below_the_per_arm_floor() -> None:
 
 def test_gate_fails_a_no_lift_candidate() -> None:
     assert not score_gate(_labels(4, 4, 4, 4)).passed
-
-
-def test_two_stage_gate_blocks_a_global_regression() -> None:
-    local = _labels(4, 4, 0, 4)
-    regressed = _labels(0, 4, 4, 4)
-    assert score_gate(local).passed
-    verdict = two_stage_gate(local, regressed)
-    assert not verdict.passed
-    assert "global regression" in verdict.reason

@@ -179,32 +179,25 @@ def test_wire_registry_refuses_bound_defs_and_the_action_prefix() -> None:
         ToolRegistry((prefixed,))
 
 
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    (
+def test_declaration_gates_hold_presentation_and_final_act_models() -> None:
+    for overrides, message in (
         ({"presentation": ActionPresentation(label="  ")}, "empty label"),
-        (
-            {"presentation": ActionPresentation(label="Run", confirm=" ")},
-            "empty confirmation",
-        ),
-        (
-            {"profile_only": True, "presentation": ActionPresentation(label="Run")},
-            "profile_only",
-        ),
+        ({"presentation": ActionPresentation(label="Run", confirm=" ")}, "empty confirmation"),
+        ({"profile_only": True, "presentation": ActionPresentation(label="Run")}, "profile_only"),
         ({"final_act_model": _ProbeInput}, "no terminal frame field"),
-    ),
-)
-def test_declaration_gates_hold_presentation_and_final_act_models(
-    overrides: dict[str, object], message: str
-) -> None:
-    with pytest.raises(ValueError, match=message):
-        ToolRegistry(
-            (
-                ToolDef(
-                    name="p", description="d", input_model=_ProbeInput, handler=_probe, **overrides
-                ),
-            )
-        )  # type: ignore[arg-type]
+    ):
+        with pytest.raises(ValueError, match=message):
+            ToolRegistry(
+                (
+                    ToolDef(
+                        name="p",
+                        description="d",
+                        input_model=_ProbeInput,
+                        handler=_probe,
+                        **overrides,
+                    ),
+                )
+            )  # type: ignore[arg-type]
 
 
 def _kinds() -> dict[str, BoundKind]:
@@ -356,6 +349,7 @@ def test_deploy_validation_returns_the_context_free_action_registry() -> None:
     assert actions[sample.WORKSPACE_KIND][sample.AUDIT_ACTION].context is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_list_envelope_carries_granted_collection_actions(db: None) -> None:
     workspace_id = await _workspace()
     tools, _ = _sample_verbs()
@@ -400,6 +394,7 @@ async def test_list_envelope_carries_granted_collection_actions(db: None) -> Non
         assert "actions" not in ungranted
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_kinds_listing_marks_kinds_with_granted_actions(db: None) -> None:
     workspace_id = await _workspace()
     tools, _ = _sample_verbs()
@@ -416,6 +411,7 @@ async def test_kinds_listing_marks_kinds_with_granted_actions(db: None) -> None:
         assert all("has_actions" not in row for row in bare)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_get_envelope_binds_instance_actions_after_status(db: None) -> None:
     workspace_id = await _workspace()
     tools, _ = _sample_verbs()
@@ -452,6 +448,7 @@ async def test_get_envelope_binds_instance_actions_after_status(db: None) -> Non
         assert yaml.safe_load(walled)["actions"] == []
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_explain_envelope_returns_both_action_sets(db: None) -> None:
     workspace_id = await _workspace()
     tools, _ = _sample_verbs()

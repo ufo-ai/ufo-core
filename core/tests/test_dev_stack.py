@@ -1,7 +1,6 @@
 import subprocess
 from pathlib import Path
 
-import pytest
 import yaml
 
 from sandbox.build_template import NODE_VERSION
@@ -10,56 +9,45 @@ from ufo.sdk.sandbox import NODE_GLOBAL_MODULES, PLAYWRIGHT_BROWSERS_DIR, PLAYWR
 REPO = Path(__file__).parents[2]
 
 
-@pytest.mark.parametrize(
-    ("stack", "host", "postgres", "redis", "gateway", "serve", "ingress"),
-    [
+def _check_stack_slot_selects_one_complete_compose_project() -> None:
+    for stack, host, postgres, redis, gateway, serve, ingress in [
         ("1", "ufo-1.localhost", "15541", "15543", "18080", "18710", "18100"),
         ("2", "ufo-2.localhost", "15641", "15643", "18180", "18810", "18200"),
         ("3", "ufo-3.localhost", "15741", "15743", "18280", "18910", "18300"),
         ("4", "ufo-4.localhost", "15841", "15843", "18380", "19010", "18400"),
         ("5", "ufo-5.localhost", "15941", "15943", "18480", "19110", "18500"),
-    ],
-)
-def test_stack_slot_selects_one_complete_compose_project(
-    stack: str,
-    host: str,
-    postgres: str,
-    redis: str,
-    gateway: str,
-    serve: str,
-    ingress: str,
-) -> None:
-    result = subprocess.run(
-        ["make", "--no-print-directory", "-n", "stack-down", f"STACK={stack}"],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-
-    command = result.stdout.strip()
-    repository_root = Path(
-        subprocess.run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ]:
+        result = subprocess.run(
+            ["make", "--no-print-directory", "-n", "stack-down", f"STACK={stack}"],
             cwd=REPO,
             capture_output=True,
             text=True,
             check=True,
-        ).stdout.strip()
-    ).parent
-    workspace_root = repository_root / ".local" / f"ufo-{stack}" / "workspaces"
-    assert f"UFO_DEV_IMAGE=ufo-{stack}-dev" in command
-    assert f"UFO_STACK_HOST={host}" in command
-    assert f"UFO_PG_PORT={postgres}" in command
-    assert f"UFO_REDIS_PORT={redis}" in command
-    assert f"UFO_GATEWAY_PORT_HOST={gateway}" in command
-    assert f"UFO_SERVE_PORT_HOST={serve}" in command
-    assert f"UFO_INGRESS_PORT_HOST={ingress}" in command
-    assert f'UFO_WORKSPACE_ROOT="{workspace_root}"' in command
-    assert f"docker compose --project-name ufo-{stack} down" in command
+        )
+
+        command = result.stdout.strip()
+        repository_root = Path(
+            subprocess.run(
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                cwd=REPO,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        ).parent
+        workspace_root = repository_root / ".local" / f"ufo-{stack}" / "workspaces"
+        assert f"UFO_DEV_IMAGE=ufo-{stack}-dev" in command
+        assert f"UFO_STACK_HOST={host}" in command
+        assert f"UFO_PG_PORT={postgres}" in command
+        assert f"UFO_REDIS_PORT={redis}" in command
+        assert f"UFO_GATEWAY_PORT_HOST={gateway}" in command
+        assert f"UFO_SERVE_PORT_HOST={serve}" in command
+        assert f"UFO_INGRESS_PORT_HOST={ingress}" in command
+        assert f'UFO_WORKSPACE_ROOT="{workspace_root}"' in command
+        assert f"docker compose --project-name ufo-{stack} down" in command
 
 
-def test_stack_origin_reaches_every_browser_callback() -> None:
+def _check_stack_origin_reaches_every_browser_callback() -> None:
     compose = yaml.safe_load((REPO / "compose.yaml").read_text())
     gateway = compose["services"]["gateway"]["environment"]
     serve = compose["services"]["serve"]["environment"]
@@ -87,7 +75,7 @@ def test_stack_origin_reaches_every_browser_callback() -> None:
     )
 
 
-def test_stack_passes_every_model_provider_key() -> None:
+def _check_stack_passes_every_model_provider_key() -> None:
     compose = yaml.safe_load((REPO / "compose.yaml").read_text())
     serve = compose["services"]["serve"]["environment"]
 
@@ -96,7 +84,7 @@ def test_stack_passes_every_model_provider_key() -> None:
     assert serve["OPENROUTER_API_KEY"] == "${OPENROUTER_API_KEY:-}"
 
 
-def test_local_sandbox_has_the_application_builder_runtime() -> None:
+def _check_local_sandbox_has_the_application_builder_runtime() -> None:
     dockerfile = (REPO / "dev/Dockerfile").read_text()
 
     assert f"FROM node:{NODE_VERSION}-bookworm-slim AS node" in dockerfile
@@ -115,7 +103,7 @@ def test_local_sandbox_has_the_application_builder_runtime() -> None:
     assert 'ln -s "$chromium_path" /usr/local/bin/chromium' in dockerfile
 
 
-def test_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> None:
+def _check_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> None:
     ignored = set((REPO / ".dockerignore").read_text().splitlines())
     assert {".local", "**/.local", ".worktrees", "**/.worktrees"} <= ignored
 
@@ -131,7 +119,7 @@ def test_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> None:
     assert "blobs" in compose["volumes"]
 
 
-def test_stack_refuses_a_slot_outside_its_closed_range() -> None:
+def _check_stack_refuses_a_slot_outside_its_closed_range() -> None:
     result = subprocess.run(
         ["make", "--no-print-directory", "-n", "stack", "STACK=6"],
         cwd=REPO,
@@ -143,7 +131,7 @@ def test_stack_refuses_a_slot_outside_its_closed_range() -> None:
     assert "STACK must be one of: 1 2 3 4 5" in result.stderr
 
 
-def test_db_keeps_the_test_and_eval_postgres_port() -> None:
+def _check_db_keeps_the_test_and_eval_postgres_port() -> None:
     result = subprocess.run(
         ["make", "--no-print-directory", "-n", "db"],
         cwd=REPO,
@@ -153,3 +141,10 @@ def test_db_keeps_the_test_and_eval_postgres_port() -> None:
     )
 
     assert result.stdout.strip() == "docker compose up -d postgres"
+
+
+def test_dev_stack_sync_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 7
+    for check in checks:
+        check()

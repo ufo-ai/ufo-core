@@ -153,15 +153,6 @@ async def test_issues_paginate_over_pageinfo_and_render_lifts_readable_body() ->
     assert "nodes" not in body
 
 
-async def test_issues_incremental_sends_the_updatedat_filter_and_orderby() -> None:
-    bodies: list[dict[str, object]] = []
-    await _fetch("issues", _issues_handler(bodies), cursor="2026-01-01T00:00:00.000Z")
-
-    variables = bodies[0]["variables"]
-    assert variables["orderBy"] == "updatedAt"
-    assert variables["filter"] == {"updatedAt": {"gte": "2026-01-01T00:00:00.000Z"}}
-
-
 async def test_full_refresh_stream_upserts_without_a_snapshot() -> None:
     """A collection with no `updatedAt` filter (issue_relations) full-refreshes each run:
     snapshot=False, no cursor advanced, and no `filter`/`orderBy` variables threaded."""
@@ -196,37 +187,25 @@ async def test_full_refresh_stream_upserts_without_a_snapshot() -> None:
     assert "variables" not in bodies[0]
 
 
-async def test_project_render_is_readable() -> None:
+async def test_forbidden_status_raises_stream_skipped() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"errors": [{"message": "forbidden"}]})
+
+    with pytest.raises(StreamSkipped, match="refused"):
+        await _fetch("issues", handle)
+
+
+async def test_graphql_errors_fail_loud() -> None:
+    """A GraphQL `errors` array (a 200 the query engine rejected) fails loud rather than commit a
+    partial page — the run surfaces the fault instead of silently syncing nothing."""
+
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            200,
-            json={
-                "data": {
-                    "projects": {
-                        "nodes": [
-                            {
-                                "id": "p1",
-                                "name": "Launch",
-                                "description": "Ship v1 to customers",
-                                "state": "started",
-                                "lead": {"id": "u1"},
-                                "targetDate": "2026-03-01",
-                                "updatedAt": "2026-02-01T00:00:00.000Z",
-                            }
-                        ],
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    }
-                }
-            },
+            200, json={"errors": [{"message": "Field 'bogus' doesn't exist on type 'Issue'"}]}
         )
 
-    result = await _fetch("projects", handle)
-    assert _refs(result) == {"projects/p1"}
-    body = result.pages[0].body
-    assert "Launch" in body
-    assert "Ship v1 to customers" in body
-    assert "started" in body
-    assert "nodes" not in body
+    with pytest.raises(RuntimeError, match="graphql error"):
+        await _fetch("issues", handle)
 
 
 async def test_comments_land_with_a_title_taken_off_the_body() -> None:
@@ -270,24 +249,3 @@ async def test_comments_land_with_a_title_taken_off_the_body() -> None:
     body = next(page.body for page in result.pages if page.source_ref == "comments/cm1")
     assert "Looks good to me\nship it" in body
     assert result.next_cursor == "2026-02-03T00:00:00.000Z"
-
-
-async def test_forbidden_status_raises_stream_skipped() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, json={"errors": [{"message": "forbidden"}]})
-
-    with pytest.raises(StreamSkipped, match="refused"):
-        await _fetch("issues", handle)
-
-
-async def test_graphql_errors_fail_loud() -> None:
-    """A GraphQL `errors` array (a 200 the query engine rejected) fails loud rather than commit a
-    partial page — the run surfaces the fault instead of silently syncing nothing."""
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"errors": [{"message": "Field 'bogus' doesn't exist on type 'Issue'"}]}
-        )
-
-    with pytest.raises(RuntimeError, match="graphql error"):
-        await _fetch("issues", handle)

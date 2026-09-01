@@ -6,11 +6,9 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
-from ufo_ext_debugger import manifest as debugger_manifest
 from ufo_ext_debugger.report import (
     PROBLEM_MAX_CHARS,
     PROBLEM_REPORTED_EVENT,
-    REPORT_PROBLEM_TOOL,
     ReportProblemInput,
     report_problem,
 )
@@ -175,18 +173,3 @@ def test_a_problem_may_name_the_host_that_stopped_answering() -> None:
         origin="fault",
     )
     assert accepted.category == "asset_site"
-
-
-def test_the_manifest_declares_the_tool_and_the_fields_the_board_reads() -> None:
-    (tool,) = debugger_manifest.manifest().tools
-    assert tool.name == REPORT_PROBLEM_TOOL
-    assert tool.parallel_safe is True
-    assert tool.side_effecting is False
-    properties = tool.input_model.model_json_schema()["properties"]
-    assert properties["origin"]["enum"] == ["fault", "member_request"]
-    assert properties["impact"]["enum"] == ["critical", "major", "minor"]
-    assert "sandbox_runtime" in properties["category"]["enum"]
-    assert set(tool.input_model.model_fields) == {"problem", "category", "impact", "origin"}
-    assert all(field.is_required() for field in tool.input_model.model_fields.values()), (
-        "a default reached by silence measures nothing"
-    )

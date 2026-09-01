@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from ufo_ext_research.observations import (
     SOURCE_LIMIT,
@@ -23,6 +24,11 @@ from ufo.runtime.turns.audience import SHARED_AUDIENCE
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 NOW = datetime(2026, 8, 6, tzinfo=UTC)
 MODEL = "claude-opus-4-8"

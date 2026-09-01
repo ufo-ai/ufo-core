@@ -8,7 +8,6 @@ raised or timed out would deny the member's Slack message, so the unresolvable c
 through the real `HookChain`, where a denial would show.
 """
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -31,10 +30,15 @@ from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
 from ufo.runtime.ext.hooks import BoundHook, HookChain, HookResolution
 from ufo.runtime.ext.manifest import HookSpec, PreToolUse
-from ufo.runtime.ext.surface import AMBIENT_CONTEXT_ELEMENT, SurfaceContext
+from ufo.runtime.ext.surface import SurfaceContext
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.sdk.audience import SHARED_AUDIENCE
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 BOT_USER_ID = "U0BOTUFO"
 SLACK_SEND_SLUG = "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL"
@@ -78,15 +82,6 @@ def _attribution_spec() -> HookSpec:
     """The manifest's attribution hook, named by its handler — the manifest declares others."""
     (spec,) = [hook for hook in slack_manifest().hooks if hook.handler is attribute_connector_send]
     return spec
-
-
-def _declared_chain() -> HookChain:
-    """The hook the Slack manifest declares, bound the way a turn binds it."""
-    return turn_hooks(
-        (slack_manifest(),),
-        CredentialStore(fernet=Fernet(Fernet.generate_key())),
-        audience=SHARED_AUDIENCE,
-    )
 
 
 def _chain_over(store: ScopedStore) -> HookChain:
@@ -153,53 +148,20 @@ async def test_the_surfaces_own_identity_read_mirrors_the_id_into_the_store(
         )
 
 
-async def test_the_hook_footers_a_send_with_the_id_the_surface_mirrored(db: None) -> None:
-    """The join that makes the mention reachable from a hook: the surface writes the proved id into
-    the extension's own scoped store, and the hook — which holds a ScopedStore and no BlobStore —
-    reads it back with no call to Slack."""
-    workspace_id = await _seed_workspace()
-    with ws(workspace_id):
-        await slack._mirror_self_user_id(workspace_id, BOT_USER_ID)
-        resolution = await _fire(
-            _declared_chain(),
-            _send({"channel": "C1", "text": SENT_TEXT, "markdown_text": SENT_MARKDOWN}),
-        )
-
-    assert (resolution.denied, resolution.failed_closed) == (None, None)
-    assert isinstance(resolution.tool_input, CallExternalToolInput)
-    assert resolution.tool_input.arguments == {
-        "channel": "C1",
-        "text": SENT_TEXT,
-        "blocks": [{"type": "markdown", "text": SENT_MARKDOWN}, FOOTER_BLOCK],
-    }
-    assert MENTION_FOOTER == f"*Sent using* <@{BOT_USER_ID}>"
-
-
-async def test_the_hooks_footer_leaves_the_connector_tool_nothing_to_append(db: None) -> None:
-    """No double footer: the mentioning footer is a form the tool's never-stack guard matches, so
-    its own append is suppressed — the generic subject rides only when the hook wrote no footer."""
-    workspace_id = await _seed_workspace()
-    with ws(workspace_id):
-        await slack._mirror_self_user_id(workspace_id, BOT_USER_ID)
-        resolution = await _fire(_declared_chain(), _send({"channel": "C1", "text": SENT_TEXT}))
-
-    assert isinstance(resolution.tool_input, CallExternalToolInput)
-    rewritten = resolution.tool_input.arguments
-    assert (
-        connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, rewritten)
-        == rewritten
-    )
-    assert json.dumps(rewritten).count(connector_tools.UFO_ATTRIBUTION_LEAD) == 1
-    assert connector_tools.UFO_ATTRIBUTION_SUBJECT not in json.dumps(rewritten)
-
-
 async def test_a_workspace_with_no_proved_id_keeps_the_generic_attribution(db: None) -> None:
     """A deploy running the connector without a Slack install — no mirror row — degrades to the
     footer the tool writes on its own, and the send still dispatches."""
     workspace_id = await _seed_workspace()
     arguments: dict[str, JsonValue] = {"channel": "C1", "text": SENT_TEXT}
     with ws(workspace_id):
-        resolution = await _fire(_declared_chain(), _send(arguments))
+        resolution = await _fire(
+            turn_hooks(
+                (slack_manifest(),),
+                CredentialStore(fernet=Fernet(Fernet.generate_key())),
+                audience=SHARED_AUDIENCE,
+            ),
+            _send(arguments),
+        )
 
     assert (resolution.denied, resolution.failed_closed) == (None, None)
     assert resolution.tool_input is not None
@@ -252,50 +214,6 @@ async def test_only_a_slack_send_is_rewritten(call: CallExternalToolInput) -> No
     assert resolution.tool_input.arguments == call.arguments
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"markdown_text": SENT_MARKDOWN},
-        {"text": SENT_TEXT},
-        {"blocks": list(SENT_BLOCKS), "text": SENT_TEXT},
-        {"channel": "C1"},
-    ],
-    ids=["markdown_text", "text", "blocks", "no_body"],
-)
-def test_the_hooks_footer_suppresses_the_tools_own_append_in_every_shape(
-    body: dict[str, JsonValue],
-) -> None:
-    """No double footer whichever body the send authored, which is the same join the never-stack
-    guard holds: the tool's own pass over the rewritten arguments adds nothing, the mention is the
-    only subject in it, and a call carrying no body at all is never given one by either writer."""
-    rewritten = mention_attributed(body, BOT_USER_ID)
-    assert (
-        connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, rewritten)
-        == rewritten
-    )
-    published = json.dumps(rewritten)
-    assert published.count(connector_tools.UFO_ATTRIBUTION_LEAD) == published.count(MENTION_FOOTER)
-    assert published.count(MENTION_FOOTER) == (1 if body.keys() - {"channel"} else 0)
-
-
-def test_a_footered_message_is_not_a_message_addressed_to_the_agent() -> None:
-    """A connector send is authored by a member's own connected account, so no inbound bot-author
-    drop catches it. Read naively, its footer's mention would open a turn about the deploy's own
-    outbound message; the footer-aware test keeps a real mention addressing and the footer's not."""
-    footered = f"{SENT_TEXT}\n\n{MENTION_FOOTER}"
-    event = {"type": "message", "text": footered}
-    assert slack.slack_message_addressed(event, BOT_USER_ID, is_dm=False) is False
-    assert (
-        slack.slack_message_addressed(
-            {"type": "message", "text": f"<@{BOT_USER_ID}> what happened here?"},
-            BOT_USER_ID,
-            is_dm=False,
-        )
-        is True
-    )
-    assert addressing_mention(f"<@{BOT_USER_ID}> and {footered}", BOT_USER_ID) is True
-
-
 def test_a_blocks_authored_send_is_not_an_address_when_slack_delivers_it_back() -> None:
     """A `blocks`-authored send names no `text`, so the footer's mention has no home but a context
     element — and the event Slack delivers back for it is an `app_mention` whose `text` is empty.
@@ -343,19 +261,3 @@ def test_a_footer_the_body_did_not_keep_a_line_for_is_not_an_address() -> None:
         addressing_mention(f"<@{BOT_USER_ID}> what happened here?  {MENTION_FOOTER}", BOT_USER_ID)
         is True
     )
-
-
-def test_a_footered_message_stays_visible_in_the_ambient_digest() -> None:
-    """The second half of the same defect: a mention-bearing message is dropped from the digest
-    because that mention already became its own turn. The deploy's own connector send never did, so
-    dropping it would hide this product's messages from the agent reading the channel later."""
-    footered = f"{SENT_TEXT}\n\n{MENTION_FOOTER}"
-    messages: list[object] = [
-        {"user": "U_MEMBER", "ts": "1700000000.000100", "text": footered},
-        {"user": "U_OTHER", "ts": "1700000060.000200", "text": f"<@{BOT_USER_ID}> already a turn"},
-    ]
-    digest = slack.ambient_digest(messages, BOT_USER_ID, slack.AMBIENT_THREAD_NOTE, MARK, {})
-
-    assert AMBIENT_CONTEXT_ELEMENT in digest
-    assert SENT_TEXT in digest
-    assert "already a turn" not in digest

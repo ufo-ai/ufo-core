@@ -773,6 +773,7 @@ def wire_server(
         )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 def test_the_wire_streams_the_answer_then_spend_reports_the_burn(
     wire_server: tuple[CliRunner, str],
 ) -> None:

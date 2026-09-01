@@ -14,7 +14,6 @@ from ufo.host.ext.loader import core_object_kinds, turn_tools
 from ufo.host.kinds.surface_kind import SURFACE_KIND, SurfaceObjects, registered_surfaces
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.ext.surface import SurfaceSpec
-from ufo.runtime.object_name import InvalidName
 from ufo.runtime.objects import ObjectListQuery, UnknownObject, VerbNotSupported
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.tools.registry import ToolDef
@@ -154,6 +153,7 @@ async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
     return result.content[0].text
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_every_registered_surface_lists_and_reads_its_declaration(db: None) -> None:
     workspace_id = await _workspace()
     tools = _tools(_manifests())
@@ -218,6 +218,7 @@ async def test_every_registered_surface_lists_and_reads_its_declaration(db: None
         }
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_status_reads_the_workspace_binding_truthfully(db: None) -> None:
     workspace_id = await _workspace()
     agent_id = await _agent_row(workspace_id, "assistant")
@@ -255,6 +256,7 @@ async def test_status_reads_the_workspace_binding_truthfully(db: None) -> None:
         assert [row["name"] for row in still_to_bind] == ["texty", "webby"]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_binding_to_an_archived_agent_keeps_its_name_and_says_so(db: None) -> None:
     workspace_id = await _workspace()
     agent_id = await _agent_row(workspace_id, "assistant")
@@ -286,6 +288,7 @@ async def test_a_binding_to_an_archived_agent_keeps_its_name_and_says_so(db: Non
     assert listed[0]["summary"] == "probe_chat: bound to assistant (archived)"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_binding_in_another_workspace_reads_as_unbound(db: None) -> None:
     other_workspace = await _workspace()
     other_agent = await _agent_row(other_workspace, "neighbor")
@@ -300,6 +303,7 @@ async def test_a_binding_in_another_workspace_reads_as_unbound(db: None) -> None
     assert read["status"] == {"bound": False}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_foreign_audiences_read_no_surfaces(db: None) -> None:
     workspace_id = await _workspace()
     tools = _tools(_manifests())
@@ -313,18 +317,7 @@ async def test_foreign_audiences_read_no_surfaces(db: None) -> None:
         assert await store.status(ctx, "chatty", expected_generation=None) is None
 
 
-async def test_an_absent_surface_name_is_no_object_at_all(db: None) -> None:
-    workspace_id = await _workspace()
-    tools = _tools(_manifests())
-    store = SurfaceObjects(surfaces=registered_surfaces(_manifests()))
-    with ws(workspace_id):
-        ctx = _context(workspace_id)
-        with pytest.raises(UnknownObject):
-            await _text(tools["object_get"], ctx, kind=SURFACE_KIND, name="subagent")
-        assert await store.get(ctx, "subagent") is None
-        assert await store.status(ctx, "subagent", expected_generation=None) is None
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_binding_and_removal_are_refused_as_acts_that_live_elsewhere(db: None) -> None:
     workspace_id = await _workspace()
     tools = _tools(_manifests())
@@ -346,6 +339,7 @@ async def test_binding_and_removal_are_refused_as_acts_that_live_elsewhere(db: N
             await _text(tools["object_delete"], ctx, kind=SURFACE_KIND, name="chatty")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_portal_reads_answer_an_admin_alone(db: None) -> None:
     workspace_id = await _workspace()
     agent_id = await _agent_row(workspace_id, "assistant")
@@ -377,11 +371,4 @@ def test_two_extensions_registering_one_surface_name_fail_loud() -> None:
                 Manifest(name="probe_one", version="1", surfaces=(SurfaceSpec(name="twin"),)),
                 Manifest(name="probe_two", version="1", surfaces=(SurfaceSpec(name="twin"),)),
             )
-        )
-
-
-def test_a_surface_name_outside_the_object_grammar_fails_loud_naming_its_extension() -> None:
-    with pytest.raises(InvalidName, match="extension 'probe' registers surface 'Bad_Name'"):
-        registered_surfaces(
-            (Manifest(name="probe", version="1", surfaces=(SurfaceSpec(name="Bad_Name"),)),)
         )

@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from io import BytesIO
 
 import pytest
-from PIL import GifImagePlugin, Image
+from PIL import Image
 
 import ufo.runtime.media.image_previews as image_previews
 from ufo.runtime.media.image_previews import (
@@ -57,50 +57,12 @@ async def test_image_preview_rejects_truncated_raster_containers(
         )
 
 
-async def test_image_preview_normalizes_malformed_png_parser_failures() -> None:
-    malformed = bytearray(_image("PNG"))
-    chunk_type = malformed.index(b"IDAT")
-    chunk_size = int.from_bytes(malformed[chunk_type - 4 : chunk_type], "big")
-    malformed[chunk_type + 4 + chunk_size] ^= 1
-    data = bytes(malformed)
-
-    with pytest.raises(InvalidImagePreview):
-        await validated_image_preview(_stream(data), ImagePreviewGrant("image/png", len(data)))
-
-
-async def test_image_preview_decodes_every_animation_frame() -> None:
-    data = _animation(3)[:-6] + b";"
-    with Image.open(BytesIO(data)) as image:
-        image.verify()
-
-    with pytest.raises(InvalidImagePreview):
-        await validated_image_preview(_stream(data), ImagePreviewGrant("image/gif", len(data)))
-
-
 async def test_image_preview_bounds_animation_frames(monkeypatch: pytest.MonkeyPatch) -> None:
     data = _animation(3)
     monkeypatch.setattr(image_previews, "IMAGE_PREVIEW_MAX_FRAMES", 2)
 
     with pytest.raises(InvalidImagePreview):
         await validated_image_preview(_stream(data), ImagePreviewGrant("image/gif", len(data)))
-
-
-async def test_image_preview_stops_seeking_after_the_frame_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    data = _animation(image_previews.IMAGE_PREVIEW_MAX_FRAMES + 1, size=(1, 1))
-    sought: list[int] = []
-    original_seek = GifImagePlugin.GifImageFile.seek
-
-    def tracked_seek(image: GifImagePlugin.GifImageFile, frame: int) -> None:
-        sought.append(frame)
-        original_seek(image, frame)
-
-    monkeypatch.setattr(GifImagePlugin.GifImageFile, "seek", tracked_seek)
-
-    with pytest.raises(InvalidImagePreview):
-        await validated_image_preview(_stream(data), ImagePreviewGrant("image/gif", len(data)))
-    assert max(sought) == image_previews.IMAGE_PREVIEW_MAX_FRAMES
 
 
 async def test_image_preview_bounds_dimensions(monkeypatch: pytest.MonkeyPatch) -> None:

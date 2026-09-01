@@ -18,6 +18,7 @@ from ufo_testsupport.migrations import apply_cached_migrations
 from ufo_testsupport.plugin import POSTGRES_TEST_URL, postgres_reachable
 
 import evals.stack as eval_stack
+from evals.registry import selected_run_tasks
 from evals.sandbox_image import SandboxImagePlan
 from evals.stack import (
     APPLICATION_BUILD_PRODUCTS,
@@ -1516,3 +1517,9 @@ def test_run_names_the_missing_egress_binary_before_any_seed_subprocess(tmp_path
         asyncio.run(stack.run(asyncio.Lock()))
 
     assert (stack.root / "seed.log").read_bytes() == b""
+
+
+def test_ufo_app_suites_are_explicit() -> None:
+    assert not {"ufo-app-bench", "ufo-app-copy"} & {task.name for task in selected_run_tasks()}
+    assert [task.name for task in selected_run_tasks(("ufo-app-bench",))] == ["ufo-app-bench"]
+    assert [task.name for task in selected_run_tasks(("ufo-app-copy",))] == ["ufo-app-copy"]

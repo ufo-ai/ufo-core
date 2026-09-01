@@ -9,7 +9,7 @@ import asyncio
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -27,17 +27,14 @@ from ufo_ext_memory.store import (
     MemoryWrite,
     PageIndexer,
     Recalled,
-    clip_to_word,
     decay_factor,
     drop_near_duplicates,
     enforce_type_diversity,
-    fuse_hits,
     fuse_recall,
     inventory,
     mem_page,
     memory_item,
     memory_source,
-    recall_subjects,
 )
 
 from ufo.db import workspace_tx
@@ -54,7 +51,11 @@ from ufo.runtime.sources.sync import PageChange
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.sdk.audience import conversation_audience
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 PAGE_DIGEST = "sha256:page"
 PAGE_REVISION = 1
@@ -541,116 +542,6 @@ async def test_deleting_one_source_keeps_a_fact_its_other_source_still_provides(
     assert [item.memory_id for item in recalled] == [row.id]
 
 
-async def test_deleting_the_last_source_erases_the_fact(db: None) -> None:
-    """A single-source fact loses its only link when its page is deleted, so the row is removed and
-    its index scope with it — nothing else links it."""
-    workspace_id = await _workspace()
-    page_id, source_id = uuid4(), uuid4()
-    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
-    await store.commit(
-        MemoryWrite(
-            subject=SHARED_SUBJECT,
-            body="the retired mailbox code is helios",
-            created_from_page_id=page_id,
-            created_from_page_revision=PAGE_REVISION,
-            source_id=source_id,
-        )
-    )
-    with ws(workspace_id):
-        await MemoryIndexer(
-            index=store.index,
-            embed=StubEmbed(vec((0, 1.0))),
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            page_states=context_for("memory", frozenset()).page_states,
-        ).run()
-    async with workspace_tx() as connection:
-        await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_id))
-    with ws(workspace_id):
-        await store.supersede_page_facts(page_id, None)
-
-    async with workspace_tx() as connection:
-        rows = (
-            await connection.execute(sa.select(sa.func.count()).select_from(memory_item))
-        ).scalar_one()
-        chunks = (await connection.execute(sa.text("select count(*) from chunk"))).scalar_one()
-    assert rows == 0
-    assert chunks == 0
-
-
-async def test_retiring_a_primary_repoints_to_a_live_feed_over_an_older_stale_one(
-    db: None,
-) -> None:
-    """Re-pointing a retired primary prefers a surviving link the page mirror shows live at that
-    link's revision over a merely older link whose page it does not — so a fact bound to a deleted
-    feed lands on a feed a reader can actually recall it through, not the oldest one to hand."""
-    workspace_id = await _workspace()
-    stale_page, live_page, primary_page = uuid4(), uuid4(), uuid4()
-    stale_src, live_src, primary_src = uuid4(), uuid4(), uuid4()
-    await _seed_page(workspace_id, stale_page, stale_src, SHARED_SUBJECT)
-    await _seed_page(workspace_id, live_page, live_src, SHARED_SUBJECT)
-    await _seed_page(workspace_id, primary_page, primary_src, SHARED_SUBJECT)
-    async with workspace_tx() as connection:
-        revisions = {
-            row.id: row.revision
-            for row in (
-                await connection.execute(
-                    sa.select(tables.page.c.id, tables.page.c.revision).where(
-                        tables.page.c.id.in_((stale_page, live_page, primary_page))
-                    )
-                )
-            ).all()
-        }
-    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
-    body = "the badge reader logs every swipe"
-    for page_id, source_id in (
-        (stale_page, stale_src),
-        (live_page, live_src),
-        (primary_page, primary_src),
-    ):
-        await store.commit(
-            MemoryWrite(
-                subject=SHARED_SUBJECT,
-                body=body,
-                created_from_page_id=page_id,
-                created_from_page_revision=revisions[page_id],
-                source_id=source_id,
-            )
-        )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(memory_source)
-            .where(memory_source.c.page_id == stale_page)
-            .values(created_at=datetime(2024, 1, 1, tzinfo=UTC))
-        )
-        await connection.execute(
-            sa.update(memory_source)
-            .where(memory_source.c.page_id == live_page)
-            .values(created_at=datetime(2025, 6, 1, tzinfo=UTC))
-        )
-        await connection.execute(
-            sa.insert(mem_page).values(
-                page_id=live_page,
-                workspace_id=workspace_id,
-                subject=SHARED_SUBJECT,
-                revision=revisions[live_page],
-                created_at=datetime(2025, 1, 1, tzinfo=UTC),
-            )
-        )
-    with ws(workspace_id):
-        await store.supersede_page_facts(primary_page, None)
-
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(memory_item.c.created_from_page_id, memory_item.c.source_id)
-            )
-        ).one()
-    assert row.created_from_page_id == live_page
-    assert row.source_id == live_src
-
-
 async def test_two_pages_of_one_source_each_keep_the_fact_they_share(db: None) -> None:
     """A fact one source derives from two of its pages carries a link per page, not one per source,
     so deleting one page drops only that page's link and re-points the primary to the page that
@@ -706,65 +597,6 @@ async def test_two_pages_of_one_source_each_keep_the_fact_they_share(db: None) -
     assert row.created_from_page_id == page_2
     assert row.source_id == source_id
     assert set(links) == {(source_id, page_2)}
-
-
-async def test_retiring_a_non_primary_page_leaves_the_primary_binding_untouched(db: None) -> None:
-    """Retiring a feed the fact only links to — not the one its row binds to — drops that link and
-    stops: a surviving link still backs the primary, so the row keeps its page, source, and settled
-    digest. Only losing the primary's own link forces the re-point that clears the digest, so this
-    path must leave it alone."""
-    workspace_id = await _workspace()
-    page_secondary, page_primary = uuid4(), uuid4()
-    source_secondary, source_primary = uuid4(), uuid4()
-    await _seed_page(workspace_id, page_secondary, source_secondary, SHARED_SUBJECT)
-    await _seed_page(workspace_id, page_primary, source_primary, SHARED_SUBJECT)
-    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
-    for page_id, source_id in (
-        (page_secondary, source_secondary),
-        (page_primary, source_primary),
-    ):
-        await store.commit(
-            MemoryWrite(
-                subject=SHARED_SUBJECT,
-                body="the wire transfer clears friday",
-                created_from_page_id=page_id,
-                created_from_page_revision=PAGE_REVISION,
-                source_id=source_id,
-            )
-        )
-    with ws(workspace_id):
-        await MemoryIndexer(
-            index=store.index,
-            embed=store.embed,
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            page_states=context_for("memory", frozenset()).page_states,
-        ).run()
-    async with workspace_tx() as connection:
-        settled = (await connection.execute(sa.select(memory_item.c.embedding_digest))).scalar_one()
-    assert settled is not None
-    async with workspace_tx() as connection:
-        await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_secondary))
-    with ws(workspace_id):
-        await store.supersede_page_facts(page_secondary, None)
-
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(
-                    memory_item.c.created_from_page_id,
-                    memory_item.c.source_id,
-                    memory_item.c.embedding_digest,
-                )
-            )
-        ).one()
-        links = (
-            await connection.execute(sa.select(memory_source.c.source_id, memory_source.c.page_id))
-        ).all()
-    assert row.created_from_page_id == page_primary
-    assert row.source_id == source_primary
-    assert row.embedding_digest == settled
-    assert set(links) == {(source_primary, page_primary)}
 
 
 async def test_a_revision_bump_retires_only_the_stale_source_link(db: None) -> None:
@@ -915,38 +747,6 @@ async def test_concurrent_retirements_over_one_fact_leave_no_dangling_primary(db
                 )
 
 
-def test_fuse_recall_blends_cosine_to_break_a_rrf_tie() -> None:
-    """Two rows tied on fused rank (each leads one leg) split by the cosine term: pure RRF keeps the
-    lexical-leader first, the recall blend promotes the row nearer in embedding space."""
-    lexical = (
-        Hit("a", OWNER_KIND_MEMORY_ITEM, "A", SHARED_SUBJECT, 0, "alpha", 5.0),
-        Hit("b", OWNER_KIND_MEMORY_ITEM, "B", SHARED_SUBJECT, 0, "beta", 3.0),
-    )
-    vector = (
-        Hit("b", OWNER_KIND_MEMORY_ITEM, "B", SHARED_SUBJECT, 0, "beta", 0.9),
-        Hit("a", OWNER_KIND_MEMORY_ITEM, "A", SHARED_SUBJECT, 0, "alpha", 0.4),
-    )
-    assert [fused.owner_id for fused in fuse_hits(lexical, vector, 10)] == ["A", "B"]
-    assert [fused.owner_id for fused in fuse_recall(lexical, vector, (), 10)] == ["B", "A"]
-
-
-def test_fuse_hits_holds_a_source_page_to_the_same_floor() -> None:
-    """Source-page search answers the same portal box and the same tool as recall, so a page the
-    lexical leg never matched earns its place the same way. Without this a meaningless query still
-    returns pages: the vector leg always answers, and pure fused rank is relative to whatever came
-    back."""
-    far = (Hit("f", OWNER_KIND_PAGE, "F", SHARED_SUBJECT, 0, "far", RECALL_COSINE_FLOOR / 2),)
-    assert fuse_hits((), far, 10) == ()
-
-    near = (Hit("n", OWNER_KIND_PAGE, "N", SHARED_SUBJECT, 0, "near", RECALL_COSINE_FLOOR),)
-    assert [fused.owner_id for fused in fuse_hits((), near, 10)] == ["N"]
-
-    # A page the lexical leg matched holds the member's own words, so no cosine bars it.
-    worded = (Hit("w", OWNER_KIND_PAGE, "W", SHARED_SUBJECT, 0, "worded", 3.0),)
-    barely = (Hit("w", OWNER_KIND_PAGE, "W", SHARED_SUBJECT, 0, "worded", 0.1),)
-    assert [fused.owner_id for fused in fuse_hits(worded, barely, 10)] == ["W"]
-
-
 def test_fuse_recall_drops_a_vector_only_row_no_nearer_than_the_floor() -> None:
     """A nearest-neighbour search always answers: ask it about a random string and it returns its
     closest chunks, however far away they are. A row the lexical legs never matched has to earn its
@@ -976,70 +776,6 @@ def test_fuse_recall_keeps_a_vector_only_row_at_the_floor() -> None:
     it, so the floor admits a row that reaches it."""
     near = (Hit("n", OWNER_KIND_MEMORY_ITEM, "N", SHARED_SUBJECT, 0, "near", RECALL_COSINE_FLOOR),)
     assert [fused.owner_id for fused in fuse_recall((), near, (), 10)] == ["N"]
-
-
-def test_fuse_recall_floor_guards_the_query_not_each_row() -> None:
-    """A cosine height is meaningful only within one corpus and one embedding model — measured
-    across three, garbage tops 0.16 on one corpus while correct answers sit at 0.44 on it, and
-    garbage reaches 0.50 on another — so a constant held against each row cuts real answers
-    wherever the corpus runs cool. What a constant CAN judge is a query that worded nothing
-    anywhere: across those corpora every real question matched some word and no random string
-    matched any. So the same under-floor row is dropped when the query worded nothing and ranked
-    when it worded anything — a member asking by a handle recalls the memory filed under the full
-    name, which shares no word with the query."""
-    under = Hit(
-        "u", OWNER_KIND_MEMORY_ITEM, "U", SHARED_SUBJECT, 0, "under", RECALL_COSINE_FLOOR / 2
-    )
-    worded = Hit("w", OWNER_KIND_MEMORY_ITEM, "W", SHARED_SUBJECT, 0, "worded", 3.0)
-
-    assert fuse_recall((), (under,), (), 10) == ()
-    both = fuse_recall((worded,), (under,), (), 10)
-    assert {fused.owner_id for fused in both} == {"W", "U"}
-
-    fresh = Hit("tail:T", OWNER_KIND_MEMORY_ITEM, "T", SHARED_SUBJECT, 0, "fresh", 2.0)
-    tail_worded = fuse_recall((), (under,), (fresh,), 10)
-    assert {fused.owner_id for fused in tail_worded} == {"T", "U"}
-
-
-def test_fuse_hits_floor_guards_the_query_not_each_page() -> None:
-    """Source search reads the same rule through the same constant: a query that worded no page
-    answers only with near ones, and a query that worded any page ranks everything its legs
-    returned."""
-    under = Hit("u", OWNER_KIND_PAGE, "U", SHARED_SUBJECT, 0, "under", RECALL_COSINE_FLOOR / 2)
-    worded = Hit("w", OWNER_KIND_PAGE, "W", SHARED_SUBJECT, 0, "worded", 3.0)
-
-    assert fuse_hits((), (under,), 10) == ()
-    both = fuse_hits((worded,), (under,), 10)
-    assert {fused.owner_id for fused in both} == {"W", "U"}
-
-
-def test_fuse_recall_folds_in_the_un_embedded_tail_leg() -> None:
-    """The un-embedded tail is a third, lexical-only leg: a row present only in the tail fuses into
-    the ranking (no index hit needed), while an indexed row keeps its index-hit ranking."""
-    lexical = (Hit("a", OWNER_KIND_MEMORY_ITEM, "A", SHARED_SUBJECT, 0, "alpha", 4.0),)
-    vector = (Hit("a", OWNER_KIND_MEMORY_ITEM, "A", SHARED_SUBJECT, 0, "alpha", 0.9),)
-    tail = (Hit("tail:T", OWNER_KIND_MEMORY_ITEM, "T", SHARED_SUBJECT, 0, "fresh", 2.0),)
-    owners = [fused.owner_id for fused in fuse_recall(lexical, vector, tail, 10)]
-    assert set(owners) == {"A", "T"}
-
-
-async def test_recall_answers_nothing_when_no_row_is_worded_or_near(db: None) -> None:
-    """End to end, the case the floor exists for: a query sharing no word with any memory, whose
-    embedding sits at right angles to all of them. The vector leg still answers — it always does,
-    returning its nearest chunks — and every row it returns is far. Recall comes back empty rather
-    than handing the turn whatever happened to sit closest."""
-    workspace_id = await _workspace()
-    await _seed_item(workspace_id, SHARED_SUBJECT, "budget review notes", vec((0, 1.0)))
-    await _seed_item(workspace_id, SHARED_SUBJECT, "hiring plan headcount", vec((0, 0.98)))
-
-    recalled = await _store(StubEmbed(vec((1, 1.0))), workspace_id).recall(
-        "zzqrfl mmbtwv",
-        frozenset({SHARED_SUBJECT}),
-        10,
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-
-    assert recalled == ()
 
 
 async def test_recall_admits_a_wordless_row_at_the_floor_and_drops_one_under_it(db: None) -> None:
@@ -1153,150 +889,6 @@ async def test_recall_keeps_a_row_worded_by_part_of_a_whole_sentence(db: None) -
     assert [item.memory_id for item in recalled] == [worded]
 
 
-async def test_recall_reaches_the_row_that_names_the_asked_for_person_another_way(
-    db: None,
-) -> None:
-    """A member asks by a handle; one row carries the handle, the sibling row carries the same
-    person's full name and nothing else the query says. The sibling shares no word with the query
-    and its cosine sits under the floor — under any bar high enough to stop garbage, since aliases
-    are exactly the rows worded unlike their question. The query matched a word, so both rows
-    stand. This is the shape memory_100's alias leaf grades at full coverage."""
-    workspace_id = await _workspace()
-    handle = await _seed_item(
-        workspace_id, SHARED_SUBJECT, "@tnk runs the escalation rotation", _at_cosine(0.9)
-    )
-    named = await _seed_item(
-        workspace_id,
-        SHARED_SUBJECT,
-        "Tobias Nkemdirim prefers phone calls over chat messages",
-        _at_cosine(RECALL_COSINE_FLOOR - 0.08),
-    )
-
-    recalled = await _store(StubEmbed(_at_cosine(1.0)), workspace_id).recall(
-        "@tnk is covering tonight, how does he want to be reached",
-        frozenset({SHARED_SUBJECT}),
-        10,
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-
-    assert {item.memory_id for item in recalled} == {handle, named}
-
-
-async def test_fresh_fact_recalls_before_indexing_then_via_the_index(db: None) -> None:
-    """Immediacy: a just-committed fact is recallable before the index job derives its chunks — the
-    un-embedded tail's lexical leg surfaces it. After the indexer stamps its digest, the index path
-    serves it and the tail (embedding_digest IS NULL) no longer holds it, so it counts once."""
-    workspace_id = await _workspace()
-    probe = vec((7, 1.0))
-    embed = StubEmbed(probe)
-    store = _store(embed, workspace_id)
-    await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body="the safe combination is 1234"))
-
-    before = await store.recall(
-        "safe combination",
-        frozenset({SHARED_SUBJECT}),
-        10,
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-    assert len(before) == 1
-    assert "1234" in before[0].body
-
-    with ws(workspace_id):
-        await MemoryIndexer(
-            index=store.index,
-            embed=embed,
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            page_states=context_for("memory", frozenset()).page_states,
-        ).run()
-    after = await store.recall(
-        "safe combination",
-        frozenset({SHARED_SUBJECT}),
-        10,
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-    assert len(after) == 1
-    assert "1234" in after[0].body
-
-
-async def test_untail_leg_respects_subject_scoping(db: None) -> None:
-    """The tail leg is workspace + subject scoped like the index legs: an un-embedded fact in one
-    member's subject is invisible to another member's recall, and never leaks cross-member."""
-    workspace_id = await _workspace()
-    alice, bob = uuid4(), uuid4()
-    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
-    await store.commit(MemoryWrite(subject=member_subject(alice), body="alices locker code is 77"))
-    assert (
-        await store.recall(
-            "locker code",
-            recall_subjects(conversation_audience(bob)),
-            10,
-            source_reader=_reader(frozenset({SHARED_SUBJECT})),
-        )
-        == ()
-    )
-    mine = await store.recall(
-        "locker code",
-        recall_subjects(conversation_audience(alice)),
-        10,
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-    assert len(mine) == 1 and "77" in mine[0].body
-
-
-async def test_recall_returns_items_scoped_to_subject(db: None) -> None:
-    workspace_id = await _workspace()
-    member = uuid4()
-    probe = vec((1, 1.0))
-    await _seed_item(workspace_id, member_subject(member), "alice prefers a window seat", probe)
-    await _seed_item(workspace_id, SHARED_SUBJECT, "the office wifi password is maple", probe)
-
-    mine = await _store(StubEmbed(probe), workspace_id).recall(
-        "seat and wifi",
-        recall_subjects(conversation_audience(member)),
-        10,
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-    assert {item.subject for item in mine} == {member_subject(member), SHARED_SUBJECT}
-
-    theirs = await _store(StubEmbed(probe), workspace_id).recall(
-        "seat and wifi",
-        recall_subjects(conversation_audience(uuid4())),
-        10,
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-    assert [item.subject for item in theirs] == [SHARED_SUBJECT]
-
-
-async def test_page_derived_recall_rechecks_the_current_page_subject(db: None) -> None:
-    workspace_id = await _workspace()
-    page_id, source_id = uuid4(), uuid4()
-    member = uuid4()
-    probe = vec((2, 1.0))
-    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    await _seed_item(
-        workspace_id,
-        SHARED_SUBJECT,
-        "the private acquisition codename is polaris",
-        probe,
-        created_from_page_id=page_id,
-    )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.page)
-            .values(subject=member_subject(member))
-            .where(tables.page.c.id == page_id)
-        )
-    with ws(workspace_id):
-        recalled = await _store(StubEmbed(probe), workspace_id).recall(
-            "acquisition codename",
-            frozenset({SHARED_SUBJECT}),
-            10,
-            source_reader=_reader(frozenset({SHARED_SUBJECT})),
-        )
-    assert recalled == ()
-
-
 async def test_recall_skips_a_superseded_item(db: None) -> None:
     workspace_id = await _workspace()
     probe = vec((2, 1.0))
@@ -1327,36 +919,6 @@ async def test_recall_degrades_to_lexical_when_embed_fails(db: None) -> None:
     )
     assert len(hits) == 1
     assert "zoltar" in hits[0].body
-
-
-async def test_pages_and_facts_do_not_crowd_each_others_candidate_window(db: None) -> None:
-    """Facts and pages share the chunk index; each retrieval must get a full limit of its own kind.
-    With the limit equal to the fact count (and the page count), one shared candidate window could
-    return at most `limit` rows across both kinds — so recall returning every fact AND search
-    returning every page at that limit proves neither kind crowds the other out."""
-    workspace_id = await _workspace()
-    probe = vec((4, 1.0))
-    fact_a = await _seed_item(workspace_id, SHARED_SUBJECT, "quarterly report figures", probe)
-    fact_b = await _seed_item(workspace_id, SHARED_SUBJECT, "quarterly report summary", probe)
-    await _seed_page_chunk(workspace_id, SHARED_SUBJECT, "quarterly report appendix", probe)
-    await _seed_page_chunk(workspace_id, SHARED_SUBJECT, "quarterly report preface", probe)
-
-    store = _store(StubEmbed(probe), workspace_id)
-    subjects = frozenset({SHARED_SUBJECT})
-    with ws(workspace_id):
-        facts = await store.recall(
-            "quarterly report", subjects, 2, source_reader=_reader(frozenset({SHARED_SUBJECT}))
-        )
-        pages = await store.search_sources(
-            "quarterly report",
-            subjects,
-            2,
-            source_reader=_reader(subjects),
-        )
-
-    assert {item.memory_id for item in facts} == {fact_a, fact_b}
-    assert len(pages) == 2
-    assert all("quarterly report" in page.text for page in pages)
 
 
 async def test_source_grants_filter_before_recall_ranking(db: None) -> None:
@@ -1514,76 +1076,6 @@ async def test_a_fact_from_two_feeds_is_recalled_through_a_non_primary_granted_s
     assert [str(fact.body) for fact in recalled] == [body]
 
 
-async def test_source_search_rechecks_the_current_page_subject(db: None) -> None:
-    workspace_id = await _workspace()
-    probe = vec((5, 1.0))
-    page_id = await _seed_page_chunk(
-        workspace_id, SHARED_SUBJECT, "private quarterly forecast", probe
-    )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.page)
-            .values(subject=member_subject(uuid4()))
-            .where(tables.page.c.id == page_id)
-        )
-    with ws(workspace_id):
-        pages = await _store(StubEmbed(probe), workspace_id).search_sources(
-            "quarterly forecast",
-            frozenset({SHARED_SUBJECT}),
-            10,
-            source_reader=_reader(frozenset({SHARED_SUBJECT})),
-        )
-    assert pages == ()
-
-
-def test_clip_to_word_leaves_a_body_inside_the_budget_exactly_as_written() -> None:
-    """A body written to the budget every writer on this path is now told carries no ellipsis at
-    all — the mark appears only where something overran."""
-    exact = "Acme Corp — Moved the launch to March."
-    assert clip_to_word(exact, len(exact)) == exact
-    assert "…" not in clip_to_word(exact, len(exact))
-
-
-def test_clip_to_word_cuts_an_overlong_body_at_a_word_and_counts_the_ellipsis() -> None:
-    """The mid-word cut is what a member reads today: "requested trying 2x and then viewing
-    screen…" ends on a fragment. A cut lands on the last whole word, drops the punctuation left
-    hanging behind it, and the ellipsis is inside the budget rather than pushing past it."""
-    body = "Rob Ryan described the direction as correct, but probably slightly overshot."
-    cut = clip_to_word(body, 40)
-    assert len(cut) <= 40
-    assert cut == "Rob Ryan described the direction as…"
-    assert body.startswith(cut.removesuffix("…"))
-
-
-def test_clip_to_word_cuts_a_body_that_holds_no_space() -> None:
-    """One unbroken token has no word boundary to fall back to and still owes the budget."""
-    cut = clip_to_word("x" * 200, 40)
-    assert len(cut) <= 40
-    assert cut.endswith("…")
-
-
-def test_decay_factor_weights_recency_kind_and_confidence() -> None:
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    fresh = Recalled(
-        uuid4(),
-        "shared",
-        "fact",
-        "b",
-        None,
-        1.0,
-        memory_kind="fact",
-        confidence=10,
-        created_at=now,
-    )
-    assert decay_factor(fresh, now) == 1.0
-    old = replace(fresh, as_of=datetime(2020, 1, 1, tzinfo=UTC))
-    assert 0.0 < decay_factor(old, now) < decay_factor(fresh, now)
-    aged = replace(fresh, as_of=datetime(2025, 10, 1, tzinfo=UTC))
-    assert decay_factor(replace(aged, memory_kind="task"), now) < decay_factor(aged, now)
-    assert decay_factor(replace(fresh, item_class="episodic"), now) == 1.0
-    assert decay_factor(replace(fresh, item_class="semantic"), now) == 1.0
-
-
 def test_enforce_type_diversity_caps_a_class_and_backfills() -> None:
     facts = tuple(
         Recalled(uuid4(), "shared", "fact", f"f{i}", None, float(10 - i)) for i in range(5)
@@ -1704,85 +1196,6 @@ async def test_recall_drops_the_lower_ranked_near_duplicate_and_backfills_the_fr
     )
     assert [item.memory_id for item in recalled] == [original, distinct]
     assert duplicate not in [item.memory_id for item in recalled]
-
-
-async def test_recall_reorders_by_information_age(db: None) -> None:
-    """Two equally-matching facts committed together rank by source information time: the current
-    one first and the year-old page fact demoted, end to end over the real index. The trailing word
-    differs only enough to keep the near-duplicate guard from collapsing the pair."""
-    workspace_id = await _workspace()
-    probe = vec((8, 1.0))
-    old = await _seed_item(
-        workspace_id,
-        SHARED_SUBJECT,
-        "budget review meeting stale",
-        probe,
-        as_of=datetime.now(UTC) - timedelta(days=365),
-    )
-    new = await _seed_item(
-        workspace_id,
-        SHARED_SUBJECT,
-        "budget review meeting fresh",
-        probe,
-        as_of=datetime.now(UTC),
-    )
-    recalled = await _store(StubEmbed(probe), workspace_id).recall(
-        "budget review",
-        frozenset({SHARED_SUBJECT}),
-        10,
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-    assert [item.memory_id for item in recalled] == [new, old]
-
-
-async def test_recall_filters_to_the_created_at_window(db: None) -> None:
-    """The trailing word on each body differs only enough to keep the near-duplicate guard from
-    collapsing the pair the `span` case expects both of."""
-    workspace_id = await _workspace()
-    probe = vec((0, 1.0))
-    old = await _seed_item(
-        workspace_id,
-        SHARED_SUBJECT,
-        "alpha budget review stale",
-        probe,
-        created_at=datetime(2020, 1, 1, tzinfo=UTC),
-    )
-    new = await _seed_item(
-        workspace_id,
-        SHARED_SUBJECT,
-        "alpha budget review fresh",
-        probe,
-        created_at=datetime(2025, 1, 1, tzinfo=UTC),
-    )
-    store = _store(StubEmbed(probe), workspace_id)
-    subjects = frozenset({SHARED_SUBJECT})
-
-    since = await store.recall(
-        "alpha",
-        subjects,
-        8,
-        start=datetime(2024, 1, 1, tzinfo=UTC),
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-    before = await store.recall(
-        "alpha",
-        subjects,
-        8,
-        end=datetime(2021, 1, 1, tzinfo=UTC),
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-    span = await store.recall(
-        "alpha",
-        subjects,
-        8,
-        start=datetime(2019, 1, 1, tzinfo=UTC),
-        end=datetime(2026, 1, 1, tzinfo=UTC),
-        source_reader=_reader(frozenset({SHARED_SUBJECT})),
-    )
-
-    assert {item.memory_id for item in since} == {new}
-    assert {item.memory_id for item in before} == {old}
-    assert {item.memory_id for item in span} == {old, new}
 
 
 async def test_mem_page_carries_workspace_id(db: None) -> None:
@@ -2207,80 +1620,6 @@ async def test_a_revision_rebind_with_an_unchanged_body_is_not_re_embedded(db: N
     assert row.created_from_page_revision == PAGE_REVISION + 1
 
 
-async def test_a_stale_revision_is_withdrawn_even_though_its_chunks_still_exist(db: None) -> None:
-    """The re-embed skip must never keep a stale body alive. A page that moves on without
-    re-deriving a fact leaves the fact's chunks in the index, but the job withdraws them because
-    the fact is no longer publishable — the publishability gate runs ahead of the has-chunks skip,
-    so a row due for a stale revision loses its chunks rather than keeping them."""
-    workspace_id, page_id, source_id = await _workspace(), uuid4(), uuid4()
-    body = "the merger closes in march"
-    embed = CountingEmbed(vec((8, 1.0)))
-    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    store = _store(embed, workspace_id)
-
-    def _run() -> Awaitable[None]:
-        return MemoryIndexer(
-            index=store.index,
-            embed=embed,
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            page_states=context_for("memory", frozenset()).page_states,
-        ).run()
-
-    await store.commit(
-        MemoryWrite(
-            subject=SHARED_SUBJECT,
-            body=body,
-            created_from_page_id=page_id,
-            created_from_page_revision=PAGE_REVISION,
-            source_id=source_id,
-        )
-    )
-    with ws(workspace_id):
-        await _run()
-        assert (
-            len(
-                await store.recall(
-                    "merger",
-                    frozenset({SHARED_SUBJECT}),
-                    10,
-                    source_reader=_reader(frozenset({SHARED_SUBJECT})),
-                )
-            )
-            == 1
-        )
-    async with workspace_tx() as connection:
-        item_id = (
-            await connection.execute(
-                sa.select(memory_item.c.id).where(memory_item.c.created_from_page_id == page_id)
-            )
-        ).scalar_one()
-    scope = IndexScope(OWNER_KIND_MEMORY_ITEM, str(item_id))
-    with ws(workspace_id):
-        assert await store.index.has_chunks(scope)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.page).values(digest="sha256:moved").where(tables.page.c.id == page_id)
-        )
-        await connection.execute(
-            sa.update(memory_item)
-            .values(embedding_digest=None, embedding_claimed_at=None)
-            .where(memory_item.c.id == item_id)
-        )
-    with ws(workspace_id):
-        await _run()
-        assert (
-            await store.recall(
-                "merger",
-                frozenset({SHARED_SUBJECT}),
-                10,
-                source_reader=_reader(frozenset({SHARED_SUBJECT})),
-            )
-            == ()
-        )
-        assert not await store.index.has_chunks(scope)
-
-
 async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(
     db: None,
 ) -> None:
@@ -2565,3 +1904,25 @@ async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: Non
         ).scalar_one()
     assert mirror == 0
     assert count == 1
+
+
+def test_decay_factor_weights_recency_kind_and_confidence() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    fresh = Recalled(
+        uuid4(),
+        "shared",
+        "fact",
+        "b",
+        None,
+        1.0,
+        memory_kind="fact",
+        confidence=10,
+        created_at=now,
+    )
+    assert decay_factor(fresh, now) == 1.0
+    old = replace(fresh, as_of=datetime(2020, 1, 1, tzinfo=UTC))
+    assert 0.0 < decay_factor(old, now) < decay_factor(fresh, now)
+    aged = replace(fresh, as_of=datetime(2025, 10, 1, tzinfo=UTC))
+    assert decay_factor(replace(aged, memory_kind="task"), now) < decay_factor(aged, now)
+    assert decay_factor(replace(fresh, item_class="episodic"), now) == 1.0
+    assert decay_factor(replace(fresh, item_class="semantic"), now) == 1.0

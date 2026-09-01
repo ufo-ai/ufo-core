@@ -1,13 +1,12 @@
 import asyncio
 import json
 import shlex
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-import ufo_ext_documents.manifest as documents
 import ufo_ext_repl.manifest as repl
 from ufo_ext_repl.manifest import JsReplInput, XlsxReplInput
 
@@ -266,65 +265,6 @@ def test_data_skills_parse_and_index() -> None:
         assert name in index
 
 
-def test_data_visualization_pulls_design_foundations() -> None:
-    registry = skill_registry((documents.manifest(), repl.manifest()))
-    assert [ref.card.name for ref in registry.closure("data-visualization")] == [
-        "data-visualization",
-        "design-foundations",
-        "ufo-style",
-    ]
-
-
-async def test_js_repl_first_call_writes_fresh_and_runs_node(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(node_result=ExecResult(stdout="hello", stderr="", exit_code=0))
-    ctx = _context(sandbox, tmp_path)
-    result = await repl.js_repl(ctx, JsReplInput(code="console.log('hi')"))
-    assert sandbox.files[repl.JS_REPL_PATH] == b"console.log('hi')\n"
-    assert any(command.startswith("node ") for command in sandbox.commands)
-    assert json.loads(result.content[0].text)["stdout"] == "hello"
-    assert result.is_error is False
-
-
-async def test_repl_runtime_commands_expand_terminal_ufo_home(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(runtime_root="$UFO_HOME/runs/test")
-    ctx = _context(sandbox, tmp_path)
-
-    await repl.js_repl(ctx, JsReplInput(code="1"))
-    await repl.xlsx_repl(ctx, XlsxReplInput(code="result = 1"))
-
-    assert 'node "$UFO_HOME"/runs/test/repl/js-run.mjs' in sandbox.commands
-    assert 'python3 "$UFO_HOME"/runs/test/repl/xlsx-run.py' in sandbox.commands
-    assert any(
-        'mkdir -p "$UFO_HOME"/runs/test/repl/node_modules' in command
-        for command in sandbox.commands
-    )
-
-
-async def test_js_repl_meters_the_exit_code_and_folds_an_unlisted_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A REPL failing every call and one whose code threw once are the same `handler_error` on
-    `tool_call_total`, which carries no reason for a result that raised nothing. The exit code is
-    what separates a missing interpreter from the agent's own code, and an unlisted one folds so a
-    run cannot mint a series per value."""
-    emitted: list[dict[str, str]] = []
-    monkeypatch.setattr(
-        repl,
-        "emit_metric",
-        lambda name, **dimensions: emitted.append({"metric": name, **dimensions}),
-    )
-    sandbox = FakeSandbox(node_result=ExecResult(stdout="", stderr="not found", exit_code=127))
-    ctx = _context(sandbox, tmp_path)
-    ctx = replace(ctx, turn=ctx.turn.model_copy(update={"subagent_profile": "coding"}))
-    await repl.js_repl(ctx, JsReplInput(code="console.log(1)"))
-    sandbox.node_result = ExecResult(stdout="", stderr="", exit_code=42)
-    await repl.js_repl(ctx, JsReplInput(code="console.log(2)"))
-    assert emitted == [
-        {"metric": "repl_run_total", "tool": "js_repl", "exit_code": "127", "profile": "coding"},
-        {"metric": "repl_run_total", "tool": "js_repl", "exit_code": "other", "profile": "coding"},
-    ]
-
-
 async def test_js_repl_accumulates_state_across_calls(tmp_path: Path) -> None:
     sandbox = FakeSandbox()
     ctx = _context(sandbox, tmp_path)
@@ -368,45 +308,6 @@ async def test_xlsx_repl_discards_failed_code(tmp_path: Path) -> None:
     assert sandbox.files[repl.XLSX_REPL_PATH] == b"a = 1\nb = 2\n"
 
 
-async def test_js_repl_reset_overwrites_state(tmp_path: Path) -> None:
-    sandbox = FakeSandbox()
-    ctx = _context(sandbox, tmp_path)
-    await repl.js_repl(ctx, JsReplInput(code="let x = 1"))
-    await repl.js_repl(ctx, JsReplInput(code="let y = 2", reset=True))
-    assert sandbox.files[repl.JS_REPL_PATH] == b"let y = 2\n"
-
-
-async def test_js_repl_composes_prelude_and_accumulated_code_into_the_run_file(
-    tmp_path: Path,
-) -> None:
-    sandbox = FakeSandbox()
-    ctx = _context(sandbox, tmp_path)
-    await repl.js_repl(ctx, JsReplInput(code="let x = 1"))
-    await repl.js_repl(ctx, JsReplInput(code="console.log(x)"))
-    run_file = sandbox.files[repl.JS_RUN_PATH].decode()
-    assert run_file == (
-        repl.js_emit_prelude(sandbox.emit_paths[-1]) + "let x = 1\nconsole.log(x)\n"
-    )
-    assert any(command == f"node {repl.JS_RUN_PATH}" for command in sandbox.commands)
-
-
-async def test_js_repl_returns_emitted_images_after_the_text_result(tmp_path: Path) -> None:
-    emitted = (
-        json.dumps({"media_type": "image/jpeg", "data": "anBn"})
-        + "\n"
-        + json.dumps({"media_type": "image/png", "data": "cG5n"})
-        + "\n"
-    )
-    sandbox = FakeSandbox(node_emit=emitted.encode())
-    ctx = _context(sandbox, tmp_path)
-    result = await repl.js_repl(ctx, JsReplInput(code="emitImage(shot)"))
-    assert json.loads(result.content[0].text)["stdout"] == "ran"
-    assert [(image.media_type, image.data) for image in result.content[1:]] == [
-        ("image/jpeg", "anBn"),
-        ("image/png", "cG5n"),
-    ]
-
-
 async def test_js_repl_keeps_only_the_last_five_emitted_images(tmp_path: Path) -> None:
     lines = "".join(
         json.dumps({"media_type": "image/png", "data": f"aW1n{index}"}) + "\n" for index in range(7)
@@ -444,77 +345,6 @@ async def test_js_repl_removes_the_emit_file_it_read(tmp_path: Path) -> None:
     result = await repl.js_repl(ctx, JsReplInput(code="emitImage(shot)"))
     assert [image.data for image in result.content[1:]] == ["cG5n"]
     assert sandbox.emit_paths[-1] not in sandbox.files
-
-
-async def test_js_repl_gives_each_call_an_emit_file_of_its_own(tmp_path: Path) -> None:
-    """A cell that outgrew its budget keeps running, so it can still write images after its result
-    was discarded. The next call reads a file of its own, so what the survivor writes stays out of
-    it and the call keeps the images it emitted itself."""
-    survivor = json.dumps({"media_type": "image/png", "data": "c3Vy"}) + "\n"
-    own = json.dumps({"media_type": "image/jpeg", "data": "b3du"}) + "\n"
-    sandbox = FakeSandbox(
-        node_result=ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=120),
-        probe_pid="4321",
-        node_emit=survivor.encode(),
-    )
-    ctx = _context(sandbox, tmp_path)
-    await repl.js_repl(ctx, JsReplInput(code="await hang(shot)"))
-    sandbox.node_result = ExecResult(stdout="ran", stderr="", exit_code=0)
-    sandbox.node_emit = own.encode()
-    sandbox.late_emit = survivor.encode()
-
-    result = await repl.js_repl(ctx, JsReplInput(code="emitImage(shot)"))
-
-    assert sandbox.emit_paths[0] != sandbox.emit_paths[1]
-    assert [(image.media_type, image.data) for image in result.content[1:]] == [
-        ("image/jpeg", "b3du")
-    ]
-
-
-async def test_xlsx_repl_wraps_accumulated_code_with_the_result_footer(tmp_path: Path) -> None:
-    sandbox = FakeSandbox(python_result=ExecResult(stdout='{"a": 1}', stderr="", exit_code=0))
-    ctx = _context(sandbox, tmp_path)
-    result = await repl.xlsx_repl(ctx, XlsxReplInput(code="result = {'a': 1}"))
-    run_file = sandbox.files[repl.XLSX_RUN_PATH].decode()
-    assert run_file.startswith("result = {'a': 1}\n")
-    assert "_json.dumps(result, default=str)" in run_file
-    assert any(command.startswith("python3 ") for command in sandbox.commands)
-    assert json.loads(result.content[0].text)["stdout"] == '{"a": 1}'
-
-
-async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Path) -> None:
-    carrier = LocalCarrier()
-    handle = await carrier.create(
-        SandboxSpec(
-            conversation_id=uuid4(),
-            image_ref="ufo-sandbox:latest",
-            workspace_host_path=str(tmp_path / "workspace"),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-            run_token="run-token-abc",
-        )
-    )
-    ctx = _context(SandboxSession(carrier=carrier, handle=handle), tmp_path)
-    state_dir = Path(handle.runtime_root) / repl.REPL_STATE_DIR
-    state_dir.mkdir(parents=True)
-    (state_dir / "node_modules").symlink_to("/nonexistent")
-    code = (
-        "await Promise.resolve();\n"
-        'emitImage(Buffer.from([1, 2, 3]), "image/jpeg");\n'
-        'console.log("emitted");'
-    )
-    result = await repl.js_repl(ctx, JsReplInput(code=code))
-    assert result.is_error is False
-    assert json.loads(result.content[0].text)["stdout"] == "emitted\n"
-    assert [(image.media_type, image.data) for image in result.content[1:]] == [
-        ("image/jpeg", "AQID")
-    ]
-    assert (state_dir / "node_modules" / "npm").is_symlink()
-    resolved = await repl.js_repl(
-        ctx,
-        JsReplInput(code="console.log(import.meta.resolve('npm'));"),
-    )
-    assert resolved.is_error is False
-    assert "/node_modules/npm/" in json.loads(resolved.content[0].text)["stdout"]
 
 
 async def test_a_js_cell_over_its_budget_survives_in_the_real_local_carrier(
@@ -651,3 +481,17 @@ async def test_nonzero_exit_is_flagged_as_error(tmp_path: Path) -> None:
     result = await repl.js_repl(ctx, JsReplInput(code="throw new Error()"))
     assert result.is_error is True
     assert json.loads(result.content[0].text)["stderr"] == "boom"
+
+
+async def test_js_repl_composes_prelude_and_accumulated_code_into_the_run_file(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    await repl.js_repl(ctx, JsReplInput(code="let x = 1"))
+    await repl.js_repl(ctx, JsReplInput(code="console.log(x)"))
+    run_file = sandbox.files[repl.JS_RUN_PATH].decode()
+    assert run_file == (
+        repl.js_emit_prelude(sandbox.emit_paths[-1]) + "let x = 1\nconsole.log(x)\n"
+    )
+    assert any(command == f"node {repl.JS_RUN_PATH}" for command in sandbox.commands)

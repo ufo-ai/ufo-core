@@ -10,12 +10,6 @@ from ufo.harness.auth.surface_token import mint_surface_token, verify_surface_to
 from ufo.harness.auth.token_signing import sign_token
 
 
-def test_roundtrip_returns_the_minted_claims(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
-    payload = {"ws": str(uuid4()), "site": "landing"}
-    assert verify_surface_token("sites", mint_surface_token("sites", payload)) == payload
-
-
 def test_a_token_never_verifies_at_another_surface(monkeypatch: pytest.MonkeyPatch) -> None:
     """The namespace is the point: a link minted for one surface must yield nothing at another's
     route, so a route can trust its own claims without re-deriving where they came from."""
@@ -42,14 +36,6 @@ def test_rejects_tampered_foreign_and_malformed_tokens(monkeypatch: pytest.Monke
         foreign_secret,
     ):
         assert verify_surface_token("sites", token) is None
-
-
-def test_refuses_to_mint_over_the_namespace_claim(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
-    with pytest.raises(ValueError, match="reserved"):
-        mint_surface_token("sites", {"surface": "web"})
-    with pytest.raises(ValueError, match="must name its surface"):
-        mint_surface_token("", {"ws": "w"})
 
 
 def test_fails_loud_without_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:

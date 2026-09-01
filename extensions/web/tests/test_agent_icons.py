@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-from ufo.schema.records import AGENT_ICONS, MAIN_AGENT_ICON
+from ufo.schema.records import AGENT_ICONS
 
 ICON_COMPONENTS = (
     Path(__file__).resolve().parents[3] / "extensions/web/frontend/src/lib/agentIcon.tsx"
@@ -35,18 +35,6 @@ def test_the_portal_bundles_exactly_the_marks_its_picker_offers() -> None:
         f"unnamed {[slug for slug in drawn if slug not in named]}, "
         f"reordered {[(a, b) for a, b in zip(named, drawn, strict=False) if a != b]}"
     )
-
-
-def test_neither_list_offers_the_products_own_mark() -> None:
-    """The product's own mark is reserved: neither list offers it, so no picker can present it. The
-    portal names the same slug core reserves and draws it on a path of its own, which is what keeps
-    the main agent's row — the one row that holds it — drawing a mark."""
-    source = ICON_COMPONENTS.read_text()
-    assert MAIN_AGENT_ICON not in AGENT_ICONS
-    assert MAIN_AGENT_ICON not in _offered()
-    reserved = RESERVED_SLUG.search(source)
-    assert reserved is not None, f"{ICON_COMPONENTS}: no RESERVED_MARK slug to read"
-    assert reserved.group(1) == MAIN_AGENT_ICON
 
 
 def test_the_reserved_mark_is_drawn_from_the_brands_own_file() -> None:

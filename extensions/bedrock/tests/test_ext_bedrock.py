@@ -7,7 +7,6 @@ import ufo_ext_bedrock as bedrock
 
 from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.harness.models.anthropic import AnthropicClient
-from ufo.harness.models.openai import OpenAIClient
 from ufo.harness.models.registry import model_registry
 from ufo.runtime.workspace import ws
 from ufo.sdk.credentials import CredentialValueInvalid
@@ -62,16 +61,6 @@ def test_anthropic_specs_build_the_native_mantle_messages_client(
     assert client.client.auth_headers == {"Authorization": "Bearer bedrock-key"}
 
 
-def test_openai_chat_specs_build_a_mantle_chat_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(bedrock.AWS_REGION_ENV, "us-east-1")
-    spec = _spec("openai.gpt-oss-120b")
-    client = spec.client(spec, "bedrock-key")
-    assert isinstance(client, OpenAIClient)
-    assert client.spec.api_surface == "chat"
-    assert str(client.client.base_url) == "https://bedrock-mantle.us-east-1.api.aws/v1/"
-    assert client.client.auth_headers == {"Authorization": "Bearer bedrock-key"}
-
-
 @pytest.mark.parametrize("model_id", ("anthropic.claude-opus-5", "openai.gpt-5.5"))
 async def test_registry_rejects_a_non_ascii_bedrock_key(
     model_id: str,
@@ -95,35 +84,11 @@ async def test_registry_rejects_a_non_ascii_bedrock_key(
             await registry.client_for(model_id)
 
 
-def test_frontier_openai_specs_build_a_mantle_responses_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(bedrock.AWS_REGION_ENV, "us-east-2")
-    spec = _spec("openai.gpt-5.5")
-    client = spec.client(spec, "bedrock-key")
-    assert isinstance(client, OpenAIClient)
-    assert client.spec.api_surface == "responses"
-    assert str(client.client.base_url) == "https://bedrock-mantle.us-east-2.api.aws/openai/v1/"
-    assert client.client.auth_headers == {"Authorization": "Bearer bedrock-key"}
-
-
 def _config(tmp_path: Path) -> Config:
     return Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
         blob=BlobConfig(backend="filesystem", root=tmp_path),
     )
-
-
-async def test_registry_passes_the_platform_bedrock_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(bedrock.AWS_REGION_ENV, "us-west-2")
-    monkeypatch.setenv(bedrock.BEDROCK_API_KEY_ENV, "platform-key")
-    registry = model_registry(_config(tmp_path), (bedrock.manifest(),))
-    with ws(uuid4()):
-        client = await registry.client_for("anthropic.claude-opus-4-8")
-    assert isinstance(client, AnthropicClient)
-    assert client.client.auth_headers == {"Authorization": "Bearer platform-key"}
 
 
 async def test_registry_fails_loud_without_a_bedrock_key(

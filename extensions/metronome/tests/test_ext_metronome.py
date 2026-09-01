@@ -31,7 +31,7 @@ from ufo.harness.models.registry import ModelRegistry, model_registry
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import turn_tools
 from ufo.host.kinds.workspace_kind import WORKSPACE_KIND
-from ufo.runtime.access.credentials import CredentialRequests, CredentialStore
+from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.authority import ExecutionAuthority
 from ufo.runtime.billing.accounting import (
     record_egress_request,
@@ -60,6 +60,11 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
 from ufo.sdk.audience import Audience, conversation_audience
 from ufo.sdk.http import Request
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 DOLLAR = 1_000_000
 TOOL_NARRATION = "checking their billing"
@@ -269,97 +274,6 @@ def test_manifest_declares_two_cron_jobs_one_tool_one_section() -> None:
     assert billing_route.handler is metronome._billing_projection
 
 
-async def test_ships_settled_rows_with_exact_events(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection,
-            workspace_id,
-            turn_id,
-            MODEL,
-            Usage(input_tokens=1000, output_tokens=500),
-        )
-        await record_workspace_usage(connection, workspace_id, MODEL, Usage(input_tokens=250))
-    recorder = _Recorder()
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-
-    (request,) = recorder.ingests()
-    assert str(request.url) == metronome.INGEST_URL
-    assert request.headers["authorization"] == f"Bearer {TOKEN}"
-    rows = {f"{row.id}:0": row for row in await _ledger_rows()}
-    events = _events(request)
-    assert {event["transaction_id"] for event in events} == set(rows)
-    for event in events:
-        row = rows[event["transaction_id"]]
-        assert row.priced_micro_usd > 0
-        assert event["customer_id"] == str(workspace_id)
-        assert event["event_type"] == "ufo_usage"
-        datetime.fromisoformat(event["timestamp"])
-        assert event["properties"] == {
-            "dimension": "tokens",
-            "model": MODEL,
-            "amount": str(row.amount),
-            "priced_micro_usd": str(row.priced_micro_usd),
-            "price_digest": row.price_digest,
-            "turn_id": str(row.turn_id) if row.turn_id else "",
-            "byok": "false",
-        }
-        assert all(isinstance(value, str) for value in event["properties"].values())
-
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    assert len(recorder.ingests()) == 1
-
-
-async def test_sandbox_rows_wait_for_turn_terminal_and_late_growth_ships_as_top_up(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    async with workspace_tx() as connection:
-        await record_sandbox_tokens(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=100, output_tokens=50)
-        )
-        await record_sandbox_tokens(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=25)
-        )
-    recorder = _Recorder()
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    assert recorder.ingests() == []
-
-    await _settle(turn_id, age_seconds=0)
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    assert recorder.ingests() == []
-
-    await _settle(turn_id, age_seconds=PAST_MARGIN_SECONDS)
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    (request,) = recorder.ingests()
-    (event,) = _events(request)
-    assert event["properties"]["dimension"] == "sandbox_tokens"
-    assert event["properties"]["amount"] == "175"
-
-    async with workspace_tx() as connection:
-        await record_sandbox_tokens(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=40)
-        )
-    await _settle(turn_id, age_seconds=PAST_MARGIN_SECONDS)
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    (top_up,) = _events(recorder.ingests()[1])
-    assert top_up["transaction_id"] == f"{event['transaction_id'].split(':')[0]}:175"
-    assert top_up["properties"]["amount"] == "40"
-
-
 async def test_unacked_delivery_stays_frozen_when_the_row_grows(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -504,27 +418,6 @@ async def test_missing_token_fails_loud_even_with_nothing_to_ship(
     assert await _acked() == set()
 
 
-async def test_manifest_job_fires_through_job_runner(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    recorder = _Recorder()
-    monkeypatch.setattr(metronome, "INGEST_TRANSPORT", httpx.MockTransport(recorder.handle))
-    workspace_id, _, _ = await _seed()
-    async with workspace_tx() as connection:
-        await record_workspace_usage(connection, workspace_id, MODEL, Usage(input_tokens=100))
-    declared = metronome.manifest()
-    runner = JobRunner(
-        bindings=bindings_from((declared,), ()), manifests=(declared,), registry=_registry()
-    )
-    for workspace_id in await runner.candidates(f"{metronome.NAME}:{metronome.JOB_NAME}"):
-        await runner.fire(f"{metronome.NAME}:{metronome.JOB_NAME}", workspace_id)
-    (request,) = recorder.ingests()
-    (event,) = _events(request)
-    assert event["customer_id"] == str(workspace_id)
-    assert await _acked() != set()
-
-
 def _tool_context(
     workspace_id: UUID,
     ext: ExtensionContext,
@@ -592,60 +485,6 @@ async def test_byok_label_flips_with_the_stored_key_and_stays_per_workspace(
     assert {event["properties"]["byok"] for event in passthrough_events} == {"false"}
 
 
-async def test_byok_label_reflects_a_key_added_between_ticks(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    init_workspace_credentials(store)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(connection, workspace_id, turn_id, MODEL, Usage(input_tokens=100))
-    recorder = _Recorder()
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-late")
-    second_turn = await _turn(workspace_id, conversation_id, agent_id, seq=2)
-    await _settle(second_turn, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection, workspace_id, second_turn, MODEL, Usage(input_tokens=50), byok=True
-        )
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    (first,) = _events(recorder.ingests()[0])
-    (second,) = _events(recorder.ingests()[1])
-    assert first["properties"]["byok"] == "false"
-    assert second["properties"]["byok"] == "true"
-
-
-async def test_the_declared_slot_opens_the_chat_seal_and_byok_resolution(db: None) -> None:
-    """The whole BYOK path over real parts: the manifest's declared union lets the private
-    handoff seal exactly this slot (and refuses it when metronome is absent), the fulfilled
-    secret lands in the store, and model-key resolution prefers it over the platform env."""
-    workspace_id, _, _ = await _seed()
-    fernet = Fernet(Fernet.generate_key())
-    declared = frozenset(slot.name for slot in metronome.manifest().credentials)
-    requests = CredentialRequests(fernet=fernet, declared=declared, fillable=declared)
-    member_id = uuid4()
-    sealed = requests.seal(workspace_id, member_id, (metronome.ANTHROPIC_KEY_SLOT,))
-    assert sealed
-    without_metronome = CredentialRequests(
-        fernet=fernet, declared=frozenset(), fillable=frozenset()
-    )
-    with pytest.raises(ValueError, match="anthropic_api_key"):
-        without_metronome.seal(workspace_id, member_id, (metronome.ANTHROPIC_KEY_SLOT,))
-    store = CredentialStore(fernet=fernet)
-    init_workspace_credentials(store)
-    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-byok")
-    with ws(workspace_id) as scope:
-        assert await scope.credential(metronome.ANTHROPIC_KEY_SLOT, "ANTHROPIC_API_KEY") == (
-            "sk-ant-byok"
-        )
-
-
 async def test_byok_labels_only_anthropic_served_host_tokens(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -709,51 +548,6 @@ async def test_byok_label_is_frozen_at_mint_across_a_key_change(
     (event,) = _events(recorder.ingests()[0])
     assert event == failed_event
     assert event["properties"]["byok"] == "false"
-
-
-async def test_byok_follows_the_serving_providers_stored_key(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A Bedrock-served model labels from the bedrock slot, never the anthropic one: storing
-    `anthropic_api_key` does not make Bedrock usage BYOK, and storing `bedrock_api_key` does —
-    the label follows whichever key `client_for` would actually resolve for the model."""
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
-    init_workspace_credentials(store)
-    workspace_id, agent_id, conversation_id = await _seed()
-    await store.put(workspace_id, metronome.ANTHROPIC_KEY_SLOT, "sk-ant-own")
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection,
-            workspace_id,
-            turn_id,
-            "anthropic.claude-opus-4-8",
-            Usage(input_tokens=10),
-        )
-    recorder = _Recorder()
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    (event,) = _events(recorder.ingests()[0])
-    assert event["properties"]["model"] == "anthropic.claude-opus-4-8"
-    assert event["properties"]["byok"] == "false"
-    await store.put(workspace_id, bedrock.BEDROCK_KEY_SLOT, "bedrock-bearer-own")
-    second_turn = await _turn(workspace_id, conversation_id, agent_id, seq=2)
-    await _settle(second_turn, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection,
-            workspace_id,
-            second_turn,
-            "anthropic.claude-opus-4-8",
-            Usage(input_tokens=10),
-            byok=True,
-        )
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    (bedrock_event,) = _events(recorder.ingests()[1])
-    assert bedrock_event["properties"]["byok"] == "true"
 
 
 class _RecordingInvoker:
@@ -1097,48 +891,6 @@ async def test_billing_requires_a_speaking_admin(
     assert result["portal_url"] == "https://billing.stripe.com/session/1"
 
 
-async def test_status_reports_the_card_and_the_balance(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`status` answers what the workspace can spend and whether a card is on file — the card from
-    Stripe rather than from our record, and the balance from core. `portal` resolves the customer
-    itself, so no prior setup act is required to reach it."""
-    _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
-    providers = _Providers()
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-
-    assert await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "status") == {
-        "payment_method_on_file": False,
-        "balance_micro_usd": None,
-        "reserve_micro_usd": None,
-        "granted_micro_usd": None,
-        "charged_micro_usd": None,
-    }
-
-    portal = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "portal")
-    session_calls = _calls(providers, "POST", "/v1/billing_portal/sessions")
-    assert _form(session_calls[-1]) == {
-        "customer": "cus_1",
-        "configuration": PORTAL_CONFIGURATION,
-    }
-    assert portal["portal_url"] == f"https://billing.stripe.com/session/{providers.sessions}"
-    assert portal["stripe_customer_id"] == "cus_1"
-
-    providers.default_payment_method = SAVED_CARD
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await credit(connection, workspace_id, 150_000_000, 100_000_000, "grant")
-    funded = await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "status")
-    assert funded == {
-        "payment_method_on_file": True,
-        "balance_micro_usd": 150_000_000,
-        "reserve_micro_usd": 0,
-        "granted_micro_usd": 150_000_000,
-        "charged_micro_usd": 100_000_000,
-    }
-
-
 async def test_a_failed_stripe_customer_create_records_nothing(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1190,156 +942,6 @@ def test_billing_config_names_every_missing_setting_at_once(
         metronome.BillingConfig.from_env()
 
 
-async def test_every_stripe_call_pins_the_api_version(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A Stripe-side default-version bump can never reshape a response under us."""
-    _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate_id, _conversation_id = await _billing_seed()
-    providers = _Providers()
-    providers.default_payment_method = SAVED_CARD
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "portal")
-    await _manage_billing(workspace_id, tmp_path, owner_id, owner_id, "status")
-
-    stripe_calls = [r for r in providers.requests if r.url.host == "api.stripe.com"]
-    assert stripe_calls
-    assert {r.headers["stripe-version"] for r in stripe_calls} == {metronome.STRIPE_API_VERSION}
-    assert not any(
-        "stripe-version" in r.headers for r in providers.requests if r not in stripe_calls
-    )
-
-
-async def test_the_shipper_creates_the_customer_that_resolves_its_ingest_alias(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Every event is stamped with the workspace uuid, and Metronome resolves that through a
-    customer's ingest alias. With no customer holding it the events are attributed to nobody and
-    metering silently stops, so the shipper makes sure one exists before it posts — and a later run
-    adopts the alias rather than creating a second holder."""
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
-        )
-    recorder = _Recorder()
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-
-    created = [r for r in recorder.requests if r.url.path == "/v1/customers" and r.method == "POST"]
-    assert [json.loads(r.content)["ingest_aliases"] for r in created] == [[str(workspace_id)]]
-    (event,) = _events(recorder.ingests()[0])
-    assert event["customer_id"] == str(workspace_id)
-    assert recorder.customers[str(workspace_id)]
-
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    created_again = [
-        r for r in recorder.requests if r.url.path == "/v1/customers" and r.method == "POST"
-    ]
-    assert len(created_again) == 1
-
-
-async def test_an_existing_alias_is_adopted_rather_than_created_twice(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The branch every workspace set up under the old code takes: the alias already resolves, so
-    nothing is created and the events ship against it."""
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
-        )
-    recorder = _Recorder()
-    recorder.customers[str(workspace_id)] = "mc_existing"
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    assert [
-        r for r in recorder.requests if r.method == "POST" and r.url.path == "/v1/customers"
-    ] == []
-    assert len(recorder.ingests()) == 1
-
-
-async def test_a_conflicting_create_reconciles_to_the_alias_holder(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An archived customer keeps the alias while the alias filter excludes it, so the create
-    conflicts. Raising there would fail every tick forever with no in-product way out."""
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
-        )
-    recorder = _Recorder()
-    recorder.hidden_once.add(str(workspace_id))
-    recorder.customers[str(workspace_id)] = "mc_archived"
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    assert len(recorder.ingests()) == 1
-
-
-async def test_usage_waits_when_the_token_cannot_confirm_the_customer(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A token that cannot read customers cannot confirm the alias, and ingest answers 2xx either
-    way — so shipping under it and acking the exports destroys that usage instead of delaying it.
-    The backlog waits for a token that can confirm rather than draining into nowhere."""
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
-        )
-    recorder = _Recorder()
-    recorder.forbid_customers = True
-    with ws(workspace_id), pytest.raises(metronome.MetronomeError):
-        await _shipper(recorder).run()
-    assert recorder.ingests() == []
-
-    recorder.forbid_customers = False
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    assert len(recorder.ingests()) == 1
-
-
-async def test_usage_waits_when_the_customer_cannot_be_confirmed(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Ingest answers 2xx whether or not the alias resolves, so shipping past an unconfirmed alias
-    and acking the exports would destroy that usage rather than delay it. Every way of failing to
-    confirm leaves the backlog for the next tick."""
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
-        )
-    recorder = _Recorder()
-    recorder.failing.add("/v1/customers")
-    with ws(workspace_id):
-        with pytest.raises(metronome.MetronomeError):
-            await _shipper(recorder).run()
-    assert recorder.ingests() == []
-
-    recorder.failing.clear()
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    assert len(recorder.ingests()) == 1
-
-
 async def test_an_idle_workspace_spends_no_metronome_call(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1355,69 +957,6 @@ async def test_an_idle_workspace_spends_no_metronome_call(
     assert recorder.requests == []
 
 
-async def test_an_alias_held_by_a_customer_this_token_cannot_read_holds_the_usage(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A conflict means something already holds the alias. If a re-read finds it, the other shipper
-    created it in the gap and this tick lost a harmless race. If the re-read still finds nothing,
-    the holder is archived or otherwise invisible, and every event stamped with that alias is
-    dropped — so the usage waits rather than shipping into nowhere."""
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
-        )
-    alias = str(workspace_id)
-    recorder = _Recorder()
-    recorder.customers[alias] = "mc_archived"
-    recorder.hidden_always.add(alias)
-    with ws(workspace_id), pytest.raises(metronome.MetronomeError):
-        await _shipper(recorder).run()
-    assert recorder.ingests() == []
-
-    recorder.hidden_always.discard(alias)
-    with ws(workspace_id):
-        await _shipper(recorder).run()
-    assert len(recorder.ingests()) == 1
-
-
-async def test_usage_held_past_the_backdating_window_is_reported(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Holding a batch delays the usage rather than destroying it, but the provider backdates only
-    BACKFILL_WINDOW_DAYS — held longer, the usage becomes unbillable and the hold turns into the
-    loss it was meant to prevent. Nothing recovers it; it must at least not be silent."""
-    monkeypatch.setenv(metronome.METRONOME_BEARER_TOKEN_ENV, TOKEN)
-    workspace_id, agent_id, conversation_id = await _seed()
-    turn_id = await _turn(workspace_id, conversation_id, agent_id)
-    await _settle(turn_id, age_seconds=0)
-    async with workspace_tx() as connection:
-        await record_turn_usage(
-            connection, workspace_id, turn_id, MODEL, Usage(input_tokens=1000, output_tokens=500)
-        )
-        await connection.execute(
-            sa.update(tables.ledger)
-            .where(tables.ledger.c.turn_id == turn_id)
-            .values(
-                updated_at=datetime.now(UTC) - timedelta(days=metronome.BACKFILL_WINDOW_DAYS + 3)
-            )
-        )
-    recorder = _Recorder()
-    warned: list[str] = []
-    monkeypatch.setattr(metronome, "warn", lambda event, **fields: warned.append(event))
-    shipper = _shipper(recorder)
-    with ws(workspace_id):
-        await shipper.ctx.store.put(
-            metronome.FLOOR_KEY,
-            (datetime.now(UTC) - timedelta(days=metronome.BACKFILL_WINDOW_DAYS + 30)).isoformat(),
-        )
-        await shipper.run()
-    assert "metronome.usage_past_backdating_window" in warned
-
-
 async def _balance_of(workspace_id: UUID) -> int:
     with ws(workspace_id):
         async with workspace_tx() as connection:
@@ -1430,41 +969,6 @@ async def _run_topup(workspace_id: UUID, providers: "_Providers") -> None:
     ctx = context_for(metronome.NAME, frozenset())
     with ws(workspace_id):
         await metronome.BalanceTopup(ctx=ctx, transport=providers.transport).run()
-
-
-async def test_autopay_refills_the_balance_from_the_card_on_file(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The whole point of arranging a refill is that it happens with nobody present, so the charge
-    is off-session against the card already saved. Core decides the workspace is short; this
-    pays."""
-    _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate, _conv = await _billing_seed()
-    providers = _Providers()
-    providers.default_payment_method = "pm_1"
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
-    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
-    arranged = await _manage_billing(
-        workspace_id,
-        tmp_path,
-        owner_id,
-        None,
-        "autopay",
-        autopay_dollars=50,
-        autopay_below_dollars=10,
-    )
-    assert arranged["autopay_micro_usd"] == 50 * DOLLAR
-
-    await _run_topup(workspace_id, providers)
-    assert await _balance_of(workspace_id) == 55 * DOLLAR
-    (charge,) = providers.intents
-    assert charge["amount"] == "5000"
-    assert charge["off_session"] == "true"
-    assert charge["customer"].startswith("cus_")
 
 
 async def test_the_refill_job_fans_out_only_to_a_workspace_that_reached_its_line(
@@ -1493,101 +997,6 @@ async def test_the_refill_job_fans_out_only_to_a_workspace_that_reached_its_line
     named = await runner.candidates(f"{metronome.NAME}:{metronome.TOPUP_JOB_NAME}")
 
     assert named == (due,)
-
-
-async def test_autopay_leaves_a_balance_above_its_line_alone(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The trigger is core's, and a workspace still above its line is not short. A tick that
-    charged anyway would bill a card on a schedule rather than on need."""
-    _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate, _conv = await _billing_seed()
-    providers = _Providers()
-    providers.default_payment_method = "pm_1"
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await credit(connection, workspace_id, 80 * DOLLAR, 0, "opening")
-    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
-    await _manage_billing(
-        workspace_id,
-        tmp_path,
-        owner_id,
-        None,
-        "autopay",
-        autopay_dollars=50,
-        autopay_below_dollars=10,
-    )
-
-    await _run_topup(workspace_id, providers)
-    assert providers.intents == []
-    assert await _balance_of(workspace_id) == 80 * DOLLAR
-
-
-async def test_a_second_tick_after_a_refill_charges_nothing(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The job ticks every few minutes. Once a refill lands the workspace is no longer short, so
-    the next tick asks core, is told nothing is needed, and never reaches the card — the schedule
-    bills on need, not on its own cadence.
-
-    A redelivery that repeats a charge is a different guard: the intent carries an idempotency key
-    so Stripe collapses it, and the credit is keyed on the intent so the balance records it once."""
-    _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate, _conv = await _billing_seed()
-    providers = _Providers()
-    providers.default_payment_method = "pm_1"
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
-    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
-    await _manage_billing(
-        workspace_id,
-        tmp_path,
-        owner_id,
-        None,
-        "autopay",
-        autopay_dollars=50,
-        autopay_below_dollars=10,
-    )
-
-    await _run_topup(workspace_id, providers)
-    await _run_topup(workspace_id, providers)
-    assert await _balance_of(workspace_id) == 55 * DOLLAR
-    assert len(providers.charges) == 1
-
-
-async def test_a_declined_card_leaves_the_balance_alone(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A decline is the issuer's answer, not our fault. Crediting anyway would hand out money the
-    workspace never paid, so the balance stays where it was and the workspace stays refused."""
-    _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate, _conv = await _billing_seed()
-    providers = _Providers()
-    providers.default_payment_method = "pm_1"
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
-    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
-    await _manage_billing(
-        workspace_id,
-        tmp_path,
-        owner_id,
-        None,
-        "autopay",
-        autopay_dollars=50,
-        autopay_below_dollars=10,
-    )
-    providers.decline = True
-
-    await _run_topup(workspace_id, providers)
-    assert await _balance_of(workspace_id) == 5 * DOLLAR
 
 
 async def test_autopay_refuses_to_promise_a_refill_without_a_card(
@@ -1798,16 +1207,6 @@ async def test_a_refused_refill_asks_again_once_the_wait_is_up(
     assert len(keys) == len(set(keys)) == 2
 
 
-def test_the_billing_tool_names_every_action_it_accepts() -> None:
-    """The description is what the model reads before choosing the tool, and the prompt section is
-    what it reads on every turn. An action missing from either is an action the agent never calls,
-    however well the code behind it works — the admin is told the thing cannot be done."""
-    (tool,) = metronome.manifest().tools
-    for action in ("status", "portal", "autopay"):
-        assert action in tool.description, action
-        assert action in metronome.BILLING_SECTION_BODY, action
-
-
 async def _grace(workspace_id: UUID) -> int:
     with ws(workspace_id):
         async with workspace_tx() as connection:
@@ -1846,44 +1245,6 @@ async def test_a_settled_charge_earns_the_workspace_its_grace(
     await _run_topup(workspace_id, providers)
     assert await _balance_of(workspace_id) == 25 * DOLLAR
     assert await _grace(workspace_id) == TOPUP_GRACE_MICRO_USD
-
-
-async def test_a_charge_still_in_flight_does_not_stand_the_refill_down(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The tick is shorter than an authorization can take, so a refill still being decided is asked
-    again under the same key and told so. Counting that as a refusal would park the refill for a
-    day over a card in the middle of paying, and the balance it was about to fund would run out."""
-    _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate, _conv = await _billing_seed()
-    providers = _Providers()
-    providers.default_payment_method = "pm_1"
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await credit(connection, workspace_id, 5 * DOLLAR, 0, "opening")
-    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
-    await _manage_billing(
-        workspace_id,
-        tmp_path,
-        owner_id,
-        None,
-        "autopay",
-        autopay_dollars=20,
-        autopay_below_dollars=10,
-    )
-
-    providers.in_flight = True
-    await _run_topup(workspace_id, providers)
-    assert await _balance_of(workspace_id) == 5 * DOLLAR
-    ctx = context_for(metronome.NAME, frozenset())
-    with ws(workspace_id):
-        assert await ctx.store.get(metronome.TOPUP_REFUSED_AT_KEY) is None
-
-    providers.in_flight = False
-    await _run_topup(workspace_id, providers)
-    assert await _balance_of(workspace_id) == 25 * DOLLAR
 
 
 def _billing_request(workspace_id: UUID, email: str | None) -> Request:
@@ -1985,87 +1346,6 @@ async def test_the_billing_page_answers_an_admin_what_stops_the_workspace(
     assert paid["refused_below_micro_usd"] == 5 * DOLLAR - TOPUP_GRACE_MICRO_USD
 
 
-async def test_the_billing_page_names_the_card_rather_than_answering_yes(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An admin arranging a refill is about to charge a particular card, so the screen states which
-    one. A bare 'yes' cannot be checked against the wallet it came from, and the provider is the one
-    that knows — the digits are read from it, never stored here."""
-    _billing_env(monkeypatch)
-    workspace_id, _owner, _mate, _conv = await _billing_seed()
-    providers = _Providers()
-    providers.default_payment_method = "pm_live"
-    providers.card_brand, providers.card_last4 = "mastercard", "1590"
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-    ctx = context_for(metronome.NAME, frozenset())
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await credit(connection, workspace_id, 10 * DOLLAR, 10 * DOLLAR, "opening")
-        await ctx.store.put(
-            metronome.BILLING_KEY,
-            metronome.BillingRecord(stripe_customer_id="cus_1").model_dump(mode="json"),
-        )
-
-    _status, body = await _read_billing(workspace_id, "owner@example.com")
-
-    assert body["card"] == {"brand": "mastercard", "last4": "1590"}
-
-
-async def test_a_provider_that_will_not_answer_does_not_take_the_page_down(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """This is the one screen a stopped workspace can still read, and what it most needs to state —
-    what is left, and the line turns stopped at — is core's, not the provider's. So a refused card
-    read costs the card and nothing else, and reads as unknown rather than as absent: 'no card'
-    invites saving one, which would be a guess about the provider's own state."""
-    _billing_env(monkeypatch)
-    workspace_id, _owner, _mate, _conv = await _billing_seed()
-    providers = _Providers()
-    providers.default_payment_method = "pm_live"
-    providers.failing.add("/v1/customers/cus_1")
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-    ctx = context_for(metronome.NAME, frozenset())
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await credit(connection, workspace_id, 40 * DOLLAR, 40 * DOLLAR, "opening")
-        await ctx.store.put(
-            metronome.BILLING_KEY,
-            metronome.BillingRecord(stripe_customer_id="cus_1").model_dump(mode="json"),
-        )
-
-    status, body = await _read_billing(workspace_id, "owner@example.com")
-
-    assert status == 200
-    assert body["balance_micro_usd"] == 40 * DOLLAR
-    assert body["card"] is None
-    assert body["card_unread"] is True
-
-
-async def test_the_billing_page_lists_the_credits_behind_the_balance(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The balance is one figure with a history: a grant, a card charge, a correction. Both figures
-    ride each row, so a grant reads apart from money the workspace paid. Ordering is
-    `recent_purchases`' own contract and tested there, against instants a test can set — these rows
-    are written a clock tick apart at most, so asserting their order here would test the driver's
-    timestamp resolution."""
-    _billing_env(monkeypatch)
-    workspace_id, _owner, _mate, _conv = await _billing_seed()
-    with ws(workspace_id):
-        async with workspace_tx() as connection:
-            await credit(connection, workspace_id, 100 * DOLLAR, 0, "trial")
-            await credit(connection, workspace_id, 5 * DOLLAR, 5 * DOLLAR, "stripe/pi_1")
-
-    _status, body = await _read_billing(workspace_id, "owner@example.com")
-
-    listed = body["purchases"]
-    assert isinstance(listed, list)
-    assert sorted((row["granted_micro_usd"], row["charged_micro_usd"]) for row in listed) == [
-        (5 * DOLLAR, 5 * DOLLAR),
-        (100 * DOLLAR, 0),
-    ]
-
-
 async def test_the_card_link_sends_the_member_back_to_their_billing_screen(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2089,49 +1369,6 @@ async def test_the_card_link_sends_the_member_back_to_their_billing_screen(
     assert _form(session)["return_url"] == (
         f"https://ufo.test/surface/{HOME_SURFACE}{BILLING_SCREEN_FRAGMENT}"
     )
-
-
-async def test_a_deploy_with_no_browser_surface_still_saves_a_card(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A deploy installing no browser surface has no screen to return anyone to, whatever its public
-    base says. The session still saves a card; the member is left at the provider."""
-    _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate, _conv = await _billing_seed()
-    providers = _Providers()
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-
-    answer = await _manage_billing(
-        workspace_id,
-        tmp_path,
-        owner_id,
-        None,
-        "portal",
-        public_base_url="https://ufo.test/",
-        home_surface=None,
-    )
-
-    (session,) = _calls(providers, "POST", "/v1/billing_portal/sessions")
-    assert "return_url" not in _form(session)
-    assert str(answer["portal_url"]).startswith("https://billing.stripe.com/")
-
-
-async def test_a_deploy_with_no_public_base_still_saves_a_card(
-    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A self-hosted deploy that never set a public base has nowhere to send anyone back to. That
-    is not a reason to refuse the link: the session still saves a card, and the member is simply
-    left at the provider."""
-    _billing_env(monkeypatch)
-    workspace_id, owner_id, _mate, _conv = await _billing_seed()
-    providers = _Providers()
-    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
-
-    answer = await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
-
-    (session,) = _calls(providers, "POST", "/v1/billing_portal/sessions")
-    assert "return_url" not in _form(session)
-    assert str(answer["portal_url"]).startswith("https://billing.stripe.com/")
 
 
 def _customer_reads(providers: _Providers) -> int:

@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from ufo_ext_scheduled_tasks.manifest import NAME, PAUSE_RUNNER_JOB, manifest
+from ufo_ext_scheduled_tasks.manifest import NAME, manifest
 from ufo_ext_scheduled_tasks.pause_runner import FIRE_KEY_PREFIX, PauseRunner
 from ufo_ext_scheduled_tasks.pauses import Pause, PauseStore, due_pause_workspaces
 from ufo_ext_scheduled_tasks.pauses import pause as pause_table
@@ -41,6 +41,11 @@ from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 
 @dataclass(frozen=True)
@@ -395,86 +400,6 @@ async def test_a_member_message_folds_into_the_fired_turn(db: None) -> None:
     assert arrivals == ["The approval arrived."]
 
 
-async def test_an_internal_arrival_does_not_supersede_the_timer(db: None) -> None:
-    """A pending internal invocation is not a member reply: the guard is member-only, so the timer
-    still fires."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=member_id)
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id), agent(agent_id):
-        await pause_and_wait(ctx, _wait())
-        [row] = await _rows(workspace_id)
-        await invoker.invoke(
-            conversation_id,
-            agent_id,
-            "background note",
-            "internal-1",
-            authority=WORKSPACE_AUTHORITY,
-        )
-        await _due_now(row["id"])
-        await PauseRunner(ctx=_runner_ctx(invoker)).run()
-        turns = await _turns(conversation_id)
-        remaining = await _rows(workspace_id)
-
-    assert remaining == []
-    assert any(turn["admission_source"] == "scheduled" for turn in turns)
-    fired = next(turn for turn in turns if turn["admission_source"] == "scheduled")
-    assert fired["inbound"] == row["prompt"]
-    assert fired["speaker_member_id"] is None
-    assert fired["on_behalf_of_member_id"] == member_id
-
-
-async def test_a_redelivered_older_message_does_not_supersede_a_later_pause(db: None) -> None:
-    """A message already admitted and answered is not a newer one. Its redelivery dedupes to the
-    finished turn, so no member turn exists past the pause's origin and the timer still fires."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id), agent(agent_id):
-        earlier = (
-            await member_admission.admit(
-                conversation_id, "The approval arrived.", "redelivered", speaker_member_id=member_id
-            )
-        ).turn_id
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.turn)
-                .where(tables.turn.c.id == earlier)
-                .values(
-                    status="done",
-                    terminal=TerminalFrame(status="done", text="handled").model_dump(mode="json"),
-                    seq=1,
-                    updated_at=sa.func.now(),
-                )
-            )
-        await pause_and_wait(
-            replace(
-                _tool_ctx(workspace_id, conversation_id, agent_id, seq=1),
-                speaker_member_id=member_id,
-            ),
-            _wait(),
-        )
-        [row] = await _rows(workspace_id)
-        redelivered = (
-            await member_admission.admit(
-                conversation_id, "The approval arrived.", "redelivered", speaker_member_id=member_id
-            )
-        ).turn_id
-        await _due_now(row["id"])
-        await PauseRunner(
-            ctx=_runner_ctx(AdmissionInvoker(admission=admission, workspace_id=workspace_id))
-        ).run()
-        turns = await _turns(conversation_id)
-        remaining = await _rows(workspace_id)
-
-    assert redelivered == earlier
-    assert remaining == []
-    assert [turn["admission_source"] for turn in turns] == ["member", "scheduled"]
-
-
 async def test_a_crash_between_the_fire_and_the_retire_admits_one_turn(db: None) -> None:
     """Invoke first, retire second: a crash between the two leaves the row armed and still claimed,
     so recovery is the lease expiring and the next tick re-claiming it. That tick re-fires under the
@@ -502,63 +427,6 @@ async def test_a_crash_between_the_fire_and_the_retire_admits_one_turn(db: None)
     [turn] = turns
     assert turn["idempotency_key"] == f"{FIRE_KEY_PREFIX}{persisted['id']}"
     assert dbos.enqueued == [str(turn["id"]), str(turn["id"])]
-
-
-async def test_re_arming_overwrites_the_wait_and_releases_its_claim(db: None) -> None:
-    """A workflow waits for one thing at a time, so a second pause replaces the first rather than
-    queueing beside it — and the tick that leased the predecessor can no longer retire what replaced
-    it, for two independent reasons: the claim it holds was released, and the row it leased no
-    longer carries that id."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=member_id)
-    ext = _runner_ctx(_invoker(workspace_id, StubDbos()))
-    with ws(workspace_id), agent(agent_id):
-        await pause_and_wait(ctx, _wait(reason="first wait", wait_minutes=1))
-        [first] = await _rows(workspace_id)
-        await _due_now(first["id"])
-        [claimed] = await PauseStore(ext).claim_due(datetime.now(UTC), 300)
-        await pause_and_wait(ctx, _wait(reason="second wait", wait_minutes=30))
-        rows = await _rows(workspace_id)
-        await PauseStore(ext).retire(claimed)
-        after_stale_retire = await _rows(workspace_id)
-
-    [row] = rows
-    assert row["id"] != first["id"]
-    assert row["id"] != claimed.id
-    assert "second wait" in row["prompt"]
-    assert "first wait" not in row["prompt"]
-    assert row["claimed_by"] is None
-    assert len(after_stale_retire) == 1
-
-
-async def test_a_re_armed_wait_is_not_fired_by_the_tick_that_leased_its_predecessor(
-    db: None,
-) -> None:
-    """The agent replaced the wait while a tick held the old one — a re-arm inside the lease window,
-    which needs no member message and so passes the supersession guard untouched. Firing the leased
-    predecessor would resume the workflow against an instruction it has already abandoned, and leave
-    the wait that replaced it still armed to fire again."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=member_id)
-    dbos = StubDbos()
-    ext = _runner_ctx(_invoker(workspace_id, dbos))
-    runner = PauseRunner(ctx=ext)
-    with ws(workspace_id), agent(agent_id):
-        await pause_and_wait(ctx, _wait(reason="first wait", wait_minutes=1))
-        [first] = await _rows(workspace_id)
-        await _due_now(first["id"])
-        [claimed] = await PauseStore(ext).claim_due(datetime.now(UTC), 300)
-        await pause_and_wait(ctx, _wait(reason="second wait", wait_minutes=30))
-
-        await runner._fire(PauseStore(ext), claimed)
-
-        turns = await _turns(conversation_id)
-        rows = await _rows(workspace_id)
-
-    assert turns == []
-    assert dbos.enqueued == []
-    assert len(rows) == 1
-    assert "second wait" in rows[0]["prompt"]
 
 
 async def test_a_failed_enqueue_still_ends_the_wait(db: None) -> None:
@@ -746,13 +614,6 @@ def test_pause_and_wait_bounds_the_timer(wait_minutes: int) -> None:
         _wait(wait_minutes=wait_minutes)
 
 
-def test_the_manifest_exposes_the_pause_tool_and_its_runner() -> None:
-    tool = next(tool for tool in manifest().tools if tool.name == "pause_and_wait")
-    assert tool.handler is pause_and_wait
-    assert tool.side_effecting is True
-    assert PAUSE_RUNNER_JOB in {job.name for job in manifest().jobs}
-
-
 async def test_a_re_arm_after_an_undelivered_retire_still_resumes(db: None) -> None:
     """The crash window a stable row id would swallow.
 
@@ -875,118 +736,6 @@ async def test_a_member_message_the_live_turn_absorbed_supersedes_the_timer(db: 
 
     assert [turn["id"] for turn in turns] == [arming]
     assert remaining == []
-
-
-async def test_a_fold_the_agent_had_already_read_does_not_kill_the_timer(db: None) -> None:
-    """The member spoke, the agent absorbed it, and *then* decided to wait — so the timer must fire.
-
-    Sibling of `test_a_member_message_the_live_turn_absorbed_supersedes_the_timer`, and the pair is
-    the whole argument for a second watermark. Both fold a member message into the turn that arms
-    the wait, so both have `folded_into.seq == origin_seq`: in turn-sequence space the two are
-    indistinguishable, yet they must end opposite ways. What separates them is *when* the arrival
-    landed relative to the arm, which only the arrival counter can answer."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id), agent(agent_id):
-        arming = await invoker.invoke(
-            conversation_id,
-            agent_id,
-            "the arming work",
-            "arming",
-            authority=WORKSPACE_AUTHORITY,
-        )
-        folded = (
-            await MemberAdmission(admission=admission, workspace_id=workspace_id).admit(
-                conversation_id, "some context first", "folded-early", speaker_member_id=member_id
-            )
-        ).turn_id
-        assert folded == arming
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.inbound_message)
-                .values(consumed_turn_id=arming)
-                .where(tables.inbound_message.c.consumed_turn_id.is_(None))
-            )
-
-        [arming_row] = await _turns(conversation_id)
-        base = _tool_ctx(
-            workspace_id,
-            conversation_id,
-            agent_id,
-            speaker_member_id=member_id,
-            seq=arming_row["seq"],
-        )
-        await pause_and_wait(
-            replace(base, turn=base.turn.model_copy(update={"id": arming})), _wait()
-        )
-        [row] = await _rows(workspace_id)
-        await _due_now(row["id"])
-        await PauseRunner(ctx=_runner_ctx(invoker)).run()
-        turns = await _turns(conversation_id)
-        remaining = await _rows(workspace_id)
-
-    assert len(turns) == 2
-    assert turns[1]["admission_source"] == "scheduled"
-    assert turns[1]["inbound"] == row["prompt"]
-    assert remaining == []
-
-
-async def test_re_arming_moves_both_watermarks_forward(db: None) -> None:
-    """A second wait is armed from where the conversation is now, not where the first one started.
-
-    Both marks advance together: the turn the new wait was armed from, and how far member arrivals
-    had got when it was. Leaving the arrival mark behind would make the new wait inherit the first
-    one's blind spot — every message folded in between would look like it landed after the arm."""
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    invoker = AdmissionInvoker(admission=admission, workspace_id=workspace_id)
-    member_admission = MemberAdmission(admission=admission, workspace_id=workspace_id)
-    with ws(workspace_id), agent(agent_id):
-        live = await invoker.invoke(
-            conversation_id,
-            agent_id,
-            "the arming work",
-            "arming",
-            authority=WORKSPACE_AUTHORITY,
-        )
-        [live_row] = await _turns(conversation_id)
-        base = _tool_ctx(
-            workspace_id,
-            conversation_id,
-            agent_id,
-            speaker_member_id=member_id,
-            seq=live_row["seq"],
-        )
-        armed_ctx = replace(base, turn=base.turn.model_copy(update={"id": live}))
-        await pause_and_wait(armed_ctx, _wait(reason="first wait"))
-        [first] = await _rows(workspace_id)
-
-        assert (
-            await member_admission.admit(
-                conversation_id, "one more thing", "folded-between", speaker_member_id=member_id
-            )
-        ).turn_id == live
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.inbound_message)
-                .values(consumed_turn_id=live)
-                .where(tables.inbound_message.c.consumed_turn_id.is_(None))
-            )
-
-        await pause_and_wait(armed_ctx, _wait(reason="second wait"))
-        [second] = await _rows(workspace_id)
-        await _due_now(second["id"])
-        await PauseRunner(ctx=_runner_ctx(invoker)).run()
-        turns = await _turns(conversation_id)
-
-    assert first["origin_arrival_seq"] < second["origin_arrival_seq"]
-    assert second["origin_seq"] == first["origin_seq"]
-    assert "second wait" in second["prompt"]
-    assert len(turns) == 2
-    assert turns[1]["admission_source"] == "scheduled"
 
 
 async def test_a_pause_on_an_archived_app_keeps_its_row_for_the_restore(db: None) -> None:

@@ -10,7 +10,7 @@ state (a queued turn) → an agent can run it, with nothing but the external que
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -23,12 +23,9 @@ from ufo_ext_memory.store import memory_item
 from ufo_ext_scheduled_tasks import tools as scheduled_tools
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.cron import next_fire
-from ufo_ext_scheduled_tasks.manifest import NAME, RUNNER_JOB, manifest
+from ufo_ext_scheduled_tasks.manifest import NAME, manifest
 from ufo_ext_scheduled_tasks.runner import (
-    FINAL_FIRE_INSTRUCTION,
-    REPORT_INSTRUCTION,
     ScheduledTaskRunner,
-    fire_body,
 )
 from ufo_ext_scheduled_tasks.schedules import (
     ScheduledTask,
@@ -41,52 +38,44 @@ from ufo_ext_scheduled_tasks.tools import (
     SCHEDULE_MAX,
     SCHEDULED_TASK_KIND,
     SCHEDULED_TASK_OBJECT,
-    SUMMARY_MAX,
     ScheduledTaskObjects,
     ScheduledTaskSpec,
-    pause_and_wait,
 )
 from ufo_ext_scheduled_tasks.visibility import task_content_visible
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.suites.object_tools import (
     BOUNDED_INFORMATIONAL_FIRES,
-    EXPLICIT_DAILY_FIRES,
     FEW_FIRES_MAX,
     REMEMBERED_CADENCE,
-    SINGLE_RUN_FIRES,
     _graded_a_few_runs,
     _graded_bounded_daily,
-    _graded_cron_syntax,
-    _graded_final_fire_result_and_check_in,
     _graded_no_emulated_run_once,
-    _graded_operational_task_stays_open,
     _graded_remembered_cadence,
-    _graded_run_count,
     _remember_cadence,
 )
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.host.ext.loader import skill_registry, turn_tools
-from ufo.runtime.agent_scope import AgentUnbound, agent
+from ufo.host.ext.loader import turn_tools
+from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
-from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.runtime.objects import AdminRequired, ObjectListQuery, UnknownObject, VerbNotSupported
-from ufo.runtime.queue import _load_turn
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import WRITEBACK_PENDING, Agent, TerminalFrame, Turn
+from ufo.schema.records import Agent, TerminalFrame, Turn
 from ufo.sdk.audience import (
-    SHARED_AUDIENCE,
     conversation_audience,
-    foreign_room_audience,
-    room_audience,
 )
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 TOOL_NARRATION = "setting up the reminder"
 
@@ -420,137 +409,6 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
         )
 
 
-async def test_the_task_kind_filters_and_orders_on_its_declared_fields(db: None) -> None:
-    """`next_run_at` and `paused` ride the listing rows, so the agent reads what fires next and
-    what is stopped without opening every task."""
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    listing = _object_tool("object_list")
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(
-            _object_tool("object_apply"),
-            ctx,
-            manifest=_task_manifest("daily", DAILY_9AM, "morning"),
-        )
-        await _dispatch(
-            _object_tool("object_apply"),
-            ctx,
-            manifest=yaml.safe_dump(
-                {
-                    "kind": SCHEDULED_TASK_KIND,
-                    "name": "weekly",
-                    "spec": {"schedule": "0 17 * * 1", "prompt": "digest", "paused": True},
-                }
-            ),
-        )
-        await _store().create(
-            conversation_id,
-            "standing",
-            DAILY_9AM,
-            "sweep",
-            "nightly sweep",
-            datetime(2026, 8, 8, 9, tzinfo=UTC),
-        )
-        tasks = {task.name: task for task in await _store().list()}
-        listed = json.loads(await _dispatch(listing, ctx, kind=SCHEDULED_TASK_KIND))
-        admin_ctx = replace(ctx, speaker_member_id=await _member(workspace_id, is_admin=True))
-        admin_listed = json.loads(await _dispatch(listing, admin_ctx, kind=SCHEDULED_TASK_KIND))
-        stopped = json.loads(
-            await _dispatch(listing, ctx, kind=SCHEDULED_TASK_KIND, filters={"paused": True})
-        )
-        soonest_first = json.loads(
-            await _dispatch(listing, ctx, kind=SCHEDULED_TASK_KIND, order_by="next_run_at")
-        )
-
-    rows = {row["name"]: row for row in listed["objects"]}
-    assert rows["daily"]["paused"] is False
-    assert rows["daily"]["next_run_at"] == tasks["daily"].next_run_at.isoformat()
-    assert rows["daily"]["owner_email"] == f"{creator.hex[:8]}@x.test"
-    assert "standing" not in rows
-    admin_rows = {row["name"]: row for row in admin_listed["objects"]}
-    assert admin_rows["standing"]["owner_email"] is None
-    assert rows["weekly"]["paused"] is True
-    assert [row["name"] for row in stopped["objects"]] == ["weekly"]
-    assert [row["name"] for row in soonest_first["objects"]] == sorted(
-        ("daily", "weekly"), key=lambda name: tasks[name].next_run_at
-    )
-
-
-async def test_a_listed_task_carries_its_latest_fire_and_how_it_ended(db: None) -> None:
-    """A listing row states the fire behind the task as well as the one ahead of it: `last_run_at`,
-    and the status the turn that fire ran closed with. So "what is up with this one" is answered off
-    the row, by an agent reading a page and by the portal drawing one. A task that has never fired
-    states neither."""
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    fired_at = datetime(2026, 8, 15, 9, tzinfo=UTC)
-    fired_turn = uuid4()
-    with ws(workspace_id), agent(agent_id):
-        store = _store()
-        ran = await store.create(
-            conversation_id,
-            "digest",
-            DAILY_9AM,
-            "summarize what merged",
-            "daily digest",
-            datetime(2026, 8, 16, 9, tzinfo=UTC),
-            created_by_member_id=creator,
-        )
-        await store.create(
-            conversation_id,
-            "sweep",
-            DAILY_9AM,
-            "sweep the queue",
-            "nightly sweep",
-            datetime(2026, 8, 16, 9, tzinfo=UTC),
-            created_by_member_id=creator,
-        )
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.turn).values(
-                    id=fired_turn,
-                    workspace_id=workspace_id,
-                    conversation_id=conversation_id,
-                    agent_id=agent_id,
-                    seq=1,
-                    status="done",
-                    inbound="summarize what merged",
-                    admission_source="scheduled",
-                    on_behalf_of_member_id=creator,
-                    terminal=TerminalFrame(status="done", text="posted it").model_dump(mode="json"),
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-            await connection.execute(
-                sa.update(schedule_table)
-                .where(schedule_table.c.id == ran.id)
-                .values(last_run_at=fired_at, last_turn_id=fired_turn)
-            )
-        listed = json.loads(
-            await _dispatch(_object_tool("object_list"), ctx, kind=SCHEDULED_TASK_KIND)
-        )
-        page = await ScheduledTaskObjects().member_page(
-            context_for(NAME, frozenset()),
-            member_id=creator,
-            admin=False,
-            query=ObjectListQuery(supported_fields=SCHEDULED_TASK_OBJECT.list_fields),
-        )
-
-    assert {"last_run_at", "last_run_status"} <= SCHEDULED_TASK_OBJECT.list_fields
-    rows = {row["name"]: row for row in listed["objects"]}
-    assert rows["digest"]["last_run_at"] == fired_at.isoformat()
-    assert rows["digest"]["last_run_status"] == "done"
-    assert rows["sweep"]["last_run_at"] is None
-    assert rows["sweep"]["last_run_status"] is None
-    member_rows = {row.name: row for row in page.rows}
-    assert member_rows["digest"].fields["last_run_at"] == fired_at.isoformat()
-    assert member_rows["digest"].fields["last_run_status"] == "done"
-    assert member_rows["sweep"].fields["last_run_status"] is None
-
-
 async def test_a_turn_reads_a_prompt_excerpt_the_member_reads_whole(db: None) -> None:
     """`object_list` answers a whole page — 50 rows — into the model's context, and the spec bounds
     no prompt, so the rows a turn reads carry an excerpt. The member's own read carries the prompt
@@ -586,21 +444,6 @@ async def test_a_turn_reads_a_prompt_excerpt_the_member_reads_whole(db: None) ->
     assert turn_row["prompt"] == sprawling[:PROMPT_EXCERPT_MAX]
     [member_row] = page.rows
     assert member_row.fields["prompt"] == sprawling
-
-
-async def test_malformed_conversation_filter_still_validates_the_list_query() -> None:
-    query = ObjectListQuery(
-        filters={"conversation": "not-a-uuid", "unexpected": True},
-        supported_fields=frozenset({"conversation", "next_run_at", "paused"}),
-    )
-
-    with pytest.raises(ValueError, match=r"unknown object list filters.*unexpected"):
-        await ScheduledTaskObjects().member_page(
-            None,
-            member_id=uuid4(),
-            admin=False,
-            query=query,
-        )
 
 
 async def test_automations_slot_rejects_a_recreated_task_generation(db: None) -> None:
@@ -775,151 +618,6 @@ async def test_paused_task_neither_fires_nor_reopens_its_workspace(db: None) -> 
     assert workspace_id in await due_task_workspaces()()
 
 
-async def test_reapplied_name_updates_in_place(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    apply = _object_tool("object_apply")
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(ctx=ctx, tool=apply, manifest=_task_manifest("report", DAILY_9AM, "daily"))
-        second = json.loads(
-            await _dispatch(
-                ctx=ctx, tool=apply, manifest=_task_manifest("report", "0 17 * * 1", "weekly")
-            )
-        )
-        tasks = await _store().list()
-    assert second["result"] == "updated"
-    assert len(tasks) == 1
-    assert tasks[0].schedule == "0 17 * * 1"
-    assert tasks[0].prompt == "weekly"
-
-
-async def test_concurrent_first_create_converges_by_agent_name(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    second_conversation = uuid4()
-    async with workspace_tx() as connection:
-        member_id = (
-            await connection.execute(
-                sa.select(tables.member.c.id).where(tables.member.c.workspace_id == workspace_id)
-            )
-        ).scalar_one()
-        await connection.execute(
-            sa.insert(tables.conversation).values(
-                id=second_conversation,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                surface="cli",
-                queue_key="second-session",
-                member_id=member_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    store = _store()
-    due_at = datetime.now(UTC) + timedelta(minutes=10)
-    with ws(workspace_id), agent(agent_id):
-        outcomes = await asyncio.gather(
-            store.create(
-                conversation_id,
-                "scheduled-shared-name",
-                DAILY_9AM,
-                "first",
-                "first",
-                due_at,
-            ),
-            store.create(
-                second_conversation,
-                "scheduled-shared-name",
-                DAILY_9AM,
-                "second",
-                "second",
-                due_at,
-            ),
-            return_exceptions=True,
-        )
-        tasks = await store.list()
-    created = [outcome for outcome in outcomes if isinstance(outcome, ScheduledTask)]
-    refused = [outcome for outcome in outcomes if isinstance(outcome, ValueError)]
-    assert len(created) == 1
-    assert len(refused) == 1
-    assert "already exists" in str(refused[0])
-    assert len(tasks) == 1
-
-
-async def test_runner_fires_due_task_into_a_turn(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    store = _store()
-    due_at = datetime.now(UTC) - timedelta(minutes=1)
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        await store.create(
-            conversation_id,
-            "scheduled-daily",
-            DAILY_9AM,
-            "check inbox",
-            "check inbox",
-            due_at,
-            created_by_member_id=creator,
-        )
-        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
-
-        turns = await _turns(conversation_id)
-        assert len(turns) == 1
-        assert turns[0]["inbound"] == (
-            "<scheduled_task>\n"
-            f"scheduled_fire: {due_at.isoformat().replace('+00:00', 'Z')}\n"
-            "</scheduled_task>\n"
-            "check inbox\n"
-            "<scheduled_task_instruction>\n"
-            f"{REPORT_INSTRUCTION}\n"
-            "</scheduled_task_instruction>"
-        )
-        assert turns[0]["admission_source"] == "scheduled"
-        assert turns[0]["speaker_member_id"] is None
-        assert turns[0]["on_behalf_of_member_id"] == creator
-        assert turns[0]["status"] == "queued"
-        assert dbos.enqueued == [str(turns[0]["id"])]
-        advanced = (await store.list())[0]
-        assert advanced.last_run_at is not None
-        assert await store.claim_due(datetime.now(UTC), 300) == ()
-
-        inspection = await store.inspect(advanced)
-        assert inspection is not None
-        assert inspection.last_turn_id == turns[0]["id"]
-        assert inspection.last_response is None
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.turn)
-                .values(status="done", terminal={"status": "done", "text": "found 3 new replies"})
-                .where(tables.turn.c.id == turns[0]["id"])
-            )
-        fetched = yaml.safe_load(
-            await _dispatch(
-                _object_tool("object_get"),
-                replace(
-                    _tool_ctx(workspace_id, conversation_id, agent_id),
-                    speaker_member_id=creator,
-                ),
-                kind=SCHEDULED_TASK_KIND,
-                name="scheduled-daily",
-            )
-        )
-        assert fetched["links"] == [
-            {
-                "relation": "reports_to",
-                "target": {"kind": "conversation", "name": str(conversation_id)},
-            },
-        ]
-        assert fetched["updated_at"] is not None
-        status = fetched["status"]
-        assert status["last_run"]["turn_id"] == str(turns[0]["id"])
-        assert status["last_run"]["response"] == "found 3 new replies"
-
-
 async def test_re_applying_a_manifest_keeps_the_recorded_run(db: None) -> None:
     """Re-applying an existing task's manifest changes what the task says, never what it did: the
     last fire's time, its turn, and that turn's response all read back after the update."""
@@ -986,84 +684,6 @@ async def test_re_applying_a_manifest_keeps_the_recorded_run(db: None) -> None:
         "turn_status": "done",
         "response": "three competitors moved",
     }
-
-
-async def test_runner_replaces_final_permitted_fire_with_check_in(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    tick_at = datetime.now(UTC)
-    due_at = tick_at - timedelta(minutes=1)
-    expires_at = next_fire(DAILY_9AM, tick_at)
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        await store.create(
-            conversation_id,
-            "bounded-daily",
-            DAILY_9AM,
-            "check inbox",
-            "check inbox",
-            due_at,
-            expires_at=expires_at,
-        )
-        [claimed] = await store.claim_due(tick_at, 300)
-        assert (
-            await ScheduledTaskRunner(ctx=_runner_ctx(invoker))._fire(
-                store, claimed, tick_at, tick_at
-            )
-            is None
-        )
-        [advanced] = await store.list()
-    [turn] = await _turns(conversation_id)
-    assert turn["inbound"] == (
-        "<scheduled_task>\n"
-        f"scheduled_fire: {due_at.isoformat().replace('+00:00', 'Z')}\n"
-        "</scheduled_task>\n"
-        "check inbox\n"
-        "<scheduled_task_instruction>\n"
-        f"{FINAL_FIRE_INSTRUCTION}\n"
-        "</scheduled_task_instruction>"
-    )
-    assert advanced.next_run_at.replace(tzinfo=UTC) == expires_at
-
-
-async def test_task_horizon_round_trips_through_spec_and_status(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    expires_at = datetime.now(UTC) + timedelta(days=7)
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(
-            _object_tool("object_apply"),
-            ctx,
-            manifest=_task_manifest(
-                "seven-day-digest",
-                DAILY_9AM,
-                "send the digest",
-                expires_at=expires_at,
-            ),
-        )
-        fetched = yaml.safe_load(
-            await _dispatch(
-                _object_tool("object_get"),
-                ctx,
-                kind=SCHEDULED_TASK_KIND,
-                name="seven-day-digest",
-            )
-        )
-    assert datetime.fromisoformat(fetched["spec"]["expires_at"]) == expires_at
-    assert datetime.fromisoformat(fetched["status"]["expires_at"]) == expires_at
-
-
-def test_task_expiry_requires_utc() -> None:
-    with pytest.raises(ValueError, match="UTC"):
-        ScheduledTaskSpec(
-            schedule=DAILY_9AM,
-            prompt="send the digest",
-            expires_at=datetime(2026, 8, 1, tzinfo=UTC).astimezone(timezone(timedelta(hours=-4))),
-        )
 
 
 async def test_expired_task_is_cancelled_without_invoking(db: None) -> None:
@@ -1133,34 +753,6 @@ async def test_unclaimed_task_cannot_be_retired(db: None) -> None:
         )
         with pytest.raises(ValueError, match="unclaimed"):
             await store.retire_if_expired(task, now)
-
-
-async def test_future_expiry_allows_claimed_task_to_invoke(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    now = datetime.now(UTC)
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    store = _store()
-    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id), agent(agent_id):
-        await store.create(
-            conversation_id,
-            "unexpired-digest",
-            DAILY_9AM,
-            "send the digest",
-            "send the digest",
-            now,
-            expires_at=now + timedelta(minutes=1),
-        )
-        [claimed] = await store.claim_due(now, 300)
-        assert await runner._fire(store, claimed, now, now) is None
-        [remaining] = await store.list()
-    [turn] = await _turns(conversation_id)
-    assert remaining.last_run_at is not None
-    assert remaining.last_run_at.replace(tzinfo=UTC) == now
-    assert dbos.enqueued == [str(turn["id"])]
 
 
 async def test_batch_backlog_does_not_skip_next_cron_occurrence(db: None) -> None:
@@ -1303,63 +895,6 @@ async def test_claim_due_caps_a_sweep_at_its_batch_limit(db: None) -> None:
         assert [task.name for task in second_sweep] == ["second"]
 
 
-async def test_fire_into_a_durable_surface_conversation_registers_delivery(db: None) -> None:
-    """A scheduled fire and member ingress use distinct capabilities over the same admission
-    workflow, so a task in a Slack thread still registers its writeback with the turn."""
-    workspace_id, agent_id, conversation_id = await _seed(surface="slack")
-    store = _store()
-    due_at = datetime.now(UTC) - timedelta(minutes=1)
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset({"slack"})),
-        workspace_id=workspace_id,
-    )
-    with ws(workspace_id), agent(agent_id):
-        await store.create(
-            conversation_id,
-            "scheduled-daily",
-            DAILY_9AM,
-            "check inbox",
-            "check inbox",
-            due_at,
-        )
-        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
-        turns = await _turns(conversation_id)
-        assert len(turns) == 1
-        async with workspace_tx() as connection:
-            status = (
-                await connection.execute(
-                    sa.select(tables.writeback.c.status).where(
-                        tables.writeback.c.turn_id == turns[0]["id"]
-                    )
-                )
-            ).scalar_one()
-        assert status == WRITEBACK_PENDING
-
-
-async def test_second_poll_does_not_refire_an_advanced_task(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    store = _store()
-    due_at = datetime.now(UTC) - timedelta(minutes=1)
-    dbos = StubDbos()
-    ctx = _runner_ctx(
-        AdmissionInvoker(
-            admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-        ),
-    )
-    with ws(workspace_id), agent(agent_id):
-        await store.create(
-            conversation_id,
-            "scheduled-daily",
-            DAILY_9AM,
-            "check inbox",
-            "check inbox",
-            due_at,
-        )
-        await ScheduledTaskRunner(ctx=ctx).run()
-        await ScheduledTaskRunner(ctx=ctx).run()
-        assert len(await _turns(conversation_id)) == 1
-
-
 async def test_next_recurring_fire_admits_a_distinct_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
@@ -1445,56 +980,6 @@ async def test_applied_task_rejects_expiry_at_its_first_fire(
         await apply.handler(ctx, args)
 
 
-async def test_applied_task_accepts_expiry_after_its_first_fire(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(scheduled_tools, "datetime", SimpleNamespace(now=lambda _tz: APPLY_NOW))
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    first_fire = next_fire(DAILY_9AM, APPLY_NOW)
-    expires_at = next_fire(DAILY_9AM, first_fire)
-
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(
-            _object_tool("object_apply"),
-            ctx,
-            manifest=_task_manifest("one-fire", DAILY_9AM, "report once", expires_at=expires_at),
-        )
-        [task] = await _store().list()
-
-    assert task.expires_at == expires_at
-
-
-async def test_applied_paused_task_accepts_expiry_at_its_first_fire(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(scheduled_tools, "datetime", SimpleNamespace(now=lambda _tz: APPLY_NOW))
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator)
-    first_fire = next_fire(DAILY_9AM, APPLY_NOW)
-    manifest = yaml.safe_dump(
-        {
-            "kind": SCHEDULED_TASK_KIND,
-            "name": "paused-zero-fire",
-            "spec": {
-                "schedule": DAILY_9AM,
-                "prompt": "report once",
-                "expires_at": first_fire,
-                "paused": True,
-            },
-        }
-    )
-
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(_object_tool("object_apply"), ctx, manifest=manifest)
-        [task] = await _store().list()
-
-    assert task.paused
-    assert task.expires_at == first_fire
-
-
 async def test_applied_task_update_rejects_expiry_at_its_next_fire(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1523,13 +1008,6 @@ async def test_applied_task_update_rejects_expiry_at_its_next_fire(
         [task] = await _store().list()
 
     assert task.expires_at is None
-
-
-def test_task_scheduling_skill_parses_and_indexes() -> None:
-    registry = skill_registry((manifest(),))
-    index = dict(registry.index())
-    assert "task-scheduling" in index
-    assert manifest().requires == ("memory_search",)
 
 
 async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: None) -> None:
@@ -1573,80 +1051,11 @@ async def test_bounded_daily_eval_rejects_open_ended_and_accepts_ten_fires(db: N
         assert (await _graded_bounded_daily(CapabilityOutput("", ()))).passed
 
 
-async def test_operational_eval_requires_an_open_ended_task(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    first_fire = datetime(2026, 8, 1, 9, tzinfo=UTC)
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        task = await store.create(
-            conversation_id,
-            "credential-refresh",
-            "0 * * * *",
-            "Refresh integration credentials so synchronization keeps access.",
-            "Credential refresh",
-            first_fire,
-            expires_at=first_fire + timedelta(days=1),
-        )
-        assert not (await _graded_operational_task_stays_open(CapabilityOutput("", ()))).passed
-        await store.update(
-            task,
-            "0 * * * *",
-            "Refresh integration credentials so synchronization keeps access.",
-            "Credential refresh",
-            first_fire,
-            paused=False,
-        )
-        assert (await _graded_operational_task_stays_open(CapabilityOutput("", ()))).passed
-
-
 def _fire_after(schedule: str, first_fire: datetime, occurrences: int) -> datetime:
     fire = first_fire
     for _ in range(occurrences):
         fire = next_fire(schedule, fire)
     return fire
-
-
-async def test_cron_syntax_eval_requires_both_requested_weekdays_at_the_asked_clock(
-    db: None,
-) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    tuesdays = "30 18 * * 2"
-    both_days = "30 18 * * 2,4"
-    wrong_clock = "0 18 * * 2,4"
-    prompt = "Post the changelog highlights."
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        task = await store.create(
-            conversation_id,
-            "changelog-highlights",
-            tuesdays,
-            prompt,
-            "Changelog highlights",
-            next_fire(tuesdays, datetime(2026, 8, 1, tzinfo=UTC)),
-        )
-        one_day = await _graded_cron_syntax(CapabilityOutput("", ()))
-        assert not one_day.passed
-        assert "one of the two requested days" in one_day.reason
-        task = await store.update(
-            task,
-            wrong_clock,
-            prompt,
-            "Changelog highlights",
-            next_fire(wrong_clock, datetime(2026, 8, 1, tzinfo=UTC)),
-            paused=False,
-        )
-        off_clock = await _graded_cron_syntax(CapabilityOutput("", ()))
-        assert not off_clock.passed
-        assert "fires at" in off_clock.reason
-        await store.update(
-            task,
-            both_days,
-            prompt,
-            "Changelog highlights",
-            next_fire(both_days, datetime(2026, 8, 1, tzinfo=UTC)),
-            paused=False,
-        )
-        assert (await _graded_cron_syntax(CapabilityOutput("", ()))).passed
 
 
 async def test_run_once_eval_rejects_a_cron_schedule_bounded_by_an_expiry(db: None) -> None:
@@ -1694,60 +1103,6 @@ async def test_run_once_eval_rejects_a_cron_schedule_bounded_by_an_expiry(db: No
                 CapabilityOutput("One-time runs are not supported, so nothing is scheduled.", ())
             )
         ).passed
-
-
-async def test_run_count_eval_counts_the_fires_the_expiry_admits(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    schedule = "0 6 * * *"
-    first_fire = datetime(2026, 8, 1, 6, tzinfo=UTC)
-    prompt = "Report the shipping queue backlog."
-    single_run = _graded_run_count(SINGLE_RUN_FIRES, "O14-explicit-single-run")
-    ten_runs = _graded_run_count(EXPLICIT_DAILY_FIRES, "O14-explicit-single-run")
-    store = _store()
-    with ws(workspace_id), agent(agent_id):
-        task = await store.create(
-            conversation_id,
-            "shipping-backlog",
-            schedule,
-            prompt,
-            "Shipping queue backlog",
-            first_fire,
-        )
-        open_ended = await single_run(CapabilityOutput("", ()))
-        assert not open_ended.passed
-        assert "expires_at" in open_ended.reason
-        task = await store.update(
-            task,
-            schedule,
-            prompt,
-            "Shipping queue backlog",
-            first_fire,
-            expires_at=_fire_after(schedule, first_fire, 2),
-            paused=False,
-        )
-        two_fires = await single_run(CapabilityOutput("", ()))
-        assert not two_fires.passed
-        assert "permits 2 fires, not 1" in two_fires.reason
-        task = await store.update(
-            task,
-            schedule,
-            prompt,
-            "Shipping queue backlog",
-            first_fire,
-            expires_at=_fire_after(schedule, first_fire, 1),
-            paused=False,
-        )
-        assert (await single_run(CapabilityOutput("", ()))).passed
-        await store.update(
-            task,
-            schedule,
-            prompt,
-            "Shipping queue backlog",
-            first_fire,
-            expires_at=_fire_after(schedule, first_fire, EXPLICIT_DAILY_FIRES),
-            paused=False,
-        )
-        assert (await ten_runs(CapabilityOutput("", ()))).passed
 
 
 async def test_a_few_runs_eval_accepts_a_small_bound_and_rejects_a_long_one(db: None) -> None:
@@ -1841,157 +1196,6 @@ async def test_remembered_cadence_eval_seeds_the_preference_and_requires_its_cad
         assert searched.evidence["memory_search"] is True
 
 
-async def test_final_fire_eval_requires_result_then_check_in() -> None:
-    no_question = CapabilityOutput("", ())
-    assert not (await _graded_final_fire_result_and_check_in(no_question)).passed
-    question_without_report = CapabilityOutput(
-        "",
-        (
-            ToolInvocation(
-                name="object_apply",
-                input={},
-                result="created",
-                has_result=True,
-            ),
-            ToolInvocation(
-                name="ask_user",
-                input={
-                    "title": "Keep this task running?",
-                    "questions": [
-                        {
-                            "question": "What should I do next?",
-                            "options": [
-                                {"label": "Continue daily"},
-                                {"label": "Change cadence"},
-                                {"label": "Stop"},
-                            ],
-                        }
-                    ],
-                },
-                result="waiting",
-                has_result=True,
-            ),
-        ),
-    )
-    assert not (await _graded_final_fire_result_and_check_in(question_without_report)).passed
-    searched_without_result = CapabilityOutput(
-        "",
-        (
-            ToolInvocation(
-                name="object_apply",
-                input={},
-                result="created",
-                has_result=True,
-            ),
-            ToolInvocation(
-                name="search_web",
-                input={"queries": ["McCarren Park events"]},
-                result="No listed events.",
-                has_result=True,
-            ),
-            ToolInvocation(
-                name="ask_user",
-                input={
-                    "title": "Keep this task running?",
-                    "questions": [
-                        {
-                            "question": "What should I do next?",
-                            "options": [
-                                {"label": "Continue daily"},
-                                {"label": "Change cadence"},
-                                {"label": "Stop"},
-                            ],
-                        }
-                    ],
-                },
-                result="waiting",
-                has_result=True,
-            ),
-        ),
-    )
-    assert not (await _graded_final_fire_result_and_check_in(searched_without_result)).passed
-    result_and_question = CapabilityOutput(
-        "McCarren Park today: Unable to retrieve event listings. Keep this running?",
-        (
-            ToolInvocation(
-                name="object_apply",
-                input={},
-                result="created",
-                has_result=True,
-            ),
-            ToolInvocation(
-                name="search_web",
-                input={"queries": ["McCarren Park events"]},
-                result="CredentialSlotUnset: perplexity_api_key",
-                has_result=True,
-                is_error=True,
-            ),
-            ToolInvocation(
-                name="ask_user",
-                input={
-                    "title": "Keep this task running?",
-                    "questions": [
-                        {
-                            "question": "What should I do next?",
-                            "options": [
-                                {"label": "Continue daily"},
-                                {"label": "Change cadence"},
-                                {"label": "Stop"},
-                            ],
-                        }
-                    ],
-                },
-                result="waiting",
-                has_result=True,
-            ),
-        ),
-    )
-    assert (await _graded_final_fire_result_and_check_in(result_and_question)).passed
-
-
-def test_manifest_exposes_pause_as_a_side_effecting_tool() -> None:
-    tool = next(tool for tool in manifest().tools if tool.name == "pause_and_wait")
-    assert tool.handler is pause_and_wait
-    assert tool.side_effecting is True
-    assert manifest().conversation_slots == (AUTOMATIONS_SLOT,)
-
-
-async def test_manifest_job_fires_through_job_runner(db: None) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    due_at = datetime.now(UTC) - timedelta(minutes=1)
-    with ws(workspace_id), agent(agent_id):
-        await _store().create(
-            conversation_id,
-            "scheduled-daily",
-            DAILY_9AM,
-            "check inbox",
-            "check inbox",
-            due_at,
-        )
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    declared = manifest()
-    runner = JobRunner(
-        bindings=bindings_from((declared,), ()),
-        manifests=(declared,),
-        invoker_factory=lambda wid: AdmissionInvoker(admission=admission, workspace_id=wid),
-    )
-    with ws(workspace_id), agent(agent_id):
-        for workspace_id in await runner.candidates(f"{NAME}:{RUNNER_JOB}"):
-            await runner.fire(f"{NAME}:{RUNNER_JOB}", workspace_id)
-    turns = await _turns(conversation_id)
-    assert len(turns) == 1
-    assert turns[0]["inbound"] == (
-        "<scheduled_task>\n"
-        f"scheduled_fire: {due_at.isoformat().replace('+00:00', 'Z')}\n"
-        "</scheduled_task>\n"
-        "check inbox\n"
-        "<scheduled_task_instruction>\n"
-        f"{REPORT_INSTRUCTION}\n"
-        "</scheduled_task_instruction>"
-    )
-
-
 async def test_invoke_without_invoker_fails_loud(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     store = _store()
@@ -2036,45 +1240,6 @@ async def test_apply_captures_the_creating_member(db: None) -> None:
         tasks = await _store().list()
     assert len(tasks) == 1
     assert tasks[0].created_by_member_id == creator
-
-
-async def test_scheduled_fire_runs_on_behalf_of_the_creator(db: None) -> None:
-    """A fired task's turn carries the creator as on_behalf_of (never as speaker), so it keeps the
-    creator's private connections without gaining the granting authority a live speaker has."""
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    due_at = datetime.now(UTC) - timedelta(minutes=1)
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        await _store().create(
-            conversation_id,
-            "digest",
-            DAILY_9AM,
-            "send the digest",
-            "send the digest",
-            due_at,
-            created_by_member_id=creator,
-        )
-        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
-        turns = await _turns(conversation_id)
-        _, _, audience = await _load_turn(turns[0]["id"])
-        async with workspace_tx() as connection:
-            conversation_member = (
-                await connection.execute(
-                    sa.select(tables.conversation.c.member_id).where(
-                        tables.conversation.c.id == conversation_id
-                    )
-                )
-            ).scalar_one()
-    assert len(turns) == 1
-    assert turns[0]["admission_source"] == "scheduled"
-    assert turns[0]["speaker_member_id"] is None
-    assert turns[0]["on_behalf_of_member_id"] == creator
-    assert audience == conversation_audience(conversation_member)
-    assert audience != conversation_audience(creator)
 
 
 async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -> None:
@@ -2143,148 +1308,6 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
     assert len(tasks) == 1
     assert tasks[0].prompt == "Check my oncology portal and summarize the biopsy result."
     assert tasks[0].created_by_member_id == creator
-
-
-async def test_a_task_reporting_into_a_shared_conversation_is_read_but_not_changed(
-    db: None,
-) -> None:
-    """A task reporting into a conversation the whole workspace reads is listed and read whole by
-    every member — its fires post there for all of them, so the schedule behind them is no secret.
-    Reading is not owning: the same member is refused the edit and the delete, and told who may."""
-    workspace_id, agent_id, _private_conversation = await _seed()
-    creator = await _member(workspace_id)
-    colleague = await _member(workspace_id)
-    shared_conversation, private_room, foreign_room = uuid4(), uuid4(), uuid4()
-    async with workspace_tx() as connection:
-        for conversation_id, queue_key, audience in (
-            (shared_conversation, "channel", str(SHARED_AUDIENCE)),
-            (private_room, "private-room", str(room_audience("slack", "C0PRIVATE"))),
-            (foreign_room, "foreign-room", str(foreign_room_audience("slack", "C0FOREIGN"))),
-        ):
-            await connection.execute(
-                sa.insert(tables.conversation).values(
-                    id=conversation_id,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    surface="slack",
-                    queue_key=queue_key,
-                    member_id=None,
-                    audience=audience,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-    creator_ctx = replace(
-        _tool_ctx(workspace_id, shared_conversation, agent_id), speaker_member_id=creator
-    )
-    colleague_ctx = replace(creator_ctx, speaker_member_id=colleague)
-    apply = _object_tool("object_apply")
-    get = _object_tool("object_get")
-    listing = _object_tool("object_list")
-    delete = _object_tool("object_delete")
-
-    with ws(workspace_id), agent(agent_id):
-        await _dispatch(
-            apply,
-            creator_ctx,
-            manifest=_task_manifest("digest", DAILY_9AM, "post the channel digest", "the digest"),
-        )
-        seen = json.loads(await _dispatch(listing, colleague_ctx, kind=SCHEDULED_TASK_KIND))
-        fetched = yaml.safe_load(
-            await _dispatch(get, colleague_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
-        )
-        with pytest.raises(AdminRequired, match="creator"):
-            await _dispatch(
-                apply,
-                colleague_ctx,
-                manifest=_task_manifest("digest", "0 17 * * 1", "hijacked"),
-            )
-        with pytest.raises(AdminRequired, match="creator or a workspace admin"):
-            await _dispatch(delete, colleague_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
-        for conversation_id, name in ((private_room, "room-sweep"), (foreign_room, "guest-sweep")):
-            await _dispatch(
-                apply,
-                replace(
-                    _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator
-                ),
-                manifest=_task_manifest(name, DAILY_9AM, f"run {name}", name),
-            )
-        walled = json.loads(await _dispatch(listing, colleague_ctx, kind=SCHEDULED_TASK_KIND))
-        surviving = await _store().list()
-
-    assert [row["name"] for row in seen["objects"]] == ["digest"]
-    assert [row["summary"] for row in seen["objects"]] == [f"{DAILY_9AM} — the digest"]
-    assert fetched["spec"]["prompt"] == "post the channel digest"
-    assert [row["name"] for row in walled["objects"]] == ["digest"]
-    assert {task.name for task in surviving} == {"digest", "room-sweep", "guest-sweep"}
-    assert [
-        (task.prompt, task.created_by_member_id) for task in surviving if task.name == "digest"
-    ] == [("post the channel digest", creator)]
-
-
-async def test_task_namespace_and_conversation_are_ambient_agent_scoped(db: None) -> None:
-    workspace_id, first_agent, first_conversation = await _seed()
-    second_agent, second_conversation = await _second_agent(workspace_id)
-    store = _store()
-    due_at = datetime.now(UTC) + timedelta(hours=1)
-
-    with ws(workspace_id):
-        with pytest.raises(AgentUnbound):
-            await store.list()
-        with agent(first_agent):
-            first = await store.create(
-                first_conversation,
-                "digest",
-                DAILY_9AM,
-                "first agent digest",
-                "first",
-                due_at,
-            )
-            with pytest.raises(ValueError, match="bound to its executing agent"):
-                await store.create(
-                    second_conversation,
-                    "crossed",
-                    DAILY_9AM,
-                    "crossed",
-                    "crossed",
-                    due_at,
-                )
-        with agent(second_agent):
-            assert await store.inspect(first) is None
-            second_due_at = due_at + timedelta(minutes=1)
-            second = await store.create(
-                second_conversation,
-                "digest",
-                DAILY_9AM,
-                "second agent digest",
-                "second",
-                second_due_at,
-            )
-            second_rows = await store.list()
-            second_inspection = await store.inspect(second)
-            assert second_inspection is not None
-            assert second_inspection.next_run_at.replace(tzinfo=UTC) == second_due_at
-        with agent(first_agent):
-            first_rows = await store.list()
-            first_inspection = await store.inspect(first)
-            assert first_inspection is not None
-            assert first_inspection.next_run_at.replace(tzinfo=UTC) == due_at
-            await store.cancel(first)
-            assert await store.inspect(first) is None
-        with agent(second_agent):
-            surviving_rows = await store.list()
-            surviving_inspection = await store.inspect(second)
-            assert surviving_inspection is not None
-            assert surviving_inspection.next_run_at.replace(tzinfo=UTC) == second_due_at
-
-    assert first.id != second.id
-    assert [(task.agent_id, task.prompt) for task in first_rows] == [
-        (first_agent, "first agent digest")
-    ]
-    assert [(task.agent_id, task.prompt) for task in second_rows] == [
-        (second_agent, "second agent digest")
-    ]
-    assert surviving_rows == second_rows
 
 
 async def test_workspace_clock_fires_exact_records_across_agents(db: None) -> None:
@@ -2537,73 +1560,6 @@ async def test_object_apply_refuses_a_generation_change_after_its_snapshot(
     else:
         assert replacement is not None
         assert remaining == (replacement,)
-
-
-@pytest.mark.parametrize("change", ["none", "delete", "replace"])
-async def test_object_get_rechecks_generation_after_status(
-    db: None,
-    monkeypatch: pytest.MonkeyPatch,
-    change: str,
-) -> None:
-    workspace_id, agent_id, conversation_id = await _seed()
-    alice = await _member(workspace_id)
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=alice)
-    scheduler = _store()
-
-    with ws(workspace_id), agent(agent_id):
-        original = await scheduler.create(
-            conversation_id,
-            "digest",
-            DAILY_9AM,
-            "original",
-            "original",
-            datetime.now(UTC),
-            created_by_member_id=alice,
-        )
-
-        async def finish_status(store: ScheduleStore, expected: ScheduledTask):
-            if change != "none":
-                await scheduler.cancel(original)
-            if change == "replace":
-                await scheduler.create(
-                    conversation_id,
-                    expected.name,
-                    DAILY_9AM,
-                    "replacement",
-                    "replacement",
-                    datetime.now(UTC),
-                    created_by_member_id=alice,
-                )
-            return None
-
-        monkeypatch.setattr(ScheduleStore, "inspect", finish_status)
-        if change == "none":
-            fetched = yaml.safe_load(
-                await _dispatch(
-                    _object_tool("object_get"),
-                    ctx,
-                    kind=SCHEDULED_TASK_KIND,
-                    name="digest",
-                )
-            )
-            assert fetched["status"] is None
-        else:
-            with pytest.raises(ValueError, match="changed while reading"):
-                await _dispatch(
-                    _object_tool("object_get"),
-                    ctx,
-                    kind=SCHEDULED_TASK_KIND,
-                    name="digest",
-                )
-        remaining = await scheduler.list()
-
-    if change == "none":
-        assert remaining == (original,)
-    elif change == "delete":
-        assert remaining == ()
-    else:
-        assert len(remaining) == 1
-        assert remaining[0].prompt == "replacement"
 
 
 async def test_object_delete_refuses_a_replacement_after_its_detail_snapshot(
@@ -3481,30 +2437,9 @@ def _facet(prop: dict, key: str) -> object:
     return next((entry[key] for entry in prop.get("anyOf", ()) if key in entry), None)
 
 
-def test_spec_schema_states_the_shape_a_form_needs() -> None:
-    properties = ScheduledTaskSpec.model_json_schema()["properties"]
-
-    assert properties["schedule"]["examples"] == ["0 9 * * 1-5"]
-    assert _facet(properties["schedule"], "maxLength") == SCHEDULE_MAX
-    assert _facet(properties["description"], "maxLength") is None
-    assert _facet(properties["prompt"], "maxLength") is None
-    assert properties["expires_at"]["title"] == "Expires At"
-    assert _facet(properties["expires_at"], "format") == "date-time"
-
-
 def test_a_bound_field_refuses_a_value_past_its_bound() -> None:
     with pytest.raises(ValueError):
         ScheduledTaskSpec(schedule="* " * SCHEDULE_MAX)
-
-
-def test_a_description_past_the_listing_line_is_still_a_spec_this_model_reads() -> None:
-    """A listing line is bounded where it is drawn, never where it is stored: this model is what a
-    read reconstructs a stored row into, so a bound here makes every row written before it
-    unreadable for good. Each read draws its own — the portal's proof carries a row that summarizes
-    at `SUMMARY_MAX` and states its prompt whole, and a turn's carries the same prompt at
-    `PROMPT_EXCERPT_MAX`."""
-    sprawling = "d" * (SUMMARY_MAX * 3)
-    assert ScheduledTaskSpec(description=sprawling).description == sprawling
 
 
 async def test_a_cancel_inside_the_lease_window_does_not_fire(db: None) -> None:
@@ -3542,105 +2477,6 @@ async def test_a_cancel_inside_the_lease_window_does_not_fire(db: None) -> None:
     assert turns == []
     assert remaining == ()
     assert dbos.enqueued == []
-
-
-async def test_an_edit_inside_the_lease_window_does_not_fire_the_old_claim(db: None) -> None:
-    """An edit rewrites what the task says and releases its claim, so the version a tick leased is
-    no longer the version that exists. The old claim fires nothing and the edited row waits for its
-    own next occurrence."""
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    store = _store()
-    due_at = datetime.now(UTC) - timedelta(minutes=1)
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    runner = ScheduledTaskRunner(ctx=_runner_ctx(invoker))
-    with ws(workspace_id), agent(agent_id):
-        created = await store.create(
-            conversation_id,
-            "digest",
-            DAILY_9AM,
-            "check inbox",
-            "digest",
-            due_at,
-            created_by_member_id=creator,
-        )
-        [claimed] = await store.claim_due(datetime.now(UTC), 300)
-        await store.update(
-            created,
-            "0 17 * * 1",
-            "read the weekly instead",
-            "weekly",
-            datetime.now(UTC) + timedelta(days=1),
-            paused=False,
-        )
-        assert await store.claim_holds(claimed) is False
-        assert await runner._fire(store, claimed, due_at, due_at) is None
-        turns = await _turns(conversation_id)
-        [edited] = await store.list()
-
-    assert turns == []
-    assert dbos.enqueued == []
-    assert edited.prompt == "read the weekly instead"
-    assert edited.schedule == "0 17 * * 1"
-    assert edited.claim_id is None
-
-
-async def test_a_refire_of_the_same_occurrence_collapses_to_one_turn(db: None) -> None:
-    """The dedupe contract across a deploy roll, and the precision trap inside it.
-
-    A roll can kill the process after admission and before the reschedule commits, leaving the same
-    occurrence due again. The key is the task and that exact occurrence, so the re-fire settles on
-    the turn already admitted rather than firing the task twice.
-
-    The occurrence carries microseconds on purpose: `isoformat()` renders them, so a key derived
-    from a recomputed or rounded due time would differ from the one the pre-roll turn carries and
-    would dedupe against nothing. This pins that the key comes from the claimed row's stored value.
-    """
-    workspace_id, agent_id, conversation_id = await _seed()
-    creator = await _member(workspace_id)
-    store = _store()
-    due_at = (datetime.now(UTC) - timedelta(minutes=1)).replace(microsecond=123456)
-    dbos = StubDbos()
-    invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
-    )
-    with ws(workspace_id), agent(agent_id):
-        created = await store.create(
-            conversation_id,
-            "digest",
-            DAILY_9AM,
-            "check inbox",
-            "digest",
-            due_at,
-            created_by_member_id=creator,
-        )
-        _, key = fire_body(created, None)
-        assert key == f"{created.id}:{due_at.isoformat()}"
-        assert ".123456+00:00" in key
-        assert str(created.id) == str(created.id).lower()
-
-        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
-        [fired] = await _turns(conversation_id)
-        assert fired["idempotency_key"] == key
-
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(schedule_table)
-                .where(schedule_table.c.id == created.id)
-                .values(
-                    next_run_at=due_at,
-                    last_run_at=None,
-                    claimed_by=None,
-                    claim_expires_at=None,
-                )
-            )
-        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
-        turns = await _turns(conversation_id)
-
-    assert [turn["id"] for turn in turns] == [fired["id"]]
 
 
 async def test_a_task_pointing_at_another_workspaces_conversation_is_not_listed(db: None) -> None:

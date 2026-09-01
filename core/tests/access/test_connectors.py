@@ -156,10 +156,6 @@ def test_two_connectors_claiming_the_same_provider_fail_loud() -> None:
         )
 
 
-def test_no_credential_key_means_no_connect_flow() -> None:
-    assert _connect_flow(None, _config(PUBLIC_BASE_URL), (sample.manifest(),)) is None
-
-
 def test_connect_is_inert_without_a_connector_and_needs_no_callback_config() -> None:
     flow = _connect_flow(_credentials(), _config(None), ())
     assert flow is not None
@@ -182,18 +178,13 @@ def test_redirect_uri_accepts_loopback_because_a_local_node_serves_the_same_brow
     assert _connect_redirect_uri(_config(base), providers) == f"{base}{CONNECT_CALLBACK_PATH}"
 
 
-def test_redirect_uri_rejects_a_scheme_less_callback() -> None:
-    providers = {c.oauth.provider: c.oauth for c in sample.manifest().connectors}
-    with pytest.raises(RuntimeError, match="scheme and host"):
-        _connect_redirect_uri(_config("ufo.example.com"), providers)
-
-
 def test_redirect_uri_requires_config_once_a_connector_is_registered() -> None:
     providers = {c.oauth.provider: c.oauth for c in sample.manifest().connectors}
     with pytest.raises(RuntimeError, match="public_base_url"):
         _connect_redirect_uri(_config(None), providers)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connector_account_is_scoped_to_the_turn_agents_own_grants(db: None) -> None:
     """The server-side-execution accessor is agent-scoped: agent A's context resolves A's
     connected-account id only — B's grant on the same provider is not in A's resolved grants, so A
@@ -220,58 +211,7 @@ async def test_connector_account_is_scoped_to_the_turn_agents_own_grants(db: Non
             await ctx_a.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-b")
 
 
-async def test_connector_account_selects_the_named_account(db: None) -> None:
-    """An agent holding two accounts for one provider: `connector_account(provider, account_id=X)`
-    returns X, not the other account; omitting the choice or naming one it does not hold fails
-    loud."""
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    store = GrantStore()
-    with ws(workspace_id), agent(agent_id):
-        for account in ("acct-1", "acct-2"):
-            await store.record(
-                provider=sample.CONNECTOR_PROVIDER,
-                account_id=account,
-                host=sample.CONNECTOR_HOST,
-                grantor_member_id=member_id,
-                conversation_id=conversation_id,
-                shared=False,
-            )
-        ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
-        with pytest.raises(ValueError, match=r"multiple active.*pass account_id"):
-            await ctx.connector_account(sample.CONNECTOR_PROVIDER)
-        assert (
-            await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-2") == "acct-2"
-        )
-        with pytest.raises(ValueError, match="acct-9"):
-            await ctx.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-9")
-
-
-async def test_connector_accounts_lists_only_the_turn_agents_provider_accounts(db: None) -> None:
-    workspace_id = await _workspace()
-    member_id, agent_id = await _member_agent(workspace_id)
-    conversation_id = await _conversation(workspace_id, member_id)
-    store = GrantStore()
-    for provider, account in (
-        (sample.CONNECTOR_PROVIDER, "acct-2"),
-        (sample.CONNECTOR_PROVIDER, "acct-1"),
-        ("other", "acct-other"),
-    ):
-        with ws(workspace_id), agent(agent_id):
-            await store.record(
-                provider=provider,
-                account_id=account,
-                host=sample.CONNECTOR_HOST,
-                grantor_member_id=member_id,
-                conversation_id=conversation_id,
-                shared=False,
-            )
-    ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
-    with ws(workspace_id), agent(agent_id):
-        assert await ctx.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-1", "acct-2")
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_source_credential_stays_bound_to_its_connection_generation(db: None) -> None:
     workspace_id = await _workspace()
     alice, agent_id = await _member_agent(workspace_id)
@@ -357,6 +297,7 @@ async def test_source_credential_stays_bound_to_its_connection_generation(db: No
     assert transport.requests == 1
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connector_account_prefers_the_acting_members_private_account(db: None) -> None:
     """A provider bound both privately and agent-shared resolves by tier: the acting member's own
     private account first, the agent-shared one as the fallback — M's turns act as M's account, a

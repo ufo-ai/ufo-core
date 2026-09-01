@@ -11,27 +11,34 @@ _SPEC.loader.exec_module(strip)
 EXISTING = frozenset({"stage-1.md", "stage-9.2.md"})
 
 
-def test_keeps_links_to_existing_pages():
+def _check_keeps_links_to_existing_pages():
     text = "See [Turn loop](stage-9.2.md) and [Boot](stage-1.md)."
     assert strip.unlink_dangling(text, EXISTING) == text
 
 
-def test_unlinks_dangling_leaving_label():
+def _check_unlinks_dangling_leaving_label():
     text = "See [Teardown](stage-14.md) now."
     assert strip.unlink_dangling(text, EXISTING) == "See Teardown now."
 
 
-def test_mixed_line_unlinks_only_dangling():
+def _check_mixed_line_unlinks_only_dangling():
     text = "[A](stage-1.md), [B](stage-14.2.md), [C](stage-9.2.md)"
     assert strip.unlink_dangling(text, EXISTING) == "[A](stage-1.md), B, [C](stage-9.2.md)"
 
 
-def test_heading_and_its_prose_survive_no_orphan():
+def _check_heading_and_its_prose_survive_no_orphan():
     text = "## [Gone](stage-99.md) `stage-99` — 0 files\n\nDescription paragraph.\n"
     expected = "## Gone `stage-99` — 0 files\n\nDescription paragraph.\n"
     assert strip.unlink_dangling(text, EXISTING) == expected
 
 
-def test_non_stage_links_untouched():
+def _check_non_stage_links_untouched():
     text = "[overview](overview.md), [register](register.md), [ext](https://x/stage-1.md)"
     assert strip.unlink_dangling(text, EXISTING) == text
+
+
+def test_dead_link_cleanup_contract() -> None:
+    checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
+    assert len(checks) == 5
+    for check in checks:
+        check()

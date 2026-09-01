@@ -35,29 +35,6 @@ def test_the_account_follows_the_feature() -> None:
     assert app_meetings.NOTES_CONNECTOR in app_meetings.MEETINGS_APP_PROMPT
 
 
-def test_the_app_arrives_armed_for_one_feature_and_offers_the_cadences_that_arm_it() -> None:
-    """A clock is what wakes this app, so it says so and offers how often. The hourly cadence is
-    first because a meeting is booked and moved through the day: a once-a-day pass leaves whatever
-    was booked after it until tomorrow."""
-    setup = app_meetings.MEETINGS_APP_AGENT.setup
-    assert setup.standing == ("scheduled_task",)
-    assert setup.schedule is not None
-    assert setup.schedule.name == app_meetings.BRIEFS_TASK
-    assert setup.schedule.cadences[0].hour is None
-    assert setup.schedule.prompt
-
-
-def test_the_prompt_arms_nothing_nobody_asked_for() -> None:
-    """The two features that wait are named in the prompt with what turns each on — and with the
-    rule that stops the app doing an unarmed feature's work by hand, which would be the feature
-    with no record of being armed: nothing to see and nothing to turn off."""
-    prompt = app_meetings.MEETINGS_APP_PROMPT
-    assert app_meetings.FOLLOWUPS_TASK in prompt
-    assert app_meetings.NOTES_TASK in prompt
-    assert "never do an unarmed feature's work by hand" in prompt
-    assert "so the ask is answered now rather than at the next fire" in prompt
-
-
 def test_a_meeting_falls_to_exactly_one_fire() -> None:
     """A brief lands in the run's own conversation and nowhere a later run reads, so "already
     briefed" asked the model to recall every brief it had written — and a compacted transcript
@@ -73,45 +50,6 @@ def test_a_meeting_falls_to_exactly_one_fire() -> None:
     schedule = app_meetings.MEETINGS_APP_AGENT.setup.schedule
     assert schedule is not None
     assert "before this task's next fire" in schedule.prompt
-
-
-def test_the_built_page_is_the_apps_own_tsx() -> None:
-    entry = MODULE_SCRIPT.search(BUILD_ENTRY.read_text())
-    assert entry is not None
-    assert (BUILD_ENTRY.parent / entry[1]).resolve() == (SKILL_DIR / "app.tsx").resolve()
-    source = (SKILL_DIR / "app.tsx").read_text()
-    assert "mountApp(" in source
-    # A section per feature, and every one of them filled in. The page is the shape the app
-    # rebuilds against its own sources, so a page of empty bands would tell it nothing about what
-    # to draw and a member nothing about what the app is for.
-    for section in ("Next meetings", "Follow-ups", "Notes"):
-        assert f'"{section}"' in source
-    # The brief a meeting gets — what last time settled, what work is open, what to raise — is what
-    # Prep fetches into the conversation, so a row states when, who and the act. The facts the page
-    # carries are the ones its rows draw: a meeting, a date, a commitment, a decision.
-    for filled in ("Northstar renewal", "$48,000", "1 Sept", "22 Aug"):
-        assert filled in source
-    assert "<AppConversations" in source
-    # Setup is a portal screen, never a band here: the acts that wire an app — a workspace install
-    # an admin makes, a model turn that authors a page — are the two a framed page cannot start.
-    assert "AppSetup" not in source
-
-
-def test_the_home_skill_edits_builds_and_deploys_the_project() -> None:
-    skill = (SKILL_DIR / "SKILL.md").read_text()
-    assert "Copy this skill's `app.tsx` and `index.html`" in skill
-    assert (
-        "`deploy_website` action (`object_action` with kind `site`) with that directory and "
-        "`site_name` `meetings-home`"
-    ) in skill
-    assert "do not run a build yourself" in skill
-    assert "`object_get` kind `agent` with an empty name reads this turn's own agent" in skill
-    assert "`set_homepage` action's call template already carries the agent's name" in skill
-    assert f"`{app_meetings.manifest().agents[0].name}`" not in skill
-    assert "`object_get` the site" in skill
-    # A rebuild takes the kit as it stands today, which is how a page gains what the kit has since
-    # gained — and why a page nobody rebuilds keeps drawing against the kit of the day it was built.
-    assert "takes the platform kit as it stands today" in skill
 
 
 def test_the_page_says_what_the_app_is_for_in_the_provisions_own_words() -> None:

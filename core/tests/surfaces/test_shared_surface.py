@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
@@ -31,6 +32,11 @@ from ufo.runtime.hub import InProcessHub
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.serve import _mount_shared_surfaces
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 PROBE_SURFACE = "probe"
 

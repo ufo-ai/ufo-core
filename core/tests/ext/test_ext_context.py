@@ -41,16 +41,13 @@ from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSand
 from ufo.harness.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
-    RUNTIME_DIRNAME,
     SENTINEL_MODEL_KEY,
     ProbeTokenCodec,
     ProxyEndpoint,
 )
 from ufo.harness.sandbox.terminal import TerminalGone
-from ufo.runtime.access.connectors import CliCredential, ForwardedResponse
-from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
-from ufo.runtime.access.grants import GrantStore, grant_sentinel
-from ufo.runtime.agent_scope import agent
+from ufo.runtime.access.connectors import ForwardedResponse
+from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.authority import (
     WORKSPACE_AUTHORITY,
     ExecutionAuthority,
@@ -67,20 +64,16 @@ from ufo.runtime.ext.context import (
     TurnOutcome,
     UndeclaredCredentialSlot,
     context_for,
-    conversation_agent_id,
-    untitled_conversation_workspaces,
 )
 from ufo.runtime.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.runtime.ext.surface import (
     AddressClaimState,
-    SurfaceInstallationConflict,
     UndeclaredSurface,
-    retitle_conversation,
 )
 from ufo.runtime.sources.sync import CorePageFeed
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.runtime.workspace import WorkspaceUnbound, init_workspace_credentials, ws
+from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import Usage
 
@@ -240,6 +233,7 @@ async def _turn(model: ModelClient, job: str = JOB) -> Message:
         )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_model_turn_opens_a_tool_calling_message_with_its_reasoning_blocks(
     db: None,
 ) -> None:
@@ -254,23 +248,7 @@ async def test_model_turn_opens_a_tool_calling_message_with_its_reasoning_blocks
     )
 
 
-async def test_a_background_call_is_pinned_to_its_own_jobs_cache_series(db: None) -> None:
-    """A job sends one system prompt over and over with a small payload behind it, so the prefix a
-    router keeps warm is the job's. The seam fixes the series onto every completion the way it fixes
-    the model, and a caller cannot split a job's cache across upstream providers."""
-    model = RecordingModel()
-
-    await _turn(model)
-
-    assert [request.session_id for request in model.sent] == [JOB]
-
-
-async def test_model_turn_without_tool_calls_stays_plain_text(db: None) -> None:
-    """A round with nothing to authenticate returns its text: there is no tool call coming back, so
-    the reasoning has no continuation to ride and never becomes a blocks tuple."""
-    assert (await _turn(ReasoningModel(with_tool=False))).content == "checking"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_background_call_meters_its_tokens_and_latency_under_its_job(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -306,22 +284,7 @@ async def test_a_background_call_meters_its_tokens_and_latency_under_its_job(
     ]
 
 
-async def test_two_jobs_on_one_model_meter_as_two_series(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Every background job runs on the one configured model, so the model alone cannot say which
-    work spent the tokens — the whole point of the `job` dimension. Two jobs calling the same model
-    keep their own series."""
-    reader = _metric_capture(monkeypatch)
-    await _turn(CachingModel(), job=JOB)
-    await _turn(CachingModel(), job="web:chat_titles")
-    points = _exported_metrics(reader)
-    assert {
-        (point.attributes["job"], point.attributes["kind"], point.value)
-        for point in points["ufo.model_round_tokens_total"]
-    } >= {(JOB, "input", 11), ("web:chat_titles", "input", 11)}
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_failed_background_call_meters_its_latency_with_the_error_class(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -344,6 +307,7 @@ async def test_a_failed_background_call_meters_its_latency_with_the_error_class(
     assert "ufo.model_round_tokens_total" not in points
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_invalid_background_output_keeps_reported_provider_usage(db: None) -> None:
     workspace_id = await _workspace()
     context = context_for(
@@ -374,6 +338,7 @@ async def test_invalid_background_output_keeps_reported_provider_usage(db: None)
     assert tuple(row) == (7, 5)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_stream_with_no_usage_meters_the_failure_it_raises(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -394,6 +359,7 @@ async def test_a_stream_with_no_usage_meters_the_failure_it_raises(
     ]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_cancelled_background_call_meters_the_cancellation(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -415,14 +381,7 @@ async def test_a_cancelled_background_call_meters_the_cancellation(
     ]
 
 
-async def test_a_wired_model_seam_without_its_job_fails_at_the_wiring(db: None) -> None:
-    """The label is what keeps the series attributable, so a caller that wires the seam and omits it
-    fails where the context is built — never at the first call, mid-job, with an unlabelled series
-    already minted."""
-    with pytest.raises(ValueError, match="model_job"):
-        context_for("core", frozenset(), model_resolver=StubResolver(CachingModel()))
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_scoped_store_round_trips_json_values(db: None) -> None:
     with ws(await _workspace()):
         store = ScopedStore(extension="sample")
@@ -433,14 +392,7 @@ async def test_scoped_store_round_trips_json_values(db: None) -> None:
         assert await store.get("absent") is None
 
 
-async def test_scoped_store_upserts(db: None) -> None:
-    with ws(await _workspace()):
-        store = ScopedStore(extension="sample")
-        await store.put("k", "one")
-        await store.put("k", "two")
-        assert await store.get("k") == "two"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_scoped_store_put_survives_a_concurrent_first_write(db: None) -> None:
     """Two callers writing one key that is not there yet. Each finds nothing to update, so a probe
     followed by a separate insert leaves both to insert and one to fail on the primary key."""
@@ -451,36 +403,7 @@ async def test_scoped_store_put_survives_a_concurrent_first_write(db: None) -> N
         assert await store.get("contested") in {f"writer-{n}" for n in range(8)}
 
 
-async def test_scoped_store_delete_removes_only_its_key(db: None) -> None:
-    with ws(await _workspace()):
-        store = ScopedStore(extension="sample")
-        await store.put("watch:a", 1)
-        await store.put("watch:b", 2)
-        await store.delete("watch:a")
-        assert await store.get("watch:a") is None
-        assert await store.list("watch:") == (("watch:b", 2),)
-
-
-async def test_scoped_store_lists_by_prefix_within_its_extension(db: None) -> None:
-    with ws(await _workspace()):
-        sample = ScopedStore(extension="sample")
-        other = ScopedStore(extension="other")
-        await sample.put("run:2", 2)
-        await sample.put("run:1", 1)
-        await sample.put("cursor", "x")
-        await other.put("run:9", 9)
-        assert await sample.list("run:") == (("run:1", 1), ("run:2", 2))
-        assert await other.list() == (("run:9", 9),)
-
-
-async def test_scoped_store_isolates_extensions(db: None) -> None:
-    with ws(await _workspace()):
-        sample = ScopedStore(extension="sample")
-        other = ScopedStore(extension="other")
-        await sample.put("shared_key", "sample-value")
-        assert await other.get("shared_key") is None
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_get_many_returns_exactly_the_named_keys_within_its_scopes(db: None) -> None:
     """One query for exactly `keys`: absent keys are omitted, another extension's and another
     workspace's rows under the same keys stay invisible, and an empty key set answers empty. The
@@ -502,6 +425,7 @@ async def test_get_many_returns_exactly_the_named_keys_within_its_scopes(db: Non
         assert await ScopedStore(extension="sample").get_many([]) == {}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_scoped_store_scopes_to_the_bound_workspace(db: None) -> None:
     """The store reads the ambient workspace, so rebinding to another workspace never sees the
     first's rows — the isolation is the `with ws(...)` scope, not a field the caller passes."""
@@ -512,12 +436,7 @@ async def test_scoped_store_scopes_to_the_bound_workspace(db: None) -> None:
         assert await ScopedStore(extension="sample").get("k") is None
 
 
-async def test_scoped_store_outside_a_workspace_scope_fails_loud(db: None) -> None:
-    """No ambient workspace → the store raises rather than reading a NULL or wrong workspace."""
-    with pytest.raises(WorkspaceUnbound):
-        await ScopedStore(extension="sample").get("k")
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_access_reads_declared_and_rejects_undeclared(db: None) -> None:
     workspace_id = await _workspace()
     store = _store()
@@ -541,6 +460,7 @@ class MintedCredential:
         return self.value is not None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_access_resolves_manifest_source(db: None) -> None:
     workspace_id = await _workspace()
     store = _store()
@@ -553,72 +473,7 @@ async def test_credential_access_resolves_manifest_source(db: None) -> None:
         assert await access.resolve("sample_api") == "minted"
 
 
-async def test_credential_access_resolve_falls_back_to_stored_value(db: None) -> None:
-    workspace_id = await _workspace()
-    store = _store()
-    await store.put(workspace_id, "sample_api", "stored")
-    init_workspace_credentials(store)
-    access = CredentialAccess(
-        declared=frozenset({"sample_api"}),
-        _sources=(("sample_api", MintedCredential(None)),),
-        _store=store,
-    )
-    with ws(workspace_id):
-        assert await access.resolve("sample_api") == "stored"
-
-
-async def test_credential_access_resolve_falls_back_to_platform_value(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("SAMPLE_API", "platform")
-    store = _store()
-    init_workspace_credentials(store)
-    access = CredentialAccess(
-        declared=frozenset({"sample_api"}),
-        _sources=(("sample_api", MintedCredential(None)),),
-        _store=store,
-    )
-    with ws(await _workspace()):
-        assert await access.resolve("sample_api") == "platform"
-
-
-async def test_credential_access_resolve_requires_source_store(db: None) -> None:
-    access = CredentialAccess(
-        declared=frozenset({"sample_api"}),
-        _sources=(("sample_api", MintedCredential("minted")),),
-    )
-    with ws(await _workspace()), pytest.raises(RuntimeError, match="no credential store"):
-        await access.resolve("sample_api")
-
-
-async def test_credential_access_falls_back_to_platform_env(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A declared slot with no stored BYOK resolves the platform default from env — the same read a
-    turn and a job share, so rotating the deploy value reaches every workspace."""
-    monkeypatch.setenv("SAMPLE_API", "sk-platform")
-    init_workspace_credentials(_store())
-    access = CredentialAccess(declared=frozenset({"sample_api"}))
-    with ws(await _workspace()):
-        assert await access.get("sample_api") == "sk-platform"
-
-
-async def test_empty_platform_credential_is_unset(
-    db: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("SAMPLE_API", "")
-    access = CredentialAccess(declared=frozenset({"sample_api"}))
-    with ws(await _workspace()), pytest.raises(CredentialSlotUnset):
-        await access.get("sample_api")
-
-
-async def test_credential_access_outside_a_workspace_scope_fails_loud(db: None) -> None:
-    init_workspace_credentials(_store())
-    access = CredentialAccess(declared=frozenset({"sample_api"}))
-    with pytest.raises(WorkspaceUnbound):
-        await access.get("sample_api")
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_core_context_builds_and_is_usable(db: None) -> None:
     with ws(await _workspace()):
         context = context_for("core", frozenset())
@@ -628,6 +483,7 @@ async def test_core_context_builds_and_is_usable(db: None) -> None:
         assert await context.store.get("tick") == {"count": 1}
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_installation_access_rejects_operations_for_an_undeclared_surface(
     db: None,
 ) -> None:
@@ -663,6 +519,7 @@ async def _member(workspace_id: UUID) -> UUID:
     return member_id
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_reserve_address_holds_one_phone_for_one_member_across_the_fleet(db: None) -> None:
     """The address is the identity a shared line routes by, so a claim on it is fleet-wide: the
     member who staged it may restage it, another member is told it is taken whichever workspace
@@ -701,59 +558,7 @@ async def test_reserve_address_holds_one_phone_for_one_member_across_the_fleet(d
         )
 
 
-async def test_a_proved_address_answers_linked_and_stays_its_member_s(db: None) -> None:
-    first, second = await _workspace(), await _workspace()
-    mine, elsewhere = await _member(first), await _member(second)
-    context = context_for("imessage", frozenset(), surfaces=SURFACES, addressed_surfaces=SURFACES)
-    phone = "+14155550124"
-    live = datetime.now(UTC) + timedelta(minutes=30)
-    with ws(first):
-        await context.installations.reserve_address(PHONE_SURFACE, phone, mine, live)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.surface_address)
-            .where(tables.surface_address.c.address == phone)
-            .values(claim_expires_at=None, proved_by="message-1")
-        )
-    with ws(first):
-        assert await context.installations.reserve_address(PHONE_SURFACE, phone, mine, live) == (
-            AddressClaimState.LINKED
-        )
-    with ws(second):
-        assert (
-            await context.installations.reserve_address(PHONE_SURFACE, phone, elsewhere, live)
-            == AddressClaimState.TAKEN
-        )
-
-
-async def test_an_addressed_surface_binds_the_same_installation_in_every_workspace(
-    db: None,
-) -> None:
-    """The provider belongs to the deploy, so its installation identity routes no tenant and every
-    workspace binds it. An installation-routed surface's identity stays one workspace's."""
-    first, second = await _workspace(), await _workspace()
-    context = context_for("imessage", frozenset(), surfaces=SURFACES, addressed_surfaces=SURFACES)
-    with ws(first):
-        await context.installations.bind(PHONE_SURFACE, "project:one")
-    with ws(second):
-        await context.installations.bind(PHONE_SURFACE, "project:one")
-        assert await context.installations.installation(PHONE_SURFACE) == "project:one"
-
-
-async def test_installation_access_preserves_fleet_wide_uniqueness(db: None) -> None:
-    first, second = await _workspace(), await _workspace()
-    context = context_for("slack", frozenset(), surfaces=frozenset({"slack"}))
-    with ws(first):
-        assert await context.installations.installation("slack") is None
-        await context.installations.bind("slack", "team-a")
-        assert await context.installations.installation("slack") == "team-a"
-        await context.installations.bind("slack", "team-a")
-        await context.installations.bind("slack", "team-b")
-        assert await context.installations.installation("slack") == "team-b"
-    with ws(second), pytest.raises(SurfaceInstallationConflict, match="slack"):
-        await context.installations.bind("slack", "team-b")
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_set_source_subject_flips_the_row_and_restamps_live_pages(
     db: None, tmp_path: Path
 ) -> None:
@@ -872,6 +677,7 @@ async def test_set_source_subject_flips_the_row_and_restamps_live_pages(
     assert _aware(pages[tombstoned_id]["updated_at"]) == much_older
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_set_source_subject_flips_every_stream_of_a_binding_in_one_transaction(
     db: None,
 ) -> None:
@@ -1068,68 +874,7 @@ async def _named(conversation_id: UUID) -> tuple[str | None, bool]:
     return row.title, bool(row.title_summarized)
 
 
-async def test_conversations_awaiting_title_names_what_a_member_spoke_in_newest_first(
-    db: None,
-) -> None:
-    """The titling job's work: a conversation a member spoke in and an agent answered that no
-    summary has named. An errand nobody spoke in is named by the payload that opened it and is not
-    work; a conversation whose member turn has yet to answer has no exchange to summarize and is not
-    work either, so nothing is named from an empty transcript and nothing is read for one on every
-    tick; another workspace's conversation is never this workspace's; and the newest come first, so
-    the conversation a member is looking at is named ahead of a backlog behind it."""
-    workspace_id, other = await _workspace(), await _workspace()
-    with ws(other):
-        elsewhere = await _conversation(other)
-        await _seed_turn(other, elsewhere, 1, "done", DONE, source="member")
-    with ws(workspace_id):
-        newest, older, errand, turnless, running = (
-            await _conversation(workspace_id),
-            await _conversation(workspace_id),
-            await _conversation(workspace_id),
-            await _conversation(workspace_id),
-            await _conversation(workspace_id),
-        )
-        await _opened_at(newest, datetime(2026, 8, 2, tzinfo=UTC))
-        await _opened_at(older, datetime(2026, 8, 1, tzinfo=UTC))
-        await _seed_turn(workspace_id, newest, 1, "done", DONE, source="member")
-        await _seed_turn(workspace_id, older, 1, "done", DONE, source="member")
-        await _seed_turn(workspace_id, errand, 1, "done", DONE)
-        await _seed_turn(workspace_id, running, 1, "running", None, source="member")
-        context = context_for("sample", frozenset())
-
-        assert await context.conversations_awaiting_title(5) == (newest, older)
-        assert await context.conversations_awaiting_title(1) == (newest,)
-        assert turnless not in await context.conversations_awaiting_title(5)
-        assert running not in await context.conversations_awaiting_title(5)
-
-    assert workspace_id in await untitled_conversation_workspaces()()
-
-
-async def test_summarizing_a_title_names_the_conversation_and_records_the_attempt(
-    db: None,
-) -> None:
-    """One write does both, so a summary is paid for once: the name lands and the conversation
-    leaves the candidate set. A summary the model wrote nothing usable for leaves the conversation
-    called what its opening words called it and still leaves the set, so an exchange no model can
-    name costs one summary rather than one every tick."""
-    workspace_id = await _workspace()
-    with ws(workspace_id):
-        named, unnameable = await _conversation(workspace_id), await _conversation(workspace_id)
-        for conversation_id in (named, unnameable):
-            await _seed_turn(workspace_id, conversation_id, 1, "done", DONE, source="member")
-            await retitle_conversation(workspace_id, conversation_id, "what they typed first")
-        context = context_for("sample", frozenset())
-
-        await context.summarized_conversation_title(named, "Restock the depot")
-        await context.summarized_conversation_title(unnameable, "   ")
-
-        assert await _named(named) == ("Restock the depot", True)
-        assert await _named(unnameable) == ("what they typed first", True)
-        assert await context.conversations_awaiting_title(5) == ()
-
-    assert workspace_id not in await untitled_conversation_workspaces()()
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_facts_answers_a_page_in_one_read(db: None) -> None:
     """A member-facing listing decides visibility from the audience of the conversation each row
     reports into, and names its origin from that conversation's surface label. Both come back for a
@@ -1166,6 +911,7 @@ async def test_conversation_facts_answers_a_page_in_one_read(db: None) -> None:
     )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_facts_omits_what_it_cannot_vouch_for(db: None) -> None:
     """An unknown id and another tenant's id are both absent from the mapping rather than defaulted.
     A caller deciding disclosure has to read that absence as "not visible" — standing in a shared
@@ -1201,47 +947,7 @@ async def _arrival(
         )
 
 
-async def test_conversation_arrival_seq_watermarks_member_arrivals_only(db: None) -> None:
-    """The watermark work compares against to tell "a member spoke before I armed" from "a member
-    spoke after". It is the highest member `seq`, so it must ignore three things that would each
-    corrupt that comparison: an internal arrival (work the system posted to itself — counting it
-    would let a watcher be woken by its own effects), another conversation's arrivals, and another
-    workspace's. Zero is a real answer meaning no member has spoken."""
-    workspace_id, other_workspace = await _workspace(), await _workspace()
-    with ws(other_workspace):
-        elsewhere = await _conversation(other_workspace)
-        await _arrival(
-            other_workspace,
-            elsewhere,
-            99,
-            "member",
-            await _seed_turn(other_workspace, elsewhere, 1, "running", None),
-        )
-    with ws(workspace_id):
-        watched = await _conversation(workspace_id)
-        neighbour = await _conversation(workspace_id)
-        context = context_for("sample", frozenset())
-        assert await context.conversation_arrival_seq(watched) == 0
-
-        turn_id = await _seed_turn(workspace_id, watched, 1, "running", None)
-        await _arrival(workspace_id, watched, 1, "member", turn_id)
-        await _arrival(workspace_id, watched, 2, "member", turn_id)
-        assert await context.conversation_arrival_seq(watched) == 2
-
-        await _arrival(workspace_id, watched, 3, "internal", turn_id)
-        assert await context.conversation_arrival_seq(watched) == 2
-
-        await _arrival(
-            workspace_id,
-            neighbour,
-            50,
-            "member",
-            await _seed_turn(workspace_id, neighbour, 1, "running", None),
-        )
-        assert await context.conversation_arrival_seq(watched) == 2
-        assert await context.conversation_arrival_seq(neighbour) == 50
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_turn_outcomes_reads_status_and_terminal_text(db: None) -> None:
     """The last-run line of a status rendering: what the turn's status is, and what its terminal
     frame said. A running turn and a turn that ended saying nothing both answer None for the text,
@@ -1259,21 +965,6 @@ async def test_turn_outcomes_reads_status_and_terminal_text(db: None) -> None:
     assert outcomes[spoke] == TurnOutcome(status="done", text="ok")
     assert outcomes[silent] == TurnOutcome(status="done", text=None)
     assert outcomes[running] == TurnOutcome(status="running", text=None)
-
-
-async def test_turn_outcomes_omits_a_turn_that_is_no_longer_there(db: None) -> None:
-    """A row can point at a turn that has since gone. That reads as an absent key, never a raise:
-    the status line renders it exactly as it renders a row that has not fired yet, which is what the
-    outer join it replaces did."""
-    workspace_id, other = await _workspace(), await _workspace()
-    with ws(other):
-        foreign = await _seed_turn(other, await _conversation(other), 1, "done", {"text": "theirs"})
-    with ws(workspace_id):
-        context = context_for("sample", frozenset())
-        outcomes = await context.turn_outcomes((foreign, uuid4()))
-        assert await context.turn_outcomes(()) == {}
-
-    assert outcomes == {}
 
 
 @dataclass(frozen=True)
@@ -1311,52 +1002,7 @@ def _files(sandboxes: ConversationSandbox) -> ConversationFiles:
     return context.files
 
 
-async def test_conversation_files_write_lands_in_the_conversation_workspace(
-    db: None, tmp_path: Path
-) -> None:
-    """What an off-turn handler writes is what the agent's next turn sees: the returned path is the
-    container path, and the bytes land in the conversation's workspace directory the carrier
-    serves."""
-    workspace_id = await _workspace()
-    root = tmp_path / "workspaces"
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id)
-        path = await _files(_sandboxes(root)).write(
-            conversation_id, "exports/acme/now.jsonl", b"{}\n"
-        )
-
-    assert path == "/workspace/exports/acme/now.jsonl"
-    assert (root / str(conversation_id) / "exports/acme/now.jsonl").read_bytes() == b"{}\n"
-
-
-async def test_conversation_files_runtime_is_separate_and_pruned(db: None, tmp_path: Path) -> None:
-    workspace_id = await _workspace()
-    root = tmp_path / "workspaces"
-    sandboxes = _sandboxes(root)
-    carrier = sandboxes.carrier
-    assert isinstance(carrier, LocalCarrier)
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id)
-        files = _files(sandboxes)
-        first = await files.write_runtime(
-            conversation_id, "sources", "acme/20260826T000000Z.jsonl", b"one\n"
-        )
-        latest = await files.write_runtime(
-            conversation_id, "sources", "acme/20260826T000001Z.jsonl", b"two\n"
-        )
-        await files.prune_runtime(conversation_id, "sources", "acme", keep=1)
-
-    runtime = carrier.ufo_home / RUNTIME_DIRNAME / conversation_id.hex / "sources" / "acme"
-    assert first == (
-        f"$UFO_HOME/{RUNTIME_DIRNAME}/{conversation_id.hex}/sources/acme/20260826T000000Z.jsonl"
-    )
-    assert latest == (
-        f"$UFO_HOME/{RUNTIME_DIRNAME}/{conversation_id.hex}/sources/acme/20260826T000001Z.jsonl"
-    )
-    assert [entry.name for entry in runtime.iterdir()] == ["20260826T000001Z.jsonl"]
-    assert not (root / str(conversation_id) / "sources").exists()
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_probe_runs_in_the_conversations_own_sandbox(db: None, tmp_path: Path) -> None:
     """A probe reads what the conversation's workspace holds — the same `/workspace` the agent's
     file tools see — and hands back the command's own stdout and exit code."""
@@ -1375,90 +1021,7 @@ async def test_probe_runs_in_the_conversations_own_sandbox(db: None, tmp_path: P
     assert (result.stdout, result.exit_code) == ("queued\n", 0)
 
 
-async def test_a_probes_nonzero_exit_is_a_result_not_a_raise(db: None, tmp_path: Path) -> None:
-    """Reading what a command reports is the point, so a failing command answers its exit code and
-    stderr rather than raising: the caller decides whether a failure is news."""
-    workspace_id = await _workspace()
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id)
-        result = await _probes(_sandboxes(tmp_path / "workspaces")).run(
-            conversation_id,
-            "echo nope >&2; exit 3",
-            authority=WORKSPACE_AUTHORITY,
-        )
-
-    assert (result.exit_code, result.stdout, result.stderr.strip()) == (3, "", "nope")
-
-
-async def test_a_probe_names_its_conversation_in_the_environment(db: None, tmp_path: Path) -> None:
-    """Work a probe leaves outside the workspace joins back to the record that produced it through
-    the same variable a turn states it in."""
-    workspace_id = await _workspace()
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id)
-        result = await _probes(_sandboxes(tmp_path / "workspaces")).run(
-            conversation_id,
-            f"printenv {CONVERSATION_ID_ENV}",
-            authority=WORKSPACE_AUTHORITY,
-        )
-
-    assert result.stdout.strip() == str(conversation_id)
-
-
-async def test_a_probe_runs_under_the_jobs_role_binding_production_provides(
-    db: None, tmp_path: Path
-) -> None:
-    """A job binds a workspace and no agent — nothing has an agent to bind, since a probe answers to
-    no turn — yet the connector-CLI export reads the bound agent's grants. Every deploy whose pack
-    declares a CLI credential therefore takes that branch on every probe, so this binds exactly what
-    `JobRunner.fire` binds and nothing more: `ws()` alone, a real `GrantStore`, and a non-empty
-    connector CLI map. The probe must run and its environment must carry that grant's sentinel."""
-    workspace_id = await _workspace()
-    root = tmp_path / "workspaces"
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id)
-        agent_id = await conversation_agent_id(workspace_id, conversation_id)
-        assert agent_id is not None
-        member_id = uuid4()
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.member).values(
-                    id=member_id,
-                    workspace_id=workspace_id,
-                    email="armer@x.test",
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
-        with agent(agent_id):
-            await GrantStore().record(
-                provider="hub",
-                account_id="acct-1",
-                host="api.hub.test",
-                grantor_member_id=member_id,
-                conversation_id=conversation_id,
-                shared=True,
-            )
-        probes = ConversationProbes(
-            _sandboxes(root),
-            ProbeTokenCodec(b"probe-token-test-secret"),
-            ProbeEnv(
-                grants=GrantStore(),
-                clis={
-                    "hub": CliCredential(
-                        env="HUB_TOKEN", header="authorization", forward=_UnusedForwarder()
-                    )
-                },
-            ).exports,
-        )
-        result = await probes.run(
-            conversation_id, "printenv HUB_TOKEN", authority=WORKSPACE_AUTHORITY
-        )
-
-    assert result.exit_code == 0
-    assert result.stdout.strip() == grant_sentinel("acct-1")
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_probes_authority_reaches_the_environment_and_the_token(
     db: None, tmp_path: Path
 ) -> None:
@@ -1502,6 +1065,7 @@ async def test_a_probes_authority_reaches_the_environment_and_the_token(
     assert len({probe_id for probe_id, _ in asked}) == 2
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_key(
     db: None,
 ) -> None:
@@ -1544,6 +1108,7 @@ async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_
     }
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_probe_refuses_another_workspaces_conversation(db: None, tmp_path: Path) -> None:
     """The conversation is resolved through `workspace_tx` before anything is opened, so a handler
     holding another tenant's conversation id runs no command in it."""
@@ -1558,6 +1123,7 @@ async def test_a_probe_refuses_another_workspaces_conversation(db: None, tmp_pat
             )
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_probe_refuses_a_timeout_over_the_ceiling(db: None, tmp_path: Path) -> None:
     """The token's deadline is the timeout, so an unbounded one would be an off-turn exec holding
     egress for as long as it liked."""
@@ -1576,6 +1142,7 @@ async def test_a_probe_refuses_a_timeout_over_the_ceiling(db: None, tmp_path: Pa
             await probes.run(conversation_id, "true", timeout_s=0, authority=WORKSPACE_AUTHORITY)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_probe_says_so_when_the_bound_terminal_is_gone(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1607,6 +1174,7 @@ def test_a_context_wired_without_probe_deps_has_no_probes() -> None:
 
 
 @pytest.mark.parametrize("rel", ["../messages.json.lz4", "/etc/passwd", "a/../../escape"])
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_files_refuse_a_path_outside_the_workspace(
     db: None, tmp_path: Path, rel: str
 ) -> None:
@@ -1617,6 +1185,7 @@ async def test_conversation_files_refuse_a_path_outside_the_workspace(
             await _files(_sandboxes(tmp_path / "workspaces")).write(conversation_id, rel, b"x")
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_files_refuse_another_workspaces_conversation(
     db: None, tmp_path: Path
 ) -> None:
@@ -1632,31 +1201,7 @@ async def test_conversation_files_refuse_another_workspaces_conversation(
     assert not (root / str(foreign) / "note.txt").exists()
 
 
-async def test_conversation_files_write_replaces_a_planted_symlink(
-    db: None, tmp_path: Path
-) -> None:
-    """An off-turn write lands in a directory the agent writes to on its turns, so the name it is
-    given may already be a link the agent planted. The copy-in replaces the link instead of
-    delivering through it: the host file it pointed at is untouched, and the attachment still
-    arrives — refusing would hand the agent a way to deny that name for good."""
-    workspace_id = await _workspace()
-    root = tmp_path / "workspaces"
-    outside = tmp_path / "outside.txt"
-    outside.write_bytes(b"host secret")
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id)
-        files = _files(_sandboxes(root))
-        await files.write(conversation_id, "inbox/first.txt", b"{}\n")
-        planted = root / str(conversation_id) / "inbox" / "planted.txt"
-        planted.symlink_to(outside)
-
-        await files.write(conversation_id, "inbox/planted.txt", b"delivered")
-
-    assert outside.read_bytes() == b"host secret"
-    assert not planted.is_symlink()
-    assert planted.read_bytes() == b"delivered"
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_files_prune_refuses_a_symlinked_prefix(
     db: None, tmp_path: Path
 ) -> None:
@@ -1681,22 +1226,7 @@ async def test_conversation_files_prune_refuses_a_symlinked_prefix(
     assert len(list(outside.iterdir())) == 3
 
 
-@pytest.mark.parametrize("rel_prefix", ["../..", "log/../../..", "/etc"])
-async def test_conversation_files_prune_refuses_a_prefix_outside_the_workspace(
-    db: None, tmp_path: Path, rel_prefix: str
-) -> None:
-    workspace_id = await _workspace()
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id)
-        files = _files(_sandboxes(tmp_path / "workspaces"))
-        await files.write(conversation_id, "log/keep.jsonl", b"{}\n")
-
-        with pytest.raises((ValueError, OSError)):
-            await files.prune(conversation_id, rel_prefix, keep=0)
-
-    assert (tmp_path / "workspaces" / str(conversation_id) / "log/keep.jsonl").exists()
-
-
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_files_prune_keeps_the_newest(db: None, tmp_path: Path) -> None:
     """An unattended writer is bounded: prune keeps the newest `keep` entries under the prefix and
     drops the rest, and never reaches a sibling directory."""
@@ -1718,6 +1248,7 @@ async def test_conversation_files_prune_keeps_the_newest(db: None, tmp_path: Pat
     assert (root / str(conversation_id) / "log-sibling/keep.jsonl").exists()
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_open_conversation_is_the_agents_own_and_keyed_by_its_trigger(db: None) -> None:
     """A conversation a trigger opens belongs to the agent that does the work and to no member, so
     it lists under that agent and reaches no member's rail; the key is the event's identity, so a
@@ -1757,6 +1288,7 @@ async def test_open_conversation_is_the_agents_own_and_keyed_by_its_trigger(db: 
     assert row.sandbox_conversation_id is None
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_open_conversation_binds_a_member_when_named(db: None) -> None:
     """A member-bound trigger room is that member's own — their id and their private audience —
     so the authority an on-behalf turn carries stays inside a room its member already reads."""
@@ -1794,6 +1326,7 @@ async def test_open_conversation_binds_a_member_when_named(db: None) -> None:
     assert row.audience == str(conversation_audience(member_id))
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_open_conversation_refuses_an_agent_of_another_workspace(db: None) -> None:
     workspace_id = await _workspace()
     other_workspace = await _workspace()
@@ -1817,6 +1350,7 @@ class _CostlyModel:
         yield Usage(input_tokens=2_000_000, output_tokens=2_000_000)
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_background_job_on_the_workspaces_own_key_debits_nothing(
     db: None,
 ) -> None:

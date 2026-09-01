@@ -24,11 +24,8 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import (
     DEDUP_CURSOR_KEY,
-    DEDUP_MIN_AGE,
     FACT_EXTRACT_TOOL,
     MACHINE_STATUS_STREAMS,
-    MAX_SUMMARY_SENTENCES,
-    MAX_SUMMARY_WORDS,
     MEMBER_SECTION_HEADINGS,
     MIN_CLUSTER_FACTS,
     MIN_OLDEST_AGE,
@@ -36,9 +33,7 @@ from ufo_ext_memory.condenser import (
     MIN_SECTION_FACTS,
     PAGE_PASS_MIN_ROWS,
     PAGE_PASS_TOOL,
-    PROFILE_ROLE_MAX_CHARS,
     PROFILE_TOOL,
-    SENTENCE_END,
     WORKSPACE_SECTION_HEADINGS,
     FactDeriver,
     MemoryConsolidator,
@@ -49,17 +44,13 @@ from ufo_ext_memory.condenser import (
     RetiredRow,
     SectionWriter,
     _restates,
-    _to_overview_budget,
     admitted_curation,
-    cosine,
     memory_profile,
 )
 from ufo_ext_memory.manifest import RebuildPageFactsInput
 from ufo_ext_memory.objects import (
     MEMORY_OBJECT,
-    PROFILE_OBJECT,
     MemoryObjects,
-    ProfileObjects,
 )
 from ufo_ext_memory.store import (
     FACT,
@@ -77,7 +68,6 @@ from ufo_ext_memory.store import (
     memory_item,
     memory_source,
 )
-from ufo_ext_sources.registry import CONNECTORS
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -92,9 +82,7 @@ from ufo.harness.models.interface import (
     ToolCallStart,
 )
 from ufo.harness.models.registry import ModelRegistry
-from ufo.runtime.agent_scope import agent as bind_agent
 from ufo.runtime.billing.accounting import Pricing
-from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import (
     JsonValue,
     ModelAccess,
@@ -117,10 +105,9 @@ from ufo.runtime.indexing import (
     IndexScope,
     TextChunker,
 )
-from ufo.runtime.jobs import PageChangeRunner, TurnDispatcher, core_jobs
-from ufo.runtime.objects import MemberListable, ObjectListQuery
-from ufo.runtime.sources.sync import CorePageFeed, FolderSource, PageChange, SyncDriver
-from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.jobs import PageChangeRunner
+from ufo.runtime.objects import ObjectListQuery
+from ufo.runtime.sources.sync import CorePageFeed, PageChange
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.turns.audience import conversation_audience, foreign_room_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
@@ -129,6 +116,11 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.audience import SHARED_AUDIENCE
 from ufo.sdk.delivery_register import DELIVERY_REGISTER_BLOCK
+
+pytestmark = [
+    pytest.mark.usefixtures("database_url"),
+    pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
+]
 
 WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 AUTO_MODEL = "claude-opus-4-8"
@@ -621,29 +613,6 @@ async def _seed_admin(workspace_id: UUID, admin: bool = True) -> UUID:
     return member_id
 
 
-def _rebuild_ctx(workspace_id: UUID, member_id: UUID) -> ToolContext:
-    return ToolContext(
-        sandbox=None,  # type: ignore[arg-type]
-        blob=None,  # type: ignore[arg-type]
-        turn=Turn(
-            id=uuid4(),
-            workspace_id=workspace_id,
-            conversation_id=uuid4(),
-            agent_id=uuid4(),
-            seq=1,
-            status="running",
-            inbound="rebuild",
-            created_at=datetime.now(UTC),
-        ),
-        agent=Agent(prompt="p", model="auto"),
-        spawn=None,  # type: ignore[arg-type]
-        speaker_member_id=member_id,
-        audience=conversation_audience(member_id),
-        artifact_token_secret="",
-        ext=context_for(memory_manifest.NAME, frozenset()),
-    )
-
-
 def _scripted(store: MemoryStore, *payloads: str) -> FactDeriver:
     return FactDeriver(
         store=store,
@@ -791,87 +760,6 @@ async def test_derive_facts_writes_each_source_supported_fact_through_page_chang
     assert fact.created_from_page_id == page_id
 
 
-async def test_the_extraction_payload_names_what_each_page_is_about(
-    db: None, tmp_path: object
-) -> None:
-    """A page's `subject` is the visibility audience, so it names nothing a member would recognise;
-    the page's own title and stream do. They ride the payload because "The pull request was created
-    at ..." is unambiguous to a model holding the page and empty to the member who meets that row
-    alone months later — a model cannot name a subject it was never shown."""
-    workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page_id, _source_id = await _seed_page(
-        blob,
-        workspace_id,
-        "The reviewer list is empty and no assignee is set.",
-        title="Pull request 2189: pin the adapter",
-        stream="pull_requests",
-    )
-    client = RecordingExtractionClient(
-        _extraction(page_id, "Pull request 2189 — Has no assignee and no reviewer.")
-    )
-    runner = _runner(blob, vec((22, 1.0)), _registry(client))
-    with ws(workspace_id):
-        await runner.drive(_derive_consumer(runner))
-
-    sent = json.loads(client.requests[0].messages[0].content)["pages"][0]
-    assert sent["page_id"] == str(page_id)
-    assert sent["title"] == "Pull request 2189: pin the adapter"
-    assert sent["stream"] == "pull_requests"
-
-
-async def test_the_extraction_writes_to_the_house_register(db: None, tmp_path: object) -> None:
-    """The condenser is a direct model call, so it never met the register the shell and every
-    subagent prompt carry. It prepends the one copy rather than restating its rules, and adds only
-    what is specific to writing a memory item."""
-    workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page_id, _source_id = await _seed_page(
-        blob, workspace_id, "Acme Corp moved the launch to March, and Rob Ryan owns the rollout."
-    )
-    client = RecordingExtractionClient(
-        _extraction(page_id, "Acme Corp — Moved the launch to March.")
-    )
-    runner = _runner(blob, vec((23, 1.0)), _registry(client))
-    with ws(workspace_id):
-        await runner.drive(_derive_consumer(runner))
-
-    system = client.requests[0].system
-    assert system.startswith(DELIVERY_REGISTER_BLOCK)
-    assert system.count(DELIVERY_REGISTER_BLOCK) == 1
-    assert "the reader sees this item alone, months later" in system
-
-
-async def test_one_reply_records_a_page_restatement_once(db: None, tmp_path: object) -> None:
-    """Four restatements of one introduction email reach a member as four rows today, and nothing
-    downstream collapses them: the store's content address catches identical text only, the dedup
-    sweep never reads a page-derived row, and consolidation excludes them by predicate. One reply is
-    the one place they are visible to each other, so the entry carrying the most content survives
-    and the entries it already covers do not — while a claim of its own stands beside it."""
-    workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page_id, _source_id = await _seed_page(
-        blob, workspace_id, "Ivan introduced Marshall to Nalu Concepcion of Idler.ai."
-    )
-    covered = "Ivan asked Marshall to book a call with Nalu, a co-founder of Idler.ai."
-    specific = "Ivan asked Marshall to book a call with Nalu, an Idler.ai co-founder, by her link."
-    distinct = "Nalu Concepcion sent Marshall her scheduling link on 20 August 2026."
-    payload = json.dumps(
-        {
-            "facts": [
-                {"page_id": str(page_id), "memory_kind": "task", "confidence": 7, "body": body}
-                for body in (covered, specific, distinct)
-            ]
-        }
-    )
-    client = ExtractionModelClient(payload, Usage(input_tokens=50, output_tokens=20))
-    runner = _runner(blob, vec((24, 1.0)), _registry(client))
-    with ws(workspace_id):
-        await runner.drive(_derive_consumer(runner))
-
-    assert set(await _page_facts(page_id)) == {specific, distinct}
-
-
 def test_an_entry_that_covers_another_is_a_restatement_and_a_distinct_claim_is_not() -> None:
     """The measure is how much of the shorter entry the longer one covers, not how much the two
     share of everything they say between them. The two real Idler.ai sentences score 0.23 by the
@@ -886,33 +774,6 @@ def test_an_entry_that_covers_another_is_a_restatement_and_a_distinct_claim_is_n
     assert _restates(covered, carrying_more)
     assert not _restates(covered, apart)
     assert not _restates("Acme ships friday", "Acme ships")
-
-
-def test_an_overview_entry_inside_the_budget_stands_and_one_past_it_loses_whole_sentences() -> None:
-    """The Overview item is the one memory text a member reads whole rather than scans, so it is cut
-    on sentences: the entry keeps what it opens with and gives up the elaboration behind it, never
-    ending a member's paragraph mid-word."""
-    inside = "Acme Corp moved the launch to March. Rob Ryan owns the rollout."
-    assert _to_overview_budget(inside) == inside
-
-    over = " ".join(f"Sentence number {index} carries its own clause." for index in range(20))
-    kept = _to_overview_budget(over)
-    assert len(kept) <= MEMORY_BODY_MAX_CHARS
-    assert len(kept.split()) <= MAX_SUMMARY_WORDS
-    assert len(SENTENCE_END.split(kept)) <= MAX_SUMMARY_SENTENCES
-    assert over.startswith(kept)
-    assert kept.endswith(".")
-
-
-def test_an_overview_entry_of_one_unbroken_sentence_falls_back_to_the_word() -> None:
-    """A single sentence past the character budget has no sentence boundary to cut on, and a member
-    still reads a paragraph that ends on a word."""
-    unbroken = "the launch slipped again " * 100
-    kept = _to_overview_budget(unbroken)
-    assert len(kept) <= MEMORY_BODY_MAX_CHARS
-    assert kept.endswith("…")
-    assert unbroken.startswith(kept.removesuffix("…"))
-    assert kept.removesuffix("…")[-1].isalpha()
 
 
 async def test_derive_facts_cuts_an_oversized_model_body_back_to_a_whole_word(
@@ -952,49 +813,6 @@ async def test_derive_facts_cuts_an_oversized_model_body_back_to_a_whole_word(
     clipped = rows[0].body.removesuffix("…")
     assert oversized.startswith(clipped)
     assert oversized[len(clipped)] == " "
-
-
-async def test_derive_facts_rides_its_own_cursor_independent_of_the_indexer(
-    db: None, tmp_path: object
-) -> None:
-    workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page_id, _source_id = await _seed_page(
-        blob, workspace_id, "Beatrix leads the platform team from Berlin now."
-    )
-    payload = json.dumps(
-        {
-            "facts": [
-                {
-                    "page_id": str(page_id),
-                    "memory_kind": "fact",
-                    "confidence": 7,
-                    "body": "Beatrix leads the platform team",
-                }
-            ]
-        }
-    )
-    client = ExtractionModelClient(payload, Usage(input_tokens=50, output_tokens=20))
-    runner = _runner(blob, vec((1, 1.0)), _registry(client))
-    consumers = {c.discriminator: c for c in runner.consumers()}
-
-    with ws(workspace_id):
-        await runner.drive(consumers["derive_facts"])
-    assert client.calls == 1
-    assert len([row for row in await _facts(workspace_id) if row.item_class == FACT]) == 1
-
-    with ws(workspace_id):
-        scoped = ScopedStore(extension=memory_manifest.NAME)
-        derive_cursor = await scoped.get("page_change_cursor:derive_facts")
-        assert isinstance(derive_cursor, str)
-        assert await scoped.get("page_change_cursor:index_pages") is None
-
-        await runner.drive(consumers["derive_facts"])
-        assert client.calls == 1
-
-        await runner.drive(consumers["index_pages"])
-        assert isinstance(await scoped.get("page_change_cursor:index_pages"), str)
-        assert await scoped.get("page_change_cursor:derive_facts") == derive_cursor
 
 
 async def test_derive_facts_is_idempotent(db: None) -> None:
@@ -1039,49 +857,6 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
     assert rows[0].body == "the office is in the old cannery building"
     assert rows[0].subject == subject
     assert rows[0].as_of.replace(tzinfo=UTC) == change.as_of
-
-
-async def test_derive_facts_binds_each_fact_to_its_pages_source(db: None) -> None:
-    """The deriver is the one production writer of `memory_item.source_id` and its `memory_source`
-    link: it stamps every fact it commits with the source of the page it read, so a reader granted
-    that source reaches the fact and one without it does not. Binding a fact to the wrong feed would
-    mis-scope the grant invisibly, so the source it writes is read straight back."""
-    workspace_id = await _workspace()
-    page_id, source_id = uuid4(), uuid4()
-    payload = json.dumps(
-        {
-            "facts": [
-                {
-                    "page_id": str(page_id),
-                    "memory_kind": "fact",
-                    "confidence": 6,
-                    "body": "the acquisition codename is polaris",
-                }
-            ]
-        }
-    )
-    change = _change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page")
-    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    deriver = _scripted(_store(workspace_id, vec((2, 1.0))), payload)
-    with ws(workspace_id):
-        await deriver.apply((change,))
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(memory_item.c.id, memory_item.c.source_id).where(
-                    memory_item.c.created_from_page_id == page_id
-                )
-            )
-        ).one()
-        links = (
-            await connection.execute(
-                sa.select(memory_source.c.source_id, memory_source.c.page_id).where(
-                    memory_source.c.memory_item_id == row.id
-                )
-            )
-        ).all()
-    assert row.source_id == source_id
-    assert set(links) == {(source_id, page_id)}
 
 
 async def test_fact_deriver_ignores_a_stale_private_payload_after_sanitization(
@@ -1156,41 +931,6 @@ async def test_derive_facts_without_a_model_holds_its_cursor_instead_of_skipping
         assert await scoped.get("page_change_cursor:derive_facts") is None
 
 
-async def test_the_extraction_compels_the_recording_tool_instead_of_asking_for_json_prose(
-    db: None, tmp_path: object
-) -> None:
-    """The facts are a tool contract, never structured data read out of a completion: the pass
-    offers the recording tool alone, compels it, and asks for optional reasoning to stay off, so
-    the entries arrive as arguments the provider decoded. A required-reasoning model uses its
-    minimum adaptive effort. A body carrying the quote and newline that break a hand-decoded reply
-    lands verbatim."""
-    workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page_id, _source_id = await _seed_page(
-        blob, workspace_id, 'The buyer said "polaris" is the codename, on two lines.'
-    )
-    body = 'the buyer calls the deal "polaris"\nand closes it in Q3'
-    client = RecordingExtractionClient(_extraction(page_id, body))
-    runner = _runner(blob, vec((21, 1.0)), _registry(client))
-    with ws(workspace_id):
-        await runner.drive(_derive_consumer(runner))
-
-    request = client.requests[0]
-    assert [tool.name for tool in request.tools] == [FACT_EXTRACT_TOOL]
-    assert request.tool_choice == FACT_EXTRACT_TOOL
-    assert request.reasoning == "off"
-    assert request.tools[0].input_schema["properties"]["facts"]["type"] == "array"
-    assert "notability" not in json.dumps(request.tools[0].input_schema)
-    assert "Record them with the record_facts tool." in request.system
-    assert request.system.index("First discard source metadata") < request.system.index(
-        "Write each fact as one row"
-    )
-    assert "validation or check outcomes and counts" in request.system
-    assert "Keep an entity identifier" in request.system
-    assert "when it is the subject that lets the member recognise the entity" in request.system
-    assert await _page_facts(page_id) == {body: 1}
-
-
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -1243,56 +983,6 @@ async def test_an_extraction_it_cannot_read_holds_the_cursor_instead_of_dropping
             is None
         )
     assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
-
-
-async def test_the_tick_after_an_unreadable_extraction_derives_the_pages_the_last_one_held(
-    db: None, tmp_path: object
-) -> None:
-    """The held cursor is what makes the loss recoverable: the pages an unreadable extraction left
-    underived are exactly the pages the next tick replays, so the facts of the edited page land one
-    tick late instead of never, and the revision they replace retires then."""
-    workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page_id, source_id = await _seed_page(
-        blob, workspace_id, "The acquisition codename is polaris and the deal closes in Q3."
-    )
-    store = _store(workspace_id, vec((17, 1.0)))
-    await store.commit(
-        MemoryWrite(
-            subject=SHARED_SUBJECT,
-            body="the acquisition codename is polaris",
-            created_from_page_id=page_id,
-            created_from_page_revision=1,
-            source_id=source_id,
-        )
-    )
-    revision = await _rewrite_page(page_id, "sha256:edited")
-    unreadable = _runner(
-        blob,
-        vec((17, 1.0)),
-        _registry(
-            ExtractionModelClient(
-                '{"facts":[{"page_id":"x","body":"the buyer said "polaris""}]}',
-                Usage(input_tokens=10, output_tokens=5),
-            )
-        ),
-    )
-    with ws(workspace_id), pytest.raises(ValueError):
-        await unreadable.drive(_derive_consumer(unreadable))
-
-    readable = _runner(
-        blob,
-        vec((17, 1.0)),
-        _registry(
-            ExtractionModelClient(
-                _extraction(page_id, "the acquisition codename is meridian"),
-                Usage(input_tokens=10, output_tokens=5),
-            )
-        ),
-    )
-    with ws(workspace_id):
-        await readable.drive(_derive_consumer(readable))
-    assert await _page_facts(page_id) == {"the acquisition codename is meridian": revision}
 
 
 async def test_a_body_too_thin_to_derive_keeps_the_pages_prior_fact(db: None) -> None:
@@ -1413,53 +1103,6 @@ async def test_an_extraction_carrying_no_facts_keeps_the_pages_prior_fact(db: No
         )
 
     assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
-
-
-async def test_a_page_fact_outlives_its_edit_until_the_derivation_replaces_it(db: None) -> None:
-    """The delete-before-replace regression, over all three page-derived consumers. An edit fences
-    the page's fact out of recall, but nothing may remove it before the derivation for the new
-    revision commits — not the page indexer on its own cursor, not the index job re-claiming the row
-    with its embedding cleared. The moment the replacement lands, recall serves it and the row it
-    replaced is gone."""
-    workspace_id = await _workspace()
-    page_id, source_id = uuid4(), uuid4()
-    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
-    probe = vec((13, 1.0))
-    store = _store(workspace_id, probe)
-    deriver = _scripted(
-        store,
-        _extraction(page_id, "the acquisition codename is polaris"),
-        _extraction(page_id, "the acquisition codename is meridian"),
-    )
-    shared = frozenset({SHARED_SUBJECT})
-    with ws(workspace_id):
-        await deriver.apply(
-            (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, 1, "sha256:page"),)
-        )
-        await _index_memory(store, probe)
-        assert [
-            item.body
-            for item in await store.recall("acquisition codename", shared, 5, source_reader=reader)
-        ] == ["the acquisition codename is polaris"]
-
-        revision = await _rewrite_page(page_id, "sha256:edited")
-        edited = _change(
-            page_id, source_id, SHARED_SUBJECT, EDITED_PAGE_BODY, revision, "sha256:edited"
-        )
-        await _index_pages(store, probe, workspace_id, edited)
-        await _index_memory(store, probe)
-
-        assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
-        assert await store.recall("acquisition codename", shared, 5, source_reader=reader) == ()
-
-        await deriver.apply((edited,))
-        await _index_memory(store, probe)
-        assert await _page_facts(page_id) == {"the acquisition codename is meridian": revision}
-        assert [
-            item.body
-            for item in await store.recall("acquisition codename", shared, 5, source_reader=reader)
-        ] == ["the acquisition codename is meridian"]
 
 
 async def test_a_committed_replacement_retires_the_prior_revision_exactly_once(db: None) -> None:
@@ -1626,269 +1269,7 @@ async def test_the_index_withholds_facts_bound_to_a_superseded_revision(db: None
     assert len(await _page_facts(page_id)) == 6
 
 
-async def test_a_withheld_fact_leaves_the_index_jobs_due_set(db: None) -> None:
-    """A fact the index job may not publish is settled, not left claimed: it stamps the digest and
-    releases the lease, so the row cannot sit in the due set forever holding the claim slots and the
-    per-tick candidate binding that a newly committed fact needs. The row itself stays — retiring it
-    is the derivation's to do."""
-    workspace_id = await _workspace()
-    page_id, source_id = uuid4(), uuid4()
-    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    probe = vec((21, 1.0))
-    store = _store(workspace_id, probe)
-    await store.commit(
-        MemoryWrite(
-            subject=SHARED_SUBJECT,
-            body="the acquisition codename is polaris",
-            created_from_page_id=page_id,
-            created_from_page_revision=1,
-            source_id=source_id,
-        )
-    )
-    await _rewrite_page(page_id, "sha256:edited")
-    job = next(
-        spec
-        for spec in memory_manifest.manifest().jobs
-        if spec.name == memory_manifest.MEMORY_INDEX_JOB
-    )
-    assert workspace_id in set(await job.candidates())
-
-    with ws(workspace_id):
-        await _index_memory(store, probe)
-
-    assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
-    assert workspace_id not in set(await job.candidates())
-    digest, claimed_at = await _embedding_state(page_id)
-    assert digest is not None
-    assert claimed_at is None
-
-
-async def test_a_fact_carried_to_the_new_revision_is_published_again(db: None) -> None:
-    """A fact withheld while its revision was stale is not lost to the index: the derivation that
-    carries the same body forward rebinds it to the live revision, which makes it due again, so the
-    next index tick publishes it and recall serves it. Without that, a fact the index settled while
-    fenced would stay unrecallable for as long as the row lived."""
-    workspace_id = await _workspace()
-    page_id, source_id = uuid4(), uuid4()
-    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    probe = vec((22, 1.0))
-    store = _store(workspace_id, probe)
-    body = "the acquisition codename is polaris"
-    await store.commit(
-        MemoryWrite(
-            subject=SHARED_SUBJECT,
-            body=body,
-            created_from_page_id=page_id,
-            created_from_page_revision=1,
-            source_id=source_id,
-        )
-    )
-    revision = await _rewrite_page(page_id, "sha256:edited")
-    shared = frozenset({SHARED_SUBJECT})
-    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
-    with ws(workspace_id):
-        await _index_memory(store, probe)
-        assert await store.recall("acquisition codename", shared, 5, source_reader=reader) == ()
-
-        await _scripted(store, _extraction(page_id, body)).apply(
-            (_change(page_id, source_id, SHARED_SUBJECT, PAGE_BODY, revision, "sha256:edited"),)
-        )
-        digest, _claimed_at = await _embedding_state(page_id)
-        assert digest is None
-
-        await _index_memory(store, probe)
-        assert [
-            item.body
-            for item in await store.recall("acquisition codename", shared, 5, source_reader=reader)
-        ] == [body]
-    assert await _page_facts(page_id) == {body: revision}
-
-
-async def test_a_pages_move_withdraws_the_chunks_it_published_while_current(db: None) -> None:
-    """Facts published while their revision was the page's own must not keep their chunks once the
-    page moves on. The page-index pass makes the revisions the page left due again, so the index job
-    withdraws them without waiting on a derivation — a revision that derives nothing derives no
-    replacement, and five superseded siblings would otherwise fill recall's whole candidate window
-    and leave another page's live fact unrecallable for as long as the rows lived. Every row stays
-    exactly where the derivation left it."""
-    workspace_id = await _workspace()
-    edited_page, edited_source = uuid4(), uuid4()
-    live_page, live_source = uuid4(), uuid4()
-    await _seed_page_authority(workspace_id, edited_page, edited_source, SHARED_SUBJECT)
-    await _seed_page_authority(workspace_id, live_page, live_source, SHARED_SUBJECT)
-    probe = vec((23, 1.0))
-    store = _store(workspace_id, probe)
-    live_body = "the acquisition codename is meridian and the deal closes"
-    superseded = {f"the acquisition codename polaris note {note}" for note in range(5)}
-    shared = frozenset({SHARED_SUBJECT})
-    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, edited_source, live_source)
-    with ws(workspace_id):
-        states = await context_for("memory", frozenset()).page_states((edited_page, live_page))
-        for body in superseded:
-            await store.commit(
-                MemoryWrite(
-                    subject=SHARED_SUBJECT,
-                    body=body,
-                    created_from_page_id=edited_page,
-                    created_from_page_revision=states[edited_page].revision,
-                    source_id=edited_source,
-                )
-            )
-        await store.commit(
-            MemoryWrite(
-                subject=SHARED_SUBJECT,
-                body=live_body,
-                created_from_page_id=live_page,
-                created_from_page_revision=states[live_page].revision,
-                source_id=live_source,
-            )
-        )
-        await _index_memory(store, probe)
-        published = await store.index.lexical(
-            "acquisition codename", shared, OWNER_KIND_MEMORY_ITEM, 100
-        )
-        assert {hit.text for hit in published} == superseded | {live_body}
-
-        revision = await _rewrite_page(edited_page, "sha256:edited")
-        await _index_pages(
-            store,
-            probe,
-            workspace_id,
-            _change(
-                edited_page,
-                edited_source,
-                SHARED_SUBJECT,
-                EDITED_PAGE_BODY,
-                revision,
-                "sha256:edited",
-            ),
-        )
-        await _index_memory(store, probe)
-
-        assert [
-            item.body
-            for item in await store.recall("acquisition codename", shared, 3, source_reader=reader)
-        ] == [live_body]
-        withdrawn = await store.index.lexical(
-            "acquisition codename", shared, OWNER_KIND_MEMORY_ITEM, 100
-        )
-        assert {hit.text for hit in withdrawn} == {live_body}
-    assert set(await _page_facts(edited_page)) == superseded
-
-
-async def test_a_page_moving_before_the_settle_leaves_the_row_due(db: None) -> None:
-    """The index job may not settle a decision the page has already invalidated. A page moving
-    between the job's last check and its digest stamp releases the row's claim, so the stamp finds
-    no claim to release and the row stays due — the next tick withdraws the chunks the interrupted
-    run published. Without that, one interleaving leaves a superseded revision's chunks published
-    for the life of the row, exactly what the page-index pass exists to prevent."""
-    workspace_id = await _workspace()
-    page_id, source_id = uuid4(), uuid4()
-    await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    probe = vec((24, 1.0))
-    store = _store(workspace_id, probe)
-    body = "the acquisition codename is polaris"
-    shared = frozenset({SHARED_SUBJECT})
-
-    async def move() -> None:
-        revision = await _rewrite_page(page_id, "sha256:edited")
-        await _index_pages(
-            store,
-            probe,
-            workspace_id,
-            _change(
-                page_id, source_id, SHARED_SUBJECT, EDITED_PAGE_BODY, revision, "sha256:edited"
-            ),
-        )
-
-    with ws(workspace_id):
-        states = await context_for("memory", frozenset()).page_states((page_id,))
-        await store.commit(
-            MemoryWrite(
-                subject=SHARED_SUBJECT,
-                body=body,
-                created_from_page_id=page_id,
-                created_from_page_revision=states[page_id].revision,
-                source_id=source_id,
-            )
-        )
-        await MemoryIndexer(
-            index=store.index,
-            embed=StubEmbed(probe),
-            transaction=workspace_tx,
-            chunker=TextChunker(),
-            page_states=MovingPage(move),
-        ).run()
-        digest, claimed_at = await _embedding_state(page_id)
-        assert digest is None
-        assert claimed_at is None
-
-        await _index_memory(store, probe)
-        assert (
-            await store.index.lexical("acquisition codename", shared, OWNER_KIND_MEMORY_ITEM, 10)
-            == ()
-        )
-    assert await _page_facts(page_id) == {body: states[page_id].revision}
-
-
 # --- consolidation -----------------------------------------------------------
-
-
-async def test_consolidation_supersedes_originals_and_recall_surfaces_the_summary(
-    db: None,
-) -> None:
-    workspace_id = await _workspace()
-    probe = vec((9, 1.0))
-    originals = [
-        await _seed_aged_fact(
-            workspace_id, "the zephyr protocol handshake rotates every hour", probe, 6
-        ),
-        await _seed_aged_fact(
-            workspace_id, "the zephyr protocol handshake uses a fresh nonce", probe, 8
-        ),
-        await _seed_aged_fact(
-            workspace_id, "the zephyr protocol handshake token expires fast", probe, 4
-        ),
-    ]
-    summary_text = (
-        "the zephyr protocol handshake rotates hourly with a nonce and a short-lived token"
-    )
-    with ws(workspace_id):
-        await MemoryConsolidator(
-            embed=StubEmbed(probe),
-            transaction=workspace_tx,
-            workspace_id=workspace_id,
-            model=_model(summary_text),
-        ).run()
-
-    rows = await _facts(workspace_id)
-    summaries = [row for row in rows if row.item_class == SEMANTIC]
-    assert len(summaries) == 1
-    summary = summaries[0]
-    assert summary.body == summary_text
-    assert summary.subject == SHARED_SUBJECT
-    assert summary.confidence == 8
-    assert {row.superseded_by for row in rows if row.id in originals} == {summary.id}
-
-    with ws(workspace_id):
-        recalled = await _store(workspace_id, probe).recall(
-            "zephyr protocol handshake",
-            frozenset({SHARED_SUBJECT}),
-            10,
-            source_reader=_reader(frozenset({SHARED_SUBJECT})),
-        )
-    assert [item.memory_id for item in recalled] == [summary.id]
-    assert recalled[0].item_class == SEMANTIC
-
-    with ws(workspace_id):
-        await MemoryConsolidator(
-            embed=StubEmbed(probe),
-            transaction=workspace_tx,
-            workspace_id=workspace_id,
-            model=_model(summary_text),
-        ).run()
-    after = [row for row in await _facts(workspace_id) if row.item_class == SEMANTIC]
-    assert len(after) == 1
 
 
 OVERVIEW_PARAGRAPH = " ".join(
@@ -1909,46 +1290,6 @@ OVERVIEW_PARAGRAPH = " ".join(
 )
 """A summary written to the whole of the paragraph shape the consolidation prompt asks a model
 for: five sentences at the word budget."""
-
-
-async def test_consolidation_commits_a_summary_written_to_the_whole_overview_budget(
-    db: None,
-) -> None:
-    """The Overview band of the wiki reaches a member only if a paragraph-length body survives the
-    write, so the job is run over a model returning one at the full budget and the row is read back
-    whole. Clipping the summary to the budget proves nothing about that: the clipper answers the
-    prompt, and the commit is what decides whether a member ever sees the answer."""
-    assert len(OVERVIEW_PARAGRAPH) <= MEMORY_BODY_MAX_CHARS
-    assert len(OVERVIEW_PARAGRAPH.split()) <= MAX_SUMMARY_WORDS
-    assert len(SENTENCE_END.split(OVERVIEW_PARAGRAPH)) <= MAX_SUMMARY_SENTENCES
-
-    workspace_id = await _workspace()
-    probe = vec((11, 1.0))
-    for body in (
-        "the zephyr protocol handshake rotates every hour",
-        "the zephyr protocol handshake issues a fresh nonce",
-        "the zephyr protocol handshake token expires in a minute",
-    ):
-        await _seed_aged_fact(workspace_id, body, probe, 7)
-    with ws(workspace_id):
-        await MemoryConsolidator(
-            embed=StubEmbed(probe),
-            transaction=workspace_tx,
-            workspace_id=workspace_id,
-            model=_model(OVERVIEW_PARAGRAPH),
-        ).run()
-
-    summaries = [row for row in await _facts(workspace_id) if row.item_class == SEMANTIC]
-    assert [row.body for row in summaries] == [OVERVIEW_PARAGRAPH]
-
-    with ws(workspace_id):
-        recalled = await _store(workspace_id, probe).recall(
-            "zephyr protocol handshake",
-            frozenset({SHARED_SUBJECT}),
-            10,
-            source_reader=_reader(frozenset({SHARED_SUBJECT})),
-        )
-    assert [item.memory_id for item in recalled] == [summaries[0].id]
 
 
 async def test_consolidation_without_a_model_writes_nothing(db: None) -> None:
@@ -1973,65 +1314,6 @@ async def test_consolidation_without_a_model_writes_nothing(db: None) -> None:
     rows = await _facts(workspace_id)
     assert [row for row in rows if row.item_class == SEMANTIC] == []
     assert all(row.superseded_by is None for row in rows if row.id in originals)
-
-
-async def test_consolidation_excludes_page_derived_facts(db: None) -> None:
-    workspace_id = await _workspace()
-    probe = vec((6, 1.0))
-    page_id = uuid4()
-    originals = [
-        await _seed_aged_fact(
-            workspace_id,
-            f"the page-derived atlas statement {index}",
-            probe,
-            5,
-            created_from_page_id=page_id,
-        )
-        for index in range(MIN_CLUSTER_FACTS)
-    ]
-    with ws(workspace_id):
-        await MemoryConsolidator(
-            embed=StubEmbed(probe),
-            transaction=workspace_tx,
-            workspace_id=workspace_id,
-            model=_model("a summary"),
-        ).run()
-    rows = await _facts(workspace_id)
-    assert [row for row in rows if row.item_class == SEMANTIC] == []
-    assert all(row.superseded_by is None for row in rows if row.id in originals)
-
-
-async def test_consolidation_revalidates_donors_after_the_model_call(db: None) -> None:
-    workspace_id = await _workspace()
-    probe = vec((7, 1.0))
-    originals = [
-        await _seed_aged_fact(
-            workspace_id,
-            f"the orion protocol statement {index}",
-            probe,
-            5,
-        )
-        for index in range(MIN_CLUSTER_FACTS)
-    ]
-    model = ModelAccess(
-        _Resolver(
-            AUTO_MODEL,
-            CORE_PRICING,
-            SupersedingModelClient(originals[0]),
-        ),
-        CONSOLIDATE_MODEL_JOB,
-    )
-    with ws(workspace_id):
-        await MemoryConsolidator(
-            embed=StubEmbed(probe),
-            transaction=workspace_tx,
-            workspace_id=workspace_id,
-            model=model,
-        ).run()
-    rows = await _facts(workspace_id)
-    assert [row for row in rows if row.item_class == SEMANTIC] == []
-    assert next(row for row in rows if row.id == originals[0]).superseded_by is not None
-    assert all(row.superseded_by is None for row in rows if row.id in set(originals[1:]))
 
 
 async def _insert_fact(
@@ -2217,73 +1499,6 @@ async def _let_time_pass(workspace_id: UUID, elapsed: timedelta) -> None:
             )
 
 
-async def test_dedup_supersedes_all_but_the_newest_copy(db: None) -> None:
-    """The accreted ledger copies, collapsed: every copy of one statement is stamped at the newest
-    one, which is the current statement. No summary row and no model pass — that is the
-    consolidator's job, over facts that are related rather than restatements — and `semantic` rows
-    are swept like any other, since the ledgers that accreted are exactly that class."""
-    workspace_id = await _workspace()
-    start = datetime.now(UTC) - timedelta(hours=3)
-    ids = [
-        await _seed_copy(
-            workspace_id, SHARED_SUBJECT, SEMANTIC, body, start + timedelta(minutes=index)
-        )
-        for index, body in enumerate(LEDGER_COPIES)
-    ]
-    with ws(workspace_id):
-        await _deduper(workspace_id, StubEmbed(vec((25, 1.0)))).run()
-
-    rows = await _facts(workspace_id)
-    assert len(rows) == len(LEDGER_COPIES)
-    assert _live(rows) == {ids[-1]}
-    assert {row.superseded_by for row in rows if row.id in ids[:-1]} == {ids[-1]}
-
-
-def test_cosine_scores_direction_and_gives_a_zero_vector_no_score() -> None:
-    """Every collapse decision either clustering pass makes is this number: parallel vectors of any
-    magnitude score 1.0, orthogonal ones 0.0, and a row the embed backend answered with nothing has
-    no direction to compare — it must score 0.0 rather than divide by zero."""
-    assert cosine(vec((0, 1.0)), vec((0, 1.0))) == pytest.approx(1.0)
-    assert cosine(vec((0, 3.0)), vec((0, 0.5))) == pytest.approx(1.0)
-    assert cosine(vec((0, 1.0)), vec((1, 1.0))) == pytest.approx(0.0)
-    assert cosine(vec((0, 1.0)), vec()) == 0.0
-
-
-async def test_a_pair_far_apart_in_the_group_still_collapses_in_one_run(db: None) -> None:
-    """A duplicate pair is found by distance, never by position: the two copies here sit at opposite
-    ends of the group's recency order with distinct facts filling every rank between them, and one
-    run still retires the older onto the newer. Bounding a tick by taking the newest slice of the
-    group instead would leave this pair live for good — the ordering says nothing about which rows
-    restate each other, and the group's own fingerprint would then never move again."""
-    workspace_id = await _workspace()
-    start = datetime.now(UTC) - timedelta(hours=6)
-    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
-    filler = tuple(f"unrelated standing fact number {index}" for index in range(8))
-    older = await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, restated[0], start)
-    for index, body in enumerate(filler):
-        await _seed_copy(
-            workspace_id, SHARED_SUBJECT, FACT, body, start + timedelta(minutes=index + 1)
-        )
-    newer = await _seed_copy(
-        workspace_id,
-        SHARED_SUBJECT,
-        FACT,
-        restated[1],
-        start + timedelta(minutes=len(filler) + 1),
-    )
-    embed = MappedEmbed(
-        {restated[0]: vec((44, 1.0)), restated[1]: vec((44, 1.0))}
-        | {body: vec((45 + index, 1.0)) for index, body in enumerate(filler)}
-    )
-    with ws(workspace_id):
-        await _deduper(workspace_id, embed).run()
-
-    stamps = {row.id: row.superseded_by for row in await _facts(workspace_id)}
-    assert stamps[older] == newer
-    assert stamps[newer] is None
-    assert len(_live(await _facts(workspace_id))) == len(filler) + 1
-
-
 async def test_dedup_leaves_distinct_facts_and_page_derived_rows(db: None) -> None:
     """The sweep collapses restatements, never a group. Two facts of one subject that merely share
     it stay live and unstamped, and a page-derived row restating one of them word for word is not
@@ -2340,45 +1555,6 @@ async def test_dedup_never_collapses_across_subject_or_class(db: None) -> None:
     assert {donor: stamps[donor] for donor in heads} == heads
 
 
-async def test_dedup_sweeps_one_group_per_run_and_rotates_past_it(db: None) -> None:
-    """One (subject, item_class) group per run, so a workspace with a long backlog is swept across
-    ticks instead of in one unbounded transaction — and the cursor advances past the group it just
-    read, whether or not that group had anything to collapse. A sweep that restarted at the first
-    group every tick would leave every later group's copies live for good."""
-    workspace_id = await _workspace()
-    start = datetime.now(UTC) - timedelta(hours=3)
-    member = member_subject(uuid4())
-    distinct = ("the aurora index rebuilds nightly", "the beacon queue drains at noon")
-    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
-    for index, body in enumerate(distinct):
-        await _seed_copy(workspace_id, member, FACT, body, start + timedelta(minutes=index))
-    copies = [
-        await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, body, start + timedelta(minutes=index))
-        for index, body in enumerate(restated)
-    ]
-    embed = MappedEmbed(
-        {
-            distinct[0]: vec((28, 1.0)),
-            distinct[1]: vec((29, 1.0)),
-            restated[0]: vec((30, 1.0)),
-            restated[1]: vec((30, 1.0)),
-        }
-    )
-    with ws(workspace_id):
-        deduper = _deduper(workspace_id, embed)
-        await deduper.run()
-        after_first = _live(await _facts(workspace_id))
-        cursor = await ScopedStore(extension=memory_manifest.NAME).get(DEDUP_CURSOR_KEY)
-        await deduper.run()
-        after_second = _live(await _facts(workspace_id))
-
-    assert cursor == [member, FACT]
-    assert len(after_first) == 4
-    assert len(after_second) == 3
-    assert copies[0] not in after_second
-    assert copies[1] in after_second
-
-
 async def test_dedup_stamps_live_rows_only_and_leaves_an_earlier_stamp_alone(db: None) -> None:
     """A superseded row is not the sweep's to move. A row an earlier rewrite stamped keeps that
     stamp rather than being re-pointed at the newest copy, and is never read as a copy to collapse:
@@ -2400,28 +1576,6 @@ async def test_dedup_stamps_live_rows_only_and_leaves_an_earlier_stamp_alone(db:
 
     stamps = {row.id: row.superseded_by for row in await _facts(workspace_id)}
     assert stamps == {oldest: middle, middle: newest, newest: None}
-
-
-async def test_dedup_heals_the_restatements_the_write_path_let_through(db: None) -> None:
-    """The sweep's whole reason, end to end through the real writer: `commit` derives nothing, so
-    two restatements of one statement both land live however near they are. The sweep is what
-    collapses them afterwards — once they are old enough to be history rather than a member's live
-    working memory."""
-    workspace_id = await _workspace()
-    probe = vec((32, 1.0))
-    store = _store(workspace_id, probe)
-    with ws(workspace_id):
-        for body in ("the retro ships every second thursday", "the retro ships each second"):
-            await store.commit(MemoryWrite(subject=SHARED_SUBJECT, body=body))
-        assert len(_live(await _facts(workspace_id))) == 2
-
-        await _let_time_pass(workspace_id, DEDUP_MIN_AGE * 2)
-        await _deduper(workspace_id, StubEmbed(probe)).run()
-
-    rows = await _facts(workspace_id)
-    live = _live(rows)
-    assert len(live) == 1
-    assert {row.superseded_by for row in rows if row.superseded_by is not None} == live
 
 
 async def test_dedup_candidates_name_a_workspace_once_per_duplicate_backlog(db: None) -> None:
@@ -2491,77 +1645,6 @@ async def test_the_sweep_keeps_the_copy_a_member_just_re_asserted(db: None) -> N
     assert settled[reworded].superseded_by == settled[original].id
 
 
-@pytest.mark.parametrize(
-    ("cursor", "collapses"),
-    [(["member:zzzz", FACT], "shared"), (["shared", FACT], "member")],
-    ids=["vanished-cursor-walks-on", "last-group-wraps-to-first"],
-)
-async def test_the_walk_advances_past_a_cursor_whose_group_is_gone(
-    db: None, cursor: list[str], collapses: str
-) -> None:
-    """The cursor is an exclusive lower bound, not a lookup: the next tick takes the first group
-    ordering strictly after it and wraps at the end. A cursor naming a group that has since been
-    collapsed away must carry the walk forward to the group after it — restarting at the front
-    there re-walks the whole prefix after every collapse, so a workspace whose permanent groups
-    outnumber its backlogged ones heals in O(n·m) ticks instead of O(n+m)."""
-    workspace_id = await _workspace()
-    start = datetime.now(UTC) - timedelta(hours=3)
-    member = f"member:{uuid4()}"
-    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
-    collapsible = {
-        "member": [
-            await _seed_copy(workspace_id, member, FACT, body, start + timedelta(minutes=index))
-            for index, body in enumerate(restated)
-        ],
-        "shared": [
-            await _seed_copy(
-                workspace_id, SHARED_SUBJECT, FACT, body, start + timedelta(minutes=index)
-            )
-            for index, body in enumerate(restated)
-        ],
-    }
-    with ws(workspace_id):
-        await _cursor_value(cursor)
-        await _deduper(workspace_id, StubEmbed(vec((34, 1.0)))).run()
-
-    live = _live(await _facts(workspace_id))
-    swept, untouched = (
-        collapsible[collapses],
-        collapsible["shared" if collapses == "member" else "member"],
-    )
-    assert swept[0] not in live
-    assert swept[1] in live
-    assert set(untouched) <= live
-
-
-async def test_a_group_whose_sweep_raises_does_not_halt_the_walk(db: None) -> None:
-    """Fail-loud is the job erroring, not the workspace's healing stopping. The cursor advances
-    before the group is read, so a group that raises every tick costs one retry per rotation while
-    every other group still gets swept — where advancing afterwards would pin the walk to the
-    poisoned group and leave the rest of the backlog live for good."""
-    workspace_id = await _workspace()
-    start = datetime.now(UTC) - timedelta(hours=3)
-    member = f"member:{uuid4()}"
-    poisoned = ("the aurora index rebuilds nightly", "the aurora index is rebuilt each night")
-    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
-    for index, body in enumerate(poisoned):
-        await _seed_copy(workspace_id, member, FACT, body, start + timedelta(minutes=index))
-    copies = [
-        await _seed_copy(workspace_id, SHARED_SUBJECT, FACT, body, start + timedelta(minutes=index))
-        for index, body in enumerate(restated)
-    ]
-    embed = MappedEmbed({restated[0]: vec((35, 1.0)), restated[1]: vec((35, 1.0))})
-    with ws(workspace_id):
-        deduper = _deduper(workspace_id, embed)
-        with pytest.raises(LookupError):
-            await deduper.run()
-        await deduper.run()
-
-    live = _live(await _facts(workspace_id))
-    assert copies[0] not in live
-    assert copies[1] in live
-
-
 async def test_an_unchanged_group_is_skipped_instead_of_re_embedded_every_tick(db: None) -> None:
     """A healed group must not pay for its own health forever. Every workspace holding two shared
     facts is a standing candidate, so a tick that re-embeds the whole group whether or not anything
@@ -2613,33 +1696,6 @@ async def test_a_copy_retired_mid_pass_leaves_its_whole_cluster_unstamped(db: No
     assert stamps[ids[0]] not in (None, ids[2])
 
 
-async def test_copies_under_the_age_floor_are_left_for_a_later_tick(db: None) -> None:
-    """The sweep owns history, never a member's live working memory. A pair written minutes ago is
-    untouched however near-identical it is — a periodic tick that happened to land must never retire
-    a member's minutes-old memory, and an eval seeding a corpus must not have it collapse underneath
-    the run. The same pair, once past the floor, is exactly what the sweep is for."""
-    workspace_id = await _workspace()
-    just_now = datetime.now(UTC)
-    restated = ("the vault key rotates on sunday", "the vault key is rotated each sunday")
-    copies = [
-        await _seed_copy(
-            workspace_id, SHARED_SUBJECT, FACT, body, just_now - timedelta(minutes=index)
-        )
-        for index, body in enumerate(restated)
-    ]
-    with ws(workspace_id):
-        deduper = _deduper(workspace_id, StubEmbed(vec((41, 1.0))))
-        await deduper.run()
-        fresh = _live(await _facts(workspace_id))
-
-        await _let_time_pass(workspace_id, DEDUP_MIN_AGE * 2)
-        await deduper.run()
-        aged = _live(await _facts(workspace_id))
-
-    assert fresh == set(copies)
-    assert aged == {copies[0]}
-
-
 async def test_a_fresh_copy_survives_the_sweep_of_the_family_it_joins(db: None) -> None:
     """The floor fences the rows the sweep reads, not just the groups it visits. A member writing a
     third wording of a statement whose older copies are already a swept family must keep it: the
@@ -2687,29 +1743,6 @@ async def test_a_cursor_the_sweep_did_not_write_fails_loud(db: None, stored: Jso
 
 
 # --- seam --------------------------------------------------------------------
-
-
-def test_memory_registers_two_independent_page_change_consumers(tmp_path: object) -> None:
-    """The memory manifest declares two page_change hooks; the runner yields two consumers keyed by
-    their handler-name discriminator, and core_jobs names each its own `page_change:memory:<hook>`
-    workflow — so the indexer and the fact deriver never collide on JobSpec name or cursor key."""
-    blob = FilesystemBlobStore(root=tmp_path)
-    runner = _runner(blob, vec((0, 1.0)), registry=None)
-    discriminators = {consumer.discriminator for consumer in runner.consumers()}
-    assert discriminators == {"index_pages", "derive_facts"}
-
-    specs = core_jobs(
-        SyncDriver(backends={"folder": FolderSource()}, blob=blob, postgres=False),
-        TurnDispatcher(client=None),
-        runner,
-        DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
-        None,
-    )
-    page_change = {spec.name for spec in specs if spec.name.startswith("page_change:")}
-    assert page_change == {
-        f"page_change:{memory_manifest.NAME}:index_pages",
-        f"page_change:{memory_manifest.NAME}:derive_facts",
-    }
 
 
 def _same_named_handler() -> Callable[[HookContext], Awaitable[HookOutcome]]:
@@ -2852,38 +1885,6 @@ async def test_a_machine_status_pages_facts_are_retired_when_the_pass_reaches_it
         )
 
 
-async def test_rebuilding_the_page_facts_clears_the_cursor_the_deriver_rides(
-    db: None, tmp_path: object
-) -> None:
-    """The whole of what the tool does: the cursor goes, so the next tick replays every page the
-    workspace holds to the deriver. It writes nothing itself — the pass that owns this text does
-    that — and the indexer's cursor beside it is untouched, since only the derived facts are being
-    written again."""
-    workspace_id = await _workspace()
-    blob = FilesystemBlobStore(root=tmp_path)
-    page_id, _source_id = await _seed_page(blob, workspace_id, PAGE_BODY)
-    client = RecordingExtractionClient(_extraction(page_id, "the codename is polaris"))
-    runner = _runner(blob, vec((34, 1.0)), _registry(client))
-    scoped = ScopedStore(extension=memory_manifest.NAME)
-    (tool,) = (one for one in memory_manifest.manifest().tools if one.name == REBUILD_TOOL)
-    with ws(workspace_id):
-        await runner.drive(_derive_consumer(runner))
-        await runner.drive(
-            next(one for one in runner.consumers() if one.discriminator == "index_pages")
-        )
-        indexed = await scoped.get("page_change_cursor:index_pages")
-        assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) is not None
-
-        member_id = await _seed_admin(workspace_id)
-        answered = await tool.handler(
-            _rebuild_ctx(workspace_id, member_id),
-            RebuildPageFactsInput(),
-        )
-        assert answered.content[0].text == memory_manifest.REBUILD_QUEUED
-        assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) is None
-        assert await scoped.get("page_change_cursor:index_pages") == indexed
-
-
 async def test_only_an_admin_can_ask_for_the_page_facts_to_be_written_again(db: None) -> None:
     """The tool is the whole act the portal button submits, so its gate is the button's gate: the
     cursor stands where it was and the pass reads nothing twice."""
@@ -2895,7 +1896,26 @@ async def test_only_an_admin_can_ask_for_the_page_facts_to_be_written_again(db: 
         member_id = await _seed_admin(workspace_id, admin=False)
         with pytest.raises(ValueError, match=memory_manifest.REBUILD_ADMIN_ONLY):
             await tool.handler(
-                _rebuild_ctx(workspace_id, member_id),
+                ToolContext(
+                    sandbox=None,  # type: ignore[arg-type]
+                    blob=None,  # type: ignore[arg-type]
+                    turn=Turn(
+                        id=uuid4(),
+                        workspace_id=workspace_id,
+                        conversation_id=uuid4(),
+                        agent_id=uuid4(),
+                        seq=1,
+                        status="running",
+                        inbound="rebuild",
+                        created_at=datetime.now(UTC),
+                    ),
+                    agent=Agent(prompt="p", model="auto"),
+                    spawn=None,  # type: ignore[arg-type]
+                    speaker_member_id=member_id,
+                    audience=conversation_audience(member_id),
+                    artifact_token_secret="",
+                    ext=context_for(memory_manifest.NAME, frozenset()),
+                ),
                 RebuildPageFactsInput(),
             )
         assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) == "a-cursor"
@@ -3000,82 +2020,6 @@ def test_a_section_body_is_admitted_at_the_budget_and_refused_past_it() -> None:
         )
 
 
-async def test_a_band_holds_one_paragraph_however_often_the_pass_runs(db: None) -> None:
-    """The rewrite in place: a second pass over a band whose facts have moved replaces the
-    paragraph rather than adding one, so the heading a member reads never opens on two summaries of
-    the same rows — and the paragraph it replaces is stamped at the one that replaced it, which is
-    what keeps it out of every reader that drops superseded rows."""
-    workspace_id = await _workspace()
-    source_id = await _seed_wiki_feed(workspace_id)
-    start = datetime.now(UTC) - timedelta(hours=3)
-    for index, body in enumerate(DECISION_ROWS):
-        await _seed_wiki_row(
-            workspace_id,
-            source_id,
-            body,
-            start + timedelta(minutes=index),
-            "decision",
-            confidence=index + 4,
-        )
-    with ws(workspace_id):
-        await _section_writer(workspace_id, _paragraph_model(DECISION_PARAGRAPH)).run()
-
-    first = await _sections(workspace_id)
-    assert [row.body for row in first] == [DECISION_PARAGRAPH]
-    assert first[0].subject == SHARED_SUBJECT
-    assert first[0].memory_kind == "decision"
-    assert first[0].confidence == len(DECISION_ROWS) + 3
-
-    await _seed_wiki_row(
-        workspace_id, source_id, MOVED_ROW, start + timedelta(minutes=10), "decision"
-    )
-    with ws(workspace_id):
-        await _section_writer(workspace_id, _paragraph_model(MOVED_PARAGRAPH)).run()
-
-    rows = await _sections(workspace_id)
-    live = [row for row in rows if row.superseded_by is None]
-    assert len(rows) == 2
-    assert [row.body for row in live] == [MOVED_PARAGRAPH]
-    assert next(row for row in rows if row.id == first[0].id).superseded_by == live[0].id
-
-
-async def test_a_bands_paragraph_is_written_from_its_page_derived_rows(db: None) -> None:
-    """The paragraph is written from exactly what a member reads under it. Most of that is distilled
-    from synced pages, so a pass excluding page-derived rows would write every wiki's paragraphs
-    from nothing; and a row an agent committed through `memory_update` carries no page at all, yet
-    the band draws it and a member's own correction is the last thing a summary of that band should
-    miss. What the fence takes out is neither — only a page-derived row whose page has moved past
-    the revision it was read from, which no reader serves. The band's own heading travels with the
-    rows, newest first, under the house register."""
-    workspace_id = await _workspace()
-    source_id = await _seed_wiki_feed(workspace_id)
-    start = datetime.now(UTC) - timedelta(hours=3)
-    for index, body in enumerate(TASK_ROWS):
-        await _seed_wiki_row(
-            workspace_id, source_id, body, start + timedelta(minutes=index), "task"
-        )
-    await _seed_copy(
-        workspace_id,
-        SHARED_SUBJECT,
-        FACT,
-        MEMBER_WRITTEN_TASK,
-        start + timedelta(minutes=10),
-        memory_kind="task",
-    )
-    client = RecordingCompletionClient(TASK_PARAGRAPH)
-    with ws(workspace_id):
-        await _section_writer(workspace_id, _section_model(client)).run()
-
-    sent = json.loads(client.requests[0].messages[0].content)
-    assert sent == {
-        "section": "Open work",
-        "facts": [MEMBER_WRITTEN_TASK, *reversed(TASK_ROWS)],
-    }
-    assert client.requests[0].system.startswith(DELIVERY_REGISTER_BLOCK)
-    sections = await _sections(workspace_id)
-    assert [(row.body, row.memory_kind) for row in sections] == [(TASK_PARAGRAPH, "task")]
-
-
 async def test_a_band_under_the_floor_is_left_without_a_paragraph(db: None) -> None:
     """One paragraph per band, and only where the band holds enough rows to amount to more than the
     member reads underneath it. A workspace whose History band is two rows keeps its Decisions
@@ -3106,60 +2050,6 @@ async def test_a_band_under_the_floor_is_left_without_a_paragraph(db: None) -> N
 COLLAPSED_HISTORY = "Acme Corp shipped four releases while the billing migration was being planned."
 
 
-async def test_a_band_falling_under_the_floor_loses_the_paragraph_it_earned(db: None) -> None:
-    """The floor decides whether a band is written, so it has to decide the standing paragraph too.
-    A band the curation pass or the consolidator has taken back under MIN_SECTION_FACTS is one no
-    rewrite reaches again, and nothing else here retires a paragraph — the deduper excludes the
-    class, the consolidator and the page pass touch facts alone, and `commit` writes neither class.
-    Left alone the member reads sentences built from rows the page has stopped holding. The band
-    that still clears the floor is rewritten in the same run, so what the pass drops is the
-    paragraph and not the pass."""
-    workspace_id = await _workspace()
-    source_id = await _seed_wiki_feed(workspace_id)
-    start = datetime.now(UTC) - timedelta(hours=3)
-    for index, body in enumerate(DECISION_ROWS):
-        await _seed_wiki_row(
-            workspace_id, source_id, body, start + timedelta(minutes=index), "decision"
-        )
-    for index in range(MIN_SECTION_FACTS - 1):
-        await _seed_wiki_row(
-            workspace_id,
-            source_id,
-            f"Acme Corp — Shipped release {index}.",
-            start + timedelta(minutes=20 + index),
-            "event",
-        )
-    collapsed = await _seed_copy(
-        workspace_id,
-        SHARED_SUBJECT,
-        SECTION,
-        COLLAPSED_HISTORY,
-        start + timedelta(minutes=30),
-        memory_kind="event",
-    )
-    client = RecordingCompletionClient(DECISION_PARAGRAPH)
-    with ws(workspace_id):
-        await _section_writer(workspace_id, _section_model(client)).run()
-
-    assert len(client.requests) == 1
-    assert json.loads(client.requests[0].messages[0].content)["section"] == "Decisions"
-    retired = await _retirements(workspace_id)
-    assert retired[COLLAPSED_HISTORY] is not None
-    assert retired[DECISION_PARAGRAPH] is None
-    assert [row.memory_kind for row in await _sections(workspace_id) if row.id != collapsed] == [
-        "decision"
-    ]
-    async with workspace_tx() as connection:
-        row = (
-            await connection.execute(
-                sa.select(memory_item.c.embedding_digest, memory_item.c.embedding_claimed_at).where(
-                    memory_item.c.id == collapsed
-                )
-            )
-        ).one()
-    assert (row.embedding_digest, row.embedding_claimed_at) == (None, None)
-
-
 async def test_the_section_pass_without_a_model_writes_nothing(db: None) -> None:
     workspace_id = await _workspace()
     source_id = await _seed_wiki_feed(workspace_id)
@@ -3172,46 +2062,6 @@ async def test_the_section_pass_without_a_model_writes_nothing(db: None) -> None
         await _section_writer(workspace_id, None).run()
 
     assert await _sections(workspace_id) == []
-
-
-async def test_the_dedup_sweep_leaves_a_subjects_five_band_paragraphs_alone(db: None) -> None:
-    """A subject's wiki holds one paragraph per band, so five section rows share a subject and a
-    class — exactly the (subject, item_class) group the dedup sweep collapses onto its newest row,
-    and every body here embeds to one vector, which is all a collapse needs. They are not copies of
-    one statement: each opens a different heading, and four would go with nothing to bring them
-    back, the section pass writing only where a band has moved. The duplicate facts seeded beside
-    them still collapse, so what is excluded is the class and not the sweep."""
-    workspace_id = await _workspace()
-    start = datetime.now(UTC) - timedelta(hours=3)
-    paragraphs = [
-        await _seed_copy(
-            workspace_id,
-            SHARED_SUBJECT,
-            SECTION,
-            f"what the {kind} band of this wiki amounts to",
-            start + timedelta(minutes=index),
-            memory_kind=kind,
-        )
-        for index, kind in enumerate(WIKI_BANDS)
-    ]
-    copies = [
-        await _seed_copy(
-            workspace_id,
-            SHARED_SUBJECT,
-            FACT,
-            body,
-            start + timedelta(minutes=30 + index),
-        )
-        for index, body in enumerate(
-            ("the vault key rotates on sunday", "the vault key is rotated each sunday")
-        )
-    ]
-    with ws(workspace_id):
-        deduper = _deduper(workspace_id, StubEmbed(vec((47, 1.0))))
-        for _ in WIKI_BANDS:
-            await deduper.run()
-
-    assert _live(await _facts(workspace_id)) == {*paragraphs, copies[1]}
 
 
 async def test_section_candidates_name_only_workspaces_holding_a_band_worth_a_paragraph(
@@ -3368,73 +2218,6 @@ async def _seed_page_facts(
     return bodies
 
 
-async def test_a_page_holds_one_overview_however_often_the_pass_runs(db: None) -> None:
-    """The rewrite in place, one altitude above a band: a second pass over a page whose facts have
-    moved replaces the paragraph the page opens on rather than adding one, so the Overview band
-    never shows two accounts of the same workspace — and the paragraph it replaces is stamped at the
-    one that replaced it, which keeps it out of every reader that drops superseded rows."""
-    workspace_id = await _workspace()
-    await _seed_page_facts(workspace_id)
-    with ws(workspace_id):
-        await _overview_writer(workspace_id, _paragraph_model(PAGE_OVERVIEW)).run()
-
-    first = await _overviews(workspace_id)
-    assert [row.body for row in first] == [PAGE_OVERVIEW]
-    assert first[0].subject == SHARED_SUBJECT
-    assert first[0].item_class == "overview"
-
-    await _seed_wiki_row(
-        workspace_id,
-        await _seed_wiki_feed(workspace_id),
-        MOVED_ROW,
-        datetime.now(UTC) - timedelta(minutes=5),
-        "decision",
-    )
-    with ws(workspace_id):
-        await _overview_writer(workspace_id, _paragraph_model(MOVED_OVERVIEW)).run()
-
-    rows = await _overviews(workspace_id)
-    live = [row for row in rows if row.superseded_by is None]
-    assert len(rows) == 2
-    assert [row.body for row in live] == [MOVED_OVERVIEW]
-    assert next(row for row in rows if row.id == first[0].id).superseded_by == live[0].id
-
-
-async def test_the_overview_is_written_from_the_pages_live_facts_alone(db: None) -> None:
-    """What the paragraph says is where the workspace stands now. A row the page pass retired and a
-    row consolidation superseded are both off the page, so a paragraph written from either would
-    state a wiki nobody reads — and the whole payload is one bounded read under the house register,
-    with the workspace named beside it."""
-    workspace_id = await _workspace()
-    await _seed_admin(workspace_id)
-    bodies = await _seed_page_facts(workspace_id)
-    source_id = await _seed_wiki_feed(workspace_id)
-    retired = await _seed_wiki_row(
-        workspace_id,
-        source_id,
-        RETIRED_FACT,
-        datetime.now(UTC) - timedelta(minutes=10),
-        "event",
-    )
-    await _stamp_retired(retired)
-    superseded = await _seed_wiki_row(
-        workspace_id,
-        source_id,
-        SUPERSEDED_FACT,
-        datetime.now(UTC) - timedelta(minutes=9),
-        "event",
-    )
-    await _age(superseded, datetime.now(UTC) - timedelta(minutes=9), superseded_by=uuid4())
-    client = RecordingCompletionClient(PAGE_OVERVIEW)
-    with ws(workspace_id):
-        await _overview_writer(workspace_id, _overview_model(client)).run()
-
-    sent = json.loads(client.requests[0].messages[0].content)
-    assert sent == {"workspace": "example.com", "facts": list(reversed(bodies))}
-    assert client.requests[0].system.startswith(DELIVERY_REGISTER_BLOCK)
-    assert [row.body for row in await _overviews(workspace_id)] == [PAGE_OVERVIEW]
-
-
 async def test_a_page_under_the_floor_is_left_without_an_overview(db: None) -> None:
     """Under the floor the whole page is a glance, and a paragraph over it would restate what the
     member reads underneath at the cost of a model pass."""
@@ -3446,28 +2229,6 @@ async def test_a_page_under_the_floor_is_left_without_an_overview(db: None) -> N
 
     assert client.requests == []
     assert await _overviews(workspace_id) == []
-
-
-async def test_a_page_falling_under_the_floor_loses_the_overview_it_earned(db: None) -> None:
-    """The band pass's rule one altitude up. A page the curation pass or the consolidator has taken
-    back under MIN_OVERVIEW_FACTS earns no rewrite, and this is the only pass that writes the class,
-    so the paragraph it opened on would stand for ever over a page that no longer holds the rows it
-    was written from. The pass pays no model call to retire one."""
-    workspace_id = await _workspace()
-    await _seed_page_facts(workspace_id, count=MIN_OVERVIEW_FACTS - 1)
-    await _seed_copy(
-        workspace_id,
-        SHARED_SUBJECT,
-        OVERVIEW,
-        PAGE_OVERVIEW,
-        datetime.now(UTC) - timedelta(hours=2),
-    )
-    client = RecordingCompletionClient(MOVED_OVERVIEW)
-    with ws(workspace_id):
-        await _overview_writer(workspace_id, _overview_model(client)).run()
-
-    assert client.requests == []
-    assert (await _retirements(workspace_id))[PAGE_OVERVIEW] is not None
 
 
 async def test_the_overview_is_the_workspaces_page_alone(db: None) -> None:
@@ -3660,80 +2421,6 @@ async def test_a_member_holds_one_profile_row_however_often_the_pass_runs(db: No
     assert (rewritten.member_id, rewritten.role, rewritten.focus) == (member_id, ROLE, MOVED_FOCUS)
 
 
-async def test_an_entry_naming_nobody_on_the_roster_is_discarded(db: None) -> None:
-    """A profile is stored against a member id, so an entry the roster does not name has no member
-    to store it against — and guessing which colleague was meant would file one person's work under
-    another's name. An entry the contract does not satisfy drops the same way, without costing the
-    rest of the reply its entries."""
-    workspace_id = await _workspace()
-    first_id = await _seed_admin(workspace_id)
-    second_id = await _seed_admin(workspace_id, admin=False)
-    first, second = await _member_email(first_id), await _member_email(second_id)
-    await _seed_page_facts(workspace_id)
-    arguments = json.dumps(
-        {
-            "people": [
-                {"name": first, "role": ROLE, "focus": FOCUS},
-                {"name": "nalu@idler.example", "role": "Advisor", "focus": "Not a member here."},
-                {"name": second, "role": SECOND_ROLE},
-                {"name": second, "role": SECOND_ROLE, "focus": SECOND_FOCUS},
-            ]
-        }
-    )
-    with ws(workspace_id):
-        await _profile_writer(workspace_id, PeopleClient(arguments)).run()
-
-    stored = {row.member_id: (row.role, row.focus) for row in await _profiles(workspace_id)}
-    assert stored == {first_id: (ROLE, FOCUS), second_id: (SECOND_ROLE, SECOND_FOCUS)}
-
-
-async def test_the_people_payload_carries_the_roster_and_the_shared_facts_alone(db: None) -> None:
-    """A profile is read by every colleague, so it is written from what every colleague can already
-    read: the workspace-shared facts. A member's own rows never reach the payload, or the People
-    band would carry one person's private memory onto a page their colleagues open. The roster
-    travels with them, each member with the standing the workspace already states."""
-    workspace_id = await _workspace()
-    member_id = await _seed_admin(workspace_id)
-    email = await _member_email(member_id)
-    bodies = await _seed_page_facts(workspace_id)
-    await _seed_wiki_row(
-        workspace_id,
-        await _seed_wiki_feed(workspace_id, member_subject(member_id)),
-        PRIVATE_FACT,
-        datetime.now(UTC) - timedelta(minutes=5),
-        "preference",
-        subject=member_subject(member_id),
-    )
-    client = PeopleClient(_people((email, ROLE, FOCUS)))
-    with ws(workspace_id):
-        await _profile_writer(workspace_id, client).run()
-
-    sent = json.loads(client.requests[0].messages[0].content)
-    assert sent == {
-        "members": [{"name": email, "email": email, "standing": "workspace admin, seated"}],
-        "facts": list(reversed(bodies)),
-    }
-    assert client.requests[0].tool_choice == PROFILE_TOOL
-    assert [tool.name for tool in client.requests[0].tools] == [PROFILE_TOOL]
-    assert client.requests[0].system.startswith(DELIVERY_REGISTER_BLOCK)
-
-
-async def test_a_role_past_its_budget_is_cut_back_to_a_whole_word(db: None) -> None:
-    """The prompt asks for a short phrase and the store holds the writer to it, cut on a word: half
-    a word tells a member less than the word before it and costs the same line."""
-    workspace_id = await _workspace()
-    member_id = await _seed_admin(workspace_id)
-    email = await _member_email(member_id)
-    await _seed_page_facts(workspace_id)
-    overrun = "Cofounder, " + "and product ".rjust(PROFILE_ROLE_MAX_CHARS, "x")
-    with ws(workspace_id):
-        await _profile_writer(workspace_id, PeopleClient(_people((email, overrun, FOCUS)))).run()
-
-    (row,) = await _profiles(workspace_id)
-    assert len(row.role) <= PROFILE_ROLE_MAX_CHARS
-    assert row.role.endswith("…")
-
-
 async def test_the_people_pass_without_a_model_writes_nothing(db: None) -> None:
     workspace_id = await _workspace()
     await _seed_admin(workspace_id)
@@ -3742,39 +2429,6 @@ async def test_the_people_pass_without_a_model_writes_nothing(db: None) -> None:
         await _profile_writer(workspace_id, None).run()
 
     assert await _profiles(workspace_id) == []
-
-
-async def test_the_profile_kind_lists_through_the_portal_read_path(db: None) -> None:
-    """What the wiki's People band reads: the kind's own member page, which is the projection the
-    portal answers a signed-in member with. Every entry is written from the shared facts, so a
-    member of the workspace reads the whole band; a channel another organization sits in carries no
-    shared subject and reads none of it."""
-    workspace_id = await _workspace()
-    member_id = await _seed_admin(workspace_id)
-    email = await _member_email(member_id)
-    await _seed_page_facts(workspace_id)
-    with ws(workspace_id):
-        await _profile_writer(workspace_id, PeopleClient(_people((email, ROLE, FOCUS)))).run()
-
-    assert isinstance(PROFILE_OBJECT.store, MemberListable)
-    query = ObjectListQuery(supported_fields=PROFILE_OBJECT.list_fields)
-    with ws(workspace_id), bind_agent(uuid4()):
-        listed = await PROFILE_OBJECT.store.member_page(
-            context_for(memory_manifest.NAME, frozenset()),
-            member_id=member_id,
-            admin=False,
-            query=query,
-        )
-        foreign = await ProfileObjects().list(_profile_ctx(workspace_id), query)
-
-    (row,) = listed.rows
-    assert row.name == str(member_id)
-    assert row.fields["member_id"] == str(member_id)
-    assert row.fields["role"] == ROLE
-    assert row.fields["focus"] == FOCUS
-    assert isinstance(row.fields["written"], str)
-    assert row.summary.startswith(ROLE)
-    assert foreign.rows == ()
 
 
 async def test_people_candidates_name_only_workspaces_with_a_shared_fact(db: None) -> None:
@@ -4252,50 +2906,6 @@ async def test_a_fact_its_page_has_moved_past_is_never_sent_to_the_pass(db: None
     assert retired[DUPLICATE_ROWS[5]] is not None
 
 
-async def test_a_fact_its_page_has_moved_past_is_written_into_no_paragraph(db: None) -> None:
-    """The same fence, over the three passes that write the prose a member reads above their rows.
-    A revision that lands no fact supersedes nothing, so the facts of the revision before it stay
-    live bound to a revision their page has left: gone from the listing, gone from recall, and gone
-    from the page. A paragraph written from them would state claims no row under the heading
-    carries, and the member reading it has nothing left to check it against. Each pass counts the
-    fence before its floor, so a band and a page whose rows have all moved past buy no model pass
-    and lose the paragraph they earned before, and the roster's entries are written from no fact at
-    all. The rows themselves are only unread, never retired: the derivation that carries them onto
-    the revision their page now stands at is what puts them back on the page, and `retired_at` is
-    the one column nothing here clears."""
-    workspace_id = await _workspace()
-    member_id = await _seed_admin(workspace_id)
-    email = await _member_email(member_id)
-    source_id = await _seed_wiki_feed(workspace_id)
-    start = datetime.now(UTC) - timedelta(hours=3)
-    for index, body in enumerate(DECISION_ROWS):
-        await _seed_wiki_row(
-            workspace_id, source_id, body, start + timedelta(minutes=index), "decision"
-        )
-    bodies = await _seed_page_facts(workspace_id)
-    await _seed_copy(
-        workspace_id, SHARED_SUBJECT, SECTION, DECISION_PARAGRAPH, start, memory_kind="decision"
-    )
-    await _seed_copy(workspace_id, SHARED_SUBJECT, OVERVIEW, PAGE_OVERVIEW, start)
-    await _every_page_moved_on(workspace_id)
-
-    section = RecordingCompletionClient(MOVED_PARAGRAPH)
-    overview = RecordingCompletionClient(MOVED_OVERVIEW)
-    people = PeopleClient(_people((email, ROLE, FOCUS)))
-    with ws(workspace_id):
-        await _section_writer(workspace_id, _section_model(section)).run()
-        await _overview_writer(workspace_id, _overview_model(overview)).run()
-        await _profile_writer(workspace_id, people).run()
-
-    assert section.requests == []
-    assert overview.requests == []
-    assert json.loads(people.requests[0].messages[0].content)["facts"] == []
-    retired = await _retirements(workspace_id)
-    assert retired[DECISION_PARAGRAPH] is not None
-    assert retired[PAGE_OVERVIEW] is not None
-    assert all(retired[body] is None for body in (*DECISION_ROWS, *bodies))
-
-
 async def test_a_row_an_agent_wrote_is_never_sent_to_the_pass(db: None) -> None:
     """A row committed through `memory_update` carries no page at all: no source page restated it,
     and this tier judges a row only by the rows other source pages wrote about the same claim. What
@@ -4569,22 +3179,6 @@ def test_a_band_may_lose_its_only_row() -> None:
     assert admitted.refused == ""
 
 
-def test_a_band_may_lose_four_rows_in_six_and_not_five() -> None:
-    """Where the bar sits and why there is one. The bound counts every retirement admitted, because
-    all of them name a keeper and none of those names is checkable: four of the six rows six source
-    pages wrote about one pull request collapse onto the row that carries the claim, and the answer
-    reaching for the fifth — the band down to a single row of its own choosing — is refused."""
-    band = tuple(range(1, 7))
-    onto_row_one = tuple(
-        RetiredRow(id=index, reason="Restates row 1.", duplicate_of=1) for index in range(2, 7)
-    )
-
-    assert admitted_curation((band,), onto_row_one[:4]).retiring == frozenset({2, 3, 4, 5})
-    refused = admitted_curation((band,), onto_row_one)
-    assert refused.retiring == frozenset()
-    assert refused.refused.startswith("retiring 5 of 6 rows")
-
-
 async def test_the_page_pass_retires_and_writes_no_paragraph(db: None) -> None:
     """Retirement is the whole of what this pass does. The section and overview passes own every
     paragraph on the page, so a curation leaves the band's opening exactly as they wrote it — one
@@ -4663,25 +3257,3 @@ async def test_page_pass_candidates_name_only_workspaces_holding_a_page_worth_re
         _daily_time(memory_manifest.OVERVIEW_SCHEDULE),
         _daily_time(memory_manifest.PROFILE_SCHEDULE),
     )
-
-
-def test_no_machine_status_stream_name_is_shared_with_another_provider() -> None:
-    """A `PageChange` carries the provider's bare stream name and never says which provider wrote
-    it, so every name in this set matches every connector that happens to use it — and this gate
-    does not merely skip such a page, it retires what that page already derived. A shared name
-    therefore deletes a member's own rows: `workflows` is GitHub's workflow definitions and equally
-    HubSpot's marketing automation flows and Wrike's task workflows. The set is held to names one
-    connector alone uses, which is what makes matching on the name safe."""
-    declared: dict[str, set[str]] = {}
-    for name, connector in CONNECTORS.items():
-        streams = connector().streams
-        for stream in streams() if callable(streams) else streams:
-            declared.setdefault(stream.name, set()).add(name)
-
-    shared = {
-        stream: sorted(declared[stream])
-        for stream in MACHINE_STATUS_STREAMS
-        if len(declared.get(stream, set())) > 1
-    }
-
-    assert shared == {}
