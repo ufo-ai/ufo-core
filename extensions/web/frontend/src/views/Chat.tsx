@@ -177,7 +177,7 @@ export function Chat({
   const held = state.busy || state.messages === null;
 
   return (
-    <TranscriptScroll>
+    <TranscriptScroll initial={conversationId === null ? "start" : "end"}>
       {starting && !bare ? <TranscriptPane className="flex-1">{unsaid}</TranscriptPane> : null}
       {starting ? null : (
         <TranscriptPane className="flex-1">
@@ -309,7 +309,7 @@ export function FoundingChat({
     },
   };
   return (
-    <TranscriptScroll>
+    <TranscriptScroll initial="start">
       <TranscriptPane className="flex-1">{children}</TranscriptPane>
       <Composer
         target={target}
