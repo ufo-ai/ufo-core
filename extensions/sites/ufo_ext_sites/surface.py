@@ -545,7 +545,7 @@ async def _viewer_is_admin(ctx: SurfaceContext, viewer: UUID | None) -> bool:
         return False
     async with ctx.transaction() as connection:
         snapshot = await Seats(ctx.workspace_id).snapshot(connection)
-    return any(entry.admin and entry.id == viewer for entry in snapshot.members)
+    return any(entry.admin and entry.seated and entry.id == viewer for entry in snapshot.members)
 
 
 async def _viewer(ctx: SurfaceContext, request: Request) -> UUID | None:
@@ -558,7 +558,10 @@ async def _viewer(ctx: SurfaceContext, request: Request) -> UUID | None:
     email = verify_token(token, ctx.workspace_id)
     if email is None:
         return None
-    return await ctx.linked_member(email) or await ctx.link_member(email, email)
+    viewer = await ctx.linked_member(email) or await ctx.link_member(email, email)
+    if viewer is None or not await ctx.member_has_access(viewer):
+        return None
+    return viewer
 
 
 def _csrf_holds(request: Request, submitted: str) -> bool:

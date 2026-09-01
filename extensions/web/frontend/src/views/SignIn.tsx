@@ -21,6 +21,13 @@ export const FAULTS: Record<
     // portal that just refused it. Another address is reached by clearing this one first.
     door: SIGN_OUT_PATH,
   },
+  "no-seat": {
+    title: "Workspace access removed",
+    cause:
+      "An admin removed your seat in this workspace, so signing in with this address again opens nothing. Ask an admin to seat you again, or sign in with another address on the team.",
+    action: "Sign in with another email",
+    door: SIGN_OUT_PATH,
+  },
 };
 
 export function SignIn({ fault = "expired" }: { fault?: SessionFault }) {

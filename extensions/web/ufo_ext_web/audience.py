@@ -97,13 +97,13 @@ async def web_audience(
     lowered = email.strip().lower()
     async with extension.transaction() as connection:
         snapshot = await Seats(surface.workspace_id).snapshot(connection)
-    admin = any(
-        entry.admin and entry.email.strip().lower() == lowered for entry in snapshot.members
-    )
     member = next(
         (entry for entry in snapshot.members if entry.email.strip().lower() == lowered), None
     )
     agents = await surface.list_agents()
+    if member is None or not member.seated:
+        return WebAudience(admin=False, agents=(), conversation_agents=())
+    admin = member.admin
     if admin:
         return WebAudience(admin=True, agents=agents, conversation_agents=())
     granted = await _granted_agent_ids(extension.store, lowered)

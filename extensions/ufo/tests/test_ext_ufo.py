@@ -527,6 +527,28 @@ async def test_terminal_downloads_the_system_skill_bundle_once_at_startup(ufo) -
     assert current.content == b""
 
 
+async def test_an_unseated_members_bearer_cannot_read_or_write_terminal_state(ufo) -> None:
+    client, workspace_id = ufo
+    member_id = await _seed_member(workspace_id, "removed@example.com")
+    token = _mint(SECRET, workspace_id, "removed@example.com", _future())
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == member_id)
+            .values(seated_at=None, updated_at=sa.func.now())
+        )
+    auth = {"authorization": f"Bearer {token}"}
+
+    skills = await client.get("/surface/ufo/main/skills", headers=auth)
+    environment = await client.post(
+        "/surface/ufo/environment/document",
+        content=b"main: {}",
+        headers=auth,
+    )
+
+    assert (skills.status_code, environment.status_code) == (401, 401)
+
+
 @dataclass(frozen=True)
 class _Never:
     """A tail that yields one non-terminal frame then blocks forever — the turn that outruns the

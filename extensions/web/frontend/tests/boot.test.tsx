@@ -153,6 +153,32 @@ test("a live session whose email holds no member row is told that, not to sign i
   expect(screen.queryByText("Session ended")).toBeNull();
 });
 
+test("a member whose seat was removed is told that, rather than an error to reload past", async () => {
+  wire({
+    "/api/agents": () =>
+      new Response("workspace access was removed", {
+        status: 403,
+        headers: { "x-ufo-session-fault": "no-seat" },
+      }),
+  });
+  render(<Portal />);
+
+  expect(await screen.findByText("Workspace access removed")).toBeTruthy();
+  expect(screen.getByText(/An admin removed your seat/)).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: "Sign in with another email" }).getAttribute("href"),
+  ).toBe(SIGN_OUT_PATH);
+  expect(screen.queryByText("Error 403 — reload to retry.")).toBeNull();
+});
+
+test("a 403 that names no fault stays a failed boot the member can reload past", async () => {
+  wire({ "/api/agents": () => new Response("forbidden", { status: 403 }) });
+  render(<Portal />);
+
+  expect(await screen.findByText("Error 403 — reload to retry.")).toBeTruthy();
+  expect(screen.queryByText("Workspace access removed")).toBeNull();
+});
+
 test("a boot that fails on the server states the status and renders no shell", async () => {
   wire({ "/api/agents": () => new Response("boom", { status: 502 }) });
   render(<Portal />);

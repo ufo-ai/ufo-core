@@ -574,6 +574,22 @@ def _authenticated_email(request: Request, workspace_id: UUID) -> str | None:
     return verify_token(token.strip(), workspace_id)
 
 
+async def _authenticated_member(
+    ctx: SurfaceContext, request: Request
+) -> tuple[str, UUID | None] | None:
+    """The email a request's bearer proves and the member row it links to — None when the bearer is
+    unreadable or the workspace took that member's seat away. An email matching no member row links
+    to nothing and is still served: that bearer gets an unlinked conversation with no memory
+    subject, which is a seat this workspace never gave rather than one it took back."""
+    email = _authenticated_email(request, ctx.workspace_id)
+    if email is None:
+        return None
+    member_id = await ctx.linked_member(email) or await ctx.link_member(email, email)
+    if member_id is not None and not await ctx.member_has_access(member_id):
+        return None
+    return email, member_id
+
+
 def _utf8_header(request: Request, name: str) -> str:
     """A header the client sent as raw UTF-8 bytes, recovered. HTTP header values are ISO-8859-1 by
     the spec, so the ASGI server decodes each byte to a codepoint; re-encoding latin-1 is total and
@@ -664,10 +680,10 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
 
     A send (`x-ufo-send`) admits and answers without holding anything — the one request that is not
     a stream."""
-    email = _authenticated_email(request, ctx.workspace_id)
-    if email is None:
+    authenticated = await _authenticated_member(ctx, request)
+    if authenticated is None:
         return PlainTextResponse("unauthorized", status_code=401)
-    member_id = await ctx.linked_member(email) or await ctx.link_member(email, email)
+    email, member_id = authenticated
     sealed = request.headers.get(SECRET_HEADER)
     if sealed:
         return await _fulfill_secret(ctx, request, member_id, sealed)
@@ -916,10 +932,10 @@ async def op_body(ctx: SurfaceContext, request: Request) -> Response:
     """The bytes an in-flight op sends down to the terminal — what a write's relay `curl`s into
     its staged temp file. An authenticated read projection: the op id is unguessable and single-use,
     the bearer must be the member the binding was made under, and nothing is created or admitted."""
-    email = _authenticated_email(request, ctx.workspace_id)
-    if email is None:
+    authenticated = await _authenticated_member(ctx, request)
+    if authenticated is None:
         return PlainTextResponse("unauthorized", status_code=401)
-    member_id = await ctx.linked_member(email)
+    email, member_id = authenticated
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     body = await ctx.terminal_op_body(queue_key, request.path_params["op_id"], member_id)
     if body is None:
@@ -928,7 +944,7 @@ async def op_body(ctx: SurfaceContext, request: Request) -> Response:
 
 
 async def system_skills(ctx: SurfaceContext, request: Request) -> Response:
-    if _authenticated_email(request, ctx.workspace_id) is None:
+    if await _authenticated_member(ctx, request) is None:
         return PlainTextResponse("unauthorized", status_code=401)
     bundle = ctx.system_skill_bundle
     etag = f'"{bundle.digest}"'
@@ -946,7 +962,7 @@ async def store_environment(ctx: SurfaceContext, request: Request) -> Response:
     """Store one environment document and answer its digest — the value a later turn pins
     through the x-ufo-environment header. Content-addressed, so re-uploading the same document
     answers the same digest."""
-    if _authenticated_email(request, ctx.workspace_id) is None:
+    if await _authenticated_member(ctx, request) is None:
         return PlainTextResponse("unauthorized", status_code=401)
     try:
         digest = await ctx.store_environment_document(await request.body())
@@ -958,7 +974,7 @@ async def store_environment(ctx: SurfaceContext, request: Request) -> Response:
 async def store_environment_file(ctx: SurfaceContext, request: Request) -> Response:
     """Store one file an environment document references and answer its digest — the value the
     document's `files` entry pins. Content-addressed: the same bytes land on the same digest."""
-    if _authenticated_email(request, ctx.workspace_id) is None:
+    if await _authenticated_member(ctx, request) is None:
         return PlainTextResponse("unauthorized", status_code=401)
     try:
         digest = await ctx.store_environment_file(await request.body())
@@ -972,9 +988,10 @@ async def workspace_file(ctx: SurfaceContext, request: Request) -> Response:
     channel resolves through the same member-scoped queue key every post uses, so a member reaches
     only their own conversations, and the read creates nothing: a channel that never spoke, a
     conversation without a sandbox, and a path naming nothing all answer 404 alike."""
-    email = _authenticated_email(request, ctx.workspace_id)
-    if email is None:
+    authenticated = await _authenticated_member(ctx, request)
+    if authenticated is None:
         return PlainTextResponse("unauthorized", status_code=401)
+    email, _member_id = authenticated
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     conversation_id = await ctx.find_conversation(queue_key)
     if conversation_id is None:
@@ -994,10 +1011,10 @@ async def workspace_upload(ctx: SurfaceContext, request: Request) -> Response:
     an upload get-or-creates the conversation: staging files before the first turn is the point,
     so the agent's tools find them already present. The body streams into the bounded workspace
     write, which refuses past its limit instead of first sitting whole in memory."""
-    email = _authenticated_email(request, ctx.workspace_id)
-    if email is None:
+    authenticated = await _authenticated_member(ctx, request)
+    if authenticated is None:
         return PlainTextResponse("unauthorized", status_code=401)
-    member_id = await ctx.linked_member(email) or await ctx.link_member(email, email)
+    email, member_id = authenticated
     path = request.path_params["path"].strip("/")
     if not path:
         return PlainTextResponse("a file path is required", status_code=400)
@@ -1014,9 +1031,10 @@ async def workspace_listing(ctx: SurfaceContext, request: Request) -> Response:
     """List the channel's workspace files — what `ufo cp` syncs a folder against: each path with
     the size and modified time the quick-check compares. A channel that never spoke lists
     nothing."""
-    email = _authenticated_email(request, ctx.workspace_id)
-    if email is None:
+    authenticated = await _authenticated_member(ctx, request)
+    if authenticated is None:
         return PlainTextResponse("unauthorized", status_code=401)
+    email, _member_id = authenticated
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     conversation_id = await ctx.find_conversation(queue_key)
     files = () if conversation_id is None else await ctx.list_workspace_files(conversation_id)

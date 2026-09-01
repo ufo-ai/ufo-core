@@ -417,8 +417,8 @@ again and finishes the walk, rather than being forwarded away with a claim verif
 browser holding none of them, so a stale tab, a second click, and a sign-in as somebody else all land
 on the form rather than wait out an expiry. The portal offers it wherever it states who is signed in
 — the account menu and the sidebar's foot — and it is where a refusal that a second address would
-answer leads: the portal's `no-member` screen and a private site's "not signed in" page both name it,
-since the bearer behind either is live.
+answer leads: the portal's `no-member` and `no-seat` screens and a private site's "not signed in" page
+all name it, since the bearer behind each is live.
 `GET /` on the app host redirects to the surface claiming `SurfaceSpec.home` — the portal
 (`/surface/web`) — which serves its shell only to a resolved session and redirects an arrival
 without one to `/login`; a session that expires under an open page leaves the shell offering the

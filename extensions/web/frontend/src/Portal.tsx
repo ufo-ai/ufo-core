@@ -25,6 +25,10 @@ async function readAgents(): Promise<Boot> {
   }
   if (!res) return { phase: "failed", message: "Network error — try again." };
   if (res.status === 401) return { phase: "signed-out", fault: sessionFault(res) };
+  // A seat this workspace took away refuses with 403 and names itself in the fault header; every
+  // other 403 is a route refusing one read, which a reload can still answer.
+  if (res.status === 403 && sessionFault(res) === "no-seat")
+    return { phase: "signed-out", fault: "no-seat" };
   if (!res.ok) return { phase: "failed", message: "Error " + res.status + " — reload to retry." };
   try {
     return { phase: "ready", payload: (await res.json()) as AgentsPayload };
@@ -76,7 +80,7 @@ export function Portal() {
         <Waiting />
       </Empty>
     );
-  if (boot.phase === "signed-out" && boot.fault === "no-member")
+  if (boot.phase === "signed-out" && boot.fault !== "expired")
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-4xl p-2xl">
         <span

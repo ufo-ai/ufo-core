@@ -103,6 +103,7 @@ from ufo_ext_web.surface import (
     ASSET_MEDIA_TYPES,
     MAX_INBOUND_FILES,
     NO_MEMBER_FAULT,
+    NO_SEAT_FAULT,
     PORTAL_BUILD,
     PORTAL_FILE,
     PORTAL_HTML,
@@ -7490,6 +7491,28 @@ async def test_a_bearer_whose_email_holds_no_member_row_names_that_fault(
     assert SESSION_FAULT_HEADER not in sessionless.headers
 
 
+async def test_an_unseated_members_live_session_cannot_read_the_portal(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "removed@example.com", admin=True)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == member_id)
+            .values(seated_at=None, updated_at=sa.func.now())
+        )
+
+    refused = await client.get(
+        "/surface/web/api/agents",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert refused.status_code == 403
+    assert refused.text == "workspace access was removed"
+    assert refused.headers[SESSION_FAULT_HEADER] == NO_SEAT_FAULT
+
+
 async def _seed_web_turn(
     workspace_id: UUID,
     agent_id: UUID,
@@ -13479,12 +13502,13 @@ async def test_member_seat_and_role_ride_the_intent_lane(
     demoted, the last seated admin cannot be unseated, and a non-admin mutates nobody."""
     client, workspace_id, agent_id = web
     admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    member_id, _member_token = await _seed_member(workspace_id, "member@example.com")
+    plain_id, plain_token = await _seed_member(workspace_id, "plain@example.com")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.member)
             .values(seated_at=sa.func.now())
-            .where(tables.member.c.id.in_((admin_id, member_id)))
+            .where(tables.member.c.id.in_((admin_id, member_id, plain_id)))
         )
 
     def envelope(member: UUID, *, admin: bool, seated: bool) -> dict:
@@ -13534,7 +13558,7 @@ async def test_member_seat_and_role_ride_the_intent_lane(
     outsider = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
         json=envelope(admin_id, admin=False, seated=True),
-        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
+        headers={"cookie": f"{SESSION_COOKIE}={plain_token}"},
     )
     assert outsider.json()["applied"] is False
     assert "admin" in outsider.json()["message"]
@@ -15509,17 +15533,19 @@ async def test_team_view_lists_the_roster_for_every_member(
     client, workspace_id, _agent_id = web
     _member_id, token_m = await _seed_member(workspace_id, "m@example.com")
     _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    unseated_id, _unseated_token = await _seed_member(workspace_id, "gone@example.com")
     path = "/surface/web/workspace/team"
 
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.member).where(tables.member.c.id == _member_id).values(seated_at=None)
+            sa.update(tables.member).where(tables.member.c.id == unseated_id).values(seated_at=None)
         )
     member_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     body = member_view.json()
     assert [(entry["email"], entry["admin"], entry["seated"]) for entry in body["members"]] == [
         ("boss@example.com", True, True),
-        ("m@example.com", False, False),
+        ("gone@example.com", False, False),
+        ("m@example.com", False, True),
     ]
     assert "id" not in body["members"][0]
     assert body["can_add"] is False

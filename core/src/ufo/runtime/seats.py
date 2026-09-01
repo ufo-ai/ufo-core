@@ -328,6 +328,7 @@ async def member_is_admin(connection: AsyncConnection, workspace_id: UUID, membe
                 sa.select(tables.member.c.is_admin).where(
                     tables.member.c.id == member_id,
                     tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.seated_at.is_not(None),
                 )
             )
         ).scalar_one_or_none()

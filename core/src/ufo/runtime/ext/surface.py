@@ -2250,6 +2250,10 @@ class SurfaceContext:
     async def linked_member(self, external_id: str) -> UUID | None:
         return await self._identity_member(self.surface, external_id)
 
+    async def member_has_access(self, member_id: UUID) -> bool:
+        async with workspace_tx() as connection:
+            return await Seats(self.workspace_id).admits(connection, member_id)
+
     async def is_operator_workspace(self) -> bool:
         """Whether this workspace is the fleet operator's own — the workspace whose own domain
         (its initial member's vetted email domain, the same resolution hosted onboarding joins by)

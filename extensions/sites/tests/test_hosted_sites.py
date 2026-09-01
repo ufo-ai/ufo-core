@@ -1352,6 +1352,29 @@ async def test_an_unauthenticated_viewer_is_sent_to_sign_in_unless_the_site_is_p
     assert "not signed in" not in public.text
 
 
+async def test_an_unseated_members_session_cannot_open_a_non_public_site(
+    deployment: Deployment,
+) -> None:
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    link = str((await _deploy(workspace, conversation_id, audience, creator_id))["site_url"])
+    assert "<iframe" in (await client.get(link, headers=_cookie(creator_token))).text
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == creator_id)
+            .values(seated_at=None, updated_at=sa.func.now())
+        )
+
+    refused = await client.get(link, headers=_cookie(creator_token))
+
+    assert refused.status_code == 200
+    assert "not signed in to the workspace" in refused.text
+    assert "<iframe" not in refused.text
+
+
 async def test_the_frame_head_carries_the_card_and_names_only_a_public_site(
     deployment: Deployment,
 ) -> None:

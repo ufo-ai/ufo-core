@@ -41,12 +41,13 @@ export const SIGN_IN_PATH = "/login";
  *  address other than the one the cookie proves is reached by clearing it first. */
 export const SIGN_OUT_PATH = "/logout";
 
-export type SessionFault = "expired" | "no-member";
+export type SessionFault = "expired" | "no-member" | "no-seat";
 
-/** Which of the two 401s the surface answered: a bearer it could not read, or a live bearer whose
- *  email holds no member row in this workspace. */
+/** Which refusal the surface answered: a bearer it could not read, a live bearer whose email holds
+ *  no member row in this workspace, or a live member whose seat this workspace took away. */
 export function sessionFault(res: Response): SessionFault {
-  return res.headers.get(SESSION_FAULT_HEADER) === "no-member" ? "no-member" : "expired";
+  const stated = res.headers.get(SESSION_FAULT_HEADER);
+  return stated === "no-member" || stated === "no-seat" ? stated : "expired";
 }
 
 export const REFUSAL_HEADER = "x-ufo-refusal";

@@ -239,6 +239,7 @@ STOP_TURN_HEADER = "x-ufo-stop-turn"
 SESSION_FAULT_HEADER = "x-ufo-session-fault"
 REFUSAL_HEADER = "x-ufo-refusal"
 NO_MEMBER_FAULT = "no-member"
+NO_SEAT_FAULT = "no-seat"
 MAX_MEMORY_QUERY_CHARS = 500
 MAX_SEARCH_CHARS = 200
 MEMORY_RECENT_LIMIT = 100
@@ -764,6 +765,12 @@ async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, st
             "no member with this email in this workspace",
             status_code=401,
             headers={SESSION_FAULT_HEADER: NO_MEMBER_FAULT},
+        )
+    if not await ctx.member_has_access(member_id):
+        return Response(
+            "workspace access was removed",
+            status_code=403,
+            headers={SESSION_FAULT_HEADER: NO_SEAT_FAULT},
         )
     return member_id, email
 
