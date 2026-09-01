@@ -20,7 +20,7 @@ import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import IO, Self
+from typing import IO, Literal, Self
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -149,6 +149,7 @@ class RunSpec(BaseModel):
     memory_100: Path | None = None
     memory_ingestion: Path | None = None
     issue_recall: bool = False
+    member_model_provider: Literal["anthropic", "openai"] | None = None
 
     @field_validator("label")
     @classmethod
@@ -536,6 +537,8 @@ class EvalStack:
             argv += ["--model", self.spec.model]
         if self.spec.reasoning is not None:
             argv += ["--reasoning", self.spec.reasoning]
+        if self.spec.member_model_provider is not None:
+            argv += ["--member-model-provider", self.spec.member_model_provider]
         return tuple(argv)
 
     async def _ufoctl(

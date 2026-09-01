@@ -233,6 +233,7 @@ def write(shard: Shard, directory: Path, model: str, reasoning: ReasoningEffort)
                     {
                         "label": shard.label,
                         "config": str(config),
+                        "member_model_provider": "anthropic",
                         **({} if reasoning_override is None else {"reasoning": reasoning_override}),
                         "args": [
                             "--concurrency",

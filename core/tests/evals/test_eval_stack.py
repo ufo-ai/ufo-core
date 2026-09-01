@@ -430,9 +430,13 @@ def test_provision_writes_the_derived_config_and_owns_the_child_argv(
         label="boundary",
         config=template,
         args=("--jobbench", "snap", "--only", "jobbench"),
-        env={"MCP_ATLAS_URL": "http://127.0.0.1:9000"},
+        env={
+            "MCP_ATLAS_URL": "http://127.0.0.1:9000",
+            "UFO_ANTHROPIC_API_KEY": "sk-ant-stack-member",
+        },
         model="claude-haiku-4-5",
         reasoning="high",
+        member_model_provider="anthropic",
     )
     root = tmp_path / "20260717-000000" / "boundary"
 
@@ -465,6 +469,8 @@ def test_provision_writes_the_derived_config_and_owns_the_child_argv(
         "claude-haiku-4-5",
         "--reasoning",
         "high",
+        "--member-model-provider",
+        "anthropic",
     )
 
 

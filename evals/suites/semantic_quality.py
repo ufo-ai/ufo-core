@@ -3,6 +3,8 @@
 from evals.harness.capability import CapabilityCase
 from evals.harness.scorers import WEB_TOOLS, combine, predicate_scorer, restraint_scorer
 
+SEMANTIC_SAMPLES = 3
+
 
 def _incident_sections(text: str) -> bool:
     return all(heading in text for heading in ("Observed", "Inference", "Unknown", "Next action"))
@@ -29,6 +31,7 @@ CASES = (
             predicate_scorer((("all four required sections", _incident_sections),)),
             restraint_scorer(WEB_TOOLS),
         ),
+        samples=SEMANTIC_SAMPLES,
         digest_tag="semantic:incident-evidence-boundary",
         rubric=(
             "The Observed section accurately preserves the event sequence and measured values, "
@@ -60,6 +63,7 @@ CASES = (
             predicate_scorer((("all four required sections", _decision_sections),)),
             restraint_scorer(WEB_TOOLS),
         ),
+        samples=SEMANTIC_SAMPLES,
         digest_tag="semantic:commitment-tradeoff",
         rubric=(
             "The Decision prioritizes CSV export for the fixed launch because it is contractually "

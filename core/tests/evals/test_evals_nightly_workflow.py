@@ -199,6 +199,7 @@ def test_a_written_shard_is_input_the_stack_accepts(planner, tmp_path: Path) -> 
         assert config["pack"]["name"] == shard.pack
         assert config["models"]["auto_model"] == "z-ai/glm-5.3"
         assert [spec.label for spec in matrix.run] == [shard.label]
+        assert matrix.run[0].member_model_provider == "anthropic"
         assert matrix.run[0].reasoning is None
         assert matrix.run[0].args[-len(shard.suites) :] == shard.suites
         if shard.agent is not None:

@@ -47,7 +47,7 @@ from ufo.config import Config, DatabaseConfig, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.harness.auth.bearer import mint_token
 from ufo.harness.durability import replay_safe_client
-from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, CORE_MODEL_SPECS, CORE_PRICING
 from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -57,9 +57,10 @@ from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
-from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore
+from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore, member_slot
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, Usage
 from ufo.serve import _mount_shared_surfaces
@@ -199,6 +200,50 @@ def test_init_runs_on_the_ufo_prefixed_model_key_alone(
     monkeypatch.setenv("UFO_ANTHROPIC_API_KEY", "sk-ufo-scoped")
     result = cli_home.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
     assert result.exit_code == 0, result.output
+
+
+def test_init_seeds_the_owners_private_model_key(cli_home: CliRunner) -> None:
+    result = cli_home.invoke(
+        cli.main,
+        [
+            "init",
+            "--email",
+            OWNER_EMAIL,
+            "--member-model-provider",
+            "anthropic",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    config = load_config()
+    init_db(config.database.url)
+
+    async def check() -> None:
+        async with workspace_tx() as connection:
+            workspace_id, member_id = (
+                await connection.execute(
+                    sa.select(tables.workspace.c.id, tables.member.c.id).join(
+                        tables.member,
+                        tables.member.c.workspace_id == tables.workspace.c.id,
+                    )
+                )
+            ).one()
+        store = CredentialStore(fernet=Fernet(os.environ["UFO_CREDENTIAL_KEY"].encode()))
+        init_workspace_credentials(store)
+        try:
+            assert (
+                await store.get(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id))
+                == "sk-test-cli"
+            )
+            with ws(workspace_id):
+                assert await ws_current().member_holds_own_model_key(member_id)
+        finally:
+            init_workspace_credentials(None)
+
+    try:
+        asyncio.run(check())
+    finally:
+        asyncio.run(dispose_db())
 
 
 def test_init_reads_the_ufo_prefixed_model_key_from_dotenv(

@@ -8597,6 +8597,51 @@ async def test_a_shared_case_leaves_the_conversation_unowned_and_speaks_through_
     assert worker.speaker_keys == ["asker@evalco.test"], "the asker still speaks the turn"
 
 
+async def test_shared_admission_without_a_member_key_speaks_as_the_founding_admin(
+    db: None, tmp_path
+) -> None:
+    class EnqueuingDbos:
+        def __init__(self) -> None:
+            self.enqueued: list[str] = []
+
+        async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+            self.enqueued.append(turn_id)
+
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    owner = await _seed_owner(workspace_id)
+    dbos = EnqueuingDbos()
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path),
+        cast(DBOSClient, dbos),
+        tmp_path / "workspaces",
+    )
+
+    with ws(workspace_id):
+        shared = await driver.open("shared-room", shared=True)
+        turn_id = await driver.admit(shared, "Archive the digest app.")
+        async with workspace_tx() as connection:
+            conversation_member = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.member_id).where(
+                        tables.conversation.c.id == shared
+                    )
+                )
+            ).scalar_one()
+            speaker = (
+                await connection.execute(
+                    sa.select(tables.turn.c.speaker_member_id).where(tables.turn.c.id == turn_id)
+                )
+            ).scalar_one()
+
+    assert conversation_member is None
+    assert speaker == owner
+    assert dbos.enqueued == [str(turn_id)]
+
+
 async def test_workspace_driver_speaks_as_the_named_member_then_the_founding_admin(
     db: None, tmp_path
 ) -> None:

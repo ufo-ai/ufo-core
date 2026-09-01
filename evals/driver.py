@@ -904,12 +904,16 @@ class WorkspaceDriver:
         `speaker_key` is that member's email, carried by the case rather than read off the
         conversation: a shared room is unowned (`member_id` is null) yet still has someone talking
         in it, so authorship cannot be derived from ownership. Absent one, the conversation's own
-        member speaks, which is the private-conversation case."""
+        member speaks, which is the private-conversation case; a shared room falls back to the
+        workspace's founding admin."""
         async with workspace_tx() as connection:
-            speaker = await (
-                self._speaker(connection, speaker_key)
+            speaker = (
+                await self._speaker(connection, speaker_key)
                 if speaker_key is not None
-                else self._owner(connection, conversation_id)
+                else (
+                    await self._owner(connection, conversation_id)
+                    or await self._speaker(connection, None)
+                )
             )
             sender = (
                 None

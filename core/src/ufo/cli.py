@@ -43,7 +43,13 @@ from ufo.db import (
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.harness.containment import contained_file
 from ufo.harness.durability import replay_safe_client
-from ufo.harness.models.interface import TextBlock, ToolResultBlock, ToolUseBlock
+from ufo.harness.models.interface import (
+    PROVIDER_ANTHROPIC,
+    PROVIDER_OPENAI,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from ufo.harness.models.pricing import MICRO_USD_PER_USD
 from ufo.harness.sandbox.ingress_serve import run as ingress_run
 from ufo.host.ext.loader import load_manifests, lockfile_path
@@ -51,7 +57,7 @@ from ufo.host.ext.store import ExtensionStore, read_catalog
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
 from ufo.onboard.seed import KitchenSink
 from ufo.proxy_serve import OWNER_DSN_ENV
-from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.credentials import CredentialStore, deploy_env, member_slot
 from ufo.runtime.access.grants import GrantSummary, workspace_grant_summaries
 from ufo.runtime.billing.accounting import SpendReport, SpendRollup
 from ufo.runtime.billing.balance import Balance, credit, read_balance, set_reserve
@@ -59,7 +65,7 @@ from ufo.runtime.ext.surface import TurnStep
 from ufo.runtime.seats import email_domain
 from ufo.runtime.steps import DurableTurnSteps
 from ufo.runtime.turns.cancellation import cancel_one_turn
-from ufo.runtime.workspace import ws
+from ufo.runtime.workspace import MEMBER_ROUTED_SLOTS, ws
 from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_AGENT_NAME,
@@ -206,7 +212,17 @@ def _one_address(_ctx: click.Context, _param: click.Parameter, value: str) -> st
     default=DEFAULT_REASONING_EFFORT,
     show_default=True,
 )
-def init(email: str, model: str, reasoning: ReasoningEffort) -> None:
+@click.option(
+    "--member-model-provider",
+    type=click.Choice((PROVIDER_ANTHROPIC, PROVIDER_OPENAI)),
+    help="Store this provider's environment key for the initial member.",
+)
+def init(
+    email: str,
+    model: str,
+    reasoning: ReasoningEffort,
+    member_model_provider: str | None,
+) -> None:
     """Write ufo.toml if absent, apply the schema, then onboard the workspace, owner, default
     agent and model key (plus any extension onboarding steps) and bind this machine's CLI token."""
     path = config_path()
@@ -224,7 +240,7 @@ def init(email: str, model: str, reasoning: ReasoningEffort) -> None:
     if not secret:
         raise click.ClickException(f"{UFO_TOKEN_SECRET_ENV} is unset — cannot mint a CLI token")
     try:
-        onboarded = asyncio.run(_onboard(config, email, model, reasoning))
+        onboarded = asyncio.run(_onboard(config, email, model, reasoning, member_model_provider))
     except (AlreadyInitialized, ValueError, RuntimeError) as error:
         raise click.ClickException(str(error)) from error
     token = mint_token(secret, str(onboarded.workspace_id), email, CLI_TOKEN_TTL)
@@ -288,7 +304,13 @@ def _write_dev_secrets(config: Config) -> tuple[str, ...]:
     return tuple(added)
 
 
-async def _onboard(config: Config, email: str, model: str, reasoning: ReasoningEffort) -> Onboarded:
+async def _onboard(
+    config: Config,
+    email: str,
+    model: str,
+    reasoning: ReasoningEffort,
+    member_model_provider: str | None,
+) -> Onboarded:
     """Open the db boundary once: create the core workspace and owner member, THEN run the
     extension onboarding steps — so core access lands before any add-on step that could fail. The
     CLI's bearer names this owner by email; the `ufo` surface links the member on first contact."""
@@ -304,7 +326,35 @@ async def _onboard(config: Config, email: str, model: str, reasoning: ReasoningE
             credentials=credentials,
             manifests=load_manifests(config.pack.name),
         )
+        member_model_key: tuple[str, str] | None = None
+        if member_model_provider is not None:
+            env_name = (
+                config.models.anthropic_api_key_env
+                if member_model_provider == PROVIDER_ANTHROPIC
+                else config.models.openai_api_key_env
+            )
+            value = deploy_env(env_name)
+            if not value:
+                raise RuntimeError(
+                    f"member model provider {member_model_provider!r} needs UFO_{env_name} "
+                    f"(or {env_name})"
+                )
+            slot = next(
+                slot
+                for slot, provider in MEMBER_ROUTED_SLOTS.items()
+                if provider == member_model_provider
+            )
+            member_model_key = slot, value
         onboarded = await onboarding.create()
+        if member_model_key is not None:
+            if credentials is None:
+                raise RuntimeError(
+                    f"storing a member model key requires {config.credentials.key_env}"
+                )
+            slot, value = member_model_key
+            await credentials.put(
+                onboarded.workspace_id, member_slot(slot, onboarded.member_id), value
+            )
         await onboarding.run_steps(onboarded)
         return onboarded
     finally:
