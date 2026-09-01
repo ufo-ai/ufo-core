@@ -726,7 +726,10 @@ async def test_a_child_that_dies_in_setup_ends_its_foreground_parents_wait(
         subagents.spawn("research", {"task": "acme"}, dedup_key="vanished")
     )
     await _commit_failed_terminal(
-        InProcessHub(), spawned.turn_id, UnknownSubagentProfile("research", ("coding",))
+        InProcessHub(),
+        spawned.turn_id,
+        "setup-attempt",
+        UnknownSubagentProfile("research", ("coding",)),
     )
     workflow_finished.set()
     async with asyncio.timeout(SETUP_FAILURE_WAIT_SECONDS):

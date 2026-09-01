@@ -632,6 +632,7 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
     workspace_uuid = UUID(workspace_id)
     turn_uuid = UUID(turn_id)
+    attempt = DBOS.workflow_id or turn_id
     conversation_id: UUID | None = None
     with ws(workspace_uuid):
         try:
@@ -689,7 +690,7 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            await _commit_failed_terminal(runtime.hub, turn_uuid, error)
+            await _commit_failed_terminal(runtime.hub, turn_uuid, attempt, error)
             status = "failed"
         await _deliver_to_parent(runtime, turn_uuid)
         if conversation_id is not None:
@@ -748,8 +749,8 @@ async def _deliver_to_parent(runtime: Runtime, turn_id: UUID) -> None:
 
 
 async def _run_turn(runtime: Runtime, turn_id: str) -> str:
+    attempt = DBOS.workflow_id or turn_id
     try:
-        attempt = DBOS.workflow_id or turn_id
         with span("turn.claim"):
             claim = await _claim_turn(UUID(turn_id), attempt)
         if claim is None:
@@ -1043,15 +1044,18 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
     except asyncio.CancelledError:
         raise
     except Exception as error:
-        await _commit_failed_terminal(runtime.hub, UUID(turn_id), error)
+        await _commit_failed_terminal(runtime.hub, UUID(turn_id), attempt, error)
         return "failed"
 
 
-async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException) -> None:
+async def _commit_failed_terminal(
+    hub: Hub, turn_id: UUID, attempt: str, error: BaseException
+) -> None:
     """The backstop for failures outside the engine: retries until the wait can end. A setup fault
     — loading the turn, attaching the sandbox — has no engine to count it, so the terminal it writes
-    is counted here, and only when this write is the transition: the engine's own failures commit
-    their terminal first and leave nothing for this update to match.
+    is counted here, and only when this attempt owns the running row or the row is still queued. A
+    stale execution cannot terminate the live attempt that beat it to the claim. The engine's own
+    failures commit their terminal first and leave nothing for this update to match.
 
     The `profile` rides back off that same write, so the count carries the turn's real profile
     without a second read to fail in a path that has already run out of ways to report. The stack
@@ -1078,27 +1082,34 @@ async def _commit_failed_terminal(hub: Hub, turn_id: UUID, error: BaseException)
                         )
                         .where(
                             tables.turn.c.id == turn_id,
-                            tables.turn.c.status.in_(("queued", "running")),
+                            sa.or_(
+                                tables.turn.c.status == "queued",
+                                sa.and_(
+                                    tables.turn.c.status == "running",
+                                    tables.turn.c.running_attempt == attempt,
+                                ),
+                            ),
                         )
                         .returning(tables.turn.c.subagent_profile, tables.turn.c.parent_turn_id)
                     )
                 ).one_or_none()
-            if transitioned is not None:
-                emit_metric(
-                    "turn_terminal_total",
-                    status="failed",
-                    error_class=type(error).__name__,
-                    profile=turn_profile(
-                        transitioned.subagent_profile,
-                        spawned=transitioned.parent_turn_id is not None,
-                    ),
-                )
-                log_error(
-                    "turn.setup_failed",
-                    turn_id=str(turn_id),
-                    error_class=type(error).__name__,
-                    stack=formatted_stack(error),
-                )
+            if transitioned is None:
+                return
+            emit_metric(
+                "turn_terminal_total",
+                status="failed",
+                error_class=type(error).__name__,
+                profile=turn_profile(
+                    transitioned.subagent_profile,
+                    spawned=transitioned.parent_turn_id is not None,
+                ),
+            )
+            log_error(
+                "turn.setup_failed",
+                turn_id=str(turn_id),
+                error_class=type(error).__name__,
+                stack=formatted_stack(error),
+            )
             await hub.publish(turn_id, Terminal(frame=frame))
             return
         except Exception as retried:

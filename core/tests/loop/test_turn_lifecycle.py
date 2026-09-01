@@ -1102,6 +1102,7 @@ async def _running_turn(subagent_profile: str | None = None) -> tuple[UUID, UUID
                 agent_id=agent_id,
                 seq=1,
                 status="running",
+                running_attempt=str(turn_id),
                 inbound="explode",
                 subagent_profile=subagent_profile,
                 created_at=sa.func.now(),
@@ -1130,8 +1131,8 @@ async def test_backstop_logs_the_stack_that_failed_the_setup(
         open_sandbox()
     except TimeoutError as error:
         with caplog.at_level(logging.ERROR, logger="ufo"):
-            await loop_queue._commit_failed_terminal(InProcessHub(), turn_id, error)
-            await loop_queue._commit_failed_terminal(InProcessHub(), turn_id, error)
+            await loop_queue._commit_failed_terminal(InProcessHub(), turn_id, str(turn_id), error)
+            await loop_queue._commit_failed_terminal(InProcessHub(), turn_id, str(turn_id), error)
 
     (event,) = [
         record.ufo for record in caplog.records if record.getMessage() == "turn.setup_failed"
@@ -1156,10 +1157,10 @@ async def test_backstop_terminal_carries_class_and_message(
     monkeypatch.setattr(o11y, "_counters", {})
     _, turn_id = await _running_turn("coding")
     await loop_queue._commit_failed_terminal(
-        InProcessHub(), turn_id, RuntimeError("boom outside the engine")
+        InProcessHub(), turn_id, str(turn_id), RuntimeError("boom outside the engine")
     )
     await loop_queue._commit_failed_terminal(
-        InProcessHub(), turn_id, RuntimeError("boom outside the engine")
+        InProcessHub(), turn_id, str(turn_id), RuntimeError("boom outside the engine")
     )
     (terminal,) = [
         point
@@ -1186,6 +1187,34 @@ async def test_backstop_terminal_carries_class_and_message(
     assert row.status == "failed"
     assert row.terminal["error_class"] == "RuntimeError"
     assert row.terminal["error_message"] == "boom outside the engine"
+
+
+async def test_stale_setup_failure_cannot_end_the_live_attempt(db: None) -> None:
+    _, turn_id = await _running_turn()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(running_attempt="live-attempt")
+            .where(tables.turn.c.id == turn_id)
+        )
+
+    await loop_queue._commit_failed_terminal(
+        InProcessHub(),
+        turn_id,
+        "stale-attempt",
+        RuntimeError("stale attempt failed during setup"),
+    )
+
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == "running"
+    assert row.terminal is None
 
 
 OWN_ACCOUNT_MODEL = "gpt-5.6-sol"
