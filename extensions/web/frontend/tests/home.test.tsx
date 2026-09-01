@@ -524,6 +524,11 @@ test("the chat lane's unsaid state stands the member's history over the new chat
 test("a new chat tab opens its history at the top after the rows load", async () => {
   let answer!: (response: Response) => void;
   const scroll = vi.spyOn(Element.prototype, "scrollTo");
+  const rows = Array.from({ length: 30 }, (_, at) => ({
+    ...CHAT_ROW,
+    conversation_id: `00000000-0000-4000-8000-${String(at).padStart(12, "0")}`,
+    title: `History row ${String(at + 1).padStart(2, "0")}`,
+  }));
   wire({
     "/objects/conversation$": () =>
       new Promise<Response>((resolve) => {
@@ -534,14 +539,16 @@ test("a new chat tab opens its history at the top after the rows load", async ()
 
   const lane = await screen.findByRole("region", { name: "Assistant" });
   await within(lane).findByRole("heading", { name: "History", level: 3 });
-  const log = within(lane).getByTestId("log");
   scroll.mockClear();
-  log.scrollTop = 100;
 
-  act(() => answer(json({ objects: [conversationObject(CHAT_ROW)] })));
-  await within(lane).findByText(CHAT_ROW.title);
+  act(() => answer(json({ objects: rows.map(conversationObject) })));
+  const first = await within(lane).findByText("History row 01");
+  expect(within(lane).getAllByText(/History row \d{2}/)).toHaveLength(30);
+  const history = first.closest("section")?.parentElement;
+  expect(history?.className).toContain("overflow-y-auto");
+  expect(within(lane).queryByTestId("log")).toBeNull();
   await waitFor(() => {
-    const call = (scroll.mock.instances as unknown[]).findIndex((node) => node === log);
+    const call = (scroll.mock.instances as unknown[]).findIndex((node) => node === history);
     expect(call).not.toBe(-1);
     expect(scroll.mock.calls[call][0]).toMatchObject({ top: 0 });
   });

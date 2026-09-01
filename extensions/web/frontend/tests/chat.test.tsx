@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { MessageLog, TranscriptPane, TranscriptScroll } from "@/kernel/messages";
+import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import type { EarlierMessages } from "@/lib/earlier";
 import { chatHash, conversationSlotHash, newChatHash } from "@/lib/route";
 import { ConversationTranscript } from "@/views/Conversations";
@@ -2628,23 +2628,6 @@ function lands(log: HTMLElement) {
     .querySelector("[data-slot=message-scroller-content]")!
     .appendChild(document.createElement("p"));
 }
-
-test("a new chat opens at the top while a transcript opens at the bottom", async () => {
-  const page = (initial: "start" | "end") => (
-    <TranscriptScroll initial={initial}>
-      <TranscriptPane className="flex-1">
-        <div>History</div>
-      </TranscriptPane>
-    </TranscriptScroll>
-  );
-  const view = render(page("end"));
-  const log = screen.getByTestId("log");
-  log.scrollTop = FOOT;
-
-  view.rerender(page("start"));
-
-  await waitFor(() => expect(log.scrollTop).toBe(0));
-});
 
 test("streaming keeps the log pinned at the bottom but never yanks a reader back down", async () => {
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });

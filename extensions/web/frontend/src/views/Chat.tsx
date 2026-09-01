@@ -93,9 +93,8 @@ export type ChatProps = {
    *  can never hold each other busy. */
   foundingKey?: string;
   /** What the pane draws over the box while the chat is still unsaid — the chat lane's own history of
-   *  conversations. Where a caller hands one in, the box keeps the shape it takes under a transcript:
-   *  the screen is no longer empty, and the words the start screen says over an empty pane would
-   *  stand between the history and the box. */
+   *  conversations. The screen is no longer empty, so the words the start screen says over an empty
+   *  pane would stand between the history and the box. */
   unsaid?: ReactNode;
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string) => void;
@@ -177,8 +176,8 @@ export function Chat({
   const held = state.busy || state.messages === null;
 
   return (
-    <TranscriptScroll initial={conversationId === null ? "start" : "end"}>
-      {starting && !bare ? <TranscriptPane className="flex-1">{unsaid}</TranscriptPane> : null}
+    <TranscriptScroll>
+      {starting && !bare ? unsaid : null}
       {starting ? null : (
         <TranscriptPane className="flex-1">
           <MessageLog
@@ -274,11 +273,9 @@ function readyToFound(chatKey: string): void {
   );
 }
 
-/** A screen standing over the box that founds a conversation: whatever it draws scrolls in the pane,
- *  and the box holds the bottom. It is the chat screen's own shape — the same `TranscriptScroll`,
- *  the same pane, the same box with the same toolbar — with a caller's own content where the
- *  transcript would be, which is what puts the chat entry at the foot of the chat app's list of
- *  conversations.
+/** A screen standing over the box that founds a conversation: whatever it draws scrolls over the
+ *  box at the bottom. It is the chat screen's own shape — the same `TranscriptScroll` and the same
+ *  box with the same toolbar — with a caller's own content where the transcript would be.
  *
  *  The box is keyed on the agent's new chat, the key the start screen's box already uses, so words
  *  a member leaves in one of them are the words the other opens holding. The send founds the
@@ -309,8 +306,8 @@ export function FoundingChat({
     },
   };
   return (
-    <TranscriptScroll initial="start">
-      <TranscriptPane className="flex-1">{children}</TranscriptPane>
+    <TranscriptScroll>
+      <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
       <Composer
         target={target}
         draftKey={draftKey}

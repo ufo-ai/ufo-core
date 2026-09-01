@@ -1,5 +1,5 @@
 import { IconChevronRight, IconFilter2, IconHistory, IconPlus } from "@tabler/icons-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -13,7 +13,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { PressRow } from "@/components/ui/pressrow";
-import { useMessageScroller } from "@/components/ui/message-scroller";
 import { Empty, Waiting } from "@/kernel/panel";
 import { SlotTrack, useSlot, type Seek } from "@/kernel/slots";
 import { isPortalChat, origin } from "@/lib/audience";
@@ -417,13 +416,13 @@ function History({
   const ladder = useChatLadder();
   const hidden = useChatHidden();
   const runs = chatRuns(rail.rows, ladder, hidden, new Date());
-  const { scrollToStart } = useMessageScroller();
   const narrowed = ladder !== "recency" || hidden.length > 0;
   const show = (surface: string, shown: boolean) =>
     holdChatHidden(shown ? hidden.filter((name) => name !== surface) : [...hidden, surface]);
-  useLayoutEffect(() => {
-    if (rail.phase === "ready" && runs.length) void scrollToStart({ behavior: "auto" });
-  }, [rail.phase, runs.length, scrollToStart]);
+  const openAtTop = useCallback(
+    (history: HTMLDivElement | null) => history?.scrollTo({ top: 0, behavior: "auto" }),
+    [],
+  );
   return (
     <div className="flex min-h-0 flex-1 flex-col py-md">
       <div className="flex shrink-0 items-center justify-between px-lg">
@@ -469,7 +468,7 @@ function History({
         </DropdownMenu>
       </div>
       {runs.length ? (
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable">
+        <div ref={openAtTop} className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable">
           {runs.map((run) => (
             <section key={run.label} className="flex flex-col">
               <h4 className={PICK_LABEL}>{run.label}</h4>

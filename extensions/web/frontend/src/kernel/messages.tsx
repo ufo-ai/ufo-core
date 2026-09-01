@@ -75,31 +75,17 @@ const AT_THE_FOOT_PX = 40;
  *  still say "take me back to the foot", because a member who scrolled up to re-read something and
  *  then wrote is not asking to stay where they were — they have just added the newest thing on the
  *  page. `useTakeMeToTheFoot` is how those acts say it, and it reaches this through context, so a
- *  caller outside one is a mistake the primitive raises on rather than a silent no-scroll. A new
- *  chat opens at the start even when its pane holds history rather than message rows. */
-export function TranscriptScroll({
-  initial = "end",
-  children,
-}: {
-  initial?: "start" | "end";
-  children: ReactNode;
-}) {
+ *  caller outside one is a mistake the primitive raises on rather than a silent no-scroll. */
+export function TranscriptScroll({ children }: { children: ReactNode }) {
   return (
     <MessageScrollerProvider
       autoScroll
-      defaultScrollPosition={initial}
+      defaultScrollPosition="end"
       scrollEdgeThreshold={AT_THE_FOOT_PX}
     >
       {children}
-      {initial === "start" ? <OpenedAtTheStart /> : null}
     </MessageScrollerProvider>
   );
-}
-
-function OpenedAtTheStart() {
-  const { scrollToStart } = useMessageScroller();
-  useLayoutEffect(() => void scrollToStart({ behavior: "auto" }), [scrollToStart]);
-  return null;
 }
 
 /** The pane a conversation is scrolled in, with the way back to its foot standing over it. Only a
