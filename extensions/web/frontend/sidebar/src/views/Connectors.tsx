@@ -205,12 +205,23 @@ function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
       label: tiles.get(entry.provider)?.label ?? entry.provider,
       detail: (
         <>
+          {entry.agents.length
+            ? (entry.agents.length === 1 ? "App: " : "Apps: ") +
+              entry.agents.map((agent) => agentName(agent.name)).join(", ")
+            : "No apps"}
+          {" \u00b7 "}
           {accountLine(entry)}
           {" \u00b7 "}
           <Moment at={entry.connected_at} />
         </>
       ),
-      said: [entry.provider, entry.account_label ?? "", entry.account_id ?? "", entry.owner_email ?? ""].join(" "),
+      said: [
+        entry.provider,
+        entry.account_label ?? "",
+        entry.account_id ?? "",
+        entry.owner_email ?? "",
+        ...entry.agents.map((agent) => agent.name),
+      ].join(" "),
       group: tiles.get(entry.provider)?.group ?? "",
       entry,
     })),
@@ -587,7 +598,7 @@ export function WorkspaceConnectors({
           return (
             <div className="flex flex-col gap-8xl">
               {!mine.length ? null : (
-                <Section title="Connected" note="Accounts the app can use now.">
+                <Section title="Connected" note="Connected accounts and the apps that can use them.">
                   <ItemGroup>
                     {mine.map((row, index) => {
                       const held = row.entry;
@@ -797,7 +808,7 @@ function Row({
       className={cn(control?.className, open && "hover:bg-fill", current && "bg-fill")}
     >
       <MarkTile>
-        <BrandMark provider={name} className="text-ink" />
+        <BrandMark provider={name} className="rounded-none text-ink" />
       </MarkTile>
       <ItemContent>
         <ItemTitle>{label}</ItemTitle>

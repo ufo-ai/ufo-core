@@ -997,13 +997,48 @@ test("the library follows broker cursors until one press adds 25 to 50 connector
 
 test("a connected row names the account it stands on and who reaches it", async () => {
   location.hash = sectionHash("connectors");
+  library({
+    "/connections": () =>
+      json({
+        connections: [
+          {
+            ...POOLED_NOTION.connections[0],
+            agents: [
+              { id: AGENT_ID, name: "assistant" },
+              { id: SECOND_ID, name: "second" },
+            ],
+          },
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  expect(
+    within(row("Notion")).getByText(/Apps: Assistant, Second · Notion team · Only you/),
+  ).toBeTruthy();
+  // A workspace install carries no connection row, so its row keeps the catalog's own sentence.
+  expect(within(row("GitHub")).getByText(CATALOG.providers[1].summary)).toBeTruthy();
+});
+
+test("a connected row with no app states that no app holds its grant", async () => {
+  location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Notion connected");
-  expect(within(row("Notion")).getByText(/Notion team · Only you/)).toBeTruthy();
-  // A workspace install carries no connection row, so its row keeps the catalog's own sentence.
-  expect(within(row("GitHub")).getByText(CATALOG.providers[1].summary)).toBeTruthy();
+  expect(within(row("Notion")).getByText(/No apps · Notion team · Only you/)).toBeTruthy();
+});
+
+test("provider marks keep their own shape", async () => {
+  location.hash = sectionHash("connectors");
+  library();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("heading", { name: "Available" });
+  const mark = row("Slack").querySelector<HTMLElement>('[style*="--brand-slack"]');
+  expect(mark).not.toBeNull();
+  expect(mark!.className).toContain("rounded-none");
 });
 
 /** The brokers reach further than the catalog names, so the pool is listed whole: a connection on a
