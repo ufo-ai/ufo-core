@@ -44,10 +44,12 @@ export default defineConfig({
       "^/(surface/web|ext/)": {
         target: process.env.UFO_SERVE_ORIGIN ?? "http://localhost:8710",
         changeOrigin: false,
-        // The shared routing names the lanes shell's page; this root's is `sidebar.html`.
+        // The shared routing names the lanes shell's page; this root's is `sidebar.html`, named
+        // under `base` because vite's base middleware redirects `/index.html` into the base and
+        // answers a 404 for any other html path outside it.
         bypass: (req) => {
           const path = devLocalPath(req.method ?? "GET", req.url ?? "");
-          return path === "/index.html" ? "/sidebar.html" : path;
+          return path === "/index.html" ? `${BASE}sidebar.html` : path;
         },
       },
     },

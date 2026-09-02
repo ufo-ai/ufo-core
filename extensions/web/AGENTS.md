@@ -52,14 +52,17 @@ uv run --project "$UFO_REPO" ufoctl serve
 Frontend, reloading on every source change:
 
 ```bash
-pnpm -C "$FRONTEND" run dev -- --host ufo.localhost
+pnpm -C "$FRONTEND" run dev --host ufo.localhost
 ```
 
 The sidebar shell has the same loop under its own config:
 
 ```bash
-pnpm -C "$FRONTEND" run dev -- --config sidebar/vite.config.ts --host ufo.localhost
+pnpm -C "$FRONTEND" run dev --config sidebar/vite.config.ts --host ufo.localhost
 ```
+
+Pass those flags bare. A `--` before them is swallowed by pnpm, and vite then serves the lanes
+shell on `:5173` under its own config as though none were named.
 
 Run `uv run --project "$UFO_REPO" ufoctl portal` once from `$UFO_DEV_DIR` to land the session
 cookie, then edit against `http://ufo.localhost:5173/surface/web`. Use `ufo.localhost` on both:
@@ -71,6 +74,16 @@ the built tree under `ufo_ext_web/static` is out of the loop entirely — never 
 iterating. Port `8710` serves the backend and that built tree; `5173` serves current source.
 
 Two of these running at once need different `[serve] port` values in their `$UFO_DEV_DIR/ufo.toml`.
+
+### Edit loop against a Docker stack
+
+`make web STACK=N` runs the same dev server against slot N of `make stack`: it points the proxy at
+the slot's published serve port and binds `ufo-N.localhost` on the slot's own port (15173 for slot
+1, plus 100 per slot after it), which is the origin the slot's session cookie is bound to. Sign in
+once at the slot's gateway, then edit against `http://ufo-N.localhost:15173/surface/web`. It serves
+the sidebar shell; `SHELL_NAME=lanes` serves the lanes shell instead. A frontend change reloads
+there, so `make stack` earns a re-run for a backend change and nothing else — the image carries the
+Python tree and the built portal, and a rebuild is minutes.
 
 ### What does not need re-running
 

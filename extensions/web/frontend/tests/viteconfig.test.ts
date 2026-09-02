@@ -12,12 +12,12 @@ import { loadConfigFromFile, type ProxyOptions } from "vite";
  * asking the predicate, stops covering the whole surface, or lets the sign-in redirect leave this
  * origin cannot pass while the predicate's suite stays green.
  */
-const proxyRule = async (): Promise<[string, ProxyOptions]> => {
+const proxyRule = async (config = "vite.config.ts"): Promise<[string, ProxyOptions]> => {
   const loaded = await loadConfigFromFile(
     { command: "serve", mode: "development" },
-    join(import.meta.dirname, "..", "vite.config.ts")
+    join(import.meta.dirname, "..", config)
   );
-  if (!loaded) throw new Error("the vite config did not load");
+  if (!loaded) throw new Error(`${config} did not load`);
   const proxy = loaded.config.server?.proxy ?? {};
   const entries = Object.entries(proxy);
   expect(entries).toHaveLength(1);
@@ -36,6 +36,35 @@ test("the sign-in redirect comes back on the dev origin", async () => {
   // developer to the backend, which serves the gitignored built tree this server exists to avoid.
   expect(rule.changeOrigin).toBe(false);
   expect(rule.target).toBe("http://localhost:8710");
+});
+
+test("the sidebar shell's page is named under the base the server publishes", async () => {
+  // Vite's base middleware redirects `/index.html` into `base` and answers a 404 for any other
+  // html path outside it, so a bare `/sidebar.html` leaves `/surface/web` with no page at all.
+  const [, rule] = await proxyRule("sidebar/vite.config.ts");
+  const bypass = rule.bypass;
+  if (!bypass) throw new Error("the rule declares no bypass");
+  const routed = (method: string, url: string) =>
+    bypass({ method, url } as never, undefined as never, undefined as never);
+  expect(routed("GET", "/surface/web")).toBe("/surface/web/static/sidebar.html");
+  expect(routed("GET", "/surface/web/static/src/main.tsx")).toBe(
+    "/surface/web/static/src/main.tsx"
+  );
+  expect(routed("GET", "/surface/web/api/agents")).toBeUndefined();
+});
+
+test("both shells send their reads to the fleet UFO_SERVE_ORIGIN names", async () => {
+  // `make web` points the dev server at the Docker stack's published serve port with this
+  // variable, so a hard-coded target would leave that loop reading a fleet that is not running.
+  process.env.UFO_SERVE_ORIGIN = "http://ufo-2.localhost:18810";
+  try {
+    for (const config of ["vite.config.ts", "sidebar/vite.config.ts"]) {
+      const [, rule] = await proxyRule(config);
+      expect(rule.target).toBe("http://ufo-2.localhost:18810");
+    }
+  } finally {
+    delete process.env.UFO_SERVE_ORIGIN;
+  }
 });
 
 test("the rule routes each request through the predicate", async () => {

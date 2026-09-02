@@ -9,10 +9,16 @@ WT ?=
 SHARD ?=
 STACK ?= 1
 STACKS := 1 2 3 4 5
+SHELL_NAME ?= sidebar
+SHELL_NAMES := sidebar lanes
 PYTEST_TIMEOUT_SECONDS := 120
 
 ifeq ($(filter $(STACK),$(STACKS)),)
 $(error STACK must be one of: $(STACKS))
+endif
+
+ifeq ($(filter $(SHELL_NAME),$(SHELL_NAMES)),)
+$(error SHELL_NAME must be one of: $(SHELL_NAMES))
 endif
 
 STACK_OFFSET := $(shell expr \( $(STACK) - 1 \) \* 100)
@@ -25,6 +31,7 @@ UFO_REDIS_PORT ?= $(shell expr 15543 + $(STACK_OFFSET))
 UFO_GATEWAY_PORT_HOST ?= $(shell expr 18080 + $(STACK_OFFSET))
 UFO_SERVE_PORT_HOST ?= $(shell expr 18710 + $(STACK_OFFSET))
 UFO_INGRESS_PORT_HOST ?= $(shell expr 18100 + $(STACK_OFFSET))
+UFO_WEB_PORT_HOST ?= $(shell expr 15173 + $(STACK_OFFSET))
 UFO_WORKSPACE_ROOT ?= $(REPOSITORY_ROOT)/.local/$(STACK_NAME)/workspaces
 STACK_ENV := UFO_DEV_IMAGE=$(STACK_NAME)-dev UFO_STACK_HOST=$(STACK_HOST) \
 	UFO_PG_PORT=$(UFO_PG_PORT) UFO_REDIS_PORT=$(UFO_REDIS_PORT) \
@@ -33,8 +40,11 @@ STACK_ENV := UFO_DEV_IMAGE=$(STACK_NAME)-dev UFO_STACK_HOST=$(STACK_HOST) \
 	UFO_INGRESS_PORT_HOST=$(UFO_INGRESS_PORT_HOST) \
 	UFO_WORKSPACE_ROOT="$(UFO_WORKSPACE_ROOT)"
 COMPOSE := $(STACK_ENV) docker compose --project-name $(STACK_NAME)
+# `portal_page` serves the sidebar shell, so the dev server serves that shell too; the lanes shell
+# is the frontend root's own config and the sidebar shell keeps its config beside its root.
+SHELL_CONFIG := $(if $(filter sidebar,$(SHELL_NAME)),--config sidebar/vite.config.ts,)
 
-.PHONY: help install reinstall build init serve portal setup stack stack-down stack-logs db \
+.PHONY: help install reinstall build init serve portal setup stack stack-down stack-logs web db \
 	check fmt test test-one test-control test-preview test-client test-client-load \
 	cover-client bench-client test-web test-integration
 
@@ -106,6 +116,7 @@ else
 		done; \
 		$(MAKE) build; \
 		echo "Gateway: http://$(STACK_HOST):$(UFO_GATEWAY_PORT_HOST)/login"; \
+		echo "Portal from source, reloading on every frontend change: make web STACK=$(STACK)"; \
 		$(COMPOSE) up --build
 endif
 
@@ -114,6 +125,12 @@ stack-down: ## Stop stack 1-5 (STACK=1)
 
 stack-logs: ## Follow gateway logs for stack 1-5 (STACK=1)
 	$(COMPOSE) logs --follow gateway
+
+web: $(WEB)/node_modules ## Serve the portal from source against stack 1-5, reloading on every frontend change (STACK=1, SHELL_NAME=sidebar|lanes)
+	@echo "Portal: http://$(STACK_HOST):$(UFO_WEB_PORT_HOST)/surface/web"
+	UFO_SERVE_ORIGIN=http://$(STACK_HOST):$(UFO_SERVE_PORT_HOST) \
+		pnpm -C $(WEB) run dev $(SHELL_CONFIG) \
+		--host $(STACK_HOST) --port $(UFO_WEB_PORT_HOST) --strictPort
 
 db: ## Start only Postgres for tests and evals on :5541
 	docker compose up -d postgres

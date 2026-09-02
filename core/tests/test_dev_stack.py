@@ -119,6 +119,53 @@ def _check_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> Non
     assert "blobs" in compose["volumes"]
 
 
+def _check_web_reloads_from_source_against_each_slot() -> None:
+    for stack, host, web, serve in [
+        ("1", "ufo-1.localhost", "15173", "18710"),
+        ("2", "ufo-2.localhost", "15273", "18810"),
+        ("3", "ufo-3.localhost", "15373", "18910"),
+        ("4", "ufo-4.localhost", "15473", "19010"),
+        ("5", "ufo-5.localhost", "15573", "19110"),
+    ]:
+        command = subprocess.run(
+            ["make", "--no-print-directory", "-n", "web", f"STACK={stack}"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+        assert f"UFO_SERVE_ORIGIN=http://{host}:{serve}" in command
+        # The flags go to vite bare: pnpm swallows a `--` before them and vite then serves the
+        # lanes shell on its own default port.
+        assert "pnpm -C extensions/web/frontend run dev --config sidebar/vite.config.ts" in command
+        assert f"--host {host} --port {web} --strictPort" in command
+        assert f"http://{host}:{web}/surface/web" in command
+
+    lanes = subprocess.run(
+        ["make", "--no-print-directory", "-n", "web", "SHELL_NAME=lanes"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "--config" not in lanes
+
+    refused = subprocess.run(
+        ["make", "--no-print-directory", "-n", "web", "SHELL_NAME=both"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    assert refused.returncode != 0
+    assert "SHELL_NAME must be one of: sidebar lanes" in refused.stderr
+
+    # The dev server reads the fleet through this variable, and its own suite pins the reading.
+    for config in ["vite.config.ts", "sidebar/vite.config.ts"]:
+        source = (REPO / "extensions/web/frontend" / config).read_text()
+        assert "process.env.UFO_SERVE_ORIGIN" in source
+
+
 def _check_stack_refuses_a_slot_outside_its_closed_range() -> None:
     result = subprocess.run(
         ["make", "--no-print-directory", "-n", "stack", "STACK=6"],
@@ -145,6 +192,6 @@ def _check_db_keeps_the_test_and_eval_postgres_port() -> None:
 
 def test_dev_stack_sync_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 7
+    assert len(checks) == 8
     for check in checks:
         check()
