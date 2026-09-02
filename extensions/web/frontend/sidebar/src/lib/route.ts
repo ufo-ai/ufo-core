@@ -6,6 +6,7 @@ export const WORKSPACE_TABS = [
   "tasks",
   "skills",
   "memory",
+  "connectors",
   "credentials",
   "usage",
   "billing",
@@ -351,6 +352,9 @@ const AGENT = row(
     AGENT_PREFIX + agentId + serializePlace(place),
 );
 
+/* The connectors screen is a workspace tab and a section both: the tab is where a member finds it,
+   and the section name is the address held links carry. So the workspace prefix reads that one name
+   as the tab, and every other section name at this prefix stays the section's. */
 const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
   "workspace",
   new RegExp(`^${WORKSPACE_PREFIX}(${TAB_NAME})${PLACE_TAIL}`),

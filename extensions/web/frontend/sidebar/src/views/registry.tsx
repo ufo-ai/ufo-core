@@ -41,6 +41,13 @@ function declared<Payload, Row>(label: string, spec: ListingSpec<Payload, Row>):
   };
 }
 
+export const CONNECTORS: PaneView = {
+  label: "Connectors",
+  remountOnPlace: false,
+  search: "Search connectors",
+  render: (place, onPlace) => <WorkspaceConnectors place={place} onPlace={onPlace} />,
+};
+
 export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   team: {
     label: "Team",
@@ -70,6 +77,7 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     search: "Search memory",
     render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
   },
+  connectors: CONNECTORS,
   credentials: declared("Credentials", CREDENTIALS),
   usage: {
     label: "Usage",
@@ -81,13 +89,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     remountOnPlace: false,
     render: (place, onPlace) => <WorkspaceBilling place={place} onPlace={onPlace} />,
   },
-};
-
-export const CONNECTORS: PaneView = {
-  label: "Connectors",
-  remountOnPlace: false,
-  search: "Search connectors",
-  render: (place, onPlace) => <WorkspaceConnectors place={place} onPlace={onPlace} />,
 };
 
 /** The sections the portal renders itself. A `Section` outside this record is a screen an app

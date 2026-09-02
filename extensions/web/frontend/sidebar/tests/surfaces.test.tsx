@@ -93,7 +93,7 @@ test("an offered workspace screen keeps its tab", async () => {
   render(<App agents={[AGENT]} member={MEMBER} surfaces={ALL_SURFACES} onAgents={() => {}} />);
 
   expect(await screen.findByRole("tab", { name: "Memory" })).toBeTruthy();
-  expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
+  expect(screen.getByRole("tab", { name: "Connectors" })).toBeTruthy();
   expect(screen.queryByRole("tab", { name: "Sources" })).toBeNull();
 });
 
