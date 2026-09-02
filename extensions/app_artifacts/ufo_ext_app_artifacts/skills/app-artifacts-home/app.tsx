@@ -29,6 +29,7 @@ import {
   chatHash,
   cn,
   creator,
+  isTextMedia,
   mountApp,
   objectAt,
   ownerLabel,
@@ -176,22 +177,16 @@ function siteCard(row: ObjectRow, viewer: string | null, owner: string): Card {
   };
 }
 
-const FINGERPRINT_MEDIA = new Set([
-  "application/json",
-  "text/csv",
-  "text/markdown",
-  "text/x-patch",
-]);
-
-/** A shaped text file's tile is its fingerprint: the content renders at reading width — markdown
- *  as the document it is, a csv as its table, json and a patch as their characters — and scales to
- *  the edge of legibility, so the tile holds a dense picture of the page rather than one
- *  full-sized opening line. It reads the same link the viewer reads whole, the one preview an
- *  already-shared file can grow without a re-render; plain text stays pictureless, since it has no
- *  shape a fingerprint would carry. The fingerprint is `inert`: the tile is decoration, so nothing
- *  in it takes a press or the keyboard, and the tile's own overflow crops it. */
+/** A text file's tile is its fingerprint: the content renders at reading width — markdown as the
+ *  document it is, a csv as its table, code and plain text as their characters — and scales to the
+ *  edge of legibility, so the tile holds a dense picture of the page rather than one full-sized
+ *  opening line. Every file the sheet reads as text draws one, so the same file previews on the
+ *  shelf and in its record; a type the preview service cannot render draws its extension. It
+ *  reads the same link the viewer reads whole, the one preview an already-shared file can grow
+ *  without a re-render. The fingerprint is `inert`: the tile is decoration, so nothing in it takes
+ *  a press or the keyboard, and the tile's own overflow crops it. */
 function tileExcerpt(file: Artifact | null): ReactNode {
-  if (!file?.url || !FINGERPRINT_MEDIA.has(file.media_type)) return null;
+  if (!file?.url || !isTextMedia(file.media_type)) return null;
   return (
     <div inert className="w-(--size-fingerprint) origin-top-left scale-(--scale-fingerprint)">
       <ArtifactText
@@ -201,6 +196,39 @@ function tileExcerpt(file: Artifact | null): ReactNode {
         display="inline"
       />
     </div>
+  );
+}
+
+/** The wrappers a compressed archive is named by. A `.tar.gz` is a tarball rather than a gzip file,
+ *  so the pair names the format and the last suffix alone would say the wrong thing. */
+const WRAPPER_SUFFIX = new Set(["gz", "bz2", "xz", "zst"]);
+
+/** What a file states about itself when it has neither a picture nor characters the page can read:
+ *  its extension, uppercased. A member scanning the shelf reads ZIP, PDF or TAR.GZ off the tile
+ *  rather than a row of empty boxes that differ in nothing. A name with no suffix states nothing. */
+function extensionLabel(filename: string): string | null {
+  const parts = filename.split(".");
+  if (parts.length < 2) return null;
+  const last = parts[parts.length - 1];
+  const suffix =
+    parts.length > 2 && WRAPPER_SUFFIX.has(last.toLowerCase())
+      ? parts[parts.length - 2] + "." + last
+      : last;
+  return suffix.toUpperCase();
+}
+
+/** What a tile draws where the record has no picture of its own: a file's characters where the
+ *  preview service can render them, and otherwise its extension. A site takes neither. */
+function tileBody(card: Card): ReactNode {
+  const excerpt = tileExcerpt(card.file);
+  if (excerpt) return excerpt;
+  if (!card.file) return null;
+  const suffix = extensionLabel(card.file.filename);
+  if (!suffix) return null;
+  return (
+    <span className="flex size-full items-center justify-center font-mono text-subtitle text-ink-soft">
+      {suffix}
+    </span>
   );
 }
 
@@ -402,7 +430,7 @@ function Artifacts({
                     mark={{
                       shape: "tile",
                       image: (card) => card.image,
-                      body: (card) => tileExcerpt(card.file),
+                      body: (card) => tileBody(card),
                     }}
                     primary={(card) => card.name}
                     status={(card) => card.status}

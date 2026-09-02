@@ -431,6 +431,52 @@ test("the artifacts page mounts and draws the empty shelf with its search", asyn
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 });
 
+function sharedFile(filename: string, mediaType: string) {
+  return {
+    name: "conv1-" + filename,
+    filename,
+    subject: null,
+    media_type: mediaType,
+    size_bytes: 64,
+    shared_at: "2026-08-14T09:00:00Z",
+    url: "/dl/" + filename,
+    preview_url: null,
+    owner_email: MEMBER.email,
+    origin: null,
+    conversation: CONVO_ID,
+    surface: "web",
+    source: null,
+  };
+}
+
+test("the artifacts shelf draws code and plain text as their characters and labels the rest with their extension", async () => {
+  await runPage("artifacts", {
+    "/objects/site": () => objectIndex(SITE_KIND, []),
+    "/objects/artifact": () =>
+      json({
+        objects: [
+          sharedFile("deploy.py", "text/x-python"),
+          sharedFile("compose.yaml", "application/yaml"),
+          sharedFile("app.ts", "application/typescript"),
+          sharedFile("bundle.zip", "application/zip"),
+          sharedFile("archive.tar.gz", "application/octet-stream"),
+        ],
+      }),
+    "/dl/deploy.py": () => new Response("print('deploying')"),
+    "/dl/compose.yaml": () => new Response("services:\n  web: {}"),
+    "/dl/app.ts": () => new Response("export const port = 8080;"),
+    "/dl/bundle.zip": () => new Response("PK"),
+    "/dl/archive.tar.gz": () => new Response("\u001f\u008b"),
+  });
+
+  expect(await screen.findByText("print('deploying')")).toBeTruthy();
+  expect(await screen.findByText(/services:/)).toBeTruthy();
+  expect(await screen.findByText("export const port = 8080;")).toBeTruthy();
+  expect(screen.queryByText("PK")).toBeNull();
+  expect(await screen.findByText("ZIP")).toBeTruthy();
+  expect(await screen.findByText("TAR.GZ")).toBeTruthy();
+});
+
 /** A page that ships filled in still has to mount: its placeholder is the shape the app rebuilds
  *  against, so a page that throws on mount is a page the app forks a broken copy of. Each of the
  *  three draws its own bands and the conversation list the kit hands it. */

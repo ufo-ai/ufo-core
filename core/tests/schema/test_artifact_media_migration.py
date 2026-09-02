@@ -9,16 +9,21 @@ from alembic.config import Config
 from ufo.db import MIGRATIONS_DIR
 
 MOMENT = datetime(2026, 8, 1, tzinfo=UTC)
+FALLBACK = "application/octet-stream"
+PRESENTATION = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
-def test_media_type_backfill_retypes_only_the_fallback_rows_by_suffix(tmp_path: Path) -> None:
-    path = tmp_path / "artifact-media.db"
+def _retyped(
+    path: Path, before: str, after: str, shared: tuple[tuple[str, str], ...]
+) -> dict[str, str]:
+    """The `filename -> media_type` a schema at `before` holds after `shared` rows are written into
+    it and it is upgraded to `after`."""
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
     config.set_main_option("version_locations", str(MIGRATIONS_DIR / "versions"))
     config.set_main_option("path_separator", "os")
     config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{path}")
-    command.upgrade(config, "0088")
+    command.upgrade(config, before)
 
     workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
     conversation_id, turn_id = uuid4(), uuid4()
@@ -31,17 +36,6 @@ def test_media_type_backfill_retypes_only_the_fallback_rows_by_suffix(tmp_path: 
     def stored(value: UUID) -> str:
         return value.hex
 
-    shared = (
-        ("deck.pptx", "application/octet-stream"),
-        ("Cased.PPTX", "application/octet-stream"),
-        ("fix.patch", "application/octet-stream"),
-        ("unknown.bin", "application/octet-stream"),
-        (
-            "guessed.pptx",
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        ),
-        ("report.pdf", "application/pdf"),
-    )
     with engine.connect() as connection:
         connection.execute(
             metadata.tables["workspace"]
@@ -122,10 +116,10 @@ def test_media_type_backfill_retypes_only_the_fallback_rows_by_suffix(tmp_path: 
             )
         connection.commit()
 
-    command.upgrade(config, "0089")
+    command.upgrade(config, after)
 
     with engine.connect() as connection:
-        retyped = dict(
+        return dict(
             connection.execute(
                 sa.select(
                     metadata.tables["shared_artifact"].c.filename,
@@ -133,12 +127,60 @@ def test_media_type_backfill_retypes_only_the_fallback_rows_by_suffix(tmp_path: 
                 )
             ).all()
         )
-    presentation = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+def test_media_type_backfill_retypes_only_the_fallback_rows_by_suffix(tmp_path: Path) -> None:
+    retyped = _retyped(
+        tmp_path / "artifact-media.db",
+        "0088",
+        "0089",
+        (
+            ("deck.pptx", FALLBACK),
+            ("Cased.PPTX", FALLBACK),
+            ("fix.patch", FALLBACK),
+            ("unknown.bin", FALLBACK),
+            ("guessed.pptx", PRESENTATION),
+            ("report.pdf", "application/pdf"),
+        ),
+    )
     assert retyped == {
-        "deck.pptx": presentation,
-        "Cased.PPTX": presentation,
+        "deck.pptx": PRESENTATION,
+        "Cased.PPTX": PRESENTATION,
         "fix.patch": "text/x-patch",
-        "unknown.bin": "application/octet-stream",
-        "guessed.pptx": presentation,
+        "unknown.bin": FALLBACK,
+        "guessed.pptx": PRESENTATION,
         "report.pdf": "application/pdf",
+    }
+
+
+def test_text_media_type_backfill_retypes_every_row_by_suffix(tmp_path: Path) -> None:
+    """A yaml, toml or typescript row moves whatever a registry guessed for it — the fallback the
+    hosted image wrote, the video type a laptop's registry gives a `.ts`, another's `x-yaml` — and
+    a row whose suffix the table does not name keeps its type, `.tsx` included."""
+    retyped = _retyped(
+        tmp_path / "artifact-text-media.db",
+        "20260901111145",
+        "20260902223926",
+        (
+            ("compose.yaml", FALLBACK),
+            ("Cased.YML", FALLBACK),
+            ("pyproject.toml", FALLBACK),
+            ("app.ts", "video/mp2t"),
+            ("types.d.ts", FALLBACK),
+            ("laptop.yaml", "application/x-yaml"),
+            ("App.tsx", FALLBACK),
+            ("unknown.bin", FALLBACK),
+            ("notes.txt", "text/plain"),
+        ),
+    )
+    assert retyped == {
+        "compose.yaml": "application/yaml",
+        "Cased.YML": "application/yaml",
+        "pyproject.toml": "application/toml",
+        "app.ts": "application/typescript",
+        "types.d.ts": "application/typescript",
+        "laptop.yaml": "application/yaml",
+        "App.tsx": FALLBACK,
+        "unknown.bin": FALLBACK,
+        "notes.txt": "text/plain",
     }

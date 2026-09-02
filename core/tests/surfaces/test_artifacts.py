@@ -91,6 +91,11 @@ def test_artifact_media_types_answer_from_the_product_table_on_any_host() -> Non
     )
     assert artifact_media_type("fix.patch") == "text/x-patch"
     assert artifact_media_type("fix.diff") == "text/x-patch"
+    assert artifact_media_type("compose.yaml") == "application/yaml"
+    assert artifact_media_type("ci.YML") == "application/yaml"
+    assert artifact_media_type("pyproject.toml") == "application/toml"
+    assert artifact_media_type("app.ts") == "application/typescript"
+    assert artifact_media_type("App.tsx") == "application/octet-stream"
     bare_registry = mimetypes.MimeTypes(filenames=())
     for suffix in ARTIFACT_MEDIA_TYPES:
         assert bare_registry.guess_type(f"a{suffix}")[0] is None

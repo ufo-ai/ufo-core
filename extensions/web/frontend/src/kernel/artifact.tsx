@@ -29,9 +29,22 @@ const HTML_CSP =
 export const PICTURE_DID_NOT_LOAD =
   "The image did not load. Its link may have expired — reload the page.";
 
-/** Whether a media type is text the page can show as text — `text/*` and JSON. */
+/** The code and data types the store serves under `application/*` whose bytes are characters —
+ *  what it names a `.json`, `.sh`, `.xsl`, `.yaml`, `.toml` or `.ts` share. It types a file by its
+ *  extension, so a page reading media type alone would call these unreadable. */
+const TEXT_APPLICATION_MEDIA = new Set([
+  "application/json",
+  "application/toml",
+  "application/typescript",
+  "application/x-sh",
+  "application/xml",
+  "application/yaml",
+]);
+
+/** Whether a media type is text the page can show as text — every `text/*` type, and the code and
+ *  data types `application/*` carries. */
 export function isTextMedia(mediaType: string): boolean {
-  return mediaType.startsWith("text/") || mediaType === "application/json";
+  return mediaType.startsWith("text/") || TEXT_APPLICATION_MEDIA.has(mediaType);
 }
 
 const SPREADSHEET_MEDIA_TYPES = new Set([

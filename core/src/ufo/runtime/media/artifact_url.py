@@ -48,7 +48,11 @@ ARTIFACT_MEDIA_TYPES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".patch": "text/x-patch",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".toml": "application/toml",
+    ".ts": "application/typescript",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
 }
 
 
@@ -95,8 +99,9 @@ def artifact_media_type(filename: str) -> str:
     keys features on — the media families, previews, and inline text rendering — resolve through
     `ARTIFACT_MEDIA_TYPES`, never the registry: `mimetypes` answers from the host's own mime files,
     and the hosted image (`python:3.12-slim`) carries none, so an office type guessed right on a
-    laptop and landed as the fallback in production. A name whose type carries a compression
-    encoding (`chart.png.gz`) is not the inner type — declaring `image/png` without
+    laptop and landed as the fallback in production, and the interpreter's own map names no yaml,
+    toml or typescript while a laptop's calls a `.ts` a video stream. A name whose type carries a
+    compression encoding (`chart.png.gz`) is not the inner type — declaring `image/png` without
     `content-encoding: gzip` serves broken bytes — so it falls back with the unknowns."""
     declared = ARTIFACT_MEDIA_TYPES.get(PurePosixPath(filename).suffix.lower())
     if declared is not None:

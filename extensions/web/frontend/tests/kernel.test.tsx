@@ -119,6 +119,30 @@ test("a file sheet renders a markdown document instead of its image preview", as
   expect(within(sheet).queryByRole("img")).toBeNull();
 });
 
+test("a file sheet renders a code file's characters instead of stating no preview", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("services:\n  web: {}")));
+
+  render(
+    <FileSheet
+      file={{
+        filename: "compose.yaml",
+        subject: null,
+        media_type: "application/yaml",
+        size_bytes: 24,
+        url: "/files/compose.yaml",
+        preview_url: null,
+      }}
+      onClose={() => {}}
+    />,
+  );
+
+  const sheet = screen.getByRole("dialog", { name: "compose.yaml" });
+  expect(await within(sheet).findByText(/services:/)).toBeTruthy();
+  expect(
+    within(sheet).queryByText("No preview for this file type. Download it to open it."),
+  ).toBeNull();
+});
+
 type Row = { name: string };
 
 function Listing({ path }: { path: string }) {
