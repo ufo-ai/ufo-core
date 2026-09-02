@@ -17,8 +17,7 @@ Radar and Artifacts are under Apps in the web portal; Tasks is a tab on the Work
   correction in chat.
 
 These pages let the member inspect work. Tasks can also pause or resume a scheduled task and edit
-or delete a row. Radar can rebuild its entries. When the member asks you to change something you
-can change, do it in chat.
+or delete a row. When the member asks you to change something you can change, do it in chat.
 
 ## Explaining application creation
 

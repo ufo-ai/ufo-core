@@ -183,8 +183,8 @@ test("the radar page mounts and draws its empty feed under its own band", async 
     "/actions/report$": () => json({ actions: [] }),
   });
   expect(await screen.findByRole("heading", { name: "Radar" })).toBeTruthy();
-  expect(await screen.findByRole("button", { name: "Rebuild entries" })).toBeTruthy();
   expect(await screen.findByText(NO_RUNS)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Rebuild entries" })).toBeNull();
   expect(calls.some((url) => url.includes("/api/agents"))).toBe(false);
   expect(calls.some((url) => url.includes("/objects/report"))).toBe(true);
 });

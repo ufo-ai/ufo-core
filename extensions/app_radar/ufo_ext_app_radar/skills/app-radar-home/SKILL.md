@@ -9,7 +9,7 @@ metadata:
 
 The homepage is served with the deploy: `app.tsx` in this skill is its source, built into the
 page every workspace reads until it changes one. It renders the radar feed: each report's
-digest, its findings and the actors behind them, and the control that rebuilds an entry.
+digest, and its findings with the actors behind them.
 
 To change it:
 

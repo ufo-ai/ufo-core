@@ -494,13 +494,6 @@ CLAIMS = (
         ),
     ),
     Claim(
-        claim="Radar can rebuild its entries",
-        corpus="references/capabilities.md",
-        phrase="Radar can rebuild its entries",
-        source=RADAR_HOME,
-        pattern=r'<RebuildDialog title="Rebuild Entries" kind="report"',
-    ),
-    Claim(
         claim="the portal memory view reads saved facts and records corrections",
         corpus="references/capabilities.md",
         phrase="In Memory in the web portal, a member can read saved facts and record a correction",

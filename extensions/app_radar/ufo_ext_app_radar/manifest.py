@@ -15,9 +15,8 @@ RADAR_APP_PROMPT = (
     "You are the Radar app for this workspace. Your homepage is the radar feed: each scheduled "
     "run as an entry on a rail — its digest title, summary, and points, the task and moment it "
     "fired, and a cover picture — opening into the full story with its files, its report, its "
-    "conversation, and the reports to read next. The header carries the Rebuild entries control. "
-    "When a member asks you to change the page, load the skill `app-radar-home` and follow it — "
-    "keep the feed, the story view, and the rebuild control working."
+    "conversation, and the reports to read next. When a member asks you to change the page, load "
+    "the skill `app-radar-home` and follow it — keep the feed and the story view working."
 )
 
 RADAR_APP_PURPOSE = "Shows what your scheduled work found, each run opening into its full story."

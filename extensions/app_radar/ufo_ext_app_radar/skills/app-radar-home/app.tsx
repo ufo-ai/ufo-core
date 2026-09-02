@@ -6,9 +6,6 @@ import {
   AgentIcon,
   Avatar,
   AvatarFallback,
-  Button,
-  Dialog,
-  DialogTrigger,
   FileSheet,
   Header,
   Markdown,
@@ -18,7 +15,6 @@ import {
   PanelBlank,
   PanelEmpty,
   PressRow,
-  RebuildDialog,
   Section,
   SectionApp,
   Sheet,
@@ -152,7 +148,7 @@ function Radar({
   const page = pin === undefined ? title : named?.run === pin ? named.name : REPORT;
   const band = usePageHead(
     pin === undefined ? (
-      <Header pinned heading={1} title={page} acts={<RebuildEntries />} />
+      <Header pinned heading={1} title={page} />
     ) : (
       <Header
         pinned
@@ -183,31 +179,6 @@ function Radar({
           />
         ))}
     </>
-  );
-}
-
-/** The feed's one act: the entries under the reports, written again. What a report says is the
- *  report's own and is never touched — this reaches the title and the lines the digest job wrote
- *  over it, which that job can write again from the report it read the first time. The window is
- *  the job's, and the dialog says so, because a report the job will never read again would lose its
- *  entry rather than gain a better one. */
-function RebuildEntries() {
-  return (
-    <Dialog>
-      <DialogTrigger asChild>
-        <Button size="bar">Rebuild entries</Button>
-      </DialogTrigger>
-      <RebuildDialog title="Rebuild Entries" kind="report">
-        <p className="m-0">
-          Every report published in the last seven days is read again, and the title and lines
-          standing over it are written from scratch.
-        </p>
-        <p className="m-0">
-          A report older than seven days keeps the entry it has. The digest job does not read that
-          far back.
-        </p>
-      </RebuildDialog>
-    </Dialog>
   );
 }
 
