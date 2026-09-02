@@ -45,6 +45,9 @@ WEB_SURFACE = "extensions/web/ufo_ext_web/surface.py"
 WEB_AUDIENCE = "extensions/web/ufo_ext_web/audience.py"
 WEB_BILLING_VIEW = "extensions/web/frontend/src/views/Billing.tsx"
 TERMINAL_SURFACE = "extensions/ufo/ufo_ext_ufo/surface.py"
+BEDROCK = "extensions/bedrock/ufo_ext_bedrock.py"
+OPENROUTER = "extensions/openrouter/ufo_ext_openrouter.py"
+ACCOUNTING = "core/src/ufo/runtime/billing/accounting.py"
 SPEC = "spec.md"
 TASK_SCHEDULING_SKILL_MD = (
     "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/skills/task-scheduling/SKILL.md"
@@ -709,6 +712,29 @@ CLAIMS = (
         " repositories chosen when it was installed",
         source=CODING_SKILL_MD,
         pattern=r"choose the organization and which repositories the ufo App may reach",
+    ),
+    Claim(
+        claim="bring-your-own-key is not Anthropic-specific — Bedrock is a second provider a"
+        " workspace can hold its own key for",
+        corpus="references/billing-and-seats.md",
+        phrase="A workspace can supply its own key for the model provider serving it",
+        source=BEDROCK,
+        pattern=r'BEDROCK_KEY_SLOT = "bedrock_api_key"',
+    ),
+    Claim(
+        claim="OpenRouter is a third provider a workspace can hold its own key for",
+        corpus="references/billing-and-seats.md",
+        phrase="A workspace can supply its own key for the model provider serving it",
+        source=OPENROUTER,
+        pattern=r'OPENROUTER_KEY_SLOT = "openrouter_api_key"',
+    ),
+    Claim(
+        claim="metering that key's usage as not billed as pass-through is a provider-agnostic"
+        " byok flag, not an Anthropic-only rule",
+        corpus="references/billing-and-seats.md",
+        phrase="that provider's\nusage is metered for visibility but not billed as pass-through",
+        source=ACCOUNTING,
+        pattern=r"billed = 0 if byok else priced",
     ),
 )
 

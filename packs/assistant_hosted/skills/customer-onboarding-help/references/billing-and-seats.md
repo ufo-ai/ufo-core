@@ -51,9 +51,9 @@ Never predict a numeric total cost. Describe cost qualitatively.
 
 ## Bring your own model key
 
-A workspace can supply its own Anthropic API key. When it does, model usage is metered for visibility
-but not billed as pass-through. Without it, the platform key is used and model usage bills through.
-The key is always entered through a private prompt, never pasted into chat.
+A workspace can supply its own key for the model provider serving it. When it does, that provider's
+usage is metered for visibility but not billed as pass-through; usage served by the platform's own
+key still bills through. The key is always entered through a private prompt, never pasted into chat.
 
 ## Members
 
