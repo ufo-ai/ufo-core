@@ -23,7 +23,7 @@ date: 2026-08-27
 | What stays globally listed? | Cross-cutting execution, conversation control, research, connector discovery, and the six object verbs in [Retained global tools](#retained-global-tools). |
 | What moves? | The 26 names in [Action inventory](#action-inventory) — a starting assignment: a family that fails its eval gate returns to the global set, updating the inventory tables in that change. |
 | What happens to the lazy tool catalog? | Deleted in the final unit. Object discovery is the one deferral mechanism; retained global tools are always on the wire. |
-| How are moved capabilities found? | Collection actions on `object_list(kind)`; instance actions on `object_get(kind, name)`. `object_explain(kind)` returns both sets. |
+| How are moved capabilities found? | Collection actions on `object_list(kind)`; instance actions on `object_get(ref)`. `object_explain(kind)` returns both sets. |
 | How are they called? | One generic `object_action` tool with a structured target and an action-specific `input` mapping. |
 | May an extension attach to another extension's or core's kind? | Yes. Kind ownership controls object reads; action ownership controls the handler and its `ExtensionContext`. |
 | How many kinds are added? | One: `surface`. Every other action binds to an existing kind. |
@@ -96,7 +96,7 @@ RFC 0017 already supplies the required discovery vocabulary:
 - `ObjectKind` is a deploy-wide kind with a typed spec and handlers;
 - `object_list("")` lists registered kinds;
 - `object_list(kind)` lists instances;
-- `object_get(kind, name)` returns spec, status, links, timestamps, and generation;
+- `object_get(ref)` returns spec, status, links, timestamps, and generation;
 - `object_explain(kind)` returns guidance and schema;
 - `object_apply` and `object_delete` are the generic mutations.
 
@@ -300,11 +300,10 @@ never copied into each row.
 }
 ```
 
-`object_get(kind, name)` returns instance actions with the target pre-bound:
+`object_get(ref)` returns instance actions with the target pre-bound:
 
 ```yaml
-kind: member
-name: 94f3b3d4-4f4a-4f7c-90d0-b4b0a6403db9
+ref: member/94f3b3d4-4f4a-4f7c-90d0-b4b0a6403db9
 spec:
   admin: false
   seated: true

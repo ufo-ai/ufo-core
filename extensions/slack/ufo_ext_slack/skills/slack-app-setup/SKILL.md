@@ -14,7 +14,7 @@ Stand up a Slack bot and wire it into the slack surface this deploy already runs
 server to build: the surface is mounted and listening, and you drive every step with three calls —
 the `slack_connect` and `slack_app_manifest` actions on the `surface/slack` object (`object_action`
 with `kind: surface`, `name: slack`, `action: <name>`, and the action's own fields under `input`;
-`object_get` on `surface/slack` lists them), and the `credential` collection's `request_credentials`
+`object_get(ref="surface/slack")` lists them), and the `credential` collection's `request_credentials`
 action. The member only clicks through Slack's own pages and enters two values privately in their
 terminal.
 

@@ -598,7 +598,7 @@ async def test_an_agent_targetable_action_resolves_a_visible_agent_for_the_live_
         result = await get.handler(
             ctx,
             get.input_model.model_validate(
-                {"kind": sample.WIDGET_KIND, "name": "anvil", "agent": "helper"}
+                {"ref": f"{sample.WIDGET_KIND}/anvil", "agent": "helper"}
             ),
         )
         block = result.content[0]
@@ -615,7 +615,7 @@ async def test_an_agent_targetable_action_resolves_a_visible_agent_for_the_live_
 
         own = await get.handler(
             ctx,
-            get.input_model.model_validate({"kind": sample.WIDGET_KIND, "name": "anvil"}),
+            get.input_model.model_validate({"ref": f"{sample.WIDGET_KIND}/anvil"}),
         )
         own_block = own.content[0]
         assert isinstance(own_block, TextContent)

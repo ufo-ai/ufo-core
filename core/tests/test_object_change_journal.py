@@ -119,7 +119,7 @@ async def test_a_journal_failure_precedes_the_mutation(
         with pytest.raises(RuntimeError, match="journal unavailable"):
             await _text(tools, "object_apply", ctx, manifest=_widget_manifest("anvil"))
         with pytest.raises(UnknownObject):
-            await _text(tools, "object_get", ctx, kind=sample.WIDGET_KIND, name="anvil")
+            await _text(tools, "object_get", ctx, ref=f"{sample.WIDGET_KIND}/anvil")
         assert await _changes(workspace_id) == []
 
 

@@ -166,6 +166,7 @@ async def test_every_registered_surface_lists_and_reads_its_declaration(db: None
         listed = json.loads(await _text(tools["object_list"], ctx, kind=SURFACE_KIND))["objects"]
         assert listed == [
             {
+                "ref": f"{SURFACE_KIND}/chatty",
                 "name": "chatty",
                 "summary": "probe_chat: not bound",
                 "extension": "probe_chat",
@@ -175,6 +176,7 @@ async def test_every_registered_surface_lists_and_reads_its_declaration(db: None
                 "bound": False,
             },
             {
+                "ref": f"{SURFACE_KIND}/texty",
                 "name": "texty",
                 "summary": "probe_text: not bound",
                 "extension": "probe_text",
@@ -184,6 +186,7 @@ async def test_every_registered_surface_lists_and_reads_its_declaration(db: None
                 "bound": False,
             },
             {
+                "ref": f"{SURFACE_KIND}/webby",
                 "name": "webby",
                 "summary": "probe_browser: not bound",
                 "extension": "probe_browser",
@@ -194,9 +197,7 @@ async def test_every_registered_surface_lists_and_reads_its_declaration(db: None
             },
         ]
 
-        read = yaml.safe_load(
-            await _text(tools["object_get"], ctx, kind=SURFACE_KIND, name="texty")
-        )
+        read = yaml.safe_load(await _text(tools["object_get"], ctx, ref=f"{SURFACE_KIND}/texty"))
         assert read["spec"] == {
             "surface": "texty",
             "extension": "probe_text",
@@ -227,9 +228,7 @@ async def test_status_reads_the_workspace_binding_truthfully(db: None) -> None:
     with ws(workspace_id):
         ctx = _context(workspace_id)
 
-        bound = yaml.safe_load(
-            await _text(tools["object_get"], ctx, kind=SURFACE_KIND, name="chatty")
-        )
+        bound = yaml.safe_load(await _text(tools["object_get"], ctx, ref=f"{SURFACE_KIND}/chatty"))
         assert bound["status"] == {
             "bound": True,
             "agent": "assistant",
@@ -239,9 +238,7 @@ async def test_status_reads_the_workspace_binding_truthfully(db: None) -> None:
         assert datetime.fromisoformat(bound["created_at"]).replace(tzinfo=UTC) == BOUND_AT
         assert datetime.fromisoformat(bound["updated_at"]).replace(tzinfo=UTC) == REBOUND_AT
 
-        unbound = yaml.safe_load(
-            await _text(tools["object_get"], ctx, kind=SURFACE_KIND, name="texty")
-        )
+        unbound = yaml.safe_load(await _text(tools["object_get"], ctx, ref=f"{SURFACE_KIND}/texty"))
         assert unbound["status"] == {"bound": False}
 
         listed = json.loads(await _text(tools["object_list"], ctx, kind=SURFACE_KIND))["objects"]
@@ -275,9 +272,7 @@ async def test_a_binding_to_an_archived_agent_keeps_its_name_and_says_so(db: Non
     tools = _tools(_manifests())
     with ws(workspace_id):
         ctx = _context(workspace_id)
-        read = yaml.safe_load(
-            await _text(tools["object_get"], ctx, kind=SURFACE_KIND, name="chatty")
-        )
+        read = yaml.safe_load(await _text(tools["object_get"], ctx, ref=f"{SURFACE_KIND}/chatty"))
         listed = json.loads(await _text(tools["object_list"], ctx, kind=SURFACE_KIND))["objects"]
     assert read["status"] == {
         "bound": True,
@@ -297,9 +292,7 @@ async def test_a_binding_in_another_workspace_reads_as_unbound(db: None) -> None
     tools = _tools(_manifests())
     with ws(workspace_id):
         ctx = _context(workspace_id)
-        read = yaml.safe_load(
-            await _text(tools["object_get"], ctx, kind=SURFACE_KIND, name="chatty")
-        )
+        read = yaml.safe_load(await _text(tools["object_get"], ctx, ref=f"{SURFACE_KIND}/chatty"))
     assert read["status"] == {"bound": False}
 
 
@@ -313,7 +306,7 @@ async def test_foreign_audiences_read_no_surfaces(db: None) -> None:
         listed = json.loads(await _text(tools["object_list"], ctx, kind=SURFACE_KIND))["objects"]
         assert listed == []
         with pytest.raises(UnknownObject):
-            await _text(tools["object_get"], ctx, kind=SURFACE_KIND, name="chatty")
+            await _text(tools["object_get"], ctx, ref=f"{SURFACE_KIND}/chatty")
         assert await store.status(ctx, "chatty", expected_generation=None) is None
 
 

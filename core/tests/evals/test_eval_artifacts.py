@@ -2227,7 +2227,7 @@ async def test_ufo_app_bench_rework_pulls_the_source_between_deploys() -> None:
         base,
         calls=(
             *base.calls,
-            ToolInvocation("object_get", {"kind": "site"}, "read", has_result=True),
+            ToolInvocation("object_get", {"ref": "site/daily-brief"}, "read", has_result=True),
             ToolInvocation("js_repl", {}, "checked repair", has_result=True),
             ToolInvocation("js_repl", {}, "reviewed repair", has_result=True),
             ToolInvocation(

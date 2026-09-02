@@ -166,6 +166,7 @@ async def test_the_workspace_reads_as_one_object_carrying_its_seat_shape(db: Non
         listed = json.loads(await _text(_tool("object_list"), ctx, kind=WORKSPACE_KIND))["objects"]
         assert listed == [
             {
+                "ref": f"{WORKSPACE_KIND}/{workspace_id}",
                 "name": str(workspace_id),
                 "summary": "3 members, 2 seated",
                 "members": 3,
@@ -174,7 +175,7 @@ async def test_the_workspace_reads_as_one_object_carrying_its_seat_shape(db: Non
         ]
 
         read = yaml.safe_load(
-            await _text(_tool("object_get"), ctx, kind=WORKSPACE_KIND, name=str(workspace_id))
+            await _text(_tool("object_get"), ctx, ref=f"{WORKSPACE_KIND}/{workspace_id}")
         )
         assert read["spec"] == {}
         assert read["status"] == {
@@ -195,7 +196,7 @@ async def test_the_workspace_reads_as_one_object_carrying_its_seat_shape(db: Non
         assert explained["spec_schema"]["additionalProperties"] is False
 
         with pytest.raises(UnknownObject):
-            await _text(_tool("object_get"), ctx, kind=WORKSPACE_KIND, name=str(uuid4()))
+            await _text(_tool("object_get"), ctx, ref=f"{WORKSPACE_KIND}/{uuid4()}")
 
 
 async def test_the_workspace_kind_filters_and_orders_on_its_declared_fields(db: None) -> None:
@@ -273,7 +274,7 @@ async def _member_id(workspace_id: UUID, email: str) -> UUID:
 
 async def _status(ctx: ToolContext, workspace_id: UUID) -> dict[str, object]:
     read = yaml.safe_load(
-        await _text(_tool("object_get"), ctx, kind=WORKSPACE_KIND, name=str(workspace_id))
+        await _text(_tool("object_get"), ctx, ref=f"{WORKSPACE_KIND}/{workspace_id}")
     )
     return read["status"]
 
@@ -353,4 +354,4 @@ async def test_an_externally_shared_channel_hears_no_seat_shape(db: None) -> Non
         listed = json.loads(await _text(_tool("object_list"), foreign, kind=WORKSPACE_KIND))
         assert listed["objects"] == []
         with pytest.raises(UnknownObject):
-            await _text(_tool("object_get"), foreign, kind=WORKSPACE_KIND, name=str(workspace_id))
+            await _text(_tool("object_get"), foreign, ref=f"{WORKSPACE_KIND}/{workspace_id}")

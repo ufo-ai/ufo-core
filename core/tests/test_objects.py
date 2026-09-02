@@ -23,7 +23,7 @@ import sqlalchemy as sa
 import ufo_ext_sample as sample
 import yaml
 from cryptography.fernet import Fernet
-from pydantic import BaseModel, ConfigDict, SecretStr
+from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_connectors.objects import CONNECTION_OBJECT, CONNECTOR_GRANT_OBJECT
 from ufo_ext_memory.objects import MEMORY_OBJECT
@@ -80,6 +80,7 @@ from ufo.runtime.object_name import (
     OBJECT_NAME_MAX_LENGTH,
     OBJECT_NAME_PATTERN,
     InvalidName,
+    validate_object_name,
 )
 from ufo.runtime.object_scope import ObjectActionTarget
 from ufo.runtime.objects import (
@@ -358,12 +359,14 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
         assert created == {"kind": sample.WIDGET_KIND, "name": "anvil", "result": "created"}
 
         listing = json.loads(await _text(tools, "object_list", ctx, kind=sample.WIDGET_KIND))
+        assert listing["objects"][0]["ref"] == f"{sample.WIDGET_KIND}/anvil"
         assert [row["name"] for row in listing["objects"]] == ["anvil"]
         assert "next_cursor" not in listing
 
         fetched = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=sample.WIDGET_KIND, name="anvil")
+            await _text(tools, "object_get", ctx, ref=listing["objects"][0]["ref"])
         )
+        assert fetched["ref"] == f"{sample.WIDGET_KIND}/anvil"
         assert fetched["spec"] == {"color": "teal", "size": 1}
         assert fetched["status"] is None
         assert fetched["links"] == []
@@ -376,7 +379,7 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
         assert updated["result"] == "updated"
 
         refetched = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=sample.WIDGET_KIND, name="anvil")
+            await _text(tools, "object_get", ctx, ref=f"{sample.WIDGET_KIND}/anvil")
         )
         assert datetime.fromisoformat(refetched["created_at"]) == created_at
         assert datetime.fromisoformat(refetched["updated_at"]) >= created_at
@@ -396,12 +399,7 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
         with pytest.raises(UnknownObject):
             await get_tool.handler(
                 ctx,
-                get_tool.input_model.model_validate(
-                    {
-                        "kind": sample.WIDGET_KIND,
-                        "name": "anvil",
-                    }
-                ),
+                get_tool.input_model.model_validate({"ref": f"{sample.WIDGET_KIND}/anvil"}),
             )
 
 
@@ -411,7 +409,12 @@ async def test_relic_reads_and_refuses_every_mutation(db: None) -> None:
     with ws(workspace_id):
         ctx = _tool_context(workspace_id)
         fetched = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=sample.RELIC_KIND, name=sample.RELIC_NAME)
+            await _text(
+                tools,
+                "object_get",
+                ctx,
+                ref=f"{sample.RELIC_KIND}/{sample.RELIC_NAME}",
+            )
         )
         assert fetched["status"] == {"origin": "excavated"}
         assert fetched["created_at"] is None
@@ -812,8 +815,7 @@ async def test_cross_agent_apply_requires_the_actual_declared_verb(
                 tools,
                 "object_get",
                 ctx,
-                kind=sample.WIDGET_KIND,
-                name="anvil",
+                ref=f"{sample.WIDGET_KIND}/anvil",
                 agent="research",
             )
         )
@@ -973,7 +975,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
         )
 
         fetched = yaml.safe_load(
-            await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name="assistant")
+            await _text(tools, "object_get", owner_ctx, ref=f"{AGENT_KIND}/assistant")
         )
         assert fetched["spec"] == {
             "model": "claude-opus-4-8",
@@ -1033,8 +1035,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
                 tools,
                 "object_get",
                 _tool_context(workspace_id, speaker_member_id=joiner),
-                kind=AGENT_KIND,
-                name="assistant",
+                ref=f"{AGENT_KIND}/assistant",
             )
         )
         assert joiner_fetched["spec"]["internet_access_allowed"] is False
@@ -1111,7 +1112,7 @@ async def test_agent_kind_round_trips_sandbox_size(db: None) -> None:
             )
         assert stored == "large"
         fetched = yaml.safe_load(
-            await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name="assistant")
+            await _text(tools, "object_get", owner_ctx, ref=f"{AGENT_KIND}/assistant")
         )
         assert fetched["spec"]["sandbox_size"] == "large"
 
@@ -1129,13 +1130,13 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
         member_ctx = _tool_context(workspace_id, speaker_member_id=member, agent_id=main)
 
         fetched = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="research")
+            await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/research")
         )
         assert fetched["spec"]["visibility"] == "private"
         private_listing = json.loads(await _text(tools, "object_list", member_ctx, kind=AGENT_KIND))
         assert [row["name"] for row in private_listing["objects"]] == ["ufo"]
         with pytest.raises(UnknownObject):
-            await _text(tools, "object_get", member_ctx, kind=AGENT_KIND, name="research")
+            await _text(tools, "object_get", member_ctx, ref=f"{AGENT_KIND}/research")
         widen = yaml.safe_dump(
             {
                 "kind": AGENT_KIND,
@@ -1161,7 +1162,7 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
         shared_listing = json.loads(await _text(tools, "object_list", member_ctx, kind=AGENT_KIND))
         assert [row["name"] for row in shared_listing["objects"]] == ["research", "ufo"]
         shared = yaml.safe_load(
-            await _text(tools, "object_get", member_ctx, kind=AGENT_KIND, name="research")
+            await _text(tools, "object_get", member_ctx, ref=f"{AGENT_KIND}/research")
         )
         assert shared["spec"]["visibility"] == "workspace"
 
@@ -1235,18 +1236,23 @@ async def test_an_agent_reads_its_own_row_on_a_speakerless_turn(db: None) -> Non
         ctx = _tool_context(workspace_id, agent_id=own)
 
         fetched = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="research")
+            await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/research")
         )
         assert fetched["spec"]["visibility"] == "private"
-        unnamed = yaml.safe_load(await _text(tools, "object_get", ctx, kind=AGENT_KIND, name=""))
-        assert unnamed["name"] == "research"
+        unnamed = yaml.safe_load(await _text(tools, "object_get", ctx, ref=""))
+        assert unnamed["ref"] == f"{AGENT_KIND}/research"
         assert unnamed["spec"] == fetched["spec"]
         listing = json.loads(await _text(tools, "object_list", ctx, kind=AGENT_KIND))
         assert [row["name"] for row in listing["objects"]] == ["research", "ufo"]
         with pytest.raises(UnknownObject):
-            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="analyst")
-        with pytest.raises(UnknownObject):
-            await _text(tools, "object_get", ctx, kind="workspace", name="")
+            await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/analyst")
+        get_tool = tools["object_get"]
+        with pytest.raises(ValidationError):
+            get_tool.input_model.model_validate({"ref": "workspace/"})
+        with pytest.raises(ValidationError):
+            get_tool.input_model.model_validate({"kind": AGENT_KIND, "name": ""})
+        with pytest.raises(ValueError, match="cannot target another agent"):
+            await _text(tools, "object_get", ctx, ref="", agent="ufo")
 
 
 async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_named(
@@ -1316,7 +1322,7 @@ async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_nam
             )
             assert applied["result"] == "updated"
             fetched = yaml.safe_load(
-                await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="support-desk")
+                await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/support-desk")
             )
             assert fetched["spec"]["icon"] == slug
 
@@ -1340,13 +1346,9 @@ async def test_a_child_agent_is_scoped_to_the_main_agent(db: None) -> None:
         await _agent_row(workspace_id, name="research")
         ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=main)
 
-        child = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="research")
-        )
-        parent = yaml.safe_load(await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="ufo"))
-    assert child["links"] == [
-        {"relation": "scoped_to", "target": {"kind": AGENT_KIND, "name": "ufo"}}
-    ]
+        child = yaml.safe_load(await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/research"))
+        parent = yaml.safe_load(await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/ufo"))
+    assert child["links"] == [{"relation": "scoped_to", "target": f"{AGENT_KIND}/ufo"}]
     assert parent["links"] == [], "the main agent is the scope, so it links to none"
 
 
@@ -1356,6 +1358,8 @@ async def test_agent_creation_refuses_a_name_no_link_can_express(db: None) -> No
     refuses it, and never coerces it into a conforming name."""
     workspace_id = await _workspace()
     tools = _object_tools()
+    with pytest.raises(InvalidName):
+        validate_object_name(f"~archived-{uuid4()}")
     with ws(workspace_id):
         owner = await _member(workspace_id, ADMIN_CREATED_AT)
         main = await _agent_row(workspace_id, name="ufo", is_main=True)
@@ -1433,7 +1437,7 @@ async def test_agent_kind_reports_the_model_an_auto_agent_actually_runs(db: None
         ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_model="claude-opus-5")
 
         fetched = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="assistant")
+            await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/assistant")
         )
         listing = json.loads(await _text(tools, "object_list", ctx, kind=AGENT_KIND))
 
@@ -1970,7 +1974,7 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
 
         fetched = yaml.safe_load(
             await _agent_text(
-                turn.agent_id, tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name
+                turn.agent_id, tools, "object_get", ctx, ref=f"{ARTIFACT_KIND}/{name}"
             )
         )
         assert fetched["spec"] == {
@@ -1984,7 +1988,7 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         assert fetched["links"] == [
             {
                 "relation": "created_in",
-                "target": {"kind": "conversation", "name": str(turn.conversation_id)},
+                "target": f"conversation/{turn.conversation_id}",
             }
         ]
         assert status["versions"] == 1
@@ -2018,7 +2022,7 @@ async def test_share_file_lands_an_artifact_object_and_get_copies_the_latest_bac
         assert [row["name"] for row in listing["objects"]] == [name]
         refetched = yaml.safe_load(
             await _agent_text(
-                turn.agent_id, tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name
+                turn.agent_id, tools, "object_get", ctx, ref=f"{ARTIFACT_KIND}/{name}"
             )
         )
         assert refetched["status"]["versions"] == 2
@@ -2293,7 +2297,7 @@ async def test_artifact_reads_reach_every_version(db: None, tmp_path: Path) -> N
         assert {row["filename"] for row in by_surface["objects"]} == {"report.txt"}
         fetched = yaml.safe_load(
             await _agent_text(
-                turn.agent_id, tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name
+                turn.agent_id, tools, "object_get", ctx, ref=f"{ARTIFACT_KIND}/{name}"
             )
         )
         assert fetched["spec"]["filename"] == "report.txt"
@@ -2325,8 +2329,7 @@ async def test_artifact_over_the_copy_bound_reports_no_workspace_path(db: None) 
                 tools,
                 "object_get",
                 ctx,
-                kind=ARTIFACT_KIND,
-                name=f"{turn.conversation_id.hex[:8]}-huge-bin",
+                ref=f"{ARTIFACT_KIND}/{turn.conversation_id.hex[:8]}-huge-bin",
             )
         )
         assert fetched["spec"]["filename"] == "huge.bin"
@@ -2351,10 +2354,7 @@ async def test_artifact_with_missing_bytes_fails_loud_on_get(db: None, tmp_path:
                 await get_tool.handler(
                     ctx,
                     get_tool.input_model.model_validate(
-                        {
-                            "kind": ARTIFACT_KIND,
-                            "name": f"{turn.conversation_id.hex[:8]}-gone-txt",
-                        }
+                        {"ref": f"{ARTIFACT_KIND}/{turn.conversation_id.hex[:8]}-gone-txt"}
                     ),
                 )
 
@@ -2678,8 +2678,7 @@ async def test_conversation_get_materializes_the_durable_transcript(
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(past.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{past.conversation_id}",
             )
         )
 
@@ -2727,10 +2726,7 @@ async def test_conversation_transcript_keeps_member_and_agent_gates(
                     await get_tool.handler(
                         hidden,
                         get_tool.input_model.model_validate(
-                            {
-                                "kind": CONVERSATION_KIND,
-                                "name": str(private.conversation_id),
-                            }
+                            {"ref": f"{CONVERSATION_KIND}/{private.conversation_id}"}
                         ),
                     )
         assert not (workspace_dir / "transcripts").exists()
@@ -2740,8 +2736,7 @@ async def test_conversation_transcript_keeps_member_and_agent_gates(
                 tools,
                 "object_get",
                 correct_ctx,
-                kind=CONVERSATION_KIND,
-                name=str(private.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{private.conversation_id}",
             )
         )
 
@@ -2876,8 +2871,7 @@ async def test_main_targets_child_conversations_and_artifacts_with_the_requester
                     tools,
                     "object_get",
                     alice_ctx,
-                    kind=CONVERSATION_KIND,
-                    name=str(alice_private.conversation_id),
+                    ref=f"{CONVERSATION_KIND}/{alice_private.conversation_id}",
                     agent="research",
                 )
             )
@@ -2895,9 +2889,18 @@ async def test_main_targets_child_conversations_and_artifacts_with_the_requester
                     tools,
                     "object_get",
                     alice_ctx,
-                    kind=ARTIFACT_KIND,
-                    name=alice_artifact,
+                    ref=f"{ARTIFACT_KIND}/{alice_artifact}",
                     agent="research",
+                )
+            )
+            artifact_link = artifact["links"][0]
+            linked_conversation = yaml.safe_load(
+                await _text(
+                    tools,
+                    "object_get",
+                    alice_ctx,
+                    ref=artifact_link["target"],
+                    agent=artifact_link["agent"],
                 )
             )
             bob_conversations = json.loads(
@@ -2923,8 +2926,7 @@ async def test_main_targets_child_conversations_and_artifacts_with_the_requester
                     tools,
                     "object_get",
                     bob_ctx,
-                    kind=ARTIFACT_KIND,
-                    name=alice_artifact,
+                    ref=f"{ARTIFACT_KIND}/{alice_artifact}",
                     agent="research",
                 )
             with pytest.raises(ValueError, match="rejects an agent target"):
@@ -2956,8 +2958,7 @@ async def test_main_targets_child_conversations_and_artifacts_with_the_requester
                     tools,
                     "object_get",
                     alice_ctx,
-                    kind=ARTIFACT_KIND,
-                    name=alice_artifact,
+                    ref=f"{ARTIFACT_KIND}/{alice_artifact}",
                     agent="research",
                 )
 
@@ -2978,13 +2979,12 @@ async def test_main_targets_child_conversations_and_artifacts_with_the_requester
     assert artifact["links"] == [
         {
             "relation": "created_in",
-            "target": {
-                "kind": "conversation",
-                "name": str(alice_private.conversation_id),
-                "agent": "research",
-            },
+            "target": f"conversation/{alice_private.conversation_id}",
+            "agent": "research",
         }
     ]
+    assert linked_conversation["ref"] == f"conversation/{alice_private.conversation_id}"
+    assert linked_conversation["agent"] == "research"
     artifact_path = workspace_dir / "artifacts" / alice_artifact / "alice.txt"
     assert artifact_path.read_bytes() == b"private research"
     assert deleted_artifact == {
@@ -3095,8 +3095,7 @@ async def test_message_requester_reads_their_private_conversation_from_a_shared_
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(private.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{private.conversation_id}",
             )
         )
 
@@ -3128,8 +3127,7 @@ async def test_private_turn_can_open_a_shared_conversation_transcript(
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(shared.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{shared.conversation_id}",
             )
         )
 
@@ -3173,8 +3171,7 @@ async def test_room_conversations_open_shared_and_same_room_transcripts(
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(shared.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{shared.conversation_id}",
             )
         )
         same_get = yaml.safe_load(
@@ -3183,8 +3180,7 @@ async def test_room_conversations_open_shared_and_same_room_transcripts(
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(same.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{same.conversation_id}",
             )
         )
 
@@ -3240,8 +3236,7 @@ async def test_explicit_room_request_opens_room_and_requester_private_conversati
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(room_turn.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{room_turn.conversation_id}",
             )
         )
         mine_get = yaml.safe_load(
@@ -3250,8 +3245,7 @@ async def test_explicit_room_request_opens_room_and_requester_private_conversati
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(mine.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{mine.conversation_id}",
             )
         )
         theirs_get = yaml.safe_load(
@@ -3260,8 +3254,7 @@ async def test_explicit_room_request_opens_room_and_requester_private_conversati
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(theirs.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{theirs.conversation_id}",
             )
         )
 
@@ -3315,8 +3308,7 @@ async def test_conversation_surface_label_lists_filters_and_orders(
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(general.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{general.conversation_id}",
             )
         )
         bare = yaml.safe_load(
@@ -3325,8 +3317,7 @@ async def test_conversation_surface_label_lists_filters_and_orders(
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(unlabelled.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{unlabelled.conversation_id}",
             )
         )
 
@@ -3370,8 +3361,7 @@ async def test_foreign_channel_label_never_reaches_the_workspace(db: None, tmp_p
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(sealed.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{sealed.conversation_id}",
             )
 
     assert [row["name"] for row in listing["objects"]] == [str(shared.conversation_id)]
@@ -3454,8 +3444,7 @@ async def test_conversation_transcript_uses_the_canonical_id_path(db: None, tmp_
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=past.conversation_id.hex,
+                ref=f"{CONVERSATION_KIND}/{past.conversation_id.hex}",
             )
         )
 
@@ -3481,8 +3470,7 @@ async def test_conversation_without_a_transcript_is_empty_and_corruption_fails_l
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(empty.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{empty.conversation_id}",
             )
         )
         assert fetched["status"] == {"messages": 0, "size_bytes": 0, "workspace_path": None}
@@ -3495,8 +3483,7 @@ async def test_conversation_without_a_transcript_is_empty_and_corruption_fails_l
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(broken.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{broken.conversation_id}",
             )
 
 
@@ -3518,8 +3505,7 @@ async def test_oversize_conversation_reports_size_without_writing(
                 tools,
                 "object_get",
                 ctx,
-                kind=CONVERSATION_KIND,
-                name=str(past.conversation_id),
+                ref=f"{CONVERSATION_KIND}/{past.conversation_id}",
             )
         )
 
@@ -3549,12 +3535,7 @@ async def test_artifact_reads_and_mutation_resolution_stay_inside_the_agent(db: 
             with pytest.raises(UnknownObject):
                 await get_tool.handler(
                     ctx,
-                    get_tool.input_model.model_validate(
-                        {
-                            "kind": ARTIFACT_KIND,
-                            "name": other_name,
-                        }
-                    ),
+                    get_tool.input_model.model_validate({"ref": f"{ARTIFACT_KIND}/{other_name}"}),
                 )
 
             delete_tool = tools["object_delete"]
@@ -4165,8 +4146,7 @@ async def test_a_speaking_admin_reads_another_members_private_conversation_as_me
                     tools,
                     "object_get",
                     ctx,
-                    kind=CONVERSATION_KIND,
-                    name=str(private.conversation_id),
+                    ref=f"{CONVERSATION_KIND}/{private.conversation_id}",
                 )
             )
             listed = json.loads(
@@ -4226,9 +4206,7 @@ async def test_private_conversation_metadata_stays_closed_without_a_speaking_adm
                 with pytest.raises(UnknownObject):
                     await get_tool.handler(
                         refused,
-                        get_tool.input_model.model_validate(
-                            {"kind": CONVERSATION_KIND, "name": name}
-                        ),
+                        get_tool.input_model.model_validate({"ref": f"{CONVERSATION_KIND}/{name}"}),
                     )
                 listed = json.loads(
                     await _text(
@@ -4257,13 +4235,13 @@ async def test_private_conversation_metadata_stays_closed_without_a_speaking_adm
                 await get_tool.handler(
                     admin_ctx,
                     get_tool.input_model.model_validate(
-                        {"kind": CONVERSATION_KIND, "name": str(room.conversation_id)}
+                        {"ref": f"{CONVERSATION_KIND}/{room.conversation_id}"}
                     ),
                 )
         with agent(elsewhere.agent_id), pytest.raises(UnknownObject):
             await get_tool.handler(
                 admin_ctx,
-                get_tool.input_model.model_validate({"kind": CONVERSATION_KIND, "name": name}),
+                get_tool.input_model.model_validate({"ref": f"{CONVERSATION_KIND}/{name}"}),
             )
 
 
@@ -4304,13 +4282,14 @@ async def test_delete_archives_an_app_frees_its_name_and_restore_returns_the_sam
         assert deleted["spec"]["prompt"] == "be brief"
 
         with pytest.raises(UnknownObject):
-            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="invoice-intake")
+            await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/invoice-intake")
         live = json.loads(await _text(tools, "object_list", ctx, kind=AGENT_KIND))
         assert [row["name"] for row in live["objects"]] == ["ufo"]
         listed = json.loads(
             await _text(tools, "object_list", ctx, kind=AGENT_KIND, filters={"archived": True})
         )
         assert [row["name"] for row in listed["objects"]] == [f"~archived-{archived_id}"]
+        assert listed["objects"][0]["ref"] == f"{AGENT_KIND}/~archived-{archived_id}"
         assert listed["objects"][0]["archived_name"] == "invoice-intake"
         assert listed["objects"][0]["id"] == str(archived_id)
         assert listed["objects"][0]["archived_at"] is not None
@@ -4355,7 +4334,7 @@ async def test_delete_archives_an_app_frees_its_name_and_restore_returns_the_sam
         assert isinstance(answer.content[0], TextContent)
         assert "invoice-intake-first is live again." in answer.content[0].text
         back = yaml.safe_load(
-            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="invoice-intake-first")
+            await _text(tools, "object_get", ctx, ref=f"{AGENT_KIND}/invoice-intake-first")
         )
         assert back["spec"]["prompt"] == "be brief"
         async with workspace_tx() as connection:
@@ -4494,22 +4473,27 @@ async def test_an_archived_app_is_gettable_by_its_durable_name(db: None) -> None
         durable = f"~archived-{archived_id}"
 
         fetched = yaml.safe_load(
-            await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name=durable)
+            await _text(tools, "object_get", owner_ctx, ref=f"{AGENT_KIND}/{durable}")
         )
         assert fetched["spec"]["prompt"] == "be brief"
         assert fetched["status"]["archived"] is True
         assert fetched["status"]["archived_name"] == "invoice-intake"
         assert fetched["status"]["archived_at"] is not None
 
+        current_ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=archived_id)
+        current = yaml.safe_load(await _text(tools, "object_get", current_ctx, ref=""))
+        assert current["ref"] == f"{AGENT_KIND}/{durable}"
+        assert current["spec"] == fetched["spec"]
+
         widened = yaml.safe_load(
-            await _text(tools, "object_get", admin_ctx, kind=AGENT_KIND, name=durable)
+            await _text(tools, "object_get", admin_ctx, ref=f"{AGENT_KIND}/{durable}")
         )
         assert widened["status"]["archived"] is True
 
         with pytest.raises(UnknownObject):
-            await _text(tools, "object_get", stranger_ctx, kind=AGENT_KIND, name=durable)
+            await _text(tools, "object_get", stranger_ctx, ref=f"{AGENT_KIND}/{durable}")
         with pytest.raises(UnknownObject):
-            await _text(tools, "object_get", owner_ctx, kind=AGENT_KIND, name="invoice-intake")
+            await _text(tools, "object_get", owner_ctx, ref=f"{AGENT_KIND}/invoice-intake")
         with pytest.raises(VerbNotSupported) as refusal:
             await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name=durable)
         assert str(refusal.value) == AGENT_ALREADY_ARCHIVED

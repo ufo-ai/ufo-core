@@ -31,6 +31,7 @@ from pydantic import (
     SecretBytes,
     SecretStr,
     ValidationError,
+    field_validator,
     model_validator,
 )
 from pydantic.errors import PydanticInvalidForJsonSchema
@@ -119,10 +120,6 @@ class ObjectDetail[SpecT: BaseModel]:
     links: tuple[ObjectLink, ...] = ()
     spec_visible: bool = True
     generation: UUID | None = None
-    name: str | None = None
-    """The object's own name when the read resolved an alias for it — the agent kind's empty name
-    for the turn's own agent — so the envelope and the pre-bound action templates carry the name
-    the object really answers to; None when the caller's name was already that name."""
 
 
 class UnknownKind(ValueError):
@@ -904,9 +901,22 @@ class ObjectListInput(BaseModel):
 
 
 class ObjectGetInput(BaseModel):
-    kind: str
-    name: str
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str = Field(
+        description=(
+            "Canonical <kind>/<name> object ref. Empty reads this turn's agent and returns its "
+            "concrete ref."
+        )
+    )
     agent: str = Field(default="", description=AGENT_TARGET_DESCRIPTION)
+
+    @field_validator("ref")
+    @classmethod
+    def validate_ref(cls, value: str) -> str:
+        if value:
+            ObjectRef.parse(value)
+        return value
 
 
 class ObjectExplainInput(BaseModel):
@@ -992,9 +1002,10 @@ class ObjectVerbs:
                     "its description. With a kind, lists that kind's instances one line each — "
                     "`query` searches names, summaries, and string fields; `filters` exactly "
                     "matches first-class fields, and `order_by` with `order` sorts by a field. A "
-                    "returned `next_cursor` passed back as `cursor` fetches the next page. Use "
-                    "object_get for one instance's full spec. An agent-targetable kind accepts a "
-                    "stable `agent` name from the main agent for the exact requesting member."
+                    "returned `next_cursor` passed back as `cursor` fetches the next page. Pass "
+                    "each row's `ref` unchanged to object_get for its full spec. An "
+                    "agent-targetable kind accepts a stable `agent` name from the main agent for "
+                    "the exact requesting member."
                 ),
                 input_model=ObjectListInput,
                 handler=self._list,
@@ -1003,12 +1014,14 @@ class ObjectVerbs:
             ToolDef(
                 name="object_get",
                 description=(
-                    "Read one workspace object by kind and name: its applied spec, the kind's "
+                    "Read one workspace object by its canonical kind/name ref: its applied spec, "
+                    "the kind's "
                     "live status (next fire time, last sync, fill state), its typed links to "
-                    "related objects (each an object_get-able kind/name), and the row's "
+                    "related objects (each carrying a canonical target ref), and the row's "
                     "created_at/updated_at — recency is the first arbitration signal when "
                     "retrieved facts conflict. An agent-targetable kind accepts a stable `agent` "
-                    "name from the main agent for the exact requesting member."
+                    "name from the main agent for the exact requesting member. Empty `ref` reads "
+                    "this turn's agent and returns its concrete ref."
                 ),
                 input_model=ObjectGetInput,
                 handler=self._get,
@@ -1095,7 +1108,13 @@ class ObjectVerbs:
             )
         listing: dict[str, JsonValue] = {
             "objects": [
-                {"name": row.name, "summary": row.summary, **row.fields} for row in page.rows
+                {
+                    "ref": str(ObjectRef(kind=args.kind, name=row.name)),
+                    "name": row.name,
+                    "summary": row.summary,
+                    **row.fields,
+                }
+                for row in page.rows
             ]
         }
         actions = self._action_views(ctx, args.kind, "collection")
@@ -1115,45 +1134,62 @@ class ObjectVerbs:
         return _json_result(listing)
 
     async def _get(self, ctx: ToolContext, args: ObjectGetInput) -> ToolResult:
-        bound = self._resolve(args.kind)
+        if args.ref:
+            ref = ObjectRef.parse(args.ref)
+        else:
+            if args.agent:
+                raise ValueError("empty ref cannot target another agent")
+            async with workspace_tx() as connection:
+                current_name = (
+                    await connection.execute(
+                        sa.select(tables.agent.c.name).where(
+                            tables.agent.c.workspace_id == ctx.turn.workspace_id,
+                            tables.agent.c.id == ctx.turn.agent_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+            if current_name is None:
+                raise UnknownObject("this turn's agent does not exist")
+            ref = ObjectRef(kind="agent", name=current_name)
+        bound = self._resolve(ref.kind)
         bound_ctx = self._bound_ctx(ctx, bound)
         target = await self._target(ctx, bound, args.agent, frozenset({"get"}))
         with object_agent(target):
-            detail = await bound.kind.store.get(bound_ctx, args.name)
+            detail = await bound.kind.store.get(bound_ctx, ref.name)
             if detail is None:
-                raise UnknownObject(f"no {args.kind} object named {args.name!r}")
-            name = detail.name or args.name
+                raise UnknownObject(f"no {ref.kind} object named {ref.name!r}")
             status = await bound.kind.store.status(
                 bound_ctx,
-                name,
+                ref.name,
                 expected_generation=detail.generation,
             )
+        links: list[dict[str, str]] = []
+        for link in detail.links:
+            link_agent = link.target.agent
+            if (
+                target is not None
+                and (linked := self.registry.get(link.target.kind)) is not None
+                and "get" in linked.kind.agent_target_verbs
+                and link_agent is None
+            ):
+                link_agent = target.name
+            rendered_link = {"relation": link.relation, "target": str(link.target)}
+            if link_agent is not None:
+                rendered_link["agent"] = link_agent
+            links.append(rendered_link)
         rendered: dict[str, object] = {
-            "kind": args.kind,
-            "name": name,
+            "ref": str(ref),
             "spec": detail.spec.model_dump(mode="json") if detail.spec_visible else None,
             "status": status,
             "actions": self._action_views(
                 ctx,
-                args.kind,
+                ref.kind,
                 "instance",
-                name=name,
+                name=ref.name,
                 agent=None if target is None else target.name,
                 generation=detail.generation,
             ),
-            "links": [
-                link.model_copy(
-                    update={
-                        "target": link.target.model_copy(update={"agent": target.name}),
-                    }
-                ).model_dump(mode="json", exclude_none=True)
-                if target is not None
-                and (linked := self.registry.get(link.target.kind)) is not None
-                and "get" in linked.kind.agent_target_verbs
-                and link.target.agent is None
-                else link.model_dump(mode="json", exclude_none=True)
-                for link in detail.links
-            ],
+            "links": links,
             "created_at": None if detail.created_at is None else detail.created_at.isoformat(),
             "updated_at": None if detail.updated_at is None else detail.updated_at.isoformat(),
         }

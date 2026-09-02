@@ -8,10 +8,13 @@ the verbs that read it."""
 
 import re
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 KIND_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 OBJECT_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+RESERVED_OBJECT_NAME_PATTERN = re.compile(
+    r"~archived-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
 OBJECT_NAME_MAX_LENGTH = 64
 
 
@@ -51,12 +54,29 @@ class ObjectRef(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str) -> str:
-        if len(value) > OBJECT_NAME_MAX_LENGTH or not OBJECT_NAME_PATTERN.fullmatch(value):
+        if len(value) > OBJECT_NAME_MAX_LENGTH or not (
+            OBJECT_NAME_PATTERN.fullmatch(value) or RESERVED_OBJECT_NAME_PATTERN.fullmatch(value)
+        ):
             raise ValueError(
-                f"object ref name {value!r} must match {OBJECT_NAME_PATTERN.pattern} "
+                f"object ref name {value!r} must match {OBJECT_NAME_PATTERN.pattern} or the "
+                f"reserved {RESERVED_OBJECT_NAME_PATTERN.pattern} form "
                 f"(at most {OBJECT_NAME_MAX_LENGTH} chars)"
             )
         return value
 
+    @model_validator(mode="after")
+    def validate_reserved_name_kind(self) -> "ObjectRef":
+        if self.kind != "agent" and RESERVED_OBJECT_NAME_PATTERN.fullmatch(self.name):
+            raise ValueError("reserved archived object ref names require kind 'agent'")
+        return self
+
     def __str__(self) -> str:
         return f"{self.kind}/{self.name}"
+
+    @classmethod
+    def parse(cls, value: str) -> "ObjectRef":
+        """Parse the canonical `<kind>/<name>` wire spelling."""
+        parts = value.split("/")
+        if len(parts) != 2:
+            raise ValueError("object ref must be exactly <kind>/<name>")
+        return cls(kind=parts[0], name=parts[1])

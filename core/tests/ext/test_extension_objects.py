@@ -122,6 +122,7 @@ async def test_an_active_extension_lists_and_reads_everything_it_declares(db: No
         listed = json.loads(await _text(tools["object_list"], ctx, kind=EXTENSION_KIND))["objects"]
         assert listed == [
             {
+                "ref": f"{EXTENSION_KIND}/{sample.NAME}",
                 "name": sample.NAME,
                 "summary": f"{sample.NAME} {manifest.version}, 10 tools, 1 credential slots",
                 "version": manifest.version,
@@ -131,7 +132,7 @@ async def test_an_active_extension_lists_and_reads_everything_it_declares(db: No
         ]
 
         read = yaml.safe_load(
-            await _text(tools["object_get"], ctx, kind=EXTENSION_KIND, name=sample.NAME)
+            await _text(tools["object_get"], ctx, ref=f"{EXTENSION_KIND}/{sample.NAME}")
         )
         assert read["spec"] == {
             "extension": sample.NAME,
@@ -239,10 +240,10 @@ async def test_status_carries_what_the_manifest_asks_of_the_deploy(db: None) -> 
     with ws(workspace_id):
         ctx = _context(workspace_id)
         asked = yaml.safe_load(
-            await _text(tools["object_get"], ctx, kind=EXTENSION_KIND, name="probe-asking")
+            await _text(tools["object_get"], ctx, ref=f"{EXTENSION_KIND}/probe-asking")
         )
         unasked = yaml.safe_load(
-            await _text(tools["object_get"], ctx, kind=EXTENSION_KIND, name="probe-quiet")
+            await _text(tools["object_get"], ctx, ref=f"{EXTENSION_KIND}/probe-quiet")
         )
 
     assert asked["status"] == {
@@ -261,7 +262,7 @@ async def test_an_absent_extension_name_is_no_object_at_all(db: None) -> None:
     with ws(workspace_id):
         ctx = _context(workspace_id)
         with pytest.raises(UnknownObject):
-            await _text(tools["object_get"], ctx, kind=EXTENSION_KIND, name="probe-absent")
+            await _text(tools["object_get"], ctx, ref=f"{EXTENSION_KIND}/probe-absent")
         assert await store.get(ctx, "probe-absent") is None
         assert await store.status(ctx, "probe-absent", expected_generation=None) is None
 

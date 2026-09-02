@@ -199,12 +199,10 @@ async def test_member_get_reports_role_and_seat_and_delete_is_refused(db: None) 
             await _text(
                 _tool("object_get"),
                 admin,
-                kind=MEMBER_KIND,
-                name=str(member_id),
+                ref=f"{MEMBER_KIND}/{member_id}",
             )
         )
-        assert fetched["kind"] == MEMBER_KIND
-        assert fetched["name"] == str(member_id)
+        assert fetched["ref"] == f"{MEMBER_KIND}/{member_id}"
         assert fetched["spec"] == {"admin": False, "seated": True}
         assert fetched["status"] == {
             "email": "member@example.com",
@@ -493,8 +491,7 @@ async def test_every_member_lists_the_roster_from_the_main_agent(db: None) -> No
             await _text(
                 _tool("object_get"),
                 _context(workspace_id, main_agent, member_id),
-                kind=MEMBER_KIND,
-                name=str(admin_id),
+                ref=f"{MEMBER_KIND}/{admin_id}",
             )
         )
         assert opened["spec"] == {"admin": True, "seated": True}
@@ -530,8 +527,7 @@ async def test_an_externally_shared_room_reads_only_the_speaker(db: None) -> Non
             await _text(
                 _tool("object_get"),
                 _context(workspace_id, main_agent, member_id, foreign),
-                kind=MEMBER_KIND,
-                name=str(admin_id),
+                ref=f"{MEMBER_KIND}/{admin_id}",
             )
 
 

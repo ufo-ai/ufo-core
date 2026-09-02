@@ -44,7 +44,7 @@ def _dispatched(surface: str, action: str) -> ToolInvocation:
 
 def _read(surface: str) -> ToolInvocation:
     return ToolInvocation(
-        name="object_get", input={"kind": "surface", "name": surface}, result="", has_result=True
+        name="object_get", input={"ref": f"surface/{surface}"}, result="", has_result=True
     )
 
 
@@ -77,9 +77,9 @@ async def test_a_warm_case_seeds_the_surface_read_and_refuses_rediscovery() -> N
         assert case.prior_messages
         [seeded] = case.undelivered
         assert seeded.tool == "object_get"
-        assert seeded.input == {"kind": "surface", "name": surface}
+        assert seeded.input == {"ref": f"surface/{surface}"}
         listed = yaml.safe_load(seeded.result)
-        assert listed["name"] == surface
+        assert listed["ref"] == f"surface/{surface}"
         assert action in {view["name"] for view in listed["actions"]}
         assert all(view["call"]["name"] == surface for view in listed["actions"])
         rediscovered = _output(

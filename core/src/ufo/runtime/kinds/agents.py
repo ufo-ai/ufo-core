@@ -222,25 +222,6 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
             query = replace(query, filters={**query.filters, "archived": False})
         return await super().list(ctx, query)
 
-    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[AgentSpec] | None:
-        """The empty name reads the turn's own agent. The model is never told its agent's name, so
-        the instance actions bound to that row would otherwise cost a listing round to reach; the
-        read reports the real name and the pre-bound action templates carry it."""
-        if name:
-            return await super().get(ctx, name)
-        own = next(
-            (
-                row.name
-                for row in await self._owned_rows(ctx)
-                if row.fields["id"] == str(ctx.turn.agent_id)
-            ),
-            None,
-        )
-        if own is None:
-            return None
-        detail = await super().get(ctx, own)
-        return None if detail is None else replace(detail, name=own)
-
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
         selection = sa.select(
             tables.agent.c.id,
@@ -686,7 +667,7 @@ AGENT_OBJECT = ObjectKind(
         "already running finishes. The main agent is not archivable. List the archived apps with "
         'the filter {"archived": true}; get one by its durable name, and its '
         f"{RESTORE_APPLICATION_TOOL} action brings it back under an available name. "
-        "object_get with an empty name reads this turn's own agent, with the actions bound to it. "
+        "object_get with an empty ref reads this turn's own agent, with the actions bound to it. "
         "Confirm before changing settings, and before archiving."
     ),
     spec_model=AgentSpec,

@@ -39,8 +39,8 @@ def test_the_home_skill_edits_builds_and_deploys_the_project() -> None:
         "`site_name` `chat-home`"
     ) in skill
     assert "do not run a build yourself" in skill
-    assert "`object_get` kind `agent` with an empty name reads this turn's own agent" in skill
+    assert "`object_get` with an empty `ref` reads this turn's own agent" in skill
     assert "`set_homepage` action's call template already carries the agent's name" in skill
     assert f"`{app_chat.manifest().agents[0].name}`" not in skill
-    assert "`object_get` the site" in skill
+    assert "`ref` unchanged to `object_get`" in skill
     assert "edit the `app.tsx` under `src`" in skill

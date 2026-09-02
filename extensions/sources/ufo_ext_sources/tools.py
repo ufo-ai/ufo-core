@@ -1158,13 +1158,13 @@ def _stream_counts(changes: list[PageChange]) -> str:
 def _alert_message(binding: _Binding, changes: list[PageChange], log_path: str | None) -> str:
     if len(changes) <= ALERT_NAMED_MAX:
         detail = (
-            "Changed pages (object_get each to read what changed): "
+            "Changed pages (pass each ref unchanged to object_get): "
             f"{'; '.join(_page_reference(change) for change in changes)}."
         )
     elif log_path is not None:
         detail = (
             f"Every changed page is one JSON line in {log_path} — narrow it with bash (jq, grep) "
-            "or read it with offset/limit, then object_get the ones that matter."
+            "or read it with offset/limit, then pass the refs that matter to object_get."
         )
     else:
         detail = (
@@ -1178,8 +1178,7 @@ def _alert_message(binding: _Binding, changes: list[PageChange], log_path: str |
 
 
 def _page_reference(change: PageChange) -> str:
-    """The changed page as its `page` object reference, so the alerted agent can object_get it —
-    the synced title makes the reference legible."""
+    """The changed page as the exact `object_get` ref; the synced title makes it legible."""
     label = change.title[:ALERT_LABEL_CHARS] if change.title else "an untitled page"
     return f"{PAGE_KIND}/{change.page_id} ({label})"
 

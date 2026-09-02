@@ -141,8 +141,7 @@ def status_read_scorer() -> Grader:
             )
             or (
                 call.name == OBJECT_GET
-                and call.input.get("kind") == SURFACE_KIND
-                and call.input.get("name") == SURFACE_SLACK
+                and call.input.get("ref") == f"{SURFACE_KIND}/{SURFACE_SLACK}"
             )
             for call in output.calls
         )
@@ -161,8 +160,7 @@ def _surface_read(
     """The `object_get` envelope for an unbound surface, as the kind renders it, with the
     extension's actions listed — what a warm case's prior round already saw."""
     envelope: dict[str, object] = {
-        "kind": SURFACE_KIND,
-        "name": surface,
+        "ref": f"{SURFACE_KIND}/{surface}",
         "spec": {
             "surface": surface,
             "extension": extension,
@@ -202,7 +200,7 @@ def _warm(
             UndeliveredRound(
                 narration=f"Let me look at how the {surface} surface is set up here.",
                 tool=OBJECT_GET,
-                input={"kind": SURFACE_KIND, "name": surface},
+                input={"ref": f"{SURFACE_KIND}/{surface}"},
                 result=read,
             ),
         ),

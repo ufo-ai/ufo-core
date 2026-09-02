@@ -31,7 +31,7 @@ replaces a built-in skill.
    most 50 words, beginning `Load when`; name member intent, not the workflow. To narrow the skill
    to specific agents, add `metadata:` with `agents: [<agent name>, ...]` — only those agents'
    turns list and load it; omit it for every agent. "For this agent", "this app", and "current
-   agent" are explicit scope: read the current name with `object_get(kind="agent", name="")` and
+   agent" are explicit scope: read the current name from `object_get(ref="")` and
    put that one name in `metadata.agents`.
 4. Keep the body to procedure, judgment, and traps the agent would otherwise miss. Put repeated
    deterministic logic in `scripts/`, heavy conditional material in `references/`, and reusable

@@ -862,8 +862,7 @@ async def _graded_inspect(outcome: ScenarioOutcome) -> CapabilityVerdict:
         for call in outcome.output.calls
         if call.name == "object_get"
         and call.succeeded
-        and call.input.get("kind") == KIND
-        and call.input.get("name") == DIGEST_NAME
+        and call.input.get("ref") == f"{KIND}/{DIGEST_NAME}"
     ]
     if not gets:
         return CapabilityVerdict(False, f"no successful object_get on {DIGEST_NAME!r}")

@@ -1412,9 +1412,9 @@ def source_alert(filing: Filing) -> str:
     )
     return (
         f"The source '{ALERT_SOURCE_NAME}' (github ({ALERT_CONNECTION_ID}): {page.stream}) you "
-        f"watch changed — {page.stream}: 1 updated. Changed pages (object_get each to read what "
-        f"changed): page/{page_uuid} ({page.title}). Then tell the member what is new and why it "
-        "matters."
+        f"watch changed — {page.stream}: 1 updated. Changed pages (pass each ref unchanged to "
+        f"object_get): page/{page_uuid} ({page.title}). Then tell the member what is new and why "
+        "it matters."
     )
 
 

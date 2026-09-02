@@ -1147,7 +1147,7 @@ async def _grade_preemption(output: CapabilityOutput) -> CapabilityVerdict:
 
 def _source_change(page_id: UUID) -> str:
     return (
-        "pull_requests: 1 updated. Changed pages (object_get each to read what changed): "
+        "pull_requests: 1 updated. Changed pages (pass each ref unchanged to object_get): "
         f"page/{page_id}"
     )
 

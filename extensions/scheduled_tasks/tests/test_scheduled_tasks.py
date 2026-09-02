@@ -501,7 +501,9 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
         tasks = await _store().list()
         fetched = yaml.safe_load(
             await _dispatch(
-                _object_tool("object_get"), ctx, kind=SCHEDULED_TASK_KIND, name="investor-replies"
+                _object_tool("object_get"),
+                ctx,
+                ref=f"{SCHEDULED_TASK_KIND}/investor-replies",
             )
         )
     assert len(tasks) == 1
@@ -525,7 +527,9 @@ async def test_applied_task_writes_durable_row_bound_to_the_turn(db: None) -> No
     with ws(workspace_id), agent(agent_id):
         refetched = yaml.safe_load(
             await _dispatch(
-                _object_tool("object_get"), ctx, kind=SCHEDULED_TASK_KIND, name="investor-replies"
+                _object_tool("object_get"),
+                ctx,
+                ref=f"{SCHEDULED_TASK_KIND}/investor-replies",
             )
         )
     assert refetched["status"]["last_run_at"] == fired_at.isoformat()
@@ -568,9 +572,7 @@ async def test_paused_task_neither_fires_nor_reopens_its_workspace(db: None) -> 
         assert task.paused is True
         assert task.prompt == "assemble the digest"
         fetched = yaml.safe_load(
-            await _dispatch(
-                _object_tool("object_get"), ctx, kind=SCHEDULED_TASK_KIND, name="digest"
-            )
+            await _dispatch(_object_tool("object_get"), ctx, ref=f"{SCHEDULED_TASK_KIND}/digest")
         )
         assert fetched["spec"]["paused"] is True
         assert fetched["status"]["paused"] is True
@@ -668,8 +670,7 @@ async def test_re_applying_a_manifest_keeps_the_recorded_run(db: None) -> None:
             await _dispatch(
                 _object_tool("object_get"),
                 ctx,
-                kind=SCHEDULED_TASK_KIND,
-                name="competitive-intel-daily",
+                ref=f"{SCHEDULED_TASK_KIND}/competitive-intel-daily",
             )
         )
         edited = (await store.list())[0]
@@ -1276,12 +1277,7 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
         with pytest.raises(UnknownObject):
             await get.handler(
                 stranger_ctx,
-                get.input_model.model_validate(
-                    {
-                        "kind": SCHEDULED_TASK_KIND,
-                        "name": "digest",
-                    }
-                ),
+                get.input_model.model_validate({"ref": f"{SCHEDULED_TASK_KIND}/digest"}),
             )
         with pytest.raises(UnknownObject):
             await apply.handler(
@@ -1901,8 +1897,7 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
             await _dispatch(
                 get,
                 admin_ctx,
-                kind=SCHEDULED_TASK_KIND,
-                name="digest",
+                ref=f"{SCHEDULED_TASK_KIND}/digest",
             )
         )
         with pytest.raises(AdminRequired, match="creator"):
@@ -2061,14 +2056,18 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                 await _dispatch(
                     get,
                     main_ctx,
-                    kind=SCHEDULED_TASK_KIND,
-                    name="digest",
+                    ref=f"{SCHEDULED_TASK_KIND}/digest",
                     agent=child_name,
                 )
             )
             reports_to = next(link for link in fetched["links"] if link["relation"] == "reports_to")
             linked_conversation = yaml.safe_load(
-                await _dispatch(get, main_ctx, **reports_to["target"])
+                await _dispatch(
+                    get,
+                    main_ctx,
+                    ref=reports_to["target"],
+                    agent=reports_to.get("agent", ""),
+                )
             )
             bob_listing = json.loads(
                 await _dispatch(
@@ -2082,8 +2081,7 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                 await _dispatch(
                     get,
                     bob_ctx,
-                    kind=SCHEDULED_TASK_KIND,
-                    name="digest",
+                    ref=f"{SCHEDULED_TASK_KIND}/digest",
                     agent=child_name,
                 )
             with pytest.raises(UnknownObject):
@@ -2106,8 +2104,7 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                 await _dispatch(
                     get,
                     admin_ctx,
-                    kind=SCHEDULED_TASK_KIND,
-                    name="digest",
+                    ref=f"{SCHEDULED_TASK_KIND}/digest",
                     agent=child_name,
                 )
             )
@@ -2164,15 +2161,12 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
     assert fetched["links"] == [
         {
             "relation": "reports_to",
-            "target": {
-                "kind": "conversation",
-                "name": str(child_conversation),
-                "agent": child_name,
-            },
+            "target": f"conversation/{child_conversation}",
+            "agent": child_name,
         },
     ]
     assert linked_conversation["agent"] == child_name
-    assert linked_conversation["name"] == str(child_conversation)
+    assert linked_conversation["ref"] == f"conversation/{child_conversation}"
     assert updated == {
         "kind": SCHEDULED_TASK_KIND,
         "name": "digest",

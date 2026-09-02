@@ -282,7 +282,7 @@ async def _get(ctx: ToolContext, name: str) -> dict[str, object]:
     tool = _TOOLS["object_get"]
     result = await tool.handler(
         ctx,
-        tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
+        tool.input_model.model_validate({"ref": f"{SOURCE_KIND}/{name}"}),
     )
     assert result.is_error is False
     return yaml.safe_load(result.content[0].text)
@@ -500,7 +500,7 @@ async def test_owner_applies_a_binding_and_reads_it_back(db: None) -> None:
             (
                 await get_tool.handler(
                     ctx,
-                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
+                    get_tool.input_model.model_validate({"ref": f"{SOURCE_KIND}/{name}"}),
                 )
             )
             .content[0]
@@ -616,7 +616,7 @@ async def test_a_member_registers_a_private_source_by_default(
             (
                 await get_tool.handler(
                     ctx,
-                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
+                    get_tool.input_model.model_validate({"ref": f"{SOURCE_KIND}/{name}"}),
                 )
             )
             .content[0]
@@ -833,7 +833,7 @@ async def test_read_verbs_hide_other_members_private_sources(
         with pytest.raises(UnknownObject):
             await get_tool.handler(
                 stranger_ctx,
-                get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": private_name}),
+                get_tool.input_model.model_validate({"ref": f"{SOURCE_KIND}/{private_name}"}),
             )
 
         for ctx in (member_ctx, owner_ctx):
@@ -853,10 +853,7 @@ async def test_read_verbs_hide_other_members_private_sources(
                     await get_tool.handler(
                         ctx,
                         get_tool.input_model.model_validate(
-                            {
-                                "kind": SOURCE_KIND,
-                                "name": private_name,
-                            }
+                            {"ref": f"{SOURCE_KIND}/{private_name}"}
                         ),
                     )
                 )
@@ -1349,7 +1346,7 @@ async def test_resync_is_registrar_or_admin(db: None, monkeypatch: pytest.Monkey
                 await _TOOLS["object_get"].handler(
                     owner_ctx,
                     _TOOLS["object_get"].input_model.model_validate(
-                        {"kind": SOURCE_KIND, "name": name}
+                        {"ref": f"{SOURCE_KIND}/{name}"}
                     ),
                 )
             )
@@ -1474,10 +1471,7 @@ async def test_a_private_brokered_binding_links_to_the_connection_it_uses(db: No
     assert fetched["links"] == [
         {
             "relation": "access_to",
-            "target": {
-                "kind": CONNECTION_OBJECT_KIND,
-                "name": account_object_name(ASANA, "acct-one"),
-            },
+            "target": f"{CONNECTION_OBJECT_KIND}/{account_object_name(ASANA, 'acct-one')}",
         },
     ]
 
@@ -1495,7 +1489,7 @@ async def test_a_direct_binding_links_to_its_workspace_credential_slot(
     assert fetched["links"] == [
         {
             "relation": "access_to",
-            "target": {"kind": CREDENTIAL_KIND, "name": credential_object_name(GREENHOUSE)},
+            "target": f"{CREDENTIAL_KIND}/{credential_object_name(GREENHOUSE)}",
         },
     ]
     assert {credential_object_name(provider) for provider in CONNECTORS} == set(
@@ -1896,8 +1890,9 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
                     _context(state, None),
                     get_tool.input_model.model_validate(
                         {
-                            "kind": SOURCE_TRIGGER_KIND,
-                            "name": trigger_name(name, state.conversation_id),
+                            "ref": (
+                                f"{SOURCE_TRIGGER_KIND}/{trigger_name(name, state.conversation_id)}"
+                            )
                         }
                     ),
                 )
@@ -1908,9 +1903,9 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
         assert fetched["spec"] == {"source": name, "delivery": "current"}
         assert fetched["status"]["source"] == name
         assert fetched["status"]["conversation"] == str(state.conversation_id)
-        assert {(link["relation"], link["target"]["name"]) for link in fetched["links"]} == {
-            ("watches", name),
-            ("reports_to", str(state.conversation_id)),
+        assert {(link["relation"], link["target"]) for link in fetched["links"]} == {
+            ("watches", f"{SOURCE_KIND}/{name}"),
+            ("reports_to", f"conversation/{state.conversation_id}"),
         }
 
         delete_tool = _TOOLS["object_delete"]
@@ -1995,7 +1990,7 @@ async def test_get_renders_an_empty_status_for_a_binding_removed_mid_verb(
             (
                 await get_tool.handler(
                     _context(state, None),
-                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
+                    get_tool.input_model.model_validate({"ref": f"{SOURCE_KIND}/{name}"}),
                 )
             )
             .content[0]
@@ -2232,8 +2227,9 @@ async def test_per_page_delivery_keeps_one_conversation_per_page(db: None) -> No
                     _context(state, None),
                     _TOOLS["object_get"].input_model.model_validate(
                         {
-                            "kind": SOURCE_TRIGGER_KIND,
-                            "name": trigger_name(name, state.conversation_id),
+                            "ref": (
+                                f"{SOURCE_TRIGGER_KIND}/{trigger_name(name, state.conversation_id)}"
+                            )
                         }
                     ),
                 )

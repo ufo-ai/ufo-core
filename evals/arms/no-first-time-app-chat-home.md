@@ -11,8 +11,8 @@ workspace's starter prompts.
 
 To change it:
 
-1. `object_get` the site — `object_list` kind `site` with filter `homepage_agent` set to `mine`
-   names it.
+1. `object_list` kind `site` with filter `homepage_agent` set to `mine` names it; pass that
+   row's `ref` unchanged to `object_get`.
 2. Edit the `app.tsx` under `src` in the directory its status names. Import only from `ufo/kit` —
    React and its hooks, the portal's components, `SectionApp`, `mountApp`, `getJson`, `navigate`.
    Any other bare import fails the deploy with `failed to resolve import`; never install it,
@@ -21,7 +21,7 @@ To change it:
 3. The `site` collection's `deploy_website` action (`object_action` with kind `site`) with that `src` directory and `site_name` `chat-home`. It builds the page
    against the deploy's own kit and hosts what the build wrote — do not run a build yourself, and
    do not pass a `dist` directory.
-4. `object_get` kind `agent` with an empty name reads this turn's own agent; its `set_homepage` action's call template already carries the agent's name. Call it (`object_action` with kind `agent` and the name the template carries) with the site name from the deploy result, the first time only; the binding stays
+4. `object_get` with an empty `ref` reads this turn's own agent; its `set_homepage` action's call template already carries the agent's name. Call it (`object_action` with kind `agent` and the name the template carries) with the site name from the deploy result, the first time only; the binding stays
    across later redeploys of the same site.
 
 A redeploy takes the platform kit as it stands today, not the one the page was first built against.

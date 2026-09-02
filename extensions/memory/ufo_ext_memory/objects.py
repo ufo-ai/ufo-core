@@ -367,8 +367,8 @@ MEMORY_OBJECT = ObjectKind(
     ),
     guidance=(
         "Open a memory_search ref here to read the full item: its body, recall inputs, and "
-        "links — `created_from` names the synced page the item was distilled from (object_get "
-        "it for the source document), and `superseded_by` names the item that replaced it. "
+        "links — pass the `created_from` target unchanged to object_get for the synced page the "
+        "item was distilled from, and `superseded_by` names the item that replaced it. "
         "Search excludes superseded items, so reaching one through an old reference means "
         "follow `superseded_by` to the current statement before relying on it. Listing shows "
         "live items newest first (filter subject, item_class, or memory_kind, and order on "

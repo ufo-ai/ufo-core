@@ -982,7 +982,7 @@ async def test_skill_dispatch_and_the_seam_answer_one_workspace_set(db: None, tm
         listing = json.loads(await _dispatch(_object_tool("object_list"), second, kind=SKILL_KIND))
         assert [row["name"] for row in listing["objects"]] == ["greet"]
         fetched = yaml.safe_load(
-            await _dispatch(_object_tool("object_get"), second, kind=SKILL_KIND, name="greet")
+            await _dispatch(_object_tool("object_get"), second, ref=f"{SKILL_KIND}/greet")
         )
         assert fetched["status"]["description"] == "first agent"
         await _dispatch(

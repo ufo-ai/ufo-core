@@ -156,8 +156,7 @@ class ObjectListInput(BaseModel):
     cursor: str = ""  # opaque, from the previous page's next_cursor
 
 class ObjectGetInput(BaseModel):
-    kind: str
-    name: str
+    ref: str          # canonical <kind>/<name>; "" reads this turn's agent
     agent: str = ""
 
 class ObjectExplainInput(BaseModel):
@@ -176,8 +175,8 @@ class ObjectDeleteInput(BaseModel):
 | Tool | Returns |
 |---|---|
 | `object_list ""` | `[{kind, description}]` — every registered kind |
-| `object_list <kind>` | up to `OBJECT_LIST_PAGE = 50` rows `{name, summary}` + `next_cursor` |
-| `object_get` | the object as YAML: `spec:` and `status:` side by side |
+| `object_list <kind>` | up to `OBJECT_LIST_PAGE = 50` rows `{ref, name, summary}` + `next_cursor` |
+| `object_get` | the object as YAML: canonical `ref`, `spec`, and `status` side by side |
 | `object_explain` | the kind's `guidance` verbatim, its `spec_model` JSON schema (per-field `Field(description=…)` included), its description, and the name grammar — `kubectl explain` without the structural-schema projection, since there is no CRD to feed |
 | `object_apply` | `{kind, name, result: created \| updated}` |
 | `object_delete` | `{kind, name, deleted: true}` plus the final spec — for a kind that supports create, an accidental delete is re-applyable straight from the transcript; a deleted connector or credential returns only through its handoff flow |
@@ -382,7 +381,7 @@ What those rows pin on the surface now — all already in §1–§2, none deferr
 
 1. `object_list` carries `query` and `cursor` from day one. Small kinds substring-match and
    ignore the cursor; the wire shape never changes when a ten-thousand-row kind arrives.
-2. List returns `(name, summary)` rows only. `object_get` is the sole full-spec read, so a
+2. List returns `(ref, name, summary)` rows only. `object_get` is the sole full-spec read, so a
    high-cardinality kind can never flood a turn.
 3. A read-only kind is legal and costs nothing: a system-produced kind (pages, conversations)
    is one whose handlers refuse every mutation.

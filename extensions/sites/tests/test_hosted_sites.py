@@ -1559,7 +1559,7 @@ async def _get(
     tool, ctx = _tool("object_get", conversation_audience(speaker_member_id), blob=blob)
     result = await tool.handler(
         _bind(ctx, workspace, conversation_id, speaker_member_id),
-        tool.input_model.model_validate({"kind": SITE_KIND, "name": name}),
+        tool.input_model.model_validate({"ref": f"{SITE_KIND}/{name}"}),
     )
     fetched = yaml.safe_load(result.content[0].text)
     assert isinstance(fetched, dict)

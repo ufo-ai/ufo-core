@@ -27,7 +27,7 @@ old = """   to specific agents, add `metadata:` with `agents: [<agent name>, ...
 """
 new = """   to specific agents, add `metadata:` with `agents: [<agent name>, ...]` — only those agents'
    turns list and load it; omit it for every agent. "For this agent", "this app", and "current
-   agent" are explicit scope: read the current name with `object_get(kind="agent", name="")` and
+   agent" are explicit scope: read the current name from `object_get(ref="")` and
    put that one name in `metadata.agents`.
 """
 

@@ -411,7 +411,7 @@ class MemorySearchService:
 
 def match_line(match: MemoryMatch) -> str:
     """One hit as the agent triages it: snippet first, then the durable ref and recency —
-    `object_get` the ref to open the full memory or page behind the hit."""
+    pass the ref unchanged to `object_get` to open the full memory or page behind the hit."""
     line = f"- [{match.kind}] {match.text}"
     if match.ref is None:
         return line
@@ -874,8 +874,9 @@ def manifest() -> Manifest:
                     "results are merged and deduplicated. Optionally restrict to items written "
                     "in a window with start_date/end_date (ISO-8601, e.g. 2026-01-31). Returns "
                     "the best-matching items and document snippets, each with its object ref "
-                    "(memory/<id> or page/<id>) and date — object_get a ref to open the full "
-                    "item or page and follow its provenance links. Use it to recall context "
+                    "(memory/<id> or page/<id>) and date — pass the ref unchanged as object_get's "
+                    "`ref` to open the full item or page and follow its provenance links. Use it "
+                    "to recall context "
                     "before answering."
                 ),
                 input_model=MemorySearchInput,

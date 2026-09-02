@@ -56,7 +56,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.sources import binding_name
 
 MEMORY_TOOLS = {tool.name: tool for tool in memory_manifest().tools}
-SEARCH_REF = re.compile(r"\((memory|page)/([0-9a-f-]{36})")
+SEARCH_REF = re.compile(r"\(((?:memory|page)/[0-9a-f-]{36})")
 LINK_NARRATION = "following the trail back to the source"
 PAGE_BODY = "# Acme contract\n\nThe Acme renewal closes on September 30 for 120k."
 DERIVED_FACT = "The Acme renewal closes on September 30"
@@ -282,11 +282,11 @@ def _tool_ctx(
     )
 
 
-async def _get(tools: dict[str, ToolDef], ctx: ToolContext, kind: str, name: str) -> dict:
+async def _get(tools: dict[str, ToolDef], ctx: ToolContext, ref: str) -> dict:
     tool = tools["object_get"]
     result: ToolResult = await tool.handler(
         ctx,
-        tool.input_model.model_validate({"kind": kind, "name": name}),
+        tool.input_model.model_validate({"ref": ref}),
     )
     assert result.is_error is False
     block = result.content[0]
@@ -333,26 +333,26 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
         )
         hit = next(line for line in found.content[0].text.splitlines() if DERIVED_FACT in line)
         ref = SEARCH_REF.search(hit)
-        assert ref is not None and ref.group(1) == MEMORY_KIND
+        assert ref is not None and ref.group(1).startswith(f"{MEMORY_KIND}/")
 
         ctx = _tool_ctx(workspace_id, blob)
-        memory = await _get(tools, ctx, MEMORY_KIND, ref.group(2))
+        memory = await _get(tools, ctx, ref.group(1))
         assert memory["spec"]["body"] == DERIVED_FACT
         assert memory["created_at"] is not None
         assert {
             "relation": "created_from",
-            "target": {"kind": PAGE_KIND, "name": str(page_id)},
+            "target": f"{PAGE_KIND}/{page_id}",
         } in memory["links"]
 
-        page = await _get(tools, ctx, PAGE_KIND, str(page_id))
+        page = await _get(tools, ctx, memory["links"][0]["target"])
         assert page["spec"]["body"] == PAGE_BODY
         assert page["spec"]["body_truncated"] is False
         source_name = binding_name("asana", "acct-one", None)
         assert page["links"] == [
-            {"relation": "synced_by", "target": {"kind": SOURCE_KIND, "name": source_name}}
+            {"relation": "synced_by", "target": f"{SOURCE_KIND}/{source_name}"}
         ]
 
-        source = await _get(tools, ctx, SOURCE_KIND, source_name)
+        source = await _get(tools, ctx, page["links"][0]["target"])
         assert source["spec"]["provider"] == "asana"
 
 
@@ -375,18 +375,18 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
         own = _tool_ctx(workspace_id, blob, member_id=member_id)
         get_tool = tools["object_get"]
         with agent(agent_id):
-            shared = await _get(tools, anyone, CONVERSATION_KIND, str(shared_conversation))
+            shared = await _get(tools, anyone, f"{CONVERSATION_KIND}/{shared_conversation}")
             assert shared["spec"] == {
                 "surface": "slack",
                 "surface_label": "#general",
                 "audience": "shared",
             }
             assert shared["links"] == [
-                {"relation": "scoped_to", "target": {"kind": AGENT_KIND, "name": agent_id.hex[:8]}}
+                {"relation": "scoped_to", "target": f"{AGENT_KIND}/{agent_id.hex[:8]}"}
             ]
             assert shared["created_at"] is not None
 
-            mine = await _get(tools, own, CONVERSATION_KIND, str(private_conversation))
+            mine = await _get(tools, own, f"{CONVERSATION_KIND}/{private_conversation}")
             assert mine["spec"] == {
                 "surface": "cli",
                 "surface_label": None,
@@ -398,20 +398,14 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
                     await get_tool.handler(
                         hidden,
                         get_tool.input_model.model_validate(
-                            {
-                                "kind": CONVERSATION_KIND,
-                                "name": str(private_conversation),
-                            }
+                            {"ref": f"{CONVERSATION_KIND}/{private_conversation}"}
                         ),
                     )
             with pytest.raises(UnknownObject):
                 await get_tool.handler(
                     own,
                     get_tool.input_model.model_validate(
-                        {
-                            "kind": CONVERSATION_KIND,
-                            "name": str(other_agent_conversation),
-                        }
+                        {"ref": f"{CONVERSATION_KIND}/{other_agent_conversation}"}
                     ),
                 )
 
@@ -454,7 +448,7 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
                 )
 
         with agent(other_agent_id):
-            other_mine = await _get(tools, own, CONVERSATION_KIND, str(other_agent_conversation))
+            other_mine = await _get(tools, own, f"{CONVERSATION_KIND}/{other_agent_conversation}")
             assert other_mine["spec"] == {
                 "surface": "cli",
                 "surface_label": None,
@@ -578,11 +572,11 @@ async def test_superseded_memory_leaves_search_and_links_to_its_replacement(
         assert str(new_id) in found.content[0].text
 
         ctx = _tool_ctx(workspace_id, blob)
-        stale = await _get(tools, ctx, MEMORY_KIND, str(old_id))
+        stale = await _get(tools, ctx, f"{MEMORY_KIND}/{old_id}")
         assert stale["links"] == [
-            {"relation": "superseded_by", "target": {"kind": MEMORY_KIND, "name": str(new_id)}}
+            {"relation": "superseded_by", "target": f"{MEMORY_KIND}/{new_id}"}
         ], "a workspace-shared item is scoped to no member"
-        replacement = await _get(tools, ctx, MEMORY_KIND, str(new_id))
+        replacement = await _get(tools, ctx, stale["links"][0]["target"])
         assert replacement["spec"]["body"] == "the fleet migration landed and is verified"
         assert replacement["links"] == []
 
@@ -638,46 +632,57 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
             )
 
         owner_ctx = _tool_ctx(workspace_id, blob, member_id=member_id, ext=memory_ext)
-        mine = await _get(tools, owner_ctx, MEMORY_KIND, str(item_id))
+        mine = await _get(tools, owner_ctx, f"{MEMORY_KIND}/{item_id}")
         assert [link["relation"] for link in mine["links"]] == ["created_from"]
 
-        async def walk(kind: str, name: str) -> set[str]:
+        async def walk(ref: str) -> set[str]:
             """Every link the caller who saw a row carries must open for that same caller, and so
             must every link the target carries — a forward link points at equal-or-wider
             visibility, so the closure never narrows."""
-            seen: set[tuple[str, str]] = set()
+            seen: set[str] = set()
             relations: set[str] = set()
-            pending = [(kind, name)]
+            pending = [ref]
             while pending:
                 at = pending.pop()
                 if at in seen:
                     continue
                 seen.add(at)
-                opened = await _get(tools, owner_ctx, *at)
+                opened = await _get(tools, owner_ctx, at)
                 assert opened["spec"] is not None, f"{at} opened without a spec"
                 for link in opened["links"]:
                     relations.add(link["relation"])
-                    pending.append((link["target"]["kind"], link["target"]["name"]))
+                    pending.append(link["target"])
             return relations
 
-        assert await walk(MEMORY_KIND, str(item_id)) == {"created_from", "synced_by"}
+        assert await walk(f"{MEMORY_KIND}/{item_id}") == {"created_from", "synced_by"}
 
         agent_id = await _agent(workspace_id)
         conversation_id = await _conversation(workspace_id, member_id, agent_id)
         with agent(agent_id):
-            assert await walk(CONVERSATION_KIND, str(conversation_id)) == {"scoped_to"}
+            assert await walk(f"{CONVERSATION_KIND}/{conversation_id}") == {"scoped_to"}
 
         get_tool = tools["object_get"]
         with pytest.raises(UnknownObject):
             await get_tool.handler(
                 _tool_ctx(workspace_id, blob, member_id=other_id, ext=memory_ext),
-                get_tool.input_model.model_validate({"kind": MEMORY_KIND, "name": str(item_id)}),
+                get_tool.input_model.model_validate({"ref": f"{MEMORY_KIND}/{item_id}"}),
             )
 
 
 async def test_malformed_relations_kinds_and_target_names_fail_at_the_boundary(
     db: None, tmp_path: Path
 ) -> None:
+    page_ref = f"page/{uuid4()}"
+    archived_ref = f"agent/~archived-{uuid4()}"
+    assert str(ObjectRef.parse(page_ref)) == page_ref
+    assert str(ObjectRef.parse(archived_ref)) == archived_ref
+    for malformed in ("page", "page/name/extra", "/name", "page/", "Bad/name", "page/UP"):
+        with pytest.raises((ValueError, ValidationError)):
+            ObjectRef.parse(malformed)
+    with pytest.raises(ValidationError):
+        ObjectRef.parse("agent/~archived-not-a-uuid")
+    with pytest.raises(ValidationError):
+        ObjectRef.parse(f"page/~archived-{uuid4()}")
     with pytest.raises(ValidationError):
         ObjectLink.model_validate(
             {"relation": "derived_from", "target": {"kind": "page", "name": "abc"}}
@@ -696,13 +701,13 @@ async def test_malformed_relations_kinds_and_target_names_fail_at_the_boundary(
         with pytest.raises(UnknownKind):
             await get_tool.handler(
                 ctx,
-                get_tool.input_model.model_validate({"kind": "entity", "name": "acme"}),
+                get_tool.input_model.model_validate({"ref": "entity/acme"}),
             )
         for kind in (MEMORY_KIND, CONVERSATION_KIND):
             with pytest.raises(UnknownObject):
                 await get_tool.handler(
                     ctx,
-                    get_tool.input_model.model_validate({"kind": kind, "name": "not-a-uuid"}),
+                    get_tool.input_model.model_validate({"ref": f"{kind}/not-a-uuid"}),
                 )
 
 

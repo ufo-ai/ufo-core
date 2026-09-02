@@ -330,7 +330,7 @@ CONNECTOR_GRANT_OBJECT = ObjectKind(
         "make it private. Its owner or an admin may delete it, revoking only this agent's edge "
         "while leaving the connection and other agents' edges intact. Its `scoped_to` link names "
         "the agent holding the edge; while it is private its `access_to` link names the "
-        "connection the edge opens — object_get that for every agent holding it."
+        "connection the edge opens — pass that target unchanged to object_get."
     ),
     spec_model=ConnectorGrantSpec,
     store=ConnectorGrantObjects(),

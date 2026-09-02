@@ -843,8 +843,8 @@ async def test_memory_search_raises_a_failed_leg_and_abandons_none(
 async def test_the_memory_object_kind_is_sealed_against_a_speaking_member(
     db: None, tmp_path: Path
 ) -> None:
-    """`object_list kind=memory` and `object_get kind=memory` read `ctx.read_subjects` too, so the
-    Slack Connect seal has to hold on the object surface exactly as it does on search."""
+    """`object_list kind=memory` and `object_get` with a memory ref read `ctx.read_subjects` too,
+    so the Slack Connect seal has to hold on the object surface exactly as it does on search."""
     workspace_id = await _workspace()
     alice = uuid4()
     embed = StubEmbed(vec((0, 1.0)))
@@ -886,9 +886,10 @@ async def test_the_memory_object_kind_is_sealed_against_a_speaking_member(
 async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(
     db: None, tmp_path: Path
 ) -> None:
-    """`object_list`/`object_get kind=memory` recheck a page-derived row's source grant: an agent
-    without a grant for the source sees nothing, while the granted agent reads it in full — the
-    object surface holds the same source fence recall does, so a fact never leaks via a listing."""
+    """`object_list`/`object_get` with a memory ref recheck a page-derived row's source grant: an
+    agent without a grant for the source sees nothing, while the granted agent reads it in full —
+    the object surface holds the same source fence recall does, so a fact never leaks via a
+    listing."""
     workspace_id = await _workspace()
     source_id, page_id, item_id = uuid4(), uuid4(), uuid4()
     now = datetime(2026, 7, 9, tzinfo=UTC)

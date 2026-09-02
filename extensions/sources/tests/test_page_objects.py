@@ -308,6 +308,8 @@ async def test_sync_driver_page_metadata_round_trips_through_object_verbs(
         )
         assert len(listing["objects"]) == 1
         listed = listing["objects"][0]
+        assert UUID(listed["name"])
+        assert listed["ref"] == f"{PAGE_KIND}/{listed['name']}"
         assert listed["source_id"] == str(source_id)
         assert listed["source"] == "probe"
         assert listed["stream"] == page.stream
@@ -315,9 +317,7 @@ async def test_sync_driver_page_metadata_round_trips_through_object_verbs(
         assert listed["created_at"] == "2026-07-01T12:00:00.000000+00:00"
         assert listed["updated_at"] == "2026-07-23T18:30:00.000000+00:00"
 
-        fetched = yaml.safe_load(
-            await _text(_TOOLS["object_get"], ctx, kind=PAGE_KIND, name=listed["name"])
-        )
+        fetched = yaml.safe_load(await _text(_TOOLS["object_get"], ctx, ref=listed["ref"]))
         assert fetched["spec"]["source_id"] == str(source_id)
         assert fetched["spec"]["stream"] == page.stream
         assert fetched["spec"]["title"] == page.title
@@ -459,7 +459,7 @@ async def test_pages_without_provider_timestamps_use_row_timestamps(
         assert listed["updated_at"] == "2026-07-09T00:00:00.000000+00:00"
 
         fetched = yaml.safe_load(
-            await _text(_TOOLS["object_get"], ctx, kind=PAGE_KIND, name=str(page_id))
+            await _text(_TOOLS["object_get"], ctx, ref=f"{PAGE_KIND}/{page_id}")
         )
         assert fetched["spec"]["created_at"] == "2026-07-09T00:00:00.000000+00:00"
         assert fetched["spec"]["updated_at"] == "2026-07-09T00:00:00.000000+00:00"
@@ -492,8 +492,7 @@ async def test_page_get_bounds_an_oversized_body(db: None, tmp_path: Path) -> No
             await _text(
                 _TOOLS["object_get"],
                 _context(state, blob),
-                kind=PAGE_KIND,
-                name=str(page_id),
+                ref=f"{PAGE_KIND}/{page_id}",
             )
         )
         assert fetched["spec"]["body"] == "x" * (PAGE_BODY_MAX_BYTES - 1)
@@ -554,8 +553,7 @@ async def test_page_get_closes_an_oversized_body_stream(
         await _text(
             _TOOLS["object_get"],
             _context(state, blob),
-            kind=PAGE_KIND,
-            name=str(page_id),
+            ref=f"{PAGE_KIND}/{page_id}",
         )
         assert closed is True
 

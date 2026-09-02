@@ -419,9 +419,9 @@ async def test_get_envelope_binds_instance_actions_after_status(db: None) -> Non
         ctx = _ctx(workspace_id)
         manifest = f"kind: {sample.WIDGET_KIND}\nname: anvil\nspec:\n  color: teal\n  size: 1\n"
         await _text(tools, "object_apply", ctx, manifest=manifest)
-        document = await _text(tools, "object_get", ctx, kind=sample.WIDGET_KIND, name="anvil")
+        document = await _text(tools, "object_get", ctx, ref=f"{sample.WIDGET_KIND}/anvil")
         fetched = yaml.safe_load(document)
-        assert list(fetched)[:6] == ["kind", "name", "spec", "status", "actions", "links"]
+        assert list(fetched)[:5] == ["ref", "spec", "status", "actions", "links"]
         views = fetched["actions"]
         assert [view["name"] for view in views] == [
             sample.BLESS_ACTION,
@@ -442,8 +442,7 @@ async def test_get_envelope_binds_instance_actions_after_status(db: None) -> Non
             tools,
             "object_get",
             _ctx(workspace_id, granted_actions=frozenset()),
-            kind=sample.WIDGET_KIND,
-            name="anvil",
+            ref=f"{sample.WIDGET_KIND}/anvil",
         )
         assert yaml.safe_load(walled)["actions"] == []
 

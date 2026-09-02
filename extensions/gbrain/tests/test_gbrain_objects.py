@@ -232,7 +232,7 @@ async def _get(ctx: ToolContext, name: str) -> dict[str, object]:
     tool = _TOOLS["object_get"]
     result = await tool.handler(
         ctx,
-        tool.input_model.model_validate({"kind": GBRAIN_KIND, "name": name}),
+        tool.input_model.model_validate({"ref": f"{GBRAIN_KIND}/{name}"}),
     )
     assert result.is_error is False
     return yaml.safe_load(result.content[0].text)
@@ -486,12 +486,7 @@ async def test_object_list_shows_only_visible_sources(db: None) -> None:
         with pytest.raises(UnknownObject):
             await get_tool.handler(
                 stranger_ctx,
-                get_tool.input_model.model_validate(
-                    {
-                        "kind": GBRAIN_KIND,
-                        "name": private_name,
-                    }
-                ),
+                get_tool.input_model.model_validate({"ref": f"{GBRAIN_KIND}/{private_name}"}),
             )
         for ctx in (member_ctx, admin_ctx):
             assert set(await _list_names(ctx)) == {private_name, shared_name}

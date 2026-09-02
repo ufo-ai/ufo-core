@@ -282,7 +282,7 @@ PAGE_OBJECT = ObjectKind(
         "Pages are landed by the content-sync driver, so create and update are "
         "refused; only a workspace admin can delete (forget) a page, which tombstones it and "
         "clears its derived index state. A source subscription's change alert references the "
-        "changed pages by name so you can object_get them here."
+        "changed pages by canonical ref so you can pass each one unchanged to object_get here."
     ),
     spec_model=PageSpec,
     store=PageObjects(),

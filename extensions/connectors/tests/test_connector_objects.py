@@ -222,8 +222,7 @@ async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> Non
             await _text(
                 _object_tool("object_get"),
                 ctx,
-                kind=CONNECTOR_GRANT_KIND,
-                name=GMAIL_ALICE_NAME,
+                ref=f"{CONNECTOR_GRANT_KIND}/{GMAIL_ALICE_NAME}",
             )
         )
         assert fetched["spec"] == {
@@ -253,18 +252,14 @@ async def test_a_grant_links_to_its_agent_and_the_connection_it_opens(db: None) 
             await _text(
                 _object_tool("object_get"),
                 ctx,
-                kind=CONNECTOR_GRANT_KIND,
-                name=GMAIL_ALICE_NAME,
+                ref=f"{CONNECTOR_GRANT_KIND}/{GMAIL_ALICE_NAME}",
             )
         )
         assert fetched["links"] == [
-            {"relation": "scoped_to", "target": {"kind": AGENT_KIND, "name": "assistant"}},
+            {"relation": "scoped_to", "target": f"{AGENT_KIND}/assistant"},
             {
                 "relation": "access_to",
-                "target": {
-                    "kind": CONNECTION_KIND,
-                    "name": account_object_name("gmail", "alice@example.com"),
-                },
+                "target": f"{CONNECTION_KIND}/{account_object_name('gmail', 'alice@example.com')}",
             },
         ]
         _scope, link = fetched["links"]
@@ -272,8 +267,7 @@ async def test_a_grant_links_to_its_agent_and_the_connection_it_opens(db: None) 
             await _text(
                 _object_tool("object_get"),
                 ctx,
-                kind=link["target"]["kind"],
-                name=link["target"]["name"],
+                ref=link["target"],
             )
         )
         assert opened["spec"] == {"provider": "gmail", "account_id": "alice@example.com"}
@@ -296,8 +290,7 @@ async def test_a_shared_grant_drops_the_link_to_its_owner_only_connection(db: No
                 await _text(
                     _object_tool("object_get"),
                     ctx,
-                    kind=CONNECTOR_GRANT_KIND,
-                    name=GMAIL_ALICE_NAME,
+                    ref=f"{CONNECTOR_GRANT_KIND}/{GMAIL_ALICE_NAME}",
                 )
             )
             return [link["relation"] for link in fetched["links"]]
@@ -722,8 +715,7 @@ async def test_get_refuses_a_grant_made_private_after_its_detail_snapshot(
             await _text(
                 _object_tool("object_get"),
                 _tool_context(workspace_id, agent_id, other_id),
-                kind=CONNECTOR_GRANT_KIND,
-                name=GMAIL_ALICE_NAME,
+                ref=f"{CONNECTOR_GRANT_KIND}/{GMAIL_ALICE_NAME}",
             )
         current = (await grant_summaries())[0]
 
@@ -1039,8 +1031,7 @@ async def test_connection_is_one_member_owned_object_and_disconnects_every_agent
                 await _text(
                     _object_tool("object_get"),
                     ctx,
-                    kind=CONNECTION_KIND,
-                    name=GMAIL_ALICE_NAME,
+                    ref=f"{CONNECTION_KIND}/{GMAIL_ALICE_NAME}",
                 )
             )
             assert fetched["spec"] == {
@@ -1146,8 +1137,7 @@ async def test_the_grantor_shares_their_account_and_get_reflects_it(db: None) ->
             await _text(
                 _object_tool("object_get"),
                 _tool_context(workspace_id, agent_id),
-                kind=CONNECTOR_GRANT_KIND,
-                name=GMAIL_ALICE_NAME,
+                ref=f"{CONNECTOR_GRANT_KIND}/{GMAIL_ALICE_NAME}",
             )
         )
         assert fetched["spec"]["shared"] is True
@@ -1275,10 +1265,7 @@ async def test_read_verbs_hide_other_members_private_connectors(db: None) -> Non
             await get_tool.handler(
                 stranger_ctx,
                 get_tool.input_model.model_validate(
-                    {
-                        "kind": CONNECTOR_GRANT_KIND,
-                        "name": private_name,
-                    }
+                    {"ref": f"{CONNECTOR_GRANT_KIND}/{private_name}"}
                 ),
             )
 
@@ -1291,7 +1278,7 @@ async def test_read_verbs_hide_other_members_private_connectors(db: None) -> Non
             )
             assert {row["name"] for row in listing["objects"]} == {private_name, shared_name}
             fetched = yaml.safe_load(
-                await _text(get_tool, ctx, kind=CONNECTOR_GRANT_KIND, name=private_name)
+                await _text(get_tool, ctx, ref=f"{CONNECTOR_GRANT_KIND}/{private_name}")
             )
             assert fetched["spec"]["account_id"] == "alice@example.com"
             assert fetched["status"]["owner_member_id"] == str(grantor_id)

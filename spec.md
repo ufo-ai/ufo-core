@@ -240,7 +240,7 @@ state commits on the failure path too.
   remain over the trigger.
 - **Memory** — an extension, not core: it owns the `memory_item` table, the `memory_search`/
   `memory_update` tools, the read-only `memory` object kind (each search hit carries its
-  `memory/<id>` or `page/<id>` ref and date; `object_get` opens it — `created_from` links a
+  `memory/<id>` or `page/<id>` ref and date; passing that ref unchanged to `object_get` opens it — `created_from` links a
   derived item back to its synced page, `superseded_by` a consolidated one to its replacement,
   `retired_at` one the nightly curation pass judged off the page, and search excludes both), the
   nightly passes that write the wiki, and recall (lexical + vector RRF fusion), auto-injected
@@ -288,14 +288,17 @@ state commits on the failure path too.
   vocabulary of scalars its rows carry, not its spec's shape, so a read-only kind indexes a column
   without widening the spec a form renders and its apply refuses; a row carrying an undeclared
   field is refused, and each kind's listing proof is what keeps its declaration and its rows in
-  step. Gets return the kind's readable spec beside
+  step. Every instance row carries its canonical `ref` string beside the `name`; the ref passes
+  unchanged to `object_get`. A nonempty get ref is exactly `<kind>/<name>`. The sole contextual
+  sentinel is an empty ref: it reads this turn's agent and the result carries the concrete
+  `agent/<name>` ref. Gets return that ref and the kind's readable spec beside
   its live status, the owning row's timestamps (recency is the first arbitration signal when
   retrieved facts conflict), and its typed links — `created_from`, `synced_by`, `created_in`,
   `reports_to`, `superseded_by`, `access_to` (the connection or credential slot a grant or binding
   authenticates through, and only where the linking row is no wider than that target), `scoped_to`
   (the row's one owning agent, taken only where no narrower relation already names it), a closed
-  core vocabulary; each link's
-  `kind/name` target opens with the same verb. Links are stored on the owning row and rendered forward-only: a forward link
+  core vocabulary; each link's `target` is the exact canonical ref string the same verb accepts.
+  Cross-agent scope stays in the link's separate `agent` field. Links are stored on the owning row and rendered forward-only: a forward link
   is O(1) and points toward equal-or-wider visibility, so there is no edge table, no backlinks, and
   no target elision — a reverse question is a structured query over the forward column, exposed
   only when a flow needs it. A link never grants visibility.
@@ -951,7 +954,9 @@ pending — so a restore runs what was owed. A source is the one clock-fired cos
 refuse: it belongs to the workspace and is reached through grants, so the sweep gates on its
 readers — a source the archive took every one of them from waits for a restore, its pages and
 their extracted facts being tokens spent on a feed nothing can read. The freed name is what takes the app out of the live
-namespace: the row stays gettable under its durable `~archived-<id>` name — listed by
+namespace: the row stays gettable under its durable `~archived-<id>` name — the exact
+`~archived-<uuid>` form is reserved for these readable refs and caller-authored names retain the
+ordinary object-name grammar — listed by
 `object_list agent` under the `archived` filter — and `restore_application` is that row's own
 action, taking the name the app returns under, since another app may hold the name it had.
 

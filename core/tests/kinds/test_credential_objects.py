@@ -151,7 +151,7 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
         assert "filled" in json.loads(filled_listing)["objects"][0]["summary"]
 
         fetched_text = await _text(
-            _object_tool("object_get"), ctx, kind=CREDENTIAL_KIND, name="sample-api"
+            _object_tool("object_get"), ctx, ref=f"{CREDENTIAL_KIND}/sample-api"
         )
         outputs.append(fetched_text)
         fetched = yaml.safe_load(fetched_text)
@@ -177,7 +177,7 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
         assert json.loads(deleted_text)["deleted"] is True
 
         cleared_text = await _text(
-            _object_tool("object_get"), ctx, kind=CREDENTIAL_KIND, name="sample-api"
+            _object_tool("object_get"), ctx, ref=f"{CREDENTIAL_KIND}/sample-api"
         )
         outputs.append(cleared_text)
         cleared = yaml.safe_load(cleared_text)
@@ -212,7 +212,7 @@ async def test_ciphertext_never_reaches_a_verb_output(db: None) -> None:
             ).scalar_one()
         outputs = [
             await _text(_object_tool("object_list"), ctx, kind=CREDENTIAL_KIND),
-            await _text(_object_tool("object_get"), ctx, kind=CREDENTIAL_KIND, name="sample-api"),
+            await _text(_object_tool("object_get"), ctx, ref=f"{CREDENTIAL_KIND}/sample-api"),
         ]
     sealed = ciphertext.decode()
     for output in outputs:
@@ -297,6 +297,7 @@ async def test_the_credential_kind_filters_and_orders_on_its_declared_fields(db:
 
     rows = {row["name"]: row for row in listed["objects"]}
     assert rows["probe-api-key"] == {
+        "ref": f"{CREDENTIAL_KIND}/probe-api-key",
         "name": "probe-api-key",
         "summary": "probe: Probe API key. — filled",
         "slot": "probe_api_key",
@@ -344,9 +345,9 @@ async def test_a_host_choice_slot_renders_its_options_through_tool_dispatch(db: 
         owner = await _member(workspace_id, ADMIN_CREATED_AT)
         ctx = _tool_context(workspace_id, speaker_member_id=owner)
         await store.put(workspace_id, "probe_api_key", "probe-secret")
-        default_text = await _text(get_tool, ctx, kind=CREDENTIAL_KIND, name="probe-api-key")
+        default_text = await _text(get_tool, ctx, ref=f"{CREDENTIAL_KIND}/probe-api-key")
         await store.put(workspace_id, "probe_api_host", "api.two.test")
-        chosen_text = await _text(get_tool, ctx, kind=CREDENTIAL_KIND, name="probe-api-key")
+        chosen_text = await _text(get_tool, ctx, ref=f"{CREDENTIAL_KIND}/probe-api-key")
 
     unchosen = yaml.safe_load(default_text)
     assert unchosen["spec"]["host_slot"] == "probe_api_host"
