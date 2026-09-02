@@ -37,6 +37,7 @@ import {
   useChatHidden,
   useChatLadder,
   type ChatLadder,
+  type ChatRun,
 } from "@/lib/rail";
 import { seekChat, useRail } from "@/lib/railStore";
 import { heldRoute, placeHome } from "@/lib/router";
@@ -461,25 +462,13 @@ function History({
       </div>
       {runs.length ? (
         <div ref={openAtTop} className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable">
-          {runs.map((run) => (
-            <section key={run.label} className="flex flex-col">
-              <h4 className={PICK_LABEL}>{run.label}</h4>
-              {run.rows.map((row) => (
-                <PressRow
-                  key={row.conversation_id}
-                  line={row.title || agentName(row.agent_name)}
-                  /* Where the conversation came in — the room the surface named, else the member's
-                     word for the surface. A portal chat states none: the history is read in the
-                     portal, so a source on every row would name where the member already is. */
-                  note={isPortalChat(row.surface) ? undefined : origin(row)}
-                  when={row.last_at}
-                  onPress={() =>
-                    onOpens(taken(opens, lane, homeConversationLane(row.conversation_id)))
-                  }
-                />
-              ))}
-            </section>
-          ))}
+          <HistoryRuns
+            runs={runs}
+            stamps
+            onPick={(conversationId) =>
+              onOpens(taken(opens, lane, homeConversationLane(conversationId)))
+            }
+          />
         </div>
       ) : rail.phase === "loading" ? (
         <Waiting />
@@ -487,6 +476,54 @@ function History({
         <Empty>{NO_HISTORY}</Empty>
       )}
     </div>
+  );
+}
+
+/** The runs of a history, drawn the one way wherever a history is read: one section per run under
+ *  the run's own name, and a row per conversation inside it that says its title, the source it came
+ *  in on, and where it opens.
+ *
+ *  `stamps` is whether the rows carry the moment their conversation last moved. A lane wide enough
+ *  for the column states it; a lane that spends its width on the names asks for the same runs
+ *  without it, so the two lists are one drawing rather than two that drift.
+ *
+ *  `headings` is whether the run names are drawn. A run the rows are still ordered by reads as one
+ *  list without its name where the name is the date the reader can see for themselves, and the runs
+ *  stay sections either way, so turning the names off moves no row.
+ *
+ *  Sections are keyed by the run's name: the runs are named off one `Map` of labels, so no two
+ *  share one. */
+function HistoryRuns({
+  runs,
+  onPick,
+  stamps,
+  headings = true,
+}: {
+  runs: ChatRun[];
+  onPick: (conversationId: string) => void;
+  stamps?: boolean;
+  headings?: boolean;
+}) {
+  return (
+    <>
+      {runs.map((run) => (
+        <section key={run.label} className="flex flex-col">
+          {headings ? <h4 className={PICK_LABEL}>{run.label}</h4> : null}
+          {run.rows.map((row) => (
+            <PressRow
+              key={row.conversation_id}
+              line={row.title || agentName(row.agent_name)}
+              /* Where the conversation came in — the room the surface named, else the member's word
+                 for the surface. A portal chat states none: the history is read in the portal, so a
+                 source on every row would name where the member already is. */
+              note={isPortalChat(row.surface) ? undefined : origin(row)}
+              when={stamps ? row.last_at : undefined}
+              onPress={() => onPick(row.conversation_id)}
+            />
+          ))}
+        </section>
+      ))}
+    </>
   );
 }
 
@@ -792,10 +829,12 @@ function ConversationLane({
  *  is for; and under them the conversations the member has had, in the order the rail holds them —
  *  one list, one order, wherever they are read.
  *
- *  The history is the chat lane's own list, drawn through `chatRuns` and then flattened: the
- *  surfaces the member put away stay put away and the ladder still orders the rows, but the runs
- *  are not drawn apart here. The picker is a place to pick from rather than a history to read, and
- *  a heading over every few rows in a lane this narrow costs more of it than it names.
+ *  The history is the chat lane's own list, drawn by the same `HistoryRuns`: the surfaces the member
+ *  put away stay put away and the ladder still orders the rows. The runs are named here only under
+ *  the app ladder — a member who ordered their history by app asked which app each run is, and a
+ *  lane that grouped the rows and named no group leaves the grouping unexplained. Under recency the
+ *  picker stays one flat list: the date over every few rows in a lane this narrow costs more of it
+ *  than it names. The rows carry no stamp either way, because the picker draws no date column.
  *
  *  Picking takes this lane's place in the row rather than opening a fifth beside it, so the pick
  *  lands where the member asked for it and the cap is not reached by a lane that names nothing. A
@@ -815,7 +854,7 @@ function PickerLane({
   const rail = useRail();
   const ladder = useChatLadder();
   const hidden = useChatHidden();
-  const chats = chatRuns(rail.rows, ladder, hidden, new Date()).flatMap((run) => run.rows);
+  const runs = chatRuns(rail.rows, ladder, hidden, new Date());
   const pick = (id: string) => onOpens(taken(opens, lane, id));
   /* The apps this workspace draws, and under them the connectors screen — the portal draws that one
      itself, and a member reaches it the way they reach an app, since a lane is a lane whoever draws
@@ -888,27 +927,13 @@ function PickerLane({
               <h3 className={cn(PICK_LABEL, "px-0")}>{HISTORY}</h3>
               <HistoryOptions ladder={ladder} hidden={hidden} />
             </div>
-            {chats.length ? (
-              <div className={cn(PICK_ROWS, "px-lg")}>
-                <ul className="m-0 flex list-none flex-col gap-sm p-0">
-                  {chats.map((row) => (
-                    <li key={row.conversation_id}>
-                      <button
-                        type="button"
-                        onClick={() => pick(homeConversationLane(row.conversation_id))}
-                        className="group flex w-full items-center gap-2xl border-0 bg-transparent p-0 py-sm text-left text-inherit"
-                      >
-                        <span className="[text-box:trim-both_cap_alphabetic] min-w-0 flex-1 truncate text-label font-medium tracking-(--tracking-ui) text-ink">
-                          {row.title || agentName(row.agent_name)}
-                        </span>
-                        <IconChevronRight
-                          className="size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100 ease-control group-hover:opacity-100 group-focus-visible:opacity-100"
-                          aria-hidden
-                        />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+            {runs.length ? (
+              <div className={PICK_ROWS}>
+                <HistoryRuns
+                  runs={runs}
+                  headings={ladder === "app"}
+                  onPick={(conversationId) => pick(homeConversationLane(conversationId))}
+                />
               </div>
             ) : (
               <div className={PICK_EMPTY}>

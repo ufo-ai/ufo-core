@@ -496,16 +496,19 @@ test("the picker lane offers the workspace's apps and the member's history", asy
   ).toEqual(["Assistant", "Second", "ConnectorsConnect the accounts your apps work in."]);
 
   const history = within(picker).getByRole("heading", { name: "History", level: 3 });
-  const rows = within(history.closest("section")!).getAllByRole("listitem");
+  const chats = history.closest("section")!;
+  const rows = within(chats)
+    .getAllByRole("button")
+    .filter((row) => row.textContent !== "");
   expect(rows.map((row) => row.textContent)).toEqual([CHAT_ROW.title]);
-  await userEvent.click(within(rows[0]).getByRole("button"));
+  await userEvent.click(rows[0]);
   expect(laneNames()).toEqual([CHAT_ROW.title, "Assistant"]);
 });
 
-/** The picker's history is the chat lane's own list, drawn through `chatRuns` and then flattened: a
- *  surface the member put away stays put away, and every row that is left stands in one list under
- *  the one heading, with no run drawn apart inside it. */
-test("the picker's history hides put-away surfaces and draws one flat list", async () => {
+/** The picker's history is the chat lane's own list, drawn by the same runs: a surface the member
+ *  put away stays put away, and under the recency ladder the rows that are left stand as one flat
+ *  list, with no date named over them. */
+test("the picker's history hides put-away surfaces and names no run under recency", async () => {
   wire(
     chatsOnWire([
       CHAT_ROW,
@@ -522,10 +525,49 @@ test("the picker's history hides put-away surfaces and draws one flat list", asy
     .closest("section")!;
   // The Slack row is the surface the member put away, and a portal row is never hidden: the
   // hidden one must be the only row absent.
-  expect(within(chats).queryByText("Hidden thread")).toBeNull();
-  expect(within(chats).getAllByText(CHAT_ROW.title)).toHaveLength(2);
+  expect(within(chats).queryByText(new RegExp("Hidden thread"))).toBeNull();
+  expect(within(chats).getAllByText(new RegExp(CHAT_ROW.title))).toHaveLength(2);
   expect(within(chats).queryByRole("heading", { level: 4 })).toBeNull();
-  expect(within(chats).getAllByRole("list")).toHaveLength(1);
+  // The colleague's row came in on the terminal: a row that is not a portal chat says its source,
+  // the way the chat lane's own history says it.
+  expect(within(chats).getByText(new RegExp("Terminal"))).toBeTruthy();
+  expect(within(chats).queryAllByRole("list")).toHaveLength(0);
+});
+
+/** The picker names its runs where the name is what the member asked for: a history ordered by app
+ *  says which app each run is, the way the chat lane's own history says it, and the names go again
+ *  the moment the member takes the recency order back. */
+test("the picker's history names the app over each run under the app ladder", async () => {
+  const terminal = {
+    ...CHAT_ROW,
+    conversation_id: OTHER_CONVO_ID,
+    title: "Ship the ledger",
+    surface: "ufo",
+    agent_name: "second",
+    agent_id: SECOND_ID,
+  };
+  wire(chatsOnWire([CHAT_ROW, terminal]));
+  drawHome([AGENT_ID]);
+
+  const picker = await openPicker();
+  const chats = within(picker)
+    .getByRole("heading", { name: "History", level: 3 })
+    .closest("section")!;
+
+  await userEvent.click(within(chats).getByRole("button", { name: "History options" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "App" }));
+
+  await waitFor(() =>
+    expect(within(chats).getByRole("heading", { name: "Assistant", level: 4 })).toBeTruthy(),
+  );
+  expect(within(chats).getByRole("heading", { name: "Second", level: 4 })).toBeTruthy();
+  expect(localStorage.getItem("chat-ladder")).toBe("app");
+
+  await userEvent.click(within(chats).getByRole("button", { name: "History options" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Recency" }));
+
+  await waitFor(() => expect(within(chats).queryByRole("heading", { level: 4 })).toBeNull());
+  expect(within(chats).getByText(new RegExp(terminal.title))).toBeTruthy();
 });
 
 /** The picker narrows its history the way the chat lane's own history does: the same menu, over the
@@ -543,12 +585,12 @@ test("the picker's history offers the history menu", async () => {
   const chats = within(picker)
     .getByRole("heading", { name: "History", level: 3 })
     .closest("section")!;
-  expect(within(chats).getByText("Hidden thread")).toBeTruthy();
+  expect(within(chats).getByText(new RegExp("Hidden thread"))).toBeTruthy();
 
   await userEvent.click(within(chats).getByRole("button", { name: "History options" }));
   await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Slack" }));
 
-  await waitFor(() => expect(within(chats).queryByText("Hidden thread")).toBeNull());
+  await waitFor(() => expect(within(chats).queryByText(new RegExp("Hidden thread"))).toBeNull());
   expect(heldChatHidden()).toEqual(["slack"]);
 });
 
