@@ -20,6 +20,17 @@ def test_manifest_registers_mantle_specs() -> None:
     manifest = bedrock.manifest()
     assert tuple(slot.name for slot in manifest.credentials) == ("bedrock_api_key",)
     by_id = {spec.id: spec for spec in manifest.models}
+    fable = by_id["anthropic.claude-fable-5.1"]
+    assert fable.api_surface == "chat"
+    assert fable.price.input == 10_000_000
+    assert fable.price.output == 50_000_000
+    assert fable.price.cache_read == 250_000
+    assert fable.price.cache_write_5m == 12_500_000
+    assert fable.price.cache_write_1h == 20_000_000
+    assert by_id["anthropic.claude-fable-5"].price.cache_read == 1_000_000
+    assert fable.context_window == 1_000_000
+    assert fable.knowledge_cutoff == "2026-01"
+    assert fable.reasoning.supported
     assert by_id["anthropic.claude-opus-4-8"].api_surface == "chat"
     assert by_id["openai.gpt-oss-120b"].api_surface == "chat"
     assert by_id["openai.gpt-5.5"].api_surface == "responses"

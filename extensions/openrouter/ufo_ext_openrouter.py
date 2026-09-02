@@ -787,6 +787,13 @@ OPENROUTER_MODEL_SPECS = (
         context_window=1_000_000,
     ),
     _openrouter(
+        "anthropic/claude-fable-5.1",
+        ModelPrice(10_000_000, 50_000_000, 250_000, 0, 0),
+        "2026-01",
+        context_window=1_000_000,
+        reasoning=_REQUIRED_REASONS,
+    ),
+    _openrouter(
         "anthropic/claude-fable-5",
         ModelPrice(10_000_000, 50_000_000, 1_000_000, 0, 0),
         "2026-01",

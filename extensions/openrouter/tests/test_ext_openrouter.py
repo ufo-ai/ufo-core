@@ -210,6 +210,20 @@ def test_openrouter_slug_maps_bare_ids_and_passes_slugs_through() -> None:
     assert openrouter.openrouter_slug("grok-2") == "grok-2"
 
 
+def test_manifest_registers_fable_5_1() -> None:
+    by_id = {spec.id: spec for spec in openrouter.manifest().models}
+    fable = by_id["anthropic/claude-fable-5.1"]
+    assert fable.provider == "openrouter"
+    assert fable.api_surface == "chat"
+    assert fable.price.input == 10_000_000
+    assert fable.price.output == 50_000_000
+    assert fable.price.cache_read == 250_000
+    assert by_id["anthropic/claude-fable-5"].price.cache_read == 1_000_000
+    assert fable.context_window == 1_000_000
+    assert fable.knowledge_cutoff == "2026-01"
+    assert fable.reasoning.supported
+
+
 async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget() -> None:
     create = ScriptedCreate(
         [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(3, 2))]
