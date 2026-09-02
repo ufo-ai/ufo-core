@@ -208,6 +208,21 @@ CLAIMS = (
         ),
     ),
     Claim(
+        claim="not_configured also covers a token Slack accepted but could not read an identity"
+        " back from",
+        corpus="references/slack-install.md",
+        phrase="a bot token Slack would not accept or could not read back",
+        source=SLACK_TOOLS,
+        pattern=r"if error\.error == MALFORMED_IDENTITY_ERROR:",
+    ),
+    Claim(
+        claim="not_configured also covers an auth.test failure outside the rejected-token set",
+        corpus="references/slack-install.md",
+        phrase="`auth.test` failing for any other reason",
+        source=SLACK_TOOLS,
+        pattern=r'return f"Slack auth\.test failed: \{error or \'no error given\'\}"',
+    ),
+    Claim(
         claim="the mounted Slack setup skill treats rotated credentials as pending",
         corpus="references/slack-install.md",
         phrase="A new install, a manifest setup, or a signing-secret rotation can all land here",
