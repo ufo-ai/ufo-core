@@ -154,6 +154,22 @@ resource "datadog_monitor" "surface_listener_parked" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
+resource "datadog_monitor" "problem_reported" {
+  name    = "ufo prod agent reported a problem"
+  type    = "log alert"
+  query   = "logs(\"service:ufo \\\"problem.reported\\\" env:prod\").index(\"*\").rollup(\"count\").last(\"15m\") > 0"
+  message = "An agent reported a problem no turn can repair — {{log.attributes.impact}} impact, category {{log.attributes.category}}. Open the reporting turn: {{log.attributes.debug_url}}\n\n{{log.attributes.problem}}\n\n{{value}} reports arrived in this window; the samples below carry the rest. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 0
+  }
+
+  notify_no_data     = false
+  enable_logs_sample = true
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
 resource "datadog_monitor" "db_storage_low" {
   name    = "ufo prod database is low on storage"
   type    = "query alert"

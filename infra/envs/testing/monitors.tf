@@ -160,6 +160,46 @@ resource "datadog_monitor" "surface_listener_parked" {
   tags = ["env:testing", "managed-by:terraform"]
 }
 
+# The one path out of a turn for a fault the agent cannot repair. `report_problem`
+# (`extensions/debugger/ufo_ext_debugger/report.py`) writes a single WARN record and returns — no
+# queue, no ticket, no second destination — so before this monitor a report reached an engineer only
+# if one happened to be reading the turns board. Nine reports on 2026-09-02, every one
+# `coding_subagent`, sat on that board while the pull-request review path they described stayed
+# broken.
+#
+# This reads the log records rather than `ufo.problem_reported`, the counter those two board widgets
+# read, because a report is absent almost all of the time and the two shapes fail differently on
+# absence. A metric monitor over a sparse counter evaluates an empty window as no data: it holds
+# whatever state it was in with no series left to clear it, and `.fill(0)` does not rescue that,
+# because fill interpolates between the points of a series that exists rather than conjuring one
+# that does not. A log monitor over a `count` rollup evaluates an empty window as zero and compares
+# that to the threshold, so silence is what returns this to OK — and the next report alerts again.
+# `notify_no_data` is the same fact from the other side: no report is this signal's normal state,
+# not an incident.
+#
+# Ungrouped, and deliberately so twice over. Grouping a log monitor by `@category` needs a
+# Datadog-side facet, which no terraform resource creates — the reason the board carries a log
+# metric at all — and a grouped monitor would strand each `category` and `impact` pair in ALERT with
+# no series left to clear it, which is the sparseness problem again one level down. The two
+# dimensions ride the notification as log attributes instead. `enable_logs_sample` carries the rest
+# of a burst: a window holding several reports alerts once, `{{value}}` says how many, and the
+# samples under the message hold the ones the template did not name.
+resource "datadog_monitor" "problem_reported" {
+  name    = "ufo testing agent reported a problem"
+  type    = "log alert"
+  query   = "logs(\"service:ufo \\\"problem.reported\\\" env:testing\").index(\"*\").rollup(\"count\").last(\"15m\") > 0"
+  message = "An agent reported a problem no turn can repair — {{log.attributes.impact}} impact, category {{log.attributes.category}}. Open the reporting turn: {{log.attributes.debug_url}}\n\n{{log.attributes.problem}}\n\n{{value}} reports arrived in this window; the samples below carry the rest. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 0
+  }
+
+  notify_no_data     = false
+  enable_logs_sample = true
+
+  tags = ["env:testing", "managed-by:terraform"]
+}
+
 # The database's own health, from CloudWatch. These answer capacity questions — is the instance
 # running out of something — which is a different question from whether a turn reached it, and a
 # slower one: a point lands well after the minute it describes, so none of these can catch an

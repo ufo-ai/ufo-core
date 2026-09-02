@@ -29,10 +29,11 @@ the wire rather than being inferred from the problem. Its two names are the whol
 documentation: the description above says when a member's ask is the reason, and an ablation that
 reduced the field's own hint to nothing routed every member request correctly.
 
-One call is one event, and nothing pages on it: a report is a line on a board an engineer reads, not
-an alert. So the tool keeps no window, no store, and no dedup of its own — how long a condition has
-lasted is answered by its own reports standing in that list, and a second answer to it would be
-worse than none.
+One call is one event, and the tool keeps no window, no store, and no dedup of its own — how long a
+condition has lasted is answered by its own reports standing in that list, and a second answer to it
+would be worse than none. What pages on a report is the `problem_reported` monitor over these
+records (`infra/envs/*/monitors.tf`), and the collapsing an operator needs lives there rather than
+here: a window holding several reports reaches the alert channel once.
 
 `problem` is the agent's own account, and never output it copied. A message this process did not
 write echoes the environment the failing command ran under, and that environment carries the turn's
